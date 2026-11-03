@@ -31,7 +31,7 @@
     (cond
       ((string= content-type "application/vnd.kubernetes.protobuf")
        (decode-core-resource-protobuf (hunchentoot:raw-post-data :force-binary t) expected-kind
-                                      (when (equal expected-kind "Event") *core-resource-view-version*)))
+                                      (when (member expected-kind '("Event" "DeleteOptions") :test #'equal) *core-resource-view-version*)))
       ((member content-type '("" "application/json") :test #'string=)
        (require-object (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)
                                            :max-string-length (* 2 1024 1024)) "request"))
@@ -257,8 +257,8 @@
       (core-resource-error 400 "BadRequest" "Invalid request namespace"))
     (when (and name (not (dns-subdomain-p name)))
       (core-resource-error 400 "BadRequest" "Invalid request name"))
-    (let ((*core-resource-view-version* (when (equal resource "events")
-                                         (if (uiop:string-prefix-p "/apis/" path) "events.k8s.io/v1" "v1")))
+    (let ((*core-resource-view-version* (if (and (equal resource "events") (uiop:string-prefix-p "/apis/" path))
+                                         "events.k8s.io/v1" (core-resource-api-version resource)))
           (dry-run (core-resource-dry-run-p))
           (writable-scope (or namespace (not (core-resource-namespaced-p resource)))))
       (cond
