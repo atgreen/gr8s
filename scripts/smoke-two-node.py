@@ -298,7 +298,13 @@ class Smoke:
                     break
                 owned.update(children)
             if owned:
-                print(f'Cleanup found remaining node processes: {sorted(owned)}', flush=True)
+                descriptions = []
+                for pid in sorted(owned):
+                    try:
+                        descriptions.append((pid, Path(f'/proc/{pid}/comm').read_text().strip(), parents.get(pid)))
+                    except OSError:
+                        pass
+                print(f'Cleanup found remaining node processes: {descriptions}', flush=True)
             for pid in owned:
                 try:
                     os.kill(pid, signal.SIGKILL)

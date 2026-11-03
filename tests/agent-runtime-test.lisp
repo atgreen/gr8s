@@ -536,3 +536,21 @@
                (is-true (wait-until (lambda () (bt:with-lock-held (lock) installed))))
                (is (string= journal (uiop:read-file-string (gr8s::node-runtime-network-path runtime)))))
           (gr8s::stop-node-runtime runtime))))))
+
+(test withdrawn-assignment-persists-deletion-intent-before-runtime-removal
+  (with-temporary-store (store path)
+    (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
+           (runtime (make-fake-runtime))
+           (node (gr8s::make-node-runtime (merge-pathnames "withdrawn/" path) runtime nil)))
+      (gr8s::put-assigned-pod (gr8s::node-runtime-store node) pod)
+      (gr8s::reconcile-pod (gr8s::node-runtime-reconciler node) "default" (pod-name pod))
+      (set-fake-runtime-failure runtime "transient sandbox deletion failure")
+      (signals gr8s::runtime-error (gr8s::remove-unassigned-pods node nil))
+      (is-true (gr8s::deletion-requested-p
+                (get-pod (gr8s::node-runtime-store node) "default" (pod-name pod))))
+      ;; Reopening the local desired store still converges deletion, not create.
+      (let ((restored (gr8s::make-node-runtime (merge-pathnames "withdrawn/" path) runtime nil)))
+        (gr8s::reconcile-pod (gr8s::node-runtime-reconciler restored) "default" (pod-name pod))
+        (signals gr8s:kubernetes-error
+          (get-pod (gr8s::node-runtime-store restored) "default" (pod-name pod))))
+      (is (= 1 (fake-runtime-ensure-count runtime))))))

@@ -338,9 +338,11 @@
             t))
     (dolist (pod (list-pods (node-runtime-store node-runtime) "default"))
       (unless (gethash (pod-uid pod) assigned-uids)
-        (runtime-delete (node-runtime-runtime node-runtime) (pod-uid pod))
-        (remove-pod (node-runtime-store node-runtime)
-                    (pod-namespace pod) (pod-name pod))))))
+        ;; Serialize with the background reconciler and persist deletion intent
+        ;; before CRI calls. A transient removal failure must never turn into
+        ;; runtime-ensure recreating an assignment the server has withdrawn.
+        (delete-reconciled-pod (node-runtime-reconciler node-runtime)
+                               (pod-namespace pod) (pod-name pod))))))
 
 (defun pod-observed-status-message (pod status)
   (make-instance
