@@ -212,8 +212,11 @@
              (ensure-cri-status "RemovePodSandbox" status)))
       (ag-grpc:channel-close channel))))
 
-(defun cri-pull-image (socket-path image &key (timeout 120))
-  "Pull IMAGE through the CRI image service and return its immutable reference."
+(defun cri-pull-image (socket-path image &key timeout)
+  "Pull IMAGE without a default operation deadline; callers may supply TIMEOUT."
+  ;; Download and extraction can exceed an ordinary CRI request's deadline.
+  ;; Match Kubernetes' remote image client: keep the cancellable call context,
+  ;; but do not abort an active pull merely because two minutes have elapsed.
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
          (multiple-value-bind (response status)
