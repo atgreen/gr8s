@@ -21,14 +21,12 @@
     (is (equalp (com.inuoe.jzon:parse *valid-pod-json*)
                 (pod-to-object pod)))))
 
-(test only-the-default-namespace-is-accepted
-  (handler-case
-      (progn
-        (parse-pod
-         "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\",\"namespace\":\"other\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}")
-        (fail "Expected a Kubernetes validation error"))
-    (kubernetes-error (error)
-      (is (string= "Invalid" (kubernetes-error-reason error))))))
+(test pods-accept-valid-namespaces
+  (let ((object (com.inuoe.jzon:parse *valid-pod-json*)))
+    (setf (gethash "namespace" (gethash "metadata" object)) "sonobuoy")
+    (is (string= "sonobuoy" (pod-namespace (parse-pod object))))
+    (setf (gethash "namespace" (gethash "metadata" object)) "Invalid/namespace")
+    (signals kubernetes-error (parse-pod object))))
 
 (test unsupported-pod-spec-fields-are-rejected
   (signals kubernetes-error

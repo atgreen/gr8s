@@ -163,11 +163,11 @@
   (with-store-lock (store)
     (get-pod-unlocked store namespace name)))
 
-(defun list-pods (store namespace)
-  "Return all Pods in NAMESPACE from a consistent STORE snapshot."
+(defun list-pods (store &optional namespace)
+  "Return a consistent snapshot of Pods, optionally restricted to NAMESPACE."
   (with-store-lock (store)
     (loop for pod being the hash-values of (pod-store-pods store)
-          when (string= namespace (pod-namespace pod))
+          when (or (null namespace) (string= namespace (pod-namespace pod)))
             collect pod)))
 
 (defun create-pod (store pod)

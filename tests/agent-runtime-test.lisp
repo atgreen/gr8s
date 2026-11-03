@@ -554,3 +554,24 @@
         (signals gr8s:kubernetes-error
           (get-pod (gr8s::node-runtime-store restored) "default" (pod-name pod))))
       (is (= 1 (fake-runtime-ensure-count runtime))))))
+
+(test namespaced-pods-survive-control-plane-and-agent-snapshots
+  (with-temporary-store (store directory)
+    (let* ((object (com.inuoe.jzon:parse *valid-pod-json*))
+           (fake (make-fake-runtime))
+           (agent (gr8s::make-node-runtime (merge-pathnames "agent/" directory) fake nil)))
+      (gr8s::start-node-runtime agent)
+      (setf (gethash "namespace" (gethash "metadata" object)) "sonobuoy")
+      (let ((pod (create-pod store (parse-pod object))))
+        (gr8s::persist-pod-assignment store pod "worker-a")
+        (let ((snapshot (gr8s::node-desired-state-snapshot store "worker-a")))
+          (is (= 1 (length (slot-value snapshot 'gr8s.node.v1::pods))))
+          (gr8s::reconcile-node-snapshot agent snapshot)
+          (is (= 1 (length (list-pods (gr8s::node-runtime-store agent)))))
+          (is (string= "sonobuoy" (pod-namespace
+                                  (get-pod (gr8s::node-runtime-store agent) "sonobuoy" "hello"))))
+          (gr8s::reconcile-all (gr8s::node-runtime-reconciler agent))
+          (is (= 1 (fake-runtime-ensure-count fake)))
+          (gr8s::reconcile-node-snapshot agent (desired-snapshot-for-test))
+          (is (null (list-pods (gr8s::node-runtime-store agent))))
+          (gr8s::stop-node-runtime agent))))))

@@ -383,3 +383,8 @@ make clean         remove build outputs
 
 See [`docs/design.md`](docs/design.md) for the compatibility and architecture
 boundary.
+
+The Kubernetes API compatibility target is **1.36** (`/version` reports
+`v1.36.0-gr8s.0`). This selects the upstream client and conformance test version;
+it is not a claim that gr8s passes Kubernetes conformance. The gr8s project release
+version is maintained separately in `gr8s.asd`.

@@ -4,7 +4,7 @@
 ;;;; Purpose:
 ;;;; Define gr8s's deliberately small Kubernetes domain model and the strict
 ;;;; JSON-to-model boundary used by the HTTP API.  Parsing accepts the fields
-;;;; emitted by kubectl for a single-namespace Pod, rejects unsupported
+;;;; emitted by kubectl for a namespaced Pod, rejects unsupported
 ;;;; semantics early, and returns simple structures shared by storage,
 ;;;; scheduling, reconciliation, and runtime adapters.
 
@@ -231,9 +231,7 @@
            (containers (object-value spec "containers" "spec"))
            (restart-policy (gethash "restartPolicy" spec "Always"))
            (node-name (gethash "nodeName" spec)))
-      (unless (string= "default"
-                       (require-nonempty-string namespace "metadata.namespace"))
-        (invalid-pod "only the default namespace is supported"))
+      (require-dns-label namespace "metadata.namespace")
       (unless (and (vectorp containers) (plusp (length containers)))
         (invalid-pod "spec.containers must be a non-empty array"))
       (unless (and (stringp restart-policy)

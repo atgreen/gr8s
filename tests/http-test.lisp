@@ -844,3 +844,58 @@
         (ignore-errors (usocket:socket-close listener))
         (when upstream-thread
           (ignore-errors (bt:join-thread upstream-thread)))))))
+
+(test pod-http-routes-isolate-namespaces-and-filter-cluster-lists
+  (with-temporary-store (store directory)
+    (let ((server (start-server :address "127.0.0.1" :port 18080 :store store
+                                :runtime (make-fake-runtime))))
+      (unwind-protect
+           (progn
+             (dolist (namespace '("default" "sonobuoy" "kube-system"))
+               (let* ((object (com.inuoe.jzon:parse *valid-pod-json*))
+                      (metadata (gethash "metadata" object)))
+                 (setf (gethash "labels" metadata)
+                       (gr8s::json-object "app" namespace))
+                 (multiple-value-bind (body status)
+                     (request (format nil "/api/v1/namespaces/~A/pods" namespace)
+                              :method :post :content-type "application/json"
+                              :content (com.inuoe.jzon:stringify object))
+                   (is (= 201 status))
+                   (is (string= namespace (gethash "namespace" (gethash "metadata" (response-object body))))))))
+             (dolist (case '(("/api/v1/pods" 3)
+                             ("/api/v1/namespaces/sonobuoy/pods" 1)
+                             ("/api/v1/pods?labelSelector=app%3Dsonobuoy" 1)
+                             ("/api/v1/pods?fieldSelector=metadata.namespace%3Dkube-system" 1)
+                             ("/api/v1/namespaces/kube-system/pods?labelSelector=k8s-app%3Dkube-dns" 0)))
+               (multiple-value-bind (body status) (request (first case) :preserve-uri t)
+                 (is (= 200 status))
+                 (is (= (second case) (length (gethash "items" (response-object body)))))))
+             (multiple-value-bind (body status)
+                 (request "/api/v1/namespaces/sonobuoy/pods/hello")
+               (is (= 200 status))
+               (is (string= "sonobuoy" (gethash "namespace" (gethash "metadata" (response-object body))))))
+             (let ((object (com.inuoe.jzon:parse *valid-pod-json*)))
+               (setf (gethash "namespace" (gethash "metadata" object)) "default")
+               (multiple-value-bind (body status)
+                   (request "/api/v1/namespaces/sonobuoy/pods" :method :post
+                            :content-type "application/json" :content (com.inuoe.jzon:stringify object))
+                 (declare (ignore body))
+                 (is (= 400 status))))
+             (multiple-value-bind (body status)
+                 (request "/api/v1/namespaces/sonobuoy/pods/hello" :method :delete)
+               (declare (ignore body))
+               (is (= 200 status)))
+             (is (string= "default" (pod-namespace (get-pod store "default" "hello"))))
+             (is (string= "kube-system" (pod-namespace (get-pod (open-store directory) "kube-system" "hello")))))
+        (stop-server server)))))
+
+(test kubernetes-version-reports-the-conformance-target
+  (let ((server (start-server :address "127.0.0.1" :port 18080)))
+    (unwind-protect
+         (multiple-value-bind (body status) (request "/version")
+           (is (= 200 status))
+           (let ((version (response-object body)))
+             (is (string= "1" (gethash "major" version)))
+             (is (string= "36" (gethash "minor" version)))
+             (is (string= "v1.36.0-gr8s.0" (gethash "gitVersion" version)))))
+      (stop-server server))))
