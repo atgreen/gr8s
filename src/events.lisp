@@ -176,6 +176,9 @@
                (let ((object (core-object "x-kubernetes-action" action "x-kubernetes-group-version-kind" gvk
                                           "responses" (core-object "200" (core-object "description" "Success")))))
                  (when body
+                   (setf (gethash "parameters" object)
+                         (vector (core-object "name" "fieldValidation" "in" "query"
+                                              "schema" (core-object "type" "string"))))
                    (setf (gethash "requestBody" object)
                          (core-object "required" t "content"
                                       (core-object "application/json" (core-object "schema" (reference-schema schema))))))

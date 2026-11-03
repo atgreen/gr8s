@@ -170,4 +170,11 @@
       (let ((new (gr8s::create-core-resource store "events" (event-fixture "expires") "alpha")))
         (is (not (equal uid (gethash "uid" (gethash "metadata" new)))))))))
 
+(test event-openapi-advertises-strict-request-validation
+  (with-core-api (store path)
+    (values store path)
+    (let* ((api (check-core-status 200 "/openapi/v3/apis/events.k8s.io/v1"))
+           (operation (gethash "post" (gethash "/apis/events.k8s.io/v1/namespaces/{namespace}/events" (gethash "paths" api)))))
+      (is (equal "fieldValidation" (gethash "name" (aref (gethash "parameters" operation) 0)))))))
+
 (in-suite gr8s)
