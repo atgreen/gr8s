@@ -510,3 +510,29 @@
                      ("b" "10.88.9.128/25" "192.0.2.3"))))
     (signals gr8s::cni-error
       (gr8s::validate-node-network-object (node-network-with-routes-for-test routes)))))
+
+(test node-runtime-repairs-cached-topology-without-pods-or-a-control-connection
+  (with-temporary-store (store path)
+    (assert store)
+    (let* ((state (merge-pathnames "offline-network/" path))
+           (lock (bt:make-lock "simulated kernel topology"))
+           (installed nil)
+           (runtime
+             (gr8s::make-node-runtime
+              state (make-fake-runtime) nil
+              :network-reconciler
+              (lambda (network previous)
+                (declare (ignore previous))
+                (bt:with-lock-held (lock) (setf installed network)))))
+           (network (node-network-with-routes-for-test
+                     '(("peer" "10.88.9.0/24" "192.0.2.2")))))
+      (gr8s::configure-node-runtime-network runtime network)
+      (let ((journal (uiop:read-file-string (gr8s::node-runtime-network-path runtime))))
+        ;; Simulate loss of the tunnel FDB without changing desired state.
+        (bt:with-lock-held (lock) (setf installed nil))
+        (unwind-protect
+             (progn
+               (gr8s::start-node-runtime runtime)
+               (is-true (wait-until (lambda () (bt:with-lock-held (lock) installed))))
+               (is (string= journal (uiop:read-file-string (gr8s::node-runtime-network-path runtime)))))
+          (gr8s::stop-node-runtime runtime))))))
