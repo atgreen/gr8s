@@ -160,3 +160,18 @@
       (setf (gethash "template" bad) 42)
       (is (= 422 (core-resource-status (lambda () (gr8s::create-core-resource store "podtemplates" bad "alpha"))))))
     (is (null (gr8s::list-core-resources store "podtemplates")))))
+
+(test podtemplate-strategic-patch-supports-client-side-apply-order-and-replacement
+  (with-core-api (store path)
+    (values store path)
+    (let ((collection "/api/v1/namespaces/alpha/podtemplates")
+          (item "/api/v1/namespaces/alpha/podtemplates/ordered"))
+      (check-core-status 201 collection :method :post :object (podtemplate-fixture "ordered"))
+      (let* ((patch (com.inuoe.jzon:parse "{\"template\":{\"spec\":{\"$setElementOrder/containers\":[{\"name\":\"sidecar\"},{\"name\":\"main\"}],\"containers\":[{\"name\":\"sidecar\",\"image\":\"sidecar:v1\"}]}}}"))
+             (result (check-core-status 200 item :method :patch :object patch :content-type "application/strategic-merge-patch+json")))
+        (is (equal '("sidecar" "main")
+                   (map 'list (lambda (container) (gethash "name" container))
+                        (gethash "containers" (gethash "spec" (gethash "template" result)))))))
+      (let* ((patch (com.inuoe.jzon:parse "{\"template\":{\"spec\":{\"containers\":[{\"$patch\":\"replace\"},{\"name\":\"replacement\",\"image\":\"web:v1\"}]}}}"))
+             (result (check-core-status 200 item :method :patch :object patch :content-type "application/strategic-merge-patch+json")))
+        (is (equal "replacement" (gethash "name" (template-main-container result))))))))
