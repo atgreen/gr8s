@@ -1,0 +1,181 @@
+{
+  "date": "2026-11-03",
+  "scope": "Native Pod readiness, termination, Service forwarding and restart validation",
+  "isFullConformanceRun": false,
+  "isCertificationResult": false,
+  "sourceCommit": "54a48f7c86bd271991b845d819d5f8c3ae51ad54",
+  "nativeSHA256": "699ad5ed67a0c1fccba87d147705585d6214bc3d05b813cf81053128a058405e",
+  "guestRunDirectory": "/var/tmp/gr8s-pod-termination.3ep2t_k6",
+  "localArtifacts": "build/conformance/2026-11-03-pod-ready-3ep2t_k6",
+  "scenarios": {
+    "sigtermHandler": {
+      "passed": true,
+      "processExitSeconds": 2.1233181490006245,
+      "apiRemovalSeconds": 12.834403570000177
+    },
+    "sharedDeadline": {
+      "passed": true,
+      "seconds": 5.129190168000605,
+      "containers": 2,
+      "grace": 5
+    },
+    "forceShortening": {
+      "passed": true,
+      "processExitSeconds": 0.1362212920003003,
+      "replacementUID": "E6D625BB-063C-4094-83DB-1BD7BB2A7849"
+    },
+    "restartRecovery": {
+      "passed": true,
+      "seconds": 36.00026326199986,
+      "processExitSeconds": 15.298883961000683,
+      "originalDeadline": "2026-11-03T23:51:15Z"
+    },
+    "steadyRestart": {
+      "passed": true,
+      "readyTransitionTime": "2026-11-03T23:50:47Z",
+      "containerIDUnchanged": true
+    },
+    "terminalConditions": {
+      "passed": true,
+      "actualExitCodes": [
+        0,
+        7
+      ]
+    },
+    "serviceReadiness": {
+      "passed": true,
+      "phaseAfterSidecarExit": "Running",
+      "readyAfterSidecarExit": "False",
+      "directPodStillServes": true
+    }
+  },
+  "cleanup": {
+    "nativeExitCodes": [
+      0,
+      0
+    ],
+    "ownedShimsRemaining": [],
+    "cleanupError": null
+  },
+  "artifactSHA256": {
+    "completed-1C572877-A98B-462D-9674-0813C88EB944-main.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "failed-E9AD5707-F78F-49DA-A0D2-1FA8B8E4497F-main.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "force-8613FD98-F335-41C1-A7B1-D966C5109C33-main.log": "7b4b0c5f8c2e446ddc14206334a148f935efab8a4cfa629db356f0346fa97ddd",
+    "force-E6D625BB-063C-4094-83DB-1BD7BB2A7849-main.log": "dc278188759b4a618906f7c28c3f03769f98b9693b62b091db5ac7d3009890b7",
+    "gr8s.log": "ed08d341ce52a038c8902dbf23c10d577c1653253d9ce1df510684bac7c96e10",
+    "graceful-30CBF1CC-1E80-46B5-9616-B67B76D48D65-main.log": "ef76d875e0bb76304c1f6873f441e7bf8b68728ec40c8c28651309254221fed8",
+    "parallel-823CB6F6-B96B-48A7-8C28-4BE7909E7A14-main.log": "ed88568bf5323b9a86cdded21d6df4097d1ba14cd09b8b9044f7dba3249d0e74",
+    "parallel-823CB6F6-B96B-48A7-8C28-4BE7909E7A14-side1.log": "4455e3361b4a6e7b5be0f8bad713f4896e609770a8d202bb8e1fd202b962ca82",
+    "readiness-route-C027968A-0EF4-4CCB-AFF3-3A38B220FE94-main.log": "350a8112bf8e40f5e44ab5b96c0678f3c754423dd35d7d158d9c8b93a34baa76",
+    "readiness-route-C027968A-0EF4-4CCB-AFF3-3A38B220FE94-side1.log": "d867090a67b47181c3ebabaebac5a8f195f8cfabd9b1a369aa730e74428570ed",
+    "report.json": "2bf855e91fa5e70e5b532cf720c5c320e897bb0c413d111152aa98768e464e24",
+    "restart-A34FBF8A-A9F2-47D6-A864-99E64002EEBE-main.log": "2b691068b2b2c033072ea9da725f9ddad573f515bbe4316a60f09d2b498c6a55",
+    "steady-CDB17900-EFAA-4474-A827-1B1D454EF621-main.log": "71eb4dc78b2e93e7e7d51c72ae18022279d093b18f5ff0338f230d4059526e03"
+  },
+  "negativeRuns": [
+    {
+      "guestRunDirectory": "/var/tmp/gr8s-pod-termination.f9tov2j8",
+      "nativeSHA256": "4bb691ef1f9aa0bf855764f5096a10a6c13de44b937883cd919458c0b3cb32eb",
+      "passed": false,
+      "scenarios": {
+        "sigtermHandler": {
+          "passed": true,
+          "processExitSeconds": 2.125143067999943,
+          "apiRemovalSeconds": 18.948604707999948
+        },
+        "sharedDeadline": {
+          "passed": true,
+          "seconds": 5.130277751999984,
+          "containers": 2,
+          "grace": 5
+        },
+        "forceShortening": {
+          "passed": true,
+          "processExitSeconds": 0.2733123880002495,
+          "replacementUID": "99B77E55-FF3A-43AD-B914-D9EBBDDA5CF6"
+        }
+      },
+      "error": "AssertionError({'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'restart', 'generation': 2, 'labels': {'app': 'restart'}, 'namespace': 'default', 'uid': 'DC332571-6FD0-42EC-8AA6-ECBFC475EBF5', 'resourceVersion': '3', 'creationTimestamp': '2026-11-03T23:22:34Z', 'deletionTimestamp': '2026-11-03T23:23:07Z', 'deletionGracePeriodSeconds': 15}, 'spec': {'terminationGracePeriodSeconds': 15, 'restartPolicy': 'Never', 'containers': [{'name': 'main', 'image': 'docker.io/library/busybox:1.36.1', 'imagePullPolicy': 'IfNotPresent', 'command': ['sh', '-c', \"trap 'echo TERM' TERM; echo READY; while :; do sleep 1; done # gr8s-shutdown-test-restart-1793748154898511093\"], 'env': [{'name': 'KUBERNETES_SERVICE_HOST', 'value': '10.96.0.1'}, {'name': 'KUBERNETES_SERVICE_PORT', 'value': '443'}, {'name': 'KUBERNETES_SERVICE_PORT_HTTPS', 'value': '443'}], 'volumeMounts': [{'name': 'gr8s-api-access', 'mountPath': '/var/run/secrets/kubernetes.io/serviceaccount', 'readOnly': True}]}], 'serviceAccountName': 'default', 'volumes': [{'name': 'gr8s-api-access', 'secret': {'secretName': 'default-token-8485c9b2', 'defaultMode': 420}}], 'nodeName': 'gr8s-local'}, 'status': {'containerStatuses': [{'name': 'main', 'containerID': 'containerd://b90b282b55a6757252df369838741fd21366b7fe5cd1cbad6cf3d6b9de65ba0b', 'image': 'docker.io/library/busybox:1.36.1', 'imageID': 'docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662', 'restartCount': 0, 'ready': True, 'started': True, 'state': {'running': {'startedAt': '2026-11-03T23:22:52Z'}}}], 'phase': 'Running', 'podIP': '10.88.0.1', 'podIPs': [{'ip': '10.88.0.1'}], 'observedGeneration': 2, 'reason': 'Terminating', 'conditions': [{'type': 'PodScheduled', 'status': 'True', 'lastTransitionTime': '2026-11-03T23:22:34Z', 'observedGeneration': 2}, {'type': 'Initialized', 'status': 'True', 'lastTransitionTime': '2026-11-03T23:22:34Z', 'observedGeneration': 2}, {'type': 'ContainersReady', 'status': 'True', 'lastTransitionTime': '2026-11-03T23:23:03Z', 'observedGeneration': 2}, {'type': 'Ready', 'status': 'True', 'lastTransitionTime': '2026-11-03T23:23:03Z', 'observedGeneration': 2}]}})",
+      "cleanupError": null,
+      "nativeExitCodes": [
+        0,
+        0
+      ],
+      "ownedShimsRemaining": [],
+      "interpretation": "Ready transition time changed across control-plane restart despite the same running container; led to persisted valid node leases.",
+      "artifactSHA256": {
+        "force-99B77E55-FF3A-43AD-B914-D9EBBDDA5CF6-main.log": "26f78c6e05a0cb613b7a1fc38b3dc1ae5f6c2ce0ee006e05d94a5be2480eb099",
+        "force-AE77B69E-8163-4DF6-B8A2-9C76D0A53D9B-main.log": "36a813bbf6607202024eadf2dd0142e7ef59bceca47fd8f78817f26d9b30fa00",
+        "gr8s.log": "5f22773acdea74b9bf4d8bd78998ca1afc887825ba1e5a50cb68cfd4aba4513b",
+        "graceful-BBFF9F8F-D547-4742-BC87-553065E7C2CA-main.log": "2df31116e3cb550b0f7755382052d8ac15e61f4658557621ad4d94b6d31fca1d",
+        "parallel-547C2D3D-03C0-4FA0-A5C4-E233C1944E7C-main.log": "c7118a723acb3b868d28cbd53b61a40a0e4fda31444ec62aeb94cb294e83b545",
+        "parallel-547C2D3D-03C0-4FA0-A5C4-E233C1944E7C-side1.log": "9400fdacb5b90b808606417cd918aed98c11d6621f3ff88adfbd54557ee8eb77",
+        "report.json": "761afda35c1088693ed1411a2ec03c599d5910e7a76d2a2a9874d441f04a6d2b",
+        "restart-DC332571-6FD0-42EC-8AA6-ECBFC475EBF5-main.log": "8b6d1dc19d9169110be8a4f010239da0a0b511b801e6a7af4c6d2649e87d59dd"
+      }
+    },
+    {
+      "guestRunDirectory": "/var/tmp/gr8s-pod-termination.9r2njdmd",
+      "nativeSHA256": "8fa130ea46fa2a2b2ba0968bf57e7b5d07479c0f1d9c6f60d933d946de896112",
+      "passed": false,
+      "scenarios": {
+        "sigtermHandler": {
+          "passed": true,
+          "processExitSeconds": 2.1212110789997496,
+          "apiRemovalSeconds": 18.988457503000063
+        },
+        "sharedDeadline": {
+          "passed": true,
+          "seconds": 5.130380534000324,
+          "containers": 2,
+          "grace": 5
+        },
+        "forceShortening": {
+          "passed": true,
+          "processExitSeconds": 0.11107858400009718,
+          "replacementUID": "B533C4ED-A1BE-41B3-A83B-9B0A82DF3176"
+        },
+        "restartRecovery": {
+          "passed": true,
+          "seconds": 29.48570005900001,
+          "processExitSeconds": 14.949201901999913,
+          "originalDeadline": "2026-11-03T23:37:06Z"
+        },
+        "steadyRestart": {
+          "passed": true,
+          "readyTransitionTime": "2026-11-03T23:36:33Z",
+          "containerIDUnchanged": true
+        }
+      },
+      "error": "TimeoutError('completed actual terminal phase')",
+      "cleanupError": "TimeoutError('owned container and sandbox cleanup')",
+      "nativeExitCodes": [
+        0,
+        0
+      ],
+      "ownedShimsRemaining": [
+        "containerd-shim /var/tmp/gr8s-pod-termination.chx3hu8i/state/agent/containerd/runtime/bin/containerd-shim-runc-v2 -namespace k8s.io -id 343aa7ce961103500bd3bcc46cb850b337261aa4088c6694aa6381c6632e0c14 -address /var/tmp/gr8s-pod-termination.chx3hu8i/state/agent/containerd/run/containerd.sock"
+      ],
+      "interpretation": "New assignments after restart were ignored because the prepublished snapshot revision was below the agent saved acknowledgement; led to snapshot revision rebasing.",
+      "artifactSHA256": {
+        "completed-889CDD5D-BADE-4AFC-9499-BE7F86AB5E04-main.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "force-36AA82BA-743A-4B15-928F-23756A78FEFD-main.log": "69587a6826d86f879340e0b76f862aeff28a2018d23f3cdf99b118f666757324",
+        "force-B533C4ED-A1BE-41B3-A83B-9B0A82DF3176-main.log": "96e43811848aa7d870324680bc2d11b6c35d721ffeac4e38f26b5d7063ff0d22",
+        "gr8s.log": "60e02db4c00ddfd3c727468ac6ec800cec95eb672d30f380985aa2e17a3c5a38",
+        "graceful-3FCEBD79-33C7-4036-8BBE-6F932CB70CD4-main.log": "1dd96fb16680010c5362b87132b242e6da637044df29711e3606bedf728400c6",
+        "parallel-FBFC06AF-5B76-412E-A789-5ED23E2B9957-main.log": "9fc89eb2b5492f8df9ff3a561c1e7ff964a24007f50a55a2d02367d8ea81318f",
+        "parallel-FBFC06AF-5B76-412E-A789-5ED23E2B9957-side1.log": "161baa6e1ebfce99548de4307081c4975e6a3c3c64aacb431fe00b879289f60f",
+        "report.json": "f7649136932a440298b7f7c19e9a7faf1cc72311a28a5cbf38916a04b14facea",
+        "restart-E962F466-E3E8-49F2-AE66-FB0D3A71B91E-main.log": "bafd753207fa6404276c4e301887bb06e80416ebc843e8a3e6c00f918f3bad83",
+        "steady-E7905823-1F5B-4D5E-865C-E2E175655D40-main.log": "e6a6efdbfaf58ef7b2a0d62ca855804654de858d345051dd75b492ccb5c26d39"
+      }
+    }
+  ],
+  "notes": [
+    "These seven native integration scenarios are distinct from the upstream conformance suite.",
+    "The final run reused the same owned stopped state and recovered the orphan sandbox left by the failed snapshot run; final cleanup found no owned shims.",
+    "The steady Pod retained its container identity and Ready transition time; new terminal Pods and Service workloads ran after restart.",
+    "The Service test verified ClusterIP withdrawal while direct Pod IP HTTP remained operational after the sidecar exited.",
+    "Init containers, probes, readiness gates and Pod/Node watches remain unimplemented."
+  ]
+}
