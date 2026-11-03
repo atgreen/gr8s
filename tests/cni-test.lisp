@@ -522,3 +522,11 @@
         (is (= 1 status))
         (is (= 100 (gethash "code" response)))
         (is (string= message (gethash "msg" response)))))))
+
+(test endpoint-identity-encoding-matches-the-whistler-map-layout
+  (let ((bytes (gr8s::encode-cni-endpoint-identity "10.88.1.2" #(2 17 34 51 68 85))))
+    (is (= 16 (length bytes)))
+    (is (= #x0a580102 (gr8s::netlink-read-integer bytes 0 4)))
+    (is (= #x02112233 (gr8s::netlink-read-integer bytes 4 4)))
+    (is (= #x4455 (gr8s::netlink-read-integer bytes 8 4)))
+    (is (= 1 (gr8s::netlink-read-integer bytes 12 4)))))

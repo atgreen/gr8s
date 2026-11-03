@@ -8,6 +8,8 @@
   network-reconciler
   ipam
   cni-operations
+  (observed-statuses (make-hash-table :test #'equal))
+  (observed-lock (bt:make-lock "gr8s node observations"))
   (network-lock (bt:make-lock "gr8s node network"))
   store
   reconciler
@@ -206,7 +208,8 @@
        (progn
          (setf (node-runtime-worker node-runtime)
                (start-reconciliation-worker
-                (node-runtime-reconciler node-runtime)))
+                (node-runtime-reconciler node-runtime)
+                :observer (lambda (pod status) (cache-node-observation node-runtime pod status))))
          (bt:with-lock-held ((node-runtime-lock node-runtime))
            (setf (node-runtime-state node-runtime) :running)
            (bt:condition-notify (node-runtime-state-changed node-runtime)))
@@ -336,7 +339,70 @@
    :resource-version (pod-resource-version pod)
    :phase (gethash "phase" status "Unknown")
    :reason (gethash "reason" status "")
-   :message (gethash "message" status "")))
+   :message (gethash "message" status "")
+   :pod-ip (gethash "podIP" status "")
+   :status-json (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify status))))
+
+(defun cache-node-observation (node-runtime pod status)
+  (let ((message (pod-observed-status-message pod status)))
+    (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
+      (setf (gethash (pod-uid pod) (node-runtime-observed-statuses node-runtime)) message))
+    message))
+
+(defun endpoint-telemetry-message (sandbox interface address counters error)
+  (make-instance
+   'gr8s.node.v1::endpoint-telemetry
+   :sandbox-id sandbox :interface-name interface :pod-ip address
+   :allowed-packets (gethash "allowedPackets" counters 0)
+   :allowed-bytes (gethash "allowedBytes" counters 0)
+   :dropped-packets (gethash "droppedPackets" counters 0)
+   :dropped-bytes (gethash "droppedBytes" counters 0)
+   :rejected-spoofs (gethash "rejectedSpoofs" counters 0)
+   :malformed-packets (gethash "malformedPackets" counters 0)
+   :unsupported-packets (gethash "unsupportedPackets" counters 0)
+   :error-message error))
+
+(defun node-runtime-endpoint-telemetry (node-runtime counter-reader)
+  (let ((manager (node-runtime-manager node-runtime))
+        (ipam (node-runtime-ipam node-runtime)))
+    (when (and manager ipam)
+      (let ((allocations
+              (bt:with-lock-held ((node-ipam-lock ipam))
+                (loop for key being the hash-keys of (node-ipam-allocations ipam)
+                        using (hash-value address)
+                      collect (list (car key) (cdr key) address))))
+            (root (managed-containerd-bpf-directory manager)))
+        (loop for (sandbox interface address) in allocations
+              collect (handler-case
+                          (endpoint-telemetry-message sandbox interface address
+                                                      (funcall counter-reader root sandbox) "")
+                        (error (condition)
+                          (endpoint-telemetry-message
+                           sandbox interface address (make-hash-table :test #'equal)
+                           (princ-to-string condition)))))))))
+
+(defun node-runtime-status (node-runtime &key (counter-reader #'read-cni-policy-counters))
+  (let ((pods (list-pods (node-runtime-store node-runtime) "default")))
+    (make-instance
+     'gr8s.node.v1::node-status
+     :observed-at-unix-nanos (* (- (get-universal-time) 2208988800) 1000000000)
+     :pods
+     (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
+       ;; Prune deleted UIDs and never publish a cache entry for an older Pod
+       ;; resource version while its replacement is still reconciling.
+       (let ((uids (mapcar #'pod-uid pods)))
+         (maphash (lambda (uid message)
+                    (declare (ignore message))
+                    (unless (member uid uids :test #'string=)
+                      (remhash uid (node-runtime-observed-statuses node-runtime))))
+                  (node-runtime-observed-statuses node-runtime)))
+       (loop for pod in pods
+             for message = (gethash (pod-uid pod) (node-runtime-observed-statuses node-runtime))
+             when (and message
+                       (string= (pod-resource-version pod)
+                                (slot-value message 'gr8s.node.v1::resource-version)))
+               collect message))
+     :endpoints (node-runtime-endpoint-telemetry node-runtime counter-reader))))
 
 (defun reconcile-node-snapshot (node-runtime snapshot)
   (unless (eq :running (node-runtime-state node-runtime))
@@ -352,7 +418,7 @@
             for status = (reconcile-pod
                           (node-runtime-reconciler node-runtime)
                           (pod-namespace pod) (pod-name pod))
-            collect (pod-observed-status-message pod status)
+            collect (cache-node-observation node-runtime pod status)
               into statuses
             finally (return statuses)))))
 

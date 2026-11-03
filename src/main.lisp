@@ -329,6 +329,7 @@
                 :operation-handler
                 (lambda (variant payload emit)
                   (dispatch-node-operation node-runtime variant payload emit))
+                :status-provider (lambda () (node-runtime-status node-runtime))
                 :underlay-address (getf options :node-address)
                 :reconnect-delay 0.1 :control control
                 :stop-predicate stop-predicate))
@@ -391,6 +392,7 @@
 
 (defstruct reconciliation-worker
   reconciler
+  observer
   thread
   (stop-requested nil)
   (interval 1.0)
@@ -405,7 +407,8 @@
 (defun reconciliation-worker-loop (worker)
   (loop until (reconciliation-worker-stopping-p worker)
         do (handler-case
-               (reconcile-all (reconciliation-worker-reconciler worker))
+               (reconcile-all (reconciliation-worker-reconciler worker)
+                              :observer (reconciliation-worker-observer worker))
              (error (error)
                (format *error-output* "gr8s reconciliation error: ~A~%" error)))
            (bt:with-lock-held ((reconciliation-worker-lock worker))
@@ -415,9 +418,9 @@
                 (reconciliation-worker-lock worker)
                 :timeout (reconciliation-worker-interval worker))))))
 
-(defun start-reconciliation-worker (reconciler &key (interval 1.0))
+(defun start-reconciliation-worker (reconciler &key (interval 1.0) observer)
   (let ((worker (make-reconciliation-worker
-                 :reconciler reconciler :interval interval)))
+                 :reconciler reconciler :interval interval :observer observer)))
     (setf (reconciliation-worker-thread worker)
           (bt:make-thread
            (lambda () (reconciliation-worker-loop worker))

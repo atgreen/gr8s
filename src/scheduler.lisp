@@ -216,6 +216,16 @@
   (with-store-lock (store)
     (setf (gethash (pod-uid pod) (pod-store-pod-observed-phases store)) phase)))
 
+(defun update-pod-observed-status (store pod status)
+  (with-store-lock (store)
+    (setf (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)) status
+          (gethash (pod-uid pod) (pod-store-pod-observed-phases store))
+          (gethash "phase" status "Unknown"))))
+
+(defun pod-observed-status (store pod)
+  (with-store-lock (store)
+    (gethash (pod-uid pod) (pod-store-pod-observed-statuses store))))
+
 (defun pod-scheduling-phase (store pod)
   (with-store-lock (store)
     (let* ((node-name (pod-node-name pod))

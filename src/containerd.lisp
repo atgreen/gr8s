@@ -82,6 +82,8 @@
                           (cri-pod-sandbox-info-labels sandbox)
                           :test #'string=))
               "")
+          :pod-ip (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime)
+                                      (cri-pod-sandbox-info-id sandbox))
           :phase (containerd-phase
                   runtime (containerd-containers runtime sandbox))))))))
 

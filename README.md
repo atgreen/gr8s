@@ -126,8 +126,15 @@ maps alongside its `tcx-egress` link under
 `AGENT_STATE_DIR/containerd/bpf/CONTAINER_ID/`. CHECK validates kernel map schemas,
 identity, and the TCX interface/direction; DEL removes staged links and all maps
 even after the Pod namespace disappears. Tests exercise the actual compiled
-bytecode on packet fixtures. Privileged kernel verification and telemetry
-publication remain in progress.
+bytecode on packet fixtures; privileged kernel verification remains required.
+
+Agents sample the pinned counters and publish endpoint telemetry through their
+node sessions. The loopback control-plane `/metrics` endpoint exposes accepted
+and dropped packets/bytes, spoof rejections, malformed/unsupported packets,
+sample timestamps, and node readiness. An unreadable map sets
+`gr8s_endpoint_telemetry_available` to zero and omits its counter series instead
+of reporting false zero traffic. Pod phase and IP are also refreshed from the
+agent's reconciliation observations without requiring a new desired snapshot.
 
 The native VXLAN backend uses static router neighbors and forwarding database
 entries, preserving Pod source addresses across nodes. Isolated two-node kernel

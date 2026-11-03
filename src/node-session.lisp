@@ -14,6 +14,7 @@
   node-prefix
   (revisions (make-hash-table :test #'equal))
   (snapshots (make-hash-table :test #'equal))
+  (statuses (make-hash-table :test #'equal))
   (acknowledged-revisions (make-hash-table :test #'equal))
   (operations (make-hash-table :test #'equal))
   (operation-queues (make-hash-table :test #'equal))
@@ -339,17 +340,31 @@
       (slot-value envelope 'gr8s.node.v1::snapshot-ack)))
     (:status
      (let ((status (slot-value envelope 'gr8s.node.v1::status)))
+       (bt:with-lock-held ((node-grpc-server-lock server))
+         (setf (gethash node-name (node-grpc-server-statuses server)) status))
        (loop for pod-status in (slot-value status 'gr8s.node.v1::pods)
-             for namespace =
-               (slot-value pod-status 'gr8s.node.v1::namespace)
-             for name = (slot-value pod-status 'gr8s.node.v1::name)
-             for uid = (slot-value pod-status 'gr8s.node.v1::uid)
-             for pod = (get-pod (node-grpc-server-store server)
-                                namespace name)
-             when (string= uid (pod-uid pod))
-               do (update-pod-observed-phase
-                   (node-grpc-server-store server) pod
-                   (slot-value pod-status 'gr8s.node.v1::phase)))))
+             for pod = (handler-case
+                           (get-pod (node-grpc-server-store server)
+                                    (slot-value pod-status 'gr8s.node.v1::namespace)
+                                    (slot-value pod-status 'gr8s.node.v1::name))
+                         (kubernetes-error () nil))
+             when (and pod (equal node-name (pod-node-name pod))
+                       (string= (slot-value pod-status 'gr8s.node.v1::uid) (pod-uid pod))
+                       (string= (slot-value pod-status 'gr8s.node.v1::resource-version)
+                                (pod-resource-version pod)))
+               do (let* ((bytes (slot-value pod-status 'gr8s.node.v1::status-json))
+                         (object (handler-case
+                                     (when (plusp (length bytes))
+                                       (com.inuoe.jzon:parse
+                                        (trivial-utf-8:utf-8-bytes-to-string bytes)))
+                                   (error () nil))))
+                    (unless (hash-table-p object) (setf object (make-hash-table :test #'equal)))
+                    (setf (gethash "phase" object) (slot-value pod-status 'gr8s.node.v1::phase))
+                    (unless (string= "" (slot-value pod-status 'gr8s.node.v1::pod-ip))
+                      (setf (gethash "podIP" object) (slot-value pod-status 'gr8s.node.v1::pod-ip)
+                            (gethash "podIPs" object)
+                            (vector (json-object "ip" (slot-value pod-status 'gr8s.node.v1::pod-ip)))))
+                    (update-pod-observed-status (node-grpc-server-store server) pod object)))))
     (:operation-response
      (note-node-operation-response
       server (slot-value envelope 'gr8s.node.v1::operation-response)))
@@ -733,7 +748,7 @@
 
 (defun agent-session-monitor
     (session control session-thread heartbeat-interval
-     stop-predicate finished-p finish-session)
+     stop-predicate finished-p finish-session status-provider)
   (let ((next-heartbeat
           (+ (get-internal-real-time)
              (* (funcall heartbeat-interval) internal-time-units-per-second))))
@@ -756,6 +771,15 @@
                    (send-agent-session-envelope
                     session :heartbeat
                     (make-instance 'gr8s.node.v1::heartbeat))
+                   (when status-provider
+                     (handler-case
+                         (let ((status (funcall status-provider)))
+                           (when status
+                             (unless (typep status 'gr8s.node.v1::node-status)
+                               (error "node status provider returned an invalid message"))
+                             (send-agent-session-envelope session :status status)))
+                       (error (condition)
+                         (format *error-output* "gr8s status reporting failed: ~A~%" condition))))
                    (setf next-heartbeat
                          (+ (get-internal-real-time)
                             (* (funcall heartbeat-interval)
@@ -774,7 +798,7 @@
 
 (defun run-one-node-session
     (host port node-name identity-path apply-snapshot operation-handler
-     one-shot-p control stop-predicate underlay-address)
+     one-shot-p control stop-predicate underlay-address status-provider)
   (let* ((identity (load-agent-identity identity-path node-name))
          (session-thread (bt:current-thread))
          (session-timeout (and one-shot-p 5))
@@ -823,7 +847,9 @@
                       (agent-session-monitor
                        session control session-thread
                        (lambda () heartbeat-interval)
-                       stop-predicate #'finished-p #'finish-session))
+                       stop-predicate #'finished-p #'finish-session
+                       (when status-provider
+                         (lambda () (when operation-session-p (funcall status-provider))))))
                     :name "gr8s agent session heartbeat")))
            (let* ((server-hello
                     (require-server-envelope
@@ -866,7 +892,7 @@
 
 (defun run-node-session (host port node-name identity-path apply-snapshot
                          &key max-sessions (reconnect-delay 1)
-                           operation-handler underlay-address
+                           operation-handler underlay-address status-provider
                            control
                            (stop-predicate (constantly nil)))
   (let ((completed 0)
@@ -877,7 +903,7 @@
           (progn
             (run-one-node-session host port node-name identity-path
                                   apply-snapshot operation-handler
-                                  (not (null max-sessions)) control stop-predicate underlay-address)
+                                  (not (null max-sessions)) control stop-predicate underlay-address status-provider)
             (incf completed)
             (when (and max-sessions (>= completed max-sessions))
               (return completed)))

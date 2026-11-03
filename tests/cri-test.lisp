@@ -149,3 +149,15 @@
           (when sandbox-id
             (gr8s::cri-delete-pod-sandbox socket-path sandbox-id))))
       (skip "Set GR8S_RUN_CONTAINERD_LIFECYCLE_TESTS=1 to run the CRI lifecycle test")))
+
+(test cri-sandbox-network-status-carries-the-observed-pod-ip
+  (let* ((response (make-instance
+                    'gr8s.cri.v1::pod-sandbox-status-response
+                    :status (make-instance 'gr8s.cri.v1::pod-sandbox-status
+                                           :network (make-instance 'gr8s.cri.v1::pod-sandbox-network-status
+                                                                   :ip "10.88.1.2"))))
+         (decoded (ag-proto:deserialize-from-bytes 'gr8s.cri.v1::pod-sandbox-status-response
+                                                  (ag-proto:serialize-to-bytes response))))
+    (is (string= "10.88.1.2" (gr8s::cri-pod-sandbox-ip-from-response decoded))))
+  (is (string= "" (gr8s::cri-pod-sandbox-ip-from-response
+                    (make-instance 'gr8s.cri.v1::pod-sandbox-status-response)))))

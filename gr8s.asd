@@ -36,6 +36,7 @@
                              (:file "podman")
                              (:file "reconciler")
                              (:file "control-plane-runtime")
+                             (:file "telemetry")
                              (:file "agent-runtime")
                              (:file "http")
                              (:file "server")
@@ -67,7 +68,8 @@
                              (:file "containerd-test")
                              (:file "podman-test")
                              (:file "main-test")
-                             (:file "http-test"))))
+                             (:file "http-test")
+                             (:file "telemetry-test"))))
   :perform (test-op (operation component)
              (declare (ignore operation component))
              (unless (uiop:symbol-call

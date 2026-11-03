@@ -5,6 +5,7 @@
   (pods (make-hash-table :test #'equal))
   (nodes (make-hash-table :test #'equal))
   (pod-observed-phases (make-hash-table :test #'equal))
+  (pod-observed-statuses (make-hash-table :test #'equal))
   (lock (bt:make-lock "gr8s store")))
 
 (defmacro with-store-lock ((store) &body body)
@@ -200,6 +201,8 @@
     (let ((pod (get-pod-unlocked store namespace name)))
       (delete-file (pod-path store pod))
       (remhash (pod-key namespace name) (pod-store-pods store))
+      (remhash (pod-uid pod) (pod-store-pod-observed-phases store))
+      (remhash (pod-uid pod) (pod-store-pod-observed-statuses store))
       pod)))
 
 (defun delete-pod (store namespace name)

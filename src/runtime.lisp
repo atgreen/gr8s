@@ -14,7 +14,12 @@
   uid
   resource-version
   (phase "Running")
+  (pod-ip "")
+  status
   (logs (make-hash-table :test #'equal)))
+
+(defgeneric runtime-network-metrics (runtime))
+(defmethod runtime-network-metrics ((runtime t)) (declare (ignore runtime)) "")
 
 (defgeneric runtime-observe (runtime uid))
 (defgeneric runtime-ensure (runtime pod))

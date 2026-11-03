@@ -48,7 +48,10 @@
   (make-runtime-pod
    :uid (pod-uid pod)
    :resource-version (pod-resource-version pod)
-   :phase (pod-scheduling-phase (control-plane-runtime-store runtime) pod)))
+   :phase (pod-scheduling-phase (control-plane-runtime-store runtime) pod)
+   :status (pod-observed-status (control-plane-runtime-store runtime) pod)
+   :pod-ip (let ((status (pod-observed-status (control-plane-runtime-store runtime) pod)))
+             (if status (gethash "podIP" status "") ""))))
 
 (defmethod runtime-observe ((runtime control-plane-runtime) uid)
   (let ((pod (control-plane-pod-by-uid runtime uid)))

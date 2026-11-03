@@ -911,6 +911,9 @@
       (let ((path (hunchentoot:script-name request))
             (method (hunchentoot:request-method request)))
         (cond
+          ((string= path "/metrics")
+           (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
+           (runtime-network-metrics runtime))
           ((string= path "/version") (version-response))
           ((string= path "/api") (api-versions-response))
           ((string= path "/apis") (api-groups-response))
