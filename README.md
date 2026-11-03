@@ -435,6 +435,8 @@ This focused validation
 includes the normal five-minute continuation expiry; it is separate from a full
 certified-conformance run. Regenerate the pinned schemas with
 `python3 scripts/generate-podtemplate-schema.py`; input checksums are verified.
+The [native validation record](docs/podtemplate-conformance-2026-11-03.json)
+captures all five upstream cases passing, plus local API and persistence checks.
 
 Managed native clusters also allocate durable IPv4 TCP ClusterIP Services from
 `10.96.0.0/16`. Native listeners forward connections to running, selector-matched
