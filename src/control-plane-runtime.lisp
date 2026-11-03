@@ -79,6 +79,21 @@
       (publish-node-snapshot runtime (pod-node-name pod) :excluded-uid uid)))
   nil)
 
+(defmethod runtime-delete-pod ((runtime control-plane-runtime) pod)
+  "Keep a graceful deletion assigned until its exact revision is acknowledged Deleted."
+  (let* ((store (control-plane-runtime-store runtime))
+         (status (pod-observed-status store pod)))
+    (cond
+      ((or (not (pod-node-name pod))
+           (zerop (gethash "deletionGracePeriodSeconds" (gethash "metadata" (pod-to-object pod)) 0))
+           (and (equal (pod-resource-version pod) (pod-observed-resource-version store pod))
+                (equal "Deleted" (and status (gethash "reason" status)))))
+       (runtime-delete runtime (pod-uid pod))
+       t)
+      (t
+       (publish-node-snapshot runtime (pod-node-name pod))
+       nil))))
+
 (defmethod runtime-logs ((runtime control-plane-runtime) uid container &key tail)
   (declare (ignore tail))
   (let ((pod (control-plane-pod-by-uid runtime uid)))

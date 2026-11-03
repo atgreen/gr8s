@@ -43,9 +43,14 @@
 
 (defun pod-runtime-spec-fingerprint (pod)
   "Identify container-affecting Pod spec content independently of metadata revisions."
-  (octets-to-hex (ironclad:digest-sequence :sha256
+  (let ((spec (com.inuoe.jzon:parse (com.inuoe.jzon:stringify
+                                   (gethash "spec" (pod-to-object pod))))))
+    ;; Grace affects shutdown, never the running workload. Excluding the new
+    ;; default also preserves adoption of containers created by older gr8s.
+    (remhash "terminationGracePeriodSeconds" spec)
+    (octets-to-hex (ironclad:digest-sequence :sha256
                   (trivial-utf-8:string-to-utf-8-bytes
-                   (canonical-workload-json (gethash "spec" (pod-to-object pod)))))))
+                   (canonical-workload-json spec))))))
 
 (defgeneric runtime-network-metrics (runtime))
 (defmethod runtime-network-metrics ((runtime t)) (declare (ignore runtime)) "")
@@ -53,6 +58,14 @@
 (defgeneric runtime-observe (runtime uid))
 (defgeneric runtime-ensure (runtime pod))
 (defgeneric runtime-delete (runtime uid))
+(defgeneric runtime-delete-pod (runtime pod)
+  (:documentation "Advance durable Pod shutdown; return true only when deletion is complete."))
+(defmethod runtime-delete-pod ((runtime t) pod)
+  (runtime-delete runtime (pod-uid pod))
+  t)
+(defgeneric stop-runtime-deletions (runtime)
+  (:documentation "Cancel and join background deletion operations before runtime services stop."))
+(defmethod stop-runtime-deletions ((runtime t)) nil)
 (defgeneric runtime-logs (runtime uid container &key tail))
 (defgeneric runtime-exec-url
     (runtime uid container command &key stdin stdout stderr tty))

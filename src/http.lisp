@@ -134,6 +134,9 @@
                    "namespace" (json-object "type" "string")
                    "uid" (json-object "type" "string")
                    "resourceVersion" (json-object "type" "string")
+                   "generation" (json-object "type" "integer" "format" "int64")
+                   "deletionTimestamp" (json-object "type" "string" "format" "date-time")
+                   "deletionGracePeriodSeconds" (json-object "type" "integer" "format" "int64")
                    "labels" (json-object "type" "object"
                                          "additionalProperties"
                                          (json-object "type" "string"))
@@ -178,7 +181,8 @@
        "containers" (json-object
                      "type" "array"
                      "items" (reference-schema "io.k8s.api.core.v1.Container"))
-       "restartPolicy" (json-object "type" "string")))
+       "restartPolicy" (json-object "type" "string")
+       "terminationGracePeriodSeconds" (json-object "type" "integer" "format" "int64" "minimum" 0)))
      (gethash "io.k8s.api.core.v1.Pod" definitions)
      (json-object
       "type" "object"
@@ -363,11 +367,51 @@
        (pod-response-object
         pod (reconcile-pod reconciler namespace name))))))
 
+(defun pod-delete-request-arguments ()
+  "Decode JSON/protobuf DeleteOptions and query options without mutating desired state."
+  (let* ((body (hunchentoot:raw-post-data :force-binary t))
+         (options (if (and body (plusp (length body)))
+                      (core-resource-request-object "DeleteOptions") (json-object)))
+         (preconditions (gethash "preconditions" options))
+         (preview (gethash "dryRun" options))
+         (query-grace (hunchentoot:parameter "gracePeriodSeconds"))
+         (arguments nil))
+    (when preconditions
+      (require-object preconditions "preconditions")
+      (dolist (key '("uid" "resourceVersion"))
+        (when (gethash key preconditions)
+          (require-nonempty-string (gethash key preconditions) key))))
+    (when (and preview (not (eq preview 'null)))
+      (unless (and (vectorp preview) (not (stringp preview))
+                   (every (lambda (value) (equal value "All")) preview))
+        (core-resource-error 400 "BadRequest" "DeleteOptions.dryRun must contain only All")))
+    (let ((policy (or (gethash "propagationPolicy" options)
+                      (hunchentoot:parameter "propagationPolicy"))))
+      (when (and policy (not (eq policy 'null)) (not (equal policy "Background")))
+        (invalid-pod "Pod deletion currently supports Background propagation only")))
+    (when (eq t (gethash "orphanDependents" options))
+      (invalid-pod "Orphan propagation is not supported"))
+    (multiple-value-bind (grace supplied) (gethash "gracePeriodSeconds" options)
+      (when (eq grace 'null) (setf supplied nil))
+      (when (and query-grace (not supplied))
+        (setf grace (handler-case (parse-integer query-grace)
+                      (error () (core-resource-error 400 "BadRequest" "Invalid gracePeriodSeconds")))
+              supplied t))
+      (when supplied (setf arguments (list :grace-period grace))))
+    (append arguments
+            (list :uid (and preconditions (gethash "uid" preconditions))
+                  :resource-version (and preconditions (gethash "resourceVersion" preconditions))
+                  :dry-run (or (core-resource-dry-run-p)
+                               (and (vectorp preview) (not (stringp preview)) (plusp (length preview))))))))
+
 (defun delete-pod-response (store reconciler name &optional (namespace "default"))
+  "Start or shorten Pod shutdown and return promptly while its agent stops containers."
   (declare (ignore store))
-  (delete-reconciled-pod reconciler namespace name)
-  (status-response "Success" "Deleted"
-                   (format nil "Pod ~A deleted" name) 200))
+  (multiple-value-bind (status pod)
+      (apply #'delete-reconciled-pod reconciler namespace name (pod-delete-request-arguments))
+    (if (equal "Deleted" (and status (gethash "reason" status)))
+        (status-response "Success" "Deleted" (format nil "Pod ~A deleted" name) 200)
+        (json-response (pod-response-object pod (or status (pod-status "Running" :reason "Terminating")))))))
 
 (defun pod-logs-response (store reconciler name &optional (namespace "default"))
   (let* ((pod (get-pod store namespace name))

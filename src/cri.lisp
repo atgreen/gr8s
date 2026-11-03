@@ -37,6 +37,11 @@
            (format nil "CRI ~A failed with gRPC status ~D (~A)"
                    operation status (ag-grpc:grpc-status-name status)))))
 
+(defun ensure-cri-deletion-status (operation status)
+  "Accept idempotent shutdown/removal of containers already absent from the runtime."
+  (unless (= status ag-grpc:+grpc-status-not-found+)
+    (ensure-cri-status operation status)))
+
 (defun make-cri-exec-request
     (container-id command &key stdin stdout stderr tty)
   (make-instance 'gr8s.cri.v1::exec-request
@@ -194,6 +199,7 @@
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
          (let ((stub (gr8s.cri.v1::make-runtime-service-stub channel)))
+           (register-runtime-deletion-cancel (lambda () (ag-grpc:channel-close channel)))
            (multiple-value-bind (response status)
                (gr8s.cri.v1::runtime-service-stop-pod-sandbox
                 stub
@@ -201,7 +207,8 @@
                                :pod-sandbox-id sandbox-id)
                 :timeout timeout)
              (declare (ignore response))
-             (ensure-cri-status "StopPodSandbox" status))
+             (ensure-cri-deletion-status "StopPodSandbox" status))
+           (register-runtime-deletion-cancel (lambda () (ag-grpc:channel-close channel)))
            (multiple-value-bind (response status)
                (gr8s.cri.v1::runtime-service-remove-pod-sandbox
                 stub
@@ -209,7 +216,7 @@
                                :pod-sandbox-id sandbox-id)
                 :timeout timeout)
              (declare (ignore response))
-             (ensure-cri-status "RemovePodSandbox" status)))
+             (ensure-cri-deletion-status "RemovePodSandbox" status)))
       (ag-grpc:channel-close channel))))
 
 (defun cri-pull-image (socket-path image &key timeout)
@@ -360,20 +367,24 @@
               :log-path (gr8s.cri.v1::log-path container-status))))
       (ag-grpc:channel-close channel))))
 
-(defun cri-delete-container (socket-path container-id &key (timeout 30))
+(defun cri-delete-container (socket-path container-id &key (grace-period 0)
+                                                        (timeout (+ grace-period 30)))
   "Stop and remove CONTAINER-ID through the CRI runtime service."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
          (let ((stub (gr8s.cri.v1::make-runtime-service-stub channel)))
+           (register-runtime-deletion-cancel (lambda () (ag-grpc:channel-close channel)))
            (multiple-value-bind (response status)
                (gr8s.cri.v1::runtime-service-stop-container
                 stub
                 (make-instance 'gr8s.cri.v1::stop-container-request
                                :container-id container-id
-                               :timeout 1)
+                               :timeout grace-period)
                 :timeout timeout)
              (declare (ignore response))
-             (ensure-cri-status "StopContainer" status))
+             (ensure-cri-deletion-status "StopContainer" status))
+           ;; Register again to reject a superseded job between Stop and Remove.
+           (register-runtime-deletion-cancel (lambda () (ag-grpc:channel-close channel)))
            (multiple-value-bind (response status)
                (gr8s.cri.v1::runtime-service-remove-container
                 stub
@@ -381,7 +392,7 @@
                                :container-id container-id)
                 :timeout timeout)
              (declare (ignore response))
-             (ensure-cri-status "RemoveContainer" status)))
+             (ensure-cri-deletion-status "RemoveContainer" status)))
       (ag-grpc:channel-close channel))))
 
 (defun cri-image-present-p (socket-path image &key (timeout 30))

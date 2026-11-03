@@ -87,6 +87,18 @@
          (options (make-hash-table :test #'equal))
          (preconditions (core-protobuf-value fields 2))
          (dry-run nil))
+    (let ((grace (core-protobuf-value fields 1 0 :absent)))
+      (unless (eq grace :absent)
+        (when (> grace #xffffffffffffffff) (error "Invalid DeleteOptions grace int64"))
+        (setf (gethash "gracePeriodSeconds" options)
+              (if (logbitp 63 grace) (- grace (expt 2 64)) grace))))
+    (let ((policy (core-protobuf-value fields 4)))
+      (when policy
+        (setf (gethash "propagationPolicy" options) (trivial-utf-8:utf-8-bytes-to-string policy))))
+    (let ((orphan (core-protobuf-value fields 3 0 :absent)))
+      (unless (eq orphan :absent)
+        (unless (member orphan '(0 1)) (error "Invalid DeleteOptions orphan flag"))
+        (setf (gethash "orphanDependents" options) (= 1 orphan))))
     (when preconditions
       (let ((pre-fields (core-protobuf-fields preconditions)))
         (setf (gethash "preconditions" options) (make-hash-table :test #'equal))

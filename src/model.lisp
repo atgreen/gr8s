@@ -237,13 +237,19 @@
       (invalid-pod "kind must be Pod"))
     (reject-unsupported-fields
      metadata '("name" "namespace" "labels" "annotations" "uid"
-                "resourceVersion" "creationTimestamp" "deletionTimestamp" "ownerReferences")
+                "resourceVersion" "creationTimestamp" "deletionTimestamp"
+                "deletionGracePeriodSeconds" "generation" "ownerReferences")
      "metadata")
     (validate-owner-references metadata)
     (reject-unsupported-fields
      spec '("containers" "restartPolicy" "dnsPolicy" "nodeName" "volumes"
             "securityContext" "serviceAccountName" "automountServiceAccountToken"
-            "tolerations" "nodeSelector") "spec")
+            "tolerations" "nodeSelector" "terminationGracePeriodSeconds") "spec")
+    (let ((grace (gethash "terminationGracePeriodSeconds" spec 30)))
+      (when (eq grace 'null) (setf grace 30))
+      (unless (and (integerp grace) (<= 0 grace #x7fffffffffffffff))
+        (invalid-pod "spec.terminationGracePeriodSeconds must be a nonnegative int64"))
+      (setf (gethash "terminationGracePeriodSeconds" spec) grace))
     (validate-runtime-pod-spec spec)
     (multiple-value-bind (dns-policy present-p) (gethash "dnsPolicy" spec)
       (when (and present-p

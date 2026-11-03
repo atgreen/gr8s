@@ -523,6 +523,7 @@
                     (finish-output)
                     (loop until *shutdown-requested* do (sleep 0.1)))
                (when worker (stop-reconciliation-worker worker))
+               (when runtime (stop-runtime-deletions runtime))
                (when server (stop-server server))
                (when service-controller (stop-native-service-controller service-controller))
                (when api-server (stop-server api-server))
