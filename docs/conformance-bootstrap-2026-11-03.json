@@ -1,0 +1,92 @@
+{
+  "objective": "Run Sonobuoy certification bootstrap against native gr8s and get material output from conformance tests",
+  "runDate": "2026-11-03",
+  "nativeRunDirectory": "/var/tmp/gr8s-sonobuoy-native.p98fxc3u",
+  "native": {
+    "runtime": "managed embedded containerd",
+    "agentReady": true,
+    "executableSHA256": "9f6a0cb1e1779614fb9a067cbf3dc68fb8de5a67255e3d7be060b85346a01af4",
+    "shutdownExitCode": 0,
+    "ownedProcessesRemaining": 0
+  },
+  "sonobuoy": {
+    "version": "v0.57.5",
+    "runExitCode": 0,
+    "mode": "certified-conformance",
+    "plugins": [
+      "e2e"
+    ],
+    "dnsPodLabels": "",
+    "dnsRationale": "Native agent supplies Pod DNS; real DNS lookup verified in preceding native smoke. This configures the runner Pod-presence preflight. DNS conformance selection is unchanged.",
+    "parsedPluginStatus": "unknown",
+    "statusExplanation": "Ginkgo panic terminated the suite before JUnit output; raw logs contain a completed test-body failure. No conformance pass is claimed."
+  },
+  "e2e": {
+    "image": "registry.k8s.io/conformance:v1.36.0",
+    "imageDigest": "sha256:d2158f40555e28265994711e971c3f6f9f5591ffcae7ca0209909ae4bd71c21e",
+    "selectedSpecs": 446,
+    "availableSpecs": 7579,
+    "focus": "[Conformance]",
+    "skip": "",
+    "randomSeed": 1793731755,
+    "pluginPodCount": 1,
+    "suiteStartsObserved": 1,
+    "recordedCaseFailures": 1,
+    "testProcessExitCode": 1,
+    "fullSuiteCompleted": false,
+    "passedCases": null,
+    "failedCasesTotal": null
+  },
+  "observedFailures": [
+    {
+      "test": "[sig-node] Variable Expansion should verify that a failing subpath expansion can be modified during the lifecycle of a container [Slow] [Conformance]",
+      "stage": "It",
+      "source": "test/e2e/common/node/expansion.go:269",
+      "error": "Pod POST returned HTTP500: binary protobuf request treated as UTF-8 text (Unexpected value #x80).",
+      "followUp": "podster-wda"
+    },
+    {
+      "test": "[sig-api-machinery] Servers with support for API chunking should support continue listing from the last key if the original version has been compacted away, though the list is inconsistent [Slow] [Conformance]",
+      "stage": "parallel resource setup",
+      "source": "test/e2e/apimachinery/chunking.go:68",
+      "error": "Unsupported PodTemplate POSTs returned404; framework.Failf in an unprotected worker goroutine caused an unrecovered Ginkgo panic. This is not counted as a completed case result.",
+      "followUp": "podster-3an"
+    }
+  ],
+  "bootstrapEvidence": {
+    "namespaceProtobufAccepted": true,
+    "defaultServiceAccountAndRootCAWaitsPassed": true,
+    "rootCAConfigMapMatchesActualCA": true,
+    "workerSubmittedRealDoneFileResult": true,
+    "aggregatorProducedArchive": true,
+    "metadataAndSpecSandboxChecks": "Verified separately in native run .ousivvlc",
+    "podToClusterIPTraffic": "Verified separately at 10.96.0.20:8088 in native run .ousivvlc"
+  },
+  "localValidation": {
+    "checks": 1362,
+    "passed": 1357,
+    "optionalSkips": 5,
+    "failed": 0,
+    "nativeBuild": "passed using existing pinned runtime bundle",
+    "documentationAudit": {
+      "existingIssuesOnMain": 869,
+      "currentIssues": 869,
+      "newCRICompatibilityFile": "passed"
+    }
+  },
+  "mergedImplementationPRs": [
+    10,
+    11,
+    12,
+    13
+  ],
+  "artifactSHA256": {
+    "report.json": "e3de9f2588d3ca7a114f19bb1ccadbfd600afdec5c3a244e488395818f477cac",
+    "e2e.log": "05f2f3088b8ab77efe0ecc566b46238700e5b4ea196769a21d290b657d913153",
+    "sonobuoy-worker.log": "7abefcf2817296c19c9dff9ad0edb6f3bbde7a692ffb138b02ea9f1b0f24eaf1",
+    "kube-sonobuoy.log": "309ecdbce0e1cfb72553c4bcba403096f10ca991075941492b8417551678d701",
+    "sonobuoy-results.tar.gz": "96a85607ada79ad60a3925f6c3e16177760bb290e583b96421896f8a9ba6aceb",
+    "e2e.tar.gz": "320b3e6d6851d779ec32b9adddfb47d26e68e5f0cd87682daef7496593f4e94f",
+    "sonobuoy-results.txt": "592848f13ec308e547daca62d1a252227f6bc8ad5435df5990430825db2fb195"
+  }
+}
