@@ -42,10 +42,17 @@
                  (when (gethash "resourceNames" rule)
                    (bootstrap-string-array (gethash "resourceNames" rule) "rule.resourceNames"))))))
 
+(defun default-rbac-api-group (object group)
+  "Apply Kubernetes string defaulting without treating a supplied nonstring as empty."
+  (multiple-value-bind (value present) (gethash "apiGroup" object)
+    (when (or (not present) (eq value 'null) (equal value ""))
+      (setf (gethash "apiGroup" object) group))))
+
 (defun validate-rbac-binding (object cluster-p)
   "Validate binding role references and subject identities."
   (let* ((ref (require-object (gethash "roleRef" object) "roleRef"))
          (subjects (gethash "subjects" object #())))
+    (default-rbac-api-group ref "rbac.authorization.k8s.io")
     (unless (and (equal "rbac.authorization.k8s.io" (gethash "apiGroup" ref))
                  (member (gethash "kind" ref) (if cluster-p '("ClusterRole") '("Role" "ClusterRole")) :test #'equal)
                  (dns-subdomain-p (gethash "name" ref)))
@@ -57,6 +64,7 @@
           do (unless (member kind '("User" "Group" "ServiceAccount") :test #'equal)
                (core-resource-error 422 "Invalid" "Invalid subject kind"))
              (require-nonempty-string (gethash "name" subject) "subject.name")
+             (default-rbac-api-group subject (if (equal kind "ServiceAccount") "" "rbac.authorization.k8s.io"))
              (if (equal kind "ServiceAccount")
                  (unless (and (dns-subdomain-p (gethash "name" subject))
                               (or (not cluster-p) (dns-label-p (gethash "namespace" subject)))
