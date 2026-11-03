@@ -13,7 +13,7 @@
   :license "MIT"
   :version "0.1.0"
   :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cl-cancel"
-               "com.inuoe.jzon" "hunchentoot"
+               "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
                "pure-tls/acme"
                "sb-posix" "trivial-utf-8" "usocket" "whistler/loader")
   :serial t
@@ -40,6 +40,7 @@
                              (:file "service-account")
                              (:file "core-resource-protobuf")
                              (:file "podtemplates")
+                             (:file "events")
                              (:file "node-session")
                              (:file "runtime")
                              (:file "runtime-assets")
@@ -104,6 +105,7 @@
                              (:file "pod-volumes-test")
                              (:file "service-account-test")
                              (:file "bootstrap-protobuf-test")
+                             (:file "events-test")
                              (:file "garbage-collection-test")
                              (:file "services-test")
                              (:file "telemetry-test"))))

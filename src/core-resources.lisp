@@ -1,5 +1,7 @@
 (in-package #:gr8s)
 
+(defvar *core-resource-view-version* nil)
+
 ;; Core and bootstrap resources share a durable transaction and revision sequence.
 ;; Objects are copied at the boundary so clients cannot mutate indexed state.
 (defun core-object (&rest pairs)
@@ -23,6 +25,7 @@
     ("serviceaccounts" "ServiceAccount" "v1" t)
     ("services" "Service" "v1" t)
     ("podtemplates" "PodTemplate" "v1" t)
+    ("events" "Event" "v1" t)
     ("roles" "Role" "rbac.authorization.k8s.io/v1" t)
     ("rolebindings" "RoleBinding" "rbac.authorization.k8s.io/v1" t)
     ("clusterroles" "ClusterRole" "rbac.authorization.k8s.io/v1" nil)
@@ -65,6 +68,7 @@
                    (not (typep (gethash "resourceHistoryStart" state) `(integer 0 ,(gethash "revision" state)))))
           (error "Invalid resource history start at ~A" path))
         (setf (pod-store-resource-revision store) (gethash "revision" state)
+              (pod-store-event-expirations store) (gethash "eventExpirations" state (make-hash-table :test #'equal))
               (pod-store-template-history store) (coerce (gethash "templateHistory" state #()) 'list)
               (pod-store-template-history-floor store) (gethash "templateHistoryFloor" state (gethash "revision" state))
               (pod-store-resource-history-start store) (gethash "resourceHistoryStart" state (gethash "revision" state))
@@ -86,7 +90,8 @@
   ;; Write the complete new state before publishing it in memory. A failed
   ;; atomic write leaves both the old disk state and the old index intact.
   (multiple-value-bind (history floor) (next-template-history store resources revision)
-   (let ((token-key (or (pod-store-template-token-key store) (secure-random-octets 32))))
+   (let ((token-key (or (pod-store-template-token-key store) (secure-random-octets 32)))
+         (event-expirations (next-event-expirations store resources)))
     (write-private-text-atomically
    (core-resource-state-path store)
    (com.inuoe.jzon:stringify
@@ -94,13 +99,15 @@
                  "templateHistory" (coerce history 'vector) "templateHistoryFloor" floor
                  "templateTokenKey" (ag-grpc:base64-encode token-key)
                  "resourceHistoryStart" (pod-store-resource-history-start store)
+                 "eventExpirations" event-expirations
                  "items" (coerce (loop for object being the hash-values of resources
                                        collect object) 'vector))))
   (setf (pod-store-resources store) resources
         (pod-store-resource-revision store) revision
         (pod-store-template-history store) history
         (pod-store-template-history-floor store) floor
-        (pod-store-template-token-key store) token-key))))
+        (pod-store-template-token-key store) token-key
+        (pod-store-event-expirations store) event-expirations))))
 
 (defun copy-core-resource-index (store)
   (let ((copy (make-hash-table :test #'equal)))
@@ -282,10 +289,12 @@
 
 (defun get-core-resource (store resource namespace name)
   (with-store-lock (store)
+    (expire-core-events-unlocked store)
     (copy-core-object (get-core-resource-unlocked store resource namespace name))))
 
 (defun list-core-resources (store resource &optional namespace)
   (with-store-lock (store)
+    (expire-core-events-unlocked store)
     (values
      (sort (loop for key being the hash-keys of (pod-store-resources store) using (hash-value object)
                  when (and (equal resource (first key)) (or (null namespace) (equal namespace (second key))))
@@ -317,6 +326,7 @@
 
 (defun create-core-resource (store resource input namespace &key dry-run)
   (with-store-lock (store)
+    (expire-core-events-unlocked store)
     (let* ((input (copy-core-object input))
            (metadata (require-object (gethash "metadata" input) "metadata")))
       (when (and (not (gethash "name" metadata)) (gethash "generateName" metadata))
@@ -345,15 +355,21 @@
 
 (defun update-core-resource (store resource namespace name transform &key dry-run)
   (with-store-lock (store)
+    (expire-core-events-unlocked store)
     (let* ((existing (get-core-resource-unlocked store resource namespace name))
            (existing-metadata (gethash "metadata" existing))
-           (object (normalize-core-resource resource (funcall transform (copy-core-object existing)) namespace name store))
+           (object (normalize-core-resource resource (funcall transform (if (equal resource "events")
+                                                   (event-api-view (copy-core-object existing) (or *core-resource-view-version* "v1"))
+                                                   (copy-core-object existing))) namespace name store))
            (metadata (gethash "metadata" object))
            (expected (gethash "resourceVersion" metadata))
            (revision (1+ (pod-store-resource-revision store))))
+      (when (and (equal resource "events") (member expected '(nil "") :test #'equal))
+        (setf expected (gethash "resourceVersion" existing-metadata)))
       (unless expected (core-resource-error 422 "Invalid" "metadata.resourceVersion is required for update"))
       (unless (equal expected (gethash "resourceVersion" existing-metadata))
         (core-resource-error 409 "Conflict" "The resource was modified; apply your changes to the latest version"))
+      (when (equal resource "events") (validate-event-update existing object))
       (when (and (gethash "uid" metadata) (not (equal (gethash "uid" metadata) (gethash "uid" existing-metadata))))
         (core-resource-error 409 "Conflict" "metadata.uid does not match the stored object"))
       (when (and (member resource '("rolebindings" "clusterrolebindings") :test #'equal)
@@ -378,6 +394,7 @@
 
 (defun delete-core-resource (store resource namespace name &key uid resource-version dry-run)
   (with-store-lock (store)
+    (expire-core-events-unlocked store)
     (let* ((existing (get-core-resource-unlocked store resource namespace name))
            (metadata (gethash "metadata" existing)))
       (when (or (and uid (not (equal uid (gethash "uid" metadata))))

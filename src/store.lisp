@@ -21,6 +21,7 @@
   (template-history-floor 0)
   (resource-history-start 0)
   template-token-key
+  (event-expirations (make-hash-table :test #'equal))
   in-cluster-config
   (credential-lock (bt:make-lock "gr8s ServiceAccount credentials"))
   (pod-observed-phases (make-hash-table :test #'equal))

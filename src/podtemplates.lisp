@@ -87,14 +87,15 @@
       ((equal name "k8s.io.apimachinery.pkg.apis.meta.v1.FieldsV1")
        (let ((raw (gethash "Raw" object)))
          (if raw (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (ag-grpc:base64-decode raw))) (core-object))))
-      ((equal name "k8s.io.apimachinery.pkg.apis.meta.v1.Time")
+      ((member name '("k8s.io.apimachinery.pkg.apis.meta.v1.Time" "k8s.io.apimachinery.pkg.apis.meta.v1.MicroTime") :test #'equal)
        (if (zerop (hash-table-count object)) 'null
            (multiple-value-bind (second minute hour day month year)
                (decode-universal-time (+ 2208988800 (gethash "seconds" object 0)) 0)
              (let ((nanos (gethash "nanos" object 0)))
                (unless (<= 0 nanos 999999999) (error "Invalid protobuf timestamp nanoseconds"))
                (concatenate 'string (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0D" year month day hour minute second)
-                            (if (zerop nanos) "" (format nil ".~9,'0D" nanos)) "Z")))))
+                            (cond ((equal name "k8s.io.apimachinery.pkg.apis.meta.v1.MicroTime") (format nil ".~6,'0D" (floor nanos 1000)))
+                                  ((zerop nanos) "") (t (format nil ".~9,'0D" nanos))) "Z")))))
       (t object))))
 
 (defun decode-podtemplate-protobuf (bytes)
@@ -190,13 +191,13 @@
        (coerce items 'vector)))
     (t (copy-core-object patch))))
 
-(defun delete-template-collection (store namespace labels fields &key dry-run)
-  "Delete only selector-matched templates in one atomic durable transaction."
-  (let ((label-test (core-selector-predicate labels)) (field-test (core-selector-predicate fields :fields t)))
+(defun delete-template-collection (store namespace labels fields &key dry-run (resource "podtemplates"))
+  "Delete selector-matched stored objects in one atomic durable transaction."
+  (let ((label-test (core-selector-predicate labels)) (field-test (core-selector-predicate fields :fields t :field-paths (core-resource-field-paths resource))))
     (with-store-lock (store)
       (let ((index (copy-core-resource-index store)) (changed nil))
         (maphash (lambda (key object)
-                   (when (and (equal "podtemplates" (first key)) (equal namespace (second key))
+                   (when (and (equal resource (first key)) (equal namespace (second key))
                               (funcall label-test object) (funcall field-test object))
                      (remhash key index) (setf changed t))) (pod-store-resources store))
         (when (and changed (not dry-run)) (commit-core-resources store index (1+ (pod-store-resource-revision store))))))))

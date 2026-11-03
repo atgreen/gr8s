@@ -10,7 +10,7 @@
 
 (defun template-watch-events (store namespace labels fields revision &key (resource "podtemplates"))
   "Read matching journal events after REVISION and the current storage watermark."
-  (let ((label-test (core-selector-predicate labels)) (field-test (core-selector-predicate fields :fields t)))
+  (let ((label-test (core-selector-predicate labels)) (field-test (core-selector-predicate fields :fields t :field-paths (core-resource-field-paths resource))))
     (labels ((matches (object)
                (and (hash-table-p object)
                     (or (null namespace) (equal namespace (gethash "namespace" (gethash "metadata" object))))
@@ -58,7 +58,7 @@
            (last-bookmark (get-internal-real-time)))
       (labels ((emit (event)
                  (write-sequence (trivial-utf-8:string-to-utf-8-bytes
-                                  (concatenate 'string (com.inuoe.jzon:stringify event) (string #\Newline))) out)
+                                  (concatenate 'string (com.inuoe.jzon:stringify (event-api-view event)) (string #\Newline))) out)
                  (finish-output out))
                (bookmark (&optional initial-end)
                  (let ((metadata (core-object "resourceVersion" (write-to-string revision))))

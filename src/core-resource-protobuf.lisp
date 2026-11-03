@@ -101,7 +101,7 @@
     (when dry-run (setf (gethash "dryRun" options) (coerce (nreverse dry-run) 'vector)))
     options))
 
-(defun decode-core-resource-protobuf (bytes expected-kind)
+(defun decode-core-resource-protobuf (bytes expected-kind &optional version-override)
   (handler-case
       (let ((*core-protobuf-field-count* 0))
         (when (> (length bytes) (* 16 1024 1024))
@@ -109,7 +109,7 @@
         (unless (and (>= (length bytes) 4) (equalp (subseq bytes 0 4) #(107 56 115 0)))
           (error "Missing Kubernetes protobuf prefix"))
         (let* ((descriptor (find expected-kind *stored-resource-types* :key #'second :test #'equal))
-               (expected-version (if descriptor (third descriptor) "v1"))
+               (expected-version (or version-override (if descriptor (third descriptor) "v1")))
                (envelope (core-protobuf-fields (subseq bytes 4)))
                (type-meta (core-protobuf-fields (or (core-protobuf-value envelope 1)
                                                    (make-array 0 :element-type '(unsigned-byte 8)))))
@@ -121,6 +121,14 @@
                        (member (core-protobuf-string envelope 4) '("" "application/vnd.kubernetes.protobuf") :test #'equal))
             (error "Invalid Kubernetes protobuf envelope"))
           (when (string= kind "DeleteOptions") (return-from decode-core-resource-protobuf (core-protobuf-delete-options raw)))
+          (when (equal kind "Event")
+            (return-from decode-core-resource-protobuf
+              (let* ((package (if (equal version "events.k8s.io/v1") "k8s.io.api.events.v1.Event" "k8s.io.api.core.v1.Event"))
+                     (object (template-protobuf-message package raw))
+                     (metadata (core-protobuf-value (core-protobuf-fields raw) 1)))
+                (setf (gethash "metadata" object) (if metadata (core-protobuf-metadata metadata) (core-object))
+                      (gethash "apiVersion" object) version (gethash "kind" object) kind)
+                object)))
           (when (member kind '("ServiceAccount" "Role" "RoleBinding" "ClusterRole" "ClusterRoleBinding") :test #'equal)
             (return-from decode-core-resource-protobuf (decode-bootstrap-protobuf raw kind version)))
           (when (string= kind "Service")

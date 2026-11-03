@@ -11,7 +11,7 @@
         ;; client-go v0.27 discovery compares this media type literally. JSON
         ;; is UTF-8 already; a charset parameter breaks its legacy fallback.
         (hunchentoot:content-type*) "application/json")
-  (com.inuoe.jzon:stringify object))
+  (com.inuoe.jzon:stringify (event-api-view object)))
 
 (defun status-response (status reason message code)
   (json-response
@@ -96,7 +96,8 @@
                 "groups"
                 (vector (json-object "name" "rbac.authorization.k8s.io"
                                      "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
-                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))))))
+                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
+                        (event-api-group)))))
 
 (defun api-resources-response ()
   (json-response
@@ -110,16 +111,8 @@
                    "verbs" #("create" "delete" "get" "list" "patch" "update") "shortNames" #("po"))
       (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
       (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("create"))
-      (json-object "name" "nodes" "singularName" "node" "namespaced" nil "kind" "Node" "verbs" #("get" "list"))
-      (json-object "name" "events" "singularName" "event" "namespaced" t "kind" "Event" "verbs" #("get" "list")))
+      (json-object "name" "nodes" "singularName" "node" "namespaced" nil "kind" "Node" "verbs" #("get" "list")))
      (stored-resource-discovery "v1")))))
-
-(defun event-list-response ()
-  (json-response
-   (json-object "apiVersion" "v1"
-                "kind" "EventList"
-                "metadata" (json-object "resourceVersion" "0")
-                "items" #())))
 
 (defvar *schema-reference-prefix* "#/definitions/")
 
@@ -216,7 +209,9 @@
     "paths"
     (json-object
      "api/v1"
-     (json-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")))))
+     (json-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")
+     "apis/events.k8s.io/v1"
+     (json-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1")))))
 
 (defun pod-group-version-kind ()
   (json-object "group" "" "version" "v1" "kind" "Pod"))
@@ -295,13 +290,15 @@
         (json-object "schema"
                      (reference-schema "io.k8s.api.core.v1.Pod")))))))))
 
-(defun openapi-v3-response ()
+(defun openapi-v3-response (&optional (version "v1"))
   (let ((*schema-reference-prefix* "#/components/schemas/"))
     (json-response
      (json-object
       "openapi" "3.0.0"
       "info" (json-object "title" "gr8s" "version" "v1")
-      "paths" (add-core-resource-openapi-paths (openapi-v3-pod-paths))
+      "paths" (if (equal version "events.k8s.io/v1")
+                  (add-event-openapi-paths (core-object) t)
+                  (add-core-resource-openapi-paths (openapi-v3-pod-paths)))
       "components" (json-object "schemas" (openapi-definitions))))))
 
 (defun create-pod-response (store reconciler &optional (namespace "default"))
@@ -920,13 +917,14 @@
           ((string= path "/version") (version-response))
           ((string= path "/api") (api-versions-response))
           ((string= path "/apis") (api-groups-response))
+          ((string= path "/apis/events.k8s.io") (json-response (event-api-group)))
+          ((string= path "/apis/events.k8s.io/v1") (event-discovery-response))
           ((string= path "/apis/rbac.authorization.k8s.io/v1") (rbac-resources-response))
           ((string= path "/openapi/v2") (openapi-response))
           ((string= path "/openapi/v3") (openapi-v3-discovery-response))
+          ((string= path "/openapi/v3/apis/events.k8s.io/v1") (openapi-v3-response "events.k8s.io/v1"))
           ((string= path "/openapi/v3/api/v1") (openapi-v3-response))
           ((string= path "/api/v1") (api-resources-response))
-          ((string= path "/api/v1/namespaces/default/events")
-           (event-list-response))
           ((and (eq method :get) (string= path "/api/v1/nodes"))
            (nodes-api-response store))
           ((and (eq method :get) (uiop:string-prefix-p "/api/v1/nodes/" path)

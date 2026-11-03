@@ -409,6 +409,13 @@ also expose a separate HTTPS API at `10.96.0.1:443`, authenticated with issued
 ServiceAccount tokens and authorized against live RoleBindings and
 ClusterRoleBindings.
 
+Events share durable identities and revisions between core `v1` and
+`events.k8s.io/v1`. Both versions support JSON/protobuf CRUD, patches, field and
+label selectors, collection deletion, consistent pagination and resumable
+watches. Timestamps preserve microseconds, and submitted Events expire one hour
+after their last write, producing real deletion events. Native runtime event
+emission remains pending.
+
 Pods accept JSON and typed Kubernetes protobuf requests. The decoder uses pinned
 Kubernetes wire definitions and Go JSON omission rules, preserving explicit
 pointer values and empty command arguments. Runtime admission still validates
@@ -458,6 +465,11 @@ The runner preserves the official Sonobuoy archive, native and worker logs, and
 individual executed specs in its printed report directory. A timeout preserves
 partial worker logs. A passing result requires every selected spec to execute
 and pass; running this command alone does not establish certification.
+
+For the four supplemental upstream Event API cases, use
+`--focus '\[sig-instrumentation\].*Events.*\[Conformance\]' --expected-specs 4`.
+Custom focus/count arguments are rejected with `--certified-conformance`, which
+always runs the full upstream selection.
 
 This focused validation
 includes the normal five-minute continuation expiry; it is separate from a full

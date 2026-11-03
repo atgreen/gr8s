@@ -37,6 +37,7 @@
 
 (defun compact-template-history-unlocked (store &key checkpoint)
   "Durably compact expired history, optionally recording an expired-token checkpoint."
+  (expire-core-events-unlocked store)
   (when (or checkpoint
             (some (lambda (entry) (> (- (funcall *podtemplate-clock*) (gethash "time" entry))
                                     *podtemplate-history-seconds*)) (pod-store-template-history store)))
@@ -99,7 +100,7 @@
   "List a consistent revision; return a replacement continuation when history expires."
   (unless (or (null limit) (typep limit '(integer 0 *))) (core-resource-error 400 "BadRequest" "Invalid limit"))
   (unless (member match '(nil "" "Exact" "NotOlderThan") :test #'equal) (core-resource-error 400 "BadRequest" "Invalid resourceVersionMatch"))
-  (let ((label-test (core-selector-predicate labels)) (field-test (core-selector-predicate fields :fields t)))
+  (let ((label-test (core-selector-predicate labels)) (field-test (core-selector-predicate fields :fields t :field-paths (core-resource-field-paths resource))))
     (with-store-lock (store)
       (compact-template-history-unlocked store)
       (let* ((token (when (and continuation (plusp (length continuation)))
