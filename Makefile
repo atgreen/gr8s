@@ -14,7 +14,7 @@ NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
 NODE_PROTOCOL_LISP := src/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 
-.PHONY: all help containerd-bundle generate-protocol test test-containerd test-podman test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel check smoke run kubeconfig native clean
+.PHONY: all help containerd-bundle generate-protocol test test-containerd test-podman test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel check smoke smoke-two-node run kubeconfig native clean
 
 all: native
 
@@ -35,6 +35,7 @@ help:
 	@echo "  test-whistler-cni Test the chained Whistler TC/eBPF CNI plugin"
 	@echo "  check         Syntax-check scripts and run tests"
 	@echo "  smoke         Run kubectl -> gr8s -> containerd end to end"
+	@echo "  smoke-two-node Test real containerd Pods across two isolated agent nodes"
 	@echo "  run           Start gr8s (override STATE_DIR, PORT, RUNTIME, KUBECONFIG)"
 	@echo "  kubeconfig    Write KUBECONFIG for the configured PORT"
 	@echo "  native        Build the dumped native executable at build/gr8s"
@@ -92,6 +93,14 @@ smoke:
 	fi
 	$(MAKE) native
 	sudo env PATH="$(PATH)" scripts/smoke.sh
+
+smoke-two-node:
+	@if [ "$$(id -u)" -eq 0 ]; then \
+	  echo "Run make smoke-two-node as your normal user." >&2; \
+	  exit 1; \
+	fi
+	$(MAKE) native
+	sudo env PATH="$(PATH)" python3 scripts/smoke-two-node.py
 
 run: containerd-bundle
 	scripts/gr8s serve --state-directory "$(STATE_DIR)" --port "$(PORT)" \
