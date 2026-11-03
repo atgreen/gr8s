@@ -9,7 +9,8 @@
 (def-suite bootstrap-protobuf :in gr8s)
 (in-suite bootstrap-protobuf)
 
-(defun bootstrap-wire-fixture (kind name &key version resource-version (role-kind "Role") (role-name "read-pods"))
+(defun bootstrap-wire-fixture (kind name &key version resource-version (role-kind "Role") (role-name "read-pods")
+                                           (role-api-group "rbac.authorization.k8s.io"))
   "Construct wire requests using the pinned Kubernetes core/RBAC field numbers."
   (let* ((account (equal kind "ServiceAccount"))
          (binding (member kind '("RoleBinding" "ClusterRoleBinding") :test #'equal))
@@ -22,8 +23,8 @@
                                         (list 3 (core-test-protobuf '((1 "registry-secret")))) (list 4 0)))))
       (binding
        (setf fields (append fields (list (list 2 (core-test-protobuf '((1 "ServiceAccount") (2 "") (3 "reader") (4 "alpha"))))
-                                        (list 3 (core-test-protobuf (list (list 1 "rbac.authorization.k8s.io")
-                                                                          (list 2 role-kind) (list 3 role-name))))))))
+                                        (list 3 (core-test-protobuf (append (when role-api-group (list (list 1 role-api-group)))
+                                                                           (list (list 2 role-kind) (list 3 role-name)))))))))
       (t
        (setf fields (append fields (list (list 2 (core-test-protobuf '((1 "get") (1 "list") (2 "") (3 "pods")))))))))
     (core-test-protobuf-envelope kind fields (or version (if account "v1" "rbac.authorization.k8s.io/v1")))))
@@ -89,7 +90,7 @@
                                   :octets (bootstrap-wire-fixture "Role" "read-pods"))
                (check-core-status 201 "/apis/rbac.authorization.k8s.io/v1/namespaces/alpha/rolebindings"
                                   :method :post :content-type "application/vnd.kubernetes.protobuf"
-                                  :octets (bootstrap-wire-fixture "RoleBinding" "read-pods"))
+                                  :octets (bootstrap-wire-fixture "RoleBinding" "read-pods" :role-api-group nil))
                (is (= 200 (service-account-tls-status pki "/api/v1/namespaces/alpha/pods" token)))
                (is (= 403 (service-account-tls-status pki "/api/v1/namespaces/beta/pods" token)))
                (check-core-status 200 "/apis/rbac.authorization.k8s.io/v1/namespaces/alpha/rolebindings/read-pods" :method :delete)
@@ -98,10 +99,69 @@
                                   :content-type "application/vnd.kubernetes.protobuf" :octets (bootstrap-wire-fixture "ClusterRole" "read-pods"))
                (check-core-status 201 "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings" :method :post
                                   :content-type "application/vnd.kubernetes.protobuf"
-                                  :octets (bootstrap-wire-fixture "ClusterRoleBinding" "read-pods" :role-kind "ClusterRole"))
+                                  :octets (bootstrap-wire-fixture "ClusterRoleBinding" "read-pods" :role-kind "ClusterRole" :role-api-group nil))
                (is (= 200 (service-account-tls-status pki "/api/v1/pods" token)))
                (check-core-status 200 "/api/v1/namespaces/alpha/serviceaccounts/reader" :method :delete)
                (is (= 401 (service-account-tls-status pki "/api/v1/pods" token))))
           (when tls-server (stop-server tls-server)))))))
+
+(test rbac-binding-json-defaults-role-and-subject-api-groups
+  (with-core-api (store path)
+    (values store path)
+    (dolist (kind '("RoleBinding" "ClusterRoleBinding"))
+      (let* ((cluster (equal kind "ClusterRoleBinding"))
+             (collection (if cluster "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings"
+                             "/apis/rbac.authorization.k8s.io/v1/namespaces/alpha/rolebindings"))
+             (object (gr8s::core-object
+                      "apiVersion" "rbac.authorization.k8s.io/v1" "kind" kind
+                      "metadata" (gr8s::core-object "name" "defaults")
+                      "roleRef" (gr8s::core-object "kind" (if cluster "ClusterRole" "Role") "name" "read-pods")
+                      "subjects" (vector (gr8s::core-object "kind" "User" "name" "alice")
+                                          (gr8s::core-object "kind" "Group" "name" "builders" "apiGroup" "")
+                                          (gr8s::core-object "kind" "ServiceAccount" "name" "reader" "namespace" "alpha"))))
+             (item (concatenate 'string collection "/defaults"))
+             (created (check-core-status 201 collection :method :post :object object)))
+        (is (equal "rbac.authorization.k8s.io" (gethash "apiGroup" (gethash "roleRef" created))))
+        (is (not (nth-value 1 (gethash "apiGroup" (gethash "roleRef" object)))))
+        (loop for subject across (gethash "subjects" created)
+              do (is (equal (if (equal "ServiceAccount" (gethash "kind" subject)) "" "rbac.authorization.k8s.io")
+                            (gethash "apiGroup" subject))))
+        ;; Defaulting occurs before immutable roleRef comparison on updates.
+        (remhash "apiGroup" (gethash "roleRef" created))
+        (let* ((updated (check-core-status 200 item :method :put :object created))
+               (revision (gethash "resourceVersion" (gethash "metadata" updated))))
+          (setf (gethash "apiGroup" (gethash "roleRef" updated)) "other.example")
+          (check-core-status 422 item :method :put :object updated)
+          (is (equal revision (gethash "resourceVersion" (gethash "metadata" (check-core-status 200 item))))))))))
+
+(test typed-rbac-role-reference-groups-default-for-omitted-and-empty-wire-fields
+  (with-core-api (store path)
+    (values store path)
+    (dolist (kind '("RoleBinding" "ClusterRoleBinding"))
+      (let* ((cluster (equal kind "ClusterRoleBinding"))
+             (collection (if cluster "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings"
+                             "/apis/rbac.authorization.k8s.io/v1/namespaces/alpha/rolebindings")))
+        (loop for group in '(nil "") for index from 0
+              for name = (format nil "default-~D" index)
+              for wire = (bootstrap-wire-fixture kind name :role-kind (if cluster "ClusterRole" "Role") :role-api-group group)
+              for created = (check-core-status 201 collection :method :post :content-type "application/vnd.kubernetes.protobuf" :octets wire)
+              do (is (equal "rbac.authorization.k8s.io" (gethash "apiGroup" (gethash "roleRef" created)))))))))
+
+(test rbac-defaulting-keeps-wrong-groups-invalid-and-dry-run-is-atomic
+  (with-core-api (store path)
+    (values store path)
+    (let* ((collection "/apis/rbac.authorization.k8s.io/v1/namespaces/alpha/rolebindings")
+           (object (gr8s::core-object "kind" "RoleBinding" "metadata" (gr8s::core-object "name" "preview")
+                                      "roleRef" (gr8s::core-object "kind" "Role" "name" "read-pods")
+                                      "subjects" (vector (gr8s::core-object "kind" "User" "name" "alice")))))
+      (let ((preview (check-core-status 201 (concatenate 'string collection "?dryRun=All") :method :post :object object)))
+        (is (equal "rbac.authorization.k8s.io" (gethash "apiGroup" (gethash "roleRef" preview)))))
+      (check-core-status 404 (concatenate 'string collection "/preview"))
+      (dolist (bad '(nil 0 "other.example"))
+        (setf (gethash "apiGroup" (gethash "roleRef" object)) bad)
+        (check-core-status 422 collection :method :post :object object))
+      (remhash "apiGroup" (gethash "roleRef" object))
+      (setf (gethash "apiGroup" (aref (gethash "subjects" object) 0)) "other.example")
+      (check-core-status 422 collection :method :post :object object))))
 
 (in-suite gr8s)
