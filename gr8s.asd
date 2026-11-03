@@ -103,6 +103,7 @@
                              (:file "bootstrap-resource-test")
                              (:file "pod-volumes-test")
                              (:file "service-account-test")
+                             (:file "bootstrap-protobuf-test")
                              (:file "garbage-collection-test")
                              (:file "services-test")
                              (:file "telemetry-test"))))

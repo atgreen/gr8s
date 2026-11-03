@@ -125,6 +125,15 @@
           (gethash "apiVersion" object) "v1" (gethash "kind" object) "Service")
     object))
 
+(defun decode-bootstrap-protobuf (bytes kind version)
+  "Decode typed ServiceAccounts and RBAC resources through their pinned schemas."
+  (let* ((package (if (equal kind "ServiceAccount") "k8s.io.api.core.v1." "k8s.io.api.rbac.v1."))
+         (object (template-protobuf-message (concatenate 'string package kind) bytes))
+         (metadata (core-protobuf-value (core-protobuf-fields bytes) 1)))
+    (setf (gethash "metadata" object) (if metadata (core-protobuf-metadata metadata) (core-object))
+          (gethash "apiVersion" object) version (gethash "kind" object) kind)
+    object))
+
 (defun template-strategic-merge (old patch schema)
   "Apply schema-declared merge keys instead of replacing named container and volume lists."
   (setf schema (resolve-template-schema schema))

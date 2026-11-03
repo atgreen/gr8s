@@ -1,7 +1,7 @@
 (in-package #:gr8s)
 
-;; Kubernetes request wire format, using field numbers from the upstream v0.37.1
-;; api/core/v1 and apimachinery/{runtime,apis/meta/v1}/generated.proto files.
+;; Kubernetes request envelopes and scalar/metadata helpers. Full core/RBAC
+;; message decoding uses checksum-pinned Kubernetes v1.36 wire schemas.
 ;; Responses remain JSON; kubectl advertises JSON as an acceptable response.
 (defvar *core-protobuf-field-count* 0)
 
@@ -108,17 +108,21 @@
           (core-resource-error 413 "RequestEntityTooLarge" "Protobuf request exceeds 16 MiB"))
         (unless (and (>= (length bytes) 4) (equalp (subseq bytes 0 4) #(107 56 115 0)))
           (error "Missing Kubernetes protobuf prefix"))
-        (let* ((envelope (core-protobuf-fields (subseq bytes 4)))
+        (let* ((descriptor (find expected-kind *stored-resource-types* :key #'second :test #'equal))
+               (expected-version (if descriptor (third descriptor) "v1"))
+               (envelope (core-protobuf-fields (subseq bytes 4)))
                (type-meta (core-protobuf-fields (or (core-protobuf-value envelope 1)
                                                    (make-array 0 :element-type '(unsigned-byte 8)))))
                (kind (core-protobuf-string type-meta 2 expected-kind))
-               (version (core-protobuf-string type-meta 1 "v1"))
+               (version (core-protobuf-string type-meta 1 expected-version))
                (raw (core-protobuf-value envelope 2)))
-          (unless (and raw (equal kind expected-kind) (equal version "v1")
+          (unless (and raw (equal kind expected-kind) (equal version expected-version)
                        (string= "" (core-protobuf-string envelope 3))
                        (member (core-protobuf-string envelope 4) '("" "application/vnd.kubernetes.protobuf") :test #'equal))
             (error "Invalid Kubernetes protobuf envelope"))
           (when (string= kind "DeleteOptions") (return-from decode-core-resource-protobuf (core-protobuf-delete-options raw)))
+          (when (member kind '("ServiceAccount" "Role" "RoleBinding" "ClusterRole" "ClusterRoleBinding") :test #'equal)
+            (return-from decode-core-resource-protobuf (decode-bootstrap-protobuf raw kind version)))
           (when (string= kind "Service")
             (return-from decode-core-resource-protobuf (decode-service-protobuf raw)))
           (when (string= kind "Pod")
