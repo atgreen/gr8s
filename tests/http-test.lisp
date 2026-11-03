@@ -377,8 +377,15 @@
                                (subseq payload 1)))))
                (multiple-value-bind (opcode payload)
                    (read-test-websocket-frame stream)
+                 (is (= 2 opcode))
+                 (is (= 3 (aref payload 0)))
+                 (is (string= "Success"
+                              (gethash "status" (com.inuoe.jzon:parse
+                               (trivial-utf-8:utf-8-bytes-to-string (subseq payload 1)))))))
+               (multiple-value-bind (opcode payload)
+                   (read-test-websocket-frame stream)
                  (is (= 8 opcode))
-                 (is (zerop (length payload))))
+                 (is (equalp #(3 232) payload)))
                (is (equal (list (pod-uid pod) "web"
                                 '("sh" "-c" "printf") :sync 30)
                           (gr8s::fake-runtime-last-exec runtime)))))
@@ -641,7 +648,7 @@
                (multiple-value-bind (opcode payload)
                    (gr8s::read-websocket-frame stream)
                  (is (= 8 opcode))
-                 (is (zerop (length payload)))))
+                 (is (equalp #(3 232) payload))))
              (bt:join-thread upstream-thread)
              (is (null upstream-error) "~A" upstream-error)
              (let ((frames (nreverse upstream-frames)))
