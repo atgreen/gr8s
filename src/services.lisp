@@ -66,6 +66,7 @@
             do (reject-unsupported-fields port '("name" "port" "targetPort" "protocol") "Service port")
                (let* ((number (gethash "port" port)) (name (gethash "name" port))
                       (target (gethash "targetPort" port number)))
+                 (when (eql target 0) (setf target number))
                  (unless (typep number '(integer 1 65535)) (invalid-pod "Service port must be 1..65535"))
                  (when (member number numbers) (invalid-pod "Service port numbers must be unique"))
                  (push number numbers)

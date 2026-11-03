@@ -224,4 +224,48 @@
                          :content-type "application/vnd.kubernetes.protobuf" :octets input)
       (is (null (list-pods store "alpha"))))))
 
+(defun service-wire-fixture (name &key (target 0) (type ""))
+  "Return a Kubernetes typed Service with Go's serialized zero fields."
+  (let* ((target-message (core-test-protobuf (if (stringp target)
+                                              (list (list 1 1) (list 2 0) (list 3 target))
+                                              (list (list 1 0) (list 2 target) (list 3 "")))))
+         (port (core-test-protobuf (list (list 1 "") (list 2 "") (list 3 8080) (list 4 target-message) (list 5 0))))
+         (selector (core-test-protobuf '((1 "app") (2 ""))))
+         (spec (core-test-protobuf (list (list 1 port) (list 2 selector) (list 3 "")
+                                        (list 4 type) (list 7 "") (list 8 "") (list 10 "")
+                                        (list 11 "") (list 12 0) (list 13 0))))
+         (metadata (core-test-protobuf (list (list 1 name)))))
+    (core-test-protobuf-envelope "Service" (list (list 1 metadata) (list 2 spec) (list 3 #())))))
+
+(test service-http-accepts-typed-protobuf-with-allocation-and-port-defaults
+  (with-core-api (store path)
+    (values path)
+    (let* ((input (service-wire-fixture "wire-service"))
+           (created (check-core-status 201 "/api/v1/namespaces/alpha/services" :method :post
+                                      :content-type "application/vnd.kubernetes.protobuf" :octets input))
+           (actual (gethash "spec" created))
+           (port (aref (gethash "ports" actual) 0)))
+      (is (equal "ClusterIP" (gethash "type" actual)))
+      (is (equal "None" (gethash "sessionAffinity" actual)))
+      (is (equal "" (gethash "app" (gethash "selector" actual))))
+      (is (not (null (gr8s::service-ip-index (gethash "clusterIP" actual)))))
+      (is (= 8080 (gethash "targetPort" port)))
+      (is (equal "TCP" (gethash "protocol" port)))
+      (is (= 1 (length (gr8s::list-core-resources store "services" "alpha"))))
+      (check-core-status 400 "/api/v1/namespaces/alpha/services" :method :post
+                         :content-type "application/vnd.kubernetes.protobuf" :octets (subseq input 0 5)))))
+
+(test service-protobuf-retains-named-targets-and-unsupported-types
+  (with-core-api (store path)
+    (values path)
+    (let* ((input (service-wire-fixture "named-service" :target "http"))
+           (created (check-core-status 201 "/api/v1/namespaces/alpha/services" :method :post
+                                      :content-type "application/vnd.kubernetes.protobuf" :octets input))
+           (port (aref (gethash "ports" (gethash "spec" created)) 0)))
+      (is (equal "http" (gethash "targetPort" port)))
+      (check-core-status 422 "/api/v1/namespaces/alpha/services" :method :post
+                         :content-type "application/vnd.kubernetes.protobuf"
+                         :octets (service-wire-fixture "nodeport" :type "NodePort"))
+      (is (= 1 (length (gr8s::list-core-resources store "services" "alpha")))))))
+
 (in-suite gr8s)
