@@ -34,6 +34,7 @@
                              (:file "node-tls")
                              (:file "core-resources")
                              (:file "bootstrap-resources")
+                             (:file "service-account")
                              (:file "core-resource-protobuf")
                              (:file "node-session")
                              (:file "runtime")
@@ -57,6 +58,7 @@
                              (:file "http")
                              (:file "core-resource-http")
                              (:file "server")
+                             (:file "in-cluster-api")
                              (:file "main"))))
   :in-order-to ((test-op (test-op "gr8s/tests"))))
 
@@ -91,6 +93,7 @@
                              (:file "core-resource-http-test")
                              (:file "bootstrap-resource-test")
                              (:file "pod-volumes-test")
+                             (:file "service-account-test")
                              (:file "telemetry-test"))))
   :perform (test-op (operation component)
              (declare (ignore operation component))

@@ -392,13 +392,16 @@ version is maintained separately in `gr8s.asd`.
 Bootstrap APIs also store Namespaces, ServiceAccounts, Roles, RoleBindings,
 ClusterRoles and ClusterRoleBindings with durable metadata and optimistic
 updates. The Nodes API reports registered agents and their live readiness.
-RBAC policy storage does not yet enable authorization on the local API;
-in-cluster authentication and authorization are still under implementation.
+The local administrative HTTP API remains loopback-only. Managed native clusters
+also expose a separate HTTPS API at `10.96.0.1:443`, authenticated with issued
+ServiceAccount tokens and authorized against live RoleBindings and
+ClusterRoleBindings.
 
 Pods can mount referenced ConfigMaps, Secrets and disk-backed emptyDir volumes.
 The control plane sends only referenced objects to the assigned node over mTLS;
 the agent projects files into private host directories and maps numeric user,
 group and fsGroup settings to containerd. Downward environment fields include
 Pod identity, node name and Pod IP. Projected data is applied during Pod setup;
-live refresh and automatic ServiceAccount credential projection are not yet
-implemented.
+live refresh is not yet implemented. Managed native startup projects namespace-bound
+ServiceAccount token/CA files automatically unless the Pod or account opts out.
+Deleting and recreating an account or its credential Secret revokes the old token.
