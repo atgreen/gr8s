@@ -21,6 +21,7 @@
                 :serial t
                 :components ((:file "package")
                              (:file "cri-v1-generated")
+                             (:file "cri-wire-compat")
                              (:file "node-v1-generated")
                              (:file "node-protocol")
                              (:file "grpc-unix")

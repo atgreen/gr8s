@@ -119,6 +119,22 @@
                        (member (core-protobuf-string envelope 4) '("" "application/vnd.kubernetes.protobuf") :test #'equal))
             (error "Invalid Kubernetes protobuf envelope"))
           (when (string= kind "DeleteOptions") (return-from decode-core-resource-protobuf (core-protobuf-delete-options raw)))
+          (when (string= kind "Namespace")
+            (let* ((fields (core-protobuf-fields raw))
+                   (metadata (core-protobuf-value fields 1))
+                   (spec-bytes (core-protobuf-value fields 2))
+                   (finalizers nil)
+                   (spec (core-object)))
+              (when spec-bytes
+                (dolist (field (core-protobuf-fields spec-bytes))
+                  (when (= 1 (first field))
+                    (unless (= 2 (second field)) (error "Invalid Namespace finalizer"))
+                    (push (trivial-utf-8:utf-8-bytes-to-string (third field)) finalizers))))
+              (when finalizers (setf (gethash "finalizers" spec) (coerce (nreverse finalizers) 'vector)))
+              ;; Namespace status is server-owned and normalized on admission.
+              (return-from decode-core-resource-protobuf
+                (core-object "apiVersion" "v1" "kind" kind "spec" spec
+                             "metadata" (if metadata (core-protobuf-metadata metadata) (core-object))))))
           (unless (member kind '("ConfigMap" "Secret") :test #'equal) (error "Unsupported protobuf kind"))
           (let* ((fields (core-protobuf-fields raw))
                  (metadata (core-protobuf-value fields 1))

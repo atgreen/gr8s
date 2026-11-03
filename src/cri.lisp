@@ -8,6 +8,12 @@
 
 (defstruct cri-container-info
   id
+  name
+  (attempt 0)
+  image
+  image-ref
+  (started-at 0)
+  (finished-at 0)
   state
   exit-code
   reason
@@ -334,6 +340,15 @@
            (let ((container-status (gr8s.cri.v1::status response)))
              (make-cri-container-info
               :id (gr8s.cri.v1::id container-status)
+              :name (when (gr8s.cri.v1::metadata container-status)
+                      (gr8s.cri.v1::name (gr8s.cri.v1::metadata container-status)))
+              :attempt (if (gr8s.cri.v1::metadata container-status)
+                           (gr8s.cri.v1::attempt (gr8s.cri.v1::metadata container-status)) 0)
+              :image (when (gr8s.cri.v1::image container-status)
+                       (gr8s.cri.v1::image (gr8s.cri.v1::image container-status)))
+              :image-ref (gr8s.cri.v1::image-ref container-status)
+              :started-at (gr8s.cri.v1::started-at container-status)
+              :finished-at (gr8s.cri.v1::finished-at container-status)
               :state (gr8s.cri.v1::state container-status)
               :exit-code (gr8s.cri.v1::exit-code container-status)
               :reason (gr8s.cri.v1::reason container-status)
