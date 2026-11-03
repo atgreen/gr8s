@@ -64,7 +64,7 @@ and Namespace lifecycle are not yet implemented.
 
 Pod logs and exec run through correlated agent operations, including interactive
 streams and nonzero exit status. Services, Deployments, volumes, complete
-multi-node recovery, and Kubernetes API authentication/TLS remain outside the
+agent-crash recovery, and Kubernetes API authentication/TLS remain outside the
 verified boundary. The API server
 refuses non-loopback listener addresses.
 
@@ -154,7 +154,12 @@ records. Address changes and withdrawals publish new peer snapshots. Agents
 journal pending topology changes before touching the kernel and retain the last
 applied topology until reconciliation succeeds, so a restart can remove stale
 entries from a partial update. A changed local underlay replaces the owned
-tunnel while retaining Pod endpoints and allocations.
+tunnel while retaining Pod endpoints and allocations. Periodic local
+reconciliation repairs forwarding entries lost to tunnel link events without
+requiring a newer control-plane snapshot. Graceful agent restart retains pinned
+policy links/maps, Pod assignments and addresses; withdrawn assignments persist
+deletion intent under the reconciliation lock so a background retry cannot
+recreate a deleted Pod.
 
 ## Requirements
 
@@ -165,6 +170,8 @@ tunnel while retaining Pod endpoints and allocations.
 - root privileges and working cgroup delegation for running real Pods
 - Linux 6.6 or newer with TCX eBPF support and BPF/network-administration
   privileges for the Whistler CNI stage
+- Python 3, `ip`, `nsenter`, `nft`, and a non-loopback upstream resolver for
+  the privileged two-node smoke
 - Podman only for the optional legacy-adapter integration test
 
 ## Build and run the self-contained server
@@ -305,6 +312,24 @@ exported policy counters, and Pod namespace/pin/shim cleanup:
 ```sh
 make smoke
 ```
+
+The native two-node smoke launches a control plane and two containerd agents
+with persistent, separate mount/network namespaces. Routed underlay veths carry
+VXLAN traffic without a bridge. It verifies real Pod connectivity, DNS, logs,
+exec, tunnel dependency and repair, traffic while one agent is stopped,
+certificate-based restart, unchanged Pod identities/IPs, fresh telemetry, live
+CNI CHECK, and cleanup. Temporary NAT serves only external image/DNS downloads
+from the test underlay.
+
+```sh
+make smoke-two-node
+```
+
+Set `GR8S_SMOKE_KEEP_WORKDIR=1` when invoking the Python harness directly to keep
+its logs. `GR8S_TWO_NODE_FAIL_AFTER_CREATE=1` exercises failure cleanup after
+both Pods reach Running. Remote VTEP source validation, abrupt agent/crash
+recovery, and the remaining pool/gateway design requirements are still tracked
+work.
 
 The disposable legacy Podman test is opt-in:
 

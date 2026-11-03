@@ -134,6 +134,7 @@ class Smoke:
             if self.in_node(index, 'stat', '-f', '-c', '%T', '/sys/fs/cgroup').stdout.strip() != 'cgroup2fs':
                 self.in_node(index, 'mount', '-t', 'cgroup2', 'none', '/sys/fs/cgroup')
         print(f'Launching native control plane and two nodes in {self.root}', flush=True)
+        print(f'Test namespace prefix: {self.prefix}', flush=True)
         self.server = self.start([self.binary, 'serve', '--disable-agent', '--runtime', 'fake',
                                  '--state-directory', self.root / 'control', '--port', self.api_port,
                                  '--node-listen', '0.0.0.0', '--node-port', self.node_port,
@@ -210,6 +211,8 @@ class Smoke:
             self.kubectl('create', '-f', '-', input=json.dumps(pod))
         print('Waiting for two real containerd Pods', flush=True)
         identities = wait_for('two real Running Pods', self.check_pods, timeout=180)
+        if os.environ.get('GR8S_TWO_NODE_FAIL_AFTER_CREATE') == '1':
+            raise RuntimeError('forced two-node failure after creating Pods')
         self.traffic(identities)
         print('Two-node native VXLAN connectivity, DNS, logs, exec and tunnel-dependency checks passed', flush=True)
         restart_started = int(time.time())
