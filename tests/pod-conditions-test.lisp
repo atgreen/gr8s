@@ -146,3 +146,32 @@
         (gr8s::update-pod-observed-status store pod (running-status-for-test "web")))
       (is (null (gr8s::pod-observed-status store pod)))
       (is (equal "" (gr8s::pod-observed-resource-version store pod))))))
+
+(test node-leases-survive-restart-only-while-the-granted-deadline-is-valid
+  (with-temporary-store (store path)
+    (let ((now (get-universal-time)))
+      (gr8s::register-node store (make-test-node "worker-a" "node-a" "10.88.0.0/24"))
+      (gr8s::mark-node-ready store "worker-a" now :lease-duration 60)
+      (let ((restored (gr8s::get-node (open-store path) "worker-a")))
+        (is (gr8s::node-record-ready-p restored))
+        (is (= now (gr8s::node-record-last-heartbeat restored)))
+        (is (= (+ now 60) (gr8s::node-record-lease-deadline restored))))
+      ;; A changed server timeout cannot retroactively shorten a granted lease.
+      (is (null (gr8s::expire-node-heartbeats store (+ now 50) :now (+ now 30))))
+      (is (= 1 (length (gr8s::expire-node-heartbeats store now :now (+ now 61)))))
+      (is (not (gr8s::node-record-ready-p (gr8s::get-node (open-store path) "worker-a"))))
+      (gr8s::mark-node-ready store "worker-a" (- now 100) :lease-duration 1)
+      (is (not (gr8s::node-record-ready-p (gr8s::get-node (open-store path) "worker-a"))))
+      (gr8s::mark-node-ready store "worker-a" now :lease-duration 60)
+      (gr8s::mark-node-not-ready store "worker-a")
+      (is (not (gr8s::node-record-ready-p (gr8s::get-node (open-store path) "worker-a")))))))
+
+(test node-heartbeats-checkpoint-the-servers-configured-lease-duration
+  (with-temporary-store (store path)
+    (gr8s::register-node store (make-test-node "worker-a" "node-a" "10.88.0.0/24"))
+    (let ((server (gr8s::%make-node-grpc-server :store store :heartbeat-timeout-seconds 47)))
+      (gr8s::handle-node-agent-envelope
+       server "worker-a" (gr8s::make-agent-envelope :heartbeat (make-instance 'gr8s.node.v1::heartbeat)))
+      (let ((node (gr8s::get-node (open-store path) "worker-a")))
+        (is (gr8s::node-record-ready-p node))
+        (is (= 47 (- (gr8s::node-record-lease-deadline node) (gr8s::node-record-last-heartbeat node))))))))

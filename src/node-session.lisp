@@ -333,7 +333,8 @@
   (case (slot-value envelope 'gr8s.node.v1::payload-case)
     (:heartbeat
      (mark-node-ready (node-grpc-server-store server)
-                      node-name (get-universal-time)))
+                      node-name (get-universal-time)
+                      :lease-duration (node-grpc-server-heartbeat-timeout-seconds server)))
     (:snapshot-ack
      (note-node-snapshot-ack
       server node-name
@@ -455,10 +456,10 @@
 
 (defun monitor-node-heartbeats (server)
   (loop until (node-grpc-server-stopping-p server)
-        do (expire-node-heartbeats
-            (node-grpc-server-store server)
-            (- (get-universal-time)
-               (node-grpc-server-heartbeat-timeout-seconds server)))
+        do (let ((now (get-universal-time)))
+             (expire-node-heartbeats
+              (node-grpc-server-store server)
+              (- now (node-grpc-server-heartbeat-timeout-seconds server)) :now now))
            (sleep 0.05)))
 
 (defun handle-node-enrollment (server request context)
