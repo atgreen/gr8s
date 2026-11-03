@@ -69,6 +69,8 @@
   "Copy, validate and default an implemented bootstrap API object."
   (when (equal resource "services")
     (return-from normalize-bootstrap-resource (normalize-service-resource input namespace name store)))
+  (when (equal resource "podtemplates")
+    (return-from normalize-bootstrap-resource (normalize-podtemplate input namespace name)))
   (let* ((object (copy-core-object (require-object input "resource")))
          (kind (core-resource-kind resource))
          (version (core-resource-api-version resource))
@@ -119,7 +121,9 @@
                                 "namespaced" namespaced "kind" kind
                                 "shortNames" (cond ((equal resource "configmaps") #("cm"))
                                                    ((equal resource "services") #("svc")) (t #()))
-                                "verbs" #("create" "delete" "get" "list" "patch" "update")))
+                                "verbs" (if (equal resource "podtemplates")
+                                            #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
+                                            #("create" "delete" "get" "list" "patch" "update"))))
    'vector))
 
 (defun rbac-resources-response ()

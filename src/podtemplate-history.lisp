@@ -1,0 +1,142 @@
+;;;; SPDX-FileCopyrightText: 2026 gr8s contributors
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Maintain a bounded, durable PodTemplate change journal. Historical reads
+;;;; reconstruct an exact revision by undoing later mutations. Signed key-based
+;;;; continuation tokens survive restart and support honest expiry/recovery.
+
+(in-package #:gr8s)
+
+(defparameter *podtemplate-history-seconds* 300)
+(defparameter *podtemplate-history-limit* 4096)
+(defparameter *podtemplate-clock* #'get-universal-time)
+
+(defun next-template-history (store resources revision)
+  "Compute journal changes and retention floor before committing any state."
+  (let ((history (copy-list (pod-store-template-history store)))
+        (floor (pod-store-template-history-floor store))
+        (now (funcall *podtemplate-clock*)) (keys (make-hash-table :test #'equal)))
+    (dolist (index (list (pod-store-resources store) resources))
+      (maphash (lambda (key object) (declare (ignore object))
+                 (when (equal "podtemplates" (first key)) (setf (gethash key keys) t))) index))
+    (maphash (lambda (key present)
+               (declare (ignore present))
+               (let ((old (gethash key (pod-store-resources store))) (new (gethash key resources)))
+                 (unless (eq old new)
+                   (setf history (nconc history (list (core-object "revision" revision "time" now
+                                                                 "namespace" (second key) "name" (third key)
+                                                                 "old" (or old 'null) "new" (or new 'null)))))))) keys)
+    (loop while (and history
+                     (or (> (length history) *podtemplate-history-limit*)
+                         (> (- now (gethash "time" (first history))) *podtemplate-history-seconds*)))
+          do (setf floor (max floor (gethash "revision" (pop history)))))
+    ;; Never retain half of a transaction (for example a large DeleteCollection).
+    (setf history (remove-if (lambda (entry) (<= (gethash "revision" entry) floor)) history))
+    (values history floor)))
+
+(defun compact-template-history-unlocked (store &key checkpoint)
+  "Durably compact expired history, optionally recording an expired-token checkpoint."
+  (when (or checkpoint
+            (some (lambda (entry) (> (- (funcall *podtemplate-clock*) (gethash "time" entry))
+                                    *podtemplate-history-seconds*)) (pod-store-template-history store)))
+    (commit-core-resources store (copy-core-resource-index store) (1+ (pod-store-resource-revision store)))))
+
+(defun template-index-at-revision-unlocked (store revision)
+  "Reconstruct a real historical view; reject future or compacted revisions."
+  (when (> revision (pod-store-resource-revision store))
+    (core-resource-error 504 "Timeout" "Requested resourceVersion is newer than the storage revision"))
+  (when (< revision (pod-store-template-history-floor store))
+    (core-resource-error 410 "Expired" "The requested resourceVersion has been compacted"))
+  (let ((index (copy-core-resource-index store)))
+    (dolist (entry (reverse (pod-store-template-history store)))
+      (when (> (gethash "revision" entry) revision)
+        (let ((key (core-resource-key "podtemplates" (gethash "namespace" entry) (gethash "name" entry)))
+              (old (gethash "old" entry)))
+          (if (eq old 'null) (remhash key index) (setf (gethash key index) old)))))
+    index))
+
+(defun template-object-key (object)
+  "Return the namespace/name storage ordering key for an object."
+  (let ((metadata (gethash "metadata" object)))
+    (format nil "~A/~A" (gethash "namespace" metadata) (gethash "name" metadata))))
+
+(defun template-token-signature (store payload)
+  "Authenticate a continuation payload with the private persisted store key."
+  (let ((hmac (ironclad:make-hmac (pod-store-template-token-key store) :sha256)))
+    (ironclad:update-hmac hmac (trivial-utf-8:string-to-utf-8-bytes payload))
+    (ag-grpc:base64-encode (ironclad:hmac-digest hmac))))
+
+(defun encode-template-token (store namespace labels fields revision last-key)
+  "Encode a query-bound continuation after LAST-KEY at an exact revision."
+  (let ((payload (ag-grpc:base64-encode
+                  (trivial-utf-8:string-to-utf-8-bytes
+                   (com.inuoe.jzon:stringify
+                    (core-object "namespace" (or namespace 'null) "labels" labels "fields" fields
+                                 "revision" revision "lastKey" last-key "issuedAt" (funcall *podtemplate-clock*)))))))
+    (concatenate 'string payload "." (template-token-signature store payload))))
+
+(defun decode-template-token (store value namespace labels fields)
+  "Verify a continuation token and its original scope and selectors."
+  (handler-case
+      (let* ((parts (uiop:split-string value :separator '(#\.)))
+             (payload (first parts)))
+        (unless (and (< (length value) 8192) (= 2 (length parts))
+                     (equal (second parts) (template-token-signature store payload)))
+          (error "Invalid token signature"))
+        (let ((token (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (core-base64-bytes payload "continue")))))
+          (unless (and (hash-table-p token) (equal (or namespace 'null) (gethash "namespace" token))
+                       (equal labels (gethash "labels" token)) (equal fields (gethash "fields" token))
+                       (typep (gethash "revision" token) '(integer 0 *))
+                       (typep (gethash "issuedAt" token) '(integer 0 *)) (stringp (gethash "lastKey" token)))
+            (error "Invalid token scope"))
+          token))
+    (error () (core-resource-error 400 "BadRequest" "Invalid or mismatched PodTemplate continue token"))))
+
+(defun template-list-page (store namespace labels fields &key limit continuation resource-version match)
+  "List a consistent revision; return a replacement continuation when history expires."
+  (unless (or (null limit) (typep limit '(integer 0 *))) (core-resource-error 400 "BadRequest" "Invalid limit"))
+  (unless (member match '(nil "" "Exact" "NotOlderThan") :test #'equal) (core-resource-error 400 "BadRequest" "Invalid resourceVersionMatch"))
+  (let ((label-test (core-selector-predicate labels)) (field-test (core-selector-predicate fields :fields t)))
+    (with-store-lock (store)
+      (compact-template-history-unlocked store)
+      (let* ((token (when (and continuation (plusp (length continuation)))
+                      (decode-template-token store continuation namespace labels fields)))
+             (requested (unless (member resource-version '(nil "" "0") :test #'equal)
+                          (unless (and (stringp resource-version) (every #'digit-char-p resource-version))
+                            (core-resource-error 400 "BadRequest" "Invalid resourceVersion"))
+                          (parse-integer resource-version)))
+             (revision (or (and token (gethash "revision" token))
+                           (and requested (not (equal match "NotOlderThan")) requested)
+                           (pod-store-resource-revision store)))
+             (last-key (and token (gethash "lastKey" token))))
+        (when (and token requested) (core-resource-error 400 "BadRequest" "resourceVersion cannot be combined with continue"))
+        (when (and match (not (equal match "")) (null requested) (not (equal resource-version "0")))
+          (core-resource-error 400 "BadRequest" "resourceVersionMatch requires resourceVersion"))
+        (when (and requested (> requested (pod-store-resource-revision store)))
+          (core-resource-error 504 "Timeout" "Requested resourceVersion is newer than storage"))
+        (when (and token (or (< revision (pod-store-template-history-floor store))
+                             (> (- (funcall *podtemplate-clock*) (gethash "issuedAt" token)) *podtemplate-history-seconds*)))
+          ;; Expiration checkpoints advance durable storage metadata even when
+          ;; objects have not changed. A resumed list is explicitly a new view.
+          (compact-template-history-unlocked store :checkpoint t)
+          (return-from template-list-page
+            (values (core-object "apiVersion" "v1" "kind" "Status" "status" "Failure" "code" 410 "reason" "Expired"
+                                 "message" "PodTemplate list snapshot expired; continue at a newer revision or restart for a consistent full list"
+                                 "metadata" (core-object "continue" (encode-template-token store namespace labels fields
+                                                                             (pod-store-resource-revision store) last-key))) 410)))
+        (let* ((index (template-index-at-revision-unlocked store revision))
+               (items (sort (loop for key being the hash-keys of index using (hash-value object)
+                                 when (and (equal "podtemplates" (first key)) (or (null namespace) (equal namespace (second key)))
+                                           (or (null last-key) (string> (template-object-key object) last-key))
+                                           (funcall label-test object) (funcall field-test object))
+                                   collect object) #'string< :key #'template-object-key))
+               (end (if (and limit (plusp limit)) (min limit (length items)) (length items)))
+               (metadata (core-object "resourceVersion" (write-to-string revision) "continue" "")))
+          (when (< end (length items))
+            (setf (gethash "continue" metadata) (encode-template-token store namespace labels fields revision
+                                                                 (template-object-key (nth (1- end) items))))
+            (when (and (equal labels "") (equal fields ""))
+              (setf (gethash "remainingItemCount" metadata) (- (length items) end))))
+          (values (core-object "apiVersion" "v1" "kind" "PodTemplateList" "metadata" metadata
+                               "items" (map 'vector #'copy-core-object (subseq items 0 end))) 200))))))

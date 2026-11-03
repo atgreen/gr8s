@@ -22,6 +22,7 @@
     ("namespaces" "Namespace" "v1" nil)
     ("serviceaccounts" "ServiceAccount" "v1" t)
     ("services" "Service" "v1" t)
+    ("podtemplates" "PodTemplate" "v1" t)
     ("roles" "Role" "rbac.authorization.k8s.io/v1" t)
     ("rolebindings" "RoleBinding" "rbac.authorization.k8s.io/v1" t)
     ("clusterroles" "ClusterRole" "rbac.authorization.k8s.io/v1" nil)
@@ -60,7 +61,11 @@
         (unless (and (eql 1 (gethash "version" state))
                      (typep (gethash "revision" state) '(integer 0 *)))
           (error "Invalid core resource state at ~A" path))
-        (setf (pod-store-resource-revision store) (gethash "revision" state))
+        (setf (pod-store-resource-revision store) (gethash "revision" state)
+              (pod-store-template-history store) (coerce (gethash "templateHistory" state #()) 'list)
+              (pod-store-template-history-floor store) (gethash "templateHistoryFloor" state (gethash "revision" state))
+              (pod-store-template-token-key store) (when (gethash "templateTokenKey" state)
+                                                     (ag-grpc:base64-decode (gethash "templateTokenKey" state))))
         (loop for object across (gethash "items" state)
               for metadata = (gethash "metadata" object)
               for resource = (or (first (find (gethash "kind" object) *stored-resource-types*
@@ -76,14 +81,21 @@
 (defun commit-core-resources (store resources revision)
   ;; Write the complete new state before publishing it in memory. A failed
   ;; atomic write leaves both the old disk state and the old index intact.
-  (write-private-text-atomically
+  (multiple-value-bind (history floor) (next-template-history store resources revision)
+   (let ((token-key (or (pod-store-template-token-key store) (secure-random-octets 32))))
+    (write-private-text-atomically
    (core-resource-state-path store)
    (com.inuoe.jzon:stringify
     (core-object "version" 1 "revision" revision
+                 "templateHistory" (coerce history 'vector) "templateHistoryFloor" floor
+                 "templateTokenKey" (ag-grpc:base64-encode token-key)
                  "items" (coerce (loop for object being the hash-values of resources
                                        collect object) 'vector))))
   (setf (pod-store-resources store) resources
-        (pod-store-resource-revision store) revision))
+        (pod-store-resource-revision store) revision
+        (pod-store-template-history store) history
+        (pod-store-template-history-floor store) floor
+        (pod-store-template-token-key store) token-key))))
 
 (defun copy-core-resource-index (store)
   (let ((copy (make-hash-table :test #'equal)))

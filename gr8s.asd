@@ -17,7 +17,8 @@
                "pure-tls/acme"
                "sb-posix" "trivial-utf-8" "usocket" "whistler/loader")
   :serial t
-  :components ((:module "src"
+  :components ((:static-file "schema/podtemplate-v1.json")
+               (:module "src"
                 :serial t
                 :components ((:file "package")
                              (:file "cri-v1-generated")
@@ -34,9 +35,11 @@
                              (:file "pki")
                              (:file "node-tls")
                              (:file "core-resources")
+                             (:file "podtemplate-history")
                              (:file "bootstrap-resources")
                              (:file "service-account")
                              (:file "core-resource-protobuf")
+                             (:file "podtemplates")
                              (:file "node-session")
                              (:file "runtime")
                              (:file "runtime-assets")
@@ -58,6 +61,7 @@
                              (:file "agent-runtime")
                              (:file "http")
                              (:file "core-resource-http")
+                             (:file "podtemplate-watch")
                              (:file "server")
                              (:file "in-cluster-api")
                              (:file "services")
@@ -94,6 +98,7 @@
                              (:file "main-test")
                              (:file "http-test")
                              (:file "core-resource-http-test")
+                             (:file "podtemplates-test")
                              (:file "bootstrap-resource-test")
                              (:file "pod-volumes-test")
                              (:file "service-account-test")
