@@ -398,7 +398,9 @@ the full conformance suite has not completed.
 
 Bootstrap APIs also store Namespaces, ServiceAccounts, Roles, RoleBindings,
 ClusterRoles and ClusterRoleBindings with durable metadata and optimistic
-updates. The Nodes API reports registered agents and their live readiness.
+updates. These durable APIs also support resumable JSON watches and
+revision-consistent paginated lists. Pod and Node watches remain pending.
+The Nodes API reports registered agents and their live readiness.
 The local administrative HTTP API remains loopback-only. Managed native clusters
 also expose a separate HTTPS API at `10.96.0.1:443`, authenticated with issued
 ServiceAccount tokens and authorized against live RoleBindings and
@@ -418,13 +420,18 @@ Server-side apply and finalizer processing remain unsupported.
 Templates have a 2 MiB serialized storage limit so admitted objects can be read
 back by the durable JSON loader.
 
-PodTemplate list continuations are signed and bound to their namespace and
-selectors. A durable change journal preserves a consistent resourceVersion across
+Stored-resource list continuations are signed and bound to their resource type,
+namespace and selectors. A shared durable change journal preserves a consistent
+resourceVersion across
 mutations and restarts, with five-minute retention and a 4,096-change bound.
 Compacted or expired continuations return HTTP 410 with a replacement token for
 resuming at the last key in a newer view. Restart the list without a token when a
 consistent full snapshot is required. Watch supports revision resumption,
-selector transitions, timeouts, bookmarks and initial events.
+selector transitions, timeouts, bookmarks and initial events. Upgrades preserve
+legacy PodTemplate history and continuations; requests for older history of
+newly tracked resource types return HTTP 410. The expanded journal uses storage
+format 2, which older executables reject; downgrading requires restoring a
+pre-upgrade state backup.
 
 Run `sh scripts/test-podtemplate-api.sh` for real kubectl apply, ordering and
 restart checks against a native API with its fake workload runtime. Run the five

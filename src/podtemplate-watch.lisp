@@ -2,13 +2,13 @@
 ;;;; SPDX-License-Identifier: MIT
 ;;;;
 ;;;; Purpose:
-;;;; Stream PodTemplate watch events from durable mutations, with revision
+;;;; Stream stored resource watch events from durable mutations, with revision
 ;;;; resumption, selector transitions, initial-event bookmarks and bounded
 ;;;; timeouts. Never hold the storage lock while writing to a slow client.
 
 (in-package #:gr8s)
 
-(defun template-watch-events (store namespace labels fields revision)
+(defun template-watch-events (store namespace labels fields revision &key (resource "podtemplates"))
   "Read matching journal events after REVISION and the current storage watermark."
   (let ((label-test (core-selector-predicate labels)) (field-test (core-selector-predicate fields :fields t)))
     (labels ((matches (object)
@@ -17,10 +17,11 @@
                     (funcall label-test object) (funcall field-test object))))
       (with-store-lock (store)
         (compact-template-history-unlocked store)
-        (template-index-at-revision-unlocked store revision)
+        (template-index-at-revision-unlocked store revision resource)
         (values
          (loop for entry in (pod-store-template-history store)
-               when (> (gethash "revision" entry) revision)
+               when (and (equal resource (gethash "resource" entry "podtemplates"))
+                         (> (gethash "revision" entry) revision))
                  append (let* ((old (gethash "old" entry)) (new (gethash "new" entry))
                                (before (matches old)) (after (matches new)))
                           (when (or before after)
@@ -29,8 +30,8 @@
                               (list (core-object "type" (cond ((and before after) "MODIFIED") (after "ADDED") (t "DELETED")) "object" object))))))
          (pod-store-resource-revision store))))))
 
-(defun podtemplate-watch-response (store namespace)
-  "Serve a real Kubernetes JSON watch stream for the PodTemplate collection."
+(defun podtemplate-watch-response (store namespace &optional (resource "podtemplates"))
+  "Serve a real Kubernetes JSON watch stream for a durable resource collection."
   (let* ((rv-text (or (hunchentoot:parameter "resourceVersion") ""))
          (initial (or (equal rv-text "0") (true-parameter-p (hunchentoot:parameter "sendInitialEvents"))))
          (labels (or (hunchentoot:parameter "labelSelector") ""))
@@ -45,7 +46,7 @@
     (unless (member match '(nil "" "NotOlderThan") :test #'equal) (core-resource-error 400 "BadRequest" "Unsupported watch resourceVersionMatch"))
     (when (and (true-parameter-p (hunchentoot:parameter "sendInitialEvents")) (not (equal match "NotOlderThan")))
       (core-resource-error 400 "BadRequest" "sendInitialEvents requires NotOlderThan"))
-    (multiple-value-bind (page code) (template-list-page store namespace labels fields :resource-version rv-text :match match)
+    (multiple-value-bind (page code) (template-list-page store namespace labels fields :resource-version rv-text :match match :resource resource)
       (declare (ignore code))
       (setf revision (parse-integer (gethash "resourceVersion" (gethash "metadata" page))))
       (when initial
@@ -62,7 +63,7 @@
                (bookmark (&optional initial-end)
                  (let ((metadata (core-object "resourceVersion" (write-to-string revision))))
                    (when initial-end (setf (gethash "annotations" metadata) (core-object "k8s.io/initial-events-end" "true")))
-                   (emit (core-object "type" "BOOKMARK" "object" (core-object "apiVersion" "v1" "kind" "PodTemplate" "metadata" metadata))))))
+                   (emit (core-object "type" "BOOKMARK" "object" (core-object "apiVersion" (core-resource-api-version resource) "kind" (core-resource-kind resource) "metadata" metadata))))))
         (handler-case
             (progn
               (dolist (event first-events) (emit event))
@@ -70,7 +71,7 @@
               ;; Flush headers even for an initially empty watch.
               (finish-output out)
               (loop while (< (get-internal-real-time) deadline)
-                    do (multiple-value-bind (events watermark) (template-watch-events store namespace labels fields revision)
+                    do (multiple-value-bind (events watermark) (template-watch-events store namespace labels fields revision :resource resource)
                          (dolist (event events) (emit event))
                          (setf revision watermark))
                        (when (and (true-parameter-p (hunchentoot:parameter "allowWatchBookmarks"))

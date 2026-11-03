@@ -123,7 +123,7 @@
                                                    ((equal resource "services") #("svc")) (t #()))
                                 "verbs" (if (equal resource "podtemplates")
                                             #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
-                                            #("create" "delete" "get" "list" "patch" "update"))))
+                                            #("create" "delete" "get" "list" "patch" "update" "watch"))))
    'vector))
 
 (defun rbac-resources-response ()
