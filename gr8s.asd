@@ -9,6 +9,7 @@
                "sb-posix" "trivial-utf-8" "usocket" "whistler/loader")
   :serial t
   :components ((:module "src"
+                :serial t
                 :components ((:file "package")
                              (:file "cri-v1-generated")
                              (:file "node-v1-generated")
@@ -47,6 +48,7 @@
   :depends-on ("gr8s" "drakma" "fiveam")
   :serial t
   :components ((:module "tests"
+                :serial t
                 :components ((:file "package")
                              (:file "websocket-test")
                              (:file "node-protocol-test")
