@@ -50,7 +50,7 @@
   (merge-pathnames (format nil "~A/" uid)
                    (containerd-runtime-log-root runtime)))
 
-(defun containerd-phase (runtime containers)
+(defun containerd-phase (runtime containers &optional details)
   (cond
     ((null containers) "Pending")
     ((find gr8s.cri.v1::+containerstate-container_running+
@@ -63,18 +63,63 @@
      (if (some (lambda (container)
                  (not (zerop
                        (cri-container-info-exit-code
-                        (cri-container-status
-                         (containerd-runtime-socket-path runtime)
-                         (cri-container-summary-id container))))))
+                        (or (find (cri-container-summary-id container) details
+                                  :key #'cri-container-info-id :test #'equal)
+                            (cri-container-status
+                             (containerd-runtime-socket-path runtime)
+                             (cri-container-summary-id container)))))))
                containers)
          "Failed"
          "Succeeded"))
     (t "Pending")))
 
+(defun cri-status-timestamp (nanoseconds)
+  "Format an observed CRI Unix timestamp for Kubernetes container state."
+  (when (plusp nanoseconds)
+    (multiple-value-bind (second minute hour day month year)
+        (decode-universal-time (+ 2208988800 (floor nanoseconds 1000000000)) 0)
+      (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ"
+              year month day hour minute second))))
+
+(defun containerd-container-status-object (info)
+  "Translate actual CRI state; consumers must not infer completion from an empty list."
+  (let* ((running (= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_running+))
+         (state (core-object))
+         (id (format nil "containerd://~A" (cri-container-info-id info)))
+         (started (cri-status-timestamp (cri-container-info-started-at info)))
+         (finished (cri-status-timestamp (cri-container-info-finished-at info))))
+    (cond
+      (running
+       (setf (gethash "running" state) (if started (core-object "startedAt" started) (core-object))))
+      ((= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_exited+)
+       (let ((terminated (core-object "exitCode" (cri-container-info-exit-code info)
+                                      "containerID" id)))
+         (when started (setf (gethash "startedAt" terminated) started))
+         (when finished (setf (gethash "finishedAt" terminated) finished))
+         (when (cri-container-info-reason info)
+           (setf (gethash "reason" terminated) (cri-container-info-reason info)))
+         (when (cri-container-info-message info)
+           (setf (gethash "message" terminated) (cri-container-info-message info)))
+         (setf (gethash "terminated" state) terminated)))
+      (t (setf (gethash "waiting" state)
+               (core-object "reason" (if (= (cri-container-info-state info)
+                                              gr8s.cri.v1::+containerstate-container_created+)
+                                         "ContainerCreating" "ContainerStatusUnknown")))))
+    (core-object "name" (or (cri-container-info-name info)
+                            (cdr (assoc +gr8s-container-label+ (cri-container-info-labels info) :test #'equal)))
+                 "containerID" id "image" (or (cri-container-info-image info) "")
+                 "imageID" (or (cri-container-info-image-ref info) "")
+                 "restartCount" (cri-container-info-attempt info)
+                 "ready" running "started" running "state" state)))
+
 (defmethod runtime-observe ((runtime containerd-runtime) uid)
   (call-containerd-runtime
    (lambda ()
-     (let ((sandbox (containerd-owned-sandbox runtime uid)))
+     (let* ((sandbox (containerd-owned-sandbox runtime uid))
+            (containers (when sandbox (containerd-containers runtime sandbox)))
+            (details (loop for container in containers
+                           collect (cri-container-status (containerd-runtime-socket-path runtime)
+                                                         (cri-container-summary-id container)))))
        (when sandbox
          (make-runtime-pod
           :uid uid
@@ -86,8 +131,9 @@
           :spec-fingerprint (cdr (assoc +gr8s-spec-fingerprint-label+ (cri-pod-sandbox-info-labels sandbox) :test #'string=))
           :pod-ip (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime)
                                       (cri-pod-sandbox-info-id sandbox))
-          :phase (containerd-phase
-                  runtime (containerd-containers runtime sandbox))))))))
+          :phase (containerd-phase runtime containers details)
+          :status (core-object "containerStatuses"
+                               (map 'vector #'containerd-container-status-object details))))))))
 
 (defmethod runtime-delete ((runtime containerd-runtime) uid)
   (call-containerd-runtime

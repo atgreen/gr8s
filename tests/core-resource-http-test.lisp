@@ -159,4 +159,19 @@
                          :octets (subseq input 0 5))
       (check-core-status 200 item))))
 
+(test namespace-http-accepts-upstream-protobuf-with-generate-name
+  (with-core-api (store path)
+    (values store path)
+    (let* ((label (core-test-protobuf '((1 "pod-security.kubernetes.io/enforce") (2 "privileged"))))
+           (metadata (core-test-protobuf (list (list 2 "e2e-framework-") (list 11 label))))
+           (input (core-test-protobuf-envelope "Namespace"
+                    (list (list 1 metadata) (list 2 (core-test-protobuf nil))
+                          (list 3 (core-test-protobuf nil)))))
+           (created (check-core-status 201 "/api/v1/namespaces" :method :post
+                      :content-type "application/vnd.kubernetes.protobuf" :octets input))
+           (name (gethash "name" (gethash "metadata" created))))
+      (is (uiop:string-prefix-p "e2e-framework-" name))
+      (is (equal "Active" (gethash "phase" (gethash "status" created))))
+      (check-core-status 200 (concatenate 'string "/api/v1/namespaces/" name)))))
+
 (in-suite gr8s)
