@@ -22,7 +22,7 @@ NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
 NODE_PROTOCOL_LISP := src/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 
-.PHONY: all help containerd-bundle generate-protocol test test-containerd test-podman test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel check smoke run kubeconfig native clean
+.PHONY: all help containerd-bundle generate-protocol test test-containerd test-podman test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-core-api check smoke smoke-two-node run kubeconfig native clean
 
 all: native
 
@@ -34,6 +34,7 @@ help:
 	@echo "  containerd-bundle Build and verify pinned containerd, runc, and CNI binaries"
 	@echo "  generate-protocol Generate Common Lisp node-protocol bindings"
 	@echo "  test          Run the unit and HTTP test suite"
+	@echo "  test-core-api Verify ConfigMap/Secret kubectl workflows and restart persistence"
 	@echo "  test-containerd Include the live CRI/containerd integration tests"
 	@echo "  test-routed-network Test native routed veths in isolated user/network namespaces"
 	@echo "  test-vxlan-network Test two-node VXLAN and routed Pod connectivity"
@@ -43,6 +44,7 @@ help:
 	@echo "  test-whistler-cni Test the chained Whistler TC/eBPF CNI plugin"
 	@echo "  check         Syntax-check scripts and run tests"
 	@echo "  smoke         Run kubectl -> gr8s -> containerd end to end"
+	@echo "  smoke-two-node Test real containerd Pods across two isolated agent nodes"
 	@echo "  run           Start gr8s (override STATE_DIR, PORT, RUNTIME, KUBECONFIG)"
 	@echo "  kubeconfig    Write KUBECONFIG for the configured PORT"
 	@echo "  native        Build the dumped native executable at build/gr8s"
@@ -83,6 +85,9 @@ test-endpoint-policy: build/gr8s-endpoint-test.bpf.o
 test-endpoint-policy-kernel: build/gr8s-endpoint-test.bpf.o
 	python3 scripts/test-endpoint-policy.py $< --kernel
 
+test-core-api:
+	scripts/test-core-api.sh
+
 test-podman:
 	GR8S_RUN_PODMAN_TESTS=1 $(SBCL) --noinform --non-interactive $(TEST_EVAL)
 
@@ -90,7 +95,7 @@ test-whistler-cni: containerd-bundle test
 
 check: containerd-bundle test-whistler-cni test-endpoint-policy
 	sh -n scripts/gr8s scripts/gr8s-native scripts/install-containerd.sh \
-	  scripts/verify-static-runtime.sh scripts/smoke.sh
+	  scripts/verify-static-runtime.sh scripts/smoke.sh scripts/test-core-api.sh
 	scripts/verify-static-runtime.sh build/containerd
 
 smoke:
@@ -100,6 +105,14 @@ smoke:
 	fi
 	$(MAKE) native
 	sudo env PATH="$(PATH)" scripts/smoke.sh
+
+smoke-two-node:
+	@if [ "$$(id -u)" -eq 0 ]; then \
+	  echo "Run make smoke-two-node as your normal user." >&2; \
+	  exit 1; \
+	fi
+	$(MAKE) native
+	sudo env PATH="$(PATH)" python3 scripts/smoke-two-node.py
 
 run: containerd-bundle
 	scripts/gr8s serve --state-directory "$(STATE_DIR)" --port "$(PORT)" \

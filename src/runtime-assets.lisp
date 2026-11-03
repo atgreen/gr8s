@@ -61,6 +61,25 @@
             (write-runtime-asset asset directory))
           assets))
 
+(defun filesystem-mounted-at-p (directory filesystem
+                                &key (mount-info (uiop:read-file-string #P"/proc/thread-self/mountinfo")))
+  (let* ((target (string-right-trim "/" (namestring (truename directory))))
+         (encoded
+           (with-output-to-string (stream)
+             (loop for character across target
+                   do (case character
+                        (#\Space (write-string "\\040" stream))
+                        (#\Tab (write-string "\\011" stream))
+                        (#\Newline (write-string "\\012" stream))
+                        (#\\ (write-string "\\134" stream))
+                        (otherwise (write-char character stream)))))))
+    (loop for line in (uiop:split-string mount-info :separator '(#\Newline))
+          for fields = (uiop:split-string line :separator '(#\Space))
+          for separator = (position "-" fields :test #'string=)
+          thereis (and separator (>= (length fields) (+ separator 3))
+                       (string= encoded (nth 4 fields))
+                       (string= filesystem (nth (1+ separator) fields))))))
+
 (defun mount-runtime-tmpfs (directory)
   #+linux
   (let ((target (namestring (uiop:ensure-directory-pathname directory))))

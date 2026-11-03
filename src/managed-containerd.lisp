@@ -130,17 +130,24 @@
 (defun managed-containerd-bpf-directory (manager)
   (managed-containerd-directory manager "containerd/bpf/"))
 
-(defun mount-managed-bpffs (directory)
+(defun mount-managed-bpffs (directory &key (mounted-p #'filesystem-mounted-at-p)
+                                           (mounter #'%linux-mount))
   (let ((target (namestring (uiop:ensure-directory-pathname directory))))
     (ensure-directories-exist (merge-pathnames ".mount-point" target))
-    (unless (zerop (%linux-mount "gr8s-bpf" target "bpf" #xe ""))
+    ;; Reuse the node's surviving bpffs after an agent process restart. An
+    ;; overmount would hide the pinned links and discard their counters.
+    (unless (or (funcall mounted-p target "bpf")
+                (zerop (funcall mounter "gr8s-bpf" target "bpf" #xe "")))
       (error "could not mount the gr8s BPF filesystem at ~A: ~A"
              target (sb-int:strerror (sb-alien:get-errno))))
     target))
 
-(defun unmount-managed-bpffs (directory)
+(defun unmount-managed-bpffs (directory &key (unmounter #'%linux-umount))
   (let ((target (namestring (uiop:ensure-directory-pathname directory))))
-    (unless (zerop (%linux-umount target 0))
+    ;; Running Pods outlive the agent. Keep their maps and TCX links pinned;
+    ;; the next process must adopt them before reconnecting to the server.
+    (unless (or (directory (merge-pathnames #P"*/*" target))
+                (zerop (funcall unmounter target 0)))
       (error "could not unmount the gr8s BPF filesystem at ~A: ~A"
              target (sb-int:strerror (sb-alien:get-errno))))
     target))

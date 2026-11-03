@@ -56,10 +56,16 @@ The current API supports Pods in the `default` namespace:
 - durable desired state and optimistic resource-version checks
 - periodic, idempotent reconciliation with transient-failure retry
 
-The log and exec API routes exist, but their correlated agent-operation proxy
-is still being completed after the runtime ownership split. Services,
-Deployments, volumes, production multi-node workload execution, and Kubernetes
-API authentication/TLS are outside the verified boundary. The API server
+Namespaced ConfigMap and Secret APIs support durable CRUD, list/selectors,
+pagination, patch, optimistic concurrency, and dry-run through current kubectl
+clients. See [ConfigMap and Secret APIs](docs/configmap-secret-api.md) for the
+supported surface. Pod environment/volume consumption, watch, server-side apply,
+and Namespace lifecycle are not yet implemented.
+
+Pod logs and exec run through correlated agent operations, including interactive
+streams and nonzero exit status. Services, Deployments, volumes, complete
+agent-crash recovery, and Kubernetes API authentication/TLS remain outside the
+verified boundary. The API server
 refuses non-loopback listener addresses.
 
 ## Runtime architecture
@@ -80,9 +86,11 @@ loopback. Agents advertise the source IPv4 address of their control connection
 for VXLAN, or use an explicit `--node-address` on multi-interface hosts. The
 local node name can be changed with `--node-name`.
 
-Enrollment generates the private key on the node, verifies the returned cluster
-CA against `--ca-pin`, and stores `node.key`, `node.crt`, `ca.crt`, and the
-last-applied revision below the agent state directory. Revisioned sessions carry
+Enrollment verifies the server certificate against `--ca-pin` before sending the
+one-time join token. It generates the private key on the node and stores
+`node.key`, `node.crt`, `ca.crt`, the assigned Pod CIDR, and the last-applied
+revision below the agent state directory. Persistent sessions require a client
+certificate signed by the cluster CA and bound to the node name. Revisioned sessions carry
 node hello, heartbeat, complete desired-state snapshots, observed Pod status,
 and durable revision acknowledgements. The agent persists assigned Pods,
 reconciles them through its node runtime, adopts matching runtime objects after
@@ -113,7 +121,7 @@ serves DNS there and writes the standard `default.svc.cluster.local`,
 answers `kubernetes.default.svc.cluster.local` authoritatively and forwards names
 outside `cluster.local` to the host's IPv4 resolvers, over UDP or TCP.
 
-The Whistler classifier attaches to Pod egress through the agent. It uses an
+The Whistler classifier attaches to the host veth ingress for Pod egress. It uses an
 agent-initialized map to check the exact IPAM IPv4 address and interface MAC,
 validates ARP sender identity, and drops malformed or unsupported frames. It
 counts accepted/dropped packets and bytes, rejected spoofs, malformed packets,
@@ -122,11 +130,13 @@ replacement links are attached and pinned before atomically replacing the old
 pin. Existing counter maps survive repeated CNI ADD calls.
 
 Each endpoint has `rejected_spoofs`, `endpoint_identity`, and `traffic_stats`
-maps alongside its `tcx-egress` link under
+maps alongside its `tcx-ingress` link under
 `AGENT_STATE_DIR/containerd/bpf/CONTAINER_ID/`. CHECK validates kernel map schemas,
 identity, and the TCX interface/direction; DEL removes staged links and all maps
 even after the Pod namespace disappears. Tests exercise the actual compiled
-bytecode on packet fixtures; privileged kernel verification remains required.
+bytecode on packet fixtures with both an interpreter and Linux BPF test-run.
+The privileged native smoke injects a spoofed source into a live Pod namespace
+and requires the rejection counter to appear through agent telemetry.
 
 Agents sample the pinned counters and publish endpoint telemetry through their
 node sessions. The loopback control-plane `/metrics` endpoint exposes accepted
@@ -144,7 +154,12 @@ records. Address changes and withdrawals publish new peer snapshots. Agents
 journal pending topology changes before touching the kernel and retain the last
 applied topology until reconciliation succeeds, so a restart can remove stale
 entries from a partial update. A changed local underlay replaces the owned
-tunnel while retaining Pod endpoints and allocations.
+tunnel while retaining Pod endpoints and allocations. Periodic local
+reconciliation repairs forwarding entries lost to tunnel link events without
+requiring a newer control-plane snapshot. Graceful agent restart retains pinned
+policy links/maps, Pod assignments and addresses; withdrawn assignments persist
+deletion intent under the reconciliation lock so a background retry cannot
+recreate a deleted Pod.
 
 ## Requirements
 
@@ -155,6 +170,8 @@ tunnel while retaining Pod endpoints and allocations.
 - root privileges and working cgroup delegation for running real Pods
 - Linux 6.6 or newer with TCX eBPF support and BPF/network-administration
   privileges for the Whistler CNI stage
+- Python 3, `ip`, `nsenter`, `nft`, and a non-loopback upstream resolver for
+  the privileged two-node smoke
 - Podman only for the optional legacy-adapter integration test
 
 ## Build and run the self-contained server
@@ -289,12 +306,30 @@ make test-node-topology
 Run the self-contained native smoke workflow. Invoke `make` as your normal
 user; the target builds the embedded payload without privileges and uses
 `sudo` only to start the local agent's managed containerd and exercise a real
-Pod. During the agent-operation transition, this remains the gate that will
-restore logs and exec coverage:
+Pod. The smoke checks DNS, logs, exec success and failure, source-spoof rejection,
+exported policy counters, and Pod namespace/pin/shim cleanup:
 
 ```sh
 make smoke
 ```
+
+The native two-node smoke launches a control plane and two containerd agents
+with persistent, separate mount/network namespaces. Routed underlay veths carry
+VXLAN traffic without a bridge. It verifies real Pod connectivity, DNS, logs,
+exec, tunnel dependency and repair, traffic while one agent is stopped,
+certificate-based restart, unchanged Pod identities/IPs, fresh telemetry, live
+CNI CHECK, and cleanup. Temporary NAT serves only external image/DNS downloads
+from the test underlay.
+
+```sh
+make smoke-two-node
+```
+
+Set `GR8S_SMOKE_KEEP_WORKDIR=1` when invoking the Python harness directly to keep
+its logs. `GR8S_TWO_NODE_FAIL_AFTER_CREATE=1` exercises failure cleanup after
+both Pods reach Running. Remote VTEP source validation, abrupt agent/crash
+recovery, and the remaining pool/gateway design requirements are still tracked
+work.
 
 The disposable legacy Podman test is opt-in:
 

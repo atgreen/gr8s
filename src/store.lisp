@@ -15,6 +15,8 @@
   path
   (pods (make-hash-table :test #'equal))
   (nodes (make-hash-table :test #'equal))
+  (resources (make-hash-table :test #'equal))
+  (resource-revision 0)
   (pod-observed-phases (make-hash-table :test #'equal))
   (pod-observed-statuses (make-hash-table :test #'equal))
   (lock (bt:make-lock "gr8s store")))
@@ -145,6 +147,7 @@
     (dolist (file (directory (merge-pathnames "*.json" (nodes-path store))))
       (let ((node (parse-node-record file)))
         (setf (gethash (node-record-name node) (pod-store-nodes store)) node)))
+    (load-core-resources store)
     store))
 
 (defun get-pod-unlocked (store namespace name)

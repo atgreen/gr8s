@@ -154,9 +154,15 @@
                 (setf (getf options :containerd-log-root) value))
                (t (error "unknown agent option: ~A" option)))
              (setf arguments (cddr arguments)))
-    (dolist (required '(:server :token :ca-pin :node-name :state-directory))
+    (dolist (required '(:server :node-name :state-directory))
       (unless (getf options required)
         (error "agent requires --~(~A~)" required)))
+    (let ((directory (uiop:ensure-directory-pathname (getf options :state-directory))))
+      (unless (every (lambda (name) (probe-file (merge-pathnames name directory)))
+                     '("node.key" "node.crt" "ca.crt"))
+        (dolist (required '(:token :ca-pin))
+          (unless (getf options required)
+            (error "unenrolled agent requires --~(~A~)" required)))))
     options))
 
 (defun parse-join-token-options (arguments)
@@ -395,6 +401,7 @@
 (defstruct reconciliation-worker
   reconciler
   observer
+  before-reconcile
   thread
   (stop-requested nil)
   (interval 1.0)
@@ -409,8 +416,11 @@
 (defun reconciliation-worker-loop (worker)
   (loop until (reconciliation-worker-stopping-p worker)
         do (handler-case
-               (reconcile-all (reconciliation-worker-reconciler worker)
-                              :observer (reconciliation-worker-observer worker))
+               (progn
+                 (when (reconciliation-worker-before-reconcile worker)
+                   (funcall (reconciliation-worker-before-reconcile worker)))
+                 (reconcile-all (reconciliation-worker-reconciler worker)
+                                :observer (reconciliation-worker-observer worker)))
              (error (error)
                (format *error-output* "gr8s reconciliation error: ~A~%" error)))
            (bt:with-lock-held ((reconciliation-worker-lock worker))
@@ -420,9 +430,10 @@
                 (reconciliation-worker-lock worker)
                 :timeout (reconciliation-worker-interval worker))))))
 
-(defun start-reconciliation-worker (reconciler &key (interval 1.0) observer)
+(defun start-reconciliation-worker (reconciler &key (interval 1.0) observer before-reconcile)
   (let ((worker (make-reconciliation-worker
-                 :reconciler reconciler :interval interval :observer observer)))
+                 :reconciler reconciler :interval interval :observer observer
+                 :before-reconcile before-reconcile)))
     (setf (reconciliation-worker-thread worker)
           (bt:make-thread
            (lambda () (reconciliation-worker-loop worker))
@@ -500,7 +511,7 @@
 
 (defun print-help ()
   (format t
-          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--disable-agent] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT --token TOKEN --ca-pin SHA256 --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%"))
+          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--disable-agent] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%"))
 
 (defun main-with-environment (arguments environment cni-entry)
   (if (funcall environment "CNI_COMMAND")

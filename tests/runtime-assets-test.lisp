@@ -135,3 +135,17 @@
             :cni-executable image))
       (uiop:delete-directory-tree root :validate t
                                   :if-does-not-exist :ignore))))
+
+(test surviving-filesystem-mount-detection-handles-escaped-paths-and-optional-fields
+  (with-temporary-store (store path)
+    (assert store)
+    (let* ((directory (merge-pathnames "mount with spaces/" path)))
+      (ensure-directories-exist (merge-pathnames "marker" directory))
+      (let* ((encoded (format nil "~{~A~^\\040~}"
+                              (uiop:split-string
+                               (string-right-trim "/" (namestring (truename directory)))
+                               :separator '(#\Space))))
+             (mount-info (format nil "42 1 0:1 / ~A rw,nosuid shared:77 - bpf gr8s-bpf rw~%" encoded)))
+        (is-true (gr8s::filesystem-mounted-at-p directory "bpf" :mount-info mount-info))
+        (is-false (gr8s::filesystem-mounted-at-p directory "tmpfs" :mount-info mount-info))
+        (is-false (gr8s::filesystem-mounted-at-p path "bpf" :mount-info mount-info))))))

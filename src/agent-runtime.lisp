@@ -183,6 +183,17 @@
       ((node-runtime-manager node-runtime)
        (invalid-cni "managed agent snapshot has no assigned network")))))
 
+(defun reconcile-cached-node-network (node-runtime)
+  ;; Kernel link events can flush permanent VXLAN FDB entries even when the
+  ;; control-plane revision is unchanged. Repair from durable local topology.
+  (when (node-runtime-network-reconciler node-runtime)
+    (bt:with-lock-held ((node-runtime-apply-lock node-runtime))
+      (let* ((pending (read-node-network-file (node-runtime-network-pending-path node-runtime)))
+             (network (or pending (node-runtime-network node-runtime))))
+        (when network
+          (configure-node-runtime-network node-runtime network :persist (not (null pending)))))))
+  nil)
+
 (defun handle-node-runtime-cni (node-runtime request)
   (let ((operations
           (bt:with-lock-held ((node-runtime-network-lock node-runtime))
@@ -209,6 +220,7 @@
          (setf (node-runtime-worker node-runtime)
                (start-reconciliation-worker
                 (node-runtime-reconciler node-runtime)
+                :before-reconcile (lambda () (reconcile-cached-node-network node-runtime))
                 :observer (lambda (pod status) (cache-node-observation node-runtime pod status))))
          (bt:with-lock-held ((node-runtime-lock node-runtime))
            (setf (node-runtime-state node-runtime) :running)
@@ -326,9 +338,11 @@
             t))
     (dolist (pod (list-pods (node-runtime-store node-runtime) "default"))
       (unless (gethash (pod-uid pod) assigned-uids)
-        (runtime-delete (node-runtime-runtime node-runtime) (pod-uid pod))
-        (remove-pod (node-runtime-store node-runtime)
-                    (pod-namespace pod) (pod-name pod))))))
+        ;; Serialize with the background reconciler and persist deletion intent
+        ;; before CRI calls. A transient removal failure must never turn into
+        ;; runtime-ensure recreating an assignment the server has withdrawn.
+        (delete-reconciled-pod (node-runtime-reconciler node-runtime)
+                               (pod-namespace pod) (pod-name pod))))))
 
 (defun pod-observed-status-message (pod status)
   (make-instance
