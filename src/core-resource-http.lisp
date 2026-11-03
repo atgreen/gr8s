@@ -49,7 +49,18 @@
     (push (string-trim " " (subseq selector start)) terms)
     (nreverse terms)))
 
-(defun core-selector-predicate (selector &key fields)
+(defun core-selector-field-value (object path)
+  "Read a supported scalar field path using Kubernetes selector string values."
+  (let ((value object))
+    (dolist (key (uiop:split-string path :separator '(#\.)))
+      (unless (hash-table-p value) (return-from core-selector-field-value ""))
+      (multiple-value-bind (next present) (gethash key value)
+        (unless present (return-from core-selector-field-value ""))
+        (setf value next)))
+    (cond ((stringp value) value) ((eq value t) "true") ((null value) "false")
+          ((eq value 'null) "") ((numberp value) (write-to-string value)) (t ""))))
+
+(defun core-selector-predicate (selector &key fields (field-paths '("metadata.name" "metadata.namespace")))
   (let ((predicates nil))
     (unless (or (null selector) (string= "" selector))
       (dolist (term (core-selector-terms selector))
@@ -79,7 +90,7 @@
                                          (if (or not-equal (search "==" term)) 2 1)))))
                    (t nil))))
           (when (or (zerop (length key))
-                    (and fields (or (not (member key '("metadata.name" "metadata.namespace") :test #'string=))
+                    (and fields (or (not (member key field-paths :test #'string=))
                                     (not (member operation '(:equal :not-equal))))))
             (core-resource-error 400 "BadRequest" "Unsupported selector ~S" term))
           (push (let ((key key) (operation operation) (values values))
@@ -87,7 +98,7 @@
                     (let* ((metadata (gethash "metadata" object))
                            (labels (gethash "labels" metadata))
                            (value (if fields
-                                      (gethash (if (string= key "metadata.name") "name" "namespace") metadata)
+                                      (core-selector-field-value object key)
                                       (and labels (gethash key labels))))
                            (matches (and value (member value values :test #'string=))))
                       (case operation

@@ -32,6 +32,11 @@
 (defun converge-running-pod (reconciler pod)
   (let* ((runtime (reconciler-runtime reconciler))
          (observed (runtime-observe runtime (pod-uid pod))))
+    (when (and observed (runtime-pod-spec-fingerprint observed)
+               (equal (runtime-pod-spec-fingerprint observed) (pod-runtime-spec-fingerprint pod)))
+      ;; Metadata updates advance API resourceVersion but do not change the
+      ;; running workload. The durable runtime fingerprint proves adoption.
+      (setf (runtime-pod-resource-version observed) (pod-resource-version pod)))
     (when (or (null observed)
               (not (string= (runtime-pod-resource-version observed)
                             (pod-resource-version pod)))

@@ -863,6 +863,8 @@
                    (is (= 201 status))
                    (is (string= namespace (gethash "namespace" (gethash "metadata" (response-object body))))))))
              (dolist (case '(("/api/v1/pods" 3)
+                             ("/api/v1/pods?fieldSelector=status.phase%3DRunning" 3)
+                             ("/api/v1/pods?fieldSelector=status.phase%3DSucceeded" 0)
                              ("/api/v1/namespaces/sonobuoy/pods" 1)
                              ("/api/v1/pods?labelSelector=app%3Dsonobuoy" 1)
                              ("/api/v1/pods?fieldSelector=metadata.namespace%3Dkube-system" 1)

@@ -102,7 +102,7 @@
 
 (defun make-cri-pod-sandbox-config
     (name uid namespace attempt log-directory host-network
-     &key resource-version dns-servers dns-searches dns-options privileged)
+     &key resource-version spec-fingerprint dns-servers dns-searches dns-options privileged)
   (let ((metadata
           (make-instance 'gr8s.cri.v1::pod-sandbox-metadata
                          :name name
@@ -125,7 +125,8 @@
                     (cons +gr8s-uid-label+ uid))
               (when resource-version
                 (list (cons +gr8s-resource-version-label+
-                            resource-version))))
+                            resource-version)))
+              (when spec-fingerprint (list (cons +gr8s-spec-fingerprint-label+ spec-fingerprint))))
      :linux
      (make-instance
       'gr8s.cri.v1::linux-pod-sandbox-config
@@ -142,7 +143,7 @@
 
 (defun cri-run-pod-sandbox
     (socket-path &key name uid (namespace "default") (attempt 0)
-                   log-directory host-network resource-version
+                   log-directory host-network resource-version spec-fingerprint
                    dns-servers dns-searches dns-options privileged (timeout 120))
   "Create and start a CRI pod sandbox, returning its runtime ID."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
@@ -151,7 +152,7 @@
                 (config
                   (make-cri-pod-sandbox-config
                    name uid namespace attempt log-directory host-network
-                   :resource-version resource-version
+                   :resource-version resource-version :spec-fingerprint spec-fingerprint
                    :dns-servers dns-servers
                    :dns-searches dns-searches
                    :dns-options dns-options :privileged privileged)))

@@ -83,6 +83,7 @@
                           (cri-pod-sandbox-info-labels sandbox)
                           :test #'string=))
               "")
+          :spec-fingerprint (cdr (assoc +gr8s-spec-fingerprint-label+ (cri-pod-sandbox-info-labels sandbox) :test #'string=))
           :pod-ip (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime)
                                       (cri-pod-sandbox-info-id sandbox))
           :phase (containerd-phase
@@ -138,6 +139,7 @@
                (namestring log-directory)
                (containerd-runtime-host-network runtime)
                :resource-version (pod-resource-version pod)
+               :spec-fingerprint (pod-runtime-spec-fingerprint pod)
                :privileged (pod-requests-privileged-container-p pod)
                :dns-servers (containerd-runtime-dns-servers runtime)
                :dns-searches (when (containerd-runtime-dns-searches runtime)
@@ -157,6 +159,7 @@
                     :log-directory (namestring log-directory)
                     :host-network (containerd-runtime-host-network runtime)
                     :resource-version (pod-resource-version pod)
+                    :spec-fingerprint (pod-runtime-spec-fingerprint pod)
                     :privileged (pod-requests-privileged-container-p pod)
                     :dns-servers (containerd-runtime-dns-servers runtime)
                     :dns-searches (when (containerd-runtime-dns-searches runtime)

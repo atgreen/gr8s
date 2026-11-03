@@ -244,12 +244,14 @@
 (defun update-pod-observed-phase (store pod phase)
   "Record the agent-observed PHASE for POD."
   (with-store-lock (store)
-    (setf (gethash (pod-uid pod) (pod-store-pod-observed-phases store)) phase)))
+    (setf (gethash (pod-uid pod) (pod-store-pod-observed-phases store)) phase
+          (gethash (pod-uid pod) (pod-store-pod-observed-resource-versions store)) (pod-resource-version pod))))
 
 (defun update-pod-observed-status (store pod status)
   "Record POD's complete observed STATUS and its derived phase."
   (with-store-lock (store)
-    (setf (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)) status
+    (setf (gethash (pod-uid pod) (pod-store-pod-observed-resource-versions store)) (pod-resource-version pod)
+          (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)) status
           (gethash (pod-uid pod) (pod-store-pod-observed-phases store))
           (gethash "phase" status "Unknown"))))
 
@@ -268,3 +270,8 @@
         ((not (node-record-ready-p node)) "Unknown")
         (t (or (gethash (pod-uid pod) (pod-store-pod-observed-phases store))
                "Pending"))))))
+
+(defun pod-observed-resource-version (store pod)
+  "Return the resource version actually acknowledged in the agent observation."
+  (with-store-lock (store)
+    (gethash (pod-uid pod) (pod-store-pod-observed-resource-versions store) "")))

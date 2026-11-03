@@ -18,17 +18,30 @@
          (let ((source (gethash "secret" volume)))
            (values "secrets" (gethash "secretName" source) (eq t (gethash "optional" source)))))))
 
-(defun pod-referenced-resource-objects (store pod)
-  "Copy only POD's referenced volume resources from its own namespace."
-  (let ((result nil))
-    (loop for volume across (gethash "volumes" (gethash "spec" (pod-to-object pod)) #())
+(defun pod-resource-reference-declarations (pod)
+  "Collect namespace-local resource declarations from volumes and environment sources."
+  (let* ((spec (gethash "spec" (pod-to-object pod))) (references nil))
+    (loop for volume across (gethash "volumes" spec #())
           do (multiple-value-bind (resource name optional) (pod-volume-resource-reference volume)
-               (when resource
-                 (handler-case
-                     (push (get-core-resource store resource (pod-namespace pod) name) result)
-                   (kubernetes-error (condition)
-                     (unless (and optional (= 404 (kubernetes-error-status-code condition)))
-                       (error condition)))))))
+               (when resource (push (list resource name optional) references))))
+    (loop for container across (gethash "containers" spec)
+          do (loop for variable across (gethash "env" container #())
+                   for from = (gethash "valueFrom" variable)
+                   when from
+                     do (dolist (source '(("secretKeyRef" "secrets") ("configMapKeyRef" "configmaps")))
+                          (let ((ref (gethash (first source) from)))
+                            (when ref (push (list (second source) (gethash "name" ref)
+                                                 (eq t (gethash "optional" ref))) references))))))
+    references))
+
+(defun pod-referenced-resource-objects (store pod)
+  "Copy only POD's referenced volume and environment resources from its namespace."
+  (let ((result nil))
+    (dolist (reference (pod-resource-reference-declarations pod))
+      (destructuring-bind (resource name optional) reference
+        (handler-case (push (get-core-resource store resource (pod-namespace pod) name) result)
+          (kubernetes-error (condition)
+            (unless (and optional (= 404 (kubernetes-error-status-code condition))) (error condition))))))
     (remove-duplicates result :test #'equalp)))
 
 (defun install-assigned-resource-objects (store assignments)
@@ -46,10 +59,9 @@
                                  ((equal "Secret" (gethash "kind" object)) "secrets")
                                  (t (invalid-pod "assignment resources must be ConfigMaps or Secrets")))))
             (unless (and (equal namespace (pod-namespace pod))
-                         (loop for volume across (gethash "volumes" (gethash "spec" (pod-to-object pod)) #())
-                               thereis (multiple-value-bind (referenced-resource referenced-name)
-                                           (pod-volume-resource-reference volume)
-                                         (and (equal resource referenced-resource) (equal name referenced-name)))))
+                         (some (lambda (reference)
+                                 (and (equal resource (first reference)) (equal name (second reference))))
+                               (pod-resource-reference-declarations pod)))
               (invalid-pod "assignment contains an unreferenced or cross-namespace resource"))
             (setf (gethash (core-resource-key resource namespace name) resources)
                   (normalize-core-resource resource object namespace name))))))
@@ -148,23 +160,48 @@
                                                (not (null (gethash "secret" volume)))
                                                (eq t (gethash "readOnly" mount)))))))
 
+(defun containerd-key-environment-value (runtime pod resource reference)
+  "Resolve a required or optional environment key without exposing Secret data in errors."
+  (let* ((name (gethash "name" reference)) (key (gethash "key" reference))
+         (optional (eq t (gethash "optional" reference)))
+         (object (handler-case (get-core-resource (containerd-runtime-resource-store runtime) resource (pod-namespace pod) name)
+                   (kubernetes-error (condition)
+                     (unless (and optional (= 404 (kubernetes-error-status-code condition)))
+                       (error 'runtime-error :message (format nil "Missing environment source ~A/~A" resource name))))))
+         (data (and object (gethash "data" object))))
+    (multiple-value-bind (value present) (if data (gethash key data) (values nil nil))
+      (unless present
+        (if optional (return-from containerd-key-environment-value (values nil nil))
+            (error 'runtime-error :message (format nil "Environment source ~A/~A lacks key ~A" resource name key))))
+      (let ((text (if (equal resource "secrets")
+                      (handler-case (trivial-utf-8:utf-8-bytes-to-string (core-base64-bytes value "Secret environment"))
+                        (error () (error 'runtime-error :message "Secret environment value is not valid UTF-8"))) value)))
+        (when (find #\Null text) (error 'runtime-error :message "Environment values cannot contain NUL"))
+        (values text t)))))
+
 (defun containerd-pod-environment (runtime pod container sandbox-id)
-  "Resolve environment values in declaration order after sandbox allocation."
+  "Resolve environment declarations in order, including local object key references."
   (let* ((object (pod-runtime-container-object pod container)) (pod-ip nil))
     (loop for variable across (gethash "env" object #())
           for from = (gethash "valueFrom" variable)
-          collect
-          (cons (gethash "name" variable)
-                (if (null from)
-                    (gethash "value" variable "")
-                    (let ((field (gethash "fieldPath" (gethash "fieldRef" from))))
+          append
+          (multiple-value-bind (value include)
+              (cond
+                ((null from) (values (gethash "value" variable "") t))
+                ((gethash "secretKeyRef" from)
+                 (containerd-key-environment-value runtime pod "secrets" (gethash "secretKeyRef" from)))
+                ((gethash "configMapKeyRef" from)
+                 (containerd-key-environment-value runtime pod "configmaps" (gethash "configMapKeyRef" from)))
+                (t (let ((field (gethash "fieldPath" (gethash "fieldRef" from))))
+                     (values
                       (cond ((equal field "metadata.name") (pod-name pod))
                             ((equal field "metadata.namespace") (pod-namespace pod))
                             ((equal field "metadata.uid") (pod-uid pod))
                             ((equal field "spec.nodeName") (or (pod-node-name pod) ""))
                             ((equal field "status.podIP")
                              (or pod-ip (setf pod-ip (cri-pod-sandbox-ip
-                                                     (containerd-runtime-socket-path runtime) sandbox-id)))))))))))
+                                                     (containerd-runtime-socket-path runtime) sandbox-id))))) t))))
+            (when include (list (cons (gethash "name" variable) value)))))))
 
 (defun containerd-pod-security-context (pod container)
   "Map effective Pod/container Linux identities and privileges to the CRI API."

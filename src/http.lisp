@@ -310,25 +310,19 @@
     (json-response (pod-response-object pod status) 201)))
 
 (defun list-pods-response (store reconciler &optional (namespace "default"))
-  (json-response
-   (json-object
-    "apiVersion" "v1"
-    "kind" "PodList"
-    "metadata" (json-object "resourceVersion" "0")
-    "items" (map 'vector
-                 (lambda (pod)
-                   (pod-response-object
-                    pod
-                    (reconcile-pod reconciler
-                                   (pod-namespace pod)
-                                   (pod-name pod))))
-                 (remove-if-not
-                  (let ((labels (core-selector-predicate (hunchentoot:parameter "labelSelector")))
-                        (fields (core-selector-predicate (hunchentoot:parameter "fieldSelector") :fields t)))
-                    (lambda (pod)
-                      (and (funcall labels (pod-to-object pod))
-                           (funcall fields (pod-to-object pod)))))
-                  (list-pods store namespace))))))
+  (let ((labels (core-selector-predicate (hunchentoot:parameter "labelSelector")))
+        (fields (core-selector-predicate (hunchentoot:parameter "fieldSelector") :fields t
+                                         :field-paths '("metadata.name" "metadata.namespace" "spec.nodeName"
+                                                        "spec.serviceAccountName" "spec.restartPolicy"
+                                                        "status.phase" "status.podIP"))))
+    (json-response
+     (json-object "apiVersion" "v1" "kind" "PodList"
+                  "metadata" (json-object "resourceVersion" "0")
+                  "items" (coerce
+                           (loop for pod in (list-pods store namespace)
+                                 when (funcall labels (pod-to-object pod))
+                                   append (let ((object (pod-response-object pod (reconcile-pod reconciler (pod-namespace pod) (pod-name pod)))))
+                                            (when (funcall fields object) (list object)))) 'vector)))))
 
 (defun get-pod-response (store reconciler name &optional (namespace "default"))
   (let ((pod (get-pod store namespace name)))

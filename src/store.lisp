@@ -21,6 +21,7 @@
   (credential-lock (bt:make-lock "gr8s ServiceAccount credentials"))
   (pod-observed-phases (make-hash-table :test #'equal))
   (pod-observed-statuses (make-hash-table :test #'equal))
+  (pod-observed-resource-versions (make-hash-table :test #'equal))
   (lock (bt:make-lock "gr8s store")))
 
 (defmacro with-store-lock ((store) &body body)
@@ -239,6 +240,7 @@
       (remhash (pod-key namespace name) (pod-store-pods store))
       (remhash (pod-uid pod) (pod-store-pod-observed-phases store))
       (remhash (pod-uid pod) (pod-store-pod-observed-statuses store))
+      (remhash (pod-uid pod) (pod-store-pod-observed-resource-versions store))
       pod)))
 
 (defun delete-pod (store namespace name)
