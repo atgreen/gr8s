@@ -401,7 +401,10 @@ Pods can mount referenced ConfigMaps, Secrets and disk-backed emptyDir volumes.
 The control plane sends only referenced objects to the assigned node over mTLS;
 the agent projects files into private host directories and maps numeric user,
 group and fsGroup settings to containerd. Downward environment fields include
-Pod identity, node name and Pod IP. Projected data is applied during Pod setup;
+Pod identity, node name and Pod IP, plus namespace-local Secret and ConfigMap key
+references. Pod metadata revisions preserve running containers; canonical spec
+fingerprints in sandbox labels identify the actual workload across agent restarts.
+Projected data is applied during Pod setup;
 live refresh is not yet implemented. Managed native startup projects namespace-bound
 ServiceAccount token/CA files automatically unless the Pod or account opts out.
 Deleting and recreating an account or its credential Secret revokes the old token.

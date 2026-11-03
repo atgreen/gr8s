@@ -39,7 +39,7 @@
         (or (not (equal node-name (pod-node-name pod)))
             (and excluded-uid (string= excluded-uid (pod-uid pod)))))
       (list-pods store))
-     #'string< :key #'pod-name))))
+     #'string< :key (lambda (pod) (format nil "~A/~A" (pod-namespace pod) (pod-name pod)))))))
 
 (defun publish-node-snapshot (runtime node-name &key excluded-uid)
   (publish-node-desired-state
@@ -47,12 +47,13 @@
    node-name
    (node-desired-state-snapshot
     (control-plane-runtime-store runtime) node-name
-    :excluded-uid excluded-uid)))
+    :excluded-uid excluded-uid)
+   :deduplicate t))
 
 (defun control-plane-observation (runtime pod)
   (make-runtime-pod
    :uid (pod-uid pod)
-   :resource-version (pod-resource-version pod)
+   :resource-version (pod-observed-resource-version (control-plane-runtime-store runtime) pod)
    :phase (pod-scheduling-phase (control-plane-runtime-store runtime) pod)
    :status (pod-observed-status (control-plane-runtime-store runtime) pod)
    :pod-ip (let ((status (pod-observed-status (control-plane-runtime-store runtime) pod)))

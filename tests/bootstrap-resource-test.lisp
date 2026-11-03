@@ -77,4 +77,8 @@
         (is (= 1 (length (gethash "items" list))))
         (is (equal "node-identity" (gethash "uid" (gethash "metadata" object))))
         (is (equal "True" (gethash "status" (aref (gethash "conditions" (gethash "status" object)) 0)))))
+      (let ((list (check-core-status 200 "/api/v1/nodes" :parameters '(("fieldSelector" . "spec.unschedulable=false")))))
+        (is (= 1 (length (gethash "items" list)))))
+      (let ((list (check-core-status 200 "/api/v1/nodes" :parameters '(("fieldSelector" . "spec.unschedulable=true")))))
+        (is (= 0 (length (gethash "items" list)))))
       (check-core-status 404 "/api/v1/nodes/absent"))))

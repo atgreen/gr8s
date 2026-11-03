@@ -40,18 +40,28 @@
       (invalid-pod "runAsNonRoot cannot be combined with runAsUser 0"))))
 
 (defun validate-pod-field-reference (variable)
-  "Validate the supported downward API fieldRef environment projection."
+  "Validate downward fields and namespace-local Secret/ConfigMap key environment sources."
   (when (nth-value 1 (gethash "value" variable))
     (invalid-pod "env.value and env.valueFrom are mutually exclusive"))
   (let* ((from (require-object (gethash "valueFrom" variable) "env.valueFrom"))
-         (ref (gethash "fieldRef" from)))
-    (reject-unsupported-fields from '("fieldRef") "env.valueFrom")
-    (reject-unsupported-fields ref '("fieldPath" "apiVersion") "fieldRef")
-    (unless (and (equal "v1" (gethash "apiVersion" ref "v1"))
-                 (member (gethash "fieldPath" ref)
-                         '("metadata.name" "metadata.namespace" "metadata.uid" "spec.nodeName" "status.podIP")
-                         :test #'equal))
-      (invalid-pod "unsupported downward API field reference"))))
+         (sources (loop for key being the hash-keys of from collect key)))
+    (reject-unsupported-fields from '("fieldRef" "secretKeyRef" "configMapKeyRef") "env.valueFrom")
+    (unless (= 1 (length sources)) (invalid-pod "env.valueFrom requires exactly one source"))
+    (let* ((kind (first sources)) (ref (require-object (gethash kind from) "environment source")))
+      (if (equal kind "fieldRef")
+          (progn
+            (reject-unsupported-fields ref '("fieldPath" "apiVersion") "fieldRef")
+            (unless (and (equal "v1" (gethash "apiVersion" ref "v1"))
+                         (member (gethash "fieldPath" ref)
+                                 '("metadata.name" "metadata.namespace" "metadata.uid" "spec.nodeName" "status.podIP") :test #'equal))
+              (invalid-pod "unsupported downward API field reference")))
+          (progn
+            (reject-unsupported-fields ref '("name" "key" "optional") "environment key reference")
+            (require-dns-subdomain (gethash "name" ref) "environment source name")
+            (unless (core-data-key-p (gethash "key" ref)) (invalid-pod "invalid environment source key"))
+            (multiple-value-bind (optional present) (gethash "optional" ref)
+              (when (and present (not (member optional '(t nil))))
+                (invalid-pod "environment key reference optional must be boolean"))))))))
 
 (defun validate-runtime-container (container)
   "Validate mount declarations, image policy and container security settings."

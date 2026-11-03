@@ -104,3 +104,31 @@
       (setf (gethash "nodeSelector" spec) (gr8s::core-object "kubernetes.io/hostname" "worker-a")
             (gethash "name" (gethash "metadata" object)) "selected")
       (is (equal "worker-a" (gr8s:node-record-name (gr8s::schedule-pod store (create-pod store (parse-pod object)))))))))
+
+(test key-environment-references-project-only-needed-objects-and-omit-optional-values
+  (with-temporary-store (store directory)
+    (gr8s::create-core-resource store "secrets"
+      (gr8s::core-object "metadata" (gr8s::core-object "name" "env-secret")
+                         "data" (gr8s::core-object "key" "c2VjcmV0LXZhbHVl")) "sonobuoy")
+    (gr8s::create-core-resource store "configmaps"
+      (gr8s::core-object "metadata" (gr8s::core-object "name" "env-config")
+                         "data" (gr8s::core-object "key" "config-value")) "sonobuoy")
+    (let* ((object (com.inuoe.jzon:parse *valid-pod-json*))
+           (container (aref (gethash "containers" (gethash "spec" object)) 0))
+           (agent-store (open-store (merge-pathnames "agent/" directory)))
+           (runtime (gr8s::make-containerd-runtime)))
+      (setf (gethash "namespace" (gethash "metadata" object)) "sonobuoy"
+            (gethash "env" container)
+            (vector
+             (gr8s::core-object "name" "SECRET" "valueFrom" (gr8s::core-object "secretKeyRef" (gr8s::core-object "name" "env-secret" "key" "key")))
+             (gr8s::core-object "name" "CONFIG" "valueFrom" (gr8s::core-object "configMapKeyRef" (gr8s::core-object "name" "env-config" "key" "key")))
+             (gr8s::core-object "name" "OPTIONAL_KEY" "valueFrom" (gr8s::core-object "secretKeyRef" (gr8s::core-object "name" "env-secret" "key" "missing" "optional" t)))
+             (gr8s::core-object "name" "OPTIONAL_OBJECT" "valueFrom" (gr8s::core-object "secretKeyRef" (gr8s::core-object "name" "missing" "key" "missing" "optional" t)))))
+      (let* ((pod (create-pod store (parse-pod object))) (assignment (gr8s::pod-assignment pod store)))
+        (is (= 2 (length (slot-value assignment 'gr8s.node.v1::resource-objects-json))))
+        (gr8s::install-assigned-resource-objects agent-store (list assignment))
+        (setf (gr8s::containerd-runtime-resource-store runtime) agent-store)
+        (is (equal '(("SECRET" . "secret-value") ("CONFIG" . "config-value"))
+                   (gr8s::containerd-pod-environment runtime pod (aref (pod-containers pod) 0) nil)))
+        (signals gr8s::runtime-error
+          (gr8s::containerd-key-environment-value runtime pod "secrets" (gr8s::core-object "name" "env-secret" "key" "missing")))))))

@@ -556,7 +556,13 @@
       (ignore-errors (bt:join-thread thread))))
   server)
 
-(defun publish-node-desired-state (server node-name snapshot)
+(defun same-node-desired-content-p (left right)
+  "Compare workload assignments and topology independently of envelope revision."
+  (and left right (same-node-snapshot-topology-p left right)
+       (equalp (mapcar #'ag-proto:serialize-to-bytes (slot-value left 'gr8s.node.v1::pods))
+               (mapcar #'ag-proto:serialize-to-bytes (slot-value right 'gr8s.node.v1::pods)))))
+
+(defun publish-node-desired-state (server node-name snapshot &key deduplicate)
   (get-node (node-grpc-server-store server) node-name)
   (unless (typep snapshot 'gr8s.node.v1::desired-state-snapshot)
     (error "Desired state must be a DesiredStateSnapshot"))
@@ -564,6 +570,9 @@
   (let ((revision nil)
         (session nil))
     (bt:with-lock-held ((node-grpc-server-lock server))
+      (let ((existing (gethash node-name (node-grpc-server-snapshots server))))
+        (when (and deduplicate (same-node-desired-content-p existing snapshot))
+          (return-from publish-node-desired-state (slot-value existing 'gr8s.node.v1::revision))))
       (setf revision
             (1+ (gethash node-name (node-grpc-server-revisions server) 0)))
       (setf (slot-value snapshot 'gr8s.node.v1::revision) revision

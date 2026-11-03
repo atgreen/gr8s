@@ -141,7 +141,7 @@
                              "labels" (core-object "kubernetes.io/os" "linux"
                                                    "kubernetes.io/arch" (native-node-architecture)
                                                    "kubernetes.io/hostname" (node-record-name node)))
-     "spec" (core-object "podCIDR" (node-record-pod-cidr node)
+     "spec" (core-object "unschedulable" nil "podCIDR" (node-record-pod-cidr node)
                          "podCIDRs" (vector (node-record-pod-cidr node)))
      "status" (core-object
                "conditions" (vector (core-object "type" "Ready"
@@ -158,7 +158,8 @@
   (if name
       (json-response (node-api-object (get-node store name)))
       (let ((labels (core-selector-predicate (hunchentoot:parameter "labelSelector")))
-            (fields (core-selector-predicate (hunchentoot:parameter "fieldSelector") :fields t)))
+            (fields (core-selector-predicate (hunchentoot:parameter "fieldSelector") :fields t
+                                         :field-paths '("metadata.name" "spec.unschedulable"))))
         (json-response
          (core-object "apiVersion" "v1" "kind" "NodeList"
                       "metadata" (core-object "resourceVersion" "0")
