@@ -111,3 +111,25 @@
       (is (not (null connect)))
       (is-true (ag-grpc::handler-client-streaming-p connect))
       (is-true (ag-grpc::handler-server-streaming-p connect)))))
+
+(test node-underlay-and-peer-route-fields-survive-protobuf-roundtrips
+  (let* ((hello (make-instance 'gr8s.node.v1::node-hello
+                                :node-name "worker-a" :underlay-address "192.0.2.10"))
+         (restored (roundtrip-node-message hello 'gr8s.node.v1::node-hello)))
+    (is (string= "192.0.2.10" (slot-value restored 'gr8s.node.v1::underlay-address))))
+  (let* ((snapshot
+           (make-instance
+            'gr8s.node.v1::desired-state-snapshot
+            :network (make-instance 'gr8s.node.v1::node-network-config
+                                     :node-pod-cidr "10.88.1.0/24"
+                                     :underlay-address "192.0.2.10")
+            :routes (list (make-instance 'gr8s.node.v1::node-route
+                                         :node-id "node-b" :pod-cidr "10.88.2.0/24"
+                                         :underlay-address "192.0.2.11"))))
+         (restored (roundtrip-node-message snapshot 'gr8s.node.v1::desired-state-snapshot)))
+    (is (string= "192.0.2.10"
+                 (slot-value (slot-value restored 'gr8s.node.v1::network)
+                             'gr8s.node.v1::underlay-address)))
+    (is (string= "10.88.2.0/24"
+                 (slot-value (first (slot-value restored 'gr8s.node.v1::routes))
+                             'gr8s.node.v1::pod-cidr)))))

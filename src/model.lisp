@@ -37,6 +37,7 @@
   id
   name
   pod-cidr
+  (underlay-address "")
   (ready-p nil)
   last-heartbeat)
 

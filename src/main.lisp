@@ -44,6 +44,8 @@
                        :listen "127.0.0.1"
                        :port 8080
                        :node-port 7443
+                       :node-listen "127.0.0.1"
+                       :node-address nil
                        :node-name "gr8s-local"
                        :disable-agent nil
                        :runtime "containerd"
@@ -67,6 +69,12 @@
                       (setf (getf options :listen) value))
                      ((string= option "--port")
                       (setf (getf options :port) (parse-port value)))
+                     ((string= option "--node-listen")
+                      (setf (getf options :node-listen)
+                            (format-ipv4-integer (parse-ipv4-integer value))))
+                     ((string= option "--node-address")
+                      (setf (getf options :node-address)
+                            (canonical-node-underlay-address value)))
                      ((string= option "--node-port")
                       (setf (getf options :node-port) (parse-port value)))
                      ((string= option "--node-name")
@@ -114,6 +122,8 @@
           for option = (first arguments)
           for value = (option-value arguments option)
           do (cond
+               ((string= option "--node-address")
+                (setf (getf options :node-address) (canonical-node-underlay-address value)))
                ((string= option "--server")
                 (setf (getf options :server) value))
                ((string= option "--token")
@@ -149,6 +159,40 @@
         (error "agent requires --~(~A~)" required)))
     options))
 
+(defun parse-join-token-options (arguments)
+  (let ((options (list :command :join-token
+                       :state-directory (namestring (default-state-directory)))))
+    (loop while arguments
+          for option = (first arguments)
+          for value = (option-value arguments option)
+          do (cond
+               ((string= option "--node-name")
+                (setf (getf options :node-name) (ensure-valid-node-name value)))
+               ((string= option "--state-directory")
+                (setf (getf options :state-directory) value))
+               (t (error "unknown join-token option: ~A" option)))
+             (setf arguments (cddr arguments)))
+    (unless (getf options :node-name) (error "join-token requires --node-name"))
+    options))
+
+(defun print-node-join-token (options &optional (output *standard-output*))
+  (let* ((state (uiop:ensure-directory-pathname (getf options :state-directory)))
+         (root (merge-pathnames "pki/" state)))
+    ;; The token command must use an existing control plane's CA, never create
+    ;; a new trust identity merely because the caller selected the wrong path.
+    (unless (and (probe-file (merge-pathnames "pki/cluster-ca.crt" root))
+                 (probe-file (merge-pathnames "pki/cluster-ca.key" root)))
+      (error "cluster PKI does not exist in the selected control-plane state directory"))
+    (let* ((pki (ensure-cluster-pki root))
+           (name (getf options :node-name))
+           (token (create-join-token pki name)))
+      (com.inuoe.jzon:stringify
+       (json-object "nodeName" name "token" token
+                    "caPin" (cluster-pki-ca-fingerprint pki)) :stream output)
+      (terpri output)
+      (finish-output output)))
+  0)
+
 (defun parse-kubeconfig-options (arguments)
   (let ((options (list :command :kubeconfig
                        :output nil
@@ -176,6 +220,8 @@
      (parse-serve-options (rest arguments)))
     ((string= "agent" (first arguments))
      (parse-agent-options (rest arguments)))
+    ((string= "join-token" (first arguments))
+     (parse-join-token-options (rest arguments)))
     ((string= "kubeconfig" (first arguments))
      (parse-kubeconfig-options (rest arguments)))
     ((string= "runtime-assets" (first arguments))
@@ -283,6 +329,7 @@
                 :operation-handler
                 (lambda (variant payload emit)
                   (dispatch-node-operation node-runtime variant payload emit))
+                :underlay-address (getf options :node-address)
                 :reconnect-delay 0.1 :control control
                 :stop-predicate stop-predicate))
           (stop-node-runtime node-runtime)))))
@@ -304,7 +351,10 @@
                       (list :runtime "fake"))))
     (setf (getf options :command) :agent
           (getf options :server)
-          (format nil "127.0.0.1:~D" (node-grpc-server-port server))
+          (format nil "~A:~D"
+                  (let ((host (getf options :node-listen "127.0.0.1")))
+                    (if (string= host "0.0.0.0") "127.0.0.1" host))
+                  (node-grpc-server-port server))
           (getf options :token) token
           (getf options :ca-pin) (cluster-pki-ca-fingerprint pki)
           (getf options :node-name) node-name
@@ -411,7 +461,8 @@
          (progn
            (setf node-server
                  (start-node-grpc-server
-                  store :host "127.0.0.1" :port (getf options :node-port)
+                  store :host (getf options :node-listen "127.0.0.1")
+                  :port (getf options :node-port)
                   :pki pki :cluster-pod-cidr "10.88.0.0/16" :node-prefix 24))
            (let* ((runtime (make-control-plane-runtime store node-server))
                   (reconciler (make-reconciler store runtime)))
@@ -444,7 +495,7 @@
 
 (defun print-help ()
   (format t
-          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-name NAME] [--disable-agent] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT --token TOKEN --ca-pin SHA256 --node-name NAME --state-directory DIR [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%"))
+          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--disable-agent] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT --token TOKEN --ca-pin SHA256 --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%"))
 
 (defun main-with-environment (arguments environment cni-entry)
   (if (funcall environment "CNI_COMMAND")
@@ -456,6 +507,7 @@
               (:kubeconfig
                (write-kubeconfig (getf options :output) (getf options :server))
                0)
+              (:join-token (print-node-join-token options))
               (:runtime-assets
                (print-runtime-assets)
                0)

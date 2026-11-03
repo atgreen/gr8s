@@ -96,7 +96,7 @@
   (make-array 0 :element-type '(unsigned-byte 8)))
 
 (defun handle-agent-cni-request
-    (request &key (operations (make-cni-operations)))
+    (request &key (operations (make-cni-operations)) (chained t))
   (handler-case
       (progn
         (ensure-node-protocol-version
@@ -116,7 +116,7 @@
                   (slot-value request 'gr8s.node.v1::interface-name)))
                (result
                  (dispatch-cni-command
-                  command configuration-text context operations)))
+                  command configuration-text context operations :chained chained)))
           (make-instance
            'gr8s.node.v1::cni-response
            :protocol-version +node-protocol-version+

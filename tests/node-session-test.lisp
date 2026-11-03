@@ -287,13 +287,16 @@
                :timeout 5))
 
              (gr8s::delete-reconciled-pod reconciler "default" "hello")
-             (is-true
-              (wait-until
-               (lambda ()
-                 (>= (gr8s:node-session-acknowledged-revision
-                      server "gr8s-local")
-                     2))
-               :timeout 5))
+             (let ((deletion-revision
+                     (slot-value (gr8s::current-node-snapshot server "gr8s-local")
+                                 'gr8s.node.v1::revision)))
+               (is-true
+                (wait-until
+                 (lambda ()
+                   (>= (gr8s:node-session-acknowledged-revision
+                        server "gr8s-local")
+                       deletion-revision))
+                 :timeout 5)))
              (is (null
                   (list-pods
                    (gr8s:open-store
@@ -614,3 +617,125 @@
       (gr8s::release-node-operation server operation)
       (is (null
            (gr8s::find-node-operation server "stream-before-complete"))))))
+
+(test restarted-control-plane-rebuilds-snapshot-above-agent-revision
+  (with-temporary-store (store path)
+    (gr8s:register-node
+     store (gr8s:make-node-record :id "node-recovery" :name "worker-a"
+                                  :pod-cidr "10.88.7.0/24"))
+    (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
+           (server (gr8s::%make-node-grpc-server
+                    :store store :port 0
+                    :heartbeat-timeout-seconds 5
+                    :cluster-pod-cidr "10.88.0.0/16" :node-prefix 24)))
+      (gr8s:mark-node-ready store "worker-a" (get-universal-time))
+      (gr8s:schedule-pod store pod)
+      (let* ((snapshot (gr8s::prepare-node-connect-snapshot server "worker-a" 42))
+             (network (slot-value snapshot 'gr8s.node.v1::network)))
+        (is (= 43 (slot-value snapshot 'gr8s.node.v1::revision)))
+        (is (= 1 (length (slot-value snapshot 'gr8s.node.v1::pods))))
+        (is (string= "10.88.7.0/24"
+                     (slot-value network 'gr8s.node.v1::node-pod-cidr)))
+        (is (string= "169.254.1.1"
+                     (slot-value network 'gr8s.node.v1::dns-address)))
+        (is (eq snapshot (gr8s::prepare-node-connect-snapshot server "worker-a" 43)))))))
+
+(test cancelling-agent-during-server-hello-wait-unwinds-the-session
+  (with-temporary-store (store path)
+    (let* ((server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0))
+           (control (gr8s::make-node-session-control))
+           (received-hello nil)
+           (agent nil))
+      (unwind-protect
+           (progn
+             ;; A live peer accepts the RPC and reads requests but never sends
+             ;; ServerHello. Cancellation must cover this handshake phase.
+             (gr8s.node.v1::register-node-service-service
+              (gr8s::node-grpc-server-grpc-server server)
+              :connect-handler
+              (lambda (context stream)
+                (declare (ignore context))
+                (setf received-hello (not (null (ag-grpc:stream-recv stream))))
+                (loop while (ag-grpc:stream-recv stream))))
+             (setf agent
+                   (bt:make-thread
+                    (lambda ()
+                      (gr8s:run-node-session
+                       "127.0.0.1" (gr8s:node-grpc-server-port server)
+                       "stalled-worker" (merge-pathnames "stalled/identity.json" path)
+                       (lambda (snapshot) (declare (ignore snapshot)))
+                       :control control :reconnect-delay 0.01))))
+             (is-true (wait-until (lambda () received-hello) :timeout 3))
+             (gr8s::cancel-node-session control)
+             (is-true (wait-until (lambda () (not (bt:thread-alive-p agent)))
+                                 :timeout 3)))
+        (gr8s::cancel-node-session control)
+        (when agent
+          (when (bt:thread-alive-p agent) (bt:destroy-thread agent))
+          (ignore-errors (bt:join-thread agent)))
+        (gr8s:stop-node-grpc-server server)))))
+
+(test node-underlay-identity-is-durable-and-cannot-overlap-another-node
+  (with-temporary-store (store path)
+    (dolist (entry '(("node-a" "worker-a" "10.88.1.0/24")
+                     ("node-b" "worker-b" "10.88.2.0/24")))
+      (gr8s:register-node store (gr8s:make-node-record
+                                :id (first entry) :name (second entry)
+                                :pod-cidr (third entry))))
+    (is-true (gr8s::update-node-underlay-address store "worker-a" "192.0.2.10"))
+    (is-false (gr8s::update-node-underlay-address store "worker-a" "192.0.2.10"))
+    (signals gr8s:kubernetes-error
+      (gr8s::update-node-underlay-address store "worker-b" "192.0.2.10"))
+    (is (string= "192.0.2.10"
+                 (gr8s::node-record-underlay-address
+                  (gr8s:get-node (gr8s:open-store path) "worker-a"))))))
+
+(test live-node-sessions-publish-peer-address-changes-and-withdrawals
+  (with-temporary-store (store path)
+    (dolist (entry '(("node-a" "worker-a" "10.88.1.0/24")
+                     ("node-b" "worker-b" "10.88.2.0/24")))
+      (gr8s:register-node store (gr8s:make-node-record
+                                :id (first entry) :name (second entry)
+                                :pod-cidr (third entry))))
+    (let* ((server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0))
+           (control (gr8s::make-node-session-control))
+           (agent nil) (snapshots nil)
+           (lock (bt:make-lock "peer snapshot observations")))
+      (labels ((latest-peer-address ()
+                 (bt:with-lock-held (lock)
+                   (let* ((snapshot (first snapshots))
+                          (peer (and snapshot (first (slot-value snapshot 'gr8s.node.v1::routes)))))
+                     (and peer (slot-value peer 'gr8s.node.v1::underlay-address)))))
+               (connect-peer (address)
+                 (gr8s:run-node-session
+                  "127.0.0.1" (gr8s:node-grpc-server-port server) "worker-b"
+                  (merge-pathnames "peer-b/identity.json" path)
+                  (lambda (snapshot)
+                    (is (string= address (slot-value (slot-value snapshot 'gr8s.node.v1::network)
+                                                     'gr8s.node.v1::underlay-address))))
+                  :underlay-address address :max-sessions 1)))
+        (unwind-protect
+             (progn
+               (setf agent
+                     (bt:make-thread
+                      (lambda ()
+                        (gr8s:run-node-session
+                         "127.0.0.1" (gr8s:node-grpc-server-port server) "worker-a"
+                         (merge-pathnames "peer-a/identity.json" path)
+                         (lambda (snapshot)
+                           (bt:with-lock-held (lock) (push snapshot snapshots)) nil)
+                         :underlay-address "192.0.2.10" :control control
+                         :reconnect-delay 0.01))))
+               (is-true (wait-until (lambda () (bt:with-lock-held (lock) snapshots)) :timeout 5))
+               (connect-peer "192.0.2.11")
+               (is-true (wait-until (lambda () (equal "192.0.2.11" (latest-peer-address))) :timeout 5))
+               (connect-peer "192.0.2.12")
+               (is-true (wait-until (lambda () (equal "192.0.2.12" (latest-peer-address))) :timeout 5))
+               (connect-peer "")
+               (is-true (wait-until (lambda () (null (latest-peer-address))) :timeout 5)))
+          (gr8s::cancel-node-session control)
+          (when agent
+            (unless (wait-until (lambda () (not (bt:thread-alive-p agent))) :timeout 3)
+              (bt:destroy-thread agent))
+            (ignore-errors (bt:join-thread agent)))
+          (gr8s:stop-node-grpc-server server))))))

@@ -29,7 +29,8 @@
   (let ((object (make-hash-table :test #'equal)))
     (setf (gethash "id" object) (node-record-id node)
           (gethash "name" object) (node-record-name node)
-          (gethash "podCIDR" object) (node-record-pod-cidr node))
+          (gethash "podCIDR" object) (node-record-pod-cidr node)
+          (gethash "underlayAddress" object) (node-record-underlay-address node))
     object))
 
 (defun parse-node-record (input)
@@ -38,7 +39,8 @@
                     (com.inuoe.jzon:parse input))))
     (make-node-record :id (gethash "id" object)
                       :name (gethash "name" object)
-                      :pod-cidr (gethash "podCIDR" object))))
+                      :pod-cidr (gethash "podCIDR" object)
+                      :underlay-address (gethash "underlayAddress" object ""))))
 
 (defun secure-random-octets (count)
   (let ((octets (make-array count :element-type '(unsigned-byte 8))))

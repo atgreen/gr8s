@@ -9,8 +9,10 @@ server_pid=
 
 policy_pin_count() {
   count=0
-  for pin in "$work_directory/state/containerd/bpf/"*/rejected_spoofs \
-             "$work_directory/state/containerd/bpf/"*/tcx-egress; do
+  for pin in "$work_directory/state/agent/containerd/bpf/"*/rejected_spoofs \
+             "$work_directory/state/agent/containerd/bpf/"*/endpoint_identity \
+             "$work_directory/state/agent/containerd/bpf/"*/traffic_stats \
+             "$work_directory/state/agent/containerd/bpf/"*/tcx-egress; do
     [ -e "$pin" ] || continue
     count=$((count + 1))
   done
@@ -34,9 +36,9 @@ cleanup() {
       echo "--- gr8s server log ---" >&2
       cat "$work_directory/server.log" >&2
     fi
-    if [ -f "$work_directory/state/containerd/containerd.log" ]; then
+    if [ -f "$work_directory/state/agent/containerd/containerd.log" ]; then
       echo "--- containerd log ---" >&2
-      tail -200 "$work_directory/state/containerd/containerd.log" >&2
+      tail -200 "$work_directory/state/agent/containerd/containerd.log" >&2
     fi
     echo "gr8s smoke diagnostics preserved at $work_directory" >&2
   else
@@ -69,7 +71,7 @@ spec:
     - name: main
       image: docker.io/library/busybox:1.37.0
       command: ["sh", "-c"]
-      args: ["echo gr8s-smoke; sleep 30"]
+      args: ["echo gr8s-smoke; sleep 300"]
 YAML
 
 "$project_root/build/gr8s" serve \
@@ -117,7 +119,7 @@ while :; do
   fi
   [ "$phase" = Running ] && break
   attempt=$((attempt + 1))
-  if [ "$phase" = Failed ] || [ "$attempt" -ge 10 ]; then
+  if [ "$phase" = Failed ] || [ "$attempt" -ge 600 ]; then
     echo "Pod did not reach Running; phase=${phase:-unknown}" >&2
     kubectl --kubeconfig "$work_directory/kubeconfig" \
       get pod gr8s-smoke -o yaml >&2
@@ -133,14 +135,14 @@ kubectl --kubeconfig "$work_directory/kubeconfig" logs gr8s-smoke -c main | grep
 kubectl --kubeconfig "$work_directory/kubeconfig" \
   exec gr8s-smoke -c main -- sh -c 'printf "gr8s-exec\n"' | grep -qx gr8s-exec
 kubectl --kubeconfig "$work_directory/kubeconfig" \
-  exec gr8s-smoke -c main -- grep -q '^nameserver 10\.88\.0\.1$' /etc/resolv.conf
+  exec gr8s-smoke -c main -- grep -q '^nameserver 169\.254\.1\.1$' /etc/resolv.conf
 kubectl --kubeconfig "$work_directory/kubeconfig" \
   exec gr8s-smoke -c main -- nslookup kubernetes.default.svc.cluster.local \
   | grep -q '10\.96\.0\.1'
 kubectl --kubeconfig "$work_directory/kubeconfig" \
   exec gr8s-smoke -c main -- nslookup example.com >/dev/null
-if [ "$(policy_pin_count)" -ne 2 ]; then
-  echo "expected a pinned Whistler map and TCX link for the running Pod" >&2
+if [ "$(policy_pin_count)" -ne 4 ]; then
+  echo "expected three pinned Whistler maps and a TCX link for the running Pod" >&2
   exit 1
 fi
 kubectl --kubeconfig "$work_directory/kubeconfig" delete pod gr8s-smoke
