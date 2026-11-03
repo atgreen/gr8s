@@ -99,6 +99,7 @@
                              (:file "http-test")
                              (:file "core-resource-http-test")
                              (:file "podtemplates-test")
+                             (:file "durable-resource-watches-test")
                              (:file "bootstrap-resource-test")
                              (:file "pod-volumes-test")
                              (:file "service-account-test")

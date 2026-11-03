@@ -28,7 +28,7 @@
                               :key (lambda (object) (gethash "name" object)))))
           (is (hash-table-p resource))
           (is (eq t (gethash "namespaced" resource)))
-          (is (equal '("create" "delete" "get" "list" "patch" "update")
+          (is (equal '("create" "delete" "get" "list" "patch" "update" "watch")
                      (coerce (gethash "verbs" resource) 'list))))))
     (let* ((openapi (check-core-status 200 "/openapi/v3/api/v1"))
            (schemas (gethash "schemas" (gethash "components" openapi))))
@@ -99,10 +99,11 @@
              (item (aref (gethash "items" next) 0)))
         (is (string= "beta" (gethash "name" (gethash "metadata" item)))))
       (gr8s::create-core-resource store "configmaps" (core-fixture "ConfigMap" "delta") "default")
-      (check-core-status 410 collection :parameters parameters)
+      (let ((page (check-core-status 200 collection :parameters parameters)))
+        (is (equal "beta" (gethash "name" (gethash "metadata" (aref (gethash "items" page) 0))))))
       (let ((filtered (check-core-status 200 collection :parameters '(("fieldSelector" . "metadata.name=gamma")))))
         (is (= 1 (length (gethash "items" filtered)))))
-      (check-core-status 400 collection :parameters '(("watch" . "true")))
+      (check-core-status 400 collection :parameters '(("watch" . "true") ("resourceVersion" . "invalid")))
       (check-core-status 400 collection :parameters '(("fieldSelector" . "data.key=x"))))))
 
 (test core-resource-json-patch-tests-values-case-sensitively-and-atomically

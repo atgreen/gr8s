@@ -58,12 +58,16 @@
   (let ((path (core-resource-state-path store)))
     (when (probe-file path)
       (let ((state (com.inuoe.jzon:parse path :max-string-length (* 2 1024 1024))))
-        (unless (and (eql 1 (gethash "version" state))
+        (unless (and (member (gethash "version" state) '(1 2))
                      (typep (gethash "revision" state) '(integer 0 *)))
           (error "Invalid core resource state at ~A" path))
+        (when (and (eql 2 (gethash "version" state))
+                   (not (typep (gethash "resourceHistoryStart" state) `(integer 0 ,(gethash "revision" state)))))
+          (error "Invalid resource history start at ~A" path))
         (setf (pod-store-resource-revision store) (gethash "revision" state)
               (pod-store-template-history store) (coerce (gethash "templateHistory" state #()) 'list)
               (pod-store-template-history-floor store) (gethash "templateHistoryFloor" state (gethash "revision" state))
+              (pod-store-resource-history-start store) (gethash "resourceHistoryStart" state (gethash "revision" state))
               (pod-store-template-token-key store) (when (gethash "templateTokenKey" state)
                                                      (ag-grpc:base64-decode (gethash "templateTokenKey" state))))
         (loop for object across (gethash "items" state)
@@ -86,9 +90,10 @@
     (write-private-text-atomically
    (core-resource-state-path store)
    (com.inuoe.jzon:stringify
-    (core-object "version" 1 "revision" revision
+    (core-object "version" 2 "revision" revision
                  "templateHistory" (coerce history 'vector) "templateHistoryFloor" floor
                  "templateTokenKey" (ag-grpc:base64-encode token-key)
+                 "resourceHistoryStart" (pod-store-resource-history-start store)
                  "items" (coerce (loop for object being the hash-values of resources
                                        collect object) 'vector))))
   (setf (pod-store-resources store) resources

@@ -19,6 +19,7 @@
   (resource-revision 0)
   template-history
   (template-history-floor 0)
+  (resource-history-start 0)
   template-token-key
   in-cluster-config
   (credential-lock (bt:make-lock "gr8s ServiceAccount credentials"))
