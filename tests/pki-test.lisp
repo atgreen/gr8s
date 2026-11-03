@@ -106,3 +106,17 @@
                       (lambda ()
                         (gr8s:enroll-node-csr
                          pki "worker-a" token fingerprint worker-a-csr)))))))))
+
+(test control-plane-tls-identity-is-persistent-and-bound-to-the-cluster-ca
+  (with-temporary-store (store path)
+    (values store)
+    (let ((pki (gr8s:ensure-cluster-pki path)))
+      (multiple-value-bind (certificate key) (gr8s::ensure-node-server-credentials pki)
+        (let ((original (uiop:read-file-string certificate)))
+          (is (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat key)))))
+          (is (= 2 (length (pure-tls:load-certificate-chain certificate))))
+          (is (gr8s::verify-node-server-certificate
+               (first (pure-tls:load-certificate-chain certificate))
+               (gr8s::cluster-pki-ca-certificate pki)))
+          (gr8s::ensure-node-server-credentials (gr8s:ensure-cluster-pki path))
+          (is (string= original (uiop:read-file-string certificate))))))))

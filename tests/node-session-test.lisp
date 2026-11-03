@@ -225,6 +225,8 @@
              (gr8s:run-node-session
               "127.0.0.1" (gr8s:node-grpc-server-port server)
               "worker-b" identity (lambda (snapshot) (declare (ignore snapshot)))
+              :ca-certificate-path ca-certificate
+              :certificate-path certificate :private-key-path private-key
               :max-sessions 1 :reconnect-delay 0.01)
              (is (gr8s:node-record-ready-p (gr8s:get-node store "worker-b"))))
         (gr8s:stop-node-grpc-server server)))))
@@ -772,3 +774,44 @@
        (lambda (snapshot) (declare (ignore snapshot))
          (fail "mismatched snapshot reached the runtime"))))
     (is (= 0 (gethash "lastAppliedRevision" identity)))))
+
+(test tls-enrollment-verifies-the-server-before-consuming-its-token
+  (with-temporary-store (store path)
+    (let* ((pki (gr8s:ensure-cluster-pki path))
+           (token (gr8s:create-join-token pki "tls-worker"))
+           (server (gr8s:start-node-grpc-server store :pki pki :port 0))
+           (key (merge-pathnames "worker/node.key" path))
+           (cert (merge-pathnames "worker/node.crt" path))
+           (ca (merge-pathnames "worker/ca.crt" path)))
+      (unwind-protect
+           (progn
+             (signals error
+               (gr8s:enroll-node-over-grpc
+                "127.0.0.1" (gr8s:node-grpc-server-port server) "tls-worker" token
+                (make-string 64 :initial-element #\0) key cert ca))
+             (signals gr8s:kubernetes-error (gr8s:get-node store "tls-worker"))
+             ;; The same token still works: it never crossed the rejected TLS connection.
+             (gr8s:enroll-node-over-grpc
+              "127.0.0.1" (gr8s:node-grpc-server-port server) "tls-worker" token
+              (gr8s:cluster-pki-ca-fingerprint pki) key cert ca)
+             (is (probe-file cert))
+             (let ((port (gr8s:node-grpc-server-port server)))
+               (signals error
+                 (gr8s:run-node-session
+                  "127.0.0.1" port "tls-worker" (merge-pathnames "no-cert.json" path)
+                  (lambda (snapshot) (declare (ignore snapshot)) (fail "Unauthenticated snapshot"))
+                  :ca-certificate-path ca :max-sessions 1))
+               (is-false (gr8s:node-record-ready-p (gr8s:get-node store "tls-worker")))
+               (signals error
+                 (gr8s:run-node-session
+                  "127.0.0.1" port "other-worker" (merge-pathnames "wrong-name.json" path)
+                  (lambda (snapshot) (declare (ignore snapshot)) (fail "Mismatched certificate snapshot"))
+                  :ca-certificate-path ca :certificate-path cert :private-key-path key :max-sessions 1))
+               (is-false (gr8s:node-record-ready-p (gr8s:get-node store "tls-worker")))
+               (gr8s:publish-node-desired-state server "tls-worker" (empty-desired-snapshot))
+               (gr8s:run-node-session
+                "127.0.0.1" port "tls-worker" (merge-pathnames "good-identity.json" path)
+                (lambda (snapshot) (declare (ignore snapshot)))
+                :ca-certificate-path ca :certificate-path cert :private-key-path key :max-sessions 1)
+               (is (gr8s:node-record-ready-p (gr8s:get-node store "tls-worker")))))
+        (gr8s:stop-node-grpc-server server)))))

@@ -392,12 +392,12 @@
       :sequence 1))))
 
 (defun handle-node-connect-internal (server context stream)
-  (declare (ignore context))
   (let ((first (ag-grpc:stream-recv stream)))
     (unless first (error "Node session ended before its hello"))
     (ensure-node-protocol-version (slot-value first 'gr8s.node.v1::protocol-version))
     (let* ((hello (node-envelope-payload first :hello))
            (node-name (slot-value hello 'gr8s.node.v1::node-name))
+           (authenticated (authenticate-node-peer (node-grpc-server-pki server) context node-name))
            (node (get-node (node-grpc-server-store server) node-name))
            (topology-changed
              (update-node-underlay-address
@@ -409,6 +409,7 @@
            (session (make-node-agent-session stream))
            (heartbeat-interval
              (max 1 (floor (node-grpc-server-heartbeat-timeout-seconds server) 2))))
+      (declare (ignore authenticated))
       (unwind-protect
            (progn
              ;; Register and drain queued work atomically; hold the send lock
@@ -498,7 +499,8 @@
                                             (node-prefix 24))
   (unless (plusp heartbeat-timeout-seconds)
     (error "Heartbeat timeout must be positive"))
-  (let* ((grpc-server (ag-grpc:make-grpc-server port :host host))
+  (let* ((grpc-server (apply #'ag-grpc:make-grpc-server port :host host
+                             (node-server-tls-options pki)))
          (server (%make-node-grpc-server
                   :store store
                   :grpc-server grpc-server
@@ -594,7 +596,7 @@
 (defun enroll-node-over-grpc (host port node-name token ca-fingerprint
                               private-key-path certificate-path ca-certificate-path)
   (let* ((csr (generate-node-key-and-csr node-name private-key-path))
-         (channel (ag-grpc:make-channel host port :timeout 10)))
+         (channel (make-node-tls-channel host port :timeout 10 :ca-pin ca-fingerprint)))
     (unwind-protect
          (let* ((stub (gr8s.node.v1::make-enrollment-service-stub channel))
                 (request
@@ -820,11 +822,17 @@
 
 (defun run-one-node-session
     (host port node-name identity-path apply-snapshot operation-handler
-     one-shot-p control stop-predicate underlay-address status-provider)
+     one-shot-p control stop-predicate underlay-address status-provider
+     ca-certificate-path certificate-path private-key-path)
   (let* ((identity (load-agent-identity identity-path node-name))
          (session-thread (bt:current-thread))
          (session-timeout (and one-shot-p 5))
-         (channel (ag-grpc:make-channel host port :timeout session-timeout))
+         (channel (if ca-certificate-path
+                      (make-node-tls-channel host port :timeout session-timeout
+                                             :ca-certificate-path ca-certificate-path
+                                             :certificate-path certificate-path
+                                             :private-key-path private-key-path)
+                      (ag-grpc:make-channel host port :timeout session-timeout)))
          (monitor-thread nil)
          (heartbeat-interval 1)
          (operation-session-p nil)
@@ -909,6 +917,7 @@
 (defun run-node-session (host port node-name identity-path apply-snapshot
                          &key max-sessions (reconnect-delay 1)
                            operation-handler underlay-address status-provider
+                           ca-certificate-path certificate-path private-key-path
                            control
                            (stop-predicate (constantly nil)))
   (let ((completed 0)
@@ -919,7 +928,8 @@
           (progn
             (run-one-node-session host port node-name identity-path
                                   apply-snapshot operation-handler
-                                  (not (null max-sessions)) control stop-predicate underlay-address status-provider)
+                                  (not (null max-sessions)) control stop-predicate underlay-address status-provider
+                                  ca-certificate-path certificate-path private-key-path)
             (incf completed)
             (when (and max-sessions (>= completed max-sessions))
               (return completed)))

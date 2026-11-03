@@ -330,6 +330,8 @@
                 (lambda (variant payload emit)
                   (dispatch-node-operation node-runtime variant payload emit))
                 :status-provider (lambda () (node-runtime-status node-runtime))
+                :ca-certificate-path ca-certificate
+                :certificate-path certificate :private-key-path private-key
                 :underlay-address (getf options :node-address)
                 :reconnect-delay 0.1 :control control
                 :stop-predicate stop-predicate))

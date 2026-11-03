@@ -21,6 +21,7 @@
                              (:file "store")
                              (:file "scheduler")
                              (:file "pki")
+                             (:file "node-tls")
                              (:file "node-session")
                              (:file "runtime")
                              (:file "runtime-assets")

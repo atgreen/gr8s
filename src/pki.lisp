@@ -299,6 +299,20 @@
 
 (defun generate-node-key-and-csr (node-name private-key-path)
   (ensure-valid-node-name node-name)
+  (when (probe-file private-key-path)
+    ;; Failed enrollment must be retryable without replacing its private key.
+    (let* ((private-key (pure-tls:load-private-key private-key-path))
+           (parameters (ironclad:destructure-private-key private-key))
+           (p (getf parameters :p)) (q (getf parameters :q))
+           (d (getf parameters :d)) (n (getf parameters :n)))
+      (unless (and p q d n)
+        (pki-fail "invalid-node-key" "Existing node key must be an RSA private key"))
+      (return-from generate-node-key-and-csr
+        (pure-tls/acme:generate-csr
+         private-key
+         (ironclad:make-public-key :rsa :n n
+                                  :e (ironclad::modular-inverse d (* (1- p) (1- q))))
+         node-name))))
   (multiple-value-bind (private-key public-key)
       (pure-tls/acme::generate-rsa-key-with-e65537 2048)
     (let ((pem
@@ -411,3 +425,51 @@
       (pki-fail "certificate-name-mismatch"
                 "Node certificate does not belong to ~A" expected-node-name))
     t))
+
+
+(defparameter +node-server-common-name+ "gr8s-control")
+
+(defun verify-node-server-certificate (certificate ca)
+  (pure-tls::verify-certificate-chain
+   (list certificate) (list ca) :purpose :server-auth :trust-anchor-mode :replace)
+  (pure-tls::verify-hostname certificate +node-server-common-name+)
+  t)
+
+(defun ensure-node-server-credentials (pki)
+  (let ((certificate-path (merge-pathnames "pki/server.crt" (cluster-pki-root pki)))
+        (key-path (merge-pathnames "pki/server.key" (cluster-pki-root pki))))
+    (bt:with-lock-held ((cluster-pki-lock pki))
+      (cond
+        ((and (probe-file certificate-path) (probe-file key-path))
+         (verify-node-server-certificate
+          (first (pure-tls:load-certificate-chain certificate-path))
+          (cluster-pki-ca-certificate pki)))
+        ((or (probe-file certificate-path) (probe-file key-path))
+         (pki-fail "incomplete-server-identity" "Control-plane TLS certificate/key pair is incomplete"))
+        (t
+         (multiple-value-bind (private-key public-key) (ironclad:generate-key-pair :secp256r1)
+           (let* ((der
+                    (certificate-der
+                     (pure-tls/acme::encode-subject +pki-ca-common-name+)
+                     (pure-tls/acme::encode-subject +node-server-common-name+)
+                     (pure-tls/acme::encode-ec-public-key public-key)
+                     (list
+                      (pure-tls/acme::encode-critical-extension
+                       +oid-key-usage+ (pure-tls/acme::encode-bit-string #(#x80) 7))
+                      (pure-tls/acme::encode-extension
+                       +oid-extended-key-usage+
+                       (pure-tls/acme::encode-sequence
+                        (pure-tls/acme::encode-oid '(1 3 6 1 5 5 7 3 1))))
+                      (pure-tls/acme::encode-extension
+                       pure-tls/acme::*oid-subject-alt-name*
+                       (pure-tls/acme::encode-san-extension (list +node-server-common-name+))))
+                     (cluster-pki-ca-private-key pki)))
+                  (chain (concatenate 'string (pure-tls/acme::wrap-pem "CERTIFICATE" der)
+                                      (uiop:read-file-string (cluster-pki-ca-certificate-path pki)))))
+             (write-private-text-exclusively key-path
+                                            (pure-tls/acme::encode-ec-private-key-pem private-key))
+             (handler-case (write-private-text-exclusively certificate-path chain)
+               (error (condition)
+                 (ignore-errors (delete-file key-path))
+                 (error condition))))))))
+    (values certificate-path key-path)))
