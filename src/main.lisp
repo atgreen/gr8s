@@ -468,6 +468,8 @@
          (store (open-store state-directory))
          (pki (ensure-cluster-pki (merge-pathnames "pki/" state-directory)))
          (server nil)
+         (api-server nil)
+         (service-network-created nil)
          (worker nil)
          (node-server nil)
          (local-agent nil))
@@ -490,6 +492,14 @@
                       options)))
              (unwind-protect
                   (progn
+                    (when (and local-agent (equal "containerd" (getf options :runtime))
+                               (equal "managed" (getf options :containerd-mode)))
+                      (ensure-native-bootstrap-namespaces store)
+                      (setf service-network-created (ensure-in-cluster-network pki))
+                      (setf api-server (start-in-cluster-api store runtime reconciler pki))
+                      (setf (pod-store-in-cluster-config store)
+                            (list :host "10.96.0.1" :port 443
+                                  :ca-pem (uiop:read-file-string (cluster-pki-ca-certificate-path pki)))))
                     (setf server
                           (start-server
                            :address address :port port
@@ -504,7 +514,10 @@
                     (finish-output)
                     (loop until *shutdown-requested* do (sleep 0.1)))
                (when worker (stop-reconciliation-worker worker))
-               (when server (stop-server server)))))
+               (when server (stop-server server))
+               (when api-server (stop-server api-server))
+               (when (or api-server service-network-created) (remove-in-cluster-network pki))
+               (setf (pod-store-in-cluster-config store) nil))))
       (when local-agent (stop-local-node-agent local-agent))
       (when node-server (stop-node-grpc-server node-server))))
   0)

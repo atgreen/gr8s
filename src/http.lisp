@@ -305,7 +305,7 @@
       "components" (json-object "schemas" (openapi-definitions))))))
 
 (defun create-pod-response (store reconciler &optional (namespace "default"))
-  (let* ((pod (create-pod store (request-object namespace)))
+  (let* ((pod (create-pod store (admit-in-cluster-pod store (request-object namespace))))
          (status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
     (json-response (pod-response-object pod status) 201)))
 

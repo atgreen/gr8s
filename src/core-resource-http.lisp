@@ -273,7 +273,11 @@
         ((and (eq method :get) (null name)) (core-resource-list-response store resource namespace))
         ((and writable-scope name (eq method :get)) (json-response (get-core-resource store resource namespace name)))
         ((and writable-scope (null name) (eq method :post))
-         (json-response (create-core-resource store resource (core-resource-request-object (core-resource-kind resource)) namespace :dry-run dry-run) 201))
+         (json-response
+          (complete-created-bootstrap-resource
+           store resource
+           (create-core-resource store resource (core-resource-request-object (core-resource-kind resource)) namespace :dry-run dry-run)
+           dry-run) 201))
         ((and writable-scope name (eq method :put))
          (let ((replacement (core-resource-request-object (core-resource-kind resource))))
            (json-response (update-core-resource store resource namespace name
