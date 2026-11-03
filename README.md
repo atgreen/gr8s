@@ -56,10 +56,10 @@ The current API supports Pods in the `default` namespace:
 - durable desired state and optimistic resource-version checks
 - periodic, idempotent reconciliation with transient-failure retry
 
-The log and exec API routes exist, but their correlated agent-operation proxy
-is still being completed after the runtime ownership split. Services,
-Deployments, volumes, production multi-node workload execution, and Kubernetes
-API authentication/TLS are outside the verified boundary. The API server
+Pod logs and exec run through correlated agent operations, including interactive
+streams and nonzero exit status. Services, Deployments, volumes, complete
+multi-node recovery, and Kubernetes API authentication/TLS remain outside the
+verified boundary. The API server
 refuses non-loopback listener addresses.
 
 ## Runtime architecture
@@ -80,9 +80,11 @@ loopback. Agents advertise the source IPv4 address of their control connection
 for VXLAN, or use an explicit `--node-address` on multi-interface hosts. The
 local node name can be changed with `--node-name`.
 
-Enrollment generates the private key on the node, verifies the returned cluster
-CA against `--ca-pin`, and stores `node.key`, `node.crt`, `ca.crt`, and the
-last-applied revision below the agent state directory. Revisioned sessions carry
+Enrollment verifies the server certificate against `--ca-pin` before sending the
+one-time join token. It generates the private key on the node and stores
+`node.key`, `node.crt`, `ca.crt`, the assigned Pod CIDR, and the last-applied
+revision below the agent state directory. Persistent sessions require a client
+certificate signed by the cluster CA and bound to the node name. Revisioned sessions carry
 node hello, heartbeat, complete desired-state snapshots, observed Pod status,
 and durable revision acknowledgements. The agent persists assigned Pods,
 reconciles them through its node runtime, adopts matching runtime objects after
@@ -113,7 +115,7 @@ serves DNS there and writes the standard `default.svc.cluster.local`,
 answers `kubernetes.default.svc.cluster.local` authoritatively and forwards names
 outside `cluster.local` to the host's IPv4 resolvers, over UDP or TCP.
 
-The Whistler classifier attaches to Pod egress through the agent. It uses an
+The Whistler classifier attaches to the host veth ingress for Pod egress. It uses an
 agent-initialized map to check the exact IPAM IPv4 address and interface MAC,
 validates ARP sender identity, and drops malformed or unsupported frames. It
 counts accepted/dropped packets and bytes, rejected spoofs, malformed packets,
@@ -122,11 +124,13 @@ replacement links are attached and pinned before atomically replacing the old
 pin. Existing counter maps survive repeated CNI ADD calls.
 
 Each endpoint has `rejected_spoofs`, `endpoint_identity`, and `traffic_stats`
-maps alongside its `tcx-egress` link under
+maps alongside its `tcx-ingress` link under
 `AGENT_STATE_DIR/containerd/bpf/CONTAINER_ID/`. CHECK validates kernel map schemas,
 identity, and the TCX interface/direction; DEL removes staged links and all maps
 even after the Pod namespace disappears. Tests exercise the actual compiled
-bytecode on packet fixtures; privileged kernel verification remains required.
+bytecode on packet fixtures with both an interpreter and Linux BPF test-run.
+The privileged native smoke injects a spoofed source into a live Pod namespace
+and requires the rejection counter to appear through agent telemetry.
 
 Agents sample the pinned counters and publish endpoint telemetry through their
 node sessions. The loopback control-plane `/metrics` endpoint exposes accepted
@@ -289,8 +293,8 @@ make test-node-topology
 Run the self-contained native smoke workflow. Invoke `make` as your normal
 user; the target builds the embedded payload without privileges and uses
 `sudo` only to start the local agent's managed containerd and exercise a real
-Pod. During the agent-operation transition, this remains the gate that will
-restore logs and exec coverage:
+Pod. The smoke checks DNS, logs, exec success and failure, source-spoof rejection,
+exported policy counters, and Pod namespace/pin/shim cleanup:
 
 ```sh
 make smoke
