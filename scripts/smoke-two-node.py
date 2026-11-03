@@ -215,6 +215,8 @@ class Smoke:
         restart_started = int(time.time())
         self.agents[0].terminate()
         self.agents[0].wait(timeout=20)
+        # The stopped agent's existing Pod and pinned dataplane stay alive.
+        self.kubectl('exec', 'two-node-1', '--', 'ping', '-c', '2', '-W', '2', identities[0][2])
         print('Restarting enrolled worker-0 without a bootstrap token', flush=True)
         self.start_agent(0)
         wait_for('unchanged Pods after restart', lambda: self.check_pods(identities))

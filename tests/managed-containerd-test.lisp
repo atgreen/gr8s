@@ -310,3 +310,24 @@
       (gr8s::stop-managed-containerd manager)
       (uiop:delete-directory-tree directory
                                   :validate t :if-does-not-exist :ignore))))
+
+(test agent-restart-reuses-bpffs-and-keeps-live-endpoint-pins
+  (with-temporary-store (store path)
+    (assert store)
+    (let* ((directory (merge-pathnames "bpf/" path))
+           (pin (merge-pathnames "sandbox/endpoint_identity" directory))
+           (unmounted 0))
+      (gr8s::write-private-text-exclusively pin "simulated pin")
+      (is (gr8s::mount-managed-bpffs
+           directory :mounted-p (lambda (target filesystem)
+                                  (is (string= "bpf" filesystem))
+                                  (is (probe-file target)) t)
+           :mounter (lambda (&rest args) (declare (ignore args))
+                      (fail "restart overmounted the surviving pins"))))
+      (gr8s::unmount-managed-bpffs
+       directory :unmounter (lambda (&rest args) (declare (ignore args)) (incf unmounted) 0))
+      (is (= 0 unmounted))
+      (delete-file pin)
+      (gr8s::unmount-managed-bpffs
+       directory :unmounter (lambda (&rest args) (declare (ignore args)) (incf unmounted) 0))
+      (is (= 1 unmounted)))))
