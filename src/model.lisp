@@ -136,7 +136,7 @@
 (defun optional-vector (object key context)
   "Return array KEY from OBJECT, defaulting to an empty vector."
   (let ((value (gethash key object #())))
-    (unless (vectorp value)
+    (unless (and (vectorp value) (not (stringp value)))
       (invalid-pod "~A.~A must be an array" context key))
     value))
 
@@ -148,16 +148,17 @@
   value)
 
 (defun parse-environment (container)
-  "Parse a container's env array into name/value cons cells."
+  "Validate environment entries and return their literal name/value pairs."
   (loop for variable across (optional-vector container "env" "container")
-        do (reject-unsupported-fields variable '("name" "value") "env")
-        collect (cons (require-nonempty-string
-                       (object-value variable "name" "env")
-                       "env.name")
-                      (let ((value (object-value variable "value" "env")))
-                        (unless (stringp value)
-                          (invalid-pod "env.value must be a string"))
-                        value))))
+        do (reject-unsupported-fields variable '("name" "value" "valueFrom") "env")
+           (require-nonempty-string (gethash "name" variable) "env.name")
+           (when (gethash "valueFrom" variable)
+             (validate-pod-field-reference variable))
+        unless (gethash "valueFrom" variable)
+          collect (cons (gethash "name" variable)
+                        (let ((value (gethash "value" variable "")))
+                          (unless (stringp value) (invalid-pod "env.value must be a string"))
+                          value))))
 
 (defun parse-ports (container)
   "Parse and validate the supported TCP container ports in CONTAINER."
@@ -177,9 +178,11 @@
 (defun parse-container (object)
   "Validate a container JSON OBJECT and return a CONTAINER-SPEC."
   (reject-unsupported-fields
-   object '("name" "image" "command" "args" "env" "ports" "resources")
+   object '("name" "image" "command" "args" "env" "ports" "resources"
+            "imagePullPolicy" "volumeMounts" "securityContext" "workingDir")
    "container")
   (require-empty-object-if-present object "resources" "container.resources")
+  (validate-runtime-container object)
   (make-container-spec
    :name (require-dns-label
           (object-value object "name" "container") "container.name")
@@ -219,7 +222,10 @@
                 "resourceVersion" "creationTimestamp" "deletionTimestamp")
      "metadata")
     (reject-unsupported-fields
-     spec '("containers" "restartPolicy" "dnsPolicy" "nodeName") "spec")
+     spec '("containers" "restartPolicy" "dnsPolicy" "nodeName" "volumes"
+            "securityContext" "serviceAccountName" "automountServiceAccountToken"
+            "tolerations" "nodeSelector") "spec")
+    (validate-runtime-pod-spec spec)
     (multiple-value-bind (dns-policy present-p) (gethash "dnsPolicy" spec)
       (when (and present-p
                  (not (and (stringp dns-policy)

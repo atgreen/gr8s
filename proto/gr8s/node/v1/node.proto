@@ -152,6 +152,8 @@ message PodAssignment {
   string resource_version = 4;
   bytes pod_json = 5;
   bool deleting = 6;
+  // Only ConfigMaps/Secrets referenced by this Pod, delivered over node mTLS.
+  repeated bytes resource_objects_json = 7;
 }
 
 message NodeNetworkConfig {

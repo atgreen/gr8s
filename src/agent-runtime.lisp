@@ -29,6 +29,8 @@
                                  (when manager #'reconcile-node-vxlan-network)))
   (let* ((directory (uiop:ensure-directory-pathname state-directory))
          (store (open-store (merge-pathnames "desired/" directory))))
+    (when (containerd-runtime-p runtime)
+      (setf (containerd-runtime-resource-store runtime) store))
     (let ((node-runtime
             (%make-node-runtime
              :state-directory directory :runtime runtime :manager manager
@@ -444,6 +446,7 @@
     (apply-node-runtime-network node-runtime snapshot)
     (let ((assignments (slot-value snapshot 'gr8s.node.v1::pods)))
       (remove-unassigned-pods node-runtime assignments)
+      (install-assigned-resource-objects (node-runtime-store node-runtime) assignments)
       (loop for assignment in assignments
             for pod = (put-assigned-pod
                        (node-runtime-store node-runtime)

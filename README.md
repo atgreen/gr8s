@@ -394,3 +394,11 @@ ClusterRoles and ClusterRoleBindings with durable metadata and optimistic
 updates. The Nodes API reports registered agents and their live readiness.
 RBAC policy storage does not yet enable authorization on the local API;
 in-cluster authentication and authorization are still under implementation.
+
+Pods can mount referenced ConfigMaps, Secrets and disk-backed emptyDir volumes.
+The control plane sends only referenced objects to the assigned node over mTLS;
+the agent projects files into private host directories and maps numeric user,
+group and fsGroup settings to containerd. Downward environment fields include
+Pod identity, node name and Pod IP. Projected data is applied during Pod setup;
+live refresh and automatic ServiceAccount credential projection are not yet
+implemented.
