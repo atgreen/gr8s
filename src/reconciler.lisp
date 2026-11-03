@@ -60,6 +60,7 @@
               (converge-deleting-pod reconciler pod)
               (converge-running-pod reconciler pod))
         (runtime-error (error)
+          (format *error-output* "gr8s Pod ~A/~A runtime error: ~A~%" namespace name (runtime-error-message error))
           (pod-status "Pending"
                       :reason "RuntimeError"
                       :message (runtime-error-message error)))))))
