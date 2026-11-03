@@ -16,8 +16,15 @@
       (core-resource-error 400 "BadRequest" "dryRun must be All"))
     (not (null value))))
 
-(defun core-resource-request-object ()
-  (require-object (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t) :max-string-length (* 2 1024 1024)) "request"))
+(defun core-resource-request-object (expected-kind)
+  (let ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;)))))
+    (cond
+      ((string= content-type "application/vnd.kubernetes.protobuf")
+       (decode-core-resource-protobuf (hunchentoot:raw-post-data :force-binary t) expected-kind))
+      ((member content-type '("" "application/json") :test #'string=)
+       (require-object (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)
+                                           :max-string-length (* 2 1024 1024)) "request"))
+      (t (core-resource-error 415 "UnsupportedMediaType" "Supported resource request formats are JSON and Kubernetes protobuf")))))
 
 (defun core-selector-terms (selector)
   (let ((depth 0) (start 0) (terms nil))
@@ -256,15 +263,15 @@
         ((and (eq method :get) (null name)) (core-resource-list-response store resource namespace))
         ((and namespace name (eq method :get)) (json-response (get-core-resource store resource namespace name)))
         ((and namespace (null name) (eq method :post))
-         (json-response (create-core-resource store resource (core-resource-request-object) namespace :dry-run dry-run) 201))
+         (json-response (create-core-resource store resource (core-resource-request-object (core-resource-kind resource)) namespace :dry-run dry-run) 201))
         ((and namespace name (eq method :put))
-         (let ((replacement (core-resource-request-object)))
+         (let ((replacement (core-resource-request-object (core-resource-kind resource))))
            (json-response (update-core-resource store resource namespace name
                                                (lambda (old) (declare (ignore old)) replacement) :dry-run dry-run))))
         ((and namespace name (eq method :patch)) (core-resource-patch-response store resource namespace name dry-run))
         ((and namespace name (eq method :delete))
-         (let* ((body (hunchentoot:raw-post-data :force-text t))
-                (options (if (and body (plusp (length body))) (require-object (com.inuoe.jzon:parse body) "DeleteOptions")
+         (let* ((body (hunchentoot:raw-post-data :force-binary t))
+                (options (if (and body (plusp (length body))) (core-resource-request-object "DeleteOptions")
                              (make-hash-table :test #'equal)))
                 (preconditions (gethash "preconditions" options))
                 (body-dry-run (gethash "dryRun" options)))
@@ -318,6 +325,9 @@
                                       "x-kubernetes-action" verb "x-kubernetes-group-version-kind" gvk
                                       "responses" (json-object "200" (json-object "description" "Success")))))
                    (when body
+                     (setf (gethash "parameters" operation)
+                           (vector (json-object "name" "fieldValidation" "in" "query"
+                                                "schema" (json-object "type" "string"))))
                      (setf (gethash "requestBody" operation)
                            (json-object "required" t "content"
                                         (if (string= verb "patch")

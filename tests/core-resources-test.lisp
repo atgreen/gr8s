@@ -106,4 +106,52 @@
       (let ((loaded (gr8s::get-core-resource (open-store path) "secrets" "default" "large")))
         (is (string= encoded (gethash "payload" (gethash "data" loaded))))))))
 
+(defun core-test-protobuf (fields)
+  (let ((buffer (make-array 64 :element-type '(unsigned-byte 8) :fill-pointer 0 :adjustable t)))
+    (dolist (field fields buffer)
+      (destructuring-bind (number value) field
+        (ag-proto::write-field-tag number (if (integerp value) 0 2) buffer)
+        (if (integerp value) (ag-proto::write-varint value buffer)
+            (ag-proto::write-length-delimited
+             (if (stringp value) (trivial-utf-8:string-to-utf-8-bytes value) value) buffer))))))
+
+(defun core-test-protobuf-envelope (kind fields)
+  (concatenate '(vector (unsigned-byte 8)) #(107 56 115 0)
+               (core-test-protobuf
+                (list (list 1 (core-test-protobuf (list (list 1 "v1") (list 2 kind))))
+                      (list 2 (core-test-protobuf fields))))))
+
+(test kubernetes-protobuf-secret-preserves-binary-data-and-false-immutable
+  (let* ((metadata (core-test-protobuf '((1 "credentials") (3 "default"))))
+         (map (core-test-protobuf (list (list 1 "bytes") (list 2 (make-array 2 :element-type '(unsigned-byte 8) :initial-contents '(0 255))))))
+         (input (core-test-protobuf-envelope "Secret" (list (list 1 metadata) (list 2 map) (list 3 "Opaque") (list 5 0))))
+         (object (gr8s::decode-core-resource-protobuf input "Secret")))
+    (is (string= "AP8=" (gethash "bytes" (gethash "data" object))))
+    (is (null (gethash "immutable" object)))
+    (is-true (nth-value 1 (gethash "immutable" object)))
+    (is (string= "credentials" (gethash "name" (gethash "metadata" object))))
+    (loop for length from 0 below (length input)
+          do (is (= 400 (core-resource-status
+                         (lambda () (gr8s::decode-core-resource-protobuf (subseq input 0 length) "Secret"))))))))
+
+(test protobuf-delete-options-preserve-dryrun-and-preconditions
+  (let* ((preconditions (core-test-protobuf '((1 "object-uid") (2 "9"))))
+         (input (core-test-protobuf-envelope "DeleteOptions" (list (list 2 preconditions) (list 5 "All"))))
+         (options (gr8s::decode-core-resource-protobuf input "DeleteOptions")))
+    (is (equalp #( "All") (gethash "dryRun" options)))
+    (is (string= "object-uid" (gethash "uid" (gethash "preconditions" options))))
+    (is (string= "9" (gethash "resourceVersion" (gethash "preconditions" options))))))
+
+(test malformed-protobuf-and-unsupported-ownership-fail-closed
+  (let ((wrong-kind (core-test-protobuf-envelope "Secret" nil))
+        (owner (core-test-protobuf-envelope "ConfigMap"
+                 (list (list 1 (core-test-protobuf (list (list 1 "owned") (list 13 (core-test-protobuf nil)))))))))
+    (is (= 400 (core-resource-status (lambda () (gr8s::decode-core-resource-protobuf wrong-kind "ConfigMap")))))
+    (is (= 422 (core-resource-status (lambda () (gr8s::decode-core-resource-protobuf owner "ConfigMap")))))
+    (dolist (bad (list #(107 56 115 0 0) #(107 56 115 0 10 255 255 255 255 127)
+                      #(107 56 115 0 255 255 255 255 255 255 255 255 255 255 1)))
+      (is (= 400 (core-resource-status
+                  (lambda () (gr8s::decode-core-resource-protobuf
+                               (map '(vector (unsigned-byte 8)) #'identity bad) "ConfigMap"))))))))
+
 (in-suite gr8s)

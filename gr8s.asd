@@ -23,6 +23,7 @@
                              (:file "pki")
                              (:file "node-tls")
                              (:file "core-resources")
+                             (:file "core-resource-protobuf")
                              (:file "node-session")
                              (:file "runtime")
                              (:file "runtime-assets")

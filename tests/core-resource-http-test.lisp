@@ -2,11 +2,11 @@
 (def-suite core-resource-http :in gr8s)
 (in-suite core-resource-http)
 
-(defun core-api-request (path &key (method :get) object (content-type "application/json") parameters)
+(defun core-api-request (path &key (method :get) object octets (content-type "application/json") parameters)
   (multiple-value-bind (body status)
       (drakma:http-request (concatenate 'string "http://127.0.0.1:18089" path)
                            :method method :content-type content-type :parameters parameters
-                           :content (when object (com.inuoe.jzon:stringify object)))
+                           :content (or octets (when object (com.inuoe.jzon:stringify object))))
     (values (com.inuoe.jzon:parse body :max-string-length (* 2 1024 1024)) status)))
 
 (defmacro with-core-api ((store path) &body body)
@@ -141,5 +141,22 @@
       (let ((wrong (core-fixture "ConfigMap" "wrong")))
         (setf (gethash "namespace" (gethash "metadata" wrong)) "other")
         (check-core-status 400 collection :method :post :object wrong)))))
+
+(test core-resource-http-accepts-kubernetes-protobuf-and-honors-binary-delete-dryrun
+  (with-core-api (store path)
+    (values store path)
+    (let* ((metadata (core-test-protobuf '((1 "binary") (3 "default"))))
+           (entry (core-test-protobuf '((1 "mode") (2 "protobuf"))))
+           (input (core-test-protobuf-envelope "ConfigMap" (list (list 1 metadata) (list 2 entry))))
+           (item "/api/v1/namespaces/default/configmaps/binary"))
+      (let ((created (check-core-status 201 "/api/v1/namespaces/default/configmaps"
+                                       :method :post :content-type "application/vnd.kubernetes.protobuf" :octets input)))
+        (is (string= "protobuf" (gethash "mode" (gethash "data" created)))))
+      (check-core-status 200 item :method :delete :content-type "application/vnd.kubernetes.protobuf"
+                         :octets (core-test-protobuf-envelope "DeleteOptions" '((5 "All"))))
+      (check-core-status 200 item)
+      (check-core-status 400 item :method :delete :content-type "application/vnd.kubernetes.protobuf"
+                         :octets (subseq input 0 5))
+      (check-core-status 200 item))))
 
 (in-suite gr8s)
