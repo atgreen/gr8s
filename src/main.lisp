@@ -154,9 +154,15 @@
                 (setf (getf options :containerd-log-root) value))
                (t (error "unknown agent option: ~A" option)))
              (setf arguments (cddr arguments)))
-    (dolist (required '(:server :token :ca-pin :node-name :state-directory))
+    (dolist (required '(:server :node-name :state-directory))
       (unless (getf options required)
         (error "agent requires --~(~A~)" required)))
+    (let ((directory (uiop:ensure-directory-pathname (getf options :state-directory))))
+      (unless (every (lambda (name) (probe-file (merge-pathnames name directory)))
+                     '("node.key" "node.crt" "ca.crt"))
+        (dolist (required '(:token :ca-pin))
+          (unless (getf options required)
+            (error "unenrolled agent requires --~(~A~)" required)))))
     options))
 
 (defun parse-join-token-options (arguments)
@@ -505,7 +511,7 @@
 
 (defun print-help ()
   (format t
-          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--disable-agent] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT --token TOKEN --ca-pin SHA256 --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%"))
+          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--disable-agent] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%"))
 
 (defun main-with-environment (arguments environment cni-entry)
   (if (funcall environment "CNI_COMMAND")

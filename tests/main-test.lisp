@@ -239,3 +239,19 @@
                                 "--state-directory" (namestring path)))
        (make-broadcast-stream)))
     (is-false (probe-file (merge-pathnames "pki/" path)))))
+
+(test enrolled-agent-restarts-without-a-bootstrap-token
+  (with-temporary-store (store path)
+    (assert store)
+    (let* ((directory (merge-pathnames "enrolled-agent/" path))
+           (arguments (list "agent" "--server" "127.0.0.1:7443" "--node-name" "worker-a"
+                            "--state-directory" (namestring directory))))
+      (signals error (parse-cli-options arguments))
+      (dolist (name '("node.key" "node.crt"))
+        (gr8s::write-private-text-exclusively (merge-pathnames name directory) "fixture"))
+      (signals error (parse-cli-options arguments))
+      (gr8s::write-private-text-exclusively (merge-pathnames "ca.crt" directory) "fixture")
+      (let ((options (parse-cli-options arguments)))
+        (is (eq :agent (getf options :command)))
+        (is-false (getf options :token))
+        (is-false (getf options :ca-pin))))))
