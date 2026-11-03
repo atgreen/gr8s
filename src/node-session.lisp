@@ -657,6 +657,23 @@
   (sequence 0)
   (send-lock (bt:make-lock "gr8s agent node session send")))
 
+(defun accept-agent-server-hello (identity identity-path hello)
+  (let ((node-id (slot-value hello 'gr8s.node.v1::node-id))
+        (cidr (slot-value hello 'gr8s.node.v1::assigned-pod-cidr))
+        (persisted-node-id (gethash "nodeId" identity ""))
+        (persisted-cidr (gethash "assignedPodCIDR" identity "")))
+    (when (and (plusp (length persisted-node-id))
+               (not (string= persisted-node-id node-id)))
+      (error "Server node identity changed from ~S to ~S" persisted-node-id node-id))
+    (when (zerop (length node-id)) (error "Server assigned an empty node identity"))
+    (validate-network-cidr cidr)
+    (when (and (plusp (length persisted-cidr)) (not (string= persisted-cidr cidr)))
+      (error "Server Pod CIDR changed from ~S to ~S" persisted-cidr cidr))
+    ;; Persist the allocation even when this reconnect has no newer snapshot.
+    (setf (gethash "nodeId" identity) node-id
+          (gethash "assignedPodCIDR" identity) cidr)
+    (persist-agent-identity identity-path identity)))
+
 (defun send-agent-session-envelope (session variant payload)
   (bt:with-lock-held ((agent-node-session-send-lock session))
     (ag-grpc:stream-send
@@ -669,6 +686,11 @@
   (let ((revision (slot-value snapshot 'gr8s.node.v1::revision))
         (last-applied (gethash "lastAppliedRevision" identity 0))
         (statuses nil))
+    (let ((network (slot-value snapshot 'gr8s.node.v1::network))
+          (assigned (gethash "assignedPodCIDR" identity)))
+      (when (and network assigned
+                 (not (string= assigned (slot-value network 'gr8s.node.v1::node-pod-cidr))))
+        (error "Snapshot Pod CIDR does not match the durable node allocation")))
     (when (> revision last-applied)
       (let ((result (funcall apply-snapshot snapshot)))
         ;; Snapshot applicators written before status reporting commonly
@@ -851,16 +873,10 @@
                        (when status-provider
                          (lambda () (when operation-session-p (funcall status-provider))))))
                     :name "gr8s agent session heartbeat")))
-           (let* ((server-hello
-                    (require-server-envelope
-                     (ag-grpc:stream-read-message stream) :hello))
-                  (node-id (slot-value server-hello 'gr8s.node.v1::node-id))
-                  (persisted-node-id (gethash "nodeId" identity "")))
-             (when (and (plusp (length persisted-node-id))
-                        (not (string= persisted-node-id node-id)))
-               (error "Server node identity changed from ~S to ~S"
-                      persisted-node-id node-id))
-             (setf (gethash "nodeId" identity) node-id)
+           (let ((server-hello
+                   (require-server-envelope
+                    (ag-grpc:stream-read-message stream) :hello)))
+             (accept-agent-server-hello identity identity-path server-hello)
              (setf heartbeat-interval
                    (max 1 (slot-value server-hello
                                       'gr8s.node.v1::heartbeat-interval-seconds)))

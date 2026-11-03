@@ -82,6 +82,8 @@
              (is (= 1 (gr8s:node-session-acknowledged-revision
                        server "worker-a")))
              (is (probe-file identity-path))
+             (is (string= "10.88.0.0/20"
+                          (gethash "assignedPodCIDR" (com.inuoe.jzon:parse identity-path))))
              (is (gr8s:node-record-ready-p (gr8s:get-node store "worker-a")))
 
              (send-stale-node-ack
@@ -739,3 +741,34 @@
               (bt:destroy-thread agent))
             (ignore-errors (bt:join-thread agent)))
           (gr8s:stop-node-grpc-server server))))))
+
+(test server-hello-cannot-reassign-a-durable-node-cidr
+  (with-temporary-store (store path)
+    (values store)
+    (let* ((identity-path (merge-pathnames "agent/identity.json" path))
+           (identity (gr8s::make-agent-identity "worker-a" :node-id "node-1"))
+           (hello (make-instance 'gr8s.node.v1::server-hello
+                                :node-id "node-1" :assigned-pod-cidr "10.88.0.0/20")))
+      (gr8s::accept-agent-server-hello identity identity-path hello)
+      (let ((original (uiop:read-file-string identity-path)))
+        (setf (slot-value hello 'gr8s.node.v1::assigned-pod-cidr) "10.88.16.0/20")
+        (signals error (gr8s::accept-agent-server-hello identity identity-path hello))
+        (is (string= "10.88.0.0/20" (gethash "assignedPodCIDR" identity)))
+        (is (string= original (uiop:read-file-string identity-path)))
+        (setf (slot-value hello 'gr8s.node.v1::assigned-pod-cidr) "10.88.0.1/20")
+        (signals error (gr8s::accept-agent-server-hello identity identity-path hello))
+        (is (string= original (uiop:read-file-string identity-path)))))))
+
+(test snapshot-cidr-is-checked-before-runtime-application-or-acknowledgement
+  (let ((identity (gr8s::make-agent-identity "worker-a"))
+        (snapshot (empty-desired-snapshot)))
+    (setf (gethash "assignedPodCIDR" identity) "10.88.0.0/20"
+          (slot-value snapshot 'gr8s.node.v1::revision) 1
+          (slot-value snapshot 'gr8s.node.v1::network)
+          (make-instance 'gr8s.node.v1::node-network-config :node-pod-cidr "10.88.16.0/20"))
+    (signals error
+      (gr8s::apply-node-snapshot-and-respond
+       nil identity #P"/must-not-write-node-identity" snapshot
+       (lambda (snapshot) (declare (ignore snapshot))
+         (fail "mismatched snapshot reached the runtime"))))
+    (is (= 0 (gethash "lastAppliedRevision" identity)))))
