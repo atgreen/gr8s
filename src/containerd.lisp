@@ -6,7 +6,8 @@
   host-network
   dns-servers
   dns-searches
-  dns-options)
+  dns-options
+  resource-store)
 
 (defun make-containerd-runtime
     (&key (socket-path "/run/containerd/containerd.sock")
@@ -103,7 +104,13 @@
 
 (defun containerd-create-container (runtime pod sandbox-id sandbox-config spec)
   (let ((socket (containerd-runtime-socket-path runtime)))
-    (cri-pull-image socket (container-spec-image spec))
+    (let ((policy (gethash "imagePullPolicy" (pod-runtime-container-object pod spec)
+                           (if (or (uiop:string-suffix-p (container-spec-image spec) ":latest")
+                                   (not (find #\: (car (last (uiop:split-string (container-spec-image spec) :separator '(#\/)))))))
+                               "Always" "IfNotPresent"))))
+      (when (or (equal policy "Always")
+                (and (equal policy "IfNotPresent") (not (cri-image-present-p socket (container-spec-image spec)))))
+        (cri-pull-image socket (container-spec-image spec))))
     (let ((container-id
             (cri-create-container
              socket sandbox-id sandbox-config
@@ -111,7 +118,10 @@
              :image (container-spec-image spec)
              :command (coerce (container-spec-command spec) 'list)
              :args (coerce (container-spec-args spec) 'list)
-             :env (container-spec-env spec)
+             :env (containerd-pod-environment runtime pod spec sandbox-id)
+             :mounts (containerd-pod-mounts runtime pod spec)
+             :security-context (containerd-pod-security-context pod spec)
+             :working-directory (gethash "workingDir" (pod-runtime-container-object pod spec))
              :uid (pod-uid pod)
              :log-path (format nil "~A.log" (container-spec-name spec)))))
       (cri-start-container socket container-id))))
@@ -128,8 +138,11 @@
                (namestring log-directory)
                (containerd-runtime-host-network runtime)
                :resource-version (pod-resource-version pod)
+               :privileged (pod-requests-privileged-container-p pod)
                :dns-servers (containerd-runtime-dns-servers runtime)
-               :dns-searches (containerd-runtime-dns-searches runtime)
+               :dns-searches (when (containerd-runtime-dns-searches runtime)
+                               (cons (format nil "~A.svc.cluster.local" (pod-namespace pod))
+                                     (cdr (containerd-runtime-dns-searches runtime))))
                :dns-options (containerd-runtime-dns-options runtime)))
             (sandbox-id nil))
        (ensure-directories-exist log-directory)
@@ -144,8 +157,11 @@
                     :log-directory (namestring log-directory)
                     :host-network (containerd-runtime-host-network runtime)
                     :resource-version (pod-resource-version pod)
+                    :privileged (pod-requests-privileged-container-p pod)
                     :dns-servers (containerd-runtime-dns-servers runtime)
-                    :dns-searches (containerd-runtime-dns-searches runtime)
+                    :dns-searches (when (containerd-runtime-dns-searches runtime)
+                               (cons (format nil "~A.svc.cluster.local" (pod-namespace pod))
+                                     (cdr (containerd-runtime-dns-searches runtime))))
                     :dns-options (containerd-runtime-dns-options runtime)))
              (loop for spec across (pod-containers pod)
                    do (containerd-create-container

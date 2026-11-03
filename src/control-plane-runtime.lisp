@@ -9,7 +9,7 @@
   (find uid (list-pods (control-plane-runtime-store runtime))
         :key #'pod-uid :test #'string=))
 
-(defun pod-assignment (pod)
+(defun pod-assignment (pod &optional store)
   (make-instance
    'gr8s.node.v1::pod-assignment
    :namespace (pod-namespace pod)
@@ -20,14 +20,19 @@
    (trivial-utf-8:string-to-utf-8-bytes
     (with-output-to-string (stream)
       (com.inuoe.jzon:stringify (pod-to-object pod) :stream stream)))
-   :deleting (deletion-requested-p pod)))
+   :deleting (deletion-requested-p pod)
+   :resource-objects-json
+   (when store
+     (mapcar (lambda (object)
+               (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify object)))
+             (pod-referenced-resource-objects store pod)))))
 
 (defun node-desired-state-snapshot (store node-name &key excluded-uid)
   (make-instance
    'gr8s.node.v1::desired-state-snapshot
    :pods
    (mapcar
-    #'pod-assignment
+    (lambda (pod) (pod-assignment pod store))
     (sort
      (remove-if
       (lambda (pod)

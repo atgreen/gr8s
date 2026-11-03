@@ -102,7 +102,7 @@
 
 (defun make-cri-pod-sandbox-config
     (name uid namespace attempt log-directory host-network
-     &key resource-version dns-servers dns-searches dns-options)
+     &key resource-version dns-servers dns-searches dns-options privileged)
   (let ((metadata
           (make-instance 'gr8s.cri.v1::pod-sandbox-metadata
                          :name name
@@ -132,6 +132,7 @@
       :security-context
       (make-instance
        'gr8s.cri.v1::linux-sandbox-security-context
+       :privileged (not (null privileged))
        :namespace-options
        (make-instance
         'gr8s.cri.v1::namespace-option
@@ -142,7 +143,7 @@
 (defun cri-run-pod-sandbox
     (socket-path &key name uid (namespace "default") (attempt 0)
                    log-directory host-network resource-version
-                   dns-servers dns-searches dns-options (timeout 120))
+                   dns-servers dns-searches dns-options privileged (timeout 120))
   "Create and start a CRI pod sandbox, returning its runtime ID."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
@@ -153,7 +154,7 @@
                    :resource-version resource-version
                    :dns-servers dns-servers
                    :dns-searches dns-searches
-                   :dns-options dns-options)))
+                   :dns-options dns-options :privileged privileged)))
            (multiple-value-bind (response status)
                (gr8s.cri.v1::runtime-service-run-pod-sandbox
                 stub
@@ -221,7 +222,8 @@
 
 (defun cri-create-container
     (socket-path sandbox-id sandbox-config
-     &key name image command args env uid (attempt 0) log-path (timeout 120))
+     &key name image command args env uid mounts security-context working-directory
+          (attempt 0) log-path (timeout 120))
   "Create a container in SANDBOX-ID and return its runtime ID."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
@@ -242,6 +244,10 @@
                 :image (make-instance 'gr8s.cri.v1::image-spec :image image)
                 :command command
                 :args args
+                :working-dir (or working-directory "")
+                :mounts mounts
+                :linux (when security-context
+                         (make-instance 'gr8s.cri.v1::linux-container-config :security-context security-context))
                 :envs (loop for (key . value) in env
                             collect (make-instance 'gr8s.cri.v1::key-value
                                                    :key key :value value))
@@ -357,4 +363,18 @@
                 :timeout timeout)
              (declare (ignore response))
              (ensure-cri-status "RemoveContainer" status)))
+      (ag-grpc:channel-close channel))))
+
+(defun cri-image-present-p (socket-path image &key (timeout 30))
+  "Query the CRI image service without contacting a registry."
+  (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
+    (unwind-protect
+         (multiple-value-bind (response status)
+             (gr8s.cri.v1::image-service-image-status
+              (gr8s.cri.v1::make-image-service-stub channel)
+              (make-instance 'gr8s.cri.v1::image-status-request
+                             :image (make-instance 'gr8s.cri.v1::image-spec :image image))
+              :timeout timeout)
+           (ensure-cri-status "ImageStatus" status)
+           (not (null (gr8s.cri.v1::image response))))
       (ag-grpc:channel-close channel))))

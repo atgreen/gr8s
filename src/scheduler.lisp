@@ -223,7 +223,8 @@
                (sort
                 (loop for candidate being the hash-values
                         of (pod-store-nodes store)
-                      when (node-record-ready-p candidate)
+                      when (and (node-record-ready-p candidate)
+                                (pod-node-selector-matches-p pod candidate))
                         collect candidate)
                 (lambda (left right)
                   (let ((left-count
