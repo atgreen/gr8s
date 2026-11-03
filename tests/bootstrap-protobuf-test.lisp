@@ -68,7 +68,7 @@
                              :octets (bootstrap-wire-fixture kind "wrong" :version "v1" :role-kind role-kind))
           (check-core-status 400 collection :method :post :content-type "application/vnd.kubernetes.protobuf" :octets (subseq input 0 5))
           (check-core-status 200 item :method :delete :content-type "application/vnd.kubernetes.protobuf"
-                             :octets (core-test-protobuf-envelope "DeleteOptions" nil)))))))
+                             :octets (core-test-protobuf-envelope "DeleteOptions" nil "rbac.authorization.k8s.io/v1")))))))
 
 (test typed-rbac-grants-are-enforced-by-the-authenticated-tls-api
   (with-core-api (store directory)

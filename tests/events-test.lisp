@@ -177,4 +177,25 @@
            (operation (gethash "post" (gethash "/apis/events.k8s.io/v1/namespaces/{namespace}/events" (gethash "paths" api)))))
       (is (equal "fieldValidation" (gethash "name" (aref (gethash "parameters" operation) 0)))))))
 
+(test modern-event-protobuf-delete-options-use-the-request-group
+  (with-core-api (store path)
+    (values store path)
+    (let* ((collection "/apis/events.k8s.io/v1/namespaces/alpha/events")
+           (item (concatenate 'string collection "/versioned"))
+           (created (check-core-status 201 collection :method :post :object (event-fixture "versioned" t)))
+           (uid (gethash "uid" (gethash "metadata" created)))
+           (preconditions (core-test-protobuf (list (list 1 uid))))
+           (options (core-test-protobuf-envelope "DeleteOptions" (list (list 2 preconditions)) "events.k8s.io/v1")))
+      (check-core-status 400 item :method :delete :content-type "application/vnd.kubernetes.protobuf"
+                         :octets (core-test-protobuf-envelope "DeleteOptions" nil "rbac.authorization.k8s.io/v1"))
+      (check-core-status 200 item :method :delete :content-type "application/vnd.kubernetes.protobuf" :octets options)
+      (check-core-status 404 item)
+      (check-core-status 201 collection :method :post :object (event-fixture "versioned" t))
+      (check-core-status 200 collection :method :delete :content-type "application/vnd.kubernetes.protobuf"
+                         :octets (core-test-protobuf-envelope "DeleteOptions" '((5 "All")) "events.k8s.io/v1"))
+      (check-core-status 200 item)
+      (check-core-status 200 collection :method :delete :content-type "application/vnd.kubernetes.protobuf"
+                         :octets (core-test-protobuf-envelope "DeleteOptions" nil "events.k8s.io/v1"))
+      (check-core-status 404 item))))
+
 (in-suite gr8s)
