@@ -399,7 +399,9 @@ Kubernetes conformance. The earlier
 
 Bootstrap APIs also store Namespaces, ServiceAccounts, Roles, RoleBindings,
 ClusterRoles and ClusterRoleBindings with durable metadata and optimistic
-updates. These durable APIs also support resumable JSON watches and
+updates. All these durable resources accept JSON and typed Kubernetes protobuf
+requests with API group/version validation. They also support resumable JSON
+watches and
 revision-consistent paginated lists. Pod and Node watches remain pending.
 The Nodes API reports registered agents and their live readiness.
 The local administrative HTTP API remains loopback-only. Managed native clusters
