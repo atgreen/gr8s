@@ -13,6 +13,8 @@ import urllib.request
 ROOT = Path(__file__).resolve().parent.parent
 BASE = "https://raw.githubusercontent.com/kubernetes/"
 SOURCES = {
+    "events.proto": ("api/v0.36.0/events/v1/generated.proto", "5e4e60993ed7b6e522976af29abd0994de8d68ad233763f6063a3b62ddf05982"),
+    "events-types.go": ("api/v0.36.0/events/v1/types.go", "9cdf7c0d778bf006ec1c5269d60a5c0c6cca025df40452d06f09168ae23d6c2e"),
     "rbac.proto": ("api/v0.36.0/rbac/v1/generated.proto", "b0f9979f76d060fc0aa2dcd692d04636ce3d41c5b552b827acf377f11c5eee32"),
     "rbac-types.go": ("api/v0.36.0/rbac/v1/types.go", "1a4918c1845ec5cf1515240d66612b50f11f0fd2b6f5ef8a1e204a29f8792a81"),
     "core-types.go": ("api/v0.36.0/core/v1/types.go", "335f6d034eb92b6751e9fc3833e5c027aa0da8138de44acaaadf62c5cf25183a"),
@@ -107,7 +109,7 @@ def main():
     args = parser.parse_args()
     sources = load_sources(args.cache)
     all_messages = proto_messages(sources)
-    pending = ["k8s.io.api.core.v1.PodTemplate", "k8s.io.api.core.v1.Pod", "k8s.io.api.core.v1.Service", "k8s.io.api.core.v1.ServiceAccount"]
+    pending = ["k8s.io.api.core.v1.PodTemplate", "k8s.io.api.core.v1.Pod", "k8s.io.api.core.v1.Service", "k8s.io.api.core.v1.ServiceAccount", "k8s.io.api.core.v1.Event", "k8s.io.api.events.v1.Event"]
     pending.extend("k8s.io.api.rbac.v1." + kind for kind in ["Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding"])
     messages = {}
     while pending:
@@ -118,7 +120,7 @@ def main():
         pending.extend(field["type"] for field in messages[name].values() if field["type"] not in SCALARS)
     # Generated Go protobuf writes non-pointer scalar zero values even where
     # the corresponding JSON field is omitted. Preserve pointer zero values.
-    for source, package in [("core-types.go", "k8s.io.api.core.v1."), ("rbac-types.go", "k8s.io.api.rbac.v1.")]:
+    for source, package in [("core-types.go", "k8s.io.api.core.v1."), ("rbac-types.go", "k8s.io.api.rbac.v1."), ("events-types.go", "k8s.io.api.events.v1.")]:
         for structure in re.finditer(r"type (\w+) struct \{(.*?)^\}", sources[source], re.S | re.M):
             fields = messages.get(package + structure[1], {})
             for line in structure[2].splitlines():
@@ -142,7 +144,9 @@ def main():
                     raise ValueError(f"Unmapped JSON field: {name}.{field['name']}")
                 field["inline"] = True
     definitions = {}
-    pending = ["io.k8s.api.core.v1.PodTemplate", "io.k8s.api.core.v1.PodTemplateList"]
+    pending = ["io.k8s.api.core.v1.PodTemplate", "io.k8s.api.core.v1.PodTemplateList",
+               "io.k8s.api.core.v1.Event", "io.k8s.api.core.v1.EventList",
+               "io.k8s.api.events.v1.Event", "io.k8s.api.events.v1.EventList"]
     while pending:
         name = pending.pop()
         if name in definitions:

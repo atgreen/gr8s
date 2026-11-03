@@ -409,6 +409,13 @@ also expose a separate HTTPS API at `10.96.0.1:443`, authenticated with issued
 ServiceAccount tokens and authorized against live RoleBindings and
 ClusterRoleBindings.
 
+Events share durable identities and revisions between core `v1` and
+`events.k8s.io/v1`. Both versions support JSON/protobuf CRUD, patches, field and
+label selectors, collection deletion, consistent pagination and resumable
+watches. Timestamps preserve microseconds, and submitted Events expire one hour
+after their last write, producing real deletion events. Native runtime event
+emission remains pending.
+
 Pods accept JSON and typed Kubernetes protobuf requests. The decoder uses pinned
 Kubernetes wire definitions and Go JSON omission rules, preserving explicit
 pointer values and empty command arguments. Runtime admission still validates

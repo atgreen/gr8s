@@ -12,7 +12,8 @@
              (namespace (and namespaced (second tail)))
              (remaining (if namespaced (cddr tail) tail))
              (type (assoc (first remaining) *stored-resource-types* :test #'equal)))
-        (when (and type (equal version (third type))
+        (when (and type (or (equal version (third type))
+                                  (and (equal "events" (first type)) (equal version "events.k8s.io/v1")))
                    (<= 1 (length remaining) 2)
                    (every (lambda (part) (plusp (length part))) remaining)
                    (or (not namespaced) (fourth type))
@@ -29,7 +30,8 @@
   (let ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;)))))
     (cond
       ((string= content-type "application/vnd.kubernetes.protobuf")
-       (decode-core-resource-protobuf (hunchentoot:raw-post-data :force-binary t) expected-kind))
+       (decode-core-resource-protobuf (hunchentoot:raw-post-data :force-binary t) expected-kind
+                                      (when (equal expected-kind "Event") *core-resource-view-version*)))
       ((member content-type '("" "application/json") :test #'string=)
        (require-object (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)
                                            :max-string-length (* 2 1024 1024)) "request"))
@@ -51,6 +53,15 @@
 
 (defun core-selector-field-value (object path)
   "Read a supported scalar field path using Kubernetes selector string values."
+  (when (equal "Event" (gethash "kind" object))
+    (cond ((equal path "source")
+           (return-from core-selector-field-value
+             (or (let ((component (gethash "component" (gethash "source" object))))
+                   (and component (plusp (length component)) component))
+                 (gethash "reportingComponent" object ""))))
+          ((equal path "reportingController") (setf path "reportingComponent"))
+          ((uiop:string-prefix-p "regarding." path)
+           (setf path (concatenate 'string "involvedObject." (subseq path 10))))))
   (let ((value object))
     (dolist (key (uiop:split-string path :separator '(#\.)))
       (unless (hash-table-p value) (return-from core-selector-field-value ""))
@@ -246,7 +257,9 @@
       (core-resource-error 400 "BadRequest" "Invalid request namespace"))
     (when (and name (not (dns-subdomain-p name)))
       (core-resource-error 400 "BadRequest" "Invalid request name"))
-    (let ((dry-run (core-resource-dry-run-p))
+    (let ((*core-resource-view-version* (when (equal resource "events")
+                                         (if (uiop:string-prefix-p "/apis/" path) "events.k8s.io/v1" "v1")))
+          (dry-run (core-resource-dry-run-p))
           (writable-scope (or namespace (not (core-resource-namespaced-p resource)))))
       (cond
         ((and (eq method :get) (null name)) (core-resource-list-response store resource namespace))
@@ -262,7 +275,7 @@
            (json-response (update-core-resource store resource namespace name
                                                (lambda (old) (declare (ignore old)) replacement) :dry-run dry-run))))
         ((and writable-scope name (eq method :patch)) (core-resource-patch-response store resource namespace name dry-run))
-        ((and writable-scope (null name) (equal resource "podtemplates") (eq method :delete))
+        ((and writable-scope (null name) (member resource '("podtemplates" "events") :test #'equal) (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
                 (options (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions")))
                 (preview (gethash "dryRun" (or options (core-object)))))
@@ -270,8 +283,8 @@
            (when (gethash "preconditions" (or options (core-object)))
              (core-resource-error 400 "BadRequest" "DeleteCollection does not support preconditions"))
            (delete-template-collection store namespace (or (hunchentoot:parameter "labelSelector") "")
-                                       (or (hunchentoot:parameter "fieldSelector") "") :dry-run (or dry-run preview))
-           (status-response "Success" "Deleted" "PodTemplate collection deleted" 200)))
+                                       (or (hunchentoot:parameter "fieldSelector") "") :dry-run (or dry-run preview) :resource resource)
+           (status-response "Success" "Deleted" "Resource collection deleted" 200)))
         ((and writable-scope name (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
                 (options (if (and body (plusp (length body))) (core-resource-request-object "DeleteOptions")
@@ -312,7 +325,9 @@
                          "x-kubernetes-group-version-kind"
                          (vector (json-object "group" "" "version" "v1" "kind" kind))))))
   (labels ((alias (name)
-             (if (member name '("io.k8s.api.core.v1.PodTemplate" "io.k8s.api.core.v1.PodTemplateList") :test #'equal)
+             (if (member name '("io.k8s.api.core.v1.PodTemplate" "io.k8s.api.core.v1.PodTemplateList"
+                                  "io.k8s.api.core.v1.Event" "io.k8s.api.core.v1.EventList"
+                                  "io.k8s.api.events.v1.Event" "io.k8s.api.events.v1.EventList") :test #'equal)
                  name (concatenate 'string "io.gr8s.template." name)))
            (rewrite (schema)
              (cond ((hash-table-p schema)
@@ -368,4 +383,6 @@
                            "delete" (operation "delete" "delete")))
         (when (equal resource "podtemplates")
           (setf (gethash "delete" (gethash collection paths)) (operation "deletecollection" "deleteCollection"))))))
+  (add-event-openapi-paths paths nil)
+  (when (equal *schema-reference-prefix* "#/definitions/") (add-event-openapi-paths paths t))
   paths)

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 gr8s contributors
 # SPDX-License-Identifier: MIT
-"""Run the upstream PodTemplate lifecycle and chunking cases in a disposable native cluster.
+"""Run upstream conformance cases in a disposable native cluster.
 
 Requires root in a disposable Linux guest, a native gr8s executable and Sonobuoy.
-This is focused API validation, not a certified-conformance run. The second
-chunking case intentionally waits for the normal five-minute history expiry.
+The default focus covers the five PodTemplate lifecycle and chunking specs,
+including normal five-minute history expiry. Custom focused runs are supplemental;
+--certified-conformance always selects the full upstream certified suite.
 """
 
 import argparse
@@ -63,13 +64,19 @@ def main():
     parser.add_argument("--timeout", type=int, default=1200)
     parser.add_argument("--certified-conformance", action="store_true",
                         help="Run the entire upstream certified selection instead of the five focused specs")
+    parser.add_argument("--focus", default=FOCUS, help="Upstream regex for a supplemental focused run")
+    parser.add_argument("--expected-specs", type=int, default=5, help="Require this many executed specs in a focused run")
     args = parser.parse_args()
+    if args.expected_specs < 1:
+        parser.error("--expected-specs must be positive")
+    if args.certified_conformance and (args.focus != FOCUS or args.expected_specs != 5):
+        parser.error("Custom focus/count cannot be combined with the full certified selection")
     if os.geteuid() != 0:
         parser.error("Run this privileged integration test inside a disposable Linux guest")
     root = Path(tempfile.mkdtemp(prefix="gr8s-conformance." if args.certified_conformance else "gr8s-podtemplates.", dir=args.state_parent))
     state = root / "state"
     base = f"http://127.0.0.1:{args.api_port}"
-    report = {"focus": None if args.certified_conformance else FOCUS,
+    report = {"focus": None if args.certified_conformance else args.focus,
               "mode": "certified-conformance" if args.certified_conformance else "focused",
               "isCertificationResult": False, "nativeSHA256": hashlib.sha256(args.gr8s.read_bytes()).hexdigest()}
     native_log = (root / "gr8s.log").open("w")
@@ -112,7 +119,7 @@ def main():
         report["version"] = json.loads(request("/version")[1])
         report["sonobuoyVersion"] = subprocess.check_output([str(args.sonobuoy), "version", "--short"], text=True).strip()
         command = [str(args.sonobuoy), "run", "--kubeconfig", str(root / "kubeconfig"), "--dns-pod-labels=", "--plugin=e2e",
-                   *(["--mode=certified-conformance"] if args.certified_conformance else ["--e2e-focus=" + FOCUS, "--e2e-skip="])]
+                   *(["--mode=certified-conformance"] if args.certified_conformance else ["--e2e-focus=" + args.focus, "--e2e-skip="])]
         report["command"] = command
         result = subprocess.run(command, capture_output=True, text=True, timeout=90)
         report["sonobuoyRunExitCode"] = result.returncode
@@ -149,7 +156,7 @@ def main():
         (root / "sonobuoy-results.txt").write_text(result.stdout + result.stderr)
         e2e = (root / "e2e.log").read_text()
         report.update(verify_upstream_results(root / "sonobuoy-results.tar.gz", e2e, result.stdout,
-                                              expected_specs=None if args.certified_conformance else 5))
+                                              expected_specs=None if args.certified_conformance else args.expected_specs))
         if not report["passed"]:
             raise RuntimeError("Upstream conformance cases did not all pass; inspect the official archive and logs")
     except Exception as error:
