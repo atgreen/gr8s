@@ -7,7 +7,8 @@
   dns-servers
   dns-searches
   dns-options
-  resource-store)
+  resource-store
+  (deletions (make-deletion-controller)))
 
 (defun make-containerd-runtime
     (&key (socket-path "/run/containerd/containerd.sock")
@@ -136,18 +137,49 @@
                                (map 'vector #'containerd-container-status-object details))))))))
 
 (defmethod runtime-delete ((runtime containerd-runtime) uid)
+  (cancel-runtime-pod-deletion (containerd-runtime-deletions runtime) uid)
+  (containerd-delete-uid runtime uid (funcall *pod-deletion-clock*)))
+
+(defun containerd-delete-uid (runtime uid deadline)
+  "Stop UID's containers concurrently against DEADLINE before removing its sandbox."
   (call-containerd-runtime
    (lambda ()
      (let ((sandbox (containerd-owned-sandbox runtime uid)))
        (when sandbox
-         (dolist (container (containerd-containers runtime sandbox))
-           (cri-delete-container
-            (containerd-runtime-socket-path runtime)
-            (cri-container-summary-id container)))
+         (let* ((containers (containerd-containers runtime sandbox))
+                (failures (make-array (length containers) :initial-element nil))
+                (register *runtime-deletion-register-cancel*)
+                (threads
+                  (loop for container in containers for index from 0
+                        collect
+                        (let ((id (cri-container-summary-id container)) (slot index))
+                          (bt:make-thread
+                           (lambda ()
+                             (let ((*runtime-deletion-register-cancel* register))
+                               (handler-case
+                                   (cri-delete-container
+                                    (containerd-runtime-socket-path runtime) id
+                                    :grace-period (max 0 (- deadline (funcall *pod-deletion-clock*))))
+                                 (error (condition) (setf (aref failures slot) condition)))))
+                           :name "gr8s stop container")))))
+           (mapc #'bt:join-thread threads)
+           (loop for failure across failures when failure do (error failure)))
          (cri-delete-pod-sandbox
           (containerd-runtime-socket-path runtime)
           (cri-pod-sandbox-info-id sandbox))))
      nil)))
+
+(defmethod runtime-terminate-pod ((runtime containerd-runtime) pod deadline)
+  "Carry out one cancellable native Pod shutdown job."
+  (containerd-delete-uid runtime (pod-uid pod) deadline))
+
+(defmethod runtime-delete-pod ((runtime containerd-runtime) pod)
+  "Poll the native Pod shutdown job without holding reconciliation until exit."
+  (poll-runtime-pod-deletion (containerd-runtime-deletions runtime) runtime pod))
+
+(defmethod stop-runtime-deletions ((runtime containerd-runtime))
+  "Join native deletion jobs before the containerd service exits."
+  (stop-runtime-deletion-controller (containerd-runtime-deletions runtime)))
 
 (defun containerd-create-container (runtime pod sandbox-id sandbox-config spec)
   (let ((socket (containerd-runtime-socket-path runtime)))

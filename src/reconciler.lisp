@@ -46,11 +46,12 @@
     (observed-status observed)))
 
 (defun converge-deleting-pod (reconciler pod)
-  (runtime-delete (reconciler-runtime reconciler) (pod-uid pod))
-  (remove-pod (reconciler-store reconciler)
-              (pod-namespace pod)
-              (pod-name pod))
-  (pod-status "Succeeded" :reason "Deleted"))
+  (if (runtime-delete-pod (reconciler-runtime reconciler) pod)
+      (progn
+        (remove-pod (reconciler-store reconciler)
+                    (pod-namespace pod) (pod-name pod))
+        (pod-status "Succeeded" :reason "Deleted"))
+      (pod-status "Running" :reason "Terminating")))
 
 (defun reconcile-pod (reconciler namespace name)
   (bt:with-lock-held ((reconciler-lock reconciler))
@@ -65,12 +66,14 @@
                       :reason "RuntimeError"
                       :message (runtime-error-message error)))))))
 
-(defun delete-reconciled-pod (reconciler namespace name &key uid)
+(defun delete-reconciled-pod (reconciler namespace name &key uid resource-version
+                                                      (grace-period nil grace-supplied-p)
+                                                      dry-run)
   (bt:with-lock-held ((reconciler-lock reconciler))
-    (mark-pod-deleting (reconciler-store reconciler) namespace name :uid uid)
-    (converge-deleting-pod
-     reconciler
-     (get-pod (reconciler-store reconciler) namespace name))))
+    (let ((pod (apply #'mark-pod-deleting (reconciler-store reconciler) namespace name
+                      :uid uid :resource-version resource-version :dry-run dry-run
+                      (when grace-supplied-p (list :grace-period grace-period)))))
+      (values (unless dry-run (converge-deleting-pod reconciler pod)) pod))))
 
 (defun reconcile-all (reconciler &key observer)
   (loop for pod in (list-pods (reconciler-store reconciler))

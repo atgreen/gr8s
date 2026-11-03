@@ -18,8 +18,9 @@
     (is (equalp #( "echo hello") (container-spec-args container)))
     (is (equal '(("GREETING" . "hello")) (container-spec-env container)))
     (is (equal '(8080) (container-spec-ports container)))
-    (is (equalp (com.inuoe.jzon:parse *valid-pod-json*)
-                (pod-to-object pod)))))
+    (let ((expected (com.inuoe.jzon:parse *valid-pod-json*)))
+      (setf (gethash "terminationGracePeriodSeconds" (gethash "spec" expected)) 30)
+      (is (equalp expected (pod-to-object pod))))))
 
 (test pods-accept-valid-namespaces
   (let ((object (com.inuoe.jzon:parse *valid-pod-json*)))

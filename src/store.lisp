@@ -96,10 +96,10 @@
             (aref octets 12) (aref octets 13) (aref octets 14)
             (aref octets 15))))
 
-(defun current-timestamp ()
+(defun current-timestamp (&optional (time (get-universal-time)))
   "Return the current UTC time in Kubernetes-compatible RFC 3339 form."
   (multiple-value-bind (second minute hour day month year)
-      (decode-universal-time (get-universal-time) 0)
+      (decode-universal-time time 0)
     (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ"
             year month day hour minute second)))
 
@@ -188,6 +188,8 @@
              :reason "AlreadyExists"
              :message (format nil "Pod ~A already exists" (pod-name pod))))
     (let ((metadata (gethash "metadata" (pod-to-object pod))))
+      (remhash "deletionTimestamp" metadata)
+      (remhash "deletionGracePeriodSeconds" metadata)
       (setf (pod-uid pod) (generate-uid)
             (pod-resource-version pod) "1"
             (gethash "namespace" metadata) (pod-namespace pod)
@@ -224,6 +226,12 @@
               (pod-node-name existing)))
       (let ((metadata (gethash "metadata" (pod-to-object replacement)))
             (existing-metadata (gethash "metadata" (pod-to-object existing))))
+        ;; Deletion is irreversible. An ordinary metadata/spec update cannot
+        ;; erase or extend a shutdown that an agent is already carrying out.
+        (dolist (key '("deletionTimestamp" "deletionGracePeriodSeconds"))
+          (remhash key metadata)
+          (when (gethash key existing-metadata)
+            (setf (gethash key metadata) (gethash key existing-metadata))))
         (setf (pod-uid replacement) (pod-uid existing)
               (pod-resource-version replacement)
               (write-to-string (1+ (parse-integer actual)))
@@ -252,17 +260,29 @@
   "Delete and return the Pod named NAME in NAMESPACE."
   (remove-pod store namespace name))
 
-(defun mark-pod-deleting (store namespace name &key uid)
+(defun mark-pod-deleting (store namespace name &key uid resource-version
+                                                (grace-period nil grace-supplied-p)
+                                                dry-run)
   "Set a Pod's deletion timestamp, advance its resource version, and persist it."
   (with-store-lock (store)
-    (let* ((pod (get-pod-unlocked store namespace name))
+    (let* ((existing (get-pod-unlocked store namespace name))
+           (pod (parse-pod (com.inuoe.jzon:parse
+                            (com.inuoe.jzon:stringify (pod-to-object existing)))))
            (metadata (gethash "metadata" (pod-to-object pod)))
            (next-version (write-to-string
                           (1+ (parse-integer (pod-resource-version pod))))))
       (when (and uid (not (equal uid (pod-uid pod))))
         (error 'kubernetes-error :status-code 409 :reason "Conflict"
                :message "Pod UID no longer matches deletion precondition"))
-      (setf (gethash "deletionTimestamp" metadata) (current-timestamp)
+      (when (and resource-version (not (equal resource-version (pod-resource-version pod))))
+        (error 'kubernetes-error :status-code 409 :reason "Conflict"
+               :message "Pod resourceVersion no longer matches deletion precondition"))
+      (unless (prepare-pod-deletion store pod grace-period grace-supplied-p)
+        (return-from mark-pod-deleting pod))
+      (setf
             (gethash "resourceVersion" metadata) next-version
             (pod-resource-version pod) next-version)
-      (persist-pod store pod))))
+      (unless dry-run
+        (persist-pod store pod)
+        (index-pod store pod))
+      pod)))
