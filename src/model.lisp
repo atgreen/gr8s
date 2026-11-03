@@ -1,3 +1,13 @@
+;;;; SPDX-FileCopyrightText: 2026 gr8s contributors
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Define gr8s's deliberately small Kubernetes domain model and the strict
+;;;; JSON-to-model boundary used by the HTTP API.  Parsing accepts the fields
+;;;; emitted by kubectl for a single-namespace Pod, rejects unsupported
+;;;; semantics early, and returns simple structures shared by storage,
+;;;; scheduling, reconciliation, and runtime adapters.
+
 (in-package #:gr8s)
 
 (define-condition kubernetes-error (error)
@@ -13,9 +23,11 @@
   (:report (lambda (condition stream)
              (format stream "~A: ~A"
                      (kubernetes-error-reason condition)
-                     (kubernetes-error-message condition)))))
+                     (kubernetes-error-message condition))))
+  (:documentation "Describe an HTTP-facing Kubernetes API failure."))
 
 (defstruct container-spec
+  "Represent the supported, runtime-relevant portion of a Pod container."
   name
   image
   command
@@ -24,6 +36,7 @@
   ports)
 
 (defstruct pod
+  "Represent a validated Kubernetes Pod and its authoritative JSON object."
   name
   namespace
   containers
@@ -34,6 +47,7 @@
   object)
 
 (defstruct node-record
+  "Represent a registered worker node and its control-plane lease state."
   id
   name
   pod-cidr
@@ -42,23 +56,27 @@
   last-heartbeat)
 
 (defun invalid-pod (control &rest arguments)
+  "Signal an HTTP 422 Kubernetes error formatted by CONTROL and ARGUMENTS."
   (error 'kubernetes-error
          :status-code 422
          :reason "Invalid"
          :message (apply #'format nil control arguments)))
 
 (defun object-value (object key &optional (context "object"))
+  "Return KEY from OBJECT, or reject the missing field in CONTEXT."
   (multiple-value-bind (value present-p) (gethash key object)
     (if present-p
         value
         (invalid-pod "~A requires field ~S" context key))))
 
 (defun require-object (value context)
+  "Return VALUE when it is a JSON object, otherwise reject it in CONTEXT."
   (unless (hash-table-p value)
     (invalid-pod "~A must be an object" context))
   value)
 
 (defun reject-unsupported-fields (object allowed context)
+  "Validate that OBJECT contains only ALLOWED string keys in CONTEXT."
   (require-object object context)
   (maphash (lambda (key value)
              (declare (ignore value))
@@ -68,6 +86,7 @@
   object)
 
 (defun require-empty-object-if-present (object key context)
+  "Require KEY, when present in OBJECT, to contain an empty JSON object."
   (multiple-value-bind (value present-p) (gethash key object)
     (when present-p
       (require-object value context)
@@ -75,16 +94,19 @@
         (invalid-pod "~A must be empty" context)))))
 
 (defun require-nonempty-string (value context)
+  "Return VALUE when it is a non-empty string, or reject it in CONTEXT."
   (unless (and (stringp value) (plusp (length value)))
     (invalid-pod "~A must be a non-empty string" context))
   value)
 
 (defun dns-label-character-p (character)
+  "Return true when CHARACTER is valid inside a lower-case DNS label."
   (or (and (char>= character #\a) (char<= character #\z))
       (digit-char-p character)
       (char= character #\-)))
 
 (defun dns-label-p (value &optional (maximum-length 63))
+  "Return true when VALUE is a valid DNS label within MAXIMUM-LENGTH."
   (and (stringp value)
        (plusp (length value))
        (<= (length value) maximum-length)
@@ -93,34 +115,40 @@
        (not (char= #\- (char value (1- (length value)))))))
 
 (defun dns-subdomain-p (value)
+  "Return true when VALUE is a valid Kubernetes-style DNS subdomain."
   (and (stringp value)
        (<= (length value) 253)
        (every #'dns-label-p
               (uiop:split-string value :separator '(#\.)))))
 
 (defun require-dns-label (value context)
+  "Return VALUE when it is a DNS label, or reject it in CONTEXT."
   (unless (dns-label-p value)
     (invalid-pod "~A must be a lowercase DNS label" context))
   value)
 
 (defun require-dns-subdomain (value context)
+  "Return VALUE when it is a DNS subdomain, or reject it in CONTEXT."
   (unless (dns-subdomain-p value)
     (invalid-pod "~A must be a lowercase DNS subdomain" context))
   value)
 
 (defun optional-vector (object key context)
+  "Return array KEY from OBJECT, defaulting to an empty vector."
   (let ((value (gethash key object #())))
     (unless (vectorp value)
       (invalid-pod "~A.~A must be an array" context key))
     value))
 
 (defun require-string-vector (value context)
+  "Return VALUE when it is an array of strings, or reject it in CONTEXT."
   (unless (and (vectorp value)
                (every #'stringp value))
     (invalid-pod "~A must be an array of strings" context))
   value)
 
 (defun parse-environment (container)
+  "Parse a container's env array into name/value cons cells."
   (loop for variable across (optional-vector container "env" "container")
         do (reject-unsupported-fields variable '("name" "value") "env")
         collect (cons (require-nonempty-string
@@ -132,6 +160,7 @@
                         value))))
 
 (defun parse-ports (container)
+  "Parse and validate the supported TCP container ports in CONTAINER."
   (loop for port across (optional-vector container "ports" "container")
         collect
         (progn
@@ -146,6 +175,7 @@
             number))))
 
 (defun parse-container (object)
+  "Validate a container JSON OBJECT and return a CONTAINER-SPEC."
   (reject-unsupported-fields
    object '("name" "image" "command" "args" "env" "ports" "resources")
    "container")
@@ -165,6 +195,7 @@
    :ports (parse-ports object)))
 
 (defun parse-pod (input)
+  "Parse JSON text or an object into the supported, validated POD model."
   (let* ((object (require-object
                   (if (hash-table-p input)
                       input
@@ -228,4 +259,5 @@
          :object object)))))
 
 (defun pod-to-object (pod)
+  "Return POD's authoritative Kubernetes JSON object."
   (pod-object pod))
