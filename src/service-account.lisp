@@ -224,8 +224,37 @@
         (unless (= 409 (kubernetes-error-status-code condition)) (error condition))))
     (ensure-default-service-account store name)))
 
+(defun ensure-namespace-root-ca (store namespace)
+  "Publish the actual native API trust anchor without rotating the ConfigMap identity."
+  (let* ((ca (getf (pod-store-in-cluster-config store) :ca-pem))
+         (existing (handler-case (get-core-resource store "configmaps" namespace "kube-root-ca.crt")
+                     (kubernetes-error (condition)
+                       (unless (= 404 (kubernetes-error-status-code condition)) (error condition))))))
+    (when ca
+      (cond
+        ((null existing)
+         (let ((owner (get-core-resource store "namespaces" nil namespace)))
+           (create-core-resource store "configmaps"
+            (core-object "metadata" (core-object "name" "kube-root-ca.crt"
+                                      "ownerReferences" (vector (core-object "apiVersion" "v1" "kind" "Namespace"
+                                                                "name" namespace "uid" (gethash "uid" (gethash "metadata" owner)))))
+                         "data" (core-object "ca.crt" ca)) namespace)))
+        ((not (equal ca (gethash "ca.crt" (or (gethash "data" existing) (core-object)))))
+         (update-core-resource store "configmaps" namespace "kube-root-ca.crt"
+          (lambda (object)
+            (unless (gethash "data" object) (setf (gethash "data" object) (core-object)))
+            (setf (gethash "ca.crt" (gethash "data" object)) ca)
+            object)))))))
+
+(defun ensure-native-namespace-root-cas (store)
+  "Initialize CA ConfigMaps for persisted namespaces once the native CA is available."
+  (dolist (namespace (list-core-resources store "namespaces"))
+    (ensure-namespace-root-ca store (gethash "name" (gethash "metadata" namespace)))))
+
 (defun complete-created-bootstrap-resource (store resource object dry-run)
-  "Create the default account after a real Namespace is admitted."
+  "Create the default account and API trust anchor after a real Namespace is admitted."
   (when (and (equal resource "namespaces") (not dry-run) (pod-store-in-cluster-config store))
-    (ensure-default-service-account store (gethash "name" (gethash "metadata" object))))
+    (let ((namespace (gethash "name" (gethash "metadata" object))))
+      (ensure-default-service-account store namespace)
+      (ensure-namespace-root-ca store namespace)))
   object)

@@ -11,6 +11,7 @@
 
 (defmethod ag-proto:deserialize-from-bytes
     ((type (eql 'gr8s.cri.v1::linux-container-user)) data)
+  "Decode CRI Linux identities, accepting packed, unpacked and mixed group fields."
   (declare (ignore type))
   (let ((object (make-instance 'gr8s.cri.v1::linux-container-user))
         (buffer (cons data 0)) (groups nil))

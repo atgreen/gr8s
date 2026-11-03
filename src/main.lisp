@@ -502,7 +502,8 @@
                             service-controller (make-native-service-controller store))
                       (setf (pod-store-in-cluster-config store)
                             (list :host "10.96.0.1" :port 443
-                                  :ca-pem (uiop:read-file-string (cluster-pki-ca-certificate-path pki)))))
+                                  :ca-pem (uiop:read-file-string (cluster-pki-ca-certificate-path pki))))
+                      (ensure-native-namespace-root-cas store))
                     (setf server
                           (start-server
                            :address address :port port

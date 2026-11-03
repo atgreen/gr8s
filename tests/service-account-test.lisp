@@ -20,6 +20,32 @@
   (trivial-utf-8:utf-8-bytes-to-string
    (gr8s::core-base64-bytes (gethash "token" (gethash "data" secret)) "token")))
 
+(test native-namespace-creation-publishes-and-restores-the-real-root-ca
+  (with-temporary-store (store directory)
+    (setf (gr8s::pod-store-in-cluster-config store) (list :ca-pem "the-cluster-ca"))
+    (let ((namespace (gr8s::create-core-resource store "namespaces"
+                       (gr8s::core-object "metadata" (gr8s::core-object "name" "e2e-test")) nil)))
+      (gr8s::complete-created-bootstrap-resource store "namespaces" namespace nil)
+      (let* ((original (gr8s::get-core-resource store "configmaps" "e2e-test" "kube-root-ca.crt"))
+             (uid (gethash "uid" (gethash "metadata" original))))
+        (is (equal "the-cluster-ca" (gethash "ca.crt" (gethash "data" original))))
+        (is (equal (gethash "uid" (gethash "metadata" namespace))
+                   (gethash "uid" (aref (gethash "ownerReferences" (gethash "metadata" original)) 0))))
+        (gr8s::update-core-resource store "configmaps" "e2e-test" "kube-root-ca.crt"
+         (lambda (object) (setf (gethash "data" object) (gr8s::core-object "other" "preserved")) object))
+        (gr8s::ensure-native-namespace-root-cas store)
+        (let ((restored (gr8s::get-core-resource store "configmaps" "e2e-test" "kube-root-ca.crt")))
+          (is (equal uid (gethash "uid" (gethash "metadata" restored))))
+          (is (equal "the-cluster-ca" (gethash "ca.crt" (gethash "data" restored))))
+          (is (equal "preserved" (gethash "other" (gethash "data" restored))))
+          (gr8s::ensure-native-namespace-root-cas store)
+          (is (equalp restored (gr8s::get-core-resource store "configmaps" "e2e-test" "kube-root-ca.crt")))
+          (is (equalp restored (gr8s::get-core-resource (open-store directory) "configmaps" "e2e-test" "kube-root-ca.crt")))))
+      (let ((preview (gr8s::create-core-resource store "namespaces"
+                       (gr8s::core-object "metadata" (gr8s::core-object "name" "preview")) nil :dry-run t)))
+        (gr8s::complete-created-bootstrap-resource store "namespaces" preview t)
+        (is (null (gr8s::list-core-resources store "configmaps" "preview")))))))
+
 (test credentials-require-private-issuance-and-live-account-identities
   (with-temporary-store (store directory)
     (service-account-test-store store)
