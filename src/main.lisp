@@ -469,6 +469,7 @@
          (pki (ensure-cluster-pki (merge-pathnames "pki/" state-directory)))
          (server nil)
          (api-server nil)
+         (service-controller nil)
          (service-network-created nil)
          (worker nil)
          (node-server nil)
@@ -495,8 +496,10 @@
                     (when (and local-agent (equal "containerd" (getf options :runtime))
                                (equal "managed" (getf options :containerd-mode)))
                       (ensure-native-bootstrap-namespaces store)
+                      (ensure-native-api-service store)
                       (setf service-network-created (ensure-in-cluster-network pki))
-                      (setf api-server (start-in-cluster-api store runtime reconciler pki))
+                      (setf api-server (start-in-cluster-api store runtime reconciler pki)
+                            service-controller (make-native-service-controller store))
                       (setf (pod-store-in-cluster-config store)
                             (list :host "10.96.0.1" :port 443
                                   :ca-pem (uiop:read-file-string (cluster-pki-ca-certificate-path pki)))))
@@ -506,7 +509,11 @@
                            :store store :runtime runtime
                            :reconciler reconciler))
                     (setf worker (start-reconciliation-worker reconciler
-                                  :before-reconcile (lambda () (collect-orphaned-api-objects reconciler))))
+                                  :before-reconcile (lambda ()
+                                      (collect-orphaned-api-objects reconciler)
+                                      (when service-controller
+                                        (ensure-in-cluster-network pki)
+                                        (reconcile-native-services service-controller)))))
                     (when (getf options :kubeconfig)
                       (write-kubeconfig
                        (getf options :kubeconfig)
@@ -516,6 +523,7 @@
                     (loop until *shutdown-requested* do (sleep 0.1)))
                (when worker (stop-reconciliation-worker worker))
                (when server (stop-server server))
+               (when service-controller (stop-native-service-controller service-controller))
                (when api-server (stop-server api-server))
                (when (or api-server service-network-created) (remove-in-cluster-network pki))
                (setf (pod-store-in-cluster-config store) nil))))
