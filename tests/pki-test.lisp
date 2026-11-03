@@ -2,6 +2,16 @@
 
 (in-suite gr8s)
 
+(test certificate-signatures-use-minimal-positive-der-integers
+  (let ((signature (make-array 64 :element-type '(unsigned-byte 8) :initial-element 0)))
+    (setf (aref signature 31) 1 (aref signature 63) 128)
+    (is (equalp #(48 7 2 1 1 2 2 0 128) (gr8s::ecdsa-signature-der signature)))
+    (let ((parsed (pure-tls::parse-ecdsa-cert-signature (gr8s::ecdsa-signature-der signature))))
+      (is (= 1 (getf parsed :r)))
+      (is (= 128 (getf parsed :s))))
+    (setf (aref signature 31) 0 (aref signature 63) 127)
+    (is (equalp #(48 6 2 1 0 2 1 127) (gr8s::ecdsa-signature-der signature)))))
+
 (defmacro with-temporary-pki ((pki path) &body body)
   `(let* ((,path (merge-pathnames
                   (format nil "gr8s-pki-test-~36R/" (random (expt 36 10)))
