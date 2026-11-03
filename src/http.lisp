@@ -106,6 +106,11 @@
                   "namespaced" t
                   "kind" "Pod"
                   "verbs" #( "create"))
+     (json-object "name" "configmaps" "singularName" "configmap" "namespaced" t
+                  "kind" "ConfigMap" "shortNames" #( "cm")
+                  "verbs" #( "create" "delete" "get" "list" "patch" "update"))
+     (json-object "name" "secrets" "singularName" "secret" "namespaced" t
+                  "kind" "Secret" "verbs" #( "create" "delete" "get" "list" "patch" "update"))
      (json-object "name" "events"
                   "singularName" ""
                   "namespaced" t
@@ -197,7 +202,7 @@
        "metadata" (reference-schema
                    "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta")
        "spec" (reference-schema "io.k8s.api.core.v1.PodSpec"))))
-    definitions))
+    (add-core-resource-openapi-definitions definitions)))
 
 (defun openapi-document ()
   (json-object "swagger" "2.0"
@@ -299,7 +304,7 @@
      (json-object
       "openapi" "3.0.0"
       "info" (json-object "title" "gr8s" "version" "v1")
-      "paths" (openapi-v3-pod-paths)
+      "paths" (add-core-resource-openapi-paths (openapi-v3-pod-paths))
       "components" (json-object "schemas" (openapi-definitions))))))
 
 (defun create-pod-response (store reconciler)
@@ -928,6 +933,8 @@
           ((string= path "/api/v1") (api-resources-response))
           ((string= path "/api/v1/namespaces/default/events")
            (event-list-response))
+          ((core-resource-route path)
+           (dispatch-core-resource-request store path method))
           ((pod-route-parts path)
            (dispatch-pod-request store runtime reconciler path method))
           ((string= path "/api/v1/namespaces/default/pods")
