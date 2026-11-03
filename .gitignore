@@ -6,3 +6,6 @@
 .beads/proxieddb/
 *.gate.lock*
 build/
+__pycache__/
+*.pyc
+.beads/.auto-import-issues.jsonl

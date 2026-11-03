@@ -402,3 +402,111 @@
         (ignore-errors (usocket:socket-close listener))
         (when upstream-thread
           (ignore-errors (bt:join-thread upstream-thread)))))))
+
+(defun node-network-for-test (&optional (cidr "10.88.8.0/24"))
+  (make-instance 'gr8s.node.v1::node-network-config
+                 :cluster-pod-cidr "10.88.0.0/16" :node-pod-cidr cidr
+                 :dns-address "169.254.1.1" :mtu 1450 :vni 42))
+
+(test assigned-network-and-ipam-restore-before-agent-reconciliation
+  (with-temporary-store (store path)
+    (assert store)
+    (let* ((state (merge-pathnames "network-agent/" path))
+           (runtime (gr8s::make-node-runtime state (make-fake-runtime) nil))
+           (network (gr8s::node-network-object (node-network-for-test))))
+      (gr8s::configure-node-runtime-network runtime network)
+      (is (string= "10.88.8.1"
+                   (gr8s::allocate-pod-address
+                    (gr8s::node-runtime-ipam runtime) "sandbox-a" "eth0")))
+      (let ((restored (gr8s::make-node-runtime state (make-fake-runtime) nil)))
+        (is-true (gr8s::node-runtime-cni-operations restored))
+        (is (string= "10.88.8.1"
+                     (gr8s::check-pod-address
+                      (gr8s::node-runtime-ipam restored) "sandbox-a" "eth0")))
+        (signals gr8s::cni-error
+          (gr8s::configure-node-runtime-network
+           restored (gr8s::node-network-object
+                     (node-network-for-test "10.88.9.0/24")))))
+      (is (= #o600 (logand #o777 (sb-posix:stat-mode
+                                 (sb-posix:stat
+                                  (gr8s::node-runtime-network-path runtime)))))))))
+
+(test managed-agent-refuses-cni-before-network-assignment
+  (with-temporary-store (store path)
+    (assert store)
+    (let* ((runtime (gr8s::make-node-runtime path (make-fake-runtime) nil))
+           (response (gr8s::handle-node-runtime-cni
+                      runtime (agent-cni-request-for-test "ADD"))))
+      (is-false (slot-value response 'gr8s.node.v1::success))
+      (is (search "assignment is not ready"
+                  (slot-value response 'gr8s.node.v1::error-message))))))
+
+(test node-network-rejects-invalid-subnets-before-persistence
+  (with-temporary-store (store path)
+    (assert store)
+    (let ((runtime (gr8s::make-node-runtime path (make-fake-runtime) nil)))
+      (dolist (cidr '("192.0.2.0/24" "10.88.1.1/24" "10.88.0.0/31"))
+        (signals gr8s::cni-error
+          (gr8s::configure-node-runtime-network
+           runtime (gr8s::node-network-object (node-network-for-test cidr)))))
+      (is-false (probe-file (gr8s::node-runtime-network-path runtime))))))
+
+(defun node-network-with-routes-for-test (routes)
+  (let ((network (gr8s::node-network-object (node-network-for-test))))
+    (setf (gethash "underlayAddress" network) "192.0.2.1"
+          (gethash "routes" network)
+          (coerce (loop for (id cidr address) in routes
+                        collect (gr8s::json-object "nodeID" id "podCIDR" cidr
+                                                   "underlayAddress" address)) 'vector))
+    network))
+
+(test partial-node-network-update-is-replayed-from-the-durable-journal
+  (with-temporary-store (store path)
+    (assert store)
+    (let* ((state (merge-pathnames "journal-agent/" path))
+           (fail-p nil)
+           (attempts nil)
+           (reconciler (lambda (network previous)
+                         (push (cons network previous) attempts)
+                         (when fail-p (error "injected partial FDB update failure"))))
+           (runtime (gr8s::make-node-runtime state (make-fake-runtime) nil
+                                             :network-reconciler reconciler))
+           (old (node-network-with-routes-for-test
+                 '(("node-a" "10.88.9.0/24" "192.0.2.2"))))
+           (new (node-network-with-routes-for-test
+                 '(("node-a" "10.88.9.0/24" "192.0.2.3")
+                   ("node-b" "10.88.10.0/24" "192.0.2.4")))))
+      (gr8s::configure-node-runtime-network runtime old)
+      (gr8s::allocate-pod-address (gr8s::node-runtime-ipam runtime) "existing-pod" "eth0")
+      (setf fail-p t)
+      (signals error (gr8s::configure-node-runtime-network runtime new))
+      (is (eq old (gr8s::node-runtime-network runtime)))
+      (is (equalp old (com.inuoe.jzon:parse (gr8s::node-runtime-network-path runtime))))
+      (is (equalp new (com.inuoe.jzon:parse (gr8s::node-runtime-network-pending-path runtime))))
+      (setf fail-p nil attempts nil)
+      (let* ((restarted (gr8s::make-node-runtime state (make-fake-runtime) nil
+                                               :network-reconciler reconciler))
+             (previous (cdr (first attempts)))
+             (old-routes (mapcan #'gr8s::node-vxlan-route-pairs previous)))
+        ;; Both the old kernel entries and partially installed new entries are
+        ;; available to cleanup on restart, while Pod addresses remain stable.
+        (is (member '("10.88.9.0/24" . "192.0.2.2") old-routes :test #'equal))
+        (is (member '("10.88.9.0/24" . "192.0.2.3") old-routes :test #'equal))
+        (is (equalp new (gr8s::node-runtime-network restarted)))
+        (is-false (probe-file (gr8s::node-runtime-network-pending-path restarted)))
+        (is (string= "10.88.8.1"
+                     (gr8s::check-pod-address
+                      (gr8s::node-runtime-ipam restarted) "existing-pod" "eth0")))))))
+
+(test node-network-rejects-conflicting-peer-routes
+  (dolist (routes '((("a" "10.88.8.0/24" "192.0.2.2"))
+                    (("a" "192.0.2.0/24" "192.0.2.2"))
+                    (("a" "10.88.9.1/24" "192.0.2.2"))
+                    (("a" "10.88.9.0/24" "127.0.0.1"))
+                    (("a" "10.88.9.0/24" "192.0.2.1"))
+                    (("a" "10.88.9.0/24" "192.0.2.2")
+                     ("a" "10.88.10.0/24" "192.0.2.3"))
+                    (("a" "10.88.9.0/24" "192.0.2.2")
+                     ("b" "10.88.9.128/25" "192.0.2.3"))))
+    (signals gr8s::cni-error
+      (gr8s::validate-node-network-object (node-network-with-routes-for-test routes)))))

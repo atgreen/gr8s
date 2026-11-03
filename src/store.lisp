@@ -5,6 +5,7 @@
   (pods (make-hash-table :test #'equal))
   (nodes (make-hash-table :test #'equal))
   (pod-observed-phases (make-hash-table :test #'equal))
+  (pod-observed-statuses (make-hash-table :test #'equal))
   (lock (bt:make-lock "gr8s store")))
 
 (defmacro with-store-lock ((store) &body body)
@@ -29,7 +30,8 @@
   (let ((object (make-hash-table :test #'equal)))
     (setf (gethash "id" object) (node-record-id node)
           (gethash "name" object) (node-record-name node)
-          (gethash "podCIDR" object) (node-record-pod-cidr node))
+          (gethash "podCIDR" object) (node-record-pod-cidr node)
+          (gethash "underlayAddress" object) (node-record-underlay-address node))
     object))
 
 (defun parse-node-record (input)
@@ -38,7 +40,8 @@
                     (com.inuoe.jzon:parse input))))
     (make-node-record :id (gethash "id" object)
                       :name (gethash "name" object)
-                      :pod-cidr (gethash "podCIDR" object))))
+                      :pod-cidr (gethash "podCIDR" object)
+                      :underlay-address (gethash "underlayAddress" object ""))))
 
 (defun secure-random-octets (count)
   (let ((octets (make-array count :element-type '(unsigned-byte 8))))
@@ -198,6 +201,8 @@
     (let ((pod (get-pod-unlocked store namespace name)))
       (delete-file (pod-path store pod))
       (remhash (pod-key namespace name) (pod-store-pods store))
+      (remhash (pod-uid pod) (pod-store-pod-observed-phases store))
+      (remhash (pod-uid pod) (pod-store-pod-observed-statuses store))
       pod)))
 
 (defun delete-pod (store namespace name)

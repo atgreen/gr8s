@@ -9,7 +9,7 @@
 (defparameter +dns-kubernetes-service+
   "kubernetes.default.svc.cluster.local")
 (defparameter +dns-kubernetes-service-address+ #(10 96 0 1))
-(defparameter +dns-pod-server-address+ "10.88.0.1")
+(defparameter +dns-pod-server-address+ "169.254.1.1")
 (defparameter +dns-pod-searches+
   '("default.svc.cluster.local" "svc.cluster.local" "cluster.local"))
 (defparameter +dns-pod-options+ '("ndots:5"))

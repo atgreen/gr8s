@@ -57,6 +57,7 @@ message NodeHello {
   uint64 last_applied_revision = 4;
   map<string, string> labels = 5;
   repeated string capabilities = 6;
+  string underlay_address = 7;
 }
 
 message Heartbeat {
@@ -72,6 +73,21 @@ message SnapshotAck {
 message NodeStatus {
   uint64 observed_at_unix_nanos = 1;
   repeated PodObservedStatus pods = 2;
+  repeated EndpointTelemetry endpoints = 3;
+}
+
+message EndpointTelemetry {
+  string sandbox_id = 1;
+  string interface_name = 2;
+  string pod_ip = 3;
+  uint64 allowed_packets = 4;
+  uint64 allowed_bytes = 5;
+  uint64 dropped_packets = 6;
+  uint64 dropped_bytes = 7;
+  uint64 rejected_spoofs = 8;
+  uint64 malformed_packets = 9;
+  uint64 unsupported_packets = 10;
+  string error_message = 11;
 }
 
 message PodObservedStatus {
@@ -144,6 +160,7 @@ message NodeNetworkConfig {
   string dns_address = 3;
   uint32 vni = 4;
   uint32 mtu = 5;
+  string underlay_address = 6;
 }
 
 message NodeRoute {

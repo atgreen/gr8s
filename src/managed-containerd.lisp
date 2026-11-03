@@ -205,9 +205,7 @@
   (managed-containerd-directory manager "containerd/containerd.log"))
 
 (defun managed-containerd-cni-config-text (manager)
-  (let ((ipam-state
-          (managed-containerd-directory manager "containerd/cni/state"))
-        (whistler-program
+  (let ((whistler-program
           (merge-pathnames
            "gr8s-whistler.bpf.o"
            (uiop:ensure-directory-pathname
@@ -215,8 +213,7 @@
         (map-pin-root (managed-containerd-bpf-directory manager)))
     (format
      nil
-     "{\"cniVersion\":\"1.0.0\",\"name\":\"gr8s\",\"plugins\":[{\"type\":\"bridge\",\"bridge\":\"gr8s0\",\"isGateway\":true,\"ipMasq\":true,\"hairpinMode\":true,\"ipam\":{\"type\":\"host-local\",\"dataDir\":~A,\"ranges\":[[{\"subnet\":\"10.88.0.0/16\",\"gateway\":\"10.88.0.1\"}]],\"routes\":[{\"dst\":\"0.0.0.0/0\"}]}},{\"type\":\"firewall\"},{\"type\":\"gr8s\",\"socket\":~A,\"direction\":\"egress\",\"program\":~A,\"mapPinRoot\":~A}]}~%"
-     (com.inuoe.jzon:stringify (namestring ipam-state))
+     "{\"cniVersion\":\"1.0.0\",\"name\":\"gr8s\",\"plugins\":[{\"type\":\"gr8s\",\"socket\":~A,\"direction\":\"egress\",\"program\":~A,\"mapPinRoot\":~A}]}~%"
      (com.inuoe.jzon:stringify
       (managed-containerd-agent-cni-socket-path manager))
      (com.inuoe.jzon:stringify (namestring whistler-program))

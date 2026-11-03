@@ -164,6 +164,23 @@
              (gr8s.cri.v1::pod-sandbox-id response)))
       (ag-grpc:channel-close channel))))
 
+(defun cri-pod-sandbox-ip-from-response (response)
+  (let* ((sandbox (gr8s.cri.v1::status response))
+         (network (and sandbox (gr8s.cri.v1::network sandbox))))
+    (if network (gr8s.cri.v1::ip network) "")))
+
+(defun cri-pod-sandbox-ip (socket-path sandbox-id &key (timeout 5))
+  (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
+    (unwind-protect
+         (multiple-value-bind (response status)
+             (gr8s.cri.v1::runtime-service-pod-sandbox-status
+              (gr8s.cri.v1::make-runtime-service-stub channel)
+              (make-instance 'gr8s.cri.v1::pod-sandbox-status-request
+                             :pod-sandbox-id sandbox-id) :timeout timeout)
+           (ensure-cri-status "PodSandboxStatus" status)
+           (cri-pod-sandbox-ip-from-response response))
+      (ag-grpc:channel-close channel))))
+
 (defun cri-delete-pod-sandbox (socket-path sandbox-id &key (timeout 30))
   "Stop and remove SANDBOX-ID through the CRI runtime service."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))

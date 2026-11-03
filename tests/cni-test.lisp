@@ -268,56 +268,99 @@
     (is (equalp #( "0.4.0" "1.0.0" "1.1.0")
                 (gethash "supportedVersions" result)))))
 
-(test cni-policy-install-reuses-the-map-and-pins-the-tcx-link
+(defun policy-map-fixture (name)
+  (whistler/loader::make-map-info
+   :name name :fd (+ 41 (position name '("rejected_spoofs" "endpoint_identity" "traffic_stats")
+                                 :test #'string=))))
+
+(test cni-policy-install-reuses-counters-and-atomically-replaces-the-link
   (let ((calls nil)
-        (configuration
-          (gr8s::parse-cni-configuration *valid-cni-config*
-                                           :require-previous t))
-        (context (gr8s::make-cni-context
-                  :container-id "sandbox-1" :netns "/proc/42/ns/net"
-                  :interface-name "eth0")))
+        (configuration (gr8s::parse-cni-configuration *valid-cni-config* :require-previous t))
+        (context (gr8s::make-cni-context :container-id "sandbox-1"
+                                        :netns "/proc/42/ns/net" :interface-name "eth0")))
+    (setf (gr8s::cni-configuration-endpoint-address configuration) "10.88.1.2")
     (gr8s::install-cni-policy
      configuration context "/pins/rejected_spoofs" "/pins/tcx-egress"
      :ensure-directory (lambda (path) (push (list :mkdir path) calls))
      :path-exists-p (lambda (path)
-                      (member path '("/pins/rejected_spoofs" "/pins/tcx-egress")
+                      (member path '("/pins/rejected_spoofs" "/pins/traffic_stats" "/pins/tcx-egress")
                               :test #'string=))
      :open-pinned (lambda (path)
-                    (push (list :open path) calls)
-                    41)
+                    (whistler/loader:map-info-fd
+                     (policy-map-fixture (file-namestring path))))
+     :validate-map (lambda (fd name) (push (list :validate fd name) calls) (policy-map-fixture name))
      :remove-path (lambda (path) (push (list :remove path) calls))
-     :open-object (lambda (path)
-                    (push (list :open-object path) calls)
-                    :object)
+     :open-object (lambda (path) (declare (ignore path)) :object)
      :load-object (lambda (object replacements)
-                    (push (list :load object replacements) calls)
-                    object)
-     :object-map (lambda (object name)
-                   (declare (ignore object name)) :map)
-     :object-program (lambda (object name)
-                       (declare (ignore object name)) :program)
-     :map-fd (lambda (map) (declare (ignore map)) 41)
+                    (push (list :load object (sort (copy-list replacements) #'string< :key #'car)) calls))
+     :object-map (lambda (object name) (declare (ignore object)) (policy-map-fixture name))
+     :object-program (lambda (object name) (declare (ignore object name)) :program)
      :program-fd (lambda (program) (declare (ignore program)) 71)
+     :initialize-identity (lambda (map config ctx)
+                            (declare (ignore ctx))
+                            (push (list :identity (whistler/loader:map-info-fd map)
+                                        (gr8s::cni-configuration-endpoint-address config)) calls))
      :pin-object (lambda (fd path) (push (list :pin fd path) calls))
-     :call-in-netns (lambda (path operation)
-                      (push (list :netns path) calls)
-                      (funcall operation))
-     :interface-index (lambda (name)
-                        (push (list :ifindex name) calls)
-                        9)
-     :attach-tcx (lambda (fd index direction)
-                   (push (list :attach fd index direction) calls)
-                   81)
+     :rename-pin (lambda (from to) (push (list :rename from to) calls))
+     :staged-links (constantly nil)
+     :call-in-netns (lambda (path operation) (declare (ignore path)) (funcall operation))
+     :interface-index (lambda (name) (declare (ignore name)) 9)
+     :attach-tcx (lambda (fd index direction) (push (list :attach fd index direction) calls) 81)
      :close-fd (lambda (fd) (push (list :close fd) calls))
-     :close-object (lambda (object) (push (list :close-object object) calls)))
-    (is (member '(:load :object (("rejected_spoofs" . 41))) calls
-                :test #'equal))
-    (is (member '(:remove "/pins/tcx-egress") calls :test #'equal))
-    (is (member '(:attach 71 9 "egress") calls :test #'equal))
-    (is (member '(:pin 81 "/pins/tcx-egress") calls :test #'equal))
-    (is (member '(:close 81) calls :test #'equal))
-    (is (not (member '(:pin 41 "/pins/rejected_spoofs") calls
-                     :test #'equal)))))
+     :close-object (lambda (object) (declare (ignore object)) (push '(:close-object) calls)))
+    (is (member '(:load :object (("rejected_spoofs" . 41) ("traffic_stats" . 43))) calls :test #'equal))
+    (is (member '(:identity 42 "10.88.1.2") calls :test #'equal))
+    (is (member '(:pin 42 "/pins/endpoint_identity") calls :test #'equal))
+    (is-false (member '(:remove "/pins/tcx-egress") calls :test #'equal))
+    (let* ((events (reverse calls))
+           (attach (position :attach events :key #'first))
+           (pin (position 81 events :key #'second))
+           (rename (position :rename events :key #'first)))
+      (is (< attach pin rename))
+      (is (string= "/pins/tcx-egress" (third (nth rename events)))))))
+
+(test failed-cni-link-pinning-leaves-the-old-policy-and-counters-in-place
+  (let ((removed nil) (renamed nil)
+        (configuration (gr8s::parse-cni-configuration *valid-cni-config*)))
+    (signals error
+      (gr8s::install-cni-policy
+       configuration (gr8s::make-cni-context :netns "/fake/netns" :interface-name "eth0")
+       "/pins/rejected_spoofs" "/pins/tcx-egress"
+       :ensure-directory (constantly nil) :path-exists-p (constantly t)
+       :open-pinned (lambda (path) (whistler/loader:map-info-fd (policy-map-fixture (file-namestring path))))
+       :validate-map (lambda (fd name) (declare (ignore fd)) (policy-map-fixture name))
+       :open-object (constantly :object) :load-object (constantly nil)
+       :object-map (lambda (object name) (declare (ignore object)) (policy-map-fixture name))
+       :object-program (constantly :program) :program-fd (constantly 71)
+       :initialize-identity (constantly nil)
+       :pin-object (lambda (fd path) (declare (ignore fd path)) (error "injected pin failure"))
+       :rename-pin (lambda (&rest args) (declare (ignore args)) (setf renamed t))
+       :remove-path (lambda (path) (push path removed))
+       :call-in-netns (lambda (path function) (declare (ignore path)) (funcall function))
+       :interface-index (constantly 9) :attach-tcx (constantly 81)
+       :close-fd (constantly nil) :close-object (constantly nil)))
+    (is-false renamed)
+    (is-false (member "/pins/tcx-egress" removed :test #'string=))
+    (is-false (member "/pins/rejected_spoofs" removed :test #'string=))
+    (is-false (member "/pins/traffic_stats" removed :test #'string=))))
+
+(test pinned-map-schemas-and-tcx-targets-are-validated-before-use
+  (dolist (spec gr8s::+cni-policy-map-specs+)
+    (let ((info (make-array 256 :element-type '(unsigned-byte 8) :initial-element 0)))
+      (flet ((put (offset value) (replace info (gr8s::netlink-integer value 4) :start1 offset)))
+        (put 0 2) (put 8 4) (put 12 (second spec)) (put 16 (third spec)) (put 20 (fourth spec))
+        (is (= 42 (whistler/loader:map-info-fd
+                   (gr8s::cni-policy-map-info 42 (first spec) :object-info (lambda (fd) (declare (ignore fd)) info)))))
+        (put 12 (+ 8 (second spec)))
+        (signals gr8s::cni-error
+          (gr8s::cni-policy-map-info 42 (first spec) :object-info (lambda (fd) (declare (ignore fd)) info))))))
+  (let ((info (make-array 256 :element-type '(unsigned-byte 8) :initial-element 0)))
+    (replace info (gr8s::netlink-integer 11 4) :start1 0)
+    (replace info (gr8s::netlink-integer 9 4) :start1 16)
+    (replace info (gr8s::netlink-integer 47 4) :start1 20)
+    (is (null (gr8s::check-cni-tcx-link 42 9 "egress" :object-info (lambda (fd) (declare (ignore fd)) info))))
+    (signals gr8s::cni-error
+      (gr8s::check-cni-tcx-link 42 10 "egress" :object-info (lambda (fd) (declare (ignore fd)) info)))))
 
 (test cni-policy-removal-is-idempotent-without-a-network-namespace
   (let* ((root (merge-pathnames
@@ -479,3 +522,20 @@
         (is (= 1 status))
         (is (= 100 (gethash "code" response)))
         (is (string= message (gethash "msg" response)))))))
+
+(test endpoint-identity-encoding-matches-the-whistler-map-layout
+  (let ((bytes (gr8s::encode-cni-endpoint-identity "10.88.1.2" #(2 17 34 51 68 85))))
+    (is (= 16 (length bytes)))
+    (is (= #x0a580102 (gr8s::netlink-read-integer bytes 0 4)))
+    (is (= #x02112233 (gr8s::netlink-read-integer bytes 4 4)))
+    (is (= #x4455 (gr8s::netlink-read-integer bytes 8 4)))
+    (is (= 1 (gr8s::netlink-read-integer bytes 12 4)))))
+
+(test routed-policy-selects-the-host-interface-without-entering-the-pod
+  (let ((configuration (gr8s::make-cni-configuration :policy-interface-name "gr-owned"))
+        (context (gr8s::make-cni-context :netns "/missing/pod" :interface-name "eth0")))
+    (is (= 42 (gr8s::call-with-cni-policy-interface
+               configuration context #'identity
+               (lambda (&rest args) (declare (ignore args))
+                 (error "host policy must not enter the Pod namespace"))
+               (lambda (name) (is (string= "gr-owned" name)) 42))))))

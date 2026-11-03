@@ -625,6 +625,11 @@
     (write-websocket-frame stream 2 payload)))
 
 (defun exec-exit-status-bytes (exit-code)
+  (when (zerop exit-code)
+    (return-from exec-exit-status-bytes
+      (trivial-utf-8:string-to-utf-8-bytes
+       (com.inuoe.jzon:stringify
+        (json-object "apiVersion" "v1" "kind" "Status" "status" "Success")))))
   (trivial-utf-8:string-to-utf-8-bytes
    (with-output-to-string (output)
      (com.inuoe.jzon:stringify
@@ -667,12 +672,12 @@
       (when stderr-p
         (write-kubernetes-channel-frame
          client 2 (runtime-exec-result-stderr result)))
-      (unless (zerop (runtime-exec-result-exit-code result))
-        (write-kubernetes-channel-frame
-         client 3
-         (exec-exit-status-bytes (runtime-exec-result-exit-code result))))
+      (write-kubernetes-channel-frame
+       client 3
+       (exec-exit-status-bytes (runtime-exec-result-exit-code result)))
       (write-websocket-frame
-       client 8 (make-array 0 :element-type '(unsigned-byte 8))))))
+       client 8 (make-array 2 :element-type '(unsigned-byte 8)
+                            :initial-contents '(3 232))))))
 
 (define-condition exec-input-reader-stopped (error) ())
 
@@ -809,14 +814,14 @@
                           (loop-finish))))
              (let ((exit-code
                      (reconciler-exec-session-exit-code reconciler session)))
-               (unless (zerop exit-code)
-                 (bt:with-lock-held (write-lock)
-                   (write-kubernetes-channel-frame
-                    client 3 (exec-exit-status-bytes exit-code)))))
+               (bt:with-lock-held (write-lock)
+                 (write-kubernetes-channel-frame
+                  client 3 (exec-exit-status-bytes exit-code))))
              (mark-finished)
              (bt:with-lock-held (write-lock)
                (write-websocket-frame
-                client 8 (make-array 0 :element-type '(unsigned-byte 8)))))
+                client 8 (make-array 2 :element-type '(unsigned-byte 8)
+                                     :initial-contents '(3 232)))))
         (mark-finished)
         (unless completed-p
           (ignore-errors
@@ -900,7 +905,7 @@
        (pod-logs-response store reconciler (first parts)))
       ((and (= 2 (length parts))
             (string= "exec" (second parts))
-            (eq method :post))
+            (member method '(:get :post)))
        (pod-exec-response store reconciler (first parts)))
       (t
        (status-response "Failure" "NotFound"
@@ -911,6 +916,9 @@
       (let ((path (hunchentoot:script-name request))
             (method (hunchentoot:request-method request)))
         (cond
+          ((string= path "/metrics")
+           (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
+           (runtime-network-metrics runtime))
           ((string= path "/version") (version-response))
           ((string= path "/api") (api-versions-response))
           ((string= path "/apis") (api-groups-response))

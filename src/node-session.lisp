@@ -14,6 +14,7 @@
   node-prefix
   (revisions (make-hash-table :test #'equal))
   (snapshots (make-hash-table :test #'equal))
+  (statuses (make-hash-table :test #'equal))
   (acknowledged-revisions (make-hash-table :test #'equal))
   (operations (make-hash-table :test #'equal))
   (operation-queues (make-hash-table :test #'equal))
@@ -238,6 +239,73 @@
            variant (slot-value envelope 'gr8s.node.v1::payload-case)))
   (slot-value envelope (find-symbol (symbol-name variant) :gr8s.node.v1)))
 
+(defun assigned-node-network (server node-name)
+  (let ((node (get-node (node-grpc-server-store server) node-name)))
+    (make-instance 'gr8s.node.v1::node-network-config
+                   :cluster-pod-cidr (node-grpc-server-cluster-pod-cidr server)
+                   :node-pod-cidr (node-record-pod-cidr node)
+                   :dns-address +dns-pod-server-address+
+                   :underlay-address (node-record-underlay-address node)
+                   :vni 42 :mtu 1450)))
+
+(defun assigned-node-routes (server node-name)
+  (when (string= "" (node-record-underlay-address
+                     (get-node (node-grpc-server-store server) node-name)))
+    (return-from assigned-node-routes nil))
+  (loop for node in (sort (copy-list (list-nodes (node-grpc-server-store server)))
+                         #'string< :key #'node-record-name)
+        unless (or (string= node-name (node-record-name node))
+                   (string= "" (node-record-underlay-address node)))
+          collect (make-instance 'gr8s.node.v1::node-route
+                                 :node-id (node-record-id node)
+                                 :pod-cidr (node-record-pod-cidr node)
+                                 :underlay-address (node-record-underlay-address node))))
+
+(defun attach-node-topology (server node-name snapshot)
+  (setf (slot-value snapshot 'gr8s.node.v1::network)
+        (assigned-node-network server node-name)
+        (slot-value snapshot 'gr8s.node.v1::routes)
+        (assigned-node-routes server node-name))
+  snapshot)
+
+(defun same-node-snapshot-topology-p (left right)
+  (and left right
+       (slot-value left 'gr8s.node.v1::network)
+       (equalp (ag-proto:serialize-to-bytes (slot-value left 'gr8s.node.v1::network))
+               (ag-proto:serialize-to-bytes (slot-value right 'gr8s.node.v1::network)))
+       (equalp (mapcar #'ag-proto:serialize-to-bytes
+                       (slot-value left 'gr8s.node.v1::routes))
+               (mapcar #'ag-proto:serialize-to-bytes
+                       (slot-value right 'gr8s.node.v1::routes)))))
+
+(defun refresh-node-peer-topology (server changed-node)
+  (dolist (node (list-nodes (node-grpc-server-store server)))
+    (let ((name (node-record-name node)))
+      (unless (string= name changed-node)
+        (let ((snapshot (attach-node-topology
+                         server name
+                         (node-desired-state-snapshot (node-grpc-server-store server) name))))
+          (unless (same-node-snapshot-topology-p
+                   (current-node-snapshot server name) snapshot)
+            (publish-node-desired-state server name snapshot)))))))
+
+(defun prepare-node-connect-snapshot (server node-name last-applied)
+  ;; Rebuild from durable desired state after a control-plane restart. Revision
+  ;; counters in memory must never strand an agent ahead of its new server.
+  (let ((snapshot (node-desired-state-snapshot
+                   (node-grpc-server-store server) node-name)))
+    (attach-node-topology server node-name snapshot)
+    (bt:with-lock-held ((node-grpc-server-lock server))
+      (let ((existing (gethash node-name (node-grpc-server-snapshots server))))
+        (if (same-node-snapshot-topology-p existing snapshot)
+            existing
+          (let ((revision (1+ (max last-applied
+                                   (gethash node-name
+                                            (node-grpc-server-revisions server) 0)))))
+            (setf (slot-value snapshot 'gr8s.node.v1::revision) revision
+                  (gethash node-name (node-grpc-server-revisions server)) revision
+                  (gethash node-name (node-grpc-server-snapshots server)) snapshot)))))))
+
 (defun current-node-snapshot (server node-name)
   (bt:with-lock-held ((node-grpc-server-lock server))
     (or (gethash node-name (node-grpc-server-snapshots server))
@@ -272,17 +340,31 @@
       (slot-value envelope 'gr8s.node.v1::snapshot-ack)))
     (:status
      (let ((status (slot-value envelope 'gr8s.node.v1::status)))
+       (bt:with-lock-held ((node-grpc-server-lock server))
+         (setf (gethash node-name (node-grpc-server-statuses server)) status))
        (loop for pod-status in (slot-value status 'gr8s.node.v1::pods)
-             for namespace =
-               (slot-value pod-status 'gr8s.node.v1::namespace)
-             for name = (slot-value pod-status 'gr8s.node.v1::name)
-             for uid = (slot-value pod-status 'gr8s.node.v1::uid)
-             for pod = (get-pod (node-grpc-server-store server)
-                                namespace name)
-             when (string= uid (pod-uid pod))
-               do (update-pod-observed-phase
-                   (node-grpc-server-store server) pod
-                   (slot-value pod-status 'gr8s.node.v1::phase)))))
+             for pod = (handler-case
+                           (get-pod (node-grpc-server-store server)
+                                    (slot-value pod-status 'gr8s.node.v1::namespace)
+                                    (slot-value pod-status 'gr8s.node.v1::name))
+                         (kubernetes-error () nil))
+             when (and pod (equal node-name (pod-node-name pod))
+                       (string= (slot-value pod-status 'gr8s.node.v1::uid) (pod-uid pod))
+                       (string= (slot-value pod-status 'gr8s.node.v1::resource-version)
+                                (pod-resource-version pod)))
+               do (let* ((bytes (slot-value pod-status 'gr8s.node.v1::status-json))
+                         (object (handler-case
+                                     (when (plusp (length bytes))
+                                       (com.inuoe.jzon:parse
+                                        (trivial-utf-8:utf-8-bytes-to-string bytes)))
+                                   (error () nil))))
+                    (unless (hash-table-p object) (setf object (make-hash-table :test #'equal)))
+                    (setf (gethash "phase" object) (slot-value pod-status 'gr8s.node.v1::phase))
+                    (unless (string= "" (slot-value pod-status 'gr8s.node.v1::pod-ip))
+                      (setf (gethash "podIP" object) (slot-value pod-status 'gr8s.node.v1::pod-ip)
+                            (gethash "podIPs" object)
+                            (vector (json-object "ip" (slot-value pod-status 'gr8s.node.v1::pod-ip)))))
+                    (update-pod-observed-status (node-grpc-server-store server) pod object)))))
     (:operation-response
      (note-node-operation-response
       server (slot-value envelope 'gr8s.node.v1::operation-response)))
@@ -310,52 +392,56 @@
       :sequence 1))))
 
 (defun handle-node-connect-internal (server context stream)
-  (declare (ignore context))
   (let ((first (ag-grpc:stream-recv stream)))
-    (unless first
-      (error "Node session ended before its hello"))
-    (ensure-node-protocol-version
-     (slot-value first 'gr8s.node.v1::protocol-version))
+    (unless first (error "Node session ended before its hello"))
+    (ensure-node-protocol-version (slot-value first 'gr8s.node.v1::protocol-version))
     (let* ((hello (node-envelope-payload first :hello))
            (node-name (slot-value hello 'gr8s.node.v1::node-name))
+           (authenticated (authenticate-node-peer (node-grpc-server-pki server) context node-name))
            (node (get-node (node-grpc-server-store server) node-name))
-           (operations (take-node-operations server node-name))
+           (topology-changed
+             (update-node-underlay-address
+              (node-grpc-server-store server) node-name
+              (slot-value hello 'gr8s.node.v1::underlay-address)))
+           (snapshot (prepare-node-connect-snapshot
+                      server node-name
+                      (slot-value hello 'gr8s.node.v1::last-applied-revision)))
            (session (make-node-agent-session stream))
            (heartbeat-interval
-             (max 1 (floor (node-grpc-server-heartbeat-timeout-seconds server)
-                           2))))
-      (bt:with-lock-held ((node-grpc-server-lock server))
-        (setf (gethash node-name (node-grpc-server-sessions server)) session))
-      (send-node-agent-envelope
-       session
-       (make-server-envelope
-        :hello
-        (make-instance 'gr8s.node.v1::server-hello
-                       :node-id (node-record-id node)
-                       :heartbeat-interval-seconds heartbeat-interval
-                       :assigned-pod-cidr (node-record-pod-cidr node))
-        :sequence 1))
-      (send-node-agent-envelope
-       session
-       (make-server-envelope :desired-state
-                             (current-node-snapshot server node-name)
-                             :sequence 2))
-      (loop for operation in operations
-            for sequence from 3
-            do (setf (pending-node-operation-session operation) session)
-               (send-node-agent-envelope
-                session
-                (make-server-envelope
-                 :operation-request
-                 (pending-node-operation-request operation)
-                 :sequence sequence)))
+             (max 1 (floor (node-grpc-server-heartbeat-timeout-seconds server) 2))))
+      (declare (ignore authenticated))
       (unwind-protect
-           (loop for envelope = (ag-grpc:stream-recv stream)
-                 while envelope
-                 do (handle-node-agent-envelope server node-name envelope))
+           (progn
+             ;; Register and drain queued work atomically; hold the send lock
+             ;; through the handshake so a concurrent publication or operation
+             ;; cannot arrive before ServerHello and the initial snapshot.
+             (bt:with-lock-held ((node-agent-session-lock session))
+               (let ((operations nil))
+                 (bt:with-lock-held ((node-grpc-server-lock server))
+                   (setf (gethash node-name (node-grpc-server-sessions server)) session
+                         snapshot (gethash node-name (node-grpc-server-snapshots server) snapshot)
+                         operations (gethash node-name (node-grpc-server-operation-queues server)))
+                   (remhash node-name (node-grpc-server-operation-queues server)))
+                 (ag-grpc:stream-send
+                  stream (make-server-envelope
+                          :hello (make-instance 'gr8s.node.v1::server-hello
+                                                :node-id (node-record-id node)
+                                                :heartbeat-interval-seconds heartbeat-interval
+                                                :assigned-pod-cidr (node-record-pod-cidr node))
+                          :sequence 1))
+                 (ag-grpc:stream-send
+                  stream (make-server-envelope :desired-state snapshot :sequence 2))
+                 (loop for operation in operations for sequence from 3
+                       do (setf (pending-node-operation-session operation) session)
+                          (ag-grpc:stream-send
+                           stream (make-server-envelope
+                                   :operation-request (pending-node-operation-request operation)
+                                   :sequence sequence)))))
+             (when topology-changed (refresh-node-peer-topology server node-name))
+             (loop for envelope = (ag-grpc:stream-recv stream)
+                   while envelope do (handle-node-agent-envelope server node-name envelope)))
         (bt:with-lock-held ((node-grpc-server-lock server))
-          (when (eq session
-                    (gethash node-name (node-grpc-server-sessions server)))
+          (when (eq session (gethash node-name (node-grpc-server-sessions server)))
             (remhash node-name (node-grpc-server-sessions server))))
         (fail-node-session-operations server session)))))
 
@@ -413,7 +499,8 @@
                                             (node-prefix 24))
   (unless (plusp heartbeat-timeout-seconds)
     (error "Heartbeat timeout must be positive"))
-  (let* ((grpc-server (ag-grpc:make-grpc-server port :host host))
+  (let* ((grpc-server (apply #'ag-grpc:make-grpc-server port :host host
+                             (node-server-tls-options pki)))
          (server (%make-node-grpc-server
                   :store store
                   :grpc-server grpc-server
@@ -473,6 +560,7 @@
   (get-node (node-grpc-server-store server) node-name)
   (unless (typep snapshot 'gr8s.node.v1::desired-state-snapshot)
     (error "Desired state must be a DesiredStateSnapshot"))
+  (attach-node-topology server node-name snapshot)
   (let ((revision nil)
         (session nil))
     (bt:with-lock-held ((node-grpc-server-lock server))
@@ -508,7 +596,7 @@
 (defun enroll-node-over-grpc (host port node-name token ca-fingerprint
                               private-key-path certificate-path ca-certificate-path)
   (let* ((csr (generate-node-key-and-csr node-name private-key-path))
-         (channel (ag-grpc:make-channel host port :timeout 10)))
+         (channel (make-node-tls-channel host port :timeout 10 :ca-pin ca-fingerprint)))
     (unwind-protect
          (let* ((stub (gr8s.node.v1::make-enrollment-service-stub channel))
                 (request
@@ -571,6 +659,23 @@
   (sequence 0)
   (send-lock (bt:make-lock "gr8s agent node session send")))
 
+(defun accept-agent-server-hello (identity identity-path hello)
+  (let ((node-id (slot-value hello 'gr8s.node.v1::node-id))
+        (cidr (slot-value hello 'gr8s.node.v1::assigned-pod-cidr))
+        (persisted-node-id (gethash "nodeId" identity ""))
+        (persisted-cidr (gethash "assignedPodCIDR" identity "")))
+    (when (and (plusp (length persisted-node-id))
+               (not (string= persisted-node-id node-id)))
+      (error "Server node identity changed from ~S to ~S" persisted-node-id node-id))
+    (when (zerop (length node-id)) (error "Server assigned an empty node identity"))
+    (validate-network-cidr cidr)
+    (when (and (plusp (length persisted-cidr)) (not (string= persisted-cidr cidr)))
+      (error "Server Pod CIDR changed from ~S to ~S" persisted-cidr cidr))
+    ;; Persist the allocation even when this reconnect has no newer snapshot.
+    (setf (gethash "nodeId" identity) node-id
+          (gethash "assignedPodCIDR" identity) cidr)
+    (persist-agent-identity identity-path identity)))
+
 (defun send-agent-session-envelope (session variant payload)
   (bt:with-lock-held ((agent-node-session-send-lock session))
     (ag-grpc:stream-send
@@ -583,6 +688,11 @@
   (let ((revision (slot-value snapshot 'gr8s.node.v1::revision))
         (last-applied (gethash "lastAppliedRevision" identity 0))
         (statuses nil))
+    (let ((network (slot-value snapshot 'gr8s.node.v1::network))
+          (assigned (gethash "assignedPodCIDR" identity)))
+      (when (and network assigned
+                 (not (string= assigned (slot-value network 'gr8s.node.v1::node-pod-cidr))))
+        (error "Snapshot Pod CIDR does not match the durable node allocation")))
     (when (> revision last-applied)
       (let ((result (funcall apply-snapshot snapshot)))
         ;; Snapshot applicators written before status reporting commonly
@@ -662,10 +772,10 @@
 
 (defun agent-session-monitor
     (session control session-thread heartbeat-interval
-     stop-predicate finished-p finish-session)
+     stop-predicate finished-p finish-session status-provider)
   (let ((next-heartbeat
           (+ (get-internal-real-time)
-             (* heartbeat-interval internal-time-units-per-second))))
+             (* (funcall heartbeat-interval) internal-time-units-per-second))))
     (handler-case
         (loop until (funcall finished-p)
               do (when (or (node-session-cancelled-p control)
@@ -685,22 +795,46 @@
                    (send-agent-session-envelope
                     session :heartbeat
                     (make-instance 'gr8s.node.v1::heartbeat))
+                   (when status-provider
+                     (handler-case
+                         (let ((status (funcall status-provider)))
+                           (when status
+                             (unless (typep status 'gr8s.node.v1::node-status)
+                               (error "node status provider returned an invalid message"))
+                             (send-agent-session-envelope session :status status)))
+                       (error (condition)
+                         (format *error-output* "gr8s status reporting failed: ~A~%" condition))))
                    (setf next-heartbeat
                          (+ (get-internal-real-time)
-                            (* heartbeat-interval
+                            (* (funcall heartbeat-interval)
                                internal-time-units-per-second))))
                  (sleep 0.05))
       (error ()
         (funcall finish-session)))))
 
+(defun node-channel-underlay-address (channel)
+  (let* ((connection (ag-grpc::channel-connection channel))
+         (socket (ag-http2::connection-socket connection))
+         (address (usocket:get-local-address socket)))
+    (if (and (= 4 (length address)) (/= 127 (aref address 0)))
+        (canonical-node-underlay-address (format nil "~{~D~^.~}" (coerce address 'list)))
+        "")))
+
 (defun run-one-node-session
     (host port node-name identity-path apply-snapshot operation-handler
-     one-shot-p control stop-predicate)
+     one-shot-p control stop-predicate underlay-address status-provider
+     ca-certificate-path certificate-path private-key-path)
   (let* ((identity (load-agent-identity identity-path node-name))
          (session-thread (bt:current-thread))
          (session-timeout (and one-shot-p 5))
-         (channel (ag-grpc:make-channel host port :timeout session-timeout))
+         (channel (if ca-certificate-path
+                      (make-node-tls-channel host port :timeout session-timeout
+                                             :ca-certificate-path ca-certificate-path
+                                             :certificate-path certificate-path
+                                             :private-key-path private-key-path)
+                      (ag-grpc:make-channel host port :timeout session-timeout)))
          (monitor-thread nil)
+         (heartbeat-interval 1)
          (operation-session-p nil)
          (session-finished-p nil)
          (finish-lock (bt:make-lock "gr8s agent node session finish")))
@@ -728,30 +862,32 @@
                             :node-name node-name
                             :boot-id (generate-uid)
                             :agent-version "gr8s"
+                            :underlay-address
+                            (or underlay-address (node-channel-underlay-address channel))
                             :last-applied-revision
                             (gethash "lastAppliedRevision" identity 0)))
            (send-agent-session-envelope
             session :heartbeat (make-instance 'gr8s.node.v1::heartbeat))
-           (let* ((server-hello
-                    (require-server-envelope
-                     (ag-grpc:stream-read-message stream) :hello))
-                  (node-id (slot-value server-hello 'gr8s.node.v1::node-id))
-                  (persisted-node-id (gethash "nodeId" identity "")))
-             (when (and (plusp (length persisted-node-id))
-                        (not (string= persisted-node-id node-id)))
-               (error "Server node identity changed from ~S to ~S"
-                      persisted-node-id node-id))
-             (setf (gethash "nodeId" identity) node-id)
-             (unless one-shot-p
-               (setf monitor-thread
-                     (bt:make-thread
-                      (lambda ()
-                        (agent-session-monitor
-                         session control session-thread
-                         (slot-value server-hello
-                                     'gr8s.node.v1::heartbeat-interval-seconds)
-                         stop-predicate #'finished-p #'finish-session))
-                      :name "gr8s agent session heartbeat")))
+           ;; Cancellation must also cover a peer that stalls before its
+           ;; ServerHello, not only sessions that finished the handshake.
+           (unless one-shot-p
+             (setf monitor-thread
+                   (bt:make-thread
+                    (lambda ()
+                      (agent-session-monitor
+                       session control session-thread
+                       (lambda () heartbeat-interval)
+                       stop-predicate #'finished-p #'finish-session
+                       (when status-provider
+                         (lambda () (when operation-session-p (funcall status-provider))))))
+                    :name "gr8s agent session heartbeat")))
+           (let ((server-hello
+                   (require-server-envelope
+                    (ag-grpc:stream-read-message stream) :hello)))
+             (accept-agent-server-hello identity identity-path server-hello)
+             (setf heartbeat-interval
+                   (max 1 (slot-value server-hello
+                                      'gr8s.node.v1::heartbeat-interval-seconds)))
              (let* ((snapshot
                       (require-server-envelope
                        (ag-grpc:stream-read-message stream) :desired-state)))
@@ -780,7 +916,8 @@
 
 (defun run-node-session (host port node-name identity-path apply-snapshot
                          &key max-sessions (reconnect-delay 1)
-                           operation-handler
+                           operation-handler underlay-address status-provider
+                           ca-certificate-path certificate-path private-key-path
                            control
                            (stop-predicate (constantly nil)))
   (let ((completed 0)
@@ -791,7 +928,8 @@
           (progn
             (run-one-node-session host port node-name identity-path
                                   apply-snapshot operation-handler
-                                  (not (null max-sessions)) control stop-predicate)
+                                  (not (null max-sessions)) control stop-predicate underlay-address status-provider
+                                  ca-certificate-path certificate-path private-key-path)
             (incf completed)
             (when (and max-sessions (>= completed max-sessions))
               (return completed)))

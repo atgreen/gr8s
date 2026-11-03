@@ -9,6 +9,7 @@
                "sb-posix" "trivial-utf-8" "usocket" "whistler/loader")
   :serial t
   :components ((:module "src"
+                :serial t
                 :components ((:file "package")
                              (:file "cri-v1-generated")
                              (:file "node-v1-generated")
@@ -20,18 +21,24 @@
                              (:file "store")
                              (:file "scheduler")
                              (:file "pki")
+                             (:file "node-tls")
                              (:file "node-session")
                              (:file "runtime")
                              (:file "runtime-assets")
                              (:file "cni")
                              (:file "node-ipam")
+                             (:file "rtnetlink")
+                             (:file "endpoint-policy")
+                             (:file "vxlan")
                              (:file "agent-cni")
+                             (:file "routed-cni")
                              (:file "managed-containerd")
                              (:file "cri")
                              (:file "containerd")
                              (:file "podman")
                              (:file "reconciler")
                              (:file "control-plane-runtime")
+                             (:file "telemetry")
                              (:file "agent-runtime")
                              (:file "http")
                              (:file "server")
@@ -42,6 +49,7 @@
   :depends-on ("gr8s" "drakma" "fiveam")
   :serial t
   :components ((:module "tests"
+                :serial t
                 :components ((:file "package")
                              (:file "websocket-test")
                              (:file "node-protocol-test")
@@ -58,11 +66,13 @@
                              (:file "runtime-assets-test")
                              (:file "cni-test")
                              (:file "node-ipam-test")
+                             (:file "rtnetlink-test")
                              (:file "managed-containerd-test")
                              (:file "containerd-test")
                              (:file "podman-test")
                              (:file "main-test")
-                             (:file "http-test"))))
+                             (:file "http-test")
+                             (:file "telemetry-test"))))
   :perform (test-op (operation component)
              (declare (ignore operation component))
              (unless (uiop:symbol-call

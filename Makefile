@@ -14,7 +14,7 @@ NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
 NODE_PROTOCOL_LISP := src/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 
-.PHONY: all help containerd-bundle generate-protocol test test-containerd test-podman test-whistler-cni check smoke run kubeconfig native clean
+.PHONY: all help containerd-bundle generate-protocol test test-containerd test-podman test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel check smoke run kubeconfig native clean
 
 all: native
 
@@ -27,6 +27,10 @@ help:
 	@echo "  generate-protocol Generate Common Lisp node-protocol bindings"
 	@echo "  test          Run the unit and HTTP test suite"
 	@echo "  test-containerd Include the live CRI/containerd integration tests"
+	@echo "  test-routed-network Test native routed veths in isolated user/network namespaces"
+	@echo "  test-vxlan-network Test two-node VXLAN and routed Pod connectivity"
+	@echo "  test-agent-network Test agent CNI IPC, IPAM recovery, and Pod DNS"
+	@echo "  test-node-topology Test live node snapshots, VXLAN, and route recovery"
 	@echo "  test-podman   Include the disposable rootless Podman integration test"
 	@echo "  test-whistler-cni Test the chained Whistler TC/eBPF CNI plugin"
 	@echo "  check         Syntax-check scripts and run tests"
@@ -50,12 +54,33 @@ test-containerd:
 	GR8S_CONTAINERD_SOCKET="$(CONTAINERD_SOCKET)" \
 	$(SBCL) --noinform --non-interactive $(TEST_EVAL)
 
+test-routed-network:
+	unshare -Urn $(SBCL) --noinform --non-interactive --load scripts/test-routed-network.lisp
+
+test-vxlan-network:
+	unshare -Urn $(SBCL) --noinform --non-interactive --load scripts/test-vxlan-network.lisp
+
+test-agent-network:
+	unshare -Urn $(SBCL) --noinform --non-interactive --load scripts/test-agent-network.lisp
+
+test-node-topology:
+	unshare -Urn $(SBCL) --noinform --non-interactive --load scripts/test-node-topology.lisp
+
+build/gr8s-endpoint-test.bpf.o: network/gr8s-egress-guard.lisp scripts/build-whistler-program.lisp
+	$(SBCL) --noinform --script scripts/build-whistler-program.lisp $< $@
+
+test-endpoint-policy: build/gr8s-endpoint-test.bpf.o
+	python3 scripts/test-endpoint-policy.py $<
+
+test-endpoint-policy-kernel: build/gr8s-endpoint-test.bpf.o
+	python3 scripts/test-endpoint-policy.py $< --kernel
+
 test-podman:
 	GR8S_RUN_PODMAN_TESTS=1 $(SBCL) --noinform --non-interactive $(TEST_EVAL)
 
 test-whistler-cni: containerd-bundle test
 
-check: containerd-bundle test-whistler-cni
+check: containerd-bundle test-whistler-cni test-endpoint-policy
 	sh -n scripts/gr8s scripts/gr8s-native scripts/install-containerd.sh \
 	  scripts/verify-static-runtime.sh scripts/smoke.sh
 	scripts/verify-static-runtime.sh build/containerd

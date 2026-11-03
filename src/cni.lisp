@@ -18,8 +18,13 @@
 (defun invalid-cni (control &rest arguments)
   (error 'cni-error :message (apply #'format nil control arguments)))
 
+(defparameter +cni-policy-map-specs+
+  '(("rejected_spoofs" 8 1 0)
+    ("endpoint_identity" 16 1 128)
+    ("traffic_stats" 8 6 0)))
+
 (defstruct cni-configuration
-  version name type direction program map-pin-root previous-result)
+  version name type direction program map-pin-root previous-result endpoint-address policy-interface-name)
 
 (defstruct cni-context
   container-id netns interface-name)
@@ -28,8 +33,10 @@
                              (&key (add 'install-cni-policy)
                                    (check 'check-cni-policy)
                                    (delete 'remove-cni-policy)
-                                   (status 'check-cni-status))))
-  add check delete status)
+                                   (status 'check-cni-status)
+                                   (prepare (lambda (configuration context)
+                                              (declare (ignore configuration context)))))))
+  add check delete status prepare)
 
 (defun required-cni-string (object key)
   (let ((value (gethash key object)))
@@ -99,12 +106,12 @@
                  (plusp (length (cni-context-interface-name context))))
       (invalid-cni "CNI_IFNAME is required"))))
 
-(defun dispatch-cni-command (command input context operations)
+(defun dispatch-cni-command (command input context operations &key (chained t))
   (when (string= command "VERSION")
     (return-from dispatch-cni-command (cni-version-result)))
   (let* ((require-previous (member command '("ADD" "CHECK") :test #'string=))
          (configuration
-           (parse-cni-configuration input :require-previous require-previous)))
+           (parse-cni-configuration input :require-previous (and chained require-previous))))
     (case (intern command :keyword)
       (:status
        (funcall (cni-operations-status operations) configuration)
@@ -114,6 +121,7 @@
        (require-cni-context
         context :network-namespace (member command '("ADD" "CHECK")
                                            :test #'string=))
+       (funcall (cni-operations-prepare operations) configuration context)
        (multiple-value-bind (map-path link-path directory)
            (cni-pin-paths (cni-configuration-map-pin-root configuration)
                           (cni-context-container-id context)
@@ -149,7 +157,7 @@
 
 (defun call-with-cni-network-namespace (path operation)
   #+sbcl
-  (let ((original (sb-posix:open "/proc/self/ns/net" sb-posix:o-rdonly 0))
+  (let ((original (sb-posix:open "/proc/thread-self/ns/net" sb-posix:o-rdonly 0))
         (target nil))
     (unwind-protect
          (progn
@@ -192,12 +200,24 @@
     (whistler/loader:load-bpf-object
      object :map-replacements replacements)))
 
+(defun call-with-cni-policy-interface
+    (configuration context operation call-in-netns interface-index)
+  ;; The routed agent sets this internal field from its host veth identity.
+  ;; Chained callers still select their Pod interface inside its namespace.
+  (let ((host-interface (cni-configuration-policy-interface-name configuration)))
+    (if host-interface
+        (funcall operation (funcall interface-index host-interface))
+        (funcall call-in-netns (cni-context-netns context)
+                 (lambda ()
+                   (funcall operation
+                            (funcall interface-index (cni-context-interface-name context))))))))
+
 (defun install-cni-policy
     (configuration context map-path link-path
-     &key
-       (ensure-directory #'ensure-cni-pin-directory)
+     &key (ensure-directory #'ensure-cni-pin-directory)
        (path-exists-p #'probe-file)
        (open-pinned #'whistler/loader:open-pinned-object)
+       (validate-map #'cni-policy-map-info)
        (remove-path #'remove-cni-path)
        (open-object #'whistler/loader:open-bpf-object)
        (load-object #'quiet-load-bpf-object)
@@ -205,85 +225,108 @@
        (object-program #'whistler/loader:bpf-object-prog)
        (map-fd #'whistler/loader:map-info-fd)
        (program-fd #'whistler/loader:prog-info-fd)
+       (initialize-identity #'initialize-cni-identity)
        (pin-object #'whistler/loader:pin-bpf-object)
+       (rename-pin #'uiop:rename-file-overwriting-target)
+       (staged-links #'cni-policy-staged-links)
        (call-in-netns #'call-with-cni-network-namespace)
        (interface-index #'cni-interface-index)
        (attach-tcx (lambda (fd index direction)
-                      (whistler/loader:attach-tcx
-                       fd index :direction direction)))
+                     (whistler/loader:attach-tcx fd index :direction direction)))
        (close-fd #'sb-posix:close)
        (close-object #'whistler/loader:close-bpf-object))
-  (let* ((directory (namestring
-                     (uiop:pathname-directory-pathname (pathname map-path))))
-         (existing-map-p (not (null (funcall path-exists-p map-path))))
-         (replacement-fd nil)
-         (object nil)
-         (object-owns-replacement-p nil)
-         (map-pinned-p existing-map-p)
-         (link-fd nil))
+  (let ((directory (namestring (uiop:pathname-directory-pathname map-path)))
+        (opened nil) (object nil) (new-pins nil) (link-fd nil)
+        ;; bpffs rejects pin basenames containing a dot (EPERM).
+        (staging (format nil "~A_pending_~36R" link-path (random (expt 36 12))))
+        (committed nil))
     (funcall ensure-directory directory)
-    (when existing-map-p
-      (setf replacement-fd (funcall open-pinned map-path)))
-    (when (funcall path-exists-p link-path)
-      (funcall remove-path link-path))
     (unwind-protect
          (progn
-           (setf object
-                 (funcall open-object (cni-configuration-program configuration)))
-           (funcall load-object
-                    object
-                    (when replacement-fd
-                      (list (cons "rejected_spoofs" replacement-fd))))
-           (setf object-owns-replacement-p (not (null replacement-fd)))
-           (let ((map (funcall object-map object "rejected_spoofs"))
-                 (program (funcall object-program object "gr8s_egress_guard")))
-             (unless map (invalid-cni "Whistler object has no rejected_spoofs map"))
-             (unless program
-               (invalid-cni "Whistler object has no gr8s_egress_guard program"))
-             (unless existing-map-p
-               (funcall pin-object (funcall map-fd map) map-path)
-               (setf map-pinned-p t))
+           (dolist (spec +cni-policy-map-specs+)
+             (let* ((name (first spec)) (path (cni-policy-map-path map-path name)))
+               (when (funcall path-exists-p path)
+                 (let ((fd (funcall open-pinned path)))
+                   (push (cons name fd) opened)
+                   (funcall validate-map fd name)))))
+           (setf object (funcall open-object (cni-configuration-program configuration)))
+           (funcall load-object object opened)
+           (dolist (spec +cni-policy-map-specs+)
+             (let* ((name (first spec)) (map (funcall object-map object name)))
+               (unless map (invalid-cni "Whistler object has no ~A map" name))
+               (funcall validate-map (funcall map-fd map) name)))
+           (funcall initialize-identity (funcall object-map object "endpoint_identity")
+                    configuration context)
+           (dolist (spec +cni-policy-map-specs+)
+             (let* ((name (first spec)) (path (cni-policy-map-path map-path name)))
+               (unless (assoc name opened :test #'string=)
+                 (funcall pin-object (funcall map-fd (funcall object-map object name)) path)
+                 (push path new-pins))))
+           (let ((program (funcall object-program object "gr8s_egress_guard")))
+             (unless program (invalid-cni "Whistler object has no gr8s_egress_guard program"))
              (setf link-fd
-                   (funcall call-in-netns
-                            (cni-context-netns context)
-                            (lambda ()
-                              (funcall attach-tcx
-                                       (funcall program-fd program)
-                                       (funcall interface-index
-                                                (cni-context-interface-name context))
-                                       (cni-configuration-direction configuration)))))
-             (funcall pin-object link-fd link-path)))
+                   (call-with-cni-policy-interface
+                    configuration context
+                    (lambda (index)
+                      (funcall attach-tcx (funcall program-fd program) index
+                               (cni-configuration-direction configuration)))
+                    call-in-netns interface-index))
+             ;; Keep the old pinned link live until a replacement is attached
+             ;; and pinned. Atomic rename also preserves it if pinning fails.
+             (funcall pin-object link-fd staging)
+             (funcall rename-pin staging link-path)
+             (setf committed t)
+             (dolist (old (funcall staged-links link-path)) (funcall remove-path old))))
       (when link-fd (funcall close-fd link-fd))
-      (when object (funcall close-object object))
-      (when (and replacement-fd (not object-owns-replacement-p))
-        (funcall close-fd replacement-fd))
-      (unless (and map-pinned-p (funcall path-exists-p link-path))
-        (unless existing-map-p (funcall remove-path map-path)))))
+      (let ((owned (when object
+                     (loop for spec in +cni-policy-map-specs+
+                           for map = (ignore-errors (funcall object-map object (first spec)))
+                           when map collect (funcall map-fd map)))))
+        (when object (funcall close-object object))
+        (dolist (entry opened)
+          (unless (member (cdr entry) owned) (funcall close-fd (cdr entry)))))
+      (unless committed
+        (funcall remove-path staging)
+        (dolist (path new-pins) (funcall remove-path path)))))
   nil)
 
 (defun check-cni-policy
     (configuration context map-path link-path
      &key (open-pinned #'whistler/loader:open-pinned-object)
+       (validate-map #'cni-policy-map-info)
+       (check-identity #'check-cni-identity)
+       (check-link #'check-cni-tcx-link)
        (close-fd #'sb-posix:close)
        (call-in-netns #'call-with-cni-network-namespace)
        (interface-index #'cni-interface-index))
-  (declare (ignore configuration))
-  (dolist (path (list map-path link-path))
-    (let ((fd (funcall open-pinned path)))
+  (dolist (spec +cni-policy-map-specs+)
+    (let* ((name (first spec))
+           (fd (funcall open-pinned (cni-policy-map-path map-path name))))
+      (unwind-protect
+           (let ((map (funcall validate-map fd name)))
+             (when (string= name "endpoint_identity")
+               (funcall check-identity map configuration context)))
+        (funcall close-fd fd))))
+  (let ((fd (funcall open-pinned link-path)))
+    (unwind-protect
+         (call-with-cni-policy-interface
+          configuration context
+          (lambda (index)
+            (funcall check-link fd index (cni-configuration-direction configuration)))
+          call-in-netns interface-index)
       (funcall close-fd fd)))
-  (funcall call-in-netns
-           (cni-context-netns context)
-           (lambda ()
-             (funcall interface-index (cni-context-interface-name context))))
   nil)
 
 (defun remove-cni-policy
     (configuration context map-path link-path directory
      &key (remove-path #'remove-cni-path)
+       (staged-links #'cni-policy-staged-links)
        (remove-directory #'remove-empty-cni-directory))
   (declare (ignore configuration context))
   (funcall remove-path link-path)
-  (funcall remove-path map-path)
+  (dolist (path (funcall staged-links link-path)) (funcall remove-path path))
+  (dolist (spec +cni-policy-map-specs+)
+    (funcall remove-path (cni-policy-map-path map-path (first spec))))
   (funcall remove-directory directory)
   nil)
 

@@ -20,7 +20,14 @@
     status))
 
 (defun observed-status (runtime-pod)
-  (pod-status (runtime-pod-phase runtime-pod)))
+  (let ((status (if (runtime-pod-status runtime-pod)
+                    (com.inuoe.jzon:parse (com.inuoe.jzon:stringify (runtime-pod-status runtime-pod)))
+                    (pod-status (runtime-pod-phase runtime-pod)))))
+    (setf (gethash "phase" status) (runtime-pod-phase runtime-pod))
+    (unless (string= "" (runtime-pod-pod-ip runtime-pod))
+      (setf (gethash "podIP" status) (runtime-pod-pod-ip runtime-pod)
+            (gethash "podIPs" status) (vector (json-object "ip" (runtime-pod-pod-ip runtime-pod)))))
+    status))
 
 (defun converge-running-pod (reconciler pod)
   (let* ((runtime (reconciler-runtime reconciler))
@@ -59,12 +66,11 @@
      reconciler
      (get-pod (reconciler-store reconciler) namespace name))))
 
-(defun reconcile-all (reconciler)
-  (mapcar (lambda (pod)
-            (reconcile-pod reconciler
-                           (pod-namespace pod)
-                           (pod-name pod)))
-          (list-pods (reconciler-store reconciler) "default")))
+(defun reconcile-all (reconciler &key observer)
+  (loop for pod in (list-pods (reconciler-store reconciler) "default")
+        for status = (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))
+        do (when observer (funcall observer pod status))
+        collect status))
 
 (defun reconciler-logs (reconciler uid container &key tail)
   (bt:with-lock-held ((reconciler-lock reconciler))

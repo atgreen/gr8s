@@ -14,8 +14,8 @@ socket and generated bindings for the pinned Kubernetes CRI v1 schema. The
 native build embeds pinned, statically linked containerd 2.4.2,
 `containerd-shim-runc-v2`, runc 1.5.2, and CNI `bridge`, `host-local`, and
 `loopback` plugins 1.9.1. It also embeds a TC/eBPF classifier compiled from Lisp
-by Whistler 1.15.0. The dumped gr8s image itself implements the chained CNI
-protocol and calls Whistler's Common Lisp loader directly.
+by Whistler 1.15.0. The dumped gr8s image implements the CNI protocol as a thin Unix-socket client.
+The agent owns IPAM, native rtnetlink setup, and the Whistler loader.
 At startup the local gr8s agent
 mounts a private `tmpfs`, materializes the payload there, starts its own
 containerd, and unmounts the payload after containerd stops. It also mounts a
@@ -32,9 +32,13 @@ kubectl -> gr8s HTTP API -> scheduler -> desired-state snapshot
                     gr8s agent -> reconciler -> CRI v1 -> containerd
                                                             |
                                                             +-> runc
-                                                            +-> CNI -> gr8s0
-                                                                       |
-                                                                       +-> Whistler TC/eBPF
+                                                            +-> gr8s CNI client
+                                                                      |
+                                                               agent Unix socket
+                                                                      |
+                                                        IPAM -> routed veths
+                                                                      |
+                                                               Whistler TC/eBPF
 ```
 
 Verified CRI operations include runtime version discovery, image pull, Pod
@@ -70,8 +74,11 @@ The executable has three entry paths:
 `serve` starts a local agent named `gr8s-local` by default. That agent crosses
 the same ag-gRPC boundary as a separately launched agent; `--disable-agent`
 runs a control-plane-only process and does not create a managed node runtime.
-The node endpoint defaults to loopback port 7443 and can be changed with
-`--node-port`; the local node name can be changed with `--node-name`.
+The node endpoint defaults to loopback port 7443. Set `--node-listen` and
+`--node-port` for a node-facing address; the Kubernetes HTTP API stays on
+loopback. Agents advertise the source IPv4 address of their control connection
+for VXLAN, or use an explicit `--node-address` on multi-interface hosts. The
+local node name can be changed with `--node-name`.
 
 Enrollment generates the private key on the node, verifies the returned cluster
 CA against `--ca-pin`, and stores `node.key`, `node.crt`, `ca.crt`, and the
@@ -92,29 +99,52 @@ The checked-in [`proto/cri-v1.proto`](proto/cri-v1.proto) is the full CRI v1
 schema pinned from Kubernetes `cri-api` v0.36.0. Its generated Common Lisp
 bindings live in `src/cri-v1-generated.lisp`.
 
-Managed Pods receive network namespaces, veth pairs, and addresses from the
-embedded CNI bridge and host-local plugins. The default network is `gr8s0` on
-`10.88.0.0/16`; host-local keeps its allocation data under the selected gr8s
-state directory. gr8s serves DNS on the bridge gateway at `10.88.0.1:53` and
-writes the standard `default.svc.cluster.local`, `svc.cluster.local`, and
-`cluster.local` searches into each Pod's resolver configuration. It answers
-`kubernetes.default.svc.cluster.local` authoritatively and forwards names
-outside `cluster.local` to the IPv4 resolvers in the host's `/etc/resolv.conf`,
-over UDP or TCP.
+Managed Pods receive directly routed veth pairs and `/32` addresses from
+persistent agent IPAM. The control plane assigns each node a distinct Pod CIDR
+within `10.88.0.0/16` and includes the network configuration in desired-state
+snapshots. The agent persists that assignment and restores IPAM before restarting
+reconciliation. Containerd invokes only the `gr8s` CNI plugin, which sends typed
+requests to the agent's private Unix socket. CNI ADD retains its durable lease
+through partial failures; DEL releases it only after removing policy and links.
 
-Whistler is layered on top: a chained gr8s CNI
-plugin attaches a Whistler-generated TC/eBPF program after the baseline CNI
-plugin has created the link. The current 27-instruction egress guard rejects
-IPv4 packets whose source is outside `10.88.0.0/16`, preventing a Pod from
-spoofing an address outside the managed network, and counts rejections in an
-eBPF map. The Common Lisp CNI path attaches it with a persistent TCX link and
-pins both objects. The map lives at
-`STATE_DIR/containerd/bpf/CONTAINER_ID/rejected_spoofs`, reuses it across
-idempotent CNI ADD calls, and the link lives beside it as `tcx-egress`. CHECK
-verifies both pins and the target interface; DEL removes both even if the Pod
-network namespace has already disappeared. The private bpffs
-is unmounted only after containerd stops. Whistler is not asked to replace CNI
-link and IPAM setup.
+Each Pod uses `169.254.1.1` as its link-local gateway and DNS server. The agent
+serves DNS there and writes the standard `default.svc.cluster.local`,
+`svc.cluster.local`, and `cluster.local` searches into the Pod resolver. It
+answers `kubernetes.default.svc.cluster.local` authoritatively and forwards names
+outside `cluster.local` to the host's IPv4 resolvers, over UDP or TCP.
+
+The Whistler classifier attaches to Pod egress through the agent. It uses an
+agent-initialized map to check the exact IPAM IPv4 address and interface MAC,
+validates ARP sender identity, and drops malformed or unsupported frames. It
+counts accepted/dropped packets and bytes, rejected spoofs, malformed packets,
+and unsupported protocols. Identity initialization precedes TCX attachment;
+replacement links are attached and pinned before atomically replacing the old
+pin. Existing counter maps survive repeated CNI ADD calls.
+
+Each endpoint has `rejected_spoofs`, `endpoint_identity`, and `traffic_stats`
+maps alongside its `tcx-egress` link under
+`AGENT_STATE_DIR/containerd/bpf/CONTAINER_ID/`. CHECK validates kernel map schemas,
+identity, and the TCX interface/direction; DEL removes staged links and all maps
+even after the Pod namespace disappears. Tests exercise the actual compiled
+bytecode on packet fixtures; privileged kernel verification remains required.
+
+Agents sample the pinned counters and publish endpoint telemetry through their
+node sessions. The loopback control-plane `/metrics` endpoint exposes accepted
+and dropped packets/bytes, spoof rejections, malformed/unsupported packets,
+sample timestamps, and node readiness. An unreadable map sets
+`gr8s_endpoint_telemetry_available` to zero and omits its counter series instead
+of reporting false zero traffic. Pod phase and IP are also refreshed from the
+agent's reconciliation observations without requiring a new desired snapshot.
+
+The native VXLAN backend uses static router neighbors and forwarding database
+entries, preserving Pod source addresses across nodes. Isolated two-node kernel
+tests cover bidirectional connectivity, the 1450-byte inner MTU, repeated setup,
+and peer route removal. Node underlay addresses are durable control-plane
+records. Address changes and withdrawals publish new peer snapshots. Agents
+journal pending topology changes before touching the kernel and retain the last
+applied topology until reconciliation succeeds, so a restart can remove stale
+entries from a partial update. A changed local underlay replaces the owned
+tunnel while retaining Pod endpoints and allocations.
 
 ## Requirements
 
@@ -141,6 +171,36 @@ sudo build/gr8s serve \
 No Podman, system containerd, or host glibc is used by the embedded runtime
 payload. Root is still required for the Linux facilities used by containers:
 mounts, namespaces, cgroups, and the overlay snapshotter.
+
+To accept agents from another machine, select the control node's reachable
+IPv4 address (replace the documentation addresses below with your node IPs):
+
+```sh
+sudo build/gr8s serve --state-directory /var/lib/gr8s-control \
+  --node-listen 192.0.2.10 --node-address 192.0.2.10
+```
+
+With `serve` running, create the second node's join token from another terminal
+on the control node:
+
+```sh
+sudo build/gr8s join-token --state-directory /var/lib/gr8s-control \
+  --node-name worker-b
+```
+
+`join-token` uses the existing cluster CA and prints JSON containing a one-time,
+node-bound `token` and its `caPin`. On the second node, use those values with
+the same dumped executable:
+
+```sh
+sudo build/gr8s agent --server 192.0.2.10:7443 --node-name worker-b \
+  --state-directory /var/lib/gr8s-worker-b --node-address 192.0.2.11 \
+  --token TOKEN --ca-pin CA_PIN
+```
+
+The two nodes need underlay connectivity for the node endpoint and VXLAN UDP
+port 4789. Each agent receives its own Pod CIDR and the peer route set; no
+bridge or host-local CNI configuration is required.
 
 For development against an already-running containerd, opt into external mode:
 
@@ -185,6 +245,45 @@ Run the ordinary Common Lisp and HTTP suite:
 ```sh
 make test
 make check
+```
+
+The native routed-veth backend can also be exercised without sudo on hosts
+that allow unprivileged user/network namespaces:
+
+```sh
+make test-routed-network
+```
+
+This creates two isolated Pod namespaces, verifies host-to-Pod and routed
+Pod-to-Pod connectivity, checks repeated setup and deletion after namespace
+removal, and tests namespace restoration on an agent worker thread. Link,
+address, and route changes use Common Lisp rtnetlink calls.
+
+To exercise native VXLAN between two isolated node namespaces, each with its own
+Pod namespace and CIDR:
+
+```sh
+make test-vxlan-network
+```
+
+The agent CNI integration test also checks the real Unix-socket client, durable
+IPAM restoration across an agent restart, and Pod DNS over UDP and TCP:
+
+```sh
+make test-agent-network
+```
+
+This substitutes only the BPF policy operations because unprivileged user
+namespaces cannot load those programs. These kernel tests do not exercise
+containerd or eBPF and do not replace the full smoke gates.
+
+The live topology test adds real gRPC agent sessions in separate node network
+namespaces. It checks source-address discovery, snapshot publication,
+bidirectional VXLAN traffic, tunnel restoration before reconnect, a peer
+underlay change, and route withdrawal:
+
+```sh
+make test-node-topology
 ```
 
 Run the self-contained native smoke workflow. Invoke `make` as your normal

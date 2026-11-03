@@ -115,7 +115,7 @@
       (is (string= (gr8s::managed-containerd-socket-path manager)
                    (gr8s::containerd-runtime-socket-path runtime)))
       (is (not (gr8s::containerd-runtime-host-network runtime)))
-      (is (equal '("10.88.0.1")
+      (is (equal '("169.254.1.1")
                  (gr8s::containerd-runtime-dns-servers runtime)))
       (is (equal '("default.svc.cluster.local"
                    "svc.cluster.local"
@@ -197,3 +197,45 @@
       (is (< (/ (- (get-internal-real-time) started)
                 internal-time-units-per-second)
              1.0)))))
+
+(test node-listener-and-underlay-options-are-explicit-and-validated
+  (let ((options (gr8s::parse-serve-options
+                  '("--node-listen" "0.0.0.0" "--node-address" "192.0.2.10"))))
+    (is (string= "0.0.0.0" (getf options :node-listen)))
+    (is (string= "192.0.2.10" (getf options :node-address)))
+    (is (string= "127.0.0.1" (getf options :listen))))
+  (let ((options (gr8s::parse-agent-options
+                  '("--server" "192.0.2.1:7443" "--token" "test" "--ca-pin" "test"
+                    "--node-name" "worker-a" "--state-directory" "/tmp/worker-a"
+                    "--node-address" "192.0.2.11"))))
+    (is (string= "192.0.2.11" (getf options :node-address))))
+  (dolist (address '("127.0.0.1" "0.0.0.0" "224.0.0.1" "255.255.255.255" "192.0.2.1/24"))
+    (signals error (gr8s::parse-serve-options (list "--node-address" address)))))
+
+(test join-token-command-uses-the-running-clusters-persisted-pki
+  (with-temporary-store (store path)
+    (assert store)
+    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (options (parse-cli-options
+                     (list "join-token" "--node-name" "worker-b"
+                           "--state-directory" (namestring path))))
+           (json (with-output-to-string (stream)
+                   (is (= 0 (gr8s::print-node-join-token options stream)))))
+           (result (com.inuoe.jzon:parse json)))
+      (is (string= "worker-b" (gethash "nodeName" result)))
+      (is (string= (gr8s:cluster-pki-ca-fingerprint pki) (gethash "caPin" result)))
+      (multiple-value-bind (identifier secret) (gr8s::split-join-token (gethash "token" result))
+        (declare (ignore secret))
+        (let ((record (gr8s::load-token-record pki identifier)))
+          (is (string= "worker-b" (gethash "nodeName" record)))
+          (is (string= "unused" (gethash "state" record))))))))
+
+(test join-token-command-does-not-bootstrap-a-new-cluster
+  (with-temporary-store (store path)
+    (assert store)
+    (signals error
+      (gr8s::print-node-join-token
+       (parse-cli-options (list "join-token" "--node-name" "worker-b"
+                                "--state-directory" (namestring path)))
+       (make-broadcast-stream)))
+    (is-false (probe-file (merge-pathnames "pki/" path)))))

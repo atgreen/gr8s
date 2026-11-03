@@ -155,9 +155,9 @@
                    (uiop:read-file-string
                     (gr8s::managed-containerd-directory
                      manager "containerd/cni/net.d/10-gr8s.conflist"))))
-             (is (search "\"type\":\"bridge\"" cni-config))
-             (is (search "\"type\":\"host-local\"" cni-config))
-             (is (search "\"type\":\"firewall\"" cni-config))
+             (is-false (search "\"type\":\"bridge\"" cni-config))
+             (is-false (search "\"type\":\"host-local\"" cni-config))
+             (is-false (search "\"type\":\"firewall\"" cni-config))
              (is (search "\"type\":\"gr8s\"" cni-config))
              (is (not (search "\"type\":\"gr8s-whistler\"" cni-config)))
              (is (search "\"direction\":\"egress\"" cni-config))
@@ -175,11 +175,10 @@
                   (gr8s::managed-containerd-directory
                    manager "containerd/bpf")
                   cni-config))
-             (is (search "10.88.0.0/16" cni-config))
-             (is (search (namestring
-                          (gr8s::managed-containerd-directory
-                           manager "containerd/cni/state"))
-                         cni-config)))
+             (let* ((object (com.inuoe.jzon:parse cni-config))
+                    (plugins (gethash "plugins" object)))
+               (is (= 1 (length plugins)))
+               (is-false (gethash "ipam" (aref plugins 0)))))
            (gr8s::stop-managed-containerd manager)
            (is (eq :child-process stopped-process))
            (is (null (gr8s::managed-containerd-process manager))))
