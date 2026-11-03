@@ -134,6 +134,7 @@
                    "namespace" (json-object "type" "string")
                    "uid" (json-object "type" "string")
                    "resourceVersion" (json-object "type" "string")
+                   "generation" (json-object "type" "integer" "format" "int64")
                    "deletionTimestamp" (json-object "type" "string" "format" "date-time")
                    "deletionGracePeriodSeconds" (json-object "type" "integer" "format" "int64")
                    "labels" (json-object "type" "object"

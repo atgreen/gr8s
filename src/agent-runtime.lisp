@@ -352,6 +352,20 @@
 
 (defun put-assigned-pod (store pod)
   (with-store-lock (store)
+    (let ((existing (gethash (pod-key (pod-namespace pod) (pod-name pod)) (pod-store-pods store))))
+      (when (and existing (not (equal (pod-uid existing) (pod-uid pod))))
+        ;; A force delete may free the API name before the old UID's runtime
+        ;; cleanup finishes. Keep its durable record until removal completes;
+        ;; retry this snapshot rather than overwrite the only recovery record.
+        (error 'runtime-error :message "Previous Pod UID is still terminating; retry assignment"))
+      (when (and existing (deletion-requested-p existing))
+        (unless (deletion-requested-p pod)
+          (error 'runtime-error :message "A deleted Pod UID cannot be assigned again"))
+        (when (< (pod-deletion-deadline existing) (pod-deletion-deadline pod))
+          (let ((old (gethash "metadata" (pod-to-object existing)))
+                (new (gethash "metadata" (pod-to-object pod))))
+            (setf (gethash "deletionTimestamp" new) (gethash "deletionTimestamp" old)
+                  (gethash "deletionGracePeriodSeconds" new) (gethash "deletionGracePeriodSeconds" old))))))
     (persist-pod store pod)
     (index-pod store pod))
   pod)

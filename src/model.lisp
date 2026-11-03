@@ -238,7 +238,7 @@
     (reject-unsupported-fields
      metadata '("name" "namespace" "labels" "annotations" "uid"
                 "resourceVersion" "creationTimestamp" "deletionTimestamp"
-                "deletionGracePeriodSeconds" "ownerReferences")
+                "deletionGracePeriodSeconds" "generation" "ownerReferences")
      "metadata")
     (validate-owner-references metadata)
     (reject-unsupported-fields

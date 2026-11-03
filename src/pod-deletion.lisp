@@ -58,5 +58,6 @@
                 (member (and status (gethash "phase" status)) '("Succeeded" "Failed") :test #'equal))
         (setf grace 0))
       (setf (gethash "deletionTimestamp" metadata) (current-timestamp (+ now grace))
-            (gethash "deletionGracePeriodSeconds" metadata) grace))
+            (gethash "deletionGracePeriodSeconds" metadata) grace
+            (gethash "generation" metadata) (1+ (gethash "generation" metadata 1))))
     t))

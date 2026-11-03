@@ -195,6 +195,7 @@
             (gethash "namespace" metadata) (pod-namespace pod)
             (gethash "uid" metadata) (pod-uid pod)
             (gethash "resourceVersion" metadata) (pod-resource-version pod)
+            (gethash "generation" metadata) 1
             (gethash "creationTimestamp" metadata) (current-timestamp)))
     (persist-pod store pod)
     (index-pod store pod)
@@ -232,6 +233,10 @@
           (remhash key metadata)
           (when (gethash key existing-metadata)
             (setf (gethash key metadata) (gethash key existing-metadata))))
+        (setf (gethash "generation" metadata)
+              (+ (gethash "generation" existing-metadata 1)
+                 (if (equalp (gethash "spec" (pod-to-object existing))
+                             (gethash "spec" (pod-to-object replacement))) 0 1)))
         (setf (pod-uid replacement) (pod-uid existing)
               (pod-resource-version replacement)
               (write-to-string (1+ (parse-integer actual)))

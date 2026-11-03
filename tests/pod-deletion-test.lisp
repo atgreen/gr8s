@@ -71,6 +71,28 @@
                    (gethash "deletionTimestamp" (gethash "metadata" (pod-to-object replacement)))))
         (is (= 30 (gethash "deletionGracePeriodSeconds" (gethash "metadata" (pod-to-object replacement)))))))))
 
+(test pod-generation-is-server-owned-and-observation-follows-real-reconciliation
+  (with-temporary-store (store path)
+    (let* ((input (grace-pod))
+           (runtime (make-fake-runtime))
+           (reconciler (make-reconciler store runtime)))
+      (flet ((generation (pod) (gethash "generation" (gethash "metadata" (pod-to-object pod)))))
+        (setf (gethash "generation" (gethash "metadata" (pod-to-object input))) 100)
+        (let ((pod (create-pod store input)))
+          (is (= 1 (generation pod)))
+          (is (= 1 (gethash "observedGeneration" (reconcile-pod reconciler "default" "hello"))))
+          (let ((replacement (parse-pod (gr8s::copy-json-object (pod-to-object pod)))))
+            (setf (gethash "generation" (gethash "metadata" (pod-to-object replacement))) 1000)
+            (is (= 1 (generation (update-pod store replacement (pod-resource-version pod)))))))
+        (let* ((old (get-pod store "default" "hello"))
+               (replacement (parse-pod (gr8s::copy-json-object (pod-to-object old)))))
+          (setf (gethash "image" (aref (gethash "containers" (gethash "spec" (pod-to-object replacement))) 0)) "busybox:changed")
+          (update-pod store replacement (pod-resource-version old))
+          (is (= 2 (generation replacement)))
+          (is (= 2 (gethash "observedGeneration" (reconcile-pod reconciler "default" "hello")))))
+        (is (= 3 (generation (mark-pod-deleting store "default" "hello"))))
+        (is (= 3 (generation (mark-pod-deleting store "default" "hello" :grace-period 0))))))))
+
 (test unscheduled-and-terminal-pods-delete-without-grace
   (with-temporary-store (store path)
     (create-pod store (parse-pod *valid-pod-json*))
@@ -201,3 +223,23 @@
       (gr8s::stop-runtime-deletions runtime)
       (is (= 0 (hash-table-count (gr8s::deletion-controller-jobs (gated-deletion-runtime-controller runtime)))))
       (is (null (gr8s::deletion-controller-retired (gated-deletion-runtime-controller runtime)))))))
+
+(test replacement-assignment-preserves-the-terminating-uids-recovery-record
+  (with-temporary-store (store path)
+    (let* ((old (create-pod store (grace-pod)))
+           (old-uid (pod-uid old))
+           (deleting (mark-pod-deleting store "default" "hello"))
+           (replacement (grace-pod)))
+      (setf (pod-uid replacement) "replacement-uid"
+            (pod-resource-version replacement) "1"
+            (gethash "uid" (gethash "metadata" (pod-to-object replacement))) "replacement-uid"
+            (gethash "resourceVersion" (gethash "metadata" (pod-to-object replacement))) "1")
+      (signals runtime-error (gr8s::put-assigned-pod store replacement))
+      (signals runtime-error (gr8s::put-assigned-pod store old))
+      (is (equal old-uid (pod-uid (get-pod (open-store path) "default" "hello"))))
+      (is (gr8s::deletion-requested-p (get-pod store "default" "hello")))
+      ;; Simulate the reconciler completing the old UID's runtime cleanup.
+      (gr8s::remove-pod store (pod-namespace deleting) (pod-name deleting))
+      (gr8s::put-assigned-pod store replacement)
+      (is (equal "replacement-uid" (pod-uid (get-pod (open-store path) "default" "hello")))))
+    (is (= 1 (length (directory (merge-pathnames "*.json" path)))))))

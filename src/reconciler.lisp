@@ -43,7 +43,11 @@
               (and (string= "Always" (pod-restart-policy pod))
                    (not (string= "Running" (runtime-pod-phase observed)))))
       (setf observed (runtime-ensure runtime pod)))
-    (observed-status observed)))
+    (let ((status (observed-status observed)))
+      (when (equal (pod-resource-version pod) (runtime-pod-resource-version observed))
+        (setf (gethash "observedGeneration" status)
+              (gethash "generation" (gethash "metadata" (pod-to-object pod)) 1)))
+      status)))
 
 (defun converge-deleting-pod (reconciler pod)
   (if (runtime-delete-pod (reconciler-runtime reconciler) pod)
