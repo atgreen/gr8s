@@ -93,42 +93,26 @@
   (json-response
    (json-object "apiVersion" "v1"
                 "kind" "APIGroupList"
-                "groups" #())))
+                "groups"
+                (vector (json-object "name" "rbac.authorization.k8s.io"
+                                     "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
+                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))))))
 
 (defun api-resources-response ()
   (json-response
    (json-object
-    "apiVersion" "v1"
-    "groupVersion" "v1"
-    "kind" "APIResourceList"
+    "apiVersion" "v1" "groupVersion" "v1" "kind" "APIResourceList"
     "resources"
-    (vector
-     (json-object "name" "pods"
-                  "singularName" ""
-                  "namespaced" t
-                  "kind" "Pod"
-                  "verbs" #( "create" "delete" "get" "list" "patch" "update")
-                  "shortNames" #( "po"))
-     (json-object "name" "pods/log"
-                  "singularName" ""
-                  "namespaced" t
-                  "kind" "Pod"
-                  "verbs" #( "get"))
-     (json-object "name" "pods/exec"
-                  "singularName" ""
-                  "namespaced" t
-                  "kind" "Pod"
-                  "verbs" #( "create"))
-     (json-object "name" "configmaps" "singularName" "configmap" "namespaced" t
-                  "kind" "ConfigMap" "shortNames" #( "cm")
-                  "verbs" #( "create" "delete" "get" "list" "patch" "update"))
-     (json-object "name" "secrets" "singularName" "secret" "namespaced" t
-                  "kind" "Secret" "verbs" #( "create" "delete" "get" "list" "patch" "update"))
-     (json-object "name" "events"
-                  "singularName" ""
-                  "namespaced" t
-                  "kind" "Event"
-                  "verbs" #( "get" "list"))))))
+    (concatenate
+     'vector
+     (vector
+      (json-object "name" "pods" "singularName" "pod" "namespaced" t "kind" "Pod"
+                   "verbs" #("create" "delete" "get" "list" "patch" "update") "shortNames" #("po"))
+      (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
+      (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("create"))
+      (json-object "name" "nodes" "singularName" "node" "namespaced" nil "kind" "Node" "verbs" #("get" "list"))
+      (json-object "name" "events" "singularName" "event" "namespaced" t "kind" "Event" "verbs" #("get" "list")))
+     (stored-resource-discovery "v1")))))
 
 (defun event-list-response ()
   (json-response
@@ -942,12 +926,18 @@
           ((string= path "/version") (version-response))
           ((string= path "/api") (api-versions-response))
           ((string= path "/apis") (api-groups-response))
+          ((string= path "/apis/rbac.authorization.k8s.io/v1") (rbac-resources-response))
           ((string= path "/openapi/v2") (openapi-response))
           ((string= path "/openapi/v3") (openapi-v3-discovery-response))
           ((string= path "/openapi/v3/api/v1") (openapi-v3-response))
           ((string= path "/api/v1") (api-resources-response))
           ((string= path "/api/v1/namespaces/default/events")
            (event-list-response))
+          ((and (eq method :get) (string= path "/api/v1/nodes"))
+           (nodes-api-response store))
+          ((and (eq method :get) (uiop:string-prefix-p "/api/v1/nodes/" path)
+                (dns-subdomain-p (subseq path (length "/api/v1/nodes/"))))
+           (nodes-api-response store (subseq path (length "/api/v1/nodes/"))))
           ((core-resource-route path)
            (dispatch-core-resource-request store path method))
           ((and (string= path "/api/v1/pods") (eq method :get))

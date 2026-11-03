@@ -1,6 +1,6 @@
 (in-package #:gr8s)
 
-;; ConfigMaps and Secrets share a durable transaction and revision sequence.
+;; Core and bootstrap resources share a durable transaction and revision sequence.
 ;; Objects are copied at the boundary so clients cannot mutate indexed state.
 (defun core-object (&rest pairs)
   (let ((object (make-hash-table :test #'equal)))
@@ -16,10 +16,31 @@
         ((vectorp object) (map 'vector #'copy-core-object object))
         (t object)))
 
+(defparameter *stored-resource-types*
+  '(("configmaps" "ConfigMap" "v1" t)
+    ("secrets" "Secret" "v1" t)
+    ("namespaces" "Namespace" "v1" nil)
+    ("serviceaccounts" "ServiceAccount" "v1" t)
+    ("roles" "Role" "rbac.authorization.k8s.io/v1" t)
+    ("rolebindings" "RoleBinding" "rbac.authorization.k8s.io/v1" t)
+    ("clusterroles" "ClusterRole" "rbac.authorization.k8s.io/v1" nil)
+    ("clusterrolebindings" "ClusterRoleBinding" "rbac.authorization.k8s.io/v1" nil)))
+
+(defun stored-resource-type (resource)
+  "Return the descriptor for a durable Kubernetes resource collection."
+  (or (assoc resource *stored-resource-types* :test #'equal)
+      (error "Unknown stored resource ~S" resource)))
+
 (defun core-resource-kind (resource)
-  (cond ((string= resource "configmaps") "ConfigMap")
-        ((string= resource "secrets") "Secret")
-        (t (error "Unknown core resource ~S" resource))))
+  (second (stored-resource-type resource)))
+
+(defun core-resource-api-version (resource)
+  "Return the API version serialized for RESOURCE."
+  (third (stored-resource-type resource)))
+
+(defun core-resource-namespaced-p (resource)
+  "Return whether RESOURCE is scoped to a namespace."
+  (fourth (stored-resource-type resource)))
 
 (defun core-resource-error (code reason control &rest arguments)
   (error 'kubernetes-error :status-code code :reason reason
@@ -41,9 +62,9 @@
         (setf (pod-store-resource-revision store) (gethash "revision" state))
         (loop for object across (gethash "items" state)
               for metadata = (gethash "metadata" object)
-              for resource = (cond ((equal "ConfigMap" (gethash "kind" object)) "configmaps")
-                                   ((equal "Secret" (gethash "kind" object)) "secrets")
-                                   (t (error "Invalid stored core resource kind")))
+              for resource = (or (first (find (gethash "kind" object) *stored-resource-types*
+                                             :key #'second :test #'equal))
+                                 (error "Invalid stored resource kind"))
               for key = (core-resource-key resource (gethash "namespace" metadata)
                                            (gethash "name" metadata))
               do (when (gethash key (pod-store-resources store))
@@ -114,7 +135,7 @@
 
 (defun validate-core-metadata (metadata namespace name)
   (require-object metadata "metadata")
-  (unless (dns-label-p namespace)
+  (when (and namespace (not (dns-label-p namespace)))
     (core-resource-error 422 "Invalid" "metadata.namespace must be a DNS label"))
   (multiple-value-bind (specified present) (gethash "namespace" metadata)
     (when (and present (not (member specified '(null "") :test #'equal)) (not (equal specified namespace)))
@@ -177,6 +198,9 @@
     (setf (gethash "type" object) type)))
 
 (defun normalize-core-resource (resource input namespace &optional name)
+  (unless (member resource '("configmaps" "secrets") :test #'equal)
+    (return-from normalize-core-resource
+      (normalize-bootstrap-resource resource input namespace name)))
   (let* ((object (copy-core-object (require-object input (core-resource-kind resource))))
          (kind (core-resource-kind resource))
          (metadata (require-object (gethash "metadata" object) "metadata"))
@@ -313,6 +337,11 @@
         (core-resource-error 409 "Conflict" "The resource was modified; apply your changes to the latest version"))
       (when (and (gethash "uid" metadata) (not (equal (gethash "uid" metadata) (gethash "uid" existing-metadata))))
         (core-resource-error 409 "Conflict" "metadata.uid does not match the stored object"))
+      (when (and (member resource '("rolebindings" "clusterrolebindings") :test #'equal)
+                 (let ((before (gethash "roleRef" existing)) (after (gethash "roleRef" object)))
+                   (not (every (lambda (key) (equal (gethash key before) (gethash key after)))
+                               '("apiGroup" "kind" "name")))))
+        (core-resource-error 422 "Invalid" "roleRef is immutable"))
       (when (and (string= resource "secrets") (not (equal (gethash "type" existing) (gethash "type" object))))
         (core-resource-error 422 "Invalid" "Secret.type is immutable"))
       (when (and (core-resource-immutable-p existing)
