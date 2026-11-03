@@ -398,6 +398,7 @@
    :status-json (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify status))))
 
 (defun cache-node-observation (node-runtime pod status)
+  (save-pod-observation (node-runtime-store node-runtime) pod status)
   (let ((message (pod-observed-status-message pod status)))
     (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
       (setf (gethash (pod-uid pod) (node-runtime-observed-statuses node-runtime)) message))

@@ -55,20 +55,38 @@
         (remove-pod (reconciler-store reconciler)
                     (pod-namespace pod) (pod-name pod))
         (pod-status "Succeeded" :reason "Deleted"))
-      (pod-status "Running" :reason "Terminating")))
+      (let* ((runtime (reconciler-runtime reconciler))
+             (observed (handler-case (runtime-observe runtime (pod-uid pod))
+                         ;; Concurrent container removal may invalidate a CRI
+                         ;; status lookup. The deletion remains accepted.
+                         (runtime-error () nil)))
+             (status (if observed (observed-status observed) (pod-status "Unknown"))))
+        ;; Shutdown intent does not prove that a still-running container has
+        ;; become unready. Keep actual container observations during grace;
+        ;; the Service controller separately excludes terminating endpoints.
+        (when (and observed (runtime-pod-spec-fingerprint observed)
+                   (equal (runtime-pod-spec-fingerprint observed) (pod-runtime-spec-fingerprint pod)))
+          (setf (gethash "observedGeneration" status)
+                (gethash "generation" (gethash "metadata" (pod-to-object pod)) 1)))
+        (setf (gethash "reason" status) "Terminating")
+        status)))
 
 (defun reconcile-pod (reconciler namespace name)
   (bt:with-lock-held ((reconciler-lock reconciler))
     (let ((pod (get-pod (reconciler-store reconciler) namespace name)))
       (handler-case
-          (if (deletion-requested-p pod)
-              (converge-deleting-pod reconciler pod)
-              (converge-running-pod reconciler pod))
+          (add-pod-status-conditions
+           (reconciler-store reconciler) pod
+           (if (deletion-requested-p pod)
+               (converge-deleting-pod reconciler pod)
+               (converge-running-pod reconciler pod)))
         (runtime-error (error)
           (format *error-output* "gr8s Pod ~A/~A runtime error: ~A~%" namespace name (runtime-error-message error))
-          (pod-status "Pending"
-                      :reason "RuntimeError"
-                      :message (runtime-error-message error)))))))
+          (add-pod-status-conditions
+           (reconciler-store reconciler) pod
+           (pod-status "Pending"
+                       :reason "RuntimeError"
+                       :message (runtime-error-message error))))))))
 
 (defun delete-reconciled-pod (reconciler namespace name &key uid resource-version
                                                       (grace-period nil grace-supplied-p)
@@ -77,7 +95,9 @@
     (let ((pod (apply #'mark-pod-deleting (reconciler-store reconciler) namespace name
                       :uid uid :resource-version resource-version :dry-run dry-run
                       (when grace-supplied-p (list :grace-period grace-period)))))
-      (values (unless dry-run (converge-deleting-pod reconciler pod)) pod))))
+      (values (unless dry-run
+                (add-pod-status-conditions (reconciler-store reconciler) pod
+                                          (converge-deleting-pod reconciler pod))) pod))))
 
 (defun reconcile-all (reconciler &key observer)
   (loop for pod in (list-pods (reconciler-store reconciler))

@@ -27,6 +27,7 @@
   (pod-observed-phases (make-hash-table :test #'equal))
   (pod-observed-statuses (make-hash-table :test #'equal))
   (pod-observed-resource-versions (make-hash-table :test #'equal))
+  (pod-condition-histories (make-hash-table :test #'equal))
   (lock (bt:make-lock "gr8s store")))
 
 (defmacro with-store-lock ((store) &body body)
@@ -156,6 +157,7 @@
       (let ((node (parse-node-record file)))
         (setf (gethash (node-record-name node) (pod-store-nodes store)) node)))
     (load-core-resources store)
+    (load-pod-status-state store)
     store))
 
 (defun get-pod-unlocked (store namespace name)
@@ -254,11 +256,14 @@
   "Remove a Pod and its observed status from STORE, returning the removed Pod."
   (with-store-lock (store)
     (let ((pod (get-pod-unlocked store namespace name)))
+      (let ((status-path (pod-status-state-path store (pod-uid pod))))
+        (when (probe-file status-path) (delete-file status-path)))
       (delete-file (pod-path store pod))
       (remhash (pod-key namespace name) (pod-store-pods store))
       (remhash (pod-uid pod) (pod-store-pod-observed-phases store))
       (remhash (pod-uid pod) (pod-store-pod-observed-statuses store))
       (remhash (pod-uid pod) (pod-store-pod-observed-resource-versions store))
+      (remhash (pod-uid pod) (pod-store-pod-condition-histories store))
       pod)))
 
 (defun delete-pod (store namespace name)

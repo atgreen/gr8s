@@ -243,17 +243,13 @@
 
 (defun update-pod-observed-phase (store pod phase)
   "Record the agent-observed PHASE for POD."
-  (with-store-lock (store)
-    (setf (gethash (pod-uid pod) (pod-store-pod-observed-phases store)) phase
-          (gethash (pod-uid pod) (pod-store-pod-observed-resource-versions store)) (pod-resource-version pod))))
+  (let ((status (make-hash-table :test #'equal)))
+    (setf (gethash "phase" status) phase)
+    (save-pod-observation store pod status)))
 
 (defun update-pod-observed-status (store pod status)
   "Record POD's complete observed STATUS and its derived phase."
-  (with-store-lock (store)
-    (setf (gethash (pod-uid pod) (pod-store-pod-observed-resource-versions store)) (pod-resource-version pod)
-          (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)) status
-          (gethash (pod-uid pod) (pod-store-pod-observed-phases store))
-          (gethash "phase" status "Unknown"))))
+  (save-pod-observation store pod status))
 
 (defun pod-observed-status (store pod)
   "Return the latest agent-observed status object for POD, if any."
