@@ -8,7 +8,9 @@
 
 (defun json-response (object &optional (status 200))
   (setf (hunchentoot:return-code*) status
-        (hunchentoot:content-type*) "application/json; charset=utf-8")
+        ;; client-go v0.27 discovery compares this media type literally. JSON
+        ;; is UTF-8 already; a charset parameter breaks its legacy fallback.
+        (hunchentoot:content-type*) "application/json")
   (com.inuoe.jzon:stringify object))
 
 (defun status-response (status reason message code)
