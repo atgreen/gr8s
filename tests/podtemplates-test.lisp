@@ -175,3 +175,18 @@
       (let* ((patch (com.inuoe.jzon:parse "{\"template\":{\"spec\":{\"containers\":[{\"$patch\":\"replace\"},{\"name\":\"replacement\",\"image\":\"web:v1\"}]}}}"))
              (result (check-core-status 200 item :method :patch :object patch :content-type "application/strategic-merge-patch+json")))
         (is (equal "replacement" (gethash "name" (template-main-container result))))))))
+
+(test template-wire-timestamps-preserve-nanoseconds-and-reject-invalid-values
+  (let ((gr8s::*core-protobuf-field-count* 0))
+    (is (equal "1970-01-01T00:00:01.005000000Z"
+               (gr8s::template-protobuf-message "k8s.io.apimachinery.pkg.apis.meta.v1.Time"
+                                                (core-test-protobuf '((1 1) (2 5000000))))))
+    (signals error (gr8s::template-protobuf-message "k8s.io.apimachinery.pkg.apis.meta.v1.Time"
+                                                   (core-test-protobuf '((1 1) (2 1000000000)))))))
+
+(test template-storage-limit-prevents-unreadable-persisted-objects
+  (with-temporary-store (store path)
+    (let ((object (podtemplate-fixture "oversized")))
+      (setf (gethash "args" (template-main-container object)) (vector (make-string (* 2 1024 1024) :initial-element #\x)))
+      (is (= 413 (core-resource-status (lambda () (gr8s::create-core-resource store "podtemplates" object "alpha")))))
+      (is (null (gr8s::list-core-resources (open-store path) "podtemplates"))))))

@@ -88,7 +88,10 @@
        (if (zerop (hash-table-count object)) 'null
            (multiple-value-bind (second minute hour day month year)
                (decode-universal-time (+ 2208988800 (gethash "seconds" object 0)) 0)
-             (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ" year month day hour minute second))))
+             (let ((nanos (gethash "nanos" object 0)))
+               (unless (<= 0 nanos 999999999) (error "Invalid protobuf timestamp nanoseconds"))
+               (concatenate 'string (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0D" year month day hour minute second)
+                            (if (zerop nanos) "" (format nil ".~9,'0D" nanos)) "Z")))))
       (t object))))
 
 (defun decode-podtemplate-protobuf (bytes)
@@ -263,4 +266,8 @@
                             (unless (member (gethash "protocol" port) '("TCP" "UDP" "SCTP") :test #'equal)
                               (core-resource-error 422 "Invalid" "Invalid port protocol")))))))
     (validate-template-shape object (template-schema "io.k8s.api.core.v1.PodTemplate") "PodTemplate")
+    ;; Keep protobuf's larger transport budget from admitting strings that
+    ;; cannot be read back by the durable JSON store's 2 MiB string limit.
+    (when (> (length (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify object))) (* 2 1024 1024))
+      (core-resource-error 413 "RequestEntityTooLarge" "PodTemplate exceeds the 2 MiB storage limit"))
     object))

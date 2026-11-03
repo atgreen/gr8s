@@ -18,10 +18,37 @@ import shutil
 import subprocess
 import tempfile
 import time
+import tarfile
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 
 FOCUS = "PodTemplates|Servers with support for API chunking"
+
+
+def verify_upstream_results(archive, e2e_log, summary):
+    """Distinguish the five actual specs from the extra suite-hook JUnit entries."""
+    cases = []
+    hooks = 0
+    with tarfile.open(archive) as bundle:
+        for member in bundle.getmembers():
+            if not (member.name.startswith("plugins/e2e/results/") and Path(member.name).name.startswith("junit") and member.name.endswith(".xml")):
+                continue
+            root = ET.fromstring(bundle.extractfile(member).read())
+            for case in root.findall(".//testcase"):
+                if case.find("skipped") is not None:
+                    continue
+                if case.get("name", "").startswith("[It] "):
+                    cases.append({"name": case.get("name"), "seconds": case.get("time"),
+                                  "passed": case.find("failure") is None and case.find("error") is None})
+                else:
+                    hooks += 1
+    starts = e2e_log.count("Running Suite: Kubernetes e2e suite")
+    selected = re.findall(r"Will run (\d+) of (\d+) specs", e2e_log)
+    passed = ("Status: passed" in summary and re.search(r"^Failed:\s+0\s*$", summary, re.M) is not None
+              and "Test Suite Passed" in e2e_log and starts == 1 and len(selected) == 1 and selected[0][0] == "5"
+              and len(cases) == 5 and all(case["passed"] for case in cases))
+    return {"passed": passed, "suiteStarts": starts, "selectedSpecs": selected, "upstreamCases": cases, "suiteHookEntries": hooks}
 
 
 def main():
@@ -116,10 +143,7 @@ def main():
         result = subprocess.run([str(args.sonobuoy), "results", str(root / "sonobuoy-results.tar.gz")], text=True, capture_output=True, timeout=30)
         (root / "sonobuoy-results.txt").write_text(result.stdout + result.stderr)
         e2e = (root / "e2e.log").read_text()
-        report["suiteStarts"] = e2e.count("Running Suite: Kubernetes e2e suite")
-        report["selectedSpecs"] = re.findall(r"Will run (\d+) of (\d+) specs", e2e)
-        report["passed"] = ("Status: passed" in result.stdout and re.search(r"Passed:\s+5\b", result.stdout) is not None
-                            and "Test Suite Passed" in e2e and report["suiteStarts"] == 1)
+        report.update(verify_upstream_results(root / "sonobuoy-results.tar.gz", e2e, result.stdout))
         if not report["passed"]:
             raise RuntimeError("PodTemplate conformance cases did not all pass; inspect the official archive and logs")
     except Exception as error:
