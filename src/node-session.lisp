@@ -297,7 +297,8 @@
     (attach-node-topology server node-name snapshot)
     (bt:with-lock-held ((node-grpc-server-lock server))
       (let ((existing (gethash node-name (node-grpc-server-snapshots server))))
-        (if (same-node-snapshot-topology-p existing snapshot)
+        (if (and (same-node-snapshot-topology-p existing snapshot)
+                 (>= (slot-value existing 'gr8s.node.v1::revision) last-applied))
             existing
           (let ((revision (1+ (max last-applied
                                    (gethash node-name

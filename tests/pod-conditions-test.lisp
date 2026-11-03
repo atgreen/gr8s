@@ -175,3 +175,25 @@
       (let ((node (gr8s::get-node (open-store path) "worker-a")))
         (is (gr8s::node-record-ready-p node))
         (is (= 47 (- (gr8s::node-record-lease-deadline node) (gr8s::node-record-last-heartbeat node))))))))
+
+(test prepublished-snapshot-cannot-strand-an-agent-ahead-of-a-restarted-server
+  (with-temporary-store (store path)
+    (gr8s::register-node store (gr8s::make-node-record :name "worker-a" :id "node-a" :pod-cidr "10.88.0.0/24"))
+    (let* ((server (gr8s::start-node-grpc-server store :host "127.0.0.1" :port 0))
+           (identity-path (merge-pathnames "ahead/identity.json" path))
+           (applied nil))
+      (unwind-protect
+           (progn
+             (gr8s::persist-agent-identity identity-path (gr8s::make-agent-identity "worker-a" :node-id "node-a" :revision 64))
+             (is (= 1 (gr8s::publish-node-desired-state server "worker-a" (empty-desired-snapshot))))
+             (is (gr8s::same-node-snapshot-topology-p
+                  (gr8s::current-node-snapshot server "worker-a")
+                  (gr8s::attach-node-topology server "worker-a" (gr8s::node-desired-state-snapshot store "worker-a"))))
+             (gr8s::run-node-session
+              "127.0.0.1" (gr8s::node-grpc-server-port server) "worker-a" identity-path
+              (lambda (snapshot) (push (slot-value snapshot 'gr8s.node.v1::revision) applied) nil)
+              :max-sessions 1 :reconnect-delay .01)
+             (is (equal '(65) applied))
+             (is (= 65 (gethash "lastAppliedRevision" (com.inuoe.jzon:parse identity-path))))
+             (is (= 65 (gr8s::node-session-acknowledged-revision server "worker-a"))))
+        (gr8s::stop-node-grpc-server server)))))
