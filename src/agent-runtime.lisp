@@ -355,7 +355,7 @@
       (setf (gethash (slot-value assignment 'gr8s.node.v1::uid)
                      assigned-uids)
             t))
-    (dolist (pod (list-pods (node-runtime-store node-runtime) "default"))
+    (dolist (pod (list-pods (node-runtime-store node-runtime)))
       (unless (gethash (pod-uid pod) assigned-uids)
         ;; Serialize with the background reconciler and persist deletion intent
         ;; before CRI calls. A transient removal failure must never turn into
@@ -415,7 +415,7 @@
                            (princ-to-string condition)))))))))
 
 (defun node-runtime-status (node-runtime &key (counter-reader #'read-cni-policy-counters))
-  (let ((pods (list-pods (node-runtime-store node-runtime) "default")))
+  (let ((pods (list-pods (node-runtime-store node-runtime))))
     (make-instance
      'gr8s.node.v1::node-status
      :observed-at-unix-nanos (* (- (get-universal-time) 2208988800) 1000000000)

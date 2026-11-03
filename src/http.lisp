@@ -37,8 +37,19 @@
     (setf (gethash "status" object) status)
     object))
 
-(defun request-object ()
-  (parse-pod (hunchentoot:raw-post-data :force-text t)))
+(defun request-pod-in-namespace (object namespace)
+  "Validate the request namespace and default omitted Pod metadata.namespace."
+  (let* ((metadata (require-object (gethash "metadata" object) "metadata"))
+         (specified (gethash "namespace" metadata)))
+    (when (and specified (not (equal specified "")) (not (equal namespace specified)))
+      (core-resource-error 400 "BadRequest" "metadata.namespace does not match request namespace"))
+    (setf (gethash "namespace" metadata) namespace)
+    (parse-pod object)))
+
+(defun request-object (&optional (namespace "default"))
+  (request-pod-in-namespace
+   (require-object (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)) "Pod")
+   namespace))
 
 (defun request-json-object ()
   (require-object
@@ -62,8 +73,8 @@
 (defun version-response ()
   (json-response
    (json-object "major" "1"
-                "minor" "0"
-                "gitVersion" "v1.0.0-gr8s"
+                "minor" "36"
+                "gitVersion" "v1.36.0-gr8s.0"
                 "gitCommit" "unknown"
                 "gitTreeState" "clean"
                 "buildDate" "1970-01-01T00:00:00Z"
@@ -309,12 +320,12 @@
       "paths" (add-core-resource-openapi-paths (openapi-v3-pod-paths))
       "components" (json-object "schemas" (openapi-definitions))))))
 
-(defun create-pod-response (store reconciler)
-  (let* ((pod (create-pod store (request-object)))
+(defun create-pod-response (store reconciler &optional (namespace "default"))
+  (let* ((pod (create-pod store (request-object namespace)))
          (status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
     (json-response (pod-response-object pod status) 201)))
 
-(defun list-pods-response (store reconciler)
+(defun list-pods-response (store reconciler &optional (namespace "default"))
   (json-response
    (json-object
     "apiVersion" "v1"
@@ -327,26 +338,33 @@
                     (reconcile-pod reconciler
                                    (pod-namespace pod)
                                    (pod-name pod))))
-                 (list-pods store "default")))))
+                 (remove-if-not
+                  (let ((labels (core-selector-predicate (hunchentoot:parameter "labelSelector")))
+                        (fields (core-selector-predicate (hunchentoot:parameter "fieldSelector") :fields t)))
+                    (lambda (pod)
+                      (and (funcall labels (pod-to-object pod))
+                           (funcall fields (pod-to-object pod)))))
+                  (list-pods store namespace))))))
 
-(defun get-pod-response (store reconciler name)
-  (let ((pod (get-pod store "default" name)))
+(defun get-pod-response (store reconciler name &optional (namespace "default"))
+  (let ((pod (get-pod store namespace name)))
     (json-response
-     (pod-response-object pod (reconcile-pod reconciler "default" name)))))
+     (pod-response-object pod (reconcile-pod reconciler namespace name)))))
 
-(defun apply-pod-response (store reconciler name)
+(defun apply-pod-response (store reconciler name &optional (namespace "default"))
   (let* ((patch (request-json-object))
-         (existing (handler-case (get-pod store "default" name)
+         (existing (handler-case (get-pod store namespace name)
                      (kubernetes-error (error)
                        (if (= 404 (kubernetes-error-status-code error))
                            nil
                            (error error)))))
          (replacement
-           (parse-pod
+           (request-pod-in-namespace
             (if existing
                 (merge-json-object
                  (copy-json-object (pod-to-object existing)) patch)
-                patch))))
+                patch)
+            namespace)))
     (unless (string= name (pod-name replacement))
       (invalid-pod "request name does not match metadata.name"))
     (let ((pod (if existing
@@ -355,11 +373,11 @@
                    (create-pod store replacement))))
       (json-response
        (pod-response-object
-        pod (reconcile-pod reconciler "default" name))
+        pod (reconcile-pod reconciler namespace name))
        (if existing 200 201)))))
 
-(defun replace-pod-response (store reconciler name)
-  (let ((replacement (request-object)))
+(defun replace-pod-response (store reconciler name &optional (namespace "default"))
+  (let ((replacement (request-object namespace)))
     (unless (string= name (pod-name replacement))
       (invalid-pod "request name does not match metadata.name"))
     (unless (pod-resource-version replacement)
@@ -368,16 +386,16 @@
                            (pod-resource-version replacement))))
       (json-response
        (pod-response-object
-        pod (reconcile-pod reconciler "default" name))))))
+        pod (reconcile-pod reconciler namespace name))))))
 
-(defun delete-pod-response (store reconciler name)
+(defun delete-pod-response (store reconciler name &optional (namespace "default"))
   (declare (ignore store))
-  (delete-reconciled-pod reconciler "default" name)
+  (delete-reconciled-pod reconciler namespace name)
   (status-response "Success" "Deleted"
                    (format nil "Pod ~A deleted" name) 200))
 
-(defun pod-logs-response (store reconciler name)
-  (let* ((pod (get-pod store "default" name))
+(defun pod-logs-response (store reconciler name &optional (namespace "default"))
+  (let* ((pod (get-pod store namespace name))
          (container (or (hunchentoot:parameter "container")
                         (container-spec-name (aref (pod-containers pod) 0)))))
     (unless (find container (pod-containers pod)
@@ -846,10 +864,10 @@
   (error 'kubernetes-error :status-code 400 :reason "BadRequest"
          :message message))
 
-(defun pod-exec-response (store reconciler name)
+(defun pod-exec-response (store reconciler name &optional (namespace "default"))
   (unless (upgrade-request-p)
     (bad-exec-request "Pod exec requires an upgraded connection"))
-  (let* ((pod (get-pod store "default" name))
+  (let* ((pod (get-pod store namespace name))
          (options
            (exec-options-from-parameters (hunchentoot:get-parameters*)))
          (container
@@ -881,42 +899,37 @@
               :tty (exec-options-tty options)))))))
 
 (defun pod-route-parts (path)
-  (let ((prefix "/api/v1/namespaces/default/pods"))
-    (when (and (>= (length path) (length prefix))
-               (string= prefix path :end2 (length prefix))
-               (or (= (length path) (length prefix))
-                   (char= #\/ (char path (length prefix)))))
-      (remove "" (uiop:split-string (subseq path (length prefix))
-                                    :separator '(#\/))
-              :test #'string=))))
+  "Return Pod subresource parts, namespace, and a route match indicator."
+  (let ((parts (uiop:split-string path :separator '(#\/))))
+    (when (and (<= 6 (length parts))
+               (equal (subseq parts 0 4) '("" "api" "v1" "namespaces"))
+               (dns-label-p (fifth parts)) (equal "pods" (sixth parts))
+               (every (lambda (part) (plusp (length part))) (nthcdr 6 parts)))
+      (values (nthcdr 6 parts) (fifth parts) t))))
 
 (defun dispatch-pod-request (store runtime reconciler path method)
   (declare (ignore runtime))
-  (let ((parts (pod-route-parts path)))
+  (multiple-value-bind (parts namespace matched) (pod-route-parts path)
+    (declare (ignore matched))
     (cond
       ((and (null parts) (eq method :post))
-       (create-pod-response store reconciler))
+       (create-pod-response store reconciler namespace))
       ((and (null parts) (eq method :get))
-       (list-pods-response store reconciler))
+       (list-pods-response store reconciler namespace))
       ((and (= 1 (length parts)) (eq method :get))
-       (get-pod-response store reconciler (first parts)))
+       (get-pod-response store reconciler (first parts) namespace))
       ((and (= 1 (length parts)) (eq method :patch))
-       (apply-pod-response store reconciler (first parts)))
+       (apply-pod-response store reconciler (first parts) namespace))
       ((and (= 1 (length parts)) (eq method :put))
-       (replace-pod-response store reconciler (first parts)))
+       (replace-pod-response store reconciler (first parts) namespace))
       ((and (= 1 (length parts)) (eq method :delete))
-       (delete-pod-response store reconciler (first parts)))
-      ((and (= 2 (length parts))
-            (string= "log" (second parts))
-            (eq method :get))
-       (pod-logs-response store reconciler (first parts)))
-      ((and (= 2 (length parts))
-            (string= "exec" (second parts))
-            (member method '(:get :post)))
-       (pod-exec-response store reconciler (first parts)))
-      (t
-       (status-response "Failure" "NotFound"
-                        (format nil "No route for ~A ~A" method path) 404)))))
+       (delete-pod-response store reconciler (first parts) namespace))
+      ((and (= 2 (length parts)) (string= "log" (second parts)) (eq method :get))
+       (pod-logs-response store reconciler (first parts) namespace))
+      ((and (= 2 (length parts)) (string= "exec" (second parts)) (member method '(:get :post)))
+       (pod-exec-response store reconciler (first parts) namespace))
+      (t (status-response "Failure" "NotFound"
+                          (format nil "No route for ~A ~A" method path) 404)))))
 
 (defun handle-http-request (store runtime reconciler request)
   (handler-case
@@ -937,9 +950,9 @@
            (event-list-response))
           ((core-resource-route path)
            (dispatch-core-resource-request store path method))
-          ((pod-route-parts path)
-           (dispatch-pod-request store runtime reconciler path method))
-          ((string= path "/api/v1/namespaces/default/pods")
+          ((and (string= path "/api/v1/pods") (eq method :get))
+           (list-pods-response store reconciler nil))
+          ((nth-value 2 (pod-route-parts path))
            (dispatch-pod-request store runtime reconciler path method))
           (t (status-response "Failure" "NotFound" "route not found" 404))))
     (kubernetes-error (error)

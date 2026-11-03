@@ -67,7 +67,7 @@
      (get-pod (reconciler-store reconciler) namespace name))))
 
 (defun reconcile-all (reconciler &key observer)
-  (loop for pod in (list-pods (reconciler-store reconciler) "default")
+  (loop for pod in (list-pods (reconciler-store reconciler))
         for status = (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))
         do (when observer (funcall observer pod status))
         collect status))

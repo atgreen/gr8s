@@ -6,7 +6,7 @@
   node-server)
 
 (defun control-plane-pod-by-uid (runtime uid)
-  (find uid (list-pods (control-plane-runtime-store runtime) "default")
+  (find uid (list-pods (control-plane-runtime-store runtime))
         :key #'pod-uid :test #'string=))
 
 (defun pod-assignment (pod)
@@ -33,7 +33,7 @@
       (lambda (pod)
         (or (not (equal node-name (pod-node-name pod)))
             (and excluded-uid (string= excluded-uid (pod-uid pod)))))
-      (list-pods store "default"))
+      (list-pods store))
      #'string< :key #'pod-name))))
 
 (defun publish-node-snapshot (runtime node-name &key excluded-uid)
