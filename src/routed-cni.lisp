@@ -9,16 +9,27 @@
                     (cni-context-interface-name context)))
 
 (defun check-routed-cni-link (context address)
-  (declare (ignore address))
-  (let ((host (routed-cni-host-name context))
-        (owner (routed-cni-owner context)))
-    (unless (network-link-owned-p host owner)
-      (invalid-cni "routed host endpoint is missing or belongs to another Pod"))
-    (call-with-cni-network-namespace
-     (cni-context-netns context)
-     (lambda ()
-       (unless (network-link-owned-p (cni-context-interface-name context) owner)
-         (invalid-cni "routed Pod endpoint is missing or belongs to another Pod"))))))
+  "Verify the assigned Pod /32, host route, node gateway, and static Pod neighbor."
+  (let* ((host (routed-cni-host-name context))
+         (owner (routed-cni-owner context))
+         (gateway +node-gateway-address+))
+    (unless (and (network-link-owned-p host owner)
+                 (network-address-present-p +node-gateway-interface+ gateway 32)
+                 (node-gateway-owned-or-adoptable-p gateway)
+                 (not (network-address-present-p host gateway 32))
+                 (network-route-present-p address 32 host :source gateway))
+      (invalid-cni "routed host endpoint or node gateway is missing or misconfigured"))
+    (let ((mac (gethash 1 (network-link-attributes host))))
+      (call-with-cni-network-namespace
+       (cni-context-netns context)
+       (lambda ()
+         (let ((peer (cni-context-interface-name context)))
+           (unless (and (network-link-owned-p peer owner)
+                        (network-address-present-p peer address 32)
+                        (network-route-present-p gateway 32 peer)
+                        (network-route-present-p "0.0.0.0" 0 peer :gateway gateway)
+                        (permanent-network-neighbor-p peer gateway mac))
+             (invalid-cni "routed Pod endpoint, routes or permanent gateway neighbor is misconfigured"))))))))
 
 (defun remove-routed-cni-link (context)
   ;; Deleting either end deletes the pair and its connected routes. This works

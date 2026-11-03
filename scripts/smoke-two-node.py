@@ -178,6 +178,12 @@ class Smoke:
             self.kubectl('exec', f'two-node-{index}', '--', 'nslookup', 'kubernetes.default.svc.cluster.local')
             self.kubectl('exec', f'two-node-{index}', '--', 'nslookup', 'example.com')
             assert f'two-node-{index}' in self.kubectl('logs', f'two-node-{index}').stdout
+            addresses = json.loads(self.in_node(index, 'ip', '-j', '-4', 'addr', 'show').stdout)
+            gateways = [link['ifname'] for link in addresses for address in link.get('addr_info', [])
+                        if address.get('local') == '169.254.1.1']
+            assert gateways == ['gr8s-gateway'], gateways
+            assert self.kubectl('exec', f'two-node-{index}', '--', 'ip', 'neigh', 'show',
+                                '169.254.1.1').stdout.strip().endswith('PERMANENT')
             route = json.loads(self.in_node(index, 'ip', '-j', 'route', 'get', peer).stdout)
             assert route[0]['dev'] == 'gr8s-vxlan', route
             counters = json.loads(self.in_node(index, 'ip', '-s', '-j', 'link', 'show', 'gr8s-vxlan').stdout)

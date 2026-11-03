@@ -19,6 +19,23 @@
              (push context contexts)
              (configure-routed-veth context address)
              (check-routed-cni-link context address)
+             (assert (network-address-present-p +node-gateway-interface+ +node-gateway-address+ 32))
+             (assert (not (network-address-present-p (routed-cni-host-name context)
+                                                     +node-gateway-address+ 32)))
+             ;; CHECK detects a corrupted static neighbor; repeated ADD repairs it.
+             (call-with-cni-network-namespace
+              (cni-context-netns context)
+              (lambda () (replace-permanent-network-neighbor "eth0" +node-gateway-address+
+                                                              #(2 0 0 0 0 99))))
+             (assert (handler-case (progn (check-routed-cni-link context address) nil)
+                       (cni-error () t)))
+             (configure-routed-veth context address)
+             (check-routed-cni-link context address)
+             ;; A previous image may have put the address on every host veth.
+             (add-network-address (routed-cni-host-name context) +node-gateway-address+ 32)
+             (configure-routed-veth context address)
+             (assert (not (network-address-present-p (routed-cni-host-name context)
+                                                     +node-gateway-address+ 32)))
              ;; Model a crash before either ownership alias was installed.
              (set-network-link-owner (routed-cni-host-name context) "")
              (call-with-cni-network-namespace
@@ -38,6 +55,14 @@
              (set-network-link-owner (routed-cni-host-name context) (routed-cni-owner context))
              (uiop:run-program (list "ping" "-n" "-c" "1" "-W" "2" address)
                                :output *standard-output* :error-output *error-output*)))
+         ;; Concurrent/repeated endpoint setup must leave one node gateway.
+         (let ((index (native-interface-index +node-gateway-interface+)))
+           (set-network-link-owner +node-gateway-interface+ "foreign-gateway")
+           (assert (handler-case (progn (ensure-node-gateway) nil) (cni-error () t)))
+           (assert (network-link-owned-p +node-gateway-interface+ "foreign-gateway"))
+           (set-network-link-owner +node-gateway-interface+ "")
+           (ensure-node-gateway)
+           (assert (= index (native-interface-index +node-gateway-interface+))))
          (call-with-cni-network-namespace
           (cni-context-netns (first contexts))
           (lambda ()
@@ -71,6 +96,11 @@
            (remove-routed-cni-link context)
            (remove-routed-cni-link context)
            (assert (zerop (native-interface-index (routed-cni-host-name context)))))
-         (format t "gr8s native routed-veth connectivity test passed~%"))
+         (assert (plusp (native-interface-index +node-gateway-interface+)))
+         (remove-node-gateway)
+         (remove-node-gateway)
+         (assert (zerop (native-interface-index +node-gateway-interface+)))
+         (format t "gr8s native routed-veth and permanent gateway-neighbor tests passed~%"))
     (dolist (context contexts) (ignore-errors (remove-routed-cni-link context)))
+    (ignore-errors (remove-node-gateway))
     (dolist (fd namespaces) (ignore-errors (sb-posix:close fd)))))
