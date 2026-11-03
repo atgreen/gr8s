@@ -245,13 +245,16 @@
   "Delete and return the Pod named NAME in NAMESPACE."
   (remove-pod store namespace name))
 
-(defun mark-pod-deleting (store namespace name)
+(defun mark-pod-deleting (store namespace name &key uid)
   "Set a Pod's deletion timestamp, advance its resource version, and persist it."
   (with-store-lock (store)
     (let* ((pod (get-pod-unlocked store namespace name))
            (metadata (gethash "metadata" (pod-to-object pod)))
            (next-version (write-to-string
                           (1+ (parse-integer (pod-resource-version pod))))))
+      (when (and uid (not (equal uid (pod-uid pod))))
+        (error 'kubernetes-error :status-code 409 :reason "Conflict"
+               :message "Pod UID no longer matches deletion precondition"))
       (setf (gethash "deletionTimestamp" metadata) (current-timestamp)
             (gethash "resourceVersion" metadata) next-version
             (pod-resource-version pod) next-version)

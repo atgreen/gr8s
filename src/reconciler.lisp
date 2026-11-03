@@ -59,9 +59,9 @@
                       :reason "RuntimeError"
                       :message (runtime-error-message error)))))))
 
-(defun delete-reconciled-pod (reconciler namespace name)
+(defun delete-reconciled-pod (reconciler namespace name &key uid)
   (bt:with-lock-held ((reconciler-lock reconciler))
-    (mark-pod-deleting (reconciler-store reconciler) namespace name)
+    (mark-pod-deleting (reconciler-store reconciler) namespace name :uid uid)
     (converge-deleting-pod
      reconciler
      (get-pod (reconciler-store reconciler) namespace name))))

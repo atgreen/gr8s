@@ -22,7 +22,7 @@
       (com.inuoe.jzon:stringify (pod-to-object pod) :stream stream)))
    :deleting (deletion-requested-p pod)
    :resource-objects-json
-   (when store
+   (when (and store (not (deletion-requested-p pod)))
      (mapcar (lambda (object)
                (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify object)))
              (pod-referenced-resource-objects store pod)))))
