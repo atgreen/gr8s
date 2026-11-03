@@ -33,6 +33,22 @@
            (is (eq reconciler (gr8s::acceptor-reconciler server)))
         (stop-server server)))))
 
+(test legacy-discovery-fallback-for-aggregated-discovery-clients
+  (let ((server (start-server :address "127.0.0.1" :port 18080)))
+    (unwind-protect
+         (loop for (path kind) in '(("/api" "APIVersions")
+                                   ("/apis" "APIGroupList")
+                                   ("/api/v1" "APIResourceList"))
+               do (multiple-value-bind (body status headers)
+                      (request path :additional-headers
+                               '(("Accept" . "application/json;g=apidiscovery.k8s.io;v=v2beta1;as=APIGroupDiscoveryList,application/json")))
+                    (is (= 200 status))
+                    ;; Sonobuoy's client-go requires the exact legacy media type.
+                    (is (string= "application/json"
+                                 (cdr (assoc :content-type headers))))
+                    (is (string= kind (gethash "kind" (response-object body))))))
+      (stop-server server))))
+
 (test kubernetes-discovery-and-pod-workflow
   (with-temporary-store (store path)
     (let* ((runtime (make-fake-runtime))
