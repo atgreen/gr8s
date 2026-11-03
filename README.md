@@ -404,6 +404,11 @@ also expose a separate HTTPS API at `10.96.0.1:443`, authenticated with issued
 ServiceAccount tokens and authorized against live RoleBindings and
 ClusterRoleBindings.
 
+Pods accept JSON and typed Kubernetes protobuf requests. The decoder uses pinned
+Kubernetes wire definitions and Go JSON omission rules, preserving explicit
+pointer values and empty command arguments. Runtime admission still validates
+the supported Pod feature set and rejects unsupported fields with HTTP 422.
+
 PodTemplates support namespaced CRUD and cluster-wide lists, JSON and Kubernetes
 protobuf requests, selectors, dry-run, optimistic updates, strategic merge and
 JSON patches, delete-collection, and JSON watch streams. Templates use the pinned

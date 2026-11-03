@@ -119,6 +119,8 @@
                        (member (core-protobuf-string envelope 4) '("" "application/vnd.kubernetes.protobuf") :test #'equal))
             (error "Invalid Kubernetes protobuf envelope"))
           (when (string= kind "DeleteOptions") (return-from decode-core-resource-protobuf (core-protobuf-delete-options raw)))
+          (when (string= kind "Pod")
+            (return-from decode-core-resource-protobuf (decode-pod-protobuf raw)))
           (when (string= kind "PodTemplate")
             (return-from decode-core-resource-protobuf (decode-podtemplate-protobuf raw)))
           (when (string= kind "Namespace")
