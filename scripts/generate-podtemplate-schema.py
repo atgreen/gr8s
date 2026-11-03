@@ -13,6 +13,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parent.parent
 BASE = "https://raw.githubusercontent.com/kubernetes/"
 SOURCES = {
+    "core-types.go": ("api/v0.36.0/core/v1/types.go", "335f6d034eb92b6751e9fc3833e5c027aa0da8138de44acaaadf62c5cf25183a"),
     "core.proto": ("api/v0.36.0/core/v1/generated.proto", "b1879943525fb1b0d7055570ad1a9ff6ef7502b95ee7962e0fa99d2546c52760"),
     "meta.proto": ("apimachinery/v0.36.0/pkg/apis/meta/v1/generated.proto", "055dd5d588bbe7cff216d570ad0968833eddaea755701e47d01e59ad61625eba"),
     "resource.proto": ("apimachinery/v0.36.0/pkg/api/resource/generated.proto", "78274163443c9942fd5cfd41d2c0cb6d5bb06ff109f37c33be23147dcf63771a"),
@@ -104,7 +105,7 @@ def main():
     args = parser.parse_args()
     sources = load_sources(args.cache)
     all_messages = proto_messages(sources)
-    pending = ["k8s.io.api.core.v1.PodTemplate"]
+    pending = ["k8s.io.api.core.v1.PodTemplate", "k8s.io.api.core.v1.Pod"]
     messages = {}
     while pending:
         name = pending.pop()
@@ -112,6 +113,21 @@ def main():
             continue
         messages[name] = all_messages[name]
         pending.extend(field["type"] for field in messages[name].values() if field["type"] not in SCALARS)
+    # Generated Go protobuf writes non-pointer scalar zero values even where
+    # the corresponding JSON field is omitted. Preserve pointer zero values.
+    for structure in re.finditer(r"type (\w+) struct \{(.*?)^\}", sources["core-types.go"], re.S | re.M):
+        fields = messages.get("k8s.io.api.core.v1." + structure[1], {})
+        for line in structure[2].splitlines():
+            declaration = re.match(r"\s*\w+\s+(\S+)\s+`([^`]+)`", line)
+            if not declaration or declaration[1].startswith("*"):
+                continue
+            tags = declaration[2]
+            number = re.search(r'protobuf:"[^,]+,(\d+),', tags)
+            json_tag = re.search(r'json:"([^\"]+)"', tags)
+            if number and json_tag and "omitempty" in json_tag[1].split(","):
+                field = fields.get(number[1])
+                if field and not field.get("repeated") and not field.get("mapKey") and field["type"] in {"string", "bool", "int32", "int64"}:
+                    field["omitEmpty"] = True
     all_definitions = json.loads(sources["swagger.json"])["definitions"]
     for name, fields in messages.items():
         properties = all_definitions.get(name.replace("k8s.io.", "io.k8s.", 1), {}).get("properties", {})

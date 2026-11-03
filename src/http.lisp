@@ -48,7 +48,7 @@
 
 (defun request-object (&optional (namespace "default"))
   (request-pod-in-namespace
-   (require-object (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)) "Pod")
+   (core-resource-request-object "Pod")
    namespace))
 
 (defun request-json-object ()

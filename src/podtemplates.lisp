@@ -69,7 +69,9 @@
                                      (if (equal type "string") "" (template-protobuf-message type #() (1+ depth)))))
                            map))
                        (template-protobuf-scalar type field depth))))
-            (cond ((gethash "inline" definition) (maphash (lambda (key value) (setf (gethash key object) value)) value))
+            (cond ((and (gethash "omitEmpty" definition)
+                        (or (null value) (equal value "") (eql value 0))) nil)
+                  ((gethash "inline" definition) (maphash (lambda (key value) (setf (gethash key object) value)) value))
                   ((gethash "repeated" definition) (push value (gethash key object)))
                   (t (setf (gethash key object) value)))))))
     (maphash (lambda (number definition)
@@ -102,6 +104,16 @@
     ;; metadata decoder for the outer resource identity and preconditions.
     (setf (gethash "metadata" object) (if metadata (core-protobuf-metadata metadata) (core-object))
           (gethash "apiVersion" object) "v1" (gethash "kind" object) "PodTemplate")
+    object))
+
+(defun decode-pod-protobuf (bytes)
+  "Decode typed Pod input using the pinned core schema and server-owned status."
+  (let* ((object (template-protobuf-message "k8s.io.api.core.v1.Pod" bytes))
+         (metadata (core-protobuf-value (core-protobuf-fields bytes) 1)))
+    (setf (gethash "metadata" object) (if metadata (core-protobuf-metadata metadata) (core-object))
+          (gethash "apiVersion" object) "v1" (gethash "kind" object) "Pod")
+    ;; The Pod creation strategy owns status; client status never drives runtime.
+    (remhash "status" object)
     object))
 
 (defun template-strategic-merge (old patch schema)
