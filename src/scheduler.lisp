@@ -1,17 +1,29 @@
+;;;; SPDX-FileCopyrightText: 2026 gr8s contributors
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Manage node registration, readiness leases, PodCIDR allocation, underlay
+;;;; identity, and deterministic Pod placement.  Scheduling prefers the ready
+;;;; node with the fewest nonterminal Pods, preserves explicit assignments, and
+;;;; keeps observed workload status separate from desired Pod objects.
+
 (in-package #:gr8s)
 
 (defun node-conflict (control &rest arguments)
+  "Signal a Kubernetes Conflict error formatted by CONTROL and ARGUMENTS."
   (error 'kubernetes-error
          :status-code 409
          :reason "Conflict"
          :message (apply #'format nil control arguments)))
 
 (defun same-node-identity-p (left right)
+  "Return true when LEFT and RIGHT identify the same persisted node."
   (and (string= (node-record-id left) (node-record-id right))
        (string= (node-record-name left) (node-record-name right))
        (string= (node-record-pod-cidr left) (node-record-pod-cidr right))))
 
 (defun register-node (store node)
+  "Register NODE idempotently while rejecting identity and PodCIDR collisions."
   (with-store-lock (store)
     (let ((same-name (gethash (node-record-name node) (pod-store-nodes store))))
       (when same-name
@@ -33,9 +45,11 @@
       (persist-node store node))))
 
 (defun get-node-unlocked (store name)
+  "Return NAME's node record without acquiring STORE's lock."
   (gethash name (pod-store-nodes store)))
 
 (defun get-node (store name)
+  "Return NAME's node record, or signal a Kubernetes NotFound error."
   (with-store-lock (store)
     (or (get-node-unlocked store name)
         (error 'kubernetes-error
@@ -44,12 +58,14 @@
                :message (format nil "Node ~A was not found" name)))))
 
 (defun list-nodes (store)
+  "Return STORE's nodes sorted by name."
   (with-store-lock (store)
     (sort (loop for node being the hash-values of (pod-store-nodes store)
                 collect node)
           #'string< :key #'node-record-name)))
 
 (defun mark-node-ready (store name heartbeat)
+  "Mark NAME ready and record its HEARTBEAT lease timestamp."
   (with-store-lock (store)
     (let ((node (or (get-node-unlocked store name)
                     (error 'kubernetes-error
@@ -61,6 +77,7 @@
       node)))
 
 (defun mark-node-not-ready (store name)
+  "Mark NAME not ready while preserving its registered identity."
   (with-store-lock (store)
     (let ((node (or (get-node-unlocked store name)
                     (error 'kubernetes-error
@@ -71,6 +88,7 @@
       node)))
 
 (defun expire-node-heartbeats (store oldest-acceptable-heartbeat)
+  "Mark stale ready nodes unavailable and return the records that expired."
   (with-store-lock (store)
     (loop for node being the hash-values of (pod-store-nodes store)
           when (and (node-record-ready-p node)
@@ -80,6 +98,7 @@
             collect (progn (setf (node-record-ready-p node) nil) node))))
 
 (defun parse-ipv4-integer (address)
+  "Parse dotted-decimal ADDRESS into an unsigned 32-bit integer."
   (let ((parts (uiop:split-string address :separator '(#\.))))
     (unless (= 4 (length parts))
       (error "Invalid IPv4 address ~S" address))
@@ -91,6 +110,7 @@
             parts :initial-value 0)))
 
 (defun format-ipv4-integer (address)
+  "Render an unsigned 32-bit ADDRESS as dotted-decimal IPv4."
   (format nil "~D.~D.~D.~D"
           (ldb (byte 8 24) address)
           (ldb (byte 8 16) address)
@@ -98,6 +118,7 @@
           (ldb (byte 8 0) address)))
 
 (defun parse-ipv4-cidr (cidr)
+  "Return CIDR's IPv4 address integer and prefix length as two values."
   (let ((parts (uiop:split-string cidr :separator '(#\/))))
     (unless (= 2 (length parts))
       (error "Invalid IPv4 CIDR ~S" cidr))
@@ -107,6 +128,7 @@
       (values (parse-ipv4-integer (first parts)) prefix))))
 
 (defun canonical-node-underlay-address (address)
+  "Validate and canonicalize a non-loopback unicast IPv4 underlay ADDRESS."
   (unless (and (stringp address) (plusp (length address)))
     (error "node underlay address must be a unicast IPv4 address"))
   (let ((integer (parse-ipv4-integer address)))
@@ -116,6 +138,7 @@
     (format-ipv4-integer integer)))
 
 (defun update-node-underlay-address (store node-name address)
+  "Persist NODE-NAME's unique underlay ADDRESS, returning true when changed."
   (unless (string= address "")
     (setf address (canonical-node-underlay-address address)))
   (with-store-lock (store)
@@ -138,6 +161,7 @@
   t)
 
 (defun allocate-node-pod-cidr (store cluster-cidr node-prefix)
+  "Return the first free NODE-PREFIX block within CLUSTER-CIDR."
   (multiple-value-bind (address cluster-prefix) (parse-ipv4-cidr cluster-cidr)
     (unless (<= cluster-prefix node-prefix 32)
       (error "Node prefix /~D does not fit cluster CIDR ~A"
@@ -164,9 +188,11 @@
                              node-prefix cluster-cidr))))))
 
 (defun terminal-pod-phase-p (phase)
+  "Return true when PHASE is a terminal Kubernetes Pod phase."
   (member phase '("Succeeded" "Failed") :test #'string=))
 
 (defun assigned-nonterminal-pod-count (store node-name)
+  "Count nonterminal Pods currently assigned to NODE-NAME."
   (loop for pod being the hash-values of (pod-store-pods store)
         count (and (equal node-name (pod-node-name pod))
                    (not (terminal-pod-phase-p
@@ -174,6 +200,7 @@
                                   (pod-store-pod-observed-phases store)))))))
 
 (defun persist-pod-assignment (store pod node-name)
+  "Assign POD to NODE-NAME, advance its resource version, and persist it."
   (let* ((object (pod-to-object pod))
          (spec (gethash "spec" object))
          (metadata (gethash "metadata" object))
@@ -186,6 +213,7 @@
     (persist-pod store pod)))
 
 (defun schedule-pod (store pod)
+  "Return POD's selected node, assigning it to the least-loaded ready node."
   (with-store-lock (store)
     (let ((requested-node (pod-node-name pod)))
       (when requested-node
@@ -213,20 +241,24 @@
         node))))
 
 (defun update-pod-observed-phase (store pod phase)
+  "Record the agent-observed PHASE for POD."
   (with-store-lock (store)
     (setf (gethash (pod-uid pod) (pod-store-pod-observed-phases store)) phase)))
 
 (defun update-pod-observed-status (store pod status)
+  "Record POD's complete observed STATUS and its derived phase."
   (with-store-lock (store)
     (setf (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)) status
           (gethash (pod-uid pod) (pod-store-pod-observed-phases store))
           (gethash "phase" status "Unknown"))))
 
 (defun pod-observed-status (store pod)
+  "Return the latest agent-observed status object for POD, if any."
   (with-store-lock (store)
     (gethash (pod-uid pod) (pod-store-pod-observed-statuses store))))
 
 (defun pod-scheduling-phase (store pod)
+  "Derive POD's API phase from assignment, node readiness, and observation."
   (with-store-lock (store)
     (let* ((node-name (pod-node-name pod))
            (node (and node-name (get-node-unlocked store node-name))))
