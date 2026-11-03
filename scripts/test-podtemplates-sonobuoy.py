@@ -26,8 +26,8 @@ import xml.etree.ElementTree as ET
 FOCUS = "PodTemplates|Servers with support for API chunking"
 
 
-def verify_upstream_results(archive, e2e_log, summary):
-    """Distinguish the five actual specs from the extra suite-hook JUnit entries."""
+def verify_upstream_results(archive, e2e_log, summary, expected_specs=5):
+    """Count actual specs separately from suite hooks and require complete upstream success."""
     cases = []
     hooks = 0
     with tarfile.open(archive) as bundle:
@@ -46,8 +46,9 @@ def verify_upstream_results(archive, e2e_log, summary):
     starts = e2e_log.count("Running Suite: Kubernetes e2e suite")
     selected = re.findall(r"Will run (\d+) of (\d+) specs", e2e_log)
     passed = ("Status: passed" in summary and re.search(r"^Failed:\s+0\s*$", summary, re.M) is not None
-              and "Test Suite Passed" in e2e_log and starts == 1 and len(selected) == 1 and selected[0][0] == "5"
-              and len(cases) == 5 and all(case["passed"] for case in cases))
+              and "Test Suite Passed" in e2e_log and starts == 1 and len(selected) == 1 and int(selected[0][0]) > 0
+              and (expected_specs is None or int(selected[0][0]) == expected_specs)
+              and len(cases) == int(selected[0][0]) and all(case["passed"] for case in cases))
     return {"passed": passed, "suiteStarts": starts, "selectedSpecs": selected, "upstreamCases": cases, "suiteHookEntries": hooks}
 
 
@@ -60,13 +61,17 @@ def main():
     parser.add_argument("--api-port", type=int, default=18190)
     parser.add_argument("--node-port", type=int, default=17447)
     parser.add_argument("--timeout", type=int, default=1200)
+    parser.add_argument("--certified-conformance", action="store_true",
+                        help="Run the entire upstream certified selection instead of the five focused specs")
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error("Run this privileged integration test inside a disposable Linux guest")
-    root = Path(tempfile.mkdtemp(prefix="gr8s-podtemplates.", dir=args.state_parent))
+    root = Path(tempfile.mkdtemp(prefix="gr8s-conformance." if args.certified_conformance else "gr8s-podtemplates.", dir=args.state_parent))
     state = root / "state"
     base = f"http://127.0.0.1:{args.api_port}"
-    report = {"focus": FOCUS, "isCertificationResult": False, "nativeSHA256": hashlib.sha256(args.gr8s.read_bytes()).hexdigest()}
+    report = {"focus": None if args.certified_conformance else FOCUS,
+              "mode": "certified-conformance" if args.certified_conformance else "focused",
+              "isCertificationResult": False, "nativeSHA256": hashlib.sha256(args.gr8s.read_bytes()).hexdigest()}
     native_log = (root / "gr8s.log").open("w")
     process = subprocess.Popen([str(args.gr8s), "serve", "--runtime", "containerd", "--state-directory", str(state),
                                 "--port", str(args.api_port), "--node-port", str(args.node_port), "--kubeconfig", str(root / "kubeconfig")],
@@ -107,7 +112,7 @@ def main():
         report["version"] = json.loads(request("/version")[1])
         report["sonobuoyVersion"] = subprocess.check_output([str(args.sonobuoy), "version", "--short"], text=True).strip()
         command = [str(args.sonobuoy), "run", "--kubeconfig", str(root / "kubeconfig"), "--dns-pod-labels=", "--plugin=e2e",
-                   "--e2e-focus=" + FOCUS, "--e2e-skip="]
+                   *(["--mode=certified-conformance"] if args.certified_conformance else ["--e2e-focus=" + FOCUS, "--e2e-skip="])]
         report["command"] = command
         result = subprocess.run(command, capture_output=True, text=True, timeout=90)
         report["sonobuoyRunExitCode"] = result.returncode
@@ -143,15 +148,21 @@ def main():
         result = subprocess.run([str(args.sonobuoy), "results", str(root / "sonobuoy-results.tar.gz")], text=True, capture_output=True, timeout=30)
         (root / "sonobuoy-results.txt").write_text(result.stdout + result.stderr)
         e2e = (root / "e2e.log").read_text()
-        report.update(verify_upstream_results(root / "sonobuoy-results.tar.gz", e2e, result.stdout))
+        report.update(verify_upstream_results(root / "sonobuoy-results.tar.gz", e2e, result.stdout,
+                                              expected_specs=None if args.certified_conformance else 5))
         if not report["passed"]:
-            raise RuntimeError("PodTemplate conformance cases did not all pass; inspect the official archive and logs")
+            raise RuntimeError("Upstream conformance cases did not all pass; inspect the official archive and logs")
     except Exception as error:
         report["error"] = str(error)
     finally:
         try:
             if process.poll() is None:
                 for pod in json.loads(request("/api/v1/pods")[1]).get("items", []):
+                    # Preserve partial test output even when no archive exists.
+                    for container in pod["spec"]["containers"]:
+                        log = logs_for(pod, container["name"])
+                        if log:
+                            (root / (container["name"] + ".log")).write_text(log)
                     meta = pod["metadata"]
                     code, _ = request(f"/api/v1/namespaces/{meta['namespace']}/pods/{meta['name']}", "DELETE")
                     if code not in (200, 404):

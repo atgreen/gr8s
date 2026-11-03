@@ -431,6 +431,19 @@ python3 scripts/test-podtemplates-sonobuoy.py \
   --gr8s /path/to/gr8s.bin --sonobuoy /path/to/sonobuoy
 ```
 
+Run the entire upstream certified selection with the same disposable harness:
+
+```sh
+python3 scripts/test-podtemplates-sonobuoy.py \
+  --gr8s /path/to/gr8s.bin --sonobuoy /path/to/sonobuoy \
+  --certified-conformance --timeout 21600
+```
+
+The runner preserves the official Sonobuoy archive, native and worker logs, and
+individual executed specs in its printed report directory. A timeout preserves
+partial worker logs. A passing result requires every selected spec to execute
+and pass; running this command alone does not establish certification.
+
 This focused validation
 includes the normal five-minute continuation expiry; it is separate from a full
 certified-conformance run. Regenerate the pinned schemas with
