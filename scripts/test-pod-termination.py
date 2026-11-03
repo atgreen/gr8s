@@ -46,7 +46,8 @@ def main():
     log = (root / "gr8s.log").open("w")
     pods = []
     report = {"nativeSHA256": hashlib.sha256(args.gr8s.read_bytes()).hexdigest(),
-              "directory": str(root), "stateDirectory": str(state), "scenarios": {}, "passed": False}
+              "directory": str(root), "stateDirectory": str(state), "scenarios": {},
+              "nativeExitCodes": [], "passed": False}
     print(json.dumps({"reportDirectory": str(root)}), flush=True)
 
     def request(path, method="GET", obj=None):
@@ -77,7 +78,12 @@ def main():
             except OSError:
                 return False
 
-        wait_for(ready, 90, "native agent readiness")
+        try:
+            wait_for(ready, 90, "native agent readiness")
+        except Exception:
+            child.terminate()
+            report["nativeExitCodes"].append(child.wait(timeout=45))
+            raise
         return child
 
     def stop():
@@ -86,6 +92,7 @@ def main():
         if process is not None:
             process.terminate()
             code = process.wait(timeout=45)
+            report["nativeExitCodes"].append(code)
             process = None
             if code:
                 raise RuntimeError(f"native shutdown exited {code}")
@@ -106,6 +113,7 @@ def main():
 
     def create(name, grace, command, count=1):
         """Launch real containers and wait until every shell has installed its signal trap."""
+        command += f" # gr8s-shutdown-test-{name}-{time.time_ns()}"
         containers = [{"name": "main" if index == 0 else f"side{index}",
                        "image": "docker.io/library/busybox:1.36.1", "imagePullPolicy": "IfNotPresent",
                        "command": ["sh", "-c", command]} for index in range(count)]
@@ -151,22 +159,16 @@ def main():
         return not host_container_pids(pod)
 
     def host_container_pids(pod):
-        """Find container init processes parented by shims for the observed CRI container IDs."""
-        ids = {status["containerID"].split("://", 1)[-1]
-               for status in pod.get("status", {}).get("containerStatuses", [])}
+        """Find the exact uniquely tagged test shells, independently of sandbox shim layout."""
+        commands = {container["command"][-1].encode() for container in pod["spec"]["containers"]}
         pids = []
         for path in Path("/proc").glob("[0-9]*/cmdline"):
             try:
                 fields = path.read_bytes().split(b"\0")
             except OSError:
                 continue
-            if b"-id" in fields and fields.index(b"-id") + 1 < len(fields):
-                if fields[fields.index(b"-id") + 1].decode() in ids:
-                    try:
-                        children = path.parent / "task" / path.parent.name / "children"
-                        pids.extend(int(pid) for pid in children.read_text().split())
-                    except OSError:
-                        pass
+            if len(fields) >= 3 and fields[1] == b"-c" and fields[2] in commands:
+                pids.append(int(path.parent.name))
         return pids
 
     ignore = "trap 'echo TERM' TERM; echo READY; while :; do sleep 1; done"
