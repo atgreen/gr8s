@@ -1,3 +1,12 @@
+;;;; SPDX-FileCopyrightText: 2026 gr8s contributors
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Describe the serial load order and dependencies of the gr8s control plane,
+;;;; node agent, networking dataplane, and their FiveAM test system.  The order
+;;;; mirrors architectural dependencies so later modules can rely on the public
+;;;; abstractions established by earlier files.
+
 (asdf:defsystem "gr8s"
   :description "A small Kubernetes-compatible control plane in Common Lisp"
   :author "gr8s contributors"

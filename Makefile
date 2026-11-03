@@ -1,3 +1,11 @@
+# SPDX-FileCopyrightText: 2026 gr8s contributors
+# SPDX-License-Identifier: MIT
+#
+# Purpose:
+# Define reproducible developer entry points for generating protocol bindings,
+# running unit and privileged networking tests, assembling the embedded runtime,
+# and producing the dumped gr8s executable.
+
 SBCL ?= sbcl
 STATE_DIR ?= /tmp/gr8s-state
 PORT ?= 8080
