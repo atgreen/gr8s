@@ -258,10 +258,14 @@ class Smoke:
                         result = self.in_node(index, 'sh', '-c',
                             f'for n in {self.root}/agent-{index}/containerd/run/io.containerd.grpc.v1.cri/netns/*; '
                             'do [ ! -e "$n" ] || exit 1; done')
-                        return result.returncode == 0
+                        processes = run('ps', '-eo', 'comm=,args=').stdout.splitlines()
+                        shims = any(line.split(None, 1)[0].startswith('containerd-shim') and
+                                    str(self.root / f'agent-{index}') in line for line in processes)
+                        return result.returncode == 0 and not shims
                     try:
                         wait_for('Pod namespace cleanup', absent, timeout=30)
-                    except (RuntimeError, subprocess.SubprocessError):
+                    except (RuntimeError, subprocess.SubprocessError) as error:
+                        print(f'Cleanup did not converge for worker-{index}: {error}', flush=True)
                         self.success = False
         for process in [*self.agents, self.server]:
             if process and process.poll() is None:
@@ -269,6 +273,7 @@ class Smoke:
                 try:
                     process.wait(timeout=20)
                 except subprocess.TimeoutExpired:
+                    print(f'Cleanup forcibly stopping process {process.pid}', flush=True)
                     process.kill()
                     process.wait()
                     self.success = False
@@ -292,6 +297,8 @@ class Smoke:
                 if children <= owned:
                     break
                 owned.update(children)
+            if owned:
+                print(f'Cleanup found remaining node processes: {sorted(owned)}', flush=True)
             for pid in owned:
                 try:
                     os.kill(pid, signal.SIGKILL)
