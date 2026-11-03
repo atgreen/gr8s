@@ -122,8 +122,15 @@
   (let ((serial (ironclad:octets-to-integer (ironclad:random-data 16))))
     (if (zerop serial) 1 serial)))
 
+(defun ecdsa-signature-der (raw-signature)
+  "Encode fixed-width ECDSA scalars as minimal positive DER integers."
+  ;; The ACME byte-array encoder retains redundant leading zeroes. The TLS
+  ;; encoder converts scalars to integers first, as required by strict DER.
+  (pure-tls::encode-ecdsa-signature-der raw-signature))
+
 (defun ecdsa-sign-der (private-key bytes)
-  (pure-tls/acme::encode-ecdsa-signature
+  "Sign certificate bytes using canonical DER without relaxing verification."
+  (ecdsa-signature-der
    (ironclad:sign-message private-key
                           (ironclad:digest-sequence :sha256 bytes))))
 
