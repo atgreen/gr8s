@@ -65,8 +65,10 @@
                  (unless (equal "rbac.authorization.k8s.io" (gethash "apiGroup" subject))
                    (core-resource-error 422 "Invalid" "User and Group subjects require the RBAC apiGroup"))))))
 
-(defun normalize-bootstrap-resource (resource input namespace name)
-  "Copy, validate and default a Namespace, ServiceAccount or RBAC object."
+(defun normalize-bootstrap-resource (resource input namespace name &optional store)
+  "Copy, validate and default an implemented bootstrap API object."
+  (when (equal resource "services")
+    (return-from normalize-bootstrap-resource (normalize-service-resource input namespace name store)))
   (let* ((object (copy-core-object (require-object input "resource")))
          (kind (core-resource-kind resource))
          (version (core-resource-api-version resource))
@@ -115,7 +117,8 @@
          when (equal api-version version)
            collect (core-object "name" resource "singularName" (string-downcase kind)
                                 "namespaced" namespaced "kind" kind
-                                "shortNames" (if (equal resource "configmaps") #("cm") #())
+                                "shortNames" (cond ((equal resource "configmaps") #("cm"))
+                                                   ((equal resource "services") #("svc")) (t #()))
                                 "verbs" #("create" "delete" "get" "list" "patch" "update")))
    'vector))
 

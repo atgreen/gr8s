@@ -59,14 +59,14 @@ The current API supports Pods in the `default` namespace:
 Namespaced ConfigMap and Secret APIs support durable CRUD, list/selectors,
 pagination, patch, optimistic concurrency, and dry-run through current kubectl
 clients. See [ConfigMap and Secret APIs](docs/configmap-secret-api.md) for the
-supported surface. Pod environment/volume consumption, watch, server-side apply,
-and Namespace lifecycle are not yet implemented.
+supported surface. Pods can consume referenced environment keys and mounted
+files. Watch, server-side apply, and full Namespace lifecycle are not yet implemented.
 
 Pod logs and exec run through correlated agent operations, including interactive
-streams and nonzero exit status. Services, Deployments, volumes, complete
-agent-crash recovery, and Kubernetes API authentication/TLS remain outside the
-verified boundary. The API server
-refuses non-loopback listener addresses.
+streams and nonzero exit status. Deployments and complete agent-crash recovery
+remain outside the verified boundary. The administrative HTTP API refuses
+non-loopback listener addresses; native Pods use the authenticated HTTPS API
+described below.
 
 ## Runtime architecture
 
@@ -396,6 +396,15 @@ The local administrative HTTP API remains loopback-only. Managed native clusters
 also expose a separate HTTPS API at `10.96.0.1:443`, authenticated with issued
 ServiceAccount tokens and authorized against live RoleBindings and
 ClusterRoleBindings.
+
+Managed native clusters also allocate durable IPv4 TCP ClusterIP Services from
+`10.96.0.0/16`. Native listeners forward connections to running, selector-matched
+Pods in the Service namespace, resolving numeric or named target ports. The
+reserved `default/kubernetes` Service describes the HTTPS API at `10.96.0.1:443`.
+This initial implementation supports single-stack TCP without session affinity;
+headless Services, UDP, NodePort, LoadBalancer, manual Endpoints, and general
+Service DNS records remain unsupported. Native DNS resolves the Kubernetes API
+service. TCP forwarding currently replaces the original client source address.
 
 Pods can mount referenced ConfigMaps, Secrets and disk-backed emptyDir volumes.
 The control plane sends only referenced objects to the assigned node over mTLS;
