@@ -115,8 +115,14 @@ reconciliation. Containerd invokes only the `gr8s` CNI plugin, which sends typed
 requests to the agent's private Unix socket. CNI ADD retains its durable lease
 through partial failures; DEL releases it only after removing policy and links.
 
-Each Pod uses `169.254.1.1` as its link-local gateway and DNS server. The agent
-serves DNS there and writes the standard `default.svc.cluster.local`,
+Each node owns `169.254.1.1/32` on the `gr8s-gateway` dummy interface. Pod
+veths have individual `/32` routes without duplicating that gateway address.
+Each Pod has a permanent neighbor mapping the gateway to its host veth MAC,
+plus a link route and default route through it. CNI CHECK verifies these
+addresses, routes, and neighbor state; repeated ADD repairs drift and removes
+legacy gateway addresses from the endpoint veth. The agent keeps its gateway
+while durable leases exist and removes it on shutdown after all leases are gone.
+The agent serves DNS there and writes the standard `default.svc.cluster.local`,
 `svc.cluster.local`, and `cluster.local` searches into the Pod resolver. It
 answers `kubernetes.default.svc.cluster.local` authoritatively and forwards names
 outside `cluster.local` to the host's IPv4 resolvers, over UDP or TCP.
@@ -328,7 +334,7 @@ make smoke-two-node
 Set `GR8S_SMOKE_KEEP_WORKDIR=1` when invoking the Python harness directly to keep
 its logs. `GR8S_TWO_NODE_FAIL_AFTER_CREATE=1` exercises failure cleanup after
 both Pods reach Running. Remote VTEP source validation, abrupt agent/crash
-recovery, and the remaining pool/gateway design requirements are still tracked
+recovery, and the remaining Pod-pool configuration requirements are still tracked
 work.
 
 The disposable legacy Podman test is opt-in:

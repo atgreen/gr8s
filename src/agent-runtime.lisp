@@ -183,6 +183,20 @@
       ((node-runtime-manager node-runtime)
        (invalid-cni "managed agent snapshot has no assigned network")))))
 
+(defun node-runtime-has-allocations-p (node-runtime)
+  "Report whether durable Pod leases require preserving the node dataplane."
+  (let ((ipam (node-runtime-ipam node-runtime)))
+    (and ipam
+         (bt:with-lock-held ((node-ipam-lock ipam))
+           (plusp (hash-table-count (node-ipam-allocations ipam)))))))
+
+(defun cleanup-node-runtime-gateway (node-runtime)
+  "Remove the owned gateway after node services stop and all leases are gone."
+  ;; Keep the gateway while Pods or partially installed leases outlive us.
+  (when (and (node-runtime-manager node-runtime) (node-runtime-ipam node-runtime)
+             (not (node-runtime-has-allocations-p node-runtime)))
+    (remove-node-gateway)))
+
 (defun reconcile-cached-node-network (node-runtime)
   ;; Kernel link events can flush permanent VXLAN FDB entries even when the
   ;; control-plane revision is unchanged. Repair from durable local topology.
@@ -191,7 +205,10 @@
       (let* ((pending (read-node-network-file (node-runtime-network-pending-path node-runtime)))
              (network (or pending (node-runtime-network node-runtime))))
         (when network
-          (configure-node-runtime-network node-runtime network :persist (not (null pending)))))))
+          (configure-node-runtime-network node-runtime network :persist (not (null pending)))
+          (when (and (node-runtime-manager node-runtime)
+                     (node-runtime-has-allocations-p node-runtime))
+            (ensure-node-gateway))))))
   nil)
 
 (defun handle-node-runtime-cni (node-runtime request)
@@ -258,9 +275,11 @@
 
 (defun node-runtime-thread-main (node-runtime)
   (handler-case
-      (call-with-managed-containerd
-       (node-runtime-manager node-runtime)
-       (lambda () (call-with-node-runtime-services node-runtime)))
+      (unwind-protect
+           (call-with-managed-containerd
+            (node-runtime-manager node-runtime)
+            (lambda () (call-with-node-runtime-services node-runtime)))
+        (cleanup-node-runtime-gateway node-runtime))
     (error (condition)
       (bt:with-lock-held ((node-runtime-lock node-runtime))
         (setf (node-runtime-error node-runtime) condition

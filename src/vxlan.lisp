@@ -71,11 +71,6 @@
     (enable-node-ipv4-forwarding))
   +node-vxlan-interface+)
 
-(defun netlink-neighbor-message (family interface state flags)
-  (netlink-octets (vector family 0 0 0)
-                  (netlink-integer (cni-interface-index interface) 4)
-                  (netlink-integer state 2) (vector flags 1)))
-
 (defun replace-vxlan-peer (pod-cidr underlay-address)
   (let ((interface +node-vxlan-interface+)
         (router (vxlan-router-address pod-cidr))
