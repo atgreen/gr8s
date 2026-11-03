@@ -67,7 +67,7 @@
       (invalid-cni "pinned TCX link does not enforce the selected Pod interface"))))
 
 (defun cni-policy-staged-links (link-path)
-  (directory (concatenate 'string link-path ".pending-*")))
+  (directory (concatenate 'string link-path "_pending_*")))
 
 (defun read-cni-policy-counters (root sandbox-id)
   (multiple-value-bind (map-path link-path directory) (cni-pin-paths root sandbox-id)

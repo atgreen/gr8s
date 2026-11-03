@@ -222,7 +222,8 @@
        (close-object #'whistler/loader:close-bpf-object))
   (let ((directory (namestring (uiop:pathname-directory-pathname map-path)))
         (opened nil) (object nil) (new-pins nil) (link-fd nil)
-        (staging (format nil "~A.pending-~36R" link-path (random (expt 36 12))))
+        ;; bpffs rejects pin basenames containing a dot (EPERM).
+        (staging (format nil "~A_pending_~36R" link-path (random (expt 36 12))))
         (committed nil))
     (funcall ensure-directory directory)
     (unwind-protect
