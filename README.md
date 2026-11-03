@@ -389,12 +389,13 @@ The Kubernetes API compatibility target is **1.36** (`/version` reports
 it is not a claim that gr8s passes Kubernetes conformance. The gr8s project release
 version is maintained separately in `gr8s.asd`.
 
-Native Sonobuoy bootstrap now launches the upstream e2e plugin and collects its
-results. The [2026-11-03 bootstrap record](docs/conformance-bootstrap-2026-11-03.json)
-selected all 446 conformance specs, captured a test-body failure, and then ended
-with an API chunking setup panic. Sonobuoy reports `unknown` because the panic
-prevented JUnit output. This verifies bootstrap and useful failure output;
-the full conformance suite has not completed.
+The [complete native conformance baseline](docs/conformance-full-2026-11-03.json)
+ran all **446** selected v1.36 conformance specs: **19 passed, 427 failed**.
+Sonobuoy produced the official JUnit result archive, and the native runtime shut
+down cleanly. The run predates the Pod/Service protobuf and general durable watch
+fixes. A fresh full run is required to measure those changes; gr8s has not passed
+Kubernetes conformance. The earlier
+[bootstrap record](docs/conformance-bootstrap-2026-11-03.json) remains available.
 
 Bootstrap APIs also store Namespaces, ServiceAccounts, Roles, RoleBindings,
 ClusterRoles and ClusterRoleBindings with durable metadata and optimistic
