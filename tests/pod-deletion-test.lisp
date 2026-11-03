@@ -131,6 +131,14 @@
                  ;; Fake containers exit immediately. The local record is gone,
                  ;; but its final status must survive until the CP withdraws it.
                  (signals kubernetes-error (get-pod (gr8s::node-runtime-store agent) "default" "hello"))
+                 ;; Crash after local removal but before its final status is
+                 ;; delivered. A fresh agent rebuilds the lost acknowledgement
+                 ;; when the handshake replays the same authoritative snapshot.
+                 (gr8s::stop-node-runtime agent)
+                 (setf agent (gr8s::make-node-runtime (merge-pathnames "agent/" path) (make-fake-runtime) nil))
+                 (gr8s::start-node-runtime agent)
+                 (is (null (slot-value (gr8s::node-runtime-status agent) 'gr8s.node.v1::pods)))
+                 (gr8s::reconcile-node-snapshot agent (grace-snapshot-without-network snapshot))
                  (let* ((status (gr8s::node-runtime-status agent))
                         (message (first (slot-value status 'gr8s.node.v1::pods))))
                    (is (equal "Deleted" (slot-value message 'gr8s.node.v1::reason)))
@@ -144,6 +152,25 @@
                    (gr8s::reconcile-node-snapshot agent (grace-snapshot-without-network (gr8s::current-node-snapshot server "worker-a")))
                    (is (null (slot-value (gr8s::node-runtime-status agent) 'gr8s.node.v1::pods)))))))
         (gr8s::stop-node-runtime agent)))))
+
+(test reconnect-replays-the-current-snapshot-after-a-deletion-ack-is-lost
+  (with-temporary-store (store path)
+    (gr8s:register-node store (gr8s:make-node-record :id "node-1" :name "worker-a" :pod-cidr "10.88.0.0/20"))
+    (let* ((server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0))
+           (identity (merge-pathnames "reconnect/identity.json" path))
+           (applied nil))
+      (unwind-protect
+           (progn
+             (gr8s:publish-node-desired-state server "worker-a" (empty-desired-snapshot))
+             (dotimes (connection 2)
+               (declare (ignore connection))
+               (gr8s:run-node-session
+                "127.0.0.1" (gr8s:node-grpc-server-port server) "worker-a" identity
+                (lambda (snapshot) (push (slot-value snapshot 'gr8s.node.v1::revision) applied) nil)
+                :max-sessions 1 :reconnect-delay .01))
+             (is (equal '(1 1) applied))
+             (is (= 1 (gethash "lastAppliedRevision" (com.inuoe.jzon:parse identity)))))
+        (gr8s:stop-node-grpc-server server)))))
 
 (defstruct (gated-deletion-runtime (:include gr8s::fake-runtime)
                                   (:constructor make-gated-deletion-runtime ()))
@@ -223,6 +250,29 @@
       (gr8s::stop-runtime-deletions runtime)
       (is (= 0 (hash-table-count (gr8s::deletion-controller-jobs (gated-deletion-runtime-controller runtime)))))
       (is (null (gr8s::deletion-controller-retired (gated-deletion-runtime-controller runtime)))))))
+
+(test podman-process-runner-preserves-output-status-and-can-cancel-shutdown
+  (multiple-value-bind (stdout stderr code)
+      (gr8s::run-podman-program '("sh" "-c" "printf stdout; printf stderr >&2; exit 7"))
+    (is (equal "stdout" stdout))
+    (is (equal "stderr" stderr))
+    (is (= 7 code)))
+  (let ((cancel nil) (finished nil) (thread nil)
+        (lock (bt:make-lock "test process cancellation")))
+    (unwind-protect
+         (progn
+           (setf thread
+                 (bt:make-thread
+                  (lambda ()
+                    (let ((gr8s::*runtime-deletion-register-cancel*
+                            (lambda (function) (bt:with-lock-held (lock) (setf cancel function)))))
+                      (gr8s::run-podman-program '("sh" "-c" "sleep 30")))
+                    (bt:with-lock-held (lock) (setf finished t)))))
+           (is (await-grace-test (lambda () (bt:with-lock-held (lock) (not (null cancel))))))
+           (funcall cancel)
+           (is (await-grace-test (lambda () (bt:with-lock-held (lock) finished)))))
+      (when cancel (funcall cancel))
+      (when thread (bt:join-thread thread)))))
 
 (test replacement-assignment-preserves-the-terminating-uids-recovery-record
   (with-temporary-store (store path)

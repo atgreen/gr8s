@@ -693,7 +693,7 @@
       variant payload :sequence (incf (agent-node-session-sequence session))))))
 
 (defun apply-node-snapshot-and-respond
-    (session identity identity-path snapshot apply-snapshot)
+    (session identity identity-path snapshot apply-snapshot &key replay)
   (let ((revision (slot-value snapshot 'gr8s.node.v1::revision))
         (last-applied (gethash "lastAppliedRevision" identity 0))
         (statuses nil))
@@ -702,7 +702,11 @@
       (when (and network assigned
                  (not (string= assigned (slot-value network 'gr8s.node.v1::node-pod-cidr))))
         (error "Snapshot Pod CIDR does not match the durable node allocation")))
-    (when (> revision last-applied)
+    (when (or (> revision last-applied) (and replay (= revision last-applied)))
+      ;; A restarted agent can have completed deletion after its last durable
+      ;; snapshot ack but before the final status reached the server. Reapply
+      ;; the authoritative initial snapshot to rebuild that acknowledgement;
+      ;; ordinary duplicate envelopes within a session still remain no-ops.
       (let ((result (funcall apply-snapshot snapshot)))
         ;; Snapshot applicators written before status reporting commonly
         ;; return an incidental value. Only an explicit status list is sent.
@@ -901,7 +905,7 @@
                       (require-server-envelope
                        (ag-grpc:stream-read-message stream) :desired-state)))
                (apply-node-snapshot-and-respond
-                session identity identity-path snapshot apply-snapshot)
+                session identity identity-path snapshot apply-snapshot :replay t)
                (setf operation-session-p t)
                (if one-shot-p
                    (progn

@@ -130,7 +130,9 @@ def main():
             """Wait for real agent container IDs instead of using the create-time Pending status."""
             code, current = request(pod_path(name))
             statuses = current.get("status", {}).get("containerStatuses", [])
-            return current if code == 200 and len(statuses) == count and all(item.get("containerID") for item in statuses) else None
+            return current if (code == 200 and len(statuses) == count
+                               and all(item.get("containerID") for item in statuses)
+                               and current.get("status", {}).get("observedGeneration") == 1) else None
 
         current = wait_for(observed, 30, f"Pod {name} container status")
         pod.clear()
