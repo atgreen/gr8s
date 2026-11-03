@@ -56,6 +56,12 @@ The current API supports Pods in the `default` namespace:
 - durable desired state and optimistic resource-version checks
 - periodic, idempotent reconciliation with transient-failure retry
 
+Namespaced ConfigMap and Secret APIs support durable CRUD, list/selectors,
+pagination, patch, optimistic concurrency, and dry-run through current kubectl
+clients. See [ConfigMap and Secret APIs](docs/configmap-secret-api.md) for the
+supported surface. Pod environment/volume consumption, watch, server-side apply,
+and Namespace lifecycle are not yet implemented.
+
 Pod logs and exec run through correlated agent operations, including interactive
 streams and nonzero exit status. Services, Deployments, volumes, complete
 multi-node recovery, and Kubernetes API authentication/TLS remain outside the
