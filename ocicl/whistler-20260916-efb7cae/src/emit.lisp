@@ -1,0 +1,1754 @@
+;;; -*- Mode: Lisp -*-
+;;;
+;;; Copyright (c) 2026 Anthony Green <green@moxielogic.com>
+;;;
+;;; SPDX-License-Identifier: MIT
+
+;;; emit.lisp — Emit BPF instructions from SSA IR
+;;;
+;;; Register allocation is done by linear-scan (regalloc.lisp) before
+;;; emission. This file maps the allocated physical registers to BPF
+;;; instructions, handles stack layout, map fd loading, and CO-RE tracking.
+
+(in-package #:whistler/ir)
+
+;;; ========== Emission context ==========
+
+(defstruct emit-ctx
+  (insns '())          ; BPF instructions (reverse order)
+  (vreg-map (make-hash-table))  ; vreg → physical location (:reg N) or (:stack OFF)
+  (next-callee 7)      ; next callee-saved register (7-9, R6 reserved for ctx)
+  (stack-offset 0)     ; current stack usage
+  (map-relocs '())     ; (byte-offset map-index) pairs
+  (kfunc-relocs '())   ; (kfunc-name) in call-insn order; rebuilt to (byte-offset kfunc-name)
+  (ir-prog nil)        ; the IR program
+  (fixups '())         ; (bpf-insn-idx target-label) pairs for jump patching
+  (key-cache (make-hash-table :test 'equal)) ; canonical key → stack-offset
+  (vreg-types (make-hash-table))   ; vreg → type symbol (for size-aware stack alloc)
+  (struct-offsets (make-hash-table))   ; vreg → R10-relative offset (for struct base elim)
+  (const-values (make-hash-table))    ; vreg → integer constant value
+  (map-fd-cache (make-hash-table))    ; map-name → callee-saved register number
+  (map-fd-cache-block (make-hash-table)) ; map-name → block-label where cached
+  (free-callee-regs '())             ; callee-saved regs not used by regalloc
+  (map-ref-counts (make-hash-table)) ; map-name → reference count
+  (dom-map nil)                      ; dominator map for control-flow-aware caching
+  (current-block-label nil)          ; label of the block currently being emitted
+  (core-relocs '())                  ; (bpf-insn-object struct-name field-name) for CO-RE
+  (ptr-cache (make-hash-table))     ; R10-relative offset → stack slot holding cached ptr
+  (struct-ptr-uses (make-hash-table)) ; struct vreg → count of map-ptr uses
+  (phi-moves (make-hash-table :test 'equal)) ; (src-label . tgt-label) → ((phi-dst . src-vreg) ...)
+  (stack-ledger '())                  ; ((category . size) ...) for stack usage breakdown
+  (current-op nil)                    ; IR op currently being emitted — tags emitted insns for disassembly
+  (dying-vregs (make-hash-table :test 'eq)) ; ir-insn → list of vregs whose live interval ends there
+  (current-insn nil))                 ; the ir-insn currently being emitted
+
+(defun ectx-emit (ctx insn-list)
+  (let ((op (emit-ctx-current-op ctx)))
+    (dolist (insn insn-list)
+      ;; Tag each emitted instruction with the IR op it came from (best-effort
+      ;; provenance for disassemble-cu). Don't overwrite an existing origin.
+      (when (and op (null (whistler/bpf:bpf-insn-origin insn)))
+        (setf (whistler/bpf:bpf-insn-origin insn) op))
+      (push insn (emit-ctx-insns ctx)))))
+
+(defun ectx-current-idx (ctx)
+  (length (emit-ctx-insns ctx)))
+
+(defun format-stack-breakdown (ledger)
+  "Format stack ledger entries into a human-readable breakdown string.
+   Aggregates entries by category and sorts by total bytes descending."
+  (let ((totals (make-hash-table :test 'equal)))
+    (dolist (entry ledger)
+      (cl:incf (gethash (car entry) totals 0) (cdr entry)))
+    (let ((sorted (sort (loop for cat being the hash-keys of totals
+                              using (hash-value bytes)
+                              collect (cons cat bytes))
+                        #'> :key #'cdr)))
+      (with-output-to-string (s)
+        (dolist (entry sorted)
+          (format s "~&    ~4d bytes  ~a" (cdr entry) (car entry)))))))
+
+(defun ectx-alloc-stack (ctx size &optional (category "other"))
+  "Allocate SIZE bytes on the stack with natural alignment.
+   CATEGORY is a string describing the allocation purpose for diagnostics.
+   Returns the (negative) offset from R10."
+  (let* ((align (min size 8))
+         (cur (emit-ctx-stack-offset ctx))
+         (new-off (- cur size))
+         ;; Align down to natural boundary (works for power-of-2 alignment)
+         (aligned (logand new-off (- align))))
+    (push (cons category (- cur aligned)) (emit-ctx-stack-ledger ctx))
+    (when (< aligned -512)
+      (whistler/compiler:whistler-error
+       :what (format nil "stack frame exceeds BPF 512-byte limit (~d bytes needed)~%  breakdown:~a"
+                     (- aligned) (format-stack-breakdown (emit-ctx-stack-ledger ctx)))
+       :expected "total stack usage <= 512 bytes"
+       :hint "reduce struct sizes, reuse buffers, or split logic across tail-called programs"))
+
+    (setf (emit-ctx-stack-offset ctx) aligned)
+    aligned))
+
+(defun ectx-alloc-callee (ctx)
+  "Allocate a callee-saved register. Returns reg number or nil."
+  (let ((r (emit-ctx-next-callee ctx)))
+    (when (<= r 9)
+      (incf (emit-ctx-next-callee ctx))
+      r)))
+
+;;; ========== Register allocation ==========
+;;;
+;;; Uses linear-scan allocation from regalloc.lisp.
+;;; The vreg-map is pre-computed before emission begins.
+
+(defun allocate-vreg (ctx vreg)
+  "Look up pre-computed physical location for a vreg."
+  (or (gethash vreg (emit-ctx-vreg-map ctx))
+      ;; Fallback: allocate on the fly (for vregs created during emission)
+      (let ((loc (let ((reg (ectx-alloc-callee ctx)))
+                   (if reg
+                       (list :reg reg)
+                       (list :stack (ectx-alloc-stack ctx 8 "register spills"))))))
+        (setf (gethash vreg (emit-ctx-vreg-map ctx)) loc)
+        loc)))
+
+(defun vreg-to-physical (ctx vreg tmp-reg)
+  "Get the value of VREG into TMP-REG if needed. Returns the physical register."
+  (let ((loc (allocate-vreg ctx vreg)))
+    (ecase (car loc)
+      (:reg (cadr loc))
+      (:stack
+       (ectx-emit ctx (whistler/bpf:emit-ldx-mem
+                        whistler/bpf:+bpf-dw+ tmp-reg
+                        whistler/bpf:+bpf-reg-10+ (cadr loc)))
+       tmp-reg))))
+
+(defun vreg-dies-here-p (ctx vreg)
+  "True when VREG's live interval ends at the IR instruction currently
+   being emitted — its register may then be reused destructively."
+  (and (integerp vreg)
+       (member vreg (gethash (emit-ctx-current-insn ctx)
+                             (emit-ctx-dying-vregs ctx)))))
+
+(defun store-to-vreg (ctx vreg src-reg)
+  "Store SRC-REG into the physical location for VREG."
+  (let ((loc (allocate-vreg ctx vreg)))
+    (ecase (car loc)
+      (:reg
+       (unless (= src-reg (cadr loc))
+         (ectx-emit ctx (whistler/bpf:emit-mov64-reg (cadr loc) src-reg))))
+      (:stack
+       (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                        whistler/bpf:+bpf-dw+
+                        whistler/bpf:+bpf-reg-10+ src-reg (cadr loc)))))))
+
+;;; ========== Immediate argument helpers ==========
+
+(defun imm-arg-value (arg)
+  "Extract integer from (:imm N) arg."
+  (and (consp arg) (eq (first arg) :imm) (second arg)))
+
+(defun map-arg-name (arg)
+  "Extract map name from (:map NAME) arg."
+  (and (consp arg) (eq (first arg) :map) (second arg)))
+
+(defun helper-arg-id (arg)
+  "Extract helper id from (:helper N) arg."
+  (and (consp arg) (eq (first arg) :helper) (second arg)))
+
+(defun label-arg-name (arg)
+  "Extract label from (:label NAME) arg."
+  (and (consp arg) (eq (first arg) :label) (second arg)))
+
+(defun type-arg-name (arg)
+  "Extract type from (:type NAME) arg."
+  (and (consp arg) (eq (first arg) :type) (second arg)))
+
+(defun cmp-arg-op (arg)
+  "Extract comparison op from (:cmp OP) arg."
+  (and (consp arg) (eq (first arg) :cmp) (second arg)))
+
+(defun core-arg-info (args)
+  "Find a (:core STRUCT-NAME FIELD-NAME) tag in an args list.
+   Returns (STRUCT-NAME FIELD-NAME) or nil."
+  (dolist (arg args)
+    (when (and (consp arg) (eq (first arg) :core))
+      (return (rest arg)))))
+
+(defun commutative-alu-op-p (op)
+  "Return true when OP is safe to evaluate with swapped operands."
+  (member op '(:add :mul :and :or :xor)))
+
+(defun choose-temp-reg (&rest avoid)
+  "Pick a scratch register not present in AVOID. Only R0 (never allocated
+   by regalloc) and R5 (removed from the caller pool whenever anything
+   spills — see linear-scan-alloc) are safe: any other register may hold
+   a live vreg at a non-call instruction, and clobbering it is a silent
+   wrong-value miscompile. Scratch is only ever needed to reload spilled
+   operands, and spills imply R5 is reserved."
+  (or (find-if (lambda (reg) (not (member reg avoid)))
+               (list whistler/bpf:+bpf-reg-0+
+                     whistler/bpf:+bpf-reg-5+))
+      whistler/bpf:+bpf-reg-5+))
+
+(defun materialize-compare-operands (ctx lhs rhs &key avoid-reg)
+  "Materialize LHS/RHS into safe registers for compare/jump emission.
+   Returns (values lhs-reg rhs-reg imm), where IMM is the immediate RHS
+   value when RHS can be emitted as an immediate compare."
+  (let* ((imm (imm-arg-value rhs))
+         (lhs-loc (and (integerp lhs) (allocate-vreg ctx lhs)))
+         (rhs-loc (and (integerp rhs) (allocate-vreg ctx rhs)))
+         (lhs-phys (and lhs-loc (eq (car lhs-loc) :reg) (cadr lhs-loc)))
+         (rhs-phys (and rhs-loc (eq (car rhs-loc) :reg) (cadr rhs-loc)))
+         (avoid-p (lambda (reg)
+                    (and avoid-reg (= reg avoid-reg))))
+         (rhs-reg (unless (and imm (typep imm '(signed-byte 32)))
+                    (cond
+                      ((and rhs-phys
+                            (not (funcall avoid-p rhs-phys)))
+                       rhs-phys)
+                      (t
+                       (choose-temp-reg avoid-reg lhs-phys)))))
+         (lhs-reg (cond
+                    ((and lhs-phys
+                          (not (funcall avoid-p lhs-phys))
+                          (or (null rhs-reg) (/= lhs-phys rhs-reg)))
+                     lhs-phys)
+                    (t
+                     (choose-temp-reg avoid-reg rhs-reg rhs-phys)))))
+    (when (integerp lhs)
+      (ecase (car lhs-loc)
+        (:reg
+         (unless (= lhs-reg (cadr lhs-loc))
+           (ectx-emit ctx (whistler/bpf:emit-mov64-reg lhs-reg (cadr lhs-loc)))))
+        (:stack
+         (ectx-emit ctx (whistler/bpf:emit-ldx-mem
+                         whistler/bpf:+bpf-dw+ lhs-reg
+                         whistler/bpf:+bpf-reg-10+ (cadr lhs-loc))))))
+    (when (and rhs-reg (integerp rhs))
+      (ecase (car rhs-loc)
+        (:reg
+         (unless (= rhs-reg (cadr rhs-loc))
+           (ectx-emit ctx (whistler/bpf:emit-mov64-reg rhs-reg (cadr rhs-loc)))))
+        (:stack
+         (ectx-emit ctx (whistler/bpf:emit-ldx-mem
+                         whistler/bpf:+bpf-dw+ rhs-reg
+                         whistler/bpf:+bpf-reg-10+ (cadr rhs-loc))))))
+    (values lhs-reg rhs-reg imm)))
+
+;;; ========== Size helpers ==========
+
+(defun ir-type-to-bpf-size (type-kw)
+  (let ((name (string-upcase (string type-kw))))
+    (cond
+      ((or (string= name "U8")  (string= name "I8"))  whistler/bpf:+bpf-b+)
+      ((or (string= name "U16") (string= name "I16")) whistler/bpf:+bpf-h+)
+      ((or (string= name "U32") (string= name "I32")) whistler/bpf:+bpf-w+)
+      (t whistler/bpf:+bpf-dw+))))
+
+;;; ========== BPF jump op mapping ==========
+
+(defun ir-cmp-to-bpf-jmp (op)
+  (ecase op
+    (:jeq whistler/bpf:+bpf-jeq+)
+    (:jne whistler/bpf:+bpf-jne+)
+    (:jgt whistler/bpf:+bpf-jgt+)
+    (:jge whistler/bpf:+bpf-jge+)
+    (:jlt whistler/bpf:+bpf-jlt+)
+    (:jle whistler/bpf:+bpf-jle+)
+    (:jsgt whistler/bpf:+bpf-jsgt+)
+    (:jsge whistler/bpf:+bpf-jsge+)
+    (:jslt whistler/bpf:+bpf-jslt+)
+    (:jsle whistler/bpf:+bpf-jsle+)))
+
+(defun ir-alu-to-bpf (op)
+  (ecase op
+    (:add whistler/bpf:+bpf-add+)
+    (:sub whistler/bpf:+bpf-sub+)
+    (:mul whistler/bpf:+bpf-mul+)
+    (:div whistler/bpf:+bpf-div+)
+    (:mod whistler/bpf:+bpf-mod+)
+    (:and whistler/bpf:+bpf-and+)
+    (:or  whistler/bpf:+bpf-or+)
+    (:xor whistler/bpf:+bpf-xor+)
+    (:lsh whistler/bpf:+bpf-lsh+)
+    (:rsh whistler/bpf:+bpf-rsh+)
+    (:arsh whistler/bpf:+bpf-arsh+)))
+
+;;; ========== Block ordering and label resolution ==========
+
+(defun block-has-ret-p (block)
+  "Does this block end with a :ret instruction?"
+  (let ((last-insn (car (last (basic-block-insns block)))))
+    (and last-insn (eq (ir-insn-op last-insn) :ret))))
+
+(defun order-blocks (prog)
+  "Order blocks: keep creation order but move :ret blocks to the end
+   when there are multiple of them (from explicit return statements).
+   This ensures return statements always produce forward jumps, avoiding
+   the kernel BPF verifier's infinite loop detection.
+   When there is only one :ret block, keep original order (it is
+   already the natural fall-through target)."
+  (let* ((blocks (ir-program-blocks prog))
+         (entry-label (ir-program-entry prog))
+         (non-ret '())
+         (ret-blocks '()))
+    (dolist (b blocks)
+      (if (and (block-has-ret-p b)
+               (not (eq (basic-block-label b) entry-label)))
+          (push b ret-blocks)
+          (push b non-ret)))
+    (if (> (length ret-blocks) 1)
+        ;; Multiple return blocks: move them all to end
+        (nconc (nreverse non-ret) (nreverse ret-blocks))
+        ;; Zero or one return block: keep original order
+        blocks)))
+
+;;; ========== Main emission ==========
+
+(defun build-vreg-type-map (prog)
+  "Build a hash table mapping vreg → type symbol from IR instructions."
+  (let ((map (make-hash-table)))
+    (dolist (block (ir-program-blocks prog))
+      (dolist (insn (basic-block-insns block))
+        (when (and (ir-insn-dst insn) (ir-insn-type insn))
+          (setf (gethash (ir-insn-dst insn) map) (ir-insn-type insn)))))
+    map))
+
+(defun ir-type-to-byte-size (type-kw)
+  "Return byte size for an IR type keyword."
+  (if type-kw
+      (let ((name (string-upcase (string type-kw))))
+        (cond
+          ((or (string= name "U8")  (string= name "I8"))  1)
+          ((or (string= name "U16") (string= name "I16")) 2)
+          ((or (string= name "U32") (string= name "I32")) 4)
+          (t 8)))
+      8))
+
+(defun find-free-callee-regs (alloc-map)
+  "Return a list of callee-saved registers (6-9) not used by any vreg."
+  (let ((used (make-hash-table)))
+    (maphash (lambda (vreg loc)
+               (declare (ignore vreg))
+               (when (and (consp loc) (eq (car loc) :reg)
+                          (<= 6 (cadr loc) 9))
+                 (setf (gethash (cadr loc) used) t)))
+             alloc-map)
+    (loop for r from 6 to 9
+          unless (gethash r used) collect r)))
+
+(defun count-map-fd-refs (prog)
+  "Count how many times each map is referenced in the IR program.
+   Returns a hash table: map-name → count."
+  (let ((counts (make-hash-table)))
+    (dolist (block (ir-program-blocks prog))
+      (dolist (insn (basic-block-insns block))
+        (when (member (ir-insn-op insn) '(:map-lookup :map-lookup-ptr
+                                          :tail-call :get-stackid
+                                          :map-update :map-update-ptr
+                                          :map-delete :map-delete-ptr
+                                          :ringbuf-reserve))
+          (let ((map-name (map-arg-name (first (ir-insn-args insn)))))
+            (when map-name
+              (incf (gethash map-name counts 0)))))))
+    counts))
+
+(defun count-struct-ptr-uses (prog)
+  "Count how many times each struct-alloc vreg is used as a key/value pointer
+   in map-*-ptr operations. Returns a hash table: vreg → count."
+  (let ((counts (make-hash-table)))
+    (dolist (block (ir-program-blocks prog))
+      (dolist (insn (basic-block-insns block))
+        (when (member (ir-insn-op insn) '(:map-lookup-ptr :map-update-ptr :map-delete-ptr))
+          (let ((ptr-vreg (second (ir-insn-args insn))))
+            (when (integerp ptr-vreg)
+              (incf (gethash ptr-vreg counts 0)))))
+        ;; Also count val-ptr in map-update-ptr (3rd arg)
+        (when (eq (ir-insn-op insn) :map-update-ptr)
+          (let ((val-vreg (third (ir-insn-args insn))))
+            (when (integerp val-vreg)
+              (incf (gethash val-vreg counts 0)))))))
+    counts))
+
+(defun emit-ir-to-bpf (prog &key reserve-callee-count (auto-reserve-helper-setup t))
+  "Emit BPF instructions from optimized SSA IR.
+   Returns a compilation-unit compatible structure."
+  (multiple-value-bind (alloc-map regalloc-stack)
+      (linear-scan-alloc prog
+                         :ctx-early (ctx-loads-early-p prog)
+                         :reserve-callee-count reserve-callee-count
+                         :auto-reserve-helper-setup auto-reserve-helper-setup)
+    (let* ((ctx-early (ctx-loads-early-p prog))
+           (free-callee (find-free-callee-regs alloc-map))
+           (map-refs (count-map-fd-refs prog))
+           (struct-uses (count-struct-ptr-uses prog))
+           (dom-map (compute-dominators prog))
+           (ctx (make-emit-ctx :ir-prog prog :vreg-map alloc-map
+                               :stack-offset regalloc-stack
+                               :stack-ledger (when (< regalloc-stack 0)
+                                               (list (cons "register spills (regalloc)"
+                                                           (- regalloc-stack))))
+                               :vreg-types (build-vreg-type-map prog)
+                               :free-callee-regs free-callee
+                               :map-ref-counts map-refs
+                               :struct-ptr-uses struct-uses
+                               :dom-map dom-map))
+           (blocks (order-blocks prog))
+           (block-positions (make-hash-table)))
+
+    ;; Map each vreg's live-interval end back to the ir-insn at that
+    ;; position (same walk order compute-liveness uses:
+    ;; ir-program-blocks, insns in order) so emitters can tell when a
+    ;; source register may be reused destructively. Keyed by insn
+    ;; identity because emission order (order-blocks) may differ from
+    ;; the liveness walk order.
+    (let ((pos-insns (make-array 0 :adjustable t :fill-pointer t)))
+      (dolist (b (ir-program-blocks prog))
+        (dolist (i (basic-block-insns b))
+          (vector-push-extend i pos-insns)))
+      (dolist (iv (compute-liveness prog))
+        (let ((end (live-interval-end iv)))
+          (when (< end (length pos-insns))
+            (push (live-interval-vreg iv)
+                  (gethash (aref pos-insns end)
+                           (emit-ctx-dying-vregs ctx)))))))
+
+    ;; Populate const-values: vreg → integer for mov %v (:imm N)
+    (dolist (block blocks)
+      (dolist (insn (basic-block-insns block))
+        (when (and (eq (ir-insn-op insn) :mov)
+                   (ir-insn-dst insn)
+                   (let ((arg (first (ir-insn-args insn))))
+                     (and (consp arg) (eq (car arg) :imm))))
+          (setf (gethash (ir-insn-dst insn) (emit-ctx-const-values ctx))
+                (second (first (ir-insn-args insn)))))))
+
+    ;; Build phi resolution table: for each phi in a block, record the moves
+    ;; needed at each predecessor's branch to that block.
+    (dolist (block blocks)
+      (dolist (insn (basic-block-insns block))
+        (when (and (eq (ir-insn-op insn) :phi) (ir-insn-dst insn))
+          (let ((phi-dst (ir-insn-dst insn))
+                (tgt-label (basic-block-label block)))
+            (dolist (arg (ir-insn-args insn))
+              (when (and (consp arg) (integerp (first arg))
+                         (consp (second arg)) (eq (car (second arg)) :label))
+                (let* ((src-vreg (first arg))
+                       (src-label (cadr (second arg)))
+                       (key (cons src-label tgt-label)))
+                  (push (cons phi-dst src-vreg)
+                        (gethash key (emit-ctx-phi-moves ctx))))))))))
+
+    ;; Emit ctx save only if ctx-loads happen after calls (need R6)
+    (let ((ctx-vreg (find-ctx-vreg prog)))
+      (when (and ctx-vreg (vreg-used-p prog ctx-vreg) (not ctx-early))
+        (ectx-emit ctx (whistler/bpf:emit-mov64-reg
+                        whistler/bpf:+bpf-reg-6+ whistler/bpf:+bpf-reg-1+))))
+
+    ;; Emit each block
+    (dolist (block blocks)
+      (setf (emit-ctx-current-block-label ctx) (basic-block-label block))
+      (setf (gethash (basic-block-label block) block-positions)
+            (ectx-current-idx ctx))
+      (dolist (insn (basic-block-insns block))
+        (emit-ir-insn ctx insn block-positions)))
+
+    ;; Patch jump offsets
+    (let ((bpf-insns (nreverse (emit-ctx-insns ctx))))
+      (dolist (fixup (emit-ctx-fixups ctx))
+        (destructuring-bind (bpf-idx target-label) fixup
+          (let* ((target-pos (gethash target-label block-positions))
+                 (offset (- target-pos bpf-idx 1))
+                 (insn (nth bpf-idx bpf-insns)))
+            (setf (whistler/bpf:bpf-insn-off insn) offset))))
+
+      ;; Apply peephole optimizations
+      (setf bpf-insns (peephole-optimize bpf-insns))
+
+      ;; Rebuild map relocations after peephole.
+      ;; The peephole may remove instructions, shifting byte offsets.
+      ;; Scan for ld_imm64 with src=BPF_PSEUDO_MAP_FD (1) and pair
+      ;; with original relocs (which are in the same order of appearance).
+      (let ((new-relocs '())
+            (old-relocs (nreverse (emit-ctx-map-relocs ctx))))
+        (loop for insn in bpf-insns
+              for idx from 0
+              when (and (= (whistler/bpf:bpf-insn-code insn)
+                           (logior whistler/bpf:+bpf-ld+
+                                   whistler/bpf:+bpf-dw+
+                                   whistler/bpf:+bpf-imm+))
+                        (= (whistler/bpf:bpf-insn-src insn) 1))
+              do (let ((map-idx (second (pop old-relocs))))
+                   (push (list (* idx 8) map-idx) new-relocs)))
+
+        ;; Rebuild kfunc relocations after peephole. Scan for BPF_CALL
+        ;; insns with src=BPF_PSEUDO_KFUNC_CALL and pair with the recorded
+        ;; names (same order of appearance as emission).
+        (let ((new-kfunc-relocs '())
+              (old-kfunc-relocs (nreverse (emit-ctx-kfunc-relocs ctx))))
+          (loop for insn in bpf-insns
+                for idx from 0
+                when (and (= (whistler/bpf:bpf-insn-code insn)
+                             (logior whistler/bpf:+bpf-jmp+ whistler/bpf:+bpf-call+))
+                          (= (whistler/bpf:bpf-insn-src insn)
+                             whistler/bpf:+bpf-pseudo-kfunc-call+))
+                do (let ((name (pop old-kfunc-relocs)))
+                     (push (list (* idx 8) name) new-kfunc-relocs)))
+          (setf new-kfunc-relocs (nreverse new-kfunc-relocs))
+
+        ;; Rebuild CO-RE relocations after peephole.
+        ;; Scan for eq-identical BPF insn objects recorded during emission.
+        (let ((core-reloc-map (make-hash-table :test 'eq))
+              (final-core-relocs '()))
+          (dolist (entry (emit-ctx-core-relocs ctx))
+            (destructuring-bind (insn-obj struct-name field-name) entry
+              (setf (gethash insn-obj core-reloc-map)
+                    (list struct-name field-name))))
+          (loop for insn in bpf-insns
+                for idx from 0
+                do (let ((info (gethash insn core-reloc-map)))
+                     (when info
+                       (push (list (* idx 8) (first info) (second info))
+                             final-core-relocs))))
+
+          ;; Build result
+          (let ((cu (whistler/compiler:make-compilation-unit
+                     :section (ir-program-section prog)
+                     :license (ir-program-license prog))))
+            (setf (whistler/compiler:cu-insns cu) bpf-insns)
+            (setf (whistler/compiler:cu-maps cu) (ir-program-maps prog))
+            (setf (whistler/compiler:cu-map-relocs cu) (nreverse new-relocs))
+            (setf (whistler/compiler:cu-core-relocs cu) (nreverse final-core-relocs))
+            (setf (whistler/compiler:cu-kfunc-relocs cu) new-kfunc-relocs)
+            cu))))))))
+
+(defun find-ctx-vreg (prog)
+  "Find the vreg assigned to %%CTX (the arg0 instruction)."
+  (dolist (block (ir-program-blocks prog))
+    (dolist (insn (basic-block-insns block))
+      (when (eq (ir-insn-op insn) :arg0)
+        (return-from find-ctx-vreg (ir-insn-dst insn)))))
+  nil)
+
+(defun vreg-used-p (prog vreg)
+  "Is VREG referenced in any instruction args?"
+  (dolist (block (ir-program-blocks prog))
+    (dolist (insn (basic-block-insns block))
+      (dolist (arg (ir-insn-args insn))
+        (when (and (integerp arg) (= arg vreg))
+          (return-from vreg-used-p t))
+        (when (and (consp arg) (integerp (first arg)) (= (first arg) vreg))
+          (return-from vreg-used-p t)))))
+  nil)
+
+;;; ========== Per-instruction emission ==========
+
+(defun emit-ir-insn (ctx insn block-positions)
+  (let* ((op (ir-insn-op insn))
+         (dst (ir-insn-dst insn))
+         (args (ir-insn-args insn)))
+    ;; Provenance for emitted insns (disassembly): prefer the surface source
+    ;; form the IR insn was lowered from, falling back to the IR op keyword for
+    ;; insns created by optimization passes (which carry no source form).
+    (setf (emit-ctx-current-op ctx) (or (ir-insn-source insn) op))
+    (setf (emit-ctx-current-insn ctx) insn)
+    (cond
+     ((eq op :arg0) nil)
+
+     ((eq op :mov)
+      (emit-mov-insn ctx dst args))
+
+     ((member op '(:add :sub :mul :div :mod :and :or :xor :lsh :rsh :arsh))
+      (emit-alu-insn ctx op dst args (ir-insn-type insn)))
+
+     ((eq op :neg)
+      (emit-neg-insn ctx dst args))
+
+     ((eq op :cmp)       (emit-cmp-insn ctx dst args))
+     ((eq op :load)      (emit-load-insn ctx dst args))
+     ((eq op :ctx-load)  (emit-ctx-load-insn ctx dst args))
+     ((eq op :ctx-store) (emit-ctx-store-insn ctx args))
+     ((eq op :store)     (emit-store-insn ctx args))
+     ((eq op :atomic-add)(emit-atomic-add-insn ctx args))
+     ((eq op :call)      (emit-call-insn ctx dst args))
+     ((eq op :kfunc-call)(emit-kfunc-call-insn ctx dst args))
+     ((eq op :tail-call) (emit-tail-call-insn ctx dst args))
+     ((eq op :get-stackid) (emit-get-stackid-insn ctx dst args))
+     ((eq op :map-lookup)(emit-map-lookup-insn ctx dst args))
+     ((eq op :map-lookup-ptr)(emit-map-lookup-ptr-insn ctx dst args))
+     ((eq op :struct-alloc)(emit-struct-alloc-insn ctx dst args))
+     ((eq op :map-update)(emit-map-update-insn ctx dst args))
+     ((eq op :map-update-ptr)(emit-map-update-ptr-insn ctx dst args))
+     ((eq op :map-delete)(emit-map-delete-insn ctx dst args))
+     ((eq op :map-delete-ptr)(emit-map-delete-ptr-insn ctx dst args))
+     ((eq op :ringbuf-output) (emit-ringbuf-output-insn ctx dst args))
+     ((eq op :ringbuf-reserve)(emit-ringbuf-reserve-insn ctx dst args))
+     ((eq op :ringbuf-submit)(emit-ringbuf-submit-insn ctx dst args))
+     ((eq op :ringbuf-discard)(emit-ringbuf-discard-insn ctx dst args))
+     ((eq op :log2)      (emit-log2-insn ctx dst args))
+     ((eq op :cast)      (emit-cast-insn ctx dst args))
+     ((eq op :stack-addr)(emit-stack-addr-insn ctx dst args))
+
+     ((member op '(:bswap16 :bswap32 :bswap64))
+      (emit-bswap-insn ctx op dst args))
+
+     ((eq op :phi)
+      ;; Phi resolution moves are emitted at predecessor branches, not here.
+      nil)
+
+     ((eq op :br)
+      (let ((target (label-arg-name (first args))))
+        (emit-phi-moves ctx target)
+        (push (list (ectx-current-idx ctx) target) (emit-ctx-fixups ctx))
+        (ectx-emit ctx (whistler/bpf:emit-jmp-a 0))))
+
+     ((eq op :br-cond)
+      (emit-br-cond-insn ctx args block-positions))
+
+     ((eq op :ret)
+      (let ((val (first args)))
+        (when (integerp val)
+          (let ((src-reg (vreg-to-physical ctx val whistler/bpf:+bpf-reg-0+)))
+            ;; Always emit mov r0, src — even if src is already r0.
+            ;; Needed when multiple branches converge on a shared exit:
+            ;; one branch may have the value in r0 while another has it
+            ;; in a different register.
+            (ectx-emit ctx (whistler/bpf:emit-mov64-reg whistler/bpf:+bpf-reg-0+ src-reg))))
+        (ectx-emit ctx (whistler/bpf:emit-exit))))
+
+     (t (error "Unknown IR op for emission: ~a" op)))))
+
+(defun imm-fits-signed32 (imm)
+  "If IMM's 64-bit two's-complement bit pattern equals the sign-extension
+   of a 32-bit immediate, return that signed value; otherwise NIL. BPF
+   mov64-imm and ST_MEM sign-extend their 32-bit imm field, so such values
+   materialize in one instruction instead of a two-slot ld_imm64. This is
+   what lets negative constants (stored unsigned-masked, e.g. -5 as
+   #xFFFFFFFFFFFFFFFB) avoid ld_imm64."
+  (let ((s (if (>= imm (ash 1 63)) (- imm (ash 1 64)) imm)))
+    (when (typep s '(signed-byte 32)) s)))
+
+(defun emit-mov-imm-to-stack (ctx imm stack-off)
+  "Materialize integer IMM into the stack slot at R10+STACK-OFF.
+   For a 32-bit signed IMM, this is a single ST_MEM (no temp register
+   needed — important to avoid clobbering whatever's in R1)."
+  (let ((s (imm-fits-signed32 imm)))
+    (cond
+      (s
+       (ectx-emit ctx (whistler/bpf:emit-st-mem
+                       whistler/bpf:+bpf-dw+
+                       whistler/bpf:+bpf-reg-10+ stack-off s)))
+      (t
+       ;; 64-bit immediate (rare — most appear as :ld-imm rather than :mov).
+       ;; Use R0 as scratch: regalloc never assigns R0 to a vreg.
+       (let ((tmp whistler/bpf:+bpf-reg-0+))
+         (ectx-emit ctx (whistler/bpf:emit-ld-imm64 tmp imm))
+         (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                         whistler/bpf:+bpf-dw+
+                         whistler/bpf:+bpf-reg-10+ tmp stack-off)))))))
+
+(defun emit-mov-insn (ctx dst args)
+  "Emit a mov instruction (vreg-to-vreg copy or immediate load)."
+  (when dst
+    (let ((arg (first args)))
+      (cond
+       ((integerp arg)
+        (let ((src-phys (vreg-to-physical ctx arg whistler/bpf:+bpf-reg-0+)))
+          (store-to-vreg ctx dst src-phys)))
+       ;; (:btf-id N) — load the address of a BTF-typed kernel symbol
+       ;; (e.g. a `__percpu' variable). Encoded as ld_imm64 with
+       ;; src_reg=BPF_PSEUDO_BTF_ID; the kernel resolves the address
+       ;; at program load and types the destination as the symbol's
+       ;; actual percpu_ptr_<T>, not a plain scalar.
+       ((and (consp arg) (eq (first arg) :btf-id))
+        (let* ((btf-id (second arg))
+               (dst-loc (allocate-vreg ctx dst)))
+          (ecase (car dst-loc)
+            (:reg
+             (ectx-emit ctx (whistler/bpf:emit-ld-btf-id (cadr dst-loc) btf-id)))
+            (:stack
+             ;; Materialise into R0 then spill, matching how 64-bit
+             ;; literals do it. ld_imm64 lands the typed pointer in
+             ;; R0 first, store-to-stack happens after.
+             (let ((tmp whistler/bpf:+bpf-reg-0+))
+               (ectx-emit ctx (whistler/bpf:emit-ld-btf-id tmp btf-id))
+               (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                               whistler/bpf:+bpf-dw+
+                               whistler/bpf:+bpf-reg-10+ tmp
+                               (cadr dst-loc))))))))
+       ((consp arg)
+        (let ((imm (imm-arg-value arg)))
+          (when imm
+            (let ((dst-loc (allocate-vreg ctx dst)))
+              (ecase (car dst-loc)
+                (:reg
+                 (let ((s (imm-fits-signed32 imm)))
+                   (if s
+                       (ectx-emit ctx (whistler/bpf:emit-mov64-imm (cadr dst-loc) s))
+                       (ectx-emit ctx (whistler/bpf:emit-ld-imm64 (cadr dst-loc) imm)))))
+                (:stack
+                 (emit-mov-imm-to-stack ctx imm (cadr dst-loc))))))))))))
+
+(defun emit-neg-insn (ctx dst args)
+  "Emit a negation instruction."
+  (let ((src-reg (vreg-to-physical ctx (first args) whistler/bpf:+bpf-reg-0+))
+        (dst-loc (allocate-vreg ctx dst)))
+    (ecase (car dst-loc)
+      (:reg
+       (unless (= src-reg (cadr dst-loc))
+         (ectx-emit ctx (whistler/bpf:emit-mov64-reg (cadr dst-loc) src-reg)))
+       (ectx-emit ctx (whistler/bpf:emit-alu64-imm whistler/bpf:+bpf-neg+ (cadr dst-loc) 0)))
+      (:stack
+       ;; Work in R0 — never allocated, so never live here.
+       (unless (= src-reg whistler/bpf:+bpf-reg-0+)
+         (ectx-emit ctx (whistler/bpf:emit-mov64-reg whistler/bpf:+bpf-reg-0+ src-reg)))
+       (ectx-emit ctx (whistler/bpf:emit-alu64-imm whistler/bpf:+bpf-neg+ whistler/bpf:+bpf-reg-0+ 0))
+       (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                       whistler/bpf:+bpf-dw+
+                       whistler/bpf:+bpf-reg-10+ whistler/bpf:+bpf-reg-0+ (cadr dst-loc)))))))
+
+;;; ========== ALU emission ==========
+
+(defun ir-type-is-32bit-p (type)
+  "Return T if TYPE is a 32-bit or narrower type (u8, u16, u32)."
+  (when type
+    (let ((name (string-upcase (string type))))
+      (or (string= name "U8")  (string= name "I8")
+          (string= name "U16") (string= name "I16")
+          (string= name "U32") (string= name "I32")))))
+
+(defun emit-alu-insn (ctx op dst args &optional type)
+  (let* ((bpf-op (ir-alu-to-bpf op))
+         (rhs (second args))
+         (dst-loc (allocate-vreg ctx dst))
+         ;; Spilled dst computes in R5 — reserved as scratch whenever
+         ;; anything spills — leaving R0 free for operand reloads.
+         (work-reg (if (eq (car dst-loc) :reg) (cadr dst-loc) whistler/bpf:+bpf-reg-5+))
+         (use-alu32 (ir-type-is-32bit-p type))
+         (emit-alu (if use-alu32 #'whistler/bpf:emit-alu32-reg #'whistler/bpf:emit-alu64-reg))
+         (emit-alu-i (if use-alu32 #'whistler/bpf:emit-alu32-imm #'whistler/bpf:emit-alu64-imm)))
+    (if (integerp rhs)
+        ;; vreg operand — check physical locations BEFORE emitting loads
+        ;; to avoid clobbering one operand while loading the other
+        (let* ((lhs-loc (allocate-vreg ctx (first args)))
+               (rhs-loc (allocate-vreg ctx rhs))
+               (lhs-phys (if (eq (car lhs-loc) :reg) (cadr lhs-loc) nil))
+               (rhs-phys (if (eq (car rhs-loc) :reg) (cadr rhs-loc) nil)))
+          (cond
+            ;; Case 1: lhs already in work-reg — just load rhs.
+            ;; Spill reloads use R0: never allocated, so never live here.
+            ((and lhs-phys (= lhs-phys work-reg))
+             (let ((rhs-reg (vreg-to-physical ctx rhs whistler/bpf:+bpf-reg-0+)))
+               (ectx-emit ctx (funcall emit-alu bpf-op work-reg rhs-reg))))
+            ;; Case 2: rhs NOT in work-reg — safe to load lhs first
+            ((not (and rhs-phys (= rhs-phys work-reg)))
+             (let ((lhs-reg (vreg-to-physical ctx (first args) work-reg)))
+               (unless (= lhs-reg work-reg)
+                 (ectx-emit ctx (whistler/bpf:emit-mov64-reg work-reg lhs-reg)))
+               (let ((rhs-reg (vreg-to-physical ctx rhs whistler/bpf:+bpf-reg-0+)))
+                 (ectx-emit ctx (funcall emit-alu bpf-op work-reg rhs-reg)))))
+            ;; Case 3: rhs IS in work-reg — evacuate rhs before loading lhs.
+            ;; R0 is safe for the lhs reload / rhs evacuation; work-reg is
+            ;; never R5 here (rhs-phys = work-reg implies dst has a register).
+            (t
+             (if (commutative-alu-op-p op)
+                 ;; For commutative ops, keep rhs in work-reg and apply lhs.
+                 (let ((lhs-reg (vreg-to-physical ctx (first args)
+                                                  whistler/bpf:+bpf-reg-0+)))
+                   (ectx-emit ctx (funcall emit-alu bpf-op work-reg lhs-reg)))
+                 (let ((scratch whistler/bpf:+bpf-reg-0+))
+                   (ectx-emit ctx (whistler/bpf:emit-mov64-reg scratch work-reg))
+                   (let ((lhs-reg (vreg-to-physical ctx (first args) work-reg)))
+                     (unless (= lhs-reg work-reg)
+                       (ectx-emit ctx (whistler/bpf:emit-mov64-reg work-reg lhs-reg))))
+                   (ectx-emit ctx (funcall emit-alu bpf-op work-reg scratch)))))))
+        ;; Immediate or non-integer rhs
+        (let ((lhs-reg (vreg-to-physical ctx (first args) work-reg))
+              (imm (imm-arg-value rhs)))
+          (unless (= lhs-reg work-reg)
+            (ectx-emit ctx (whistler/bpf:emit-mov64-reg work-reg lhs-reg)))
+          (if (and imm (typep imm '(signed-byte 32)))
+              (ectx-emit ctx (funcall emit-alu-i bpf-op work-reg imm))
+              ;; Must be a vreg in a non-standard form
+              (let ((rhs-reg (vreg-to-physical ctx rhs whistler/bpf:+bpf-reg-0+)))
+                (ectx-emit ctx (funcall emit-alu bpf-op work-reg rhs-reg))))))
+    ;; Store result if on stack
+    (when (eq (car dst-loc) :stack)
+      (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                       whistler/bpf:+bpf-dw+
+                       whistler/bpf:+bpf-reg-10+ work-reg (cadr dst-loc))))))
+
+;;; ========== Comparison emission ==========
+
+(defun emit-cmp-insn (ctx dst args)
+  (let* ((cmp-op (cmp-arg-op (first args)))
+         (bpf-jmp (ir-cmp-to-bpf-jmp cmp-op))
+         (lhs (second args))
+         (rhs (third args))
+         (dst-loc (allocate-vreg ctx dst)))
+    (if (eq (car dst-loc) :reg)
+        (let ((dst-reg (cadr dst-loc)))
+          (multiple-value-bind (lhs-reg rhs-reg imm)
+              (materialize-compare-operands ctx lhs rhs :avoid-reg dst-reg)
+            ;; Set result = 1
+            (ectx-emit ctx (whistler/bpf:emit-mov64-imm dst-reg 1))
+            ;; Compare
+            (if (and imm (typep imm '(signed-byte 32)))
+                (ectx-emit ctx (whistler/bpf:emit-jmp-imm bpf-jmp lhs-reg imm 1))
+                (ectx-emit ctx (whistler/bpf:emit-jmp-reg bpf-jmp lhs-reg rhs-reg 1)))
+            ;; Set result = 0 (fallthrough)
+            (ectx-emit ctx (whistler/bpf:emit-mov64-imm dst-reg 0))))
+        ;; Spilled dst: the operands may occupy both scratch registers
+        ;; (R0/R5), so branch first — once the compare has consumed them,
+        ;; R0 is free to materialize the result.
+        (let ((tmp whistler/bpf:+bpf-reg-0+))
+          (multiple-value-bind (lhs-reg rhs-reg imm)
+              (materialize-compare-operands ctx lhs rhs)
+            (if (and imm (typep imm '(signed-byte 32)))
+                (ectx-emit ctx (whistler/bpf:emit-jmp-imm bpf-jmp lhs-reg imm 2))
+                (ectx-emit ctx (whistler/bpf:emit-jmp-reg bpf-jmp lhs-reg rhs-reg 2)))
+            (ectx-emit ctx (whistler/bpf:emit-mov64-imm tmp 0))
+            (ectx-emit ctx (whistler/bpf:emit-jmp-a 1))
+            (ectx-emit ctx (whistler/bpf:emit-mov64-imm tmp 1))
+            (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                            whistler/bpf:+bpf-dw+
+                            whistler/bpf:+bpf-reg-10+ tmp (cadr dst-loc))))))))
+
+;;; ========== Load/Store emission ==========
+
+(defun emit-load-insn (ctx dst args)
+  (let* ((ptr-vreg (first args))
+         (struct-base (and (integerp ptr-vreg)
+                           (gethash ptr-vreg (emit-ctx-struct-offsets ctx))))
+         (off (imm-arg-value (second args)))
+         (type-kw (type-arg-name (third args)))
+         (bpf-size (ir-type-to-bpf-size type-kw))
+         (dst-loc (allocate-vreg ctx dst))
+         (dst-reg (if (eq (car dst-loc) :reg) (cadr dst-loc) whistler/bpf:+bpf-reg-0+))
+         (core-info (core-arg-info args))
+         load-insn)
+    (if struct-base
+        ;; Direct R10-relative load — skip loading the struct pointer
+        (let ((insns (whistler/bpf:emit-ldx-mem bpf-size dst-reg
+                       whistler/bpf:+bpf-reg-10+ (+ struct-base off))))
+          (setf load-insn (first insns))
+          (ectx-emit ctx insns))
+        ;; Normal pointer-based load — R0 scratch is safe even when the
+        ;; spilled dst also lands in R0 (ldx allows dst == src).
+        (let ((ptr-reg (vreg-to-physical ctx ptr-vreg whistler/bpf:+bpf-reg-0+)))
+          (let ((insns (whistler/bpf:emit-ldx-mem bpf-size dst-reg ptr-reg off)))
+            (setf load-insn (first insns))
+            (ectx-emit ctx insns))))
+    ;; Record CO-RE relocation if annotated
+    (when core-info
+      (push (list load-insn (first core-info) (second core-info))
+            (emit-ctx-core-relocs ctx)))
+    (when (eq (car dst-loc) :stack)
+      (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                       whistler/bpf:+bpf-dw+
+                       whistler/bpf:+bpf-reg-10+ dst-reg (cadr dst-loc))))))
+
+(defun emit-ctx-load-insn (ctx dst args)
+  ;; When ctx was saved to R6 (not early), use R6 directly instead of
+  ;; looking up the ctx vreg's allocation — which may be a stack spill
+  ;; that hasn't been initialized.
+  (let* ((ctx-early (ctx-loads-early-p (emit-ctx-ir-prog ctx)))
+         (ctx-reg (if ctx-early
+                      (vreg-to-physical ctx (first args) whistler/bpf:+bpf-reg-0+)
+                      whistler/bpf:+bpf-reg-6+))
+         (off (imm-arg-value (second args)))
+         (type-kw (type-arg-name (third args)))
+         (bpf-size (ir-type-to-bpf-size type-kw))
+         (dst-loc (allocate-vreg ctx dst))
+         (dst-reg (if (eq (car dst-loc) :reg) (cadr dst-loc) whistler/bpf:+bpf-reg-0+))
+         (core-info (core-arg-info args)))
+    (let ((insns (whistler/bpf:emit-ldx-mem bpf-size dst-reg ctx-reg off)))
+      (when core-info
+        (push (list (first insns) (first core-info) (second core-info))
+              (emit-ctx-core-relocs ctx)))
+      (ectx-emit ctx insns))
+    (when (eq (car dst-loc) :stack)
+      (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                       whistler/bpf:+bpf-dw+
+                       whistler/bpf:+bpf-reg-10+ dst-reg (cadr dst-loc))))))
+
+(defun emit-ctx-store-insn (ctx args)
+  "Emit a store to a BPF context field. Uses the same register logic as ctx-load.
+   Records CO-RE relocations when (:core ...) metadata is present."
+  (let* ((ctx-early (ctx-loads-early-p (emit-ctx-ir-prog ctx)))
+         (ctx-reg (if ctx-early
+                      (vreg-to-physical ctx (first args) whistler/bpf:+bpf-reg-0+)
+                      whistler/bpf:+bpf-reg-6+))
+         (off (imm-arg-value (second args)))
+         (val-arg (third args))
+         (val-imm (or (imm-arg-value val-arg)
+                      (and (integerp val-arg)
+                           (gethash val-arg (emit-ctx-const-values ctx)))))
+         (type-kw (type-arg-name (fourth args)))
+         (bpf-size (ir-type-to-bpf-size type-kw))
+         (core-info (core-arg-info args)))
+    (let ((insns (if val-imm
+                     (whistler/bpf:emit-st-mem bpf-size ctx-reg off val-imm)
+                     ;; R0 scratch: the ctx pointer never reloads through
+                     ;; R0 (early ctx is pre-assigned R1, otherwise R6).
+                     (let ((val-reg (vreg-to-physical ctx val-arg whistler/bpf:+bpf-reg-0+)))
+                       (whistler/bpf:emit-stx-mem bpf-size ctx-reg val-reg off)))))
+      (when core-info
+        (push (list (first insns) (first core-info) (second core-info))
+              (emit-ctx-core-relocs ctx)))
+      (ectx-emit ctx insns))))
+
+(defun emit-store-insn (ctx args)
+  (let* ((ptr-vreg (first args))
+         (struct-base (and (integerp ptr-vreg)
+                           (gethash ptr-vreg (emit-ctx-struct-offsets ctx))))
+         (off (imm-arg-value (second args)))
+         (val-arg (third args))
+         (val-imm (or (imm-arg-value val-arg)
+                      ;; Also check const-values for vregs holding constants
+                      (and (integerp val-arg)
+                           (gethash val-arg (emit-ctx-const-values ctx)))))
+         (type-kw (type-arg-name (fourth args)))
+         (bpf-size (ir-type-to-bpf-size type-kw))
+         (core-info (core-arg-info args))
+         store-insn)
+    ;; The BPF store-immediate form carries a 32-bit field that the CPU
+    ;; sign-extends to the access width. For b, h and w the extension is
+    ;; discarded past the bytes written, so any constant is fine; for dw
+    ;; it reaches the top four bytes and fills them with ones whenever
+    ;; bit 31 is set. Such a value has to go through a register instead
+    ;; (whistler-9qd).
+    (when (and val-imm
+               (= bpf-size whistler/bpf:+bpf-dw+)
+               (not (typep val-imm '(signed-byte 32))))
+      (setf val-imm nil))
+    (cond
+      ;; Immediate value + struct base → direct st-mem to R10-relative
+      ((and struct-base val-imm)
+       (let ((insns (whistler/bpf:emit-st-mem bpf-size
+                      whistler/bpf:+bpf-reg-10+ (+ struct-base off) val-imm)))
+         (setf store-insn (first insns))
+         (ectx-emit ctx insns)))
+      ;; Immediate value + normal pointer → st-mem through pointer reg
+      (val-imm
+       (let ((ptr-reg (vreg-to-physical ctx ptr-vreg whistler/bpf:+bpf-reg-0+)))
+         (let ((insns (whistler/bpf:emit-st-mem bpf-size ptr-reg off val-imm)))
+           (setf store-insn (first insns))
+           (ectx-emit ctx insns))))
+      ;; Vreg value + struct base → stx-mem to R10-relative
+      (struct-base
+       (let ((val-reg (vreg-to-physical ctx val-arg whistler/bpf:+bpf-reg-0+)))
+         (let ((insns (whistler/bpf:emit-stx-mem bpf-size
+                        whistler/bpf:+bpf-reg-10+ val-reg (+ struct-base off))))
+           (setf store-insn (first insns))
+           (ectx-emit ctx insns))))
+      ;; Normal pointer-based store
+      (t
+       ;; Use the operands' allocated registers directly (R1/R2 only as
+       ;; spill-reload scratch). A store is not call-like, so R1-R5 may
+       ;; hold live vregs — unconditionally copying the operands into
+       ;; R1/R2 clobbered a live loop counter and loop-carried pointer
+       ;; across the back-edge (issue #41). Reload the value first so a
+       ;; spilled value cannot land on top of a just-reloaded pointer.
+       ;; Scratch: R0 for the value, R5 for the pointer (R5 is reserved
+       ;; from allocation whenever anything spills).
+       (let* ((val-reg (vreg-to-physical ctx val-arg whistler/bpf:+bpf-reg-0+))
+              (ptr-reg (vreg-to-physical ctx ptr-vreg whistler/bpf:+bpf-reg-5+)))
+         (let ((insns (whistler/bpf:emit-stx-mem bpf-size ptr-reg val-reg off)))
+           (setf store-insn (first insns))
+           (ectx-emit ctx insns)))))
+    ;; Record CO-RE relocation if annotated
+    (when core-info
+      (push (list store-insn (first core-info) (second core-info))
+            (emit-ctx-core-relocs ctx)))))
+
+(defun emit-atomic-add-insn (ctx args)
+  (let* ((ptr-vreg (first args))
+         (struct-base (and (integerp ptr-vreg)
+                           (gethash ptr-vreg (emit-ctx-struct-offsets ctx))))
+         (off (imm-arg-value (second args)))
+         (val-reg (vreg-to-physical ctx (third args) whistler/bpf:+bpf-reg-0+))
+         (type-kw (if (fourth args) (type-arg-name (fourth args)) 'u64))
+         (bpf-size (ir-type-to-bpf-size type-kw)))
+    (if struct-base
+        (ectx-emit ctx (whistler/bpf:emit-stx-atomic
+                         bpf-size whistler/bpf:+bpf-reg-10+
+                         val-reg (+ struct-base off) whistler/bpf:+bpf-add+))
+        (let ((ptr-reg (vreg-to-physical ctx ptr-vreg whistler/bpf:+bpf-reg-5+)))
+          (ectx-emit ctx (whistler/bpf:emit-stx-atomic
+                           bpf-size ptr-reg
+                           val-reg off whistler/bpf:+bpf-add+))))))
+
+;;; ========== Stack-addr emission ==========
+
+(defun emit-stack-addr-insn (ctx dst args)
+  "Emit stack-addr: store vreg to stack, return pointer to that slot."
+  (let* ((src-vreg (first args))
+         (stack-offset (emit-key-to-stack ctx src-vreg))
+         (dst-loc (allocate-vreg ctx dst))
+         (dst-reg (if (eq (car dst-loc) :reg) (cadr dst-loc) whistler/bpf:+bpf-reg-1+)))
+    (emit-stack-ptr ctx stack-offset dst-reg)
+    (when (eq (car dst-loc) :stack)
+      (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                       whistler/bpf:+bpf-dw+
+                       whistler/bpf:+bpf-reg-10+ dst-reg (cadr dst-loc))))))
+
+;;; ========== Map operations emission ==========
+
+(defun emit-map-fd (ctx map-name dst-reg)
+  "Emit map fd load with relocation.  Caches the fd in a free callee-saved
+   register when available, replacing subsequent ld_pseudo (2 insns) with
+   mov (1 insn).  Uses dominator analysis to ensure the cached register is
+   only reused when the caching block dominates the current block."
+  (let ((cached-reg (gethash map-name (emit-ctx-map-fd-cache ctx)))
+        (cached-block (gethash map-name (emit-ctx-map-fd-cache-block ctx)))
+        (cur-block (emit-ctx-current-block-label ctx))
+        (dom-map (emit-ctx-dom-map ctx)))
+    (if (and cached-reg cached-block dom-map
+             (dominates-p dom-map cached-block cur-block))
+        ;; Cache hit — the block where we cached dominates here,
+        ;; so the register is guaranteed to be initialized.
+        (ectx-emit ctx (whistler/bpf:emit-mov64-reg dst-reg cached-reg))
+        ;; Cache miss or not dominated — emit fresh ld_pseudo
+        (let* ((name-str (symbol-name map-name))
+               (map (find name-str (ir-program-maps (emit-ctx-ir-prog ctx))
+                          :key (lambda (m) (symbol-name (whistler/compiler:bpf-map-name m)))
+                          :test #'string=)))
+          (unless map (error "Unknown map: ~a" map-name))
+          (let ((byte-offset (* (ectx-current-idx ctx) 8)))
+            (push (list byte-offset (whistler/compiler:bpf-map-index map))
+                  (emit-ctx-map-relocs ctx)))
+          (ectx-emit ctx (whistler/bpf:emit-ld-map-fd dst-reg 0))
+          ;; Cache in a free callee-saved register when profitable (3+ refs)
+          (when (and (not cached-reg)
+                     (emit-ctx-free-callee-regs ctx)
+                     (>= (gethash map-name (emit-ctx-map-ref-counts ctx) 0) 3))
+            (let ((cache-reg (pop (emit-ctx-free-callee-regs ctx))))
+              (ectx-emit ctx (whistler/bpf:emit-mov64-reg cache-reg dst-reg))
+              (setf (gethash map-name (emit-ctx-map-fd-cache ctx)) cache-reg)
+              (setf (gethash map-name (emit-ctx-map-fd-cache-block ctx))
+                    cur-block)))))))
+
+(defun key-cache-key (ctx key-arg byte-size)
+  "Build a stable cache key for stack-stored map keys.
+   Constant keys are canonicalized by size+value so repeated (:imm N)
+   objects and distinct constant-valued vregs can reuse the same slot."
+  (let ((imm-val (imm-arg-value key-arg)))
+    (if imm-val
+        (list :const byte-size imm-val)
+        (let ((const-val (gethash key-arg (emit-ctx-const-values ctx))))
+          (if const-val
+              (list :const byte-size const-val)
+              key-arg)))))
+
+(defun emit-key-to-stack (ctx key-arg &optional target-size)
+  "Store a key value on the stack and return the stack offset.
+   KEY-ARG may be a vreg (integer) or (:imm N) from constant propagation.
+   TARGET-SIZE, if given, is the map's declared key-size — when it
+   exceeds the natural width of the key value, we widen the store to
+   TARGET-SIZE so the verifier sees an initialised key. BPF register
+   loads / ALU ops on 32-bit subregisters zero-extend to 64 bits per
+   spec, so the upper bytes of a u32 vreg are guaranteed zero and a
+   plain u64 store gets the right key value at no extra instruction
+   cost (matches what bpftrace emits).
+
+   Reuses existing stack slot if the same key was previously stored.
+   Uses st-mem for constant keys (saves 1 insn vs mov+stx-mem)."
+  (let* ((imm-val (imm-arg-value key-arg))
+         (vreg-type (if imm-val nil (gethash key-arg (emit-ctx-vreg-types ctx))))
+         (val-size (if imm-val 4 (ir-type-to-byte-size vreg-type)))
+         (slot-size (max val-size (or target-size 0)))
+         (cache-key (key-cache-key ctx key-arg slot-size))
+         (cached (gethash cache-key (emit-ctx-key-cache ctx))))
+    (if cached
+        cached
+        (let* ((store-size (max val-size slot-size))
+               (bpf-size (cond
+                           (imm-val whistler/bpf:+bpf-w+)
+                           ((> store-size val-size)
+                            (ir-type-to-bpf-size
+                             (case store-size (1 'u8) (2 'u16) (4 'u32) (t 'u64))))
+                           (t (ir-type-to-bpf-size (or vreg-type 'u64)))))
+               (const-val (or imm-val
+                              (gethash key-arg (emit-ctx-const-values ctx))))
+               (offset (ectx-alloc-stack ctx slot-size "map key temporaries")))
+          (if (and const-val (typep const-val '(signed-byte 32)))
+              (ectx-emit ctx (whistler/bpf:emit-st-mem
+                              bpf-size
+                              whistler/bpf:+bpf-reg-10+ offset const-val))
+              (let ((src-reg (vreg-to-physical ctx key-arg whistler/bpf:+bpf-reg-0+)))
+                (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                                bpf-size
+                                whistler/bpf:+bpf-reg-10+ src-reg offset))))
+          (setf (gethash cache-key (emit-ctx-key-cache ctx)) offset)
+          offset))))
+
+(defun emit-stack-ptr (ctx offset dst-reg)
+  "Emit instructions to compute R10 + offset into dst-reg.
+   If this offset has a cached pointer (from a previous call that stored it),
+   reload in 1 instruction instead of recomputing in 2."
+  (let ((cached-slot (gethash offset (emit-ctx-ptr-cache ctx))))
+    (if cached-slot
+        ;; Cache hit: reload in 1 instruction
+        (ectx-emit ctx (whistler/bpf:emit-ldx-mem
+                         whistler/bpf:+bpf-dw+ dst-reg
+                         whistler/bpf:+bpf-reg-10+ cached-slot))
+        ;; No cache: compute normally
+        (progn
+          (ectx-emit ctx (whistler/bpf:emit-mov64-reg dst-reg whistler/bpf:+bpf-reg-10+))
+          (ectx-emit ctx (whistler/bpf:emit-alu64-imm whistler/bpf:+bpf-add+ dst-reg offset))))))
+
+;;; ========== Struct allocation ==========
+
+(defun emit-struct-alloc-insn (ctx dst args)
+  "Allocate a contiguous region on the stack (no zeroing — lowering emits
+   explicit zero stores, and DSE removes dead ones).
+   Returns a pointer (R10 + offset) in DST."
+  (let* ((size (imm-arg-value (first args)))
+         (offset (ectx-alloc-stack ctx size "struct-alloc"))
+         (dst-loc (allocate-vreg ctx dst))
+         (dst-reg (if (eq (car dst-loc) :reg) (cadr dst-loc)
+                      whistler/bpf:+bpf-reg-1+))
+         (ptr-uses (gethash dst (emit-ctx-struct-ptr-uses ctx) 0))
+         (stack-home (and (eq (car dst-loc) :stack) (cadr dst-loc))))
+    ;; Record struct base offset for direct R10-relative access optimization
+    (setf (gethash dst (emit-ctx-struct-offsets ctx)) offset)
+    ;; Compute pointer: dst = R10 + offset
+    (ectx-emit ctx (whistler/bpf:emit-mov64-reg dst-reg whistler/bpf:+bpf-reg-10+))
+    (ectx-emit ctx (whistler/bpf:emit-alu64-imm whistler/bpf:+bpf-add+ dst-reg offset))
+    ;; If this struct is used as a map-ptr key 3+ times, cache the pointer
+    ;; on the stack for 1-insn reload (saves 1 insn per subsequent use).
+    ;; Reuse the vreg's stack home when possible to avoid a duplicate store.
+    (when (>= ptr-uses 3)
+      (let ((cache-slot (or stack-home (ectx-alloc-stack ctx 8 "pointer cache"))))
+        (unless stack-home
+          (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                           whistler/bpf:+bpf-dw+
+                           whistler/bpf:+bpf-reg-10+ dst-reg cache-slot)))
+        (setf (gethash offset (emit-ctx-ptr-cache ctx)) cache-slot)))
+    (when stack-home
+      (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                       whistler/bpf:+bpf-dw+
+                       whistler/bpf:+bpf-reg-10+ dst-reg stack-home)))))
+
+(defun emit-map-lookup-ptr-insn (ctx dst args)
+  "Emit map_lookup_elem where the key is already a pointer to stack data."
+  (let* ((map-name (map-arg-name (first args)))
+         (ptr-vreg (second args))
+         ;; If the key pointer is a struct-alloc with a known stack offset,
+         ;; compute R2 = R10 + offset directly (avoids an extra mov)
+         (struct-off (and (integerp ptr-vreg)
+                          (gethash ptr-vreg (emit-ctx-struct-offsets ctx)))))
+    (if struct-off
+        ;; Direct: compute R2 from R10 + struct offset
+        (progn
+          (emit-stack-ptr ctx struct-off whistler/bpf:+bpf-reg-2+)
+          (emit-map-fd ctx map-name whistler/bpf:+bpf-reg-1+))
+        ;; General: load ptr vreg then set up R1
+        (let ((ptr-reg (vreg-to-physical ctx ptr-vreg whistler/bpf:+bpf-reg-2+)))
+          (unless (= ptr-reg whistler/bpf:+bpf-reg-2+)
+            (ectx-emit ctx (whistler/bpf:emit-mov64-reg
+                             whistler/bpf:+bpf-reg-2+ ptr-reg)))
+          (emit-map-fd ctx map-name whistler/bpf:+bpf-reg-1+)))
+    ;; call bpf_map_lookup_elem
+    (ectx-emit ctx (whistler/bpf:emit-call whistler/bpf:+bpf-func-map-lookup-elem+))
+    (store-to-vreg ctx dst whistler/bpf:+bpf-reg-0+)))
+
+(defun map-by-name (ctx map-name)
+  (let ((name-str (symbol-name map-name)))
+    (find name-str (ir-program-maps (emit-ctx-ir-prog ctx))
+          :key (lambda (m) (symbol-name (whistler/compiler:bpf-map-name m)))
+          :test #'string=)))
+
+(defun map-declared-key-size (ctx map-name)
+  (let ((m (map-by-name ctx map-name)))
+    (and m (whistler/compiler:bpf-map-key-size m))))
+
+(defun emit-map-lookup-insn (ctx dst args)
+  (let* ((map-name (map-arg-name (first args)))
+         (key-vreg (second args))
+         (key-offset (emit-key-to-stack
+                      ctx key-vreg (map-declared-key-size ctx map-name))))
+    ;; R1 = map fd
+    (emit-map-fd ctx map-name whistler/bpf:+bpf-reg-1+)
+    ;; R2 = &key
+    (emit-stack-ptr ctx key-offset whistler/bpf:+bpf-reg-2+)
+    ;; call map_lookup_elem
+    (ectx-emit ctx (whistler/bpf:emit-call whistler/bpf:+bpf-func-map-lookup-elem+))
+    ;; Result in R0
+    (store-to-vreg ctx dst whistler/bpf:+bpf-reg-0+)))
+
+(defun emit-map-update-insn (ctx dst args)
+  (let* ((map-name (map-arg-name (first args)))
+         (key-vreg (second args))
+         (val-vreg (third args))
+         (flags-arg (fourth args))
+         ;; Store key and val to stack first
+         (key-offset (emit-key-to-stack
+                      ctx key-vreg (map-declared-key-size ctx map-name)))
+         (val-offset (emit-key-to-stack ctx val-vreg)))
+    ;; Load flags into R4 BEFORE r1-r3 setup clobbers caller-saved registers
+    (let ((flags-imm (imm-arg-value flags-arg)))
+      (if flags-imm
+          ;; Immediate flags value
+          (ectx-emit ctx (whistler/bpf:emit-mov64-imm whistler/bpf:+bpf-reg-4+ flags-imm))
+          ;; Vreg flags value
+          (let ((flags-reg (vreg-to-physical ctx flags-arg whistler/bpf:+bpf-reg-4+)))
+            (unless (= flags-reg whistler/bpf:+bpf-reg-4+)
+              (ectx-emit ctx (whistler/bpf:emit-mov64-reg whistler/bpf:+bpf-reg-4+ flags-reg))))))
+    ;; Now setup r1-r3 (clobbers r1, r2, r3)
+    (emit-map-fd ctx map-name whistler/bpf:+bpf-reg-1+)
+    (emit-stack-ptr ctx key-offset whistler/bpf:+bpf-reg-2+)
+    (emit-stack-ptr ctx val-offset whistler/bpf:+bpf-reg-3+)
+    (ectx-emit ctx (whistler/bpf:emit-call whistler/bpf:+bpf-func-map-update-elem+))
+    (when dst (store-to-vreg ctx dst whistler/bpf:+bpf-reg-0+))))
+
+(defun emit-map-update-ptr-insn (ctx dst args)
+  "Emit map_update_elem where key AND value are already pointers to stack data."
+  (let* ((map-name (map-arg-name (first args)))
+         (key-vreg (second args))
+         (val-vreg (third args))
+         (flags-arg (fourth args)))
+    ;; Load flags into R4 BEFORE r1-r3 setup
+    (let ((flags-imm (imm-arg-value flags-arg)))
+      (if flags-imm
+          (ectx-emit ctx (whistler/bpf:emit-mov64-imm whistler/bpf:+bpf-reg-4+ flags-imm))
+          (let ((flags-reg (vreg-to-physical ctx flags-arg whistler/bpf:+bpf-reg-4+)))
+            (unless (= flags-reg whistler/bpf:+bpf-reg-4+)
+              (ectx-emit ctx (whistler/bpf:emit-mov64-reg whistler/bpf:+bpf-reg-4+ flags-reg))))))
+    ;; Move key/val pointers to R2/R3 FIRST (before ld_pseudo clobbers R1).
+    ;; Key/val sources may currently live in R2/R3 with the roles swapped
+    ;; (regalloc had no reason to align them with the call's ABI). A naive
+    ;; "mov r2 from key; mov r3 from val" then clobbers val before val is
+    ;; read. Resolve the parallel copy explicitly.
+    (let* ((key-off (and (integerp key-vreg)
+                         (gethash key-vreg (emit-ctx-struct-offsets ctx))))
+           (val-off (and (integerp val-vreg)
+                         (gethash val-vreg (emit-ctx-struct-offsets ctx))))
+           ;; Resolve each source to its current physical register (when it
+           ;; isn't a struct-base). For stack-homed vregs, vreg-to-physical
+           ;; loads into the suggested temp — pick distinct temps so the two
+           ;; loads can't accidentally share a slot.
+           (key-src (and (not key-off)
+                         (vreg-to-physical ctx key-vreg whistler/bpf:+bpf-reg-2+)))
+           (val-src (and (not val-off)
+                         (vreg-to-physical ctx val-vreg whistler/bpf:+bpf-reg-3+))))
+      (cond
+        ;; Both via struct-offset: independent stack-ptr emissions, no
+        ;; register interference.
+        ((and key-off val-off)
+         (emit-stack-ptr ctx key-off whistler/bpf:+bpf-reg-2+)
+         (emit-stack-ptr ctx val-off whistler/bpf:+bpf-reg-3+))
+        ;; Key from struct-offset, val from register: emit val's mov first
+        ;; in case it currently lives in R2 (which key's stack-ptr would
+        ;; clobber).
+        (key-off
+         (unless (= val-src whistler/bpf:+bpf-reg-3+)
+           (ectx-emit ctx (whistler/bpf:emit-mov64-reg
+                           whistler/bpf:+bpf-reg-3+ val-src)))
+         (emit-stack-ptr ctx key-off whistler/bpf:+bpf-reg-2+))
+        ;; Val from struct-offset, key from register: emit key's mov first
+        ;; in case it lives in R3.
+        (val-off
+         (unless (= key-src whistler/bpf:+bpf-reg-2+)
+           (ectx-emit ctx (whistler/bpf:emit-mov64-reg
+                           whistler/bpf:+bpf-reg-2+ key-src)))
+         (emit-stack-ptr ctx val-off whistler/bpf:+bpf-reg-3+))
+        ;; Both from registers: order the moves so each source is read
+        ;; before its register is overwritten. Detect the swap case
+        ;; (key in R3, val in R2) and route through a temp.
+        ((and (= key-src whistler/bpf:+bpf-reg-3+)
+              (= val-src whistler/bpf:+bpf-reg-2+))
+         ;; Swap via R5 (R4 holds flags, R1 is reserved for map fd).
+         (ectx-emit ctx (whistler/bpf:emit-mov64-reg
+                         whistler/bpf:+bpf-reg-5+ whistler/bpf:+bpf-reg-2+))
+         (ectx-emit ctx (whistler/bpf:emit-mov64-reg
+                         whistler/bpf:+bpf-reg-2+ whistler/bpf:+bpf-reg-3+))
+         (ectx-emit ctx (whistler/bpf:emit-mov64-reg
+                         whistler/bpf:+bpf-reg-3+ whistler/bpf:+bpf-reg-5+)))
+        ;; Key currently in R3: emit val→R3 would clobber key. Do key→R2
+        ;; first (it leaves R3 untouched), then val→R3.
+        ((= key-src whistler/bpf:+bpf-reg-3+)
+         (unless (= key-src whistler/bpf:+bpf-reg-2+)
+           (ectx-emit ctx (whistler/bpf:emit-mov64-reg
+                           whistler/bpf:+bpf-reg-2+ key-src)))
+         (unless (= val-src whistler/bpf:+bpf-reg-3+)
+           (ectx-emit ctx (whistler/bpf:emit-mov64-reg
+                           whistler/bpf:+bpf-reg-3+ val-src))))
+        ;; Default order: val→R3 first (in case val sits in R2), then
+        ;; key→R2. Covers val-src=R2 and any non-conflicting layout.
+        (t
+         (unless (= val-src whistler/bpf:+bpf-reg-3+)
+           (ectx-emit ctx (whistler/bpf:emit-mov64-reg
+                           whistler/bpf:+bpf-reg-3+ val-src)))
+         (unless (= key-src whistler/bpf:+bpf-reg-2+)
+           (ectx-emit ctx (whistler/bpf:emit-mov64-reg
+                           whistler/bpf:+bpf-reg-2+ key-src)))))
+      ;; R1 = map fd (after key/val are safe in R2/R3)
+      (emit-map-fd ctx map-name whistler/bpf:+bpf-reg-1+))
+    (ectx-emit ctx (whistler/bpf:emit-call whistler/bpf:+bpf-func-map-update-elem+))
+    (when dst (store-to-vreg ctx dst whistler/bpf:+bpf-reg-0+))))
+
+(defun emit-map-delete-ptr-insn (ctx dst args)
+  "Emit map_delete_elem where the key is already a pointer to stack data."
+  (let* ((map-name (map-arg-name (first args)))
+         (ptr-vreg (second args))
+         (struct-off (and (integerp ptr-vreg)
+                          (gethash ptr-vreg (emit-ctx-struct-offsets ctx)))))
+    (if struct-off
+        (progn
+          (emit-stack-ptr ctx struct-off whistler/bpf:+bpf-reg-2+)
+          (emit-map-fd ctx map-name whistler/bpf:+bpf-reg-1+))
+        (let ((ptr-reg (vreg-to-physical ctx ptr-vreg whistler/bpf:+bpf-reg-2+)))
+          (unless (= ptr-reg whistler/bpf:+bpf-reg-2+)
+            (ectx-emit ctx (whistler/bpf:emit-mov64-reg whistler/bpf:+bpf-reg-2+ ptr-reg)))
+          (emit-map-fd ctx map-name whistler/bpf:+bpf-reg-1+)))
+    (ectx-emit ctx (whistler/bpf:emit-call whistler/bpf:+bpf-func-map-delete-elem+))
+    (when dst (store-to-vreg ctx dst whistler/bpf:+bpf-reg-0+))))
+
+(defun emit-map-delete-insn (ctx dst args)
+  (let* ((map-name (map-arg-name (first args)))
+         (key-vreg (second args))
+         (key-offset (emit-key-to-stack
+                      ctx key-vreg (map-declared-key-size ctx map-name))))
+    (emit-map-fd ctx map-name whistler/bpf:+bpf-reg-1+)
+    (emit-stack-ptr ctx key-offset whistler/bpf:+bpf-reg-2+)
+    (ectx-emit ctx (whistler/bpf:emit-call whistler/bpf:+bpf-func-map-delete-elem+))
+    (when dst (store-to-vreg ctx dst whistler/bpf:+bpf-reg-0+))))
+
+;;; ========== Ring buffer emission ==========
+
+(defun vreg-imm-or-const (ctx vreg)
+  "Return the immediate value for VREG if it's (:imm N) or a const-propagated vreg."
+  (or (imm-arg-value vreg)
+      (and (integerp vreg) (gethash vreg (emit-ctx-const-values ctx)))))
+
+(defun emit-vreg-to-reg (ctx vreg dst-reg)
+  "Emit code to move VREG's value into DST-REG, handling immediates and const vregs."
+  (let ((imm (vreg-imm-or-const ctx vreg)))
+    (if imm
+        (let ((s (imm-fits-signed32 imm)))
+          (if s
+              (ectx-emit ctx (whistler/bpf:emit-mov64-imm dst-reg s))
+              (ectx-emit ctx (whistler/bpf:emit-ld-imm64 dst-reg imm))))
+        (let ((r (vreg-to-physical ctx vreg dst-reg)))
+          (unless (= r dst-reg)
+            (ectx-emit ctx (whistler/bpf:emit-mov64-reg dst-reg r)))))))
+
+(defun emit-ringbuf-output-insn (ctx dst args)
+  "Emit bpf_ringbuf_output(map, data, size, flags) — copy stack data to ringbuf.
+   The data pointer (R2) must be a direct fp-derived pointer (R10 + offset)
+   for the BPF verifier to accept it. We recompute it from the struct-alloc's
+   known stack offset rather than using the vreg (which may have been copied
+   through intermediate registers, losing its fp provenance)."
+  (let* ((map-name (map-arg-name (first args)))
+         (data-vreg (second args))
+         (size-vreg (third args))
+         (flags-vreg (fourth args))
+         ;; Look up the struct's stack offset directly
+         (stack-off (gethash data-vreg (emit-ctx-struct-offsets ctx))))
+    ;; R4 = flags, R3 = size — set before R1/R2
+    (emit-vreg-to-reg ctx flags-vreg whistler/bpf:+bpf-reg-4+)
+    (emit-vreg-to-reg ctx size-vreg whistler/bpf:+bpf-reg-3+)
+    ;; R2 = data pointer — recompute from R10 to preserve fp provenance
+    (if stack-off
+        (progn
+          (ectx-emit ctx (whistler/bpf:emit-mov64-reg
+                          whistler/bpf:+bpf-reg-2+ whistler/bpf:+bpf-reg-10+))
+          (ectx-emit ctx (whistler/bpf:emit-alu64-imm
+                          whistler/bpf:+bpf-add+ whistler/bpf:+bpf-reg-2+ stack-off)))
+        ;; Fallback: use vreg directly (may fail verifier for non-stack data)
+        (emit-vreg-to-reg ctx data-vreg whistler/bpf:+bpf-reg-2+))
+    ;; R1 = map fd (last — ld_imm64 clobbers R1)
+    (emit-map-fd ctx map-name whistler/bpf:+bpf-reg-1+)
+    (ectx-emit ctx (whistler/bpf:emit-call 130))  ; bpf_ringbuf_output
+    (when dst (store-to-vreg ctx dst whistler/bpf:+bpf-reg-0+))))
+
+(defun emit-ringbuf-reserve-insn (ctx dst args)
+  "Emit bpf_ringbuf_reserve(map, size, flags) — returns pointer or NULL.
+   IMPORTANT: Set up R3 and R2 BEFORE R1. The ld_imm64 for the map fd
+   writes to R1, clobbering any value the register allocator placed there."
+  (let* ((map-name (map-arg-name (first args)))
+         (size-vreg (second args))
+         (flags-vreg (third args)))
+    ;; R3 = flags (first — safe from clobber)
+    (emit-vreg-to-reg ctx flags-vreg whistler/bpf:+bpf-reg-3+)
+    ;; R2 = size (before R1 clobber)
+    (emit-vreg-to-reg ctx size-vreg whistler/bpf:+bpf-reg-2+)
+    ;; R1 = map fd (last — ld_imm64 clobbers R1)
+    (emit-map-fd ctx map-name whistler/bpf:+bpf-reg-1+)
+    (ectx-emit ctx (whistler/bpf:emit-call 131))  ; bpf_ringbuf_reserve
+    (when dst (store-to-vreg ctx dst whistler/bpf:+bpf-reg-0+))))
+
+(defun emit-ringbuf-submit-insn (ctx dst args)
+  "Emit bpf_ringbuf_submit(data, flags).
+   After submit, the ringbuf pointer is consumed. We emit mov r0, 0
+   to ensure a valid return value since submit returns void and
+   the peephole may eliminate a later mov r0, 0."
+  (let ((data-vreg (first args))
+        (flags-vreg (second args)))
+    ;; R2 = flags (before R1 in case data is in R2)
+    (emit-vreg-to-reg ctx flags-vreg whistler/bpf:+bpf-reg-2+)
+    ;; R1 = data pointer
+    (let ((r (vreg-to-physical ctx data-vreg whistler/bpf:+bpf-reg-1+)))
+      (unless (= r whistler/bpf:+bpf-reg-1+)
+        (ectx-emit ctx (whistler/bpf:emit-mov64-reg whistler/bpf:+bpf-reg-1+ r))))
+    (ectx-emit ctx (whistler/bpf:emit-call 132))  ; bpf_ringbuf_submit
+    ;; Emit mov r0, 0 — submit is void and clobbers R0.
+    ;; Without this, the verifier sees R0 as uninitialized on exit.
+    (ectx-emit ctx (whistler/bpf:emit-mov64-imm whistler/bpf:+bpf-reg-0+ 0))
+    (when dst (store-to-vreg ctx dst whistler/bpf:+bpf-reg-0+))))
+
+(defun emit-ringbuf-discard-insn (ctx dst args)
+  "Emit bpf_ringbuf_discard(data, flags)."
+  (let ((data-vreg (first args))
+        (flags-vreg (second args)))
+    (let ((r (vreg-to-physical ctx data-vreg whistler/bpf:+bpf-reg-1+)))
+      (unless (= r whistler/bpf:+bpf-reg-1+)
+        (ectx-emit ctx (whistler/bpf:emit-mov64-reg whistler/bpf:+bpf-reg-1+ r))))
+    (let ((flags-imm (imm-arg-value flags-vreg)))
+      (if flags-imm
+          (ectx-emit ctx (whistler/bpf:emit-mov64-imm whistler/bpf:+bpf-reg-2+ flags-imm))
+          (let ((r (vreg-to-physical ctx flags-vreg whistler/bpf:+bpf-reg-2+)))
+            (unless (= r whistler/bpf:+bpf-reg-2+)
+              (ectx-emit ctx (whistler/bpf:emit-mov64-reg whistler/bpf:+bpf-reg-2+ r))))))
+    (ectx-emit ctx (whistler/bpf:emit-call 133))  ; bpf_ringbuf_discard
+    (when dst (store-to-vreg ctx dst whistler/bpf:+bpf-reg-0+))))
+
+;;; ========== Tail call emission ==========
+
+(defun emit-get-stackid-insn (ctx dst args)
+  "Emit bpf_get_stackid(ctx, stack_trace_map, flags) (helper 27).
+   Args: ((:map MAP-NAME) ctx-vreg flags-vreg).
+   Register setup: R1=ctx, R2=map FD, R3=flags."
+  (let ((map-name   (map-arg-name (first args)))
+        (ctx-vreg   (second args))
+        (flags-vreg (third args)))
+    ;; Flags → R3 first (LD_IMM64 for map FD clobbers R2 only)
+    (emit-vreg-to-reg ctx flags-vreg whistler/bpf:+bpf-reg-3+)
+    ;; Map FD → R2
+    (emit-map-fd ctx map-name whistler/bpf:+bpf-reg-2+)
+    ;; Ctx → R1
+    (let ((ctx-reg (vreg-to-physical ctx ctx-vreg whistler/bpf:+bpf-reg-1+)))
+      (unless (= ctx-reg whistler/bpf:+bpf-reg-1+)
+        (ectx-emit ctx (whistler/bpf:emit-mov64-reg
+                         whistler/bpf:+bpf-reg-1+ ctx-reg))))
+    (ectx-emit ctx (whistler/bpf:emit-call 27))
+    (when dst (store-to-vreg ctx dst whistler/bpf:+bpf-reg-0+))))
+
+(defun emit-tail-call-insn (ctx dst args)
+  "Emit bpf_tail_call(ctx, prog_array, index).
+   Args: ((:map MAP-NAME) ctx-vreg index-vreg).
+   Register setup: R1=ctx, R2=prog_array map FD, R3=index."
+  (let ((map-name (map-arg-name (first args)))
+        (ctx-vreg (second args))
+        (idx-vreg (third args)))
+    ;; Load index into R3 first (safe from map FD clobber)
+    (emit-vreg-to-reg ctx idx-vreg whistler/bpf:+bpf-reg-3+)
+    ;; Load map FD into R2 (ld_imm64 is 2 insns, doesn't touch R3)
+    (emit-map-fd ctx map-name whistler/bpf:+bpf-reg-2+)
+    ;; Load ctx into R1
+    (let ((ctx-reg (vreg-to-physical ctx ctx-vreg whistler/bpf:+bpf-reg-1+)))
+      (unless (= ctx-reg whistler/bpf:+bpf-reg-1+)
+        (ectx-emit ctx (whistler/bpf:emit-mov64-reg
+                         whistler/bpf:+bpf-reg-1+ ctx-reg))))
+    ;; call bpf_tail_call (helper 12)
+    (ectx-emit ctx (whistler/bpf:emit-call 12))
+    ;; If tail call fails, R0 is undefined — set to 0 for safety
+    (ectx-emit ctx (whistler/bpf:emit-mov64-imm whistler/bpf:+bpf-reg-0+ 0))
+    (when dst (store-to-vreg ctx dst whistler/bpf:+bpf-reg-0+))))
+
+;;; ========== Helper call emission ==========
+
+(defun resolve-parallel-moves (ctx moves)
+  "Resolve a set of parallel register moves, emitting them in an order that
+   avoids clobbering.  Each move is (dst-reg . src), where src is one of:
+     (:imm value)    - immediate constant
+     (:reg phys-reg) - value in a physical register
+     (:stack offset) - value spilled to stack at [R10+offset]
+   Uses R0 as scratch to break cycles (safe: the upcoming CALL clobbers R0)."
+  (let ((pending (copy-list moves))
+        (tmp whistler/bpf:+bpf-reg-0+))
+    ;; A move is "safe" if its source won't be clobbered by other pending moves.
+    ;; Immediates and stack loads are always safe (no register conflict).
+    ;; A register source is safe if no pending move targets that register.
+    (loop
+      (let ((safe (find-if
+                   (lambda (m)
+                     (let ((dst (car m)))
+                       ;; A move is safe if its dst register is not read
+                       ;; as a source by any other pending move.
+                       (not (find-if (lambda (other)
+                                       (and (not (eq other m))
+                                            (eq (car (cdr other)) :reg)
+                                            (= (cadr (cdr other)) dst)))
+                                     pending))))
+                   pending)))
+        (cond
+          (safe
+           (setf pending (remove safe pending :test #'eq))
+           (destructuring-bind (dst . src) safe
+             (ecase (car src)
+               (:imm (ectx-emit ctx (whistler/bpf:emit-mov64-imm dst (cadr src))))
+               (:stack (ectx-emit ctx (whistler/bpf:emit-ldx-mem
+                                       whistler/bpf:+bpf-dw+ dst
+                                       whistler/bpf:+bpf-reg-10+ (cadr src))))
+               (:reg (unless (= dst (cadr src))
+                       (ectx-emit ctx (whistler/bpf:emit-mov64-reg dst (cadr src))))))))
+          ;; No safe move — must be a register cycle. Break via R0 temp.
+          (pending
+           (let* ((m (first pending))
+                  (src-reg (cadr (cdr m))))
+             ;; Save one source to R0, redirect all reads from that register
+             (ectx-emit ctx (whistler/bpf:emit-mov64-reg tmp src-reg))
+             (dolist (p pending)
+               (when (and (eq (car (cdr p)) :reg)
+                          (= (cadr (cdr p)) src-reg))
+                 (setf (cdr p) (list :reg tmp))))))
+          (t (return)))))))
+
+(defun emit-call-insn (ctx dst args)
+  "Emit a BPF helper call. Load arguments into R1-R5 using parallel-move
+   resolution to avoid clobbering when argument registers overlap."
+  (let ((func-id (helper-arg-id (first args)))
+        (call-args (rest args)))
+    ;; Build move list: (target-reg . (:imm val) or (:reg src-reg))
+    ;; For stack-spilled vregs, load them first without using any target
+    ;; register — use allocate-vreg to find the source location.
+    (let ((moves (loop for vreg in call-args
+                       for reg from whistler/bpf:+bpf-reg-1+
+                       collect (let ((imm (vreg-imm-or-const ctx vreg)))
+                                 (if imm
+                                     (cons reg (list :imm imm))
+                                     (let ((loc (allocate-vreg ctx vreg)))
+                                       (ecase (car loc)
+                                         (:reg (cons reg (list :reg (cadr loc))))
+                                         (:stack
+                                          ;; Stack spill: encode as (:stack offset)
+                                          ;; for resolve-parallel-moves to handle
+                                          (cons reg (list :stack (cadr loc)))))))))))
+      (resolve-parallel-moves ctx moves))
+    (ectx-emit ctx (whistler/bpf:emit-call func-id))
+    (when dst (store-to-vreg ctx dst whistler/bpf:+bpf-reg-0+))))
+
+(defun kfunc-arg-name (arg)
+  "Extract kfunc kernel-symbol name from a (:kfunc \"name\") arg."
+  (and (consp arg) (eq (first arg) :kfunc) (second arg)))
+
+(defun emit-kfunc-call-insn (ctx dst args)
+  "Emit a kfunc call. (first args) is (:kfunc NAME); the rest are vreg
+   arguments loaded into R1-R5 exactly like a helper call. The call insn
+   is emitted with imm=0 and src=BPF_PSEUDO_KFUNC_CALL; the NAME is
+   recorded so the loader can patch imm with the kfunc's BTF id."
+  (let ((kfunc-name (kfunc-arg-name (first args)))
+        (call-args (rest args)))
+    (let ((moves (loop for vreg in call-args
+                       for reg from whistler/bpf:+bpf-reg-1+
+                       collect (let ((imm (vreg-imm-or-const ctx vreg)))
+                                 (if imm
+                                     (cons reg (list :imm imm))
+                                     (let ((loc (allocate-vreg ctx vreg)))
+                                       (ecase (car loc)
+                                         (:reg (cons reg (list :reg (cadr loc))))
+                                         (:stack
+                                          (cons reg (list :stack (cadr loc)))))))))))
+      (resolve-parallel-moves ctx moves))
+    ;; Record the kfunc name in call order; byte offset is resolved after
+    ;; peephole by scanning for kfunc call insns (mirrors map relocs).
+    (push kfunc-name (emit-ctx-kfunc-relocs ctx))
+    (ectx-emit ctx (whistler/bpf:emit-kfunc-call))
+    (when dst (store-to-vreg ctx dst whistler/bpf:+bpf-reg-0+))))
+
+;;; ========== Log2 emission ==========
+
+(defun emit-log2-insn (ctx dst args)
+  (let* ((val-reg (vreg-to-physical ctx (first args) whistler/bpf:+bpf-reg-0+))
+         (dst-loc (allocate-vreg ctx dst))
+         ;; Spilled dst computes in R5 (reserved when anything spills).
+         (dst-reg (if (eq (car dst-loc) :reg) (cadr dst-loc) whistler/bpf:+bpf-reg-5+))
+         ;; work-reg holds the value being shifted during binary search
+         ;; — the shifts destroy it. It MUST differ from dst-reg (init
+         ;; clobbers) and must not be the source's own register unless
+         ;; the source dies at this insn (whistler-dtx: shifting a
+         ;; still-live source in place silently corrupts it).
+         (work-reg (cond
+                     ;; Spill reload already sits in R0 scratch — the
+                     ;; stack slot still holds the value; shift freely.
+                     ((= val-reg whistler/bpf:+bpf-reg-0+) val-reg)
+                     ((and (/= val-reg dst-reg)
+                           (vreg-dies-here-p ctx (first args)))
+                      val-reg)
+                     ;; Source is live past the log2 (or shares dst's
+                     ;; register): shift a copy in R0. dst-reg is never
+                     ;; R0, so the result init can't clobber it.
+                     (t whistler/bpf:+bpf-reg-0+))))
+    ;; Copy val to work register if needed
+    (unless (= val-reg work-reg)
+      (ectx-emit ctx (whistler/bpf:emit-mov64-reg work-reg val-reg)))
+    ;; Initialize result to 0
+    (ectx-emit ctx (whistler/bpf:emit-mov64-imm dst-reg 0))
+    ;; Unrolled binary search
+    (dolist (step '((65536 16) (256 8) (16 4) (4 2)))
+      (destructuring-bind (threshold shift) step
+        (ectx-emit ctx (whistler/bpf:emit-jmp-imm whistler/bpf:+bpf-jlt+ work-reg threshold 2))
+        (ectx-emit ctx (whistler/bpf:emit-alu64-imm whistler/bpf:+bpf-rsh+ work-reg shift))
+        (ectx-emit ctx (whistler/bpf:emit-alu64-imm whistler/bpf:+bpf-add+ dst-reg shift))))
+    (ectx-emit ctx (whistler/bpf:emit-jmp-imm whistler/bpf:+bpf-jlt+ work-reg 2 1))
+    (ectx-emit ctx (whistler/bpf:emit-alu64-imm whistler/bpf:+bpf-add+ dst-reg 1))
+    ;; Store if on stack
+    (when (eq (car dst-loc) :stack)
+      (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                       whistler/bpf:+bpf-dw+
+                       whistler/bpf:+bpf-reg-10+ dst-reg (cadr dst-loc))))))
+
+;;; ========== Cast emission ==========
+
+(defun emit-cast-insn (ctx dst args)
+  (let* ((src-reg (vreg-to-physical ctx (first args) whistler/bpf:+bpf-reg-0+))
+         (type-kw (type-arg-name (second args)))
+         (dst-loc (allocate-vreg ctx dst))
+         (dst-reg (if (eq (car dst-loc) :reg) (cadr dst-loc) whistler/bpf:+bpf-reg-0+)))
+    (unless (= src-reg dst-reg)
+      (ectx-emit ctx (whistler/bpf:emit-mov64-reg dst-reg src-reg)))
+    (let ((name (string-upcase (string type-kw))))
+      (cond
+        ((or (string= name "U8")  (string= name "I8"))
+         (ectx-emit ctx (whistler/bpf:emit-alu64-imm whistler/bpf:+bpf-and+ dst-reg #xff)))
+        ((or (string= name "U16") (string= name "I16"))
+         (ectx-emit ctx (whistler/bpf:emit-alu64-imm whistler/bpf:+bpf-and+ dst-reg #xffff)))
+        ((or (string= name "U32") (string= name "I32"))
+         ;; mov32 dst, dst — register-to-register 32-bit move zero-extends
+         (ectx-emit ctx (whistler/bpf:emit-alu32-reg whistler/bpf:+bpf-mov+ dst-reg dst-reg)))))
+    (when (eq (car dst-loc) :stack)
+      (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                       whistler/bpf:+bpf-dw+
+                       whistler/bpf:+bpf-reg-10+ dst-reg (cadr dst-loc))))))
+
+;;; ========== Byte swap emission ==========
+
+(defun emit-bswap-insn (ctx op dst args)
+  (let* ((src-reg (vreg-to-physical ctx (first args) whistler/bpf:+bpf-reg-0+))
+         (dst-loc (allocate-vreg ctx dst))
+         (dst-reg (if (eq (car dst-loc) :reg) (cadr dst-loc) whistler/bpf:+bpf-reg-0+)))
+    (unless (= src-reg dst-reg)
+      (ectx-emit ctx (whistler/bpf:emit-mov64-reg dst-reg src-reg)))
+    (ecase op
+      (:bswap16 (ectx-emit ctx (whistler/bpf:emit-bswap16 dst-reg)))
+      (:bswap32 (ectx-emit ctx (whistler/bpf:emit-bswap32 dst-reg)))
+      (:bswap64 (ectx-emit ctx (whistler/bpf:emit-bswap64 dst-reg))))
+    (when (eq (car dst-loc) :stack)
+      (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                       whistler/bpf:+bpf-dw+
+                       whistler/bpf:+bpf-reg-10+ dst-reg (cadr dst-loc))))))
+
+;;; ========== Branch condition emission ==========
+
+(defun phi-moves-for-edge (ctx target)
+  "Return phi moves for the edge from the current block to TARGET.
+   Computes them from the target block's phi nodes so emission tracks the
+   post-optimization IR directly."
+  (let ((moves '())
+        (src-label (emit-ctx-current-block-label ctx))
+        (block (ir-find-block (emit-ctx-ir-prog ctx) target)))
+    (when block
+      (dolist (insn (basic-block-insns block))
+        (unless (eq (ir-insn-op insn) :phi)
+          (return))
+        (dolist (arg (ir-insn-args insn))
+          (when (and (consp arg)
+                     (integerp (first arg))
+                     (consp (second arg))
+                     (eq (car (second arg)) :label)
+                     (eql (cadr (second arg)) src-label))
+            (push (cons (ir-insn-dst insn) (first arg)) moves)))))
+    (nreverse moves)))
+
+(defun emit-phi-moves (ctx target)
+  "Emit phi resolution moves for the edge from the current block to TARGET.
+   Phi copies are parallel: capture all source locations first, then emit
+   stack stores and resolve register copies without clobbering sources."
+  (let ((moves (phi-moves-for-edge ctx target))
+        (reg-moves '()))
+    (dolist (move moves)
+      (let* ((phi-dst (car move))
+             (src-vreg (cdr move))
+             (src-loc (allocate-vreg ctx src-vreg))
+             (dst-loc (allocate-vreg ctx phi-dst)))
+        (ecase (car dst-loc)
+          (:reg
+           (push (cons (cadr dst-loc)
+                       (ecase (car src-loc)
+                         (:reg (list :reg (cadr src-loc)))
+                         (:stack (list :stack (cadr src-loc)))))
+                 reg-moves))
+          (:stack
+           (ecase (car src-loc)
+             (:reg
+              (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                              whistler/bpf:+bpf-dw+
+                              whistler/bpf:+bpf-reg-10+
+                              (cadr src-loc)
+                              (cadr dst-loc))))
+             (:stack
+              (ectx-emit ctx (whistler/bpf:emit-ldx-mem
+                              whistler/bpf:+bpf-dw+
+                              whistler/bpf:+bpf-reg-0+
+                              whistler/bpf:+bpf-reg-10+
+                              (cadr src-loc)))
+              (ectx-emit ctx (whistler/bpf:emit-stx-mem
+                              whistler/bpf:+bpf-dw+
+                              whistler/bpf:+bpf-reg-10+
+                              whistler/bpf:+bpf-reg-0+
+                              (cadr dst-loc)))))))))
+    (when reg-moves
+      (resolve-parallel-moves ctx (nreverse reg-moves)))))
+
+(defun emit-br-cond-insn (ctx args block-positions)
+  (let* ((cmp-op (cmp-arg-op (first args)))
+         (bpf-jmp (ir-cmp-to-bpf-jmp cmp-op))
+         (lhs (second args))
+         (rhs (third args))
+         (then-label (label-arg-name (fourth args)))
+         (else-label (label-arg-name (fifth args)))
+         (then-moves (phi-moves-for-edge ctx then-label))
+         (else-moves (phi-moves-for-edge ctx else-label)))
+    (multiple-value-bind (lhs-reg rhs-reg imm)
+        (materialize-compare-operands ctx lhs rhs)
+      (if (or then-moves else-moves)
+          ;; Phi moves needed: emit trampoline for then-edge.
+          ;;   if cond goto then_trampoline
+          ;;   [else-edge phi moves]
+          ;;   goto else_label
+          ;;   then_trampoline:
+          ;;   [then-edge phi moves]
+          ;;   goto then_label
+          (let ((trampoline-label (gensym "PHI_THEN_")))
+            ;; Conditional jump to trampoline (will be fixup'd)
+            (if (and imm (typep imm '(signed-byte 32)))
+                (progn
+                  (push (list (ectx-current-idx ctx) trampoline-label) (emit-ctx-fixups ctx))
+                  (ectx-emit ctx (whistler/bpf:emit-jmp-imm bpf-jmp lhs-reg imm 0)))
+                (progn
+                  (push (list (ectx-current-idx ctx) trampoline-label) (emit-ctx-fixups ctx))
+                  (ectx-emit ctx (whistler/bpf:emit-jmp-reg bpf-jmp lhs-reg rhs-reg 0))))
+            ;; Else path: phi moves + jump
+            (emit-phi-moves ctx else-label)
+            (push (list (ectx-current-idx ctx) else-label) (emit-ctx-fixups ctx))
+            (ectx-emit ctx (whistler/bpf:emit-jmp-a 0))
+            ;; Trampoline: then phi moves + jump
+            (setf (gethash trampoline-label block-positions)
+                  (ectx-current-idx ctx))
+            (emit-phi-moves ctx then-label)
+            (push (list (ectx-current-idx ctx) then-label) (emit-ctx-fixups ctx))
+            (ectx-emit ctx (whistler/bpf:emit-jmp-a 0)))
+          ;; No phi moves: emit plain if/goto/goto as before
+          (progn
+            (if (and imm (typep imm '(signed-byte 32)))
+                (progn
+                  (push (list (ectx-current-idx ctx) then-label) (emit-ctx-fixups ctx))
+                  (ectx-emit ctx (whistler/bpf:emit-jmp-imm bpf-jmp lhs-reg imm 0)))
+                (progn
+                  (push (list (ectx-current-idx ctx) then-label) (emit-ctx-fixups ctx))
+                  (ectx-emit ctx (whistler/bpf:emit-jmp-reg bpf-jmp lhs-reg rhs-reg 0))))
+            (push (list (ectx-current-idx ctx) else-label) (emit-ctx-fixups ctx))
+            (ectx-emit ctx (whistler/bpf:emit-jmp-a 0)))))))

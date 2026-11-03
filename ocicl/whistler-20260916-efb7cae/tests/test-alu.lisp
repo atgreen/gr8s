@@ -1,0 +1,158 @@
+(in-package #:whistler/tests)
+
+(in-suite alu-suite)
+
+;;; ========== Arithmetic operation tests ==========
+;;;
+;;; Adapted from LLVM test/CodeGen/BPF/32-bit-subreg-alu.ll
+
+(test add-imm
+  "Addition with immediate should emit alu64 add imm"
+  (let ((bytes (w-body "(let ((x (get-prandom-u32)))
+                          (declare (type u64 x))
+                          (return (+ x 42)))")))
+    (is (has-opcode-p bytes +alu64-add-imm+)
+        "Expected alu64 add imm (0x07)")))
+
+(test add-reg
+  "Addition of two registers should emit alu64 add reg"
+  (let ((bytes (w-body "(let ((x (get-prandom-u32))
+                              (y (get-prandom-u32)))
+                          (declare (type u64 x) (type u64 y))
+                          (return (+ x y)))")))
+    (is (has-opcode-p bytes +alu64-add-reg+)
+        "Expected alu64 add reg (0x0f)")))
+
+(test neg-constant-folds
+  "Unary minus of a compile-time constant folds away the runtime NEG
+   (0x87 = alu64|neg|k); a runtime operand still emits it."
+  ;; (- x) where x is a constant → folded, no NEG instruction.
+  (let ((bytes (w-body "(let ((x u64 5)) (return (- x)))")))
+    (is (not (has-opcode-p bytes #x87))
+        "neg of a constant should not emit a NEG instruction"))
+  ;; (- runtime) → NEG remains.
+  (let ((bytes (w-body "(return (- (get-prandom-u32)))")))
+    (is (has-opcode-p bytes #x87)
+        "neg of a runtime value should still emit NEG")))
+
+(test negative-constant-uses-mov-imm
+  "A negative constant whose 64-bit pattern is a sign-extended 32-bit value
+   materializes via one mov64-imm (0xb7), not a two-slot ld_imm64 (0x18)."
+  (let ((bytes (w-body "(return -5)")))
+    (is (= 16 (length bytes)) "-5 should be mov + exit = 2 instructions")
+    (is (has-opcode-p bytes +alu64-mov-imm+) "should use mov64-imm (0xb7)")
+    (is (not (has-opcode-p bytes +ld-imm64+)) "should not use ld_imm64 (0x18)"))
+  ;; A genuinely 64-bit value (not sign-ext-32 representable) still needs ld_imm64.
+  (let ((bytes (w-body "(let ((x u64 #x100000000)) (return x))")))
+    (is (has-opcode-p bytes +ld-imm64+) "a true 64-bit constant still uses ld_imm64")))
+
+(test sub-imm
+  "Subtraction with immediate should emit alu64 sub imm"
+  (let ((bytes (w-body "(let ((x (get-prandom-u32)))
+                          (declare (type u64 x))
+                          (return (- x 10)))")))
+    (is (has-opcode-p bytes +alu64-sub-imm+)
+        "Expected alu64 sub imm (0x17)")))
+
+(test mul-imm
+  "Multiplication with immediate should emit alu64 mul imm"
+  (let ((bytes (w-body "(let ((x (get-prandom-u32)))
+                          (declare (type u64 x))
+                          (return (* x 3)))")))
+    (is (has-opcode-p bytes +alu64-mul-imm+)
+        "Expected alu64 mul imm (0x27)")))
+
+(test div-imm
+  "Division with immediate should emit alu64 div imm or rsh"
+  (let ((bytes (w-body "(let ((x (get-prandom-u32)))
+                          (declare (type u64 x))
+                          (return (/ x 4)))")))
+    ;; Division by power of 2 might optimize to right shift
+    (is (or (has-opcode-p bytes +alu64-div-imm+)
+            (has-opcode-p bytes +alu64-rsh-imm+))
+        "Expected alu64 div imm (0x37) or rsh imm (0x77)")))
+
+(test mod-imm
+  "Modulo with immediate should emit alu64 mod imm"
+  (let ((bytes (w-body "(let ((x (get-prandom-u32)))
+                          (declare (type u64 x))
+                          (return (mod x 7)))")))
+    (is (has-opcode-p bytes +alu64-mod-imm+)
+        "Expected alu64 mod imm (0x97)")))
+
+;;; ========== Bitwise operation tests ==========
+
+(test logand-imm
+  "Bitwise AND with immediate should emit alu and imm (32 or 64 bit)"
+  (let ((bytes (w-body "(let ((x (get-prandom-u32)))
+                          (declare (type u64 x))
+                          (return (logand x #xff)))")))
+    ;; Compiler may narrow to alu32 (0x54) when mask fits 32 bits
+    (is (or (has-opcode-p bytes +alu64-and-imm+)
+            (has-opcode-p bytes #x54))
+        "Expected alu and imm (0x57 or 0x54)")))
+
+(test logior-imm
+  "Bitwise OR with immediate should emit alu or imm (32 or 64 bit)"
+  (let ((bytes (w-body "(let ((x (get-prandom-u32)))
+                          (declare (type u64 x))
+                          (return (logior x #x80)))")))
+    (is (or (has-opcode-p bytes +alu64-or-imm+)
+            (has-opcode-p bytes #x44))
+        "Expected alu or imm (0x47 or 0x44)")))
+
+(test logxor-imm
+  "Bitwise XOR with immediate should emit alu xor imm (32 or 64 bit)"
+  (let ((bytes (w-body "(let ((x (get-prandom-u32)))
+                          (declare (type u64 x))
+                          (return (logxor x #xaa)))")))
+    (is (or (has-opcode-p bytes +alu64-xor-imm+)
+            (has-opcode-p bytes #xa4))
+        "Expected alu xor imm (0xa7 or 0xa4)")))
+
+;;; ========== Shift operation tests ==========
+;;;
+;;; Adapted from LLVM test/CodeGen/BPF/shifts.ll
+
+(test lshift-imm
+  "Left shift with immediate should emit alu lsh imm"
+  (let ((bytes (w-body "(let ((x (get-prandom-u32)))
+                          (declare (type u64 x))
+                          (return (<< x 4)))")))
+    (is (or (has-opcode-p bytes +alu64-lsh-imm+)
+            (has-opcode-p bytes #x64))
+        "Expected alu lsh imm (0x67 or 0x64)")))
+
+(test rshift-imm
+  "Right shift with immediate should emit alu rsh imm"
+  (let ((bytes (w-body "(let ((x (get-prandom-u32)))
+                          (declare (type u64 x))
+                          (return (>> x 4)))")))
+    (is (or (has-opcode-p bytes +alu64-rsh-imm+)
+            (has-opcode-p bytes #x74))
+        "Expected alu rsh imm (0x77 or 0x74)")))
+
+(test arshift-imm
+  "Arithmetic right shift with immediate should emit alu arsh imm"
+  (let ((bytes (w-body "(let ((x (get-prandom-u32)))
+                          (declare (type u64 x))
+                          (return (>>> x 4)))")))
+    (is (or (has-opcode-p bytes +alu64-arsh-imm+)
+            (has-opcode-p bytes #xc4))
+        "Expected alu arsh imm (0xc7 or 0xc4)")))
+
+;;; ========== Constant folding tests ==========
+
+(test constant-fold-add
+  "(+ 10 32) should fold to 42 at compile time — 2 instructions"
+  (is (= 2 (w-count "(return (+ 10 32))"))))
+
+(test constant-fold-nested
+  "(+ 10 (* 3 4)) should fold to 22 at compile time"
+  (is (= 2 (w-count "(return (+ 10 (* 3 4)))"))))
+
+(test constant-fold-arithmetic
+  "(+ 100 (* 5 10)) should fold to 150"
+  (let ((bytes (w-body "(return (+ 100 (* 5 10)))")))
+    (is (= 150 (nth-insn-imm bytes 0))
+        "Expected folded immediate 150")))

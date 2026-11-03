@@ -1,0 +1,217 @@
+syntax = "proto3";
+
+package gr8s.node.v1;
+
+service EnrollmentService {
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+}
+
+service NodeService {
+  rpc Connect(stream AgentEnvelope) returns (stream ServerEnvelope);
+}
+
+message EnrollRequest {
+  uint32 protocol_version = 1;
+  string node_name = 2;
+  string join_token = 3;
+  bytes certificate_request = 4;
+}
+
+message EnrollResponse {
+  uint32 protocol_version = 1;
+  string node_id = 2;
+  bytes node_certificate = 3;
+  bytes ca_certificate = 4;
+}
+
+message AgentEnvelope {
+  uint32 protocol_version = 1;
+  uint64 sequence = 2;
+  oneof payload {
+    NodeHello hello = 10;
+    Heartbeat heartbeat = 11;
+    SnapshotAck snapshot_ack = 12;
+    NodeStatus status = 13;
+    OperationResponse operation_response = 14;
+    OperationStream operation_stream = 15;
+  }
+}
+
+message ServerEnvelope {
+  uint32 protocol_version = 1;
+  uint64 sequence = 2;
+  oneof payload {
+    ServerHello hello = 10;
+    DesiredStateSnapshot desired_state = 11;
+    OperationRequest operation_request = 12;
+    OperationInput operation_input = 13;
+    OperationCancel operation_cancel = 14;
+    ProtocolError protocol_error = 15;
+  }
+}
+
+message NodeHello {
+  string node_name = 1;
+  string boot_id = 2;
+  string agent_version = 3;
+  uint64 last_applied_revision = 4;
+  map<string, string> labels = 5;
+  repeated string capabilities = 6;
+}
+
+message Heartbeat {
+  uint64 observed_at_unix_nanos = 1;
+}
+
+message SnapshotAck {
+  uint64 revision = 1;
+  bool applied = 2;
+  string error_message = 3;
+}
+
+message NodeStatus {
+  uint64 observed_at_unix_nanos = 1;
+  repeated PodObservedStatus pods = 2;
+}
+
+message PodObservedStatus {
+  string namespace = 1;
+  string name = 2;
+  string uid = 3;
+  string resource_version = 4;
+  string phase = 5;
+  string reason = 6;
+  string message = 7;
+  string pod_ip = 8;
+  bytes status_json = 9;
+}
+
+enum OperationStatus {
+  OPERATION_STATUS_UNSPECIFIED = 0;
+  OPERATION_STATUS_ACCEPTED = 1;
+  OPERATION_STATUS_COMPLETE = 2;
+  OPERATION_STATUS_FAILED = 3;
+}
+
+enum StreamChannel {
+  STREAM_CHANNEL_UNSPECIFIED = 0;
+  STREAM_CHANNEL_STDIN = 1;
+  STREAM_CHANNEL_STDOUT = 2;
+  STREAM_CHANNEL_STDERR = 3;
+  STREAM_CHANNEL_TERMINAL_RESIZE = 4;
+}
+
+message OperationResponse {
+  string operation_id = 1;
+  OperationStatus status = 2;
+  int32 exit_code = 3;
+  string error_message = 4;
+}
+
+message OperationStream {
+  string operation_id = 1;
+  uint64 sequence = 2;
+  StreamChannel channel = 3;
+  bytes data = 4;
+  bool eof = 5;
+}
+
+message ServerHello {
+  string node_id = 1;
+  uint32 heartbeat_interval_seconds = 2;
+  string assigned_pod_cidr = 3;
+}
+
+message DesiredStateSnapshot {
+  uint64 revision = 1;
+  repeated PodAssignment pods = 2;
+  NodeNetworkConfig network = 3;
+  repeated NodeRoute routes = 4;
+}
+
+message PodAssignment {
+  string namespace = 1;
+  string name = 2;
+  string uid = 3;
+  string resource_version = 4;
+  bytes pod_json = 5;
+  bool deleting = 6;
+}
+
+message NodeNetworkConfig {
+  string cluster_pod_cidr = 1;
+  string node_pod_cidr = 2;
+  string dns_address = 3;
+  uint32 vni = 4;
+  uint32 mtu = 5;
+}
+
+message NodeRoute {
+  string node_id = 1;
+  string pod_cidr = 2;
+  string underlay_address = 3;
+}
+
+enum OperationKind {
+  OPERATION_KIND_UNSPECIFIED = 0;
+  OPERATION_KIND_LOGS = 1;
+  OPERATION_KIND_EXEC = 2;
+}
+
+message OperationRequest {
+  string operation_id = 1;
+  OperationKind kind = 2;
+  string namespace = 3;
+  string pod = 4;
+  string pod_uid = 5;
+  string container = 6;
+  repeated string command = 7;
+  bool stdin = 8;
+  bool stdout = 9;
+  bool stderr = 10;
+  bool tty = 11;
+}
+
+message OperationInput {
+  string operation_id = 1;
+  uint64 sequence = 2;
+  StreamChannel channel = 3;
+  bytes data = 4;
+  uint32 rows = 5;
+  uint32 columns = 6;
+  bool eof = 7;
+}
+
+message OperationCancel {
+  string operation_id = 1;
+  string reason = 2;
+}
+
+message ProtocolError {
+  uint32 supported_version = 1;
+  uint32 received_version = 2;
+  string message = 3;
+}
+
+// The CNI executable is a thin local client.  It forwards the complete CNI
+// invocation to the node agent over a private Unix socket; only the agent is
+// allowed to mutate IPAM, links, routes, or BPF state.
+message CniRequest {
+  uint32 protocol_version = 1;
+  string command = 2;
+  bytes network_configuration = 3;
+  string container_id = 4;
+  string network_namespace = 5;
+  string interface_name = 6;
+  string arguments = 7;
+  string plugin_path = 8;
+}
+
+message CniResponse {
+  uint32 protocol_version = 1;
+  bool success = 2;
+  bytes result_json = 3;
+  uint32 error_code = 4;
+  string error_message = 5;
+  string error_details = 6;
+}

@@ -1,0 +1,35 @@
+;;; iparse.asd
+;;;
+;;; SPDX-License-Identifier: EPL-1.0
+;;;
+;;; Copyright (C) 2026 Anthony Green <green@moxielogic.com>
+;;;
+;;; This is a Common Lisp port of instaparse by Mark Engelberg.
+;;; Original: https://github.com/Engelberg/instaparse
+;;; Licensed under the Eclipse Public License 1.0.
+
+(asdf:defsystem "iparse"
+  :description "A Common Lisp port of Clojure's instaparse parser library.
+Implements the GLL (Generalized LL) parsing algorithm with support for
+ambiguous and left-recursive grammars, EBNF notation, and efficient parsing."
+  :author      "Anthony Green <green@moxielogic.com>"
+  :license     "EPL-1.0"
+  :version     "0.1.0"
+  :depends-on  ("cl-ppcre"
+                "alexandria"
+                "fset"
+                "closer-mop")
+  :serial t
+  :components ((:module "src"
+                :components
+                ((:file "packages")
+                 (:file "util")
+                 (:file "auto-flatten-seq")
+                 (:file "combinators")
+                 (:file "reduction")
+                 (:file "failure")
+                 (:file "gll")
+                 (:file "cfg")
+                 (:file "abnf")
+                 (:file "transform")
+                 (:file "core")))))

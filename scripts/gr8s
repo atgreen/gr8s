@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+GR8S_ROOT=$(dirname -- "$script_directory")
+export GR8S_ROOT
+
+exec sbcl --noinform --non-interactive \
+  --eval '(require :asdf)' \
+  --eval '(asdf:load-asd (merge-pathnames "gr8s.asd" (uiop:ensure-directory-pathname (uiop:getenv "GR8S_ROOT"))))' \
+  --eval '(asdf:load-system :gr8s)' \
+  --eval '(uiop:quit (gr8s:main (uiop:command-line-arguments)))' \
+  --end-toplevel-options "$@"

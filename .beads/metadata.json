@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "podster",
+  "project_id": "9094da67-167e-4790-955e-4729994654a9"
+}

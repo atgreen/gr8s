@@ -1,0 +1,860 @@
+;;; -*- Mode: Lisp -*-
+;;;
+;;; Copyright (c) 2026 Anthony Green <green@moxielogic.com>
+;;;
+;;; SPDX-License-Identifier: MIT
+
+(in-package #:whistler)
+
+;;; ================================================================
+;;; Surface language macros
+;;; ================================================================
+;;;
+;;; These macros make Whistler programs more declarative by hiding
+;;; BPF-shaped details behind Lisp-idiomatic forms. They all expand
+;;; to primitive Whistler forms at compile time — zero runtime cost.
+
+;;; ---- pt_regs access ----
+;;;
+;;; These match the C macros PT_REGS_PARM1() etc. from bpf_tracing.h.
+;;; Offsets are architecture-specific; detected from the host at compile time.
+;;; Currently supports x86-64 and aarch64.
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (defun pt-regs-offsets ()
+    "Return an alist of pt_regs offsets for the host architecture.
+     Each entry is (name . offset) for ctx-load u64."
+    #+x86-64
+    ;; x86-64 System V ABI: rdi, rsi, rdx, rcx, r8, r9, rax
+    '((:parm1 . 112) (:parm2 . 104) (:parm3 . 96)
+      (:parm4 .  88) (:parm5 .  72) (:parm6 . 64)
+      (:ret   .  80)
+      ;; Common pt_regs slots for bpftrace's reg() builtin.
+      (:ip    . 128) (:sp   . 152) (:bp  . 32)
+      (:ax    .  80) (:bx   .  40) (:cx  . 88) (:dx . 96)
+      (:si    . 104) (:di   . 112)
+      (:r8    .  72) (:r9   .  64) (:r10 . 56) (:r11 . 48)
+      (:r12   .  24) (:r13  .  16) (:r14 . 8)  (:r15 . 0))
+    #+arm64
+    ;; aarch64: x0-x30 at offsets 0..240, sp @ 248, pc @ 256.
+    ;; First 8 args in x0..x7; arg9+ go on the stack.
+    '((:parm1 .  0) (:parm2 .  8) (:parm3 . 16)
+      (:parm4 . 24) (:parm5 . 32) (:parm6 . 40)
+      (:parm7 . 48) (:parm8 . 56)
+      (:ret   .  0)
+      (:ip    . 256) (:sp . 248) (:pc . 256))
+    #-(or x86-64 arm64)
+    (error "pt-regs-parm1..6 and pt-regs-ret require x86-64 or aarch64. ~
+            Current architecture is not supported. ~
+            See bpf_tracing.h for your platform's pt_regs layout.")))
+
+(cl:macrolet ((def-pt-regs-accessor (name key docstring)
+                `(defmacro ,name ()
+                   ,docstring
+                   (let ((offset (cdr (assoc ,key (pt-regs-offsets)))))
+                     `(ctx u64 ,offset)))))
+  (def-pt-regs-accessor pt-regs-parm1 :parm1 "First function argument from pt_regs.")
+  (def-pt-regs-accessor pt-regs-parm2 :parm2 "Second function argument from pt_regs.")
+  (def-pt-regs-accessor pt-regs-parm3 :parm3 "Third function argument from pt_regs.")
+  (def-pt-regs-accessor pt-regs-parm4 :parm4 "Fourth function argument from pt_regs.")
+  (def-pt-regs-accessor pt-regs-parm5 :parm5 "Fifth function argument from pt_regs.")
+  (def-pt-regs-accessor pt-regs-parm6 :parm6 "Sixth function argument from pt_regs.")
+  ;; parm7 and parm8 are register-based on aarch64 (x6, x7). They're
+  ;; not exposed for x86-64 — the System V ABI passes the 7th+ args on
+  ;; the stack at *(rsp + (n-6)*8). Whistler's lower-arg builds that
+  ;; pattern inline for kprobes; this accessor stays arm64-only.
+  #+arm64
+  (def-pt-regs-accessor pt-regs-parm7 :parm7 "Seventh function argument from pt_regs (arm64 only).")
+  #+arm64
+  (def-pt-regs-accessor pt-regs-parm8 :parm8 "Eighth function argument from pt_regs (arm64 only).")
+  (def-pt-regs-accessor pt-regs-ret   :ret   "Return value from pt_regs."))
+
+;;; ---- Control flow ----
+
+(defmacro when-let (bindings &body body)
+  "Bind variables and execute body only if all bound values are non-nil.
+   Each binding is (var init) or (var type init). If any init evaluates
+   to 0/nil, the rest of the bindings and the body are skipped.
+   Returns 0 when skipped."
+  (if (null bindings)
+      `(progn ,@body)
+      (let ((b (first bindings)))
+        (if (cddr b)
+            ;; 3-element: (var type init)
+            (cl:destructuring-bind (var type init) b
+              `(let ((,var ,type ,init))
+                 (when ,var
+                   (when-let ,(rest bindings) ,@body))))
+            ;; 2-element: (var init)
+            (cl:destructuring-bind (var init) b
+              `(let ((,var ,init))
+                 (when ,var
+                   (when-let ,(rest bindings) ,@body))))))))
+
+(defmacro if-let (binding then &optional else)
+  "Bind a variable and branch on its value.
+   BINDING is (var init) or (var type init). If init is non-nil,
+   execute THEN with var bound; otherwise execute ELSE."
+  (if (cddr binding)
+      ;; 3-element: (var type init)
+      (cl:destructuring-bind (var type init) binding
+        `(let ((,var ,type ,init))
+           (if ,var ,then ,else)))
+      ;; 2-element: (var init)
+      (cl:destructuring-bind (var init) binding
+        `(let ((,var ,init))
+           (if ,var ,then ,else)))))
+
+(defmacro case (keyform &body clauses)
+  "Multi-way dispatch on a value. Each clause is (value body...) or
+   ((v1 v2 ...) body...). The final clause may use T or OTHERWISE
+   as a catch-all. Compiles to BPF cond chains."
+  (let ((key-var (gensym "CASE")))
+    `(let ((,key-var u64 ,keyform))
+       (cond
+         ,@(mapcar (lambda (clause)
+                     (let ((test (first clause))
+                           (body (rest clause)))
+                       (cond
+                         ((or (eq test t) (eq test 'otherwise))
+                          `(t ,@body))
+                         ((listp test)
+                          `((or ,@(mapcar (lambda (v) `(= ,key-var ,v)) test))
+                            ,@body))
+                         (t `((= ,key-var ,test) ,@body)))))
+                   clauses)))))
+
+;;; ---- User-space iteration ----
+
+(defmacro do-user-ptrs ((ptr-var base-ptr count max-count
+                         &key (index (gensym "I"))) &body body)
+  "Iterate over a user-space array of pointers (e.g. ffi_type **).
+   For each non-null pointer within COUNT elements (up to the compile-time
+   constant MAX-COUNT), binds PTR-VAR to the pointer value and executes BODY.
+   The loop index is bound to INDEX (default: gensym, supply a name to use it)."
+  (let ((buf (gensym "BUF")))
+    `(let ((,buf (struct-alloc 8)))
+       (dotimes (,index ,max-count)
+         (when (> ,count ,index)
+           (probe-read-user ,buf 8 (+ ,base-ptr (* ,index 8)))
+           (when-let ((,ptr-var (load u64 ,buf 0)))
+             ,@body))))))
+
+(defmacro do-user-array ((var type base-ptr count max-count
+                          &key (index (gensym "I"))) &body body)
+  "Iterate over a user-space array of TYPE elements.
+   TYPE is a scalar type (u8, u16, u32, u64) or a struct name.
+   For each element within COUNT (up to compile-time MAX-COUNT), reads it
+   from user-space and binds VAR to the value (scalar) or buffer pointer (struct).
+   The loop index is bound to INDEX (default: gensym, supply a name to use it)."
+  (let* ((struct-def (gethash (string type) *struct-defs*))
+         (elem-size (if struct-def
+                        (car struct-def)
+                        (cl:case type (u8 1) (u16 2) (u32 4) (u64 8)
+                          (t (error "do-user-array: unknown type ~a" type))))))
+    (if struct-def
+        ;; Struct elements: VAR is a reusable stack buffer
+        `(let ((,var (struct-alloc ,elem-size)))
+           (dotimes (,index ,max-count)
+             (when (> ,count ,index)
+               (probe-read-user ,var ,elem-size
+                                (+ ,base-ptr (* ,index ,elem-size)))
+               ,@body)))
+        ;; Scalar elements: VAR is the loaded value
+        (let ((buf (gensym "BUF")))
+          `(let ((,buf (struct-alloc ,elem-size)))
+             (dotimes (,index ,max-count)
+               (when (> ,count ,index)
+                 (probe-read-user ,buf ,elem-size
+                                  (+ ,base-ptr (* ,index ,elem-size)))
+                 (let ((,var (load ,type ,buf 0)))
+                   ,@body))))))))
+
+;;; ---- Ring buffer patterns ----
+
+(defmacro with-ringbuf ((var map size &key (flags 0)) &body body)
+  "Reserve a ring buffer entry, execute BODY, and submit on normal exit.
+   If BODY executes (return ...), the reservation is NOT auto-submitted —
+   use (ringbuf-discard VAR 0) before returning if needed.
+   VAR is bound to the reserved pointer (guaranteed non-null in BODY).
+   SIZE must be a compile-time constant or (sizeof STRUCT).
+   The buffer is NOT zeroed — use memset or set fields explicitly."
+  (let ((resolved-size (if (and (consp size) (eq (car size) 'sizeof))
+                           (macroexpand-1 size)
+                           size)))
+    `(let ((,var (ringbuf-reserve ,map ,resolved-size ,flags)))
+       (when ,var
+         ,@body
+         (ringbuf-submit ,var 0)))))
+
+;;; ---- Process metadata helpers ----
+
+(defmacro fill-process-info (event &key pid-field uid-field timestamp-field comm-field comm-size)
+  "Fill common process metadata fields in a struct.
+   Each keyword names the struct accessor setter (a symbol like moxie-event-pid).
+   PID-FIELD and UID-FIELD receive u32 values from get-current-pid-tgid/uid-gid.
+   TIMESTAMP-FIELD receives ktime-get-ns.
+   COMM-FIELD is a -ptr accessor symbol; COMM-SIZE is the array size."
+  (let ((forms '()))
+    (when pid-field
+      (let ((tgid (gensym "TGID")))
+        (push `(let ((,tgid (get-current-pid-tgid)))
+                 (setf (,pid-field ,event) (cast u32 (ash ,tgid -32))))
+              forms)))
+    (when uid-field
+      (let ((ugid (gensym "UGID")))
+        (push `(let ((,ugid (get-current-uid-gid)))
+                 (setf (,uid-field ,event) (cast u32 ,ugid)))
+              forms)))
+    (when timestamp-field
+      (push `(setf (,timestamp-field ,event) (ktime-get-ns)) forms))
+    (when comm-field
+      (push `(get-current-comm (,comm-field ,event) ,(or comm-size 16)) forms))
+    `(progn ,@(nreverse forms))))
+
+;;; ---- kernel-load ----
+
+(defmacro kernel-load (type ptr offset)
+  "Safely read a value of TYPE at byte OFFSET from a kernel pointer PTR.
+   Compiles to probe-read-kernel into a stack buffer followed by a load.
+   Use this instead of (load TYPE PTR OFFSET) when PTR is a kernel address
+   (e.g., from get-current-task) that the BPF verifier does not trust for
+   direct memory access.
+
+   Example:
+     ;; Read task_struct->tgid (u32 at offset 2772) safely
+     (kernel-load u32 task 2772)
+
+     ;; Equivalent to the manual pattern:
+     (let ((buf (struct-alloc 4)))
+       (probe-read-kernel buf 4 (+ task 2772))
+       (load u32 buf 0))"
+  (let ((buf (gensym "KBUF"))
+        (byte-size (cl:case type (u8 1) (u16 2) (u32 4) (u64 8) (t 8))))
+    `(let ((,buf (struct-alloc ,byte-size)))
+       (probe-read-kernel ,buf ,byte-size (+ ,ptr ,offset))
+       (load ,type ,buf 0))))
+
+;;; ---- incf / decf ----
+
+(defmacro incf (place &optional (delta 1))
+  "Increment PLACE by DELTA. For map places, uses atomic increment.
+   (incf (getmap map key))       → atomic map increment
+   (incf (getmap map key) 5)     → atomic map increment by 5
+   (incf var)                    → (setf var (+ var 1))"
+  (if (and (consp place) (cl:eq (car place) 'getmap))
+      `(incf-map ,(second place) ,(third place) ,delta)
+      `(setf ,place (+ ,place ,delta))))
+
+(defmacro decf (place &optional (delta 1))
+  "Decrement PLACE by DELTA.
+   (decf var)   → (setf var (- var 1))"
+  `(setf ,place (- ,place ,delta)))
+
+;;; ---- Map operations ----
+
+(defun map-spec-for (map-name)
+  "Look up the map spec for MAP-NAME in the current compilation."
+  (find (symbol-name map-name) *maps*
+        :key (lambda (s) (symbol-name (first s)))
+        :test #'string=))
+
+(defun array-map-p (map-name)
+  "Check if MAP-NAME refers to an array-type map in the current compilation."
+  (let ((spec (map-spec-for map-name)))
+    (and spec
+         (member (getf (rest spec) :type) '(:array :percpu-array)))))
+
+(defun struct-key-map-p (map-name)
+  "Check if MAP-NAME has a struct key (key-size > 8) requiring -ptr map operations."
+  (let ((spec (map-spec-for map-name)))
+    (and spec (> (getf (rest spec) :key-size) 8))))
+
+(defun map-value-type (map-name)
+  "Return the appropriate type symbol (u8, u16, u32, u64) for the map's value-size.
+   Defaults to u64 if the map is not found."
+  (let ((spec (map-spec-for map-name)))
+    (if spec
+        (let ((vs (getf (rest spec) :value-size)))
+          (cl:case vs
+            (1 'u8)
+            (2 'u16)
+            (4 'u32)
+            (t 'u64)))
+        'u64)))
+
+(defun map-value-size-bytes (map-name)
+  "Return the value-size in bytes for MAP-NAME. Defaults to 8."
+  (let ((spec (map-spec-for map-name)))
+    (if spec (getf (rest spec) :value-size) 8)))
+
+(defun struct-value-map-p (map-name)
+  "Check if MAP-NAME was declared with :value-type (a struct).
+   When true, getmap returns the map_value pointer directly instead of
+   dereferencing it as a scalar."
+  (let ((spec (map-spec-for map-name)))
+    (and spec (getf (rest spec) :value-type))))
+
+(defmacro incf-map (map key-form &optional (delta 1))
+  "Atomically increment a map value. For array maps where the key always exists,
+   this is just a lookup + atomic-add. For hash maps, initializes to DELTA if
+   the key is new. Automatically uses -ptr operations for struct key maps."
+  (let ((vtype (map-value-type map)))
+    (if (array-map-p map)
+        ;; Array maps: entries are pre-allocated, lookup always succeeds
+        (let ((k (gensym "K"))
+              (p (gensym "P")))
+          `(let ((,k u32 ,key-form))
+             (when-let ((,p u64 (map-lookup ,map ,k)))
+               (atomic-add ,p 0 ,delta ,vtype))))
+        ;; Hash maps: create entry if not found
+        (if (struct-key-map-p map)
+            ;; Struct key: use -ptr variants
+            (let ((p (gensym "P"))
+                  (init (gensym "INIT")))
+              `(let ((,p u64 (map-lookup-ptr ,map ,key-form)))
+                 (if ,p
+                     (atomic-add ,p 0 ,delta ,vtype)
+                     (let ((,init (struct-alloc ,(map-value-size-bytes map))))
+                       (store ,vtype ,init 0 ,delta)
+                       (map-update-ptr ,map ,key-form ,init 0)))))
+            ;; Scalar key
+            (let ((k (gensym "K"))
+                  (p (gensym "P"))
+                  (init (gensym "INIT")))
+              `(let* ((,k u32 ,key-form)
+                      (,p u64 (map-lookup ,map ,k)))
+                 (if ,p
+                     (atomic-add ,p 0 ,delta ,vtype)
+                     (let ((,init ,vtype ,delta))
+                       (map-update ,map ,k ,init 0)))))))))
+
+(defmacro getmap (map key-form)
+  "Look up a map value. For scalar values (≤8 bytes), dereferences the
+   pointer and returns the value. For struct values (>8 bytes), returns
+   the map_value pointer directly so fields can be accessed with struct
+   accessors. Returns 0/nil if the key is not found.
+   Automatically uses -ptr operations for struct key maps."
+  (let ((p (gensym "P"))
+        (vtype (map-value-type map))
+        (lookup (if (struct-key-map-p map) 'map-lookup-ptr 'map-lookup)))
+    (if (struct-value-map-p map)
+        ;; Struct value: return the pointer directly
+        `(,lookup ,map ,key-form)
+        ;; Scalar value: dereference
+        `(let ((,p u64 (,lookup ,map ,key-form)))
+           (if ,p (load ,vtype ,p 0) 0)))))
+
+(defmacro set-getmap! (map key-form val-form)
+  "Writer macro for (setf (getmap map key) val).
+   For struct-valued maps, val-form should be a pointer to a stack-allocated
+   struct (e.g., from make-<struct>). For scalar maps, val-form is a value."
+  (let ((v (gensym "V"))
+        (vtype (map-value-type map)))
+    (cond
+      ((struct-value-map-p map)
+       ;; Struct value: val-form is a pointer, use map-update-ptr or map-update
+       ;; with the struct pointer directly
+       (if (struct-key-map-p map)
+           `(map-update-ptr ,map ,key-form ,val-form 0)
+           `(map-update ,map ,key-form ,val-form 0)))
+      ((struct-key-map-p map)
+       `(let ((,v (struct-alloc ,(map-value-size-bytes map))))
+          (store ,vtype ,v 0 ,val-form)
+          (map-update-ptr ,map ,key-form ,v 0)))
+      (t
+       `(let ((,v ,vtype ,val-form))
+          (map-update ,map ,key-form ,v 0))))))
+
+(cl:defsetf getmap set-getmap!)
+
+(defmacro setmap (map key-form val-form &optional (flags 0))
+  "Update a map entry. Prefer (setf (getmap ...) ...) for the common case.
+   Automatically uses -ptr operations for struct key maps."
+  (let ((v (gensym "V"))
+        (vtype (map-value-type map)))
+    (if (struct-key-map-p map)
+        `(let ((,v (struct-alloc ,(map-value-size-bytes map))))
+           (store ,vtype ,v 0 ,val-form)
+           (map-update-ptr ,map ,key-form ,v ,flags))
+        `(let ((,v ,vtype ,val-form))
+           (map-update ,map ,key-form ,v ,flags)))))
+
+(defmacro remmap (map key-form)
+  "Delete a map entry. CL-style name (cf. remhash)."
+  (if (struct-key-map-p map)
+      `(map-delete-ptr ,map ,key-form)
+      `(map-delete ,map ,key-form)))
+
+(defmacro delmap (map key-form)
+  "Delete a map entry. Alias for remmap."
+  (if (struct-key-map-p map)
+      `(map-delete-ptr ,map ,key-form)
+      `(map-delete ,map ,key-form)))
+
+;;; ================================================================
+;;; Protocol header definitions
+;;; ================================================================
+;;;
+;;; These are compile-time macros that expand to (load TYPE ptr OFFSET).
+;;; No runtime cost — they are just named constants for byte offsets.
+;;; The "struct" is a purely compile-time abstraction.
+
+;;; ---- Struct definition macro ----
+
+(defmacro defheader (name &body fields)
+  "Define a protocol header with named field accessors.
+   Each field is (field-name :offset N :type TYPE [:net-order BOOL]).
+   Generates macros: (NAME-FIELD-NAME ptr) → (load TYPE ptr OFFSET)
+   and optionally wraps in ntohs/ntohl for network byte order."
+  (let ((forms '()))
+    (dolist (field fields)
+      (destructuring-bind (field-name &key offset type (net-order nil)) field
+        (let ((accessor-name (intern (format nil "~a-~a" name field-name)
+                                     (symbol-package name))))
+          (if net-order
+              (let ((swap-fn (cl:case type
+                               ((u16 i16) 'ntohs)
+                               ((u32 i32) 'ntohl)
+                               (t nil))))
+                (if swap-fn
+                    (push `(defmacro ,accessor-name (ptr)
+                             (list ',swap-fn (list 'load ',type ptr ,offset)))
+                          forms)
+                    (push `(defmacro ,accessor-name (ptr)
+                             (list 'load ',type ptr ,offset))
+                          forms)))
+              (push `(defmacro ,accessor-name (ptr)
+                       (list 'load ',type ptr ,offset))
+                    forms)))))
+    `(progn ,@(nreverse forms))))
+
+;;; ---- Standard protocol headers ----
+
+;; Ethernet header (14 bytes)
+(defheader eth
+  (dst-mac-hi  :offset 0  :type u32)
+  (dst-mac-lo  :offset 4  :type u16)
+  (src-mac-hi  :offset 6  :type u32)
+  (src-mac-lo  :offset 10 :type u16)
+  (type        :offset 12 :type u16 :net-order t))
+
+(defconstant +ethertype-ipv4+  #x0800)
+(defconstant +ethertype-ipv6+  #x86dd)
+(defconstant +ethertype-arp+   #x0806)
+(defconstant +ethertype-vlan+  #x8100)
+
+(defconstant +eth-hdr-len+ 14)
+
+;; IPv4 header (20 bytes minimum, without options)
+(defheader ipv4
+  (ver-ihl     :offset 0  :type u8)
+  (tos         :offset 1  :type u8)
+  (total-len   :offset 2  :type u16 :net-order t)
+  (id          :offset 4  :type u16 :net-order t)
+  (frag-off    :offset 6  :type u16 :net-order t)
+  (ttl         :offset 8  :type u8)
+  (protocol    :offset 9  :type u8)
+  (checksum    :offset 10 :type u16)
+  (src-addr    :offset 12 :type u32)
+  (dst-addr    :offset 16 :type u32))
+
+(defconstant +ipv4-hdr-len+ 20)
+(defconstant +ip-proto-icmp+  1)
+(defconstant +ip-proto-tcp+   6)
+(defconstant +ip-proto-udp+  17)
+(defconstant +ip-proto-ipv6-icmp+ 58)
+
+;; IPv6 header (40 bytes)
+(defheader ipv6
+  (ver-tc-flow :offset 0  :type u32 :net-order t)
+  (payload-len :offset 4  :type u16 :net-order t)
+  (nexthdr     :offset 6  :type u8)
+  (hop-limit   :offset 7  :type u8)
+  (src-addr-hi :offset 8  :type u64)
+  (src-addr-lo :offset 16 :type u64)
+  (dst-addr-hi :offset 24 :type u64)
+  (dst-addr-lo :offset 32 :type u64))
+
+(defconstant +ipv6-hdr-len+ 40)
+
+;; ICMP header (8 bytes)
+(defheader icmp
+  (type        :offset 0 :type u8)
+  (code        :offset 1 :type u8)
+  (checksum    :offset 2 :type u16)
+  (rest        :offset 4 :type u32))
+
+(defconstant +icmp-hdr-len+ 8)
+
+;; TCP header (20 bytes minimum)
+(defheader tcp
+  (src-port    :offset 0  :type u16 :net-order t)
+  (dst-port    :offset 2  :type u16 :net-order t)
+  (seq         :offset 4  :type u32 :net-order t)
+  (ack-seq     :offset 8  :type u32 :net-order t)
+  (data-off    :offset 12 :type u8)
+  (flags       :offset 13 :type u8)
+  (window      :offset 14 :type u16 :net-order t)
+  (checksum    :offset 16 :type u16)
+  (urgent      :offset 18 :type u16 :net-order t))
+
+(defconstant +tcp-hdr-len+ 20)
+(defconstant +tcp-fin+ #x01)
+(defconstant +tcp-syn+ #x02)
+(defconstant +tcp-rst+ #x04)
+(defconstant +tcp-psh+ #x08)
+(defconstant +tcp-ack+ #x10)
+(defconstant +tcp-urg+ #x20)
+
+;; UDP header (8 bytes)
+(defheader udp
+  (src-port    :offset 0 :type u16 :net-order t)
+  (dst-port    :offset 2 :type u16 :net-order t)
+  (length      :offset 4 :type u16 :net-order t)
+  (checksum    :offset 6 :type u16))
+
+(defconstant +udp-hdr-len+ 8)
+
+;;; ---- Packet parsing helpers (statement-oriented, with early return) ----
+
+(defmacro with-packet ((data data-end &key (min-len 0)) &body body)
+  "Bind DATA and DATA-END from the XDP context, then check minimum length."
+  `(let ((,data     u64 (ctx u32 0))
+         (,data-end u64 (ctx u32 4)))
+     (if (> (+ ,data ,min-len) ,data-end)
+         (return XDP_PASS)
+         (progn ,@body))))
+
+(defmacro with-eth ((data data-end) &body body)
+  "Parse ethernet header with bounds check. Binds DATA and DATA-END."
+  `(with-packet (,data ,data-end :min-len ,+eth-hdr-len+)
+     ,@body))
+
+(defmacro with-ipv4 ((data data-end ip-off) &body body)
+  "Parse IPv4 header with bounds check. Binds DATA, DATA-END, and IP-OFF."
+  `(with-packet (,data ,data-end :min-len ,(+ +eth-hdr-len+ +ipv4-hdr-len+))
+     (when (= (eth-type ,data) ,+ethertype-ipv4+)
+       (let ((,ip-off u64 (+ ,data ,+eth-hdr-len+)))
+         ,@body))))
+
+(defmacro with-tcp ((data data-end tcp-off) &body body)
+  "Parse TCP header with bounds check. Binds DATA, DATA-END, TCP-OFF."
+  (let ((ip-off (gensym "IP")))
+    `(with-packet (,data ,data-end
+                   :min-len ,(+ +eth-hdr-len+ +ipv4-hdr-len+ +tcp-hdr-len+))
+       (when (= (eth-type ,data) ,+ethertype-ipv4+)
+         (let ((,ip-off u64 (+ ,data ,+eth-hdr-len+)))
+           (when (= (ipv4-protocol ,ip-off) ,+ip-proto-tcp+)
+             (let ((,tcp-off u64 (+ ,ip-off ,+ipv4-hdr-len+)))
+               ,@body)))))))
+
+(defmacro with-udp ((data data-end udp-off) &body body)
+  "Parse UDP header with bounds check. Binds DATA, DATA-END, UDP-OFF."
+  (let ((ip-off (gensym "IP")))
+    `(with-packet (,data ,data-end
+                   :min-len ,(+ +eth-hdr-len+ +ipv4-hdr-len+ +udp-hdr-len+))
+       (when (= (eth-type ,data) ,+ethertype-ipv4+)
+         (let ((,ip-off u64 (+ ,data ,+eth-hdr-len+)))
+           (when (= (ipv4-protocol ,ip-off) ,+ip-proto-udp+)
+             (let ((,udp-off u64 (+ ,ip-off ,+ipv4-hdr-len+)))
+               ,@body)))))))
+
+;;; ---- Expression-oriented packet parsing ----
+;;;
+;;; Unlike with-tcp etc., these return a pointer (or 0 on failure)
+;;; and can be used in when-let bindings for pipeline-style parsing.
+
+(defmacro parse-eth (data data-end)
+  "Check Ethernet header bounds. Returns DATA (the eth pointer) or 0."
+  `(if (> (+ ,data ,+eth-hdr-len+) ,data-end) 0 ,data))
+
+(defmacro parse-ipv4 (data data-end)
+  "Check IPv4 bounds and EtherType. Returns pointer to IP header or 0."
+  (let ((d (gensym "D")) (de (gensym "DE")))
+    `(let ((,d ,data) (,de ,data-end))
+       (if (> (+ ,d ,(+ +eth-hdr-len+ +ipv4-hdr-len+)) ,de)
+           0
+           (if (/= (eth-type ,d) ,+ethertype-ipv4+)
+               0
+               (+ ,d ,+eth-hdr-len+))))))
+
+(defmacro parse-tcp (data data-end)
+  "Check TCP bounds, EtherType, and IP protocol. Returns pointer to TCP header or 0."
+  (let ((d (gensym "D")) (de (gensym "DE")) (ip (gensym "IP")))
+    `(let ((,d ,data) (,de ,data-end))
+       (if (> (+ ,d ,(+ +eth-hdr-len+ +ipv4-hdr-len+ +tcp-hdr-len+)) ,de)
+           0
+           (if (/= (eth-type ,d) ,+ethertype-ipv4+)
+               0
+               (let ((,ip (+ ,d ,+eth-hdr-len+)))
+                 (if (/= (ipv4-protocol ,ip) ,+ip-proto-tcp+)
+                     0
+                     (+ ,ip ,+ipv4-hdr-len+))))))))
+
+(defmacro parse-udp (data data-end)
+  "Check UDP bounds, EtherType, and IP protocol. Returns pointer to UDP header or 0."
+  (let ((d (gensym "D")) (de (gensym "DE")) (ip (gensym "IP")))
+    `(let ((,d ,data) (,de ,data-end))
+       (if (> (+ ,d ,(+ +eth-hdr-len+ +ipv4-hdr-len+ +udp-hdr-len+)) ,de)
+           0
+           (if (/= (eth-type ,d) ,+ethertype-ipv4+)
+               0
+               (let ((,ip (+ ,d ,+eth-hdr-len+)))
+                 (if (/= (ipv4-protocol ,ip) ,+ip-proto-udp+)
+                     0
+                     (+ ,ip ,+ipv4-hdr-len+))))))))
+
+(defmacro xdp-data ()
+  "Load XDP context data pointer."
+  `(core-ctx-load u32 0 xdp-md data))
+
+(defmacro xdp-data-end ()
+  "Load XDP context data-end pointer."
+  `(core-ctx-load u32 4 xdp-md data-end))
+
+;;; ---- TC (traffic control / sched_cls) packet parsing ----
+;;;
+;;; TC programs use __sk_buff as their context, where:
+;;;   data     is at byte offset 76
+;;;   data_end is at byte offset 80
+;;;
+;;; These macros mirror the XDP with-packet/with-tcp/with-udp family,
+;;; using TC context offsets and TC_ACT_OK as the early-return code.
+
+(defmacro tc-data ()
+  "Load TC (__sk_buff) context data pointer."
+  `(ctx u32 76))
+
+(defmacro tc-data-end ()
+  "Load TC (__sk_buff) context data-end pointer."
+  `(ctx u32 80))
+
+(defmacro with-tc-packet ((data data-end &key (min-len 0)) &body body)
+  "Bind DATA and DATA-END from the TC (__sk_buff) context, then check minimum length."
+  `(let ((,data     u64 (ctx u32 76))
+         (,data-end u64 (ctx u32 80)))
+     (if (> (+ ,data ,min-len) ,data-end)
+         (return TC_ACT_OK)
+         (progn ,@body))))
+
+(defmacro with-tc-eth ((data data-end) &body body)
+  "Parse ethernet header with bounds check in a TC program."
+  `(with-tc-packet (,data ,data-end :min-len ,+eth-hdr-len+)
+     ,@body))
+
+(defmacro with-tc-ipv4 ((data data-end ip-off) &body body)
+  "Parse IPv4 header with bounds check in a TC program."
+  `(with-tc-packet (,data ,data-end :min-len ,(+ +eth-hdr-len+ +ipv4-hdr-len+))
+     (when (= (eth-type ,data) ,+ethertype-ipv4+)
+       (let ((,ip-off u64 (+ ,data ,+eth-hdr-len+)))
+         ,@body))))
+
+(defmacro with-tc-tcp ((data data-end tcp-off) &body body)
+  "Parse TCP header with bounds check in a TC program."
+  (let ((ip-off (gensym "IP")))
+    `(with-tc-packet (,data ,data-end
+                      :min-len ,(+ +eth-hdr-len+ +ipv4-hdr-len+ +tcp-hdr-len+))
+       (when (= (eth-type ,data) ,+ethertype-ipv4+)
+         (let ((,ip-off u64 (+ ,data ,+eth-hdr-len+)))
+           (when (= (ipv4-protocol ,ip-off) ,+ip-proto-tcp+)
+             (let ((,tcp-off u64 (+ ,ip-off ,+ipv4-hdr-len+)))
+               ,@body)))))))
+
+(defmacro with-tc-udp ((data data-end udp-off) &body body)
+  "Parse UDP header with bounds check in a TC program."
+  (let ((ip-off (gensym "IP")))
+    `(with-tc-packet (,data ,data-end
+                      :min-len ,(+ +eth-hdr-len+ +ipv4-hdr-len+ +udp-hdr-len+))
+       (when (= (eth-type ,data) ,+ethertype-ipv4+)
+         (let ((,ip-off u64 (+ ,data ,+eth-hdr-len+)))
+           (when (= (ipv4-protocol ,ip-off) ,+ip-proto-udp+)
+             (let ((,udp-off u64 (+ ,ip-off ,+ipv4-hdr-len+)))
+               ,@body)))))))
+
+;;; ================================================================
+;;; Tracepoint support
+;;; ================================================================
+;;;
+;;; deftracepoint reads /sys/kernel/tracing/events/{category}/{event}/format
+;;; at macroexpand time and generates ctx-load accessors for each field.
+
+(defun parse-tracepoint-format (path)
+  "Parse a tracepoint format file. Returns list of
+   (name offset size signed-p array-size c-type). C-TYPE is the raw
+   declaration text minus the field name — e.g.
+   \"struct __kernel_timespec *\", \"char\", \"unsigned long\"."
+  (let ((fields '()))
+    (handler-bind ((error (lambda (e)
+                            (whistler-error
+                             :what (format nil "cannot read tracepoint format: ~a" path)
+                             :hint "tracefs format files are root-readable by default. Fix with: sudo chmod a+r <path>"))))
+    (with-open-file (f path)
+      (loop for line = (read-line f nil nil)
+            while line
+            do (let ((fpos (search "field:" line)))
+                 (when fpos
+                   (let* ((rest (subseq line (+ fpos 6)))
+                          ;; Extract field name: last word before ";"
+                          (semi (position #\; rest))
+                          (decl (string-trim '(#\Space #\Tab) (subseq rest 0 semi)))
+                          ;; Name is last token (may have [N] suffix)
+                          (tokens (remove "" (split-field-decl decl) :test #'string=))
+                          (raw-name (car (last tokens)))
+                          ;; Strip array suffix like [16]
+                          (bracket (position #\[ raw-name))
+                          (name (if bracket (subseq raw-name 0 bracket) raw-name))
+                          (array-size (when bracket
+                                        (parse-integer (subseq raw-name (1+ bracket))
+                                                       :junk-allowed t)))
+                          ;; C-type is everything in the declaration before
+                          ;; the field name. Whitespace-normalize. `*' may
+                          ;; have been swallowed by split-field-decl; if
+                          ;; the raw declaration contained one before the
+                          ;; field name, re-append it as a suffix.
+                          (name-pos (search raw-name decl :from-end t))
+                          (raw-type (if (and name-pos (plusp name-pos))
+                                        (string-trim '(#\Space #\Tab)
+                                                     (subseq decl 0 name-pos))
+                                        ""))
+                          (c-type (canonicalise-c-type raw-type))
+                          ;; Parse offset, size, signed from remaining "key:val;" pairs
+                          (offset (parse-format-field line "offset"))
+                          (size (parse-format-field line "size"))
+                          (signed-p (= 1 (or (parse-format-field line "signed") 0))))
+                     (when (and name offset size)
+                       (push (list name offset size signed-p
+                                   (or array-size 0)
+                                   c-type)
+                             fields)))))))
+    (nreverse fields))))
+
+(defun canonicalise-c-type (raw)
+  "Collapse runs of whitespace in a C type declaration and trim. Keeps
+   `*' adjacent to its type so `struct foo  *' becomes `struct foo *'."
+  (let ((out (make-array 0 :element-type 'character :adjustable t :fill-pointer t))
+        (last-space t))
+    (loop for c across raw
+          do (cond
+               ((or (char= c #\Space) (char= c #\Tab))
+                (unless last-space
+                  (vector-push-extend #\Space out)
+                  (setf last-space t)))
+               (t
+                (vector-push-extend c out)
+                (setf last-space nil))))
+    (string-trim '(#\Space) out)))
+
+(defun split-field-decl (decl)
+  "Split a C declaration into tokens by spaces and *."
+  (let ((result '()) (current '()))
+    (loop for c across decl
+          do (cond ((member c '(#\Space #\Tab #\*))
+                    (when current
+                      (push (coerce (nreverse current) 'string) result)
+                      (setf current nil)))
+                   (t (push c current))))
+    (when current
+      (push (coerce (nreverse current) 'string) result))
+    (nreverse result)))
+
+(defun parse-format-field (line key)
+  "Extract integer value for KEY from a tracepoint format line."
+  (let ((pos (search (format nil "~a:" key) line)))
+    (when pos
+      (let ((start (+ pos (length key) 1)))
+        (parse-integer (subseq line start) :junk-allowed t)))))
+
+(defun tracepoint-type (size signed-p array-size)
+  "Map tracepoint field size to a Whistler BPF type."
+  (if (plusp array-size)
+      ;; Array field — return as (array u8 N)
+      nil
+      (if signed-p
+          (cl:case size (1 'i8) (2 'i16) (4 'i32) (8 'i64) (t 'u64))
+          (cl:case size (1 'u8) (2 'u16) (4 'u32) (8 'u64) (t 'u64)))))
+
+(defun find-tracepoint-format-path (category event)
+  "Find the tracepoint format file path."
+  (let ((paths (list (format nil "/sys/kernel/tracing/events/~a/~a/format"
+                             category event)
+                     (format nil "/sys/kernel/debug/tracing/events/~a/~a/format"
+                             category event))))
+    (find-if #'probe-file paths)))
+
+(defmacro deftracepoint (category/event &rest field-names)
+  "Define tracepoint field accessors by reading the kernel format file.
+   CATEGORY/EVENT is a symbol like sched/sched-switch.
+   FIELD-NAMES optionally restricts which fields to import.
+   If omitted, all non-common fields are imported.
+
+   Example:
+     (deftracepoint sched/sched-switch prev-pid prev-state next-pid)
+
+   Generates: (tp-prev-pid), (tp-prev-state), (tp-next-pid)
+   Each expands to (ctx TYPE OFFSET)."
+  (let* ((name-str (substitute #\_ #\- (string-downcase
+                                          (symbol-name category/event))))
+         (slash (position #\/ name-str))
+         (category (subseq name-str 0 slash))
+         (event (subseq name-str (1+ slash)))
+         (path (find-tracepoint-format-path category event)))
+    (unless path
+      (whistler-error
+       :what (format nil "tracepoint format not found: ~a/~a" category event)
+       :expected (format nil "/sys/kernel/tracing/events/~a/~a/format" category event)
+       :hint "ensure tracefs is mounted and you have read access"))
+    (let* ((all-fields (parse-tracepoint-format (namestring path)))
+           ;; Filter out common_ fields unless explicitly requested
+           (fields (if field-names
+                       (loop for fname in field-names
+                             for c-name = (substitute #\_ #\-
+                                            (string-downcase (symbol-name fname)))
+                             for field = (find c-name all-fields
+                                               :key #'first :test #'string=)
+                             when field collect field
+                             else do (whistler-error
+                                      :what (format nil "field ~a not found in ~a/~a"
+                                                    fname category event)
+                                      :expected (format nil "one of: ~{~a~^, ~}"
+                                                        (mapcar #'first all-fields))))
+                       (remove-if (lambda (f)
+                                    (let ((n (first f)))
+                                      (and (>= (length n) 7)
+                                           (string= (subseq n 0 7) "common_"))))
+                                  all-fields)))
+           (forms '()))
+      ;; Generate accessor macros
+      (dolist (field fields)
+        (destructuring-bind (c-name offset size signed-p array-size &optional c-type) field
+          (declare (ignore c-type))
+          (let* ((lisp-name (substitute #\- #\_ c-name))
+                 (accessor (intern (format nil "TP-~a" (string-upcase lisp-name))
+                                   (symbol-package category/event)))
+                 (type (tracepoint-type size signed-p array-size)))
+            (cond
+              ;; Scalar field — accessor returns the field's value.
+              (type
+               (push `(defmacro ,accessor ()
+                        '(ctx ,type ,offset))
+                     forms))
+              ;; Array field — bare TP-NAME returns the pointer to
+              ;; the array bytes (same as TP-NAME-PTR). Lets
+              ;; `args.disk_name' / `args.name' flow through to
+              ;; printf %s without the caller needing to switch to
+              ;; the -PTR form. Uses (ctx-ptr) (raw context pointer)
+              ;; instead of (ctx u64 0) so we don't synthesise a
+              ;; verifier-rejected u64 load of the common header.
+              ((plusp array-size)
+               (push `(defmacro ,accessor ()
+                        '(+ (ctx-ptr) ,offset))
+                     forms)))
+            ;; For array fields, also keep the -ptr alias.
+            (when (plusp array-size)
+              (let ((ptr-name (intern (format nil "TP-~a-PTR"
+                                             (string-upcase lisp-name))
+                                      (symbol-package category/event))))
+                (push `(defmacro ,ptr-name ()
+                         '(+ (ctx-ptr) ,offset))
+                      forms))))))
+      `(progn ,@(nreverse forms)))))

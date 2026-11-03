@@ -1,0 +1,934 @@
+(in-package #:gr8s)
+
+(defun json-object (&rest pairs)
+  (let ((object (make-hash-table :test #'equal)))
+    (loop for (key value) on pairs by #'cddr
+          do (setf (gethash key object) value))
+    object))
+
+(defun json-response (object &optional (status 200))
+  (setf (hunchentoot:return-code*) status
+        (hunchentoot:content-type*) "application/json; charset=utf-8")
+  (com.inuoe.jzon:stringify object))
+
+(defun status-response (status reason message code)
+  (json-response
+   (json-object "apiVersion" "v1"
+                "kind" "Status"
+                "status" status
+                "reason" reason
+                "message" message
+                "code" code)
+   code))
+
+(defun kubernetes-error-response (error)
+  (status-response "Failure"
+                   (kubernetes-error-reason error)
+                   (kubernetes-error-message error)
+                   (kubernetes-error-status-code error)))
+
+(defun copy-json-object (object)
+  (com.inuoe.jzon:parse (com.inuoe.jzon:stringify object)))
+
+(defun pod-response-object (pod status)
+  (let ((object (copy-json-object (pod-to-object pod))))
+    (setf (gethash "status" object) status)
+    object))
+
+(defun request-object ()
+  (parse-pod (hunchentoot:raw-post-data :force-text t)))
+
+(defun request-json-object ()
+  (require-object
+   (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t))
+   "patch"))
+
+(defun merge-json-object (target patch)
+  (maphash
+   (lambda (key patch-value)
+     (cond
+       ((eq patch-value 'null)
+        (remhash key target))
+       ((and (hash-table-p patch-value)
+             (hash-table-p (gethash key target)))
+        (merge-json-object (gethash key target) patch-value))
+       (t
+        (setf (gethash key target) patch-value))))
+   patch)
+  target)
+
+(defun version-response ()
+  (json-response
+   (json-object "major" "1"
+                "minor" "0"
+                "gitVersion" "v1.0.0-gr8s"
+                "gitCommit" "unknown"
+                "gitTreeState" "clean"
+                "buildDate" "1970-01-01T00:00:00Z"
+                "goVersion" "common-lisp"
+                "compiler" "sbcl"
+                "platform" "linux/amd64")))
+
+(defun api-versions-response ()
+  (json-response
+   (json-object "apiVersion" "v1"
+                "kind" "APIVersions"
+                "versions" #( "v1")
+                "serverAddressByClientCIDRs" #())))
+
+(defun api-groups-response ()
+  (json-response
+   (json-object "apiVersion" "v1"
+                "kind" "APIGroupList"
+                "groups" #())))
+
+(defun api-resources-response ()
+  (json-response
+   (json-object
+    "apiVersion" "v1"
+    "groupVersion" "v1"
+    "kind" "APIResourceList"
+    "resources"
+    (vector
+     (json-object "name" "pods"
+                  "singularName" ""
+                  "namespaced" t
+                  "kind" "Pod"
+                  "verbs" #( "create" "delete" "get" "list" "patch" "update")
+                  "shortNames" #( "po"))
+     (json-object "name" "pods/log"
+                  "singularName" ""
+                  "namespaced" t
+                  "kind" "Pod"
+                  "verbs" #( "get"))
+     (json-object "name" "pods/exec"
+                  "singularName" ""
+                  "namespaced" t
+                  "kind" "Pod"
+                  "verbs" #( "create"))
+     (json-object "name" "events"
+                  "singularName" ""
+                  "namespaced" t
+                  "kind" "Event"
+                  "verbs" #( "get" "list"))))))
+
+(defun event-list-response ()
+  (json-response
+   (json-object "apiVersion" "v1"
+                "kind" "EventList"
+                "metadata" (json-object "resourceVersion" "0")
+                "items" #())))
+
+(defvar *schema-reference-prefix* "#/definitions/")
+
+(defun reference-schema (name)
+  (json-object "$ref" (format nil "~A~A" *schema-reference-prefix* name)))
+
+(defun string-array-schema ()
+  (json-object "type" "array"
+               "items" (json-object "type" "string")))
+
+(defun openapi-definitions ()
+  (let ((definitions (make-hash-table :test #'equal)))
+    (setf
+     (gethash "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta" definitions)
+     (json-object
+      "type" "object"
+      "properties"
+      (json-object "name" (json-object "type" "string")
+                   "namespace" (json-object "type" "string")
+                   "uid" (json-object "type" "string")
+                   "resourceVersion" (json-object "type" "string")
+                   "labels" (json-object "type" "object"
+                                         "additionalProperties"
+                                         (json-object "type" "string"))
+                   "annotations" (json-object "type" "object"
+                                              "additionalProperties"
+                                              (json-object "type" "string"))))
+     (gethash "io.k8s.api.core.v1.EnvVar" definitions)
+     (json-object "type" "object"
+                  "required" #( "name" "value")
+                  "properties"
+                  (json-object "name" (json-object "type" "string")
+                               "value" (json-object "type" "string")))
+     (gethash "io.k8s.api.core.v1.ContainerPort" definitions)
+     (json-object "type" "object"
+                  "required" #( "containerPort")
+                  "properties"
+                  (json-object "containerPort" (json-object "type" "integer"
+                                                             "format" "int32")
+                               "name" (json-object "type" "string")
+                               "protocol" (json-object "type" "string")))
+     (gethash "io.k8s.api.core.v1.Container" definitions)
+     (json-object
+      "type" "object"
+      "required" #( "name" "image")
+      "properties"
+      (json-object
+       "name" (json-object "type" "string")
+       "image" (json-object "type" "string")
+       "command" (string-array-schema)
+       "args" (string-array-schema)
+       "env" (json-object "type" "array"
+                          "items" (reference-schema "io.k8s.api.core.v1.EnvVar"))
+       "ports" (json-object
+                "type" "array"
+                "items" (reference-schema "io.k8s.api.core.v1.ContainerPort"))))
+     (gethash "io.k8s.api.core.v1.PodSpec" definitions)
+     (json-object
+      "type" "object"
+      "required" #( "containers")
+      "properties"
+      (json-object
+       "containers" (json-object
+                     "type" "array"
+                     "items" (reference-schema "io.k8s.api.core.v1.Container"))
+       "restartPolicy" (json-object "type" "string")))
+     (gethash "io.k8s.api.core.v1.Pod" definitions)
+     (json-object
+      "type" "object"
+      "required" #( "apiVersion" "kind" "metadata" "spec")
+      "x-kubernetes-group-version-kind"
+      (vector (json-object "group" "" "version" "v1" "kind" "Pod"))
+      "properties"
+      (json-object
+       "apiVersion" (json-object "type" "string")
+       "kind" (json-object "type" "string")
+       "metadata" (reference-schema
+                   "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta")
+       "spec" (reference-schema "io.k8s.api.core.v1.PodSpec"))))
+    definitions))
+
+(defun openapi-document ()
+  (json-object "swagger" "2.0"
+               "info" (json-object "title" "gr8s" "version" "v1")
+               "paths" (make-hash-table :test #'equal)
+               "definitions" (openapi-definitions)))
+
+(defun openapi-response ()
+  (json-response (openapi-document)))
+
+(defun openapi-v3-discovery-response ()
+  (json-response
+   (json-object
+    "paths"
+    (json-object
+     "api/v1"
+     (json-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")))))
+
+(defun pod-group-version-kind ()
+  (json-object "group" "" "version" "v1" "kind" "Pod"))
+
+(defun openapi-v3-pod-paths ()
+  (json-object
+   "/api/v1/namespaces/{namespace}/pods"
+   (json-object
+    "parameters"
+    (vector (json-object "name" "namespace"
+                         "in" "path"
+                         "required" t
+                         "schema" (json-object "type" "string")))
+    "post"
+    (json-object
+     "operationId" "createCoreV1NamespacedPod"
+     "x-kubernetes-action" "post"
+     "x-kubernetes-group-version-kind" (pod-group-version-kind)
+     "requestBody"
+     (json-object
+      "required" t
+      "content"
+      (json-object
+       "application/json"
+       (json-object "schema"
+                    (reference-schema "io.k8s.api.core.v1.Pod"))))
+     "responses"
+     (json-object
+      "201"
+      (json-object
+       "description" "Created"
+       "content"
+       (json-object
+        "application/json"
+        (json-object "schema"
+                     (reference-schema "io.k8s.api.core.v1.Pod")))))))
+   "/api/v1/namespaces/{namespace}/pods/{name}"
+   (json-object
+    "parameters"
+    (vector (json-object "name" "namespace"
+                         "in" "path"
+                         "required" t
+                         "schema" (json-object "type" "string"))
+            (json-object "name" "name"
+                         "in" "path"
+                         "required" t
+                         "schema" (json-object "type" "string")))
+    "patch"
+    (json-object
+     "operationId" "patchCoreV1NamespacedPod"
+     "x-kubernetes-action" "patch"
+     "x-kubernetes-group-version-kind" (pod-group-version-kind)
+     "parameters"
+     (vector (json-object "name" "fieldValidation"
+                          "in" "query"
+                          "schema" (json-object "type" "string")))
+     "requestBody"
+     (json-object
+      "required" t
+      "content"
+      (json-object
+       "application/strategic-merge-patch+json"
+       (json-object "schema"
+                    (reference-schema "io.k8s.api.core.v1.Pod"))
+       "application/apply-patch+yaml"
+       (json-object "schema"
+                    (reference-schema "io.k8s.api.core.v1.Pod"))))
+     "responses"
+     (json-object
+      "200"
+      (json-object
+       "description" "OK"
+       "content"
+       (json-object
+        "application/json"
+        (json-object "schema"
+                     (reference-schema "io.k8s.api.core.v1.Pod")))))))))
+
+(defun openapi-v3-response ()
+  (let ((*schema-reference-prefix* "#/components/schemas/"))
+    (json-response
+     (json-object
+      "openapi" "3.0.0"
+      "info" (json-object "title" "gr8s" "version" "v1")
+      "paths" (openapi-v3-pod-paths)
+      "components" (json-object "schemas" (openapi-definitions))))))
+
+(defun create-pod-response (store reconciler)
+  (let* ((pod (create-pod store (request-object)))
+         (status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
+    (json-response (pod-response-object pod status) 201)))
+
+(defun list-pods-response (store reconciler)
+  (json-response
+   (json-object
+    "apiVersion" "v1"
+    "kind" "PodList"
+    "metadata" (json-object "resourceVersion" "0")
+    "items" (map 'vector
+                 (lambda (pod)
+                   (pod-response-object
+                    pod
+                    (reconcile-pod reconciler
+                                   (pod-namespace pod)
+                                   (pod-name pod))))
+                 (list-pods store "default")))))
+
+(defun get-pod-response (store reconciler name)
+  (let ((pod (get-pod store "default" name)))
+    (json-response
+     (pod-response-object pod (reconcile-pod reconciler "default" name)))))
+
+(defun apply-pod-response (store reconciler name)
+  (let* ((patch (request-json-object))
+         (existing (handler-case (get-pod store "default" name)
+                     (kubernetes-error (error)
+                       (if (= 404 (kubernetes-error-status-code error))
+                           nil
+                           (error error)))))
+         (replacement
+           (parse-pod
+            (if existing
+                (merge-json-object
+                 (copy-json-object (pod-to-object existing)) patch)
+                patch))))
+    (unless (string= name (pod-name replacement))
+      (invalid-pod "request name does not match metadata.name"))
+    (let ((pod (if existing
+                   (update-pod store replacement
+                               (pod-resource-version existing))
+                   (create-pod store replacement))))
+      (json-response
+       (pod-response-object
+        pod (reconcile-pod reconciler "default" name))
+       (if existing 200 201)))))
+
+(defun replace-pod-response (store reconciler name)
+  (let ((replacement (request-object)))
+    (unless (string= name (pod-name replacement))
+      (invalid-pod "request name does not match metadata.name"))
+    (unless (pod-resource-version replacement)
+      (invalid-pod "PUT requires metadata.resourceVersion"))
+    (let ((pod (update-pod store replacement
+                           (pod-resource-version replacement))))
+      (json-response
+       (pod-response-object
+        pod (reconcile-pod reconciler "default" name))))))
+
+(defun delete-pod-response (store reconciler name)
+  (declare (ignore store))
+  (delete-reconciled-pod reconciler "default" name)
+  (status-response "Success" "Deleted"
+                   (format nil "Pod ~A deleted" name) 200))
+
+(defun pod-logs-response (store reconciler name)
+  (let* ((pod (get-pod store "default" name))
+         (container (or (hunchentoot:parameter "container")
+                        (container-spec-name (aref (pod-containers pod) 0)))))
+    (unless (find container (pod-containers pod)
+                  :key #'container-spec-name :test #'string=)
+      (error 'kubernetes-error
+             :status-code 400
+             :reason "BadRequest"
+             :message (format nil "container ~A is not valid for pod ~A"
+                              container name)))
+    (setf (hunchentoot:content-type*) "text/plain; charset=utf-8")
+    (or (reconciler-logs reconciler (pod-uid pod) container) "")))
+
+(defstruct exec-options
+  command
+  container
+  stdin
+  stdout
+  stderr
+  tty)
+
+(defun true-parameter-p (value)
+  (and value (string-equal value "true")))
+
+(defun exec-options-from-parameters (parameters)
+  (make-exec-options
+   :command (loop for (name . value) in parameters
+                  when (string= name "command") collect value)
+   :container (cdr (assoc "container" parameters :test #'string=))
+   :stdin (true-parameter-p
+           (cdr (assoc "stdin" parameters :test #'string=)))
+   :stdout (true-parameter-p
+            (cdr (assoc "stdout" parameters :test #'string=)))
+   :stderr (true-parameter-p
+            (cdr (assoc "stderr" parameters :test #'string=)))
+   :tty (true-parameter-p
+         (cdr (assoc "tty" parameters :test #'string=)))))
+
+(defparameter *runtime-upgrade-request-headers*
+  '(:connection :upgrade :sec-websocket-key :sec-websocket-version
+    :sec-websocket-protocol :x-stream-protocol-version :origin :user-agent))
+
+(defun header-name (keyword)
+  (string-capitalize (symbol-name keyword)))
+
+(defun runtime-upgrade-request (target host port headers)
+  (with-output-to-string (output)
+    (format output "POST ~A HTTP/1.1~C~CHost: ~A:~D~C~C"
+            target #\Return #\Linefeed host port #\Return #\Linefeed)
+    (dolist (header headers)
+      (when (member (car header) *runtime-upgrade-request-headers*)
+        (format output "~A: ~A~C~C"
+                (header-name (car header)) (cdr header)
+                #\Return #\Linefeed)))
+    (format output "~C~C" #\Return #\Linefeed)))
+
+(defun parse-runtime-stream-url (url)
+  (let ((prefix "http://"))
+    (unless (and (>= (length url) (length prefix))
+                 (string-equal prefix url :end2 (length prefix)))
+      (error 'runtime-error
+             :message "containerd returned a non-HTTP streaming URL"))
+    (let* ((authority-start (length prefix))
+           (target-start (or (position #\/ url :start authority-start)
+                             (length url)))
+           (authority (subseq url authority-start target-start))
+           (colon (position #\: authority :from-end t))
+           (host (and colon (subseq authority 0 colon)))
+           (port-text (and colon (subseq authority (1+ colon))))
+           (target (if (< target-start (length url))
+                       (subseq url target-start)
+                       "/")))
+      (unless (and host
+                   (member host '("127.0.0.1" "localhost" "[::1]")
+                           :test #'string-equal)
+                   (plusp (length port-text)))
+        (error 'runtime-error
+               :message "containerd returned a non-loopback streaming URL"))
+      (let ((port (parse-integer port-text :junk-allowed t)))
+        (unless (and port (<= 1 port 65535))
+          (error 'runtime-error
+                 :message "containerd returned an invalid streaming port"))
+        (values host port target)))))
+
+(defparameter *runtime-upgrade-response-headers*
+  '(:connection :upgrade :sec-websocket-accept :sec-websocket-protocol
+    :x-stream-protocol-version))
+
+(defun ascii-octets (string)
+  (let ((octets (make-array (length string)
+                            :element-type '(unsigned-byte 8))))
+    (loop for character across string
+          for index from 0
+          do (setf (aref octets index) (char-code character)))
+    octets))
+
+(defun octets-as-ascii (octets)
+  (map 'string #'code-char octets))
+
+(defun read-http-response-head (stream)
+  (let ((head (make-array 512 :element-type '(unsigned-byte 8)
+                          :adjustable t :fill-pointer 0))
+        (state 0))
+    (loop
+      (let ((octet (read-byte stream nil nil)))
+        (unless octet
+          (error 'runtime-error
+                 :message "containerd closed the exec stream before replying"))
+        (vector-push-extend octet head)
+        (setf state
+              (case state
+                (0 (if (= octet 13) 1 0))
+                (1 (cond ((= octet 10) 2) ((= octet 13) 1) (t 0)))
+                (2 (if (= octet 13) 3 0))
+                (3 (if (= octet 10) 4 0))))
+        (when (= state 4)
+          (return head))
+        (when (> (length head) 65536)
+          (error 'runtime-error
+                 :message "containerd returned oversized exec headers"))))))
+
+(defun trim-http-line (line)
+  (string-right-trim '(#\Return #\Linefeed) line))
+
+(defun parse-http-response-head (octets)
+  (with-input-from-string (input (octets-as-ascii octets))
+    (let* ((status-line (trim-http-line (or (read-line input nil) "")))
+           (first-space (position #\Space status-line))
+           (second-space (and first-space
+                              (position #\Space status-line
+                                        :start (1+ first-space))))
+           (status (and first-space
+                        (parse-integer status-line
+                                       :start (1+ first-space)
+                                       :end second-space
+                                       :junk-allowed t)))
+           (headers nil))
+      (unless status
+        (error 'runtime-error
+               :message "containerd returned an invalid exec response"))
+      (loop for raw = (read-line input nil nil)
+            while raw
+            for line = (trim-http-line raw)
+            until (zerop (length line))
+            do (let ((colon (position #\: line)))
+                 (when colon
+                   (push (cons (intern (string-upcase (subseq line 0 colon))
+                                       :keyword)
+                               (string-trim '(#\Space #\Tab)
+                                            (subseq line (1+ colon))))
+                         headers))))
+      (values status (nreverse headers)))))
+
+(defun upgrade-request-p ()
+  (let ((connection (hunchentoot:header-in* :connection))
+        (upgrade (hunchentoot:header-in* :upgrade)))
+    (and connection upgrade
+         (find "upgrade"
+               (uiop:split-string connection :separator '(#\, #\Space #\Tab))
+               :test #'string-equal))))
+
+(defun copy-binary-stream (input output)
+  (let ((buffer (make-array 16384 :element-type '(unsigned-byte 8))))
+    (loop for first = (read-byte input nil nil)
+          while first
+          do (setf (aref buffer 0) first)
+             (let ((count 1))
+               (loop while (and (< count (length buffer)) (listen input))
+                     do (setf (aref buffer count) (read-byte input))
+                        (incf count))
+               (write-sequence buffer output :end count)
+               (finish-output output)))))
+
+(defun relay-runtime-stream (client upstream socket)
+  (let ((client-to-runtime
+          (bt:make-thread
+           (lambda ()
+             (unwind-protect
+                  (ignore-errors (copy-binary-stream client upstream))
+               (ignore-errors (usocket:socket-shutdown socket :io))))
+           :name "gr8s exec client-to-runtime")))
+    (declare (ignore client-to-runtime))
+    (unwind-protect
+         (copy-binary-stream upstream client)
+      (ignore-errors (usocket:socket-close socket)))))
+
+(defun proxy-runtime-stream (url)
+  (multiple-value-bind (host port target)
+      (parse-runtime-stream-url url)
+    (let* ((socket (usocket:socket-connect
+                    host port :element-type '(unsigned-byte 8)))
+           (upstream (usocket:socket-stream socket)))
+      (handler-case
+          (progn
+            (write-sequence
+             (ascii-octets
+              (runtime-upgrade-request
+               target host port (hunchentoot:headers-in*)))
+             upstream)
+            (finish-output upstream)
+            (multiple-value-bind (status headers)
+                (parse-http-response-head
+                 (read-http-response-head upstream))
+              (unless (= status 101)
+                (error 'runtime-error
+                       :message
+                       (format nil
+                               "containerd rejected the exec upgrade with HTTP ~D"
+                               status)))
+              (setf (hunchentoot:return-code*) 101
+                    (hunchentoot:content-type*) nil)
+              (dolist (header headers)
+                (when (member (car header)
+                              *runtime-upgrade-response-headers*)
+                  (setf (hunchentoot:header-out (car header))
+                        (cdr header))))
+              ;; SEND-HEADERS treats an unknown-length response as a chunked
+              ;; body.  An upgraded connection has no HTTP body: its following
+              ;; octets belong to WebSocket/SPDY and must remain untouched.
+              (let ((client (hunchentoot::start-output 101 nil)))
+                (finish-output client)
+                (relay-runtime-stream client upstream socket))))
+        (error (condition)
+          (ignore-errors (usocket:socket-close socket))
+          (if (typep condition 'runtime-error)
+              (error condition)
+              (error 'runtime-error :message (princ-to-string condition))))))))
+
+(defparameter *kubernetes-websocket-protocols*
+  '("v5.channel.k8s.io" "v4.channel.k8s.io"))
+
+(defun requested-kubernetes-websocket-protocol ()
+  (let ((requested
+          (uiop:split-string
+           (or (hunchentoot:header-in* :sec-websocket-protocol) "")
+           :separator '(#\, #\Space #\Tab))))
+    (find-if (lambda (protocol)
+               (find protocol requested :test #'string-equal))
+             *kubernetes-websocket-protocols*)))
+
+(defun websocket-accept-value (key)
+  (ag-grpc:base64-encode
+   (ironclad:digest-sequence
+    :sha1
+    (trivial-utf-8:string-to-utf-8-bytes
+     (concatenate 'string key "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")))))
+
+(defun write-kubernetes-channel-frame (stream channel data)
+  (let ((payload (make-array (1+ (length data))
+                             :element-type '(unsigned-byte 8))))
+    (setf (aref payload 0) channel)
+    (replace payload data :start1 1)
+    (write-websocket-frame stream 2 payload)))
+
+(defun exec-exit-status-bytes (exit-code)
+  (trivial-utf-8:string-to-utf-8-bytes
+   (with-output-to-string (output)
+     (com.inuoe.jzon:stringify
+      (let ((status (make-hash-table :test #'equal))
+            (details (make-hash-table :test #'equal))
+            (cause (make-hash-table :test #'equal)))
+        (setf (gethash "apiVersion" status) "v1"
+              (gethash "kind" status) "Status"
+              (gethash "status" status) "Failure"
+              (gethash "message" status)
+              (format nil "command terminated with exit code ~D" exit-code)
+              (gethash "reason" status) "NonZeroExitCode"
+              (gethash "code" status) 500
+              (gethash "reason" cause) "ExitCode"
+              (gethash "message" cause) (princ-to-string exit-code)
+              (gethash "causes" details) (list cause)
+              (gethash "details" status) details)
+        status)
+      :stream output))))
+
+(defun serve-runtime-exec-sync (result stdout-p stderr-p)
+  (let ((key (hunchentoot:header-in* :sec-websocket-key))
+        (protocol (requested-kubernetes-websocket-protocol)))
+    (unless (and key (plusp (length key)))
+      (bad-exec-request "Pod exec requires Sec-WebSocket-Key"))
+    (unless protocol
+      (bad-exec-request "Pod exec requires a supported channel protocol"))
+    (setf (hunchentoot:return-code*) 101
+          (hunchentoot:content-type*) nil
+          (hunchentoot:header-out :connection) "Upgrade"
+          (hunchentoot:header-out :upgrade) "websocket"
+          (hunchentoot:header-out :sec-websocket-accept)
+          (websocket-accept-value key)
+          (hunchentoot:header-out :sec-websocket-protocol) protocol)
+    (let ((client (hunchentoot::start-output 101 nil)))
+      (finish-output client)
+      (when stdout-p
+        (write-kubernetes-channel-frame
+         client 1 (runtime-exec-result-stdout result)))
+      (when stderr-p
+        (write-kubernetes-channel-frame
+         client 2 (runtime-exec-result-stderr result)))
+      (unless (zerop (runtime-exec-result-exit-code result))
+        (write-kubernetes-channel-frame
+         client 3
+         (exec-exit-status-bytes (runtime-exec-result-exit-code result))))
+      (write-websocket-frame
+       client 8 (make-array 0 :element-type '(unsigned-byte 8))))))
+
+(define-condition exec-input-reader-stopped (error) ())
+
+(defun begin-kubernetes-websocket ()
+  (let ((key (hunchentoot:header-in* :sec-websocket-key))
+        (protocol (requested-kubernetes-websocket-protocol)))
+    (unless (and key (plusp (length key)))
+      (bad-exec-request "Pod exec requires Sec-WebSocket-Key"))
+    (unless protocol
+      (bad-exec-request "Pod exec requires a supported channel protocol"))
+    (setf (hunchentoot:return-code*) 101
+          (hunchentoot:content-type*) nil
+          (hunchentoot:header-out :connection) "Upgrade"
+          (hunchentoot:header-out :upgrade) "websocket"
+          (hunchentoot:header-out :sec-websocket-accept)
+          (websocket-accept-value key)
+          (hunchentoot:header-out :sec-websocket-protocol) protocol)
+    (let ((client (hunchentoot::start-output 101 nil)))
+      (finish-output client)
+      client)))
+
+(defun terminal-size-from-channel-data (data)
+  (let ((size
+          (com.inuoe.jzon:parse
+           (trivial-utf-8:utf-8-bytes-to-string data))))
+    (values (gethash "height" size 0)
+            (gethash "width" size 0))))
+
+(defun forward-kubernetes-exec-input
+    (reconciler session stream write-lock finished-p)
+  (handler-case
+      (loop until (funcall finished-p)
+            do (multiple-value-bind (opcode payload fin-p masked-p)
+                   (read-websocket-frame stream)
+                 (declare (ignore fin-p))
+                 (case opcode
+                   (2
+                    (unless masked-p
+                      (error 'runtime-error
+                             :message "WebSocket client frames must be masked"))
+                    (when (zerop (length payload))
+                      (error 'runtime-error
+                             :message "Empty remotecommand input frame"))
+                    (case (aref payload 0)
+                      (0
+                       (reconciler-send-exec-session-input
+                        reconciler session
+                        gr8s.node.v1::+streamchannel-stream_channel_stdin+
+                        (subseq payload 1)))
+                      (4
+                       (multiple-value-bind (rows columns)
+                           (terminal-size-from-channel-data (subseq payload 1))
+                         (reconciler-send-exec-session-input
+                          reconciler session
+                          gr8s.node.v1::+streamchannel-stream_channel_terminal_resize+
+                          (make-array 0 :element-type '(unsigned-byte 8))
+                          :rows rows :columns columns)))
+                      (255
+                       (when (and (> (length payload) 1)
+                                  (= 0 (aref payload 1)))
+                         (reconciler-send-exec-session-input
+                          reconciler session
+                          gr8s.node.v1::+streamchannel-stream_channel_stdin+
+                          (make-array 0 :element-type '(unsigned-byte 8))
+                          :eof t)))
+                      (otherwise
+                       (error 'runtime-error
+                              :message "Unsupported remotecommand input channel"))))
+                   (8
+                    (unless (funcall finished-p)
+                      (reconciler-cancel-exec-session
+                       reconciler session "WebSocket client closed"))
+                    (return))
+                   (9
+                    (bt:with-lock-held (write-lock)
+                      (write-websocket-frame stream 10 payload)))
+                   (10)
+                   (otherwise
+                    (error 'runtime-error
+                           :message "Unsupported WebSocket input frame")))))
+    (exec-input-reader-stopped () nil)
+    (error (condition)
+      (unless (funcall finished-p)
+        (ignore-errors
+          (reconciler-cancel-exec-session
+           reconciler session (princ-to-string condition)))))))
+
+(defun operation-stream-wire-channel (message)
+  (case (slot-value message 'gr8s.node.v1::channel)
+    (#.gr8s.node.v1::+streamchannel-stream_channel_stdout+ 1)
+    (#.gr8s.node.v1::+streamchannel-stream_channel_stderr+ 2)))
+
+(defun serve-agent-exec-session (reconciler uid container options)
+  (let* ((session
+           (reconciler-start-exec-session
+            reconciler uid container (exec-options-command options)
+            :stdin (exec-options-stdin options)
+            :stdout (exec-options-stdout options)
+            :stderr (exec-options-stderr options)
+            :tty (exec-options-tty options)))
+         (client (begin-kubernetes-websocket))
+         (write-lock (bt:make-lock "gr8s kubectl exec websocket writer"))
+         (finished-lock (bt:make-lock "gr8s kubectl exec finished"))
+         (finished-p nil)
+         (completed-p nil)
+         (input-thread nil))
+    (labels ((finished-p ()
+               (bt:with-lock-held (finished-lock) finished-p))
+             (mark-finished ()
+               (bt:with-lock-held (finished-lock) (setf finished-p t))))
+      (unwind-protect
+           (progn
+             (setf input-thread
+                   (bt:make-thread
+                    (lambda ()
+                      (forward-kubernetes-exec-input
+                       reconciler session client write-lock #'finished-p))
+                    :name "gr8s kubectl exec input"))
+             (loop with cursor = 0
+                   do (multiple-value-bind (message next-cursor done-p)
+                          (reconciler-next-exec-session-output
+                           reconciler session cursor)
+                        (setf cursor next-cursor)
+                        (when message
+                          (let ((channel
+                                  (operation-stream-wire-channel message)))
+                            (when channel
+                              (bt:with-lock-held (write-lock)
+                                (write-kubernetes-channel-frame
+                                 client channel
+                                 (slot-value message 'gr8s.node.v1::data))))))
+                        (when done-p
+                          (setf completed-p t)
+                          (loop-finish))))
+             (let ((exit-code
+                     (reconciler-exec-session-exit-code reconciler session)))
+               (unless (zerop exit-code)
+                 (bt:with-lock-held (write-lock)
+                   (write-kubernetes-channel-frame
+                    client 3 (exec-exit-status-bytes exit-code)))))
+             (mark-finished)
+             (bt:with-lock-held (write-lock)
+               (write-websocket-frame
+                client 8 (make-array 0 :element-type '(unsigned-byte 8)))))
+        (mark-finished)
+        (unless completed-p
+          (ignore-errors
+            (reconciler-cancel-exec-session
+             reconciler session "API exec stream ended")))
+        (reconciler-release-exec-session reconciler session)
+        (when (and input-thread (bt:thread-alive-p input-thread))
+          (bt:interrupt-thread
+           input-thread
+           (lambda () (error 'exec-input-reader-stopped))))
+        (when input-thread
+          (ignore-errors (bt:join-thread input-thread)))))))
+
+(defun bad-exec-request (message)
+  (error 'kubernetes-error :status-code 400 :reason "BadRequest"
+         :message message))
+
+(defun pod-exec-response (store reconciler name)
+  (unless (upgrade-request-p)
+    (bad-exec-request "Pod exec requires an upgraded connection"))
+  (let* ((pod (get-pod store "default" name))
+         (options
+           (exec-options-from-parameters (hunchentoot:get-parameters*)))
+         (container
+           (or (exec-options-container options)
+               (container-spec-name (aref (pod-containers pod) 0)))))
+    (unless (exec-options-command options)
+      (bad-exec-request "Pod exec requires at least one command argument"))
+    (unless (find container (pod-containers pod)
+                  :key #'container-spec-name :test #'string=)
+      (bad-exec-request
+       (format nil "container ~A is not valid for pod ~A" container name)))
+    (if (and (not (exec-options-stdin options))
+             (not (exec-options-tty options)))
+        (serve-runtime-exec-sync
+         (reconciler-exec-sync
+          reconciler (pod-uid pod) container (exec-options-command options)
+          :timeout 30)
+         (exec-options-stdout options)
+         (exec-options-stderr options))
+        (if (typep (reconciler-runtime reconciler) 'control-plane-runtime)
+            (serve-agent-exec-session
+             reconciler (pod-uid pod) container options)
+            (proxy-runtime-stream
+             (reconciler-exec-url
+              reconciler (pod-uid pod) container (exec-options-command options)
+              :stdin (exec-options-stdin options)
+              :stdout (exec-options-stdout options)
+              :stderr (exec-options-stderr options)
+              :tty (exec-options-tty options)))))))
+
+(defun pod-route-parts (path)
+  (let ((prefix "/api/v1/namespaces/default/pods"))
+    (when (and (>= (length path) (length prefix))
+               (string= prefix path :end2 (length prefix))
+               (or (= (length path) (length prefix))
+                   (char= #\/ (char path (length prefix)))))
+      (remove "" (uiop:split-string (subseq path (length prefix))
+                                    :separator '(#\/))
+              :test #'string=))))
+
+(defun dispatch-pod-request (store runtime reconciler path method)
+  (declare (ignore runtime))
+  (let ((parts (pod-route-parts path)))
+    (cond
+      ((and (null parts) (eq method :post))
+       (create-pod-response store reconciler))
+      ((and (null parts) (eq method :get))
+       (list-pods-response store reconciler))
+      ((and (= 1 (length parts)) (eq method :get))
+       (get-pod-response store reconciler (first parts)))
+      ((and (= 1 (length parts)) (eq method :patch))
+       (apply-pod-response store reconciler (first parts)))
+      ((and (= 1 (length parts)) (eq method :put))
+       (replace-pod-response store reconciler (first parts)))
+      ((and (= 1 (length parts)) (eq method :delete))
+       (delete-pod-response store reconciler (first parts)))
+      ((and (= 2 (length parts))
+            (string= "log" (second parts))
+            (eq method :get))
+       (pod-logs-response store reconciler (first parts)))
+      ((and (= 2 (length parts))
+            (string= "exec" (second parts))
+            (eq method :post))
+       (pod-exec-response store reconciler (first parts)))
+      (t
+       (status-response "Failure" "NotFound"
+                        (format nil "No route for ~A ~A" method path) 404)))))
+
+(defun handle-http-request (store runtime reconciler request)
+  (handler-case
+      (let ((path (hunchentoot:script-name request))
+            (method (hunchentoot:request-method request)))
+        (cond
+          ((string= path "/version") (version-response))
+          ((string= path "/api") (api-versions-response))
+          ((string= path "/apis") (api-groups-response))
+          ((string= path "/openapi/v2") (openapi-response))
+          ((string= path "/openapi/v3") (openapi-v3-discovery-response))
+          ((string= path "/openapi/v3/api/v1") (openapi-v3-response))
+          ((string= path "/api/v1") (api-resources-response))
+          ((string= path "/api/v1/namespaces/default/events")
+           (event-list-response))
+          ((pod-route-parts path)
+           (dispatch-pod-request store runtime reconciler path method))
+          ((string= path "/api/v1/namespaces/default/pods")
+           (dispatch-pod-request store runtime reconciler path method))
+          (t (status-response "Failure" "NotFound" "route not found" 404))))
+    (kubernetes-error (error)
+      (kubernetes-error-response error))
+    (com.inuoe.jzon:json-parse-error (error)
+      (status-response "Failure" "BadRequest" (princ-to-string error) 400))
+    (runtime-error (error)
+      (status-response "Failure" "RuntimeError"
+                       (runtime-error-message error) 500))))

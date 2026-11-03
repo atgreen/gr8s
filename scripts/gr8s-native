@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+binary_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+project_root=$(dirname -- "$binary_directory")
+GR8S_ROOT=${GR8S_ROOT:-$project_root}
+export GR8S_ROOT
+exec "$binary_directory/gr8s.bin" --end-runtime-options "$@"

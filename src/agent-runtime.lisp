@@ -1,0 +1,590 @@
+(in-package #:gr8s)
+
+(defstruct (node-runtime (:constructor %make-node-runtime))
+  state-directory
+  runtime
+  manager
+  store
+  reconciler
+  worker
+  thread
+  error
+  (state :stopped)
+  (stop-requested nil)
+  (operations (make-hash-table :test #'equal))
+  (operations-lock (bt:make-lock "gr8s node runtime operations"))
+  (lock (bt:make-lock "gr8s node runtime"))
+  (state-changed (bt:make-condition-variable :name "gr8s node runtime state"))
+  (apply-lock (bt:make-lock "gr8s node snapshot application")))
+
+(defun make-node-runtime (state-directory runtime manager)
+  (let* ((directory (uiop:ensure-directory-pathname state-directory))
+         (store (open-store (merge-pathnames "desired/" directory))))
+    (%make-node-runtime
+     :state-directory directory
+     :runtime runtime
+     :manager manager
+     :store store
+     :reconciler (make-reconciler store runtime))))
+
+(defun node-runtime-stopping-p (node-runtime)
+  (bt:with-lock-held ((node-runtime-lock node-runtime))
+    (node-runtime-stop-requested node-runtime)))
+
+(defun wait-for-node-runtime-stop (node-runtime)
+  (bt:with-lock-held ((node-runtime-lock node-runtime))
+    (loop until (node-runtime-stop-requested node-runtime)
+          do (bt:condition-wait
+              (node-runtime-state-changed node-runtime)
+              (node-runtime-lock node-runtime)))))
+
+(defun run-node-runtime-body (node-runtime)
+  (unwind-protect
+       (progn
+         (setf (node-runtime-worker node-runtime)
+               (start-reconciliation-worker
+                (node-runtime-reconciler node-runtime)))
+         (bt:with-lock-held ((node-runtime-lock node-runtime))
+           (setf (node-runtime-state node-runtime) :running)
+           (bt:condition-notify (node-runtime-state-changed node-runtime)))
+         (wait-for-node-runtime-stop node-runtime))
+    (when (node-runtime-worker node-runtime)
+      (stop-reconciliation-worker (node-runtime-worker node-runtime))
+      (setf (node-runtime-worker node-runtime) nil))))
+
+(defun call-with-agent-cni-server
+    (node-runtime function &key (operations (make-cni-operations)))
+  (let ((manager (node-runtime-manager node-runtime)))
+    (unless manager
+      (error "the agent CNI service requires managed containerd"))
+    (let ((server
+            (start-agent-cni-server
+             (managed-containerd-agent-cni-socket-path manager)
+             (lambda (request)
+               (handle-agent-cni-request request :operations operations)))))
+      (unwind-protect
+           (funcall function)
+        (stop-agent-cni-server server)))))
+
+(defun call-with-node-runtime-services (node-runtime)
+  (let ((body (lambda () (run-node-runtime-body node-runtime))))
+    (if (containerd-runtime-p (node-runtime-runtime node-runtime))
+        (if (node-runtime-manager node-runtime)
+            (call-with-agent-cni-server
+             node-runtime
+             (lambda () (call-with-dns-server body)))
+            (call-with-dns-server body))
+        (funcall body))))
+
+(defun node-runtime-thread-main (node-runtime)
+  (handler-case
+      (call-with-managed-containerd
+       (node-runtime-manager node-runtime)
+       (lambda () (call-with-node-runtime-services node-runtime)))
+    (error (condition)
+      (bt:with-lock-held ((node-runtime-lock node-runtime))
+        (setf (node-runtime-error node-runtime) condition
+              (node-runtime-state node-runtime) :failed)
+        (bt:condition-notify (node-runtime-state-changed node-runtime)))))
+  (bt:with-lock-held ((node-runtime-lock node-runtime))
+    (unless (eq :failed (node-runtime-state node-runtime))
+      (setf (node-runtime-state node-runtime) :stopped))
+    (bt:condition-notify (node-runtime-state-changed node-runtime))))
+
+(defun start-node-runtime (node-runtime)
+  (bt:with-lock-held ((node-runtime-lock node-runtime))
+    (case (node-runtime-state node-runtime)
+      (:running (return-from start-node-runtime node-runtime))
+      (:starting)
+      (:failed (error (node-runtime-error node-runtime)))
+      (:stopped
+       (setf (node-runtime-state node-runtime) :starting
+             (node-runtime-stop-requested node-runtime) nil
+             (node-runtime-error node-runtime) nil
+             (node-runtime-thread node-runtime)
+             (bt:make-thread
+              (lambda () (node-runtime-thread-main node-runtime))
+              :name "gr8s node runtime"))))
+    (loop while (eq :starting (node-runtime-state node-runtime))
+          do (bt:condition-wait
+              (node-runtime-state-changed node-runtime)
+              (node-runtime-lock node-runtime)))
+    (when (eq :failed (node-runtime-state node-runtime))
+      (error (node-runtime-error node-runtime))))
+  node-runtime)
+
+(defun stop-node-runtime (node-runtime)
+  (let ((thread nil))
+    (cancel-all-node-operations node-runtime "node runtime stopped")
+    (bt:with-lock-held ((node-runtime-lock node-runtime))
+      (when (member (node-runtime-state node-runtime) '(:starting :running))
+        (setf (node-runtime-stop-requested node-runtime) t)
+        (bt:condition-notify (node-runtime-state-changed node-runtime)))
+      (setf thread (node-runtime-thread node-runtime)))
+    (when (and thread (not (eq thread (bt:current-thread))))
+      (ignore-errors (bt:join-thread thread)))
+    (bt:with-lock-held ((node-runtime-lock node-runtime))
+      (unless (eq :failed (node-runtime-state node-runtime))
+        (setf (node-runtime-state node-runtime) :stopped))))
+  nil)
+
+(defun assignment-pod (assignment)
+  (let* ((json (trivial-utf-8:utf-8-bytes-to-string
+                (slot-value assignment 'gr8s.node.v1::pod-json)))
+         (pod (parse-pod json))
+         (namespace (slot-value assignment 'gr8s.node.v1::namespace))
+         (name (slot-value assignment 'gr8s.node.v1::name))
+         (uid (slot-value assignment 'gr8s.node.v1::uid))
+         (resource-version
+           (slot-value assignment 'gr8s.node.v1::resource-version)))
+    (unless (and (string= namespace (pod-namespace pod))
+                 (string= name (pod-name pod))
+                 (string= uid (pod-uid pod))
+                 (string= resource-version (pod-resource-version pod)))
+      (error "Pod assignment identity does not match its Pod JSON"))
+    pod))
+
+(defun put-assigned-pod (store pod)
+  (with-store-lock (store)
+    (persist-pod store pod)
+    (index-pod store pod))
+  pod)
+
+(defun remove-unassigned-pods (node-runtime assignments)
+  (let ((assigned-uids (make-hash-table :test #'equal)))
+    (dolist (assignment assignments)
+      (setf (gethash (slot-value assignment 'gr8s.node.v1::uid)
+                     assigned-uids)
+            t))
+    (dolist (pod (list-pods (node-runtime-store node-runtime) "default"))
+      (unless (gethash (pod-uid pod) assigned-uids)
+        (runtime-delete (node-runtime-runtime node-runtime) (pod-uid pod))
+        (remove-pod (node-runtime-store node-runtime)
+                    (pod-namespace pod) (pod-name pod))))))
+
+(defun pod-observed-status-message (pod status)
+  (make-instance
+   'gr8s.node.v1::pod-observed-status
+   :namespace (pod-namespace pod)
+   :name (pod-name pod)
+   :uid (pod-uid pod)
+   :resource-version (pod-resource-version pod)
+   :phase (gethash "phase" status "Unknown")
+   :reason (gethash "reason" status "")
+   :message (gethash "message" status "")))
+
+(defun reconcile-node-snapshot (node-runtime snapshot)
+  (unless (eq :running (node-runtime-state node-runtime))
+    (error 'runtime-error :message "node runtime is not running"))
+  (bt:with-lock-held ((node-runtime-apply-lock node-runtime))
+    (let ((assignments (slot-value snapshot 'gr8s.node.v1::pods)))
+      (remove-unassigned-pods node-runtime assignments)
+      (loop for assignment in assignments
+            for pod = (put-assigned-pod
+                       (node-runtime-store node-runtime)
+                       (assignment-pod assignment))
+            for status = (reconcile-pod
+                          (node-runtime-reconciler node-runtime)
+                          (pod-namespace pod) (pod-name pod))
+            collect (pod-observed-status-message pod status)
+              into statuses
+            finally (return statuses)))))
+
+(defun node-operation-response (request status &key (exit-code 0) (message ""))
+  (make-instance
+   'gr8s.node.v1::operation-response
+   :operation-id (slot-value request 'gr8s.node.v1::operation-id)
+   :status status
+   :exit-code exit-code
+   :error-message message))
+
+(defun node-operation-stream (request channel data &key (sequence 1) (eof t))
+  (make-instance
+   'gr8s.node.v1::operation-stream
+   :operation-id (slot-value request 'gr8s.node.v1::operation-id)
+   :sequence sequence
+   :channel channel
+   :data data
+   :eof eof))
+
+(defun assigned-operation-pod (node-runtime request)
+  (let* ((namespace (slot-value request 'gr8s.node.v1::namespace))
+         (name (slot-value request 'gr8s.node.v1::pod))
+         (uid (slot-value request 'gr8s.node.v1::pod-uid))
+         (pod (get-pod (node-runtime-store node-runtime) namespace name)))
+    (unless (string= uid (pod-uid pod))
+      (error 'runtime-error
+             :message (format nil "Pod ~A/~A is not assigned to this agent"
+                              namespace name)))
+    pod))
+
+(defun handle-node-operation (node-runtime request)
+  (handler-case
+      (progn
+        (assigned-operation-pod node-runtime request)
+        (case (slot-value request 'gr8s.node.v1::kind)
+          (#.gr8s.node.v1::+operationkind-operation_kind_logs+
+           (let ((logs
+                   (runtime-logs
+                    (node-runtime-runtime node-runtime)
+                    (slot-value request 'gr8s.node.v1::pod-uid)
+                    (slot-value request 'gr8s.node.v1::container))))
+             (list
+              (cons
+               :operation-stream
+               (node-operation-stream
+                request
+                gr8s.node.v1::+streamchannel-stream_channel_stdout+
+                (trivial-utf-8:string-to-utf-8-bytes logs)))
+              (cons
+               :operation-response
+               (node-operation-response
+                request
+                gr8s.node.v1::+operationstatus-operation_status_complete+)))))
+          (#.gr8s.node.v1::+operationkind-operation_kind_exec+
+           (let* ((result
+                    (runtime-exec-sync
+                     (node-runtime-runtime node-runtime)
+                     (slot-value request 'gr8s.node.v1::pod-uid)
+                     (slot-value request 'gr8s.node.v1::container)
+                     (slot-value request 'gr8s.node.v1::command)))
+                  (messages nil)
+                  (sequence 0))
+             (flet ((emit (enabled channel data)
+                      (when (and enabled (plusp (length data)))
+                        (push
+                         (cons :operation-stream
+                               (node-operation-stream
+                                request channel data
+                                :sequence (incf sequence)))
+                         messages))))
+               (emit (slot-value request 'gr8s.node.v1::stdout)
+                     gr8s.node.v1::+streamchannel-stream_channel_stdout+
+                     (runtime-exec-result-stdout result))
+               (emit (slot-value request 'gr8s.node.v1::stderr)
+                     gr8s.node.v1::+streamchannel-stream_channel_stderr+
+                     (runtime-exec-result-stderr result)))
+             (nreverse
+              (push
+               (cons
+                :operation-response
+                (node-operation-response
+                 request
+                 gr8s.node.v1::+operationstatus-operation_status_complete+
+                 :exit-code (runtime-exec-result-exit-code result)))
+               messages))))
+          (otherwise
+           (error 'runtime-error :message "Unsupported node operation"))))
+    (error (condition)
+      (list
+       (cons
+        :operation-response
+        (node-operation-response
+         request gr8s.node.v1::+operationstatus-operation_status_failed+
+         :exit-code 1 :message (princ-to-string condition)))))))
+
+(defstruct (node-exec-operation
+             (:constructor make-node-exec-operation
+                 (node-runtime request socket stream emit)))
+  node-runtime
+  request
+  socket
+  stream
+  emit
+  thread
+  (sequence 0)
+  (last-input-sequence 0)
+  (exit-code 0)
+  (finished-p nil)
+  (lock (bt:make-lock "gr8s interactive exec operation"))
+  (write-lock (bt:make-lock "gr8s interactive exec websocket writer")))
+
+(defun runtime-websocket-request (target host port key)
+  (format nil
+          "GET ~A HTTP/1.1~C~CHost: ~A:~D~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-WebSocket-Key: ~A~C~CSec-WebSocket-Version: 13~C~CSec-WebSocket-Protocol: v5.channel.k8s.io~C~C~C~C"
+          target #\Return #\Linefeed host port #\Return #\Linefeed
+          #\Return #\Linefeed #\Return #\Linefeed key #\Return #\Linefeed
+          #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed))
+
+(defun connect-runtime-websocket (url)
+  (multiple-value-bind (host port target) (parse-runtime-stream-url url)
+    (let* ((socket
+             (usocket:socket-connect
+              host port :element-type '(unsigned-byte 8)))
+           (stream (usocket:socket-stream socket))
+           (key
+             (ag-grpc:base64-encode
+              (make-array 16 :element-type '(unsigned-byte 8)
+                             :initial-contents
+                             (loop repeat 16 collect (random 256))))))
+      (handler-case
+          (progn
+            (write-sequence
+             (ascii-octets
+              (runtime-websocket-request target host port key))
+             stream)
+            (finish-output stream)
+            (multiple-value-bind (status headers)
+                (parse-http-response-head (read-http-response-head stream))
+              (unless (= 101 status)
+                (error 'runtime-error
+                       :message
+                       (format nil "containerd rejected exec with HTTP ~D"
+                               status)))
+              (unless (string-equal
+                       "v5.channel.k8s.io"
+                       (cdr (assoc :sec-websocket-protocol headers)))
+                (error 'runtime-error
+                       :message "containerd did not negotiate remotecommand v5")))
+            (values socket stream))
+        (error (condition)
+          (ignore-errors (usocket:socket-close socket))
+          (if (typep condition 'runtime-error)
+              (error condition)
+              (error 'runtime-error :message (princ-to-string condition))))))))
+
+(defun find-node-exec-operation (node-runtime operation-id)
+  (bt:with-lock-held ((node-runtime-operations-lock node-runtime))
+    (gethash operation-id (node-runtime-operations node-runtime))))
+
+(defun remember-node-exec-operation (node-runtime operation)
+  (let ((operation-id
+          (slot-value (node-exec-operation-request operation)
+                      'gr8s.node.v1::operation-id)))
+    (bt:with-lock-held ((node-runtime-operations-lock node-runtime))
+      (when (gethash operation-id (node-runtime-operations node-runtime))
+        (error 'runtime-error :message "Node operation already exists"))
+      (setf (gethash operation-id (node-runtime-operations node-runtime))
+            operation))))
+
+(defun forget-node-exec-operation (operation)
+  (let* ((node-runtime (node-exec-operation-node-runtime operation))
+         (operation-id
+           (slot-value (node-exec-operation-request operation)
+                       'gr8s.node.v1::operation-id)))
+    (bt:with-lock-held ((node-runtime-operations-lock node-runtime))
+      (when (eq operation
+                (gethash operation-id (node-runtime-operations node-runtime)))
+        (remhash operation-id (node-runtime-operations node-runtime))))))
+
+(defun emit-node-exec-response (operation status &key (exit-code 0) message)
+  (funcall
+   (node-exec-operation-emit operation) :operation-response
+   (node-operation-response
+    (node-exec-operation-request operation) status
+    :exit-code exit-code :message (or message ""))))
+
+(defun finish-node-exec-operation (operation &key error (emit-p t))
+  (let ((finish-p nil)
+        (exit-code 0))
+    (bt:with-lock-held ((node-exec-operation-lock operation))
+      (unless (node-exec-operation-finished-p operation)
+        (setf (node-exec-operation-finished-p operation) t
+              finish-p t
+              exit-code (node-exec-operation-exit-code operation))))
+    (when finish-p
+      (forget-node-exec-operation operation)
+      (ignore-errors
+        (usocket:socket-shutdown (node-exec-operation-socket operation) :io))
+      (ignore-errors
+        (usocket:socket-close (node-exec-operation-socket operation)))
+      (when emit-p
+        (if error
+            (emit-node-exec-response
+             operation gr8s.node.v1::+operationstatus-operation_status_failed+
+             :exit-code 1 :message error)
+            (emit-node-exec-response
+             operation gr8s.node.v1::+operationstatus-operation_status_complete+
+             :exit-code exit-code))))))
+
+(defun node-exec-output-channel (wire-channel)
+  (case wire-channel
+    (1 gr8s.node.v1::+streamchannel-stream_channel_stdout+)
+    (2 gr8s.node.v1::+streamchannel-stream_channel_stderr+)))
+
+(defun node-exec-status-exit-code (data)
+  (handler-case
+      (let* ((status
+               (com.inuoe.jzon:parse
+                (trivial-utf-8:utf-8-bytes-to-string data)))
+             (details (gethash "details" status))
+             (causes (and details (gethash "causes" details))))
+        (or (loop for cause across causes
+                  when (string= "ExitCode" (gethash "reason" cause ""))
+                    return (parse-integer (gethash "message" cause "")
+                                          :junk-allowed t))
+            1))
+    (error () 1)))
+
+(defun emit-node-exec-stream (operation channel data)
+  (let ((sequence nil))
+    (bt:with-lock-held ((node-exec-operation-lock operation))
+      (setf sequence (incf (node-exec-operation-sequence operation))))
+    (funcall
+     (node-exec-operation-emit operation) :operation-stream
+     (node-operation-stream
+      (node-exec-operation-request operation) channel data
+      :sequence sequence))))
+
+(defun run-node-exec-reader (operation)
+  (handler-case
+      (loop
+        (multiple-value-bind (opcode payload)
+            (read-websocket-frame (node-exec-operation-stream operation))
+          (case opcode
+            (2
+             (when (zerop (length payload))
+               (error 'runtime-error :message "Empty remotecommand frame"))
+             (let ((channel (aref payload 0))
+                   (data (subseq payload 1)))
+               (cond
+                 ((node-exec-output-channel channel)
+                  (emit-node-exec-stream
+                   operation (node-exec-output-channel channel) data))
+                 ((= channel 3)
+                  (bt:with-lock-held ((node-exec-operation-lock operation))
+                    (setf (node-exec-operation-exit-code operation)
+                          (node-exec-status-exit-code data)))))))
+            (8 (return))
+            (9
+             (bt:with-lock-held ((node-exec-operation-write-lock operation))
+               (write-websocket-frame
+                (node-exec-operation-stream operation) 10 payload
+                :masked-p t)))
+            (10)
+            (otherwise
+             (error 'runtime-error
+                    :message (format nil "Unsupported WebSocket opcode ~D"
+                                     opcode))))))
+    (error (condition)
+      (unless (node-exec-operation-finished-p operation)
+        (finish-node-exec-operation operation :error (princ-to-string condition)))
+      (return-from run-node-exec-reader nil)))
+  (finish-node-exec-operation operation))
+
+(defun start-node-exec-operation (node-runtime request emit)
+  (assigned-operation-pod node-runtime request)
+  (let ((url
+          (runtime-exec-url
+           (node-runtime-runtime node-runtime)
+           (slot-value request 'gr8s.node.v1::pod-uid)
+           (slot-value request 'gr8s.node.v1::container)
+           (slot-value request 'gr8s.node.v1::command)
+           :stdin (slot-value request 'gr8s.node.v1::stdin)
+           :stdout (slot-value request 'gr8s.node.v1::stdout)
+           :stderr (slot-value request 'gr8s.node.v1::stderr)
+           :tty (slot-value request 'gr8s.node.v1::tty))))
+    (multiple-value-bind (socket stream) (connect-runtime-websocket url)
+      (let ((operation
+              (make-node-exec-operation
+               node-runtime request socket stream emit)))
+        (remember-node-exec-operation node-runtime operation)
+        (emit-node-exec-response
+         operation gr8s.node.v1::+operationstatus-operation_status_accepted+)
+        (setf (node-exec-operation-thread operation)
+              (bt:make-thread
+               (lambda () (run-node-exec-reader operation))
+               :name "gr8s interactive exec reader"))
+        operation))))
+
+(defun node-exec-input-payload (input)
+  (case (slot-value input 'gr8s.node.v1::channel)
+    (#.gr8s.node.v1::+streamchannel-stream_channel_stdin+
+     (let ((data (slot-value input 'gr8s.node.v1::data)))
+       (when (plusp (length data))
+         (concatenate '(vector (unsigned-byte 8)) #(0) data))))
+    (#.gr8s.node.v1::+streamchannel-stream_channel_terminal_resize+
+     (concatenate
+      '(vector (unsigned-byte 8)) #(4)
+      (trivial-utf-8:string-to-utf-8-bytes
+       (with-output-to-string (output)
+         (com.inuoe.jzon:stringify
+          (let ((size (make-hash-table :test #'equal)))
+            (setf (gethash "width" size)
+                  (slot-value input 'gr8s.node.v1::columns)
+                  (gethash "height" size)
+                  (slot-value input 'gr8s.node.v1::rows))
+            size)
+          :stream output)))))
+    (otherwise
+     (error 'runtime-error :message "Unsupported interactive input channel"))))
+
+(defun write-node-exec-input (operation input)
+  ;; The generated binding renames this field's slot because SEQUENCE is a
+  ;; Common Lisp symbol, while preserving the protobuf :SEQUENCE initarg.
+  (let ((sequence
+          (slot-value input 'gr8s.node.v1::proto-sequence)))
+    (bt:with-lock-held ((node-exec-operation-lock operation))
+      (unless (> sequence (node-exec-operation-last-input-sequence operation))
+        (error 'runtime-error :message "Interactive input sequence is stale"))
+      (setf (node-exec-operation-last-input-sequence operation) sequence)))
+  (bt:with-lock-held ((node-exec-operation-write-lock operation))
+    (let ((payload (node-exec-input-payload input)))
+      (when payload
+        (write-websocket-frame
+         (node-exec-operation-stream operation) 2 payload :masked-p t)))
+    (when (slot-value input 'gr8s.node.v1::eof)
+      (write-websocket-frame
+       (node-exec-operation-stream operation) 2 #(255 0) :masked-p t))))
+
+(defun dispatch-node-operation (node-runtime variant payload emit)
+  (handler-case
+      (case variant
+        (:operation-request
+         (if (and (= (slot-value payload 'gr8s.node.v1::kind)
+                     gr8s.node.v1::+operationkind-operation_kind_exec+)
+                  (or (slot-value payload 'gr8s.node.v1::stdin)
+                      (slot-value payload 'gr8s.node.v1::tty)))
+             (start-node-exec-operation node-runtime payload emit)
+             (dolist (reply (handle-node-operation node-runtime payload))
+               (funcall emit (car reply) (cdr reply)))))
+        (:operation-input
+         (let ((operation
+                 (find-node-exec-operation
+                  node-runtime
+                  (slot-value payload 'gr8s.node.v1::operation-id))))
+           (unless operation
+             (error 'runtime-error :message "Interactive operation was not found"))
+           (write-node-exec-input operation payload)))
+        (:operation-cancel
+         (let ((operation
+                 (find-node-exec-operation
+                  node-runtime
+                  (slot-value payload 'gr8s.node.v1::operation-id))))
+           (when operation
+             (finish-node-exec-operation
+              operation :error
+              (or (slot-value payload 'gr8s.node.v1::reason)
+                  "operation cancelled")))))
+        (:session-closed
+         (abandon-all-node-operations node-runtime))
+        (otherwise
+         (error 'runtime-error :message "Unsupported operation envelope")))
+    (error (condition)
+      (if (eq variant :operation-request)
+          (funcall
+           emit :operation-response
+           (node-operation-response
+            payload gr8s.node.v1::+operationstatus-operation_status_failed+
+            :exit-code 1 :message (princ-to-string condition)))
+          (error condition)))))
+
+(defun cancel-all-node-operations (node-runtime reason)
+  (let ((operations nil))
+    (bt:with-lock-held ((node-runtime-operations-lock node-runtime))
+      (maphash (lambda (id operation)
+                 (declare (ignore id))
+                 (push operation operations))
+               (node-runtime-operations node-runtime)))
+    (dolist (operation operations)
+      (finish-node-exec-operation operation :error reason))))
+
+(defun abandon-all-node-operations (node-runtime)
+  (let ((operations nil))
+    (bt:with-lock-held ((node-runtime-operations-lock node-runtime))
+      (maphash (lambda (id operation)
+                 (declare (ignore id))
+                 (push operation operations))
+               (node-runtime-operations node-runtime)))
+    (dolist (operation operations)
+      (finish-node-exec-operation operation :emit-p nil))))
