@@ -12,11 +12,48 @@ policy_pin_count() {
   for pin in "$work_directory/state/agent/containerd/bpf/"*/rejected_spoofs \
              "$work_directory/state/agent/containerd/bpf/"*/endpoint_identity \
              "$work_directory/state/agent/containerd/bpf/"*/traffic_stats \
-             "$work_directory/state/agent/containerd/bpf/"*/tcx-egress; do
+             "$work_directory/state/agent/containerd/bpf/"*/tcx-ingress; do
     [ -e "$pin" ] || continue
     count=$((count + 1))
   done
   echo "$count"
+}
+
+workload_state_present() {
+  [ "$(policy_pin_count)" -ne 0 ] && return 0
+  for namespace in "$work_directory/state/agent/containerd/run/io.containerd.grpc.v1.cri/netns/"*; do
+    [ ! -e "$namespace" ] || return 0
+  done
+  ps -eo comm=,args= | awk -v state="$work_directory/state/" '
+    $1 ~ /^containerd-shim/ && index($0, state) { found = 1 }
+    END { exit !found }'
+}
+
+wait_for_workload_cleanup() {
+  cleanup_attempt=0
+  while workload_state_present; do
+    cleanup_attempt=$((cleanup_attempt + 1))
+    if [ "$cleanup_attempt" -ge 300 ]; then
+      echo "Pod policy, namespace, or containerd shim remains after deletion" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
+wait_for_counter() {
+  metric=$1
+  counter_attempt=0
+  until curl -fsS "http://127.0.0.1:$port/metrics" | awk -v metric="$metric" '
+    index($1, metric "{") == 1 && $2 > 0 { found = 1 }
+    END { exit !found }'; do
+    counter_attempt=$((counter_attempt + 1))
+    if [ "$counter_attempt" -ge 300 ]; then
+      echo "expected a positive $metric sample from the agent" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
 }
 
 cleanup() {
@@ -25,6 +62,7 @@ cleanup() {
   if [ -f "$work_directory/kubeconfig" ]; then
     kubectl --kubeconfig "$work_directory/kubeconfig" --request-timeout=2s \
       delete pod gr8s-smoke --ignore-not-found >/dev/null 2>&1 || true
+    wait_for_workload_cleanup || status=1
   fi
   if [ -n "$server_pid" ]; then
     kill "$server_pid" 2>/dev/null || true
@@ -50,7 +88,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-for command in kubectl curl; do
+for command in kubectl curl ip nsenter ping ps awk; do
   command -v "$command" >/dev/null
 done
 
@@ -134,6 +172,14 @@ kubectl --kubeconfig "$work_directory/kubeconfig" describe pod gr8s-smoke >/dev/
 kubectl --kubeconfig "$work_directory/kubeconfig" logs gr8s-smoke -c main | grep -q gr8s-smoke
 kubectl --kubeconfig "$work_directory/kubeconfig" \
   exec gr8s-smoke -c main -- sh -c 'printf "gr8s-exec\n"' | grep -qx gr8s-exec
+if kubectl --kubeconfig "$work_directory/kubeconfig" \
+  exec gr8s-smoke -c main -- sh -c 'exit 7' >"$work_directory/exec-failure.log" 2>&1; then
+  echo "kubectl exec lost the container's nonzero exit status" >&2
+  exit 1
+fi
+grep -q 'exit code 7' "$work_directory/exec-failure.log"
+kubectl --kubeconfig "$work_directory/kubeconfig" \
+  exec gr8s-smoke -c main -- ping -c 1 -W 2 169.254.1.1 >/dev/null
 kubectl --kubeconfig "$work_directory/kubeconfig" \
   exec gr8s-smoke -c main -- grep -q '^nameserver 169\.254\.1\.1$' /etc/resolv.conf
 kubectl --kubeconfig "$work_directory/kubeconfig" \
@@ -145,20 +191,30 @@ if [ "$(policy_pin_count)" -ne 4 ]; then
   echo "expected three pinned Whistler maps and a TCX link for the running Pod" >&2
   exit 1
 fi
+# Inject a source address from the host: ordinary containers do not have
+# CAP_NET_ADMIN. A failed ping plus an incremented policy counter proves the
+# attached hook rejected the packet, rather than merely losing a reply route.
+set -- "$work_directory/state/agent/containerd/run/io.containerd.grpc.v1.cri/netns/"*
+if [ "$#" -ne 1 ] || [ ! -e "$1" ]; then
+  echo "expected one live Pod network namespace" >&2
+  exit 1
+fi
+pod_namespace=$1
+nsenter --net="$pod_namespace" ip address add 192.0.2.123/32 dev eth0
+if nsenter --net="$pod_namespace" ping -I 192.0.2.123 -c 1 -W 1 169.254.1.1 >/dev/null 2>&1; then
+  echo "spoofed Pod source reached the gateway" >&2
+  exit 1
+fi
+nsenter --net="$pod_namespace" ip address del 192.0.2.123/32 dev eth0
+wait_for_counter gr8s_endpoint_allowed_packets_total
+wait_for_counter gr8s_endpoint_rejected_spoofs_total
+
 kubectl --kubeconfig "$work_directory/kubeconfig" delete pod gr8s-smoke
 if kubectl --kubeconfig "$work_directory/kubeconfig" get pod gr8s-smoke >/dev/null 2>&1; then
   echo "deleted Pod is still present" >&2
   exit 1
 fi
 
-attempt=0
-while [ "$(policy_pin_count)" -ne 0 ]; do
-  attempt=$((attempt + 1))
-  if [ "$attempt" -ge 100 ]; then
-    echo "Whistler policy pins remain after Pod deletion" >&2
-    exit 1
-  fi
-  sleep 0.1
-done
+wait_for_workload_cleanup
 
 echo "gr8s embedded managed-containerd smoke test passed"

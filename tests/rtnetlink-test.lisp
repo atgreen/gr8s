@@ -79,8 +79,12 @@
          (let* ((ipam (gr8s::open-node-ipam directory "10.42.0.0/29"))
                 (policy
                   (gr8s::make-cni-operations
-                   :add (lambda (&rest args)
-                          (declare (ignore args))
+                   :add (lambda (config ctx map-path link-path)
+                          (declare (ignore map-path))
+                          (is (string= "ingress" (gr8s::cni-configuration-direction config)))
+                          (is (string= (gr8s::routed-cni-host-name ctx)
+                                       (gr8s::cni-configuration-policy-interface-name config)))
+                          (is (string= "tcx-ingress" (file-namestring link-path)))
                           (push :policy-add events)
                           (when fail-policy (error "injected BPF failure")))
                    :check (lambda (&rest args) (declare (ignore args)))

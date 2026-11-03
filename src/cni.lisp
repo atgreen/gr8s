@@ -24,7 +24,7 @@
     ("traffic_stats" 8 6 0)))
 
 (defstruct cni-configuration
-  version name type direction program map-pin-root previous-result endpoint-address)
+  version name type direction program map-pin-root previous-result endpoint-address policy-interface-name)
 
 (defstruct cni-context
   container-id netns interface-name)
@@ -33,8 +33,10 @@
                              (&key (add 'install-cni-policy)
                                    (check 'check-cni-policy)
                                    (delete 'remove-cni-policy)
-                                   (status 'check-cni-status))))
-  add check delete status)
+                                   (status 'check-cni-status)
+                                   (prepare (lambda (configuration context)
+                                              (declare (ignore configuration context)))))))
+  add check delete status prepare)
 
 (defun required-cni-string (object key)
   (let ((value (gethash key object)))
@@ -119,6 +121,7 @@
        (require-cni-context
         context :network-namespace (member command '("ADD" "CHECK")
                                            :test #'string=))
+       (funcall (cni-operations-prepare operations) configuration context)
        (multiple-value-bind (map-path link-path directory)
            (cni-pin-paths (cni-configuration-map-pin-root configuration)
                           (cni-context-container-id context)
@@ -197,6 +200,18 @@
     (whistler/loader:load-bpf-object
      object :map-replacements replacements)))
 
+(defun call-with-cni-policy-interface
+    (configuration context operation call-in-netns interface-index)
+  ;; The routed agent sets this internal field from its host veth identity.
+  ;; Chained callers still select their Pod interface inside its namespace.
+  (let ((host-interface (cni-configuration-policy-interface-name configuration)))
+    (if host-interface
+        (funcall operation (funcall interface-index host-interface))
+        (funcall call-in-netns (cni-context-netns context)
+                 (lambda ()
+                   (funcall operation
+                            (funcall interface-index (cni-context-interface-name context))))))))
+
 (defun install-cni-policy
     (configuration context map-path link-path
      &key (ensure-directory #'ensure-cni-pin-directory)
@@ -250,11 +265,12 @@
            (let ((program (funcall object-program object "gr8s_egress_guard")))
              (unless program (invalid-cni "Whistler object has no gr8s_egress_guard program"))
              (setf link-fd
-                   (funcall call-in-netns (cni-context-netns context)
-                            (lambda ()
-                              (funcall attach-tcx (funcall program-fd program)
-                                       (funcall interface-index (cni-context-interface-name context))
-                                       (cni-configuration-direction configuration)))))
+                   (call-with-cni-policy-interface
+                    configuration context
+                    (lambda (index)
+                      (funcall attach-tcx (funcall program-fd program) index
+                               (cni-configuration-direction configuration)))
+                    call-in-netns interface-index))
              ;; Keep the old pinned link live until a replacement is attached
              ;; and pinned. Atomic rename also preserves it if pinning fails.
              (funcall pin-object link-fd staging)
@@ -293,11 +309,11 @@
         (funcall close-fd fd))))
   (let ((fd (funcall open-pinned link-path)))
     (unwind-protect
-         (funcall call-in-netns (cni-context-netns context)
-                  (lambda ()
-                    (funcall check-link fd
-                             (funcall interface-index (cni-context-interface-name context))
-                             (cni-configuration-direction configuration))))
+         (call-with-cni-policy-interface
+          configuration context
+          (lambda (index)
+            (funcall check-link fd index (cni-configuration-direction configuration)))
+          call-in-netns interface-index)
       (funcall close-fd fd)))
   nil)
 

@@ -54,6 +54,13 @@
             (policy (make-cni-operations)))
   "Bind a CNI lifecycle to agent-owned IPAM; never trust client IPAM settings."
   (make-cni-operations
+   :prepare
+   (lambda (configuration context)
+     ;; Client direction and interface settings never select the enforcement
+     ;; boundary: Pod egress arrives at its agent-owned host veth ingress.
+     (setf (cni-configuration-direction configuration) "ingress"
+           (cni-configuration-policy-interface-name configuration)
+           (routed-cni-host-name context)))
    :add
    (lambda (configuration context map-path link-path)
      (let* ((address (allocate-pod-address ipam

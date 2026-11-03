@@ -530,3 +530,12 @@
     (is (= #x02112233 (gr8s::netlink-read-integer bytes 4 4)))
     (is (= #x4455 (gr8s::netlink-read-integer bytes 8 4)))
     (is (= 1 (gr8s::netlink-read-integer bytes 12 4)))))
+
+(test routed-policy-selects-the-host-interface-without-entering-the-pod
+  (let ((configuration (gr8s::make-cni-configuration :policy-interface-name "gr-owned"))
+        (context (gr8s::make-cni-context :netns "/missing/pod" :interface-name "eth0")))
+    (is (= 42 (gr8s::call-with-cni-policy-interface
+               configuration context #'identity
+               (lambda (&rest args) (declare (ignore args))
+                 (error "host policy must not enter the Pod namespace"))
+               (lambda (name) (is (string= "gr-owned" name)) 42))))))
