@@ -1,6 +1,17 @@
+;;;; SPDX-FileCopyrightText: 2026 gr8s contributors
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Provide the control plane's durable, lock-protected Pod and node registry.
+;;;; Kubernetes objects are indexed in memory for API operations and persisted
+;;;; as atomically replaced JSON files, while optimistic resource versions and
+;;;; immutable scheduling decisions preserve the API invariants expected by
+;;;; kubectl and the reconciliation loop.
+
 (in-package #:gr8s)
 
 (defstruct (pod-store (:constructor make-pod-store (path)))
+  "Hold durable paths, in-memory indexes, observed status, and the store lock."
   path
   (pods (make-hash-table :test #'equal))
   (nodes (make-hash-table :test #'equal))
@@ -9,24 +20,30 @@
   (lock (bt:make-lock "gr8s store")))
 
 (defmacro with-store-lock ((store) &body body)
+  "Evaluate BODY while holding STORE's lock."
   `(bt:with-lock-held ((pod-store-lock ,store))
      ,@body))
 
 (defun pod-key (namespace name)
+  "Return the stable in-memory key for NAMESPACE and Pod NAME."
   (format nil "~A/~A" namespace name))
 
 (defun pod-path (store pod)
+  "Return the JSON persistence pathname for POD in STORE."
   (merge-pathnames (format nil "~A.json" (pod-uid pod))
                    (pod-store-path store)))
 
 (defun nodes-path (store)
+  "Return STORE's directory for durable node records."
   (merge-pathnames "nodes/" (pod-store-path store)))
 
 (defun node-path (store node)
+  "Return the JSON persistence pathname for NODE in STORE."
   (merge-pathnames (format nil "~A.json" (node-record-id node))
                    (nodes-path store)))
 
 (defun node-record-to-object (node)
+  "Serialize NODE into the JSON object persisted by the control plane."
   (let ((object (make-hash-table :test #'equal)))
     (setf (gethash "id" object) (node-record-id node)
           (gethash "name" object) (node-record-name node)
@@ -35,6 +52,7 @@
     object))
 
 (defun parse-node-record (input)
+  "Parse JSON text or an object into a NODE-RECORD."
   (let ((object (if (hash-table-p input)
                     input
                     (com.inuoe.jzon:parse input))))
@@ -44,6 +62,7 @@
                       :underlay-address (gethash "underlayAddress" object ""))))
 
 (defun secure-random-octets (count)
+  "Read COUNT cryptographically secure random octets from the operating system."
   (let ((octets (make-array count :element-type '(unsigned-byte 8))))
     (with-open-file (stream #P"/dev/urandom"
                             :direction :input
@@ -53,6 +72,7 @@
     octets))
 
 (defun generate-uid (&optional (entropy (secure-random-octets 16)))
+  "Return an RFC 4122 version-4 UUID string derived from 16 ENTROPY octets."
   (unless (= 16 (length entropy))
     (error "a UUID requires exactly 16 bytes of entropy"))
   (let ((octets (copy-seq entropy)))
@@ -67,12 +87,14 @@
             (aref octets 15))))
 
 (defun current-timestamp ()
+  "Return the current UTC time in Kubernetes-compatible RFC 3339 form."
   (multiple-value-bind (second minute hour day month year)
       (decode-universal-time (get-universal-time) 0)
     (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ"
             year month day hour minute second)))
 
 (defun persist-pod (store pod)
+  "Atomically persist POD's authoritative JSON object in STORE."
   (let* ((target (pod-path store pod))
          (temporary
            (make-pathname
@@ -89,6 +111,7 @@
   pod)
 
 (defun persist-node (store node)
+  "Atomically persist NODE in STORE's node directory."
   (ensure-directories-exist (nodes-path store))
   (let* ((target (node-path store node))
          (temporary
@@ -106,11 +129,13 @@
   node)
 
 (defun index-pod (store pod)
+  "Install POD in STORE's namespace/name index and return it."
   (setf (gethash (pod-key (pod-namespace pod) (pod-name pod))
                  (pod-store-pods store))
         pod))
 
 (defun open-store (path)
+  "Open or create a durable store at PATH and rebuild its in-memory indexes."
   (let* ((directory (uiop:ensure-directory-pathname path))
          (store (make-pod-store directory)))
     (ensure-directories-exist directory)
@@ -123,6 +148,7 @@
     store))
 
 (defun get-pod-unlocked (store namespace name)
+  "Return a Pod without locking, or signal a Kubernetes NotFound error."
   (or (gethash (pod-key namespace name) (pod-store-pods store))
       (error 'kubernetes-error
              :status-code 404
@@ -130,16 +156,19 @@
              :message (format nil "Pod ~A/~A was not found" namespace name))))
 
 (defun get-pod (store namespace name)
+  "Return the Pod named NAME in NAMESPACE under STORE's lock."
   (with-store-lock (store)
     (get-pod-unlocked store namespace name)))
 
 (defun list-pods (store namespace)
+  "Return all Pods in NAMESPACE from a consistent STORE snapshot."
   (with-store-lock (store)
     (loop for pod being the hash-values of (pod-store-pods store)
           when (string= namespace (pod-namespace pod))
             collect pod)))
 
 (defun create-pod (store pod)
+  "Assign server metadata, persist POD, and reject duplicate names atomically."
   (with-store-lock (store)
     (when (gethash (pod-key (pod-namespace pod) (pod-name pod))
                    (pod-store-pods store))
@@ -159,6 +188,7 @@
     pod))
 
 (defun update-pod (store replacement expected-resource-version)
+  "Persist REPLACEMENT when EXPECTED-RESOURCE-VERSION matches the stored Pod."
   (with-store-lock (store)
     (let* ((existing (get-pod-unlocked
                       store (pod-namespace replacement) (pod-name replacement)))
@@ -197,6 +227,7 @@
       replacement)))
 
 (defun remove-pod (store namespace name)
+  "Remove a Pod and its observed status from STORE, returning the removed Pod."
   (with-store-lock (store)
     (let ((pod (get-pod-unlocked store namespace name)))
       (delete-file (pod-path store pod))
@@ -206,9 +237,11 @@
       pod)))
 
 (defun delete-pod (store namespace name)
+  "Delete and return the Pod named NAME in NAMESPACE."
   (remove-pod store namespace name))
 
 (defun mark-pod-deleting (store namespace name)
+  "Set a Pod's deletion timestamp, advance its resource version, and persist it."
   (with-store-lock (store)
     (let* ((pod (get-pod-unlocked store namespace name))
            (metadata (gethash "metadata" (pod-to-object pod)))
