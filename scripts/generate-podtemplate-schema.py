@@ -105,7 +105,7 @@ def main():
     args = parser.parse_args()
     sources = load_sources(args.cache)
     all_messages = proto_messages(sources)
-    pending = ["k8s.io.api.core.v1.PodTemplate", "k8s.io.api.core.v1.Pod"]
+    pending = ["k8s.io.api.core.v1.PodTemplate", "k8s.io.api.core.v1.Pod", "k8s.io.api.core.v1.Service"]
     messages = {}
     while pending:
         name = pending.pop()

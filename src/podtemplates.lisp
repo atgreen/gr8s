@@ -5,6 +5,7 @@
 ;;;; Store PodTemplates independently of the executable Pod subset. Pinned
 ;;;; Kubernetes schemas describe all nested PodSpec fields for protobuf input,
 ;;;; structural validation, OpenAPI discovery and strategic merge patching.
+;;;; The wire decoder is also shared by executable Pods and Services.
 
 (in-package #:gr8s)
 
@@ -114,6 +115,14 @@
           (gethash "apiVersion" object) "v1" (gethash "kind" object) "Pod")
     ;; The Pod creation strategy owns status; client status never drives runtime.
     (remhash "status" object)
+    object))
+
+(defun decode-service-protobuf (bytes)
+  "Decode Service wire fields before applying normal allocation and runtime admission."
+  (let* ((object (template-protobuf-message "k8s.io.api.core.v1.Service" bytes))
+         (metadata (core-protobuf-value (core-protobuf-fields bytes) 1)))
+    (setf (gethash "metadata" object) (if metadata (core-protobuf-metadata metadata) (core-object))
+          (gethash "apiVersion" object) "v1" (gethash "kind" object) "Service")
     object))
 
 (defun template-strategic-merge (old patch schema)
