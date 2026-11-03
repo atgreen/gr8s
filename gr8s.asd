@@ -59,6 +59,7 @@
                              (:file "core-resource-http")
                              (:file "server")
                              (:file "in-cluster-api")
+                             (:file "garbage-collection")
                              (:file "main"))))
   :in-order-to ((test-op (test-op "gr8s/tests"))))
 
@@ -94,6 +95,7 @@
                              (:file "bootstrap-resource-test")
                              (:file "pod-volumes-test")
                              (:file "service-account-test")
+                             (:file "garbage-collection-test")
                              (:file "telemetry-test"))))
   :perform (test-op (operation component)
              (declare (ignore operation component))

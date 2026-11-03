@@ -405,3 +405,8 @@ Pod identity, node name and Pod IP. Projected data is applied during Pod setup;
 live refresh is not yet implemented. Managed native startup projects namespace-bound
 ServiceAccount token/CA files automatically unless the Pod or account opts out.
 Deleting and recreating an account or its credential Secret revokes the old token.
+
+Supported nonblocking owner references are preserved on Pods and stored resources.
+The control plane collects dependents after all known owners disappear, comparing
+UIDs so a newly created object cannot inherit an old object's dependents by name.
+Blocking foreground deletion and finalizer controllers remain unsupported.

@@ -197,6 +197,24 @@
    :env (parse-environment object)
    :ports (parse-ports object)))
 
+(defun validate-owner-references (metadata)
+  "Validate owner identities and the supported nonblocking ownership relationship."
+  (let ((owners (gethash "ownerReferences" metadata)) (controllers 0))
+    (when (and owners (not (eq owners 'null)))
+      (unless (and (vectorp owners) (not (stringp owners)))
+        (invalid-pod "metadata.ownerReferences must be an array"))
+      (loop for owner across owners
+            do (reject-unsupported-fields owner '("apiVersion" "kind" "name" "uid" "controller" "blockOwnerDeletion") "ownerReference")
+               (dolist (key '("apiVersion" "kind" "name" "uid"))
+                 (require-nonempty-string (gethash key owner) "ownerReference identity"))
+               (dolist (key '("controller" "blockOwnerDeletion"))
+                 (multiple-value-bind (value present) (gethash key owner)
+                   (when (and present (not (member value '(t nil)))) (invalid-pod "ownerReference flag must be boolean"))))
+               (when (eq t (gethash "controller" owner)) (incf controllers))
+               (when (eq t (gethash "blockOwnerDeletion" owner))
+                 (invalid-pod "blocking foreground owner deletion is not supported")))
+      (when (> controllers 1) (invalid-pod "an object can have only one controller owner")))))
+
 (defun parse-pod (input)
   "Parse JSON text or an object into the supported, validated POD model."
   (let* ((object (require-object
@@ -219,8 +237,9 @@
       (invalid-pod "kind must be Pod"))
     (reject-unsupported-fields
      metadata '("name" "namespace" "labels" "annotations" "uid"
-                "resourceVersion" "creationTimestamp" "deletionTimestamp")
+                "resourceVersion" "creationTimestamp" "deletionTimestamp" "ownerReferences")
      "metadata")
+    (validate-owner-references metadata)
     (reject-unsupported-fields
      spec '("containers" "restartPolicy" "dnsPolicy" "nodeName" "volumes"
             "securityContext" "serviceAccountName" "automountServiceAccountToken"

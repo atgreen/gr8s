@@ -505,7 +505,8 @@
                            :address address :port port
                            :store store :runtime runtime
                            :reconciler reconciler))
-                    (setf worker (start-reconciliation-worker reconciler))
+                    (setf worker (start-reconciliation-worker reconciler
+                                  :before-reconcile (lambda () (collect-orphaned-api-objects reconciler))))
                     (when (getf options :kubeconfig)
                       (write-kubeconfig
                        (getf options :kubeconfig)
