@@ -321,7 +321,7 @@
                              (aref mask (mod index 4))))))
     (values opcode payload)))
 
-(test noninteractive-pod-exec-frames-sync-output
+(test noninteractive-pod-exec-websocket-get-frames-sync-output
   (with-temporary-store (store path)
     (values path)
     (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
@@ -345,7 +345,7 @@
                (write-sequence
                 (gr8s::ascii-octets
                  (format nil
-                         "POST /api/v1/namespaces/default/pods/hello/exec?command=sh&command=-c&command=printf&container=web&stdout=true&stderr=true HTTP/1.1~C~CHost: 127.0.0.1:18080~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-Websocket-Key: dGhlIHNhbXBsZSBub25jZQ==~C~CSec-Websocket-Version: 13~C~CSec-Websocket-Protocol: v5.channel.k8s.io~C~CContent-Length: 0~C~C~C~C"
+                         "GET /api/v1/namespaces/default/pods/hello/exec?command=sh&command=-c&command=printf&container=web&stdout=true&stderr=true HTTP/1.1~C~CHost: 127.0.0.1:18080~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-Websocket-Key: dGhlIHNhbXBsZSBub25jZQ==~C~CSec-Websocket-Version: 13~C~CSec-Websocket-Protocol: v5.channel.k8s.io~C~CContent-Length: 0~C~C~C~C"
                          #\Return #\Linefeed #\Return #\Linefeed
                          #\Return #\Linefeed #\Return #\Linefeed
                          #\Return #\Linefeed #\Return #\Linefeed

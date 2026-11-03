@@ -900,7 +900,7 @@
        (pod-logs-response store reconciler (first parts)))
       ((and (= 2 (length parts))
             (string= "exec" (second parts))
-            (eq method :post))
+            (member method '(:get :post)))
        (pod-exec-response store reconciler (first parts)))
       (t
        (status-response "Failure" "NotFound"
