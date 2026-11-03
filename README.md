@@ -404,6 +404,40 @@ also expose a separate HTTPS API at `10.96.0.1:443`, authenticated with issued
 ServiceAccount tokens and authorized against live RoleBindings and
 ClusterRoleBindings.
 
+PodTemplates support namespaced CRUD and cluster-wide lists, JSON and Kubernetes
+protobuf requests, selectors, dry-run, optimistic updates, strategic merge and
+JSON patches, delete-collection, and JSON watch streams. Templates use the pinned
+Kubernetes 1.36 structural schemas and retain nested PodSpec fields independently
+of the agent's execution subset; storing a template does not start any Pods.
+Server-side apply and finalizer processing remain unsupported.
+Templates have a 2 MiB serialized storage limit so admitted objects can be read
+back by the durable JSON loader.
+
+PodTemplate list continuations are signed and bound to their namespace and
+selectors. A durable change journal preserves a consistent resourceVersion across
+mutations and restarts, with five-minute retention and a 4,096-change bound.
+Compacted or expired continuations return HTTP 410 with a replacement token for
+resuming at the last key in a newer view. Restart the list without a token when a
+consistent full snapshot is required. Watch supports revision resumption,
+selector transitions, timeouts, bookmarks and initial events.
+
+Run `sh scripts/test-podtemplate-api.sh` for real kubectl apply, ordering and
+restart checks against a native API with its fake workload runtime. Run the five
+upstream PodTemplate lifecycle and API chunking cases in a disposable privileged
+Linux guest with:
+
+```sh
+python3 scripts/test-podtemplates-sonobuoy.py \
+  --gr8s /path/to/gr8s.bin --sonobuoy /path/to/sonobuoy
+```
+
+This focused validation
+includes the normal five-minute continuation expiry; it is separate from a full
+certified-conformance run. Regenerate the pinned schemas with
+`python3 scripts/generate-podtemplate-schema.py`; input checksums are verified.
+The [native validation record](docs/podtemplate-conformance-2026-11-03.json)
+captures all five upstream cases passing, plus local API and persistence checks.
+
 Managed native clusters also allocate durable IPv4 TCP ClusterIP Services from
 `10.96.0.0/16`. Native listeners forward connections to running, selector-matched
 Pods in the Service namespace, resolving numeric or named target ports. The

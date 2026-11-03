@@ -17,7 +17,7 @@ CONTAINERD_SOCKET ?= /run/containerd/containerd.sock
 CONTAINERD_LOG_ROOT ?= /var/log/gr8s/pods/
 KUBECONFIG ?= /tmp/gr8s.kubeconfig
 
-LISP_SOURCES := $(wildcard src/*.lisp) $(wildcard tests/*.lisp) gr8s.asd
+LISP_SOURCES := $(wildcard src/*.lisp) $(wildcard tests/*.lisp) $(wildcard schema/*.json) gr8s.asd
 NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
 NODE_PROTOCOL_LISP := src/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
