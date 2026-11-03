@@ -249,9 +249,13 @@ def main():
             report["cleanupError"] = repr(error)
             report["passed"] = False
         log.close()
+        report["pods"] = [{"name": pod["metadata"]["name"], "uid": pod["metadata"]["uid"],
+                           "hostPids": pod.get("testHostPids", []),
+                           "containerIDs": [status.get("containerID") for status in pod.get("status", {}).get("containerStatuses", [])]}
+                          for pod in pods]
         for pod in pods:
             for container in pod["spec"]["containers"]:
-                (root / (pod["metadata"]["name"] + "-" + container["name"] + ".log")).write_text(logs(pod, container["name"]))
+                (root / (pod["metadata"]["name"] + "-" + pod["metadata"]["uid"] + "-" + container["name"] + ".log")).write_text(logs(pod, container["name"]))
         report["ownedShimsRemaining"] = owned_shims()
         if report["ownedShimsRemaining"]:
             report["passed"] = False
