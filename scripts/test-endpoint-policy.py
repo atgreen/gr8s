@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Exercise Whistler's emitted TC bytecode without kernel BPF privileges.
+"""Exercise Whistler TC bytecode with an interpreter or Linux BPF test-run.
 
-This is an instruction interpreter, not a Linux verifier. The separate kernel
-BPF_PROG_TEST_RUN gate remains necessary before claiming kernel enforcement.
+Use --kernel with BPF privileges to verify and execute the same ELF in Linux.
+The default interpreter also checks short buffers and non-linear skb lengths.
 """
+import ctypes
+import os
+import platform
 import struct
 import sys
 
@@ -183,6 +186,92 @@ class Machine:
         raise AssertionError('instruction budget exhausted')
 
 
+class KernelProgram:
+    """Load the same ELF into Linux and exercise it with BPF_PROG_TEST_RUN."""
+    def __init__(self, program):
+        self.fds = []
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        self.syscall_number = {'x86_64': 321, 'aarch64': 280}[platform.machine()]
+        code, ids, descriptors = program
+        self.ids = {}
+        try:
+            for name, descriptor in descriptors.items():
+                fd = self.bpf(0, struct.pack('<IIIII', *descriptor))
+                self.fds.append(fd)
+                self.ids[name] = fd
+            code = bytearray(code)
+            for offset in range(0, len(code), 8):
+                if code[offset] == 0x18 and code[offset + 1] >> 4 == 1:
+                    old = struct.unpack_from('<I', code, offset + 4)[0]
+                    name = next(name for name, fd in ids.items() if fd == old)
+                    struct.pack_into('<I', code, offset + 4, self.ids[name])
+            instructions = ctypes.create_string_buffer(bytes(code))
+            license = ctypes.create_string_buffer(b'GPL')
+            log = ctypes.create_string_buffer(1024 * 1024)
+            attr = struct.pack('<IIQQIIQ', 3, len(code) // 8,
+                               ctypes.addressof(instructions), ctypes.addressof(license),
+                               1, len(log), ctypes.addressof(log))
+            try:
+                self.fd = self.bpf(5, attr)
+            except OSError as error:
+                raise RuntimeError(f'kernel rejected endpoint guard: {error}\n{log.value.decode()}') from error
+            self.fds.append(self.fd)
+        except BaseException:
+            self.close()
+            raise
+
+    def bpf(self, command, attr):
+        buffer = ctypes.create_string_buffer(attr)
+        result = self.libc.syscall(self.syscall_number, command,
+                                   ctypes.byref(buffer), len(attr))
+        if result < 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        return result
+
+    def entry(self, name, key, value=None):
+        key_buffer = ctypes.create_string_buffer(struct.pack('<I', key))
+        size = 16 if name == 'endpoint_identity' else 8
+        value_buffer = ctypes.create_string_buffer(value if value is not None else bytes(size), size)
+        self.bpf(2 if value is not None else 1,
+                 struct.pack('<IIQQQ', self.ids[name], 0, ctypes.addressof(key_buffer),
+                             ctypes.addressof(value_buffer), 0))
+        return value_buffer.raw
+
+    def close(self):
+        for fd in reversed(self.fds):
+            os.close(fd)
+        self.fds.clear()
+
+
+class KernelMachine:
+    def __init__(self, program, packet, configured=True, logical_length=None):
+        assert logical_length is None
+        self.program = program
+        self.packet = bytes(packet)
+        for key in range(6):
+            program.entry('traffic_stats', key, bytes(8))
+        program.entry('rejected_spoofs', 0, bytes(8))
+        program.entry('endpoint_identity', 0,
+                      struct.pack('<IIII', 0x0a580102, 0x02112233, 0x4455, 1)
+                      if configured else bytes(16))
+
+    def run(self):
+        packet = ctypes.create_string_buffer(self.packet)
+        attr = ctypes.create_string_buffer(struct.pack('<IIIIQQII', self.program.fd,
+                    0, len(self.packet), 0, ctypes.addressof(packet), 0, 1, 0))
+        # Use a direct syscall here to retain the output fields.
+        result = self.program.libc.syscall(self.program.syscall_number, 10,
+                                          ctypes.byref(attr), 40)
+        if result < 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        return struct.unpack_from('<I', attr.raw, 4)[0]
+
+    def count(self, name, key):
+        return struct.unpack('<Q', self.program.entry(name, key))[0]
+
+
 MAC = bytes.fromhex('021122334455')
 IP = bytes([10, 88, 1, 2])
 
@@ -199,12 +288,19 @@ def arp(source=IP, sender_mac=MAC, opcode=1):
     return ethernet(0x0806, struct.pack('>HHBBH', 1, 0x0800, 6, 4, opcode) + sender_mac + source + bytes(6) + bytes([169, 254, 1, 1]))
 
 
-def main(path):
+def main(path, kernel=False):
     program = read_program(path)
+    instructions = len(program[0]) // 8
+    native = KernelProgram(program) if kernel else None
     count = 0
     def check(packet, allowed, reason=None, configured=True, logical_length=None):
         nonlocal count
-        machine = Machine(program, packet, configured, logical_length)
+        # Linux's test-run skb constructor requires an Ethernet header and
+        # cannot represent a separately specified non-linear packet length.
+        if kernel and (len(packet) < 14 or logical_length is not None):
+            return
+        machine = (KernelMachine(native, packet, configured, logical_length) if kernel
+                   else Machine(program, packet, configured, logical_length))
         assert machine.run() == (0 if allowed else 2), (count, packet.hex())
         size = len(packet) if logical_length is None else logical_length
         assert machine.count('traffic_stats', 0) == int(allowed)
@@ -239,8 +335,11 @@ def main(path):
     # TC may expose only the header in its linear data area.
     packet = bytearray(ipv4()); packet[17] = 100
     check(packet, True, logical_length=114)
-    print(f'Whistler emitted endpoint guard: {count} packet/counter cases passed ({len(program[0]) // 8} instructions)')
+    if native:
+        native.close()
+    backend = 'Linux kernel' if kernel else 'emitted bytecode'
+    print(f'Whistler endpoint guard ({backend}): {count} packet/counter cases passed ({instructions} instructions)')
 
 
 if __name__ == '__main__':
-    main(sys.argv[1])
+    main(sys.argv[1], kernel='--kernel' in sys.argv[2:])

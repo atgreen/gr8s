@@ -35,9 +35,12 @@
         (malformed (map-lookup traffic-stats 4))
         (unsupported (map-lookup traffic-stats 5))
         (spoofs (map-lookup rejected-spoofs 0))
+        (identity (map-lookup endpoint-identity 0))
         (data u64 (tc-data)) (data-end u64 (tc-data-end)))
     (when (> (+ data 14) data-end) (drop-pod-packet :malformed))
-    (if-let (identity (map-lookup endpoint-identity 0))
+    ;; Keep all helpers before packet bounds proofs. Whistler may otherwise
+    ;; rematerialize tc-data across a lookup and lose the verifier range.
+    (if (/= identity 0)
       (progn
         (when (/= (load u32 identity 12) 1) (drop-pod-packet :spoof))
         (when (or (/= (ntohl (load u32 data 6)) (load u32 identity 4))

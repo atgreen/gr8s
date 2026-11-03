@@ -14,7 +14,7 @@ NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
 NODE_PROTOCOL_LISP := src/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 
-.PHONY: all help containerd-bundle generate-protocol test test-containerd test-podman test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy check smoke run kubeconfig native clean
+.PHONY: all help containerd-bundle generate-protocol test test-containerd test-podman test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel check smoke run kubeconfig native clean
 
 all: native
 
@@ -71,6 +71,9 @@ build/gr8s-endpoint-test.bpf.o: network/gr8s-egress-guard.lisp scripts/build-whi
 
 test-endpoint-policy: build/gr8s-endpoint-test.bpf.o
 	python3 scripts/test-endpoint-policy.py $<
+
+test-endpoint-policy-kernel: build/gr8s-endpoint-test.bpf.o
+	python3 scripts/test-endpoint-policy.py $< --kernel
 
 test-podman:
 	GR8S_RUN_PODMAN_TESTS=1 $(SBCL) --noinform --non-interactive $(TEST_EVAL)
