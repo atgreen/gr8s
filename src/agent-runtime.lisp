@@ -292,8 +292,10 @@ the bpffs is mounted.  On any failure the dataplane stays NIL and the
 control-plane userspace proxy continues to serve Services, so this never blocks
 the node from starting."
   (let* ((manager (node-runtime-manager node-runtime))
+         (disabled (let ((v (uiop:getenv "GR8S_DISABLE_SERVICE_LB")))
+                     (and v (string= v "1"))))
          (pin-directory
-           (and manager
+           (and manager (not disabled)
                 (namestring (merge-pathnames
                              "service-lb/"
                              (uiop:ensure-directory-pathname

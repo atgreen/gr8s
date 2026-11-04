@@ -120,7 +120,7 @@ smoke:
 	  exit 1; \
 	fi
 	$(MAKE) native
-	sudo env PATH="$(PATH)" scripts/smoke.sh
+	sudo env PATH="$(PATH)" GR8S_DISABLE_SERVICE_LB="$(GR8S_DISABLE_SERVICE_LB)" scripts/smoke.sh
 
 smoke-two-node:
 	@if [ "$$(id -u)" -eq 0 ]; then \
