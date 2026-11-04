@@ -260,10 +260,10 @@ def main():
                     delete(pod)
                     release(pod)
                 wait(lambda: not shims(), 120, "zero test-state shims")
-                desired = state / "agent/runtime/desired/pods"
+                desired = state / "agent/runtime/desired"
                 assert desired.is_dir(), "native desired-state path was never established"
-                wait(lambda: not list(desired.rglob("*.json")), 120, "zero node desired Pods")
-                report["desiredPodFilesRemaining"] = [str(path) for path in desired.rglob("*.json")]
+                wait(lambda: not list(desired.glob("*.json")), 120, "zero node desired Pods")
+                report["desiredPodFilesRemaining"] = [str(path) for path in desired.glob("*.json")]
         except Exception as error:
             report["cleanupError"] = repr(error)
             report["passed"] = False
