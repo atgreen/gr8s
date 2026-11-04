@@ -246,8 +246,8 @@
       (lambda (old)
         (if (string= content-type "application/json-patch+json")
             (apply-core-json-patch old patch)
-            (if (and (equal resource "podtemplates") (equal content-type "application/strategic-merge-patch+json"))
-                (template-strategic-merge old (require-object patch "patch") (template-schema "io.k8s.api.core.v1.PodTemplate"))
+            (if (and (or (equal resource "podtemplates") (storage-resource-p resource)) (equal content-type "application/strategic-merge-patch+json"))
+                (template-strategic-merge old (require-object patch "patch") (template-schema (if (storage-resource-p resource) (storage-resource-schema-name resource) "io.k8s.api.core.v1.PodTemplate")))
                 (merge-json-object old (require-object patch "patch")))))
       :dry-run dry-run))))
 
@@ -275,15 +275,18 @@
            (json-response (update-core-resource store resource namespace name
                                                (lambda (old) (declare (ignore old)) replacement) :dry-run dry-run))))
         ((and writable-scope name (eq method :patch)) (core-resource-patch-response store resource namespace name dry-run))
-        ((and writable-scope (null name) (member resource '("podtemplates" "events") :test #'equal) (eq method :delete))
+        ((and writable-scope (null name) (or (storage-resource-p resource) (member resource '("podtemplates" "events") :test #'equal)) (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
                 (options (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions")))
                 (preview (gethash "dryRun" (or options (core-object)))))
            (when (and preview (not (equalp preview #("All")))) (core-resource-error 400 "BadRequest" "Invalid dryRun"))
            (when (gethash "preconditions" (or options (core-object)))
              (core-resource-error 400 "BadRequest" "DeleteCollection does not support preconditions"))
-           (delete-template-collection store namespace (or (hunchentoot:parameter "labelSelector") "")
-                                       (or (hunchentoot:parameter "fieldSelector") "") :dry-run (or dry-run preview) :resource resource)
+           (if (storage-resource-p resource)
+               (delete-storage-collection store resource namespace (or (hunchentoot:parameter "labelSelector") "")
+                                          (or (hunchentoot:parameter "fieldSelector") "") :dry-run (or dry-run preview))
+               (delete-template-collection store namespace (or (hunchentoot:parameter "labelSelector") "")
+                                           (or (hunchentoot:parameter "fieldSelector") "") :dry-run (or dry-run preview) :resource resource))
            (status-response "Success" "Deleted" "Resource collection deleted" 200)))
         ((and writable-scope name (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
@@ -327,7 +330,10 @@
   (labels ((alias (name)
              (if (member name '("io.k8s.api.core.v1.PodTemplate" "io.k8s.api.core.v1.PodTemplateList"
                                   "io.k8s.api.core.v1.Event" "io.k8s.api.core.v1.EventList"
-                                  "io.k8s.api.events.v1.Event" "io.k8s.api.events.v1.EventList") :test #'equal)
+                                  "io.k8s.api.events.v1.Event" "io.k8s.api.events.v1.EventList"
+                                  "io.k8s.api.core.v1.PersistentVolume" "io.k8s.api.core.v1.PersistentVolumeList"
+                                  "io.k8s.api.core.v1.PersistentVolumeClaim" "io.k8s.api.core.v1.PersistentVolumeClaimList"
+                                  "io.k8s.api.storage.v1.StorageClass" "io.k8s.api.storage.v1.StorageClassList") :test #'equal)
                  name (concatenate 'string "io.gr8s.template." name)))
            (rewrite (schema)
              (cond ((hash-table-p schema)
