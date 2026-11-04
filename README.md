@@ -402,7 +402,9 @@ Compared with the [third run](docs/conformance-full-third-2026-11-04.json),
 16 previously failing cases passed and none regressed. The official JUnit archive,
 complete case inventory and artifact hashes were verified. The native process
 exited cleanly, but the original cleanup report records two leftover test-owned
-shims; later cleanup must be recorded separately. This binary includes graceful
+shims. A [separate recovery](docs/conformance-fourth-cleanup-2026-11-04.json)
+completed their cleanup and all pending Pod deletions with a clean exit, preserving
+the original report. This binary includes graceful
 deletion, readiness/reconnect and generated Pod-name fixes, but predates newer
 storage/workload APIs, per-container restarts and connection cleanup fixes.
 gr8s has not passed Kubernetes conformance. The earlier
