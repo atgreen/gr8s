@@ -110,7 +110,8 @@
                     (concatenate 'vector (gethash "volumes" spec #())
                                  (vector (core-object "name" volume-name
                                                       "secret" (core-object "secretName" secret-name "defaultMode" #o644))))))))
-      (loop for container across (gethash "containers" spec)
+      (loop for container across (concatenate 'vector (gethash "initContainers" spec #())
+                                              (gethash "containers" spec))
             do (dolist (pair (list (cons "KUBERNETES_SERVICE_HOST" (getf config :host))
                                   (cons "KUBERNETES_SERVICE_PORT" (write-to-string (getf config :port)))
                                   (cons "KUBERNETES_SERVICE_PORT_HTTPS" (write-to-string (getf config :port)))))

@@ -129,6 +129,7 @@
             (statuses (container-lifecycle-statuses details (or history state))))
        (when (or sandbox (and checkpoint-owned-p (plusp (length statuses))))
          (apply-container-probe-observation runtime
+          (apply-init-container-observation
           (make-runtime-pod
           :uid uid
           :resource-version
@@ -142,7 +143,7 @@
           :phase (container-lifecycle-phase statuses (and sandbox (= gr8s.cri.v1::+podsandboxstate-sandbox_ready+
                                                                          (cri-pod-sandbox-info-state sandbox))))
           :container-details details
-          :status (core-object "containerStatuses" statuses))))))))
+          :status (core-object "containerStatuses" statuses)) state)))))))
 
 (defun containerd-replace-uid (runtime uid)
   "Remove UID's sandbox for recreation under the same Pod, keeping its volumes."
@@ -222,6 +223,7 @@
              :env environment
              :mounts (containerd-container-mounts runtime pod spec sandbox-id)
              :security-context (containerd-pod-security-context pod spec)
+             :resources (cri-linux-container-resources (pod-runtime-container-object pod spec))
              :working-directory (gethash "workingDir" (pod-runtime-container-object pod spec))
              :uid (pod-uid pod)
              :attempt attempt

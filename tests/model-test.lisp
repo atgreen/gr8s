@@ -49,7 +49,7 @@
      "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"dnsPolicy\":\"None\",\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}"))
   (signals kubernetes-error
     (parse-pod
-     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\",\"resources\":{\"limits\":{\"cpu\":\"1\"}}}]}}")))
+     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\",\"resources\":{\"limits\":{\"nvidia.com/gpu\":\"1\"}}}]}}")))
 
 (test malformed-pod-shapes-are-kubernetes-errors
   (dolist (input
