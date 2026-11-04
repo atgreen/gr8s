@@ -199,6 +199,10 @@ def main():
         try:
             if native is not None and native.poll() is None:
                 for pod in pods:
+                    code, observed = request(path(pod))
+                    save(pod["metadata"]["uid"] + "-before-cleanup.json", {"code": code, "pod": observed})
+                    for source in (Path("/var/log/gr8s/pods") / pod["metadata"]["uid"]).glob("*.log"):
+                        (root / (pod["metadata"]["uid"] + "-" + source.name)).write_bytes(source.read_bytes())
                     code, body = request(path(pod), "DELETE", {"apiVersion": "v1", "kind": "DeleteOptions",
                                                                "preconditions": {"uid": pod["metadata"]["uid"]}, "gracePeriodSeconds": 0})
                     assert code in (200, 404), (code, body)
