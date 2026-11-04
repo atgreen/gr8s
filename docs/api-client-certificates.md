@@ -19,7 +19,11 @@ and [UID mapping](https://github.com/kubernetes/apimachinery/blob/v0.36.0/pkg/ap
 
 Live RoleBindings and ClusterRoleBindings grant access through User, Group and
 standard ServiceAccount subjects. Certificate authentication does not grant
-resource permissions by itself. CSR approval and signing additionally require
+resource permissions by itself. As in the pinned [privileged group authorizer](https://github.com/kubernetes/kubernetes/blob/v1.36.0/pkg/kubeapiserver/authorizer/reload.go#L89),
+a verified certificate whose signed organizations contain `system:masters`
+receives standard privileged authorization without a RoleBinding. Ordinary
+users and groups retain their namespace, resource and verb grants. CSR approval
+and signing additionally require
 signer-specific `approve` and `sign` permission; the same admission applies to
 certificate users and ServiceAccount tokens. CSR username, UID, groups and
 credential extra are derived from authenticated credentials. Client-supplied

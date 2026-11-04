@@ -180,7 +180,9 @@
                  (gethash "nonResourceURLs" rule)))))
 
 (defun service-account-authorized-p (store identity verb group resource name namespace &optional url)
-  "Evaluate applicable live RoleBindings and ClusterRoleBindings for IDENTITY."
+  "Honor the verified system:masters group, then evaluate applicable live RoleBindings and ClusterRoleBindings."
+  (when (find "system:masters" (api-identity-groups identity) :test #'equal)
+    (return-from service-account-authorized-p t))
   (let ((bindings (append (list-core-resources store "clusterrolebindings")
                           (when namespace (list-core-resources store "rolebindings" namespace)))))
     (some

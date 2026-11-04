@@ -156,6 +156,53 @@
                             (merge-pathnames "valid.pem" directory) key token))))
           (when server (stop-server server)))))))
 
+(test trusted-system-masters-certificates-use-standard-privileged-authorization
+  (with-temporary-store (store directory)
+    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
+           (runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
+           (collection "/apis/certificates.k8s.io/v1/certificatesigningrequests")
+           (server nil))
+      (unwind-protect
+           (progn
+             (setf server (gr8s::start-in-cluster-api store runtime reconciler pki :address "127.0.0.1" :port 18096))
+             (is-false (gr8s::list-core-resources store "clusterrolebindings"))
+             (dolist (privileged '(t nil))
+               (multiple-value-bind (leaf private)
+                   (certificate-api-test-subject-leaf pki
+                     (list (cons '(2 5 4 3) (if privileged "admin-user" "normal-user"))
+                           (cons '(2 5 4 10) (if privileged "system:masters" "engineering"))))
+                 (let ((certificate (merge-pathnames (if privileged "admin.pem" "normal.pem") directory))
+                       (key (merge-pathnames (if privileged "admin.key" "normal.key") directory)))
+                   (gr8s::write-private-text-exclusively certificate
+                     (pure-tls/acme::wrap-pem "CERTIFICATE" (pure-tls::x509-certificate-raw-der leaf)))
+                   (gr8s::write-private-text-exclusively key (pure-tls/acme::encode-ec-private-key-pem private))
+                   (is (= (if privileged 200 403) (certificate-api-test-request pki certificate key "/api/v1/pods")))
+                   (is (= (if privileged 200 403) (certificate-api-test-request pki certificate key "/api/v1/namespaces/alpha/secrets"
+                            :headers '("Impersonate-Group: system:masters"))))
+                   (when privileged
+                     (multiple-value-bind (code created)
+                         (certificate-api-test-request pki certificate key collection :method "POST"
+                           :object (csr-fixture (csr-crypto-fixture directory "ec")))
+                       (is (= 201 code))
+                       (setf (gethash "conditions" (gethash "status" created)) (vector (gr8s::core-object "type" "Approved" "status" "True")))
+                       (multiple-value-bind (approval-code approved)
+                           (certificate-api-test-request pki certificate key (concatenate 'string collection "/example-csr/approval") :method "PUT" :object created)
+                         (is (= 200 approval-code))
+                         (setf (gethash "certificate" (gethash "status" approved)) (ag-grpc:base64-encode (pure-tls::read-file-bytes certificate)))
+                         (is (= 200 (certificate-api-test-request pki certificate key (concatenate 'string collection "/example-csr/status") :method "PUT" :object approved)))))))))
+             (gr8s::create-core-resource store "roles"
+               (gr8s::core-object "metadata" (gr8s::core-object "name" "pod-reader")
+                 "rules" (vector (gr8s::core-object "apiGroups" #("") "resources" #("pods") "verbs" #("list")))) "alpha")
+             (gr8s::create-core-resource store "rolebindings"
+               (gr8s::core-object "metadata" (gr8s::core-object "name" "normal-reader")
+                 "subjects" (vector (gr8s::core-object "kind" "User" "apiGroup" "rbac.authorization.k8s.io" "name" "normal-user"))
+                 "roleRef" (gr8s::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "Role" "name" "pod-reader")) "alpha")
+             (let ((certificate (merge-pathnames "normal.pem" directory)) (key (merge-pathnames "normal.key" directory)))
+               (is (= 200 (certificate-api-test-request pki certificate key "/api/v1/namespaces/alpha/pods")))
+               (is (= 403 (certificate-api-test-request pki certificate key "/api/v1/namespaces/beta/pods")))
+               (is (= 403 (certificate-api-test-request pki certificate key "/api/v1/namespaces/alpha/secrets")))))
+        (when server (stop-server server))))))
+
 (test approved-certificate-authenticates-actual-api-and-server-owned-csr-actor
   (with-temporary-store (store directory)
     (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
