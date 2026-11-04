@@ -452,6 +452,12 @@ Server-side apply and finalizer processing remain unsupported.
 Templates have a 2 MiB serialized storage limit so admitted objects can be read
 back by the durable JSON loader.
 
+PersistentVolume, PersistentVolumeClaim and StorageClass APIs now support durable
+CRUD, typed protobuf, status subresources and resumable JSON watches. Static
+filesystem hostPath/local volumes bind to matching claims and mount real backing
+storage into native Pods. See [persistent storage](docs/persistent-storage.md)
+for supported behavior, protection, Retain reclamation and remaining extensions.
+
 Stored-resource list continuations are signed and bound to their resource type,
 namespace and selectors. A shared durable change journal preserves a consistent
 resourceVersion across
