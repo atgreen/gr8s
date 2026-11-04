@@ -24,9 +24,31 @@
           ((equal *crd-field-validation* "Warn")
            (setf (hunchentoot:header-out :warning) (format nil "299 - ~A" (com.inuoe.jzon:stringify (subseq message 0 (min 1000 (length message))))))))))
 
+(defun crd-version-rank (version)
+  "Rank recognized Kubernetes versions by stability, numeric major and prerelease."
+  (cl-ppcre:register-groups-bind (major stage minor)
+      ("^v([0-9]+)(?:(alpha|beta)([0-9]+))?$" version)
+    (let ((major (parse-integer major)) (minor (if minor (parse-integer minor) 0)))
+      (when (and (<= major #x7fffffffffffffff) (<= minor #x7fffffffffffffff))
+        (list (cond ((equal stage "alpha") 0) ((equal stage "beta") 1) (t 2)) major minor)))))
+
+(defun crd-version-preferred-p (left right)
+  "Follow kube-aware ordering, placing arbitrary versions after recognized forms."
+  (let ((a (crd-version-rank left)) (b (crd-version-rank right)))
+    (cond ((and a b) (loop for x in a for y in b when (/= x y) return (> x y)))
+          (a t) (b nil) (t (string< left right)))))
+
+(defun crd-watch-definition-current-p (store definition version)
+  "Keep a watch bound to its actual definition UID and served version."
+  (with-store-lock (store)
+    (let* ((metadata (gethash "metadata" definition))
+           (current (gethash (core-resource-key "customresourcedefinitions" nil (gethash "name" metadata)) (pod-store-resources store))))
+      (and current (equal (gethash "uid" metadata) (gethash "uid" (gethash "metadata" current)))
+           (crd-version current version :served t)))))
+
 (defun crd-api-group (group versions)
   "Describe actual served versions with a deterministic preferred version."
-  (let ((values (sort (copy-list versions) #'string>)))
+  (let ((values (sort (copy-list versions) #'crd-version-preferred-p)))
     (core-object "apiVersion" "v1" "kind" "APIGroup" "name" group
                  "versions" (coerce (mapcar (lambda (version) (core-object "groupVersion" (format nil "~A/~A" group version) "version" version)) values) 'vector)
                  "preferredVersion" (core-object "groupVersion" (format nil "~A/~A" group (first values)) "version" (first values)))))

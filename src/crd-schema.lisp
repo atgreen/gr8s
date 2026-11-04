@@ -58,7 +58,10 @@
                       ((find escape "DWS")
                        (when inside (crd-schema-error "pattern" "negated shorthand classes inside character sets are unsupported"))
                        (format out "[^~A]" (case escape (#\D "0-9") (#\W "A-Za-z0-9_") (#\S "\\t\\n\\f\\r "))))
-                      ((or (not (alphanumericp escape)) (find escape "tnrfaAvz")) (write-char #\\ out) (write-char escape out))
+                      ((find escape "tnrfav")
+                       (write-char (code-char (cdr (assoc escape '((#\t . 9) (#\n . 10) (#\r . 13) (#\f . 12) (#\a . 7) (#\v . 11))))) out))
+                      ((or (not (alphanumericp escape)) (and (not inside) (find escape "Az")))
+                       (write-char #\\ out) (write-char escape out))
                       (t (crd-schema-error "pattern" "unsupported RE2 escape ~A" escape)))))
                  ((and (not inside) (char= character #\$)) (write-string "\\z" out))
                  ((and (not inside) (char= character #\{))
@@ -114,8 +117,8 @@
       (when (nth-value 1 (gethash field schema))
         (unless (typep (gethash field schema) '(integer 0 *)) (crd-schema-error path "~A requires a nonnegative integer" field))))
     (when (gethash "pattern" schema)
-      (let ((pattern (crd-regexp (gethash "pattern" schema))))
-        (unless (ignore-errors (cl-ppcre:create-scanner pattern))
+      (let ((pattern (gethash "pattern" schema)))
+        (unless (ignore-errors (cl-ppcre:create-scanner (crd-regexp pattern)))
           (crd-schema-error path "invalid regular expression"))))
     (when (gethash "format" schema)
       (unless (member (gethash "format" schema) '("" "int32" "int64" "float" "double" "byte" "date-time" "date") :test #'equal)
@@ -232,11 +235,11 @@
     (let ((keys (gethash "x-kubernetes-list-map-keys" schema)) (seen nil))
       (loop for child across value
             for identity = (if keys
-                               (loop for key across keys collect
+                               (coerce (loop for key across keys collect
                                      (multiple-value-bind (entry present) (gethash key child)
-                                       (unless present (crd-schema-error path "missing list map key ~A" key)) entry)) child)
+                                       (unless present (crd-schema-error path "missing list map key ~A" key)) entry)) 'vector) child)
             when (or keys (gethash "uniqueItems" schema) (equal "set" (gethash "x-kubernetes-list-type" schema)))
-              do (when (member identity seen :test (if keys #'equalp #'crd-json-equal-p)) (crd-schema-error path "duplicate array identity"))
+              do (when (member identity seen :test #'crd-json-equal-p) (crd-schema-error path "duplicate array identity"))
                  (push identity seen))))
   (dolist (field '("allOf" "anyOf" "oneOf"))
     (when (gethash field schema)

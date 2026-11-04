@@ -218,4 +218,48 @@
       (crd-api-request 404 "/apis/widgets.example.test/v1/namespaces/alpha/widgets/one")
       (crd-api-request 200 (concatenate 'string base "/widgets.other.example.test")))))
 
+(test custom-gc-resolves-non-storage-owner-versions-and-exact-uids
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture :versions '("v1" "v2")) nil)
+    (let* ((gr8s::*stored-resource-types* (append gr8s::*stored-resource-types* (gr8s::crd-resource-types store)))
+           (resource "custom:widgets.example.test/widgets")
+           (owner (gr8s::create-core-resource store resource (crd-instance "owner") "alpha"))
+           (child (crd-instance "child")))
+      (setf (gethash "ownerReferences" (gethash "metadata" child))
+            (vector (gr8s::core-object "apiVersion" "widgets.example.test/v2" "kind" "Widget" "name" "owner"
+                                     "uid" (gethash "uid" (gethash "metadata" owner)))))
+      (gr8s::create-core-resource store resource child "alpha")
+      (gr8s::collect-orphaned-custom-resources store)
+      (is (= 2 (length (gr8s::list-core-resources store resource "alpha"))))
+      (gr8s::delete-core-resource store resource "alpha" "owner")
+      (gr8s::create-core-resource store resource (crd-instance "owner") "alpha")
+      (gr8s::collect-orphaned-custom-resources store)
+      (signals kubernetes-error (gr8s::get-core-resource store resource "alpha" "child"))
+      (is (= 1 (length (gr8s::list-core-resources store resource "alpha")))))))
+
+(test custom-discovery-uses-kube-aware-version-priority
+  (let* ((group (gr8s::crd-api-group "versions.example.test" '("v2alpha1" "v1beta2" "v1" "v10" "foo10" "foo1")))
+         (versions (map 'list (lambda (entry) (gethash "version" entry)) (gethash "versions" group))))
+    (is (equal '("v10" "v1" "v1beta2" "v2alpha1" "foo1" "foo10") versions))
+    (is (equal "v10" (gethash "version" (gethash "preferredVersion" group))))))
+
+(test custom-watch-cannot-follow-a-same-name-definition-replacement
+  (with-crd-api (store path)
+    (values path)
+    (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
+    (sb-sys:with-deadline (:seconds 10)
+      (multiple-value-bind (stream code)
+          (drakma:http-request "http://127.0.0.1:18094/apis/widgets.example.test/v1/namespaces/alpha/widgets"
+                               :want-stream t :parameters '(("watch" . "true") ("resourceVersion" . "0") ("timeoutSeconds" . "3")))
+        (unwind-protect
+             (progn
+               (is (= 200 code))
+               (gr8s::delete-core-resource store "customresourcedefinitions" nil "widgets.widgets.example.test")
+               (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
+               (let ((event (read-template-watch-event stream)))
+                 (is (equal "ERROR" (gethash "type" event)))
+                 (is (= 410 (gethash "code" (gethash "object" event))))))
+          (close stream))))))
+
 (in-suite gr8s)

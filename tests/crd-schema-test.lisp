@@ -54,7 +54,8 @@
          (item (gr8s::core-object "key" "duplicate")))
     (gr8s::validate-crd-schema schema)
     (signals kubernetes-error (gr8s::crd-validate-value (vector item item) schema "list"))
-    (gr8s::crd-validate-value (vector item (gr8s::core-object "key" "other")) schema "list"))
+    (gr8s::crd-validate-value (vector item (gr8s::core-object "key" "other")) schema "list")
+    (is (vectorp (gr8s::crd-validate-value (vector (gr8s::core-object "key" "Case") (gr8s::core-object "key" "case")) schema "case-sensitive-list"))))
   (let ((schema (gr8s::core-object "type" "integer" "nullable" t "anyOf"
                   (vector (gr8s::core-object "minimum" 5) (gr8s::core-object "maximum" 1)))))
     (gr8s::validate-crd-schema schema)

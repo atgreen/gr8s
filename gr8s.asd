@@ -79,6 +79,7 @@
                              (:file "in-cluster-api")
                              (:file "services")
                              (:file "garbage-collection")
+                             (:file "crd-garbage-collection")
                              (:file "main"))))
   :in-order-to ((test-op (test-op "gr8s/tests"))))
 
