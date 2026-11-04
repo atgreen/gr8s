@@ -6,8 +6,7 @@ lists, JSON watches and typed Kubernetes protobuf requests. PVs and StorageClass
 are cluster scoped; PVCs are namespace scoped. PV/PVC status subresources preserve
 specification fields. Ordinary writes preserve controller-owned status.
 
-The controller binds administrator-provided filesystem `hostPath` and `local`
-PVs to matching claims. Capacity, access modes, class, selector, node affinity,
+The controller binds administrator-provided static PVs to matching claims. Capacity, access modes, class, selector, node affinity,
 claim identity and reservations constrain selection. Binding commits both objects
 atomically and persists the exact claim UID. `WaitForFirstConsumer` classes defer
 allocation until a consumer has a compatible assigned node. Class topology and
@@ -30,8 +29,11 @@ finalizers remain in effect.
 
 CSI drivers, dynamic provisioners, raw block devices, `ReadWriteOncePod`, volume
 mount options, snapshots/clones and automatic expansion are not implemented.
-Unsupported sources/modes remain Pending and are never reported as successfully
-mounted. A Delete or Recycle reclaim policy without a backend deleter becomes
+Static reservations for these sources and modes can become Bound when their
+capacity, class, mode and exact claim UID match. Binding reserves storage; it
+does not assert that a node mounted it. The native mount path rejects unavailable
+plugins or modes and never reports a successful mount for them. Unprovisioned
+claims remain Pending. A Delete or Recycle reclaim policy without a backend deleter becomes
 Failed with `ReclaimUnsupported`; backing data is retained. Storing a
 StorageClass does not install a provisioner. Server-side apply and `subPath`
 mounts remain unsupported.

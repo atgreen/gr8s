@@ -84,7 +84,7 @@
       (gr8s::create-core-resource store "persistentvolumes" volume nil))
     (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "waiting") "default")
     (gr8s::reconcile-storage-bindings store)
-    (is (equal "Pending" (storage-phase store "persistentvolumeclaims" "default" "waiting")))))
+    (is (equal "Bound" (storage-phase store "persistentvolumeclaims" "default" "waiting")))))
 
 (test storage-protection-preserves-in-use-claims-and-retained-data
   (with-temporary-store (store path)
@@ -201,7 +201,7 @@
     (is (equal "" (gethash "storageClassName" (gethash "spec" (gr8s::get-core-resource store "persistentvolumeclaims" "default" "opt-out")))))
     (is (equal "Pending" (storage-phase store "persistentvolumeclaims" "default" "opt-out")))))
 
-(test unsupported-prebound-source-cannot-fabricate-native-binding
+(test unsupported-prebound-source-reserves-exact-uid-without-fabricating-a-mount
   (with-temporary-store (store path)
     (let* ((claim (storage-test-claim "claim"))
            (volume (storage-test-volume "unsupported" (merge-pathnames "unused/" path))))
@@ -213,8 +213,15 @@
             (gr8s::core-object "name" "claim" "namespace" "default" "uid" (gethash "uid" (gethash "metadata" claim))))
       (gr8s::create-core-resource store "persistentvolumes" volume nil)
       (gr8s::reconcile-storage-bindings store)
-      (is (equal "Pending" (storage-phase store "persistentvolumeclaims" "default" "claim")))
-      (is (equal "Pending" (storage-phase store "persistentvolumes" nil "unsupported"))))))
+      (is (equal "Bound" (storage-phase store "persistentvolumeclaims" "default" "claim")))
+      (is (equal "Bound" (storage-phase store "persistentvolumes" nil "unsupported")))
+      (let* ((bound (gr8s::get-core-resource store "persistentvolumes" nil "unsupported"))
+             (runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "pod-logs/" path))))
+        (is (equal (gethash "uid" (gethash "metadata" claim)) (gethash "uid" (gethash "claimRef" (gethash "spec" bound)))))
+        (setf (gr8s::containerd-runtime-resource-store runtime) store)
+        (signals gr8s::runtime-error
+          (gr8s::materialize-persistent-claim-volume runtime (storage-test-pod "consumer" "claim")
+             (gr8s::core-object "claimName" "claim")))))))
 
 (test empty-storage-topology-term-matches-no-nodes
   (let ((node (make-test-node "worker-a" "a" "10.64.0.0/20")))

@@ -2,9 +2,9 @@
 ;;;; SPDX-License-Identifier: MIT
 ;;;;
 ;;;; Purpose:
-;;;; Reserve statically provided filesystem volumes in a durable two-sided
+;;;; Reserve statically provided volumes in a durable two-sided
 ;;;; transaction. Claims never become Bound without an exclusive PV claimRef UID;
-;;;; external provisioning, block devices and unavailable plugins stay Pending.
+;;;; installing a binding never claims a volume plugin successfully mounted it.
 
 (in-package #:gr8s)
 
@@ -107,7 +107,6 @@
   (let* ((spec (gethash "spec" volume)) (wanted (gethash "spec" claim))
          (ref (gethash "claimRef" spec)) (requested-name (gethash "volumeName" wanted)))
     (and (not (gethash "deletionTimestamp" (gethash "metadata" volume)))
-         (storage-native-volume-p volume)
          (not (or (gethash "dataSource" wanted) (gethash "dataSourceRef" wanted)))
          (or (not ref) (storage-claim-ref-matches-p volume claim :allow-unbound t))
          (or (not requested-name) (equal requested-name (storage-resource-name volume)))
@@ -152,7 +151,7 @@
       (let* ((claim (gethash (core-resource-key "persistentvolumeclaims" (pod-namespace pod) name) index))
              (bound (and claim (storage-bound-volume index claim)))
              (candidate (or bound (and claim (storage-claim-delayed-p index claim) (storage-candidate-volume index claim node used)))))
-        (unless (and claim candidate (storage-native-volume-p candidate) (not (gethash "deletionTimestamp" (gethash "metadata" claim)))
+        (unless (and claim candidate (not (gethash "deletionTimestamp" (gethash "metadata" claim)))
                      (storage-node-affinity-matches-p candidate node)
                      (storage-class-topology-matches-p (storage-claim-class index claim) node))
           (return-from pod-node-storage-compatible-p nil))
@@ -264,7 +263,7 @@
                    (consumer (find-if #'pod-node-name (storage-claim-consumers-unlocked store claim)))
                    (node (and consumer (gethash (pod-node-name consumer) (pod-store-nodes store))))
                    (delayed (storage-claim-delayed-p index claim))
-                   (candidate (or (and bound (storage-native-volume-p bound) bound) (and (or (not delayed) node)
+                   (candidate (or bound (and (or (not delayed) node)
                                             (storage-class-topology-matches-p (storage-claim-class index claim) node)
                                             (storage-candidate-volume index claim node)))))
               (if candidate
@@ -283,9 +282,7 @@
            (let* ((ref (gethash "claimRef" (gethash "spec" volume)))
                   (claim (and ref (gethash (core-resource-key "persistentvolumeclaims" (gethash "namespace" ref) (gethash "name" ref)) index)))
                   (copy (copy-core-object volume)))
-             (cond ((not (storage-native-volume-p volume))
-                    (storage-status copy "Pending" "VolumePluginUnavailable" "The native agent does not implement this volume source or mode"))
-                   ((and claim (storage-claim-ref-matches-p volume claim) (equal (storage-resource-name volume) (gethash "volumeName" (gethash "spec" claim))))
+             (cond ((and claim (storage-claim-ref-matches-p volume claim) (equal (storage-resource-name volume) (gethash "volumeName" (gethash "spec" claim))))
                     (storage-status copy "Bound"))
                    ((and ref (gethash "uid" ref) (plusp (length (gethash "uid" ref))))
                     (if (equal "Retain" (gethash "persistentVolumeReclaimPolicy" (gethash "spec" volume)))
