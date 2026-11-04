@@ -132,3 +132,15 @@
     (is (null (frame "channel.k8s.io" 0)))
     (is (search "exit code 3" (trivial-utf-8:utf-8-bytes-to-string (frame "channel.k8s.io" 3))))
     (is (search "Success" (trivial-utf-8:utf-8-bytes-to-string (frame "v5.channel.k8s.io" 0))))))
+
+(test boolean-parameters-accept-what-kubernetes-clients-send
+  (dolist (value '("1" "t" "T" "true" "TRUE" "True"))
+    (is-true (gr8s::true-parameter-p value) value))
+  (dolist (value '(nil "" "0" "f" "false" "yes" "tRuE"))
+    (is-false (gr8s::true-parameter-p value)))
+  ;; Upstream's WebSocket exec spec sends stdout=1 and needs stdout back.
+  (let ((options (gr8s::exec-options-from-parameters
+                  '(("command" . "echo") ("stdout" . "1") ("stderr" . "1")))))
+    (is-true (gr8s::exec-options-stdout options))
+    (is-true (gr8s::exec-options-stderr options))))
+

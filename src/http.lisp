@@ -473,7 +473,8 @@
   tty)
 
 (defun true-parameter-p (value)
-  (and value (string-equal value "true")))
+  "Read a boolean query parameter as Go's strconv.ParseBool does for true values."
+  (and value (member value '("1" "t" "T" "true" "TRUE" "True") :test #'string=) t))
 
 (defun exec-options-from-parameters (parameters)
   (make-exec-options
