@@ -390,6 +390,7 @@
      (cluster-pki-ca-private-key pki))))
 
 (defun enroll-node-csr (pki node-name token ca-fingerprint csr)
+  "Issue only the validated internal node name and key; requested subject attributes cannot grant API user groups."
   (ensure-valid-node-name node-name)
   (unless (and (stringp ca-fingerprint)
                (string-equal ca-fingerprint (cluster-pki-ca-fingerprint pki)))
@@ -397,15 +398,16 @@
   (bt:with-lock-held ((cluster-pki-lock pki))
     (multiple-value-bind (record path salt digest)
         (validate-token pki token node-name)
-      (multiple-value-bind (subject subject-public-key)
+      (multiple-value-bind (requested-subject subject-public-key)
           (parse-and-verify-node-csr csr node-name)
+        (declare (ignore requested-subject))
         (setf (gethash "state" record) "used")
         (write-private-text-atomically
          path
          (token-record-json node-name salt digest "used"))
         (pure-tls/acme::wrap-pem
          "CERTIFICATE"
-         (node-certificate-der pki subject subject-public-key))))))
+         (node-certificate-der pki (pure-tls/acme::encode-subject node-name) subject-public-key))))))
 
 (defun certificate-from-pem (pem)
   (handler-case

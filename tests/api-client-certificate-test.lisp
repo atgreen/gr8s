@@ -203,6 +203,24 @@
                (is (= 403 (certificate-api-test-request pki certificate key "/api/v1/namespaces/alpha/secrets")))))
         (when server (stop-server server))))))
 
+(test internal-enrollment-issuer-projects-validated-node-name-without-requested-attributes
+  (with-temporary-store (store directory)
+    (declare (ignore store))
+    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
+           (fingerprint (gr8s:cluster-pki-ca-fingerprint pki))
+           (request (csr-crypto-fixture directory "rsa" :subject "/CN=worker-a/O=engineering/OU=caller-metadata/UID=caller-id" :sans "DNS:caller.example"))
+           (csr-der (cdar (gr8s::csr-pem-blocks request)))
+           (token (gr8s:create-join-token pki "worker-a"))
+           (pem (gr8s:enroll-node-csr pki "worker-a" token fingerprint csr-der))
+           (leaf (gr8s::certificate-from-pem pem))
+           (identity (gr8s::certificate-api-identity (list leaf) (gr8s::cluster-pki-ca-certificate pki))))
+      (is-true (gr8s:verify-node-certificate pki pem "worker-a"))
+      (is (equal fingerprint (gr8s:cluster-pki-ca-fingerprint pki)))
+      (is (equal '((:common-name . "worker-a")) (pure-tls::x509-name-rdns (pure-tls::x509-certificate-subject leaf))))
+      (is (equal "worker-a" (gr8s::api-identity-username identity)))
+      (is (equalp #("system:authenticated") (gr8s::api-identity-groups identity)))
+      (is-false (gr8s::api-user-identity-uid identity)))))
+
 (test approved-certificate-authenticates-actual-api-and-server-owned-csr-actor
   (with-temporary-store (store directory)
     (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))

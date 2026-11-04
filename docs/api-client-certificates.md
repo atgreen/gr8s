@@ -55,3 +55,22 @@ its existing bare common name. The API-profile restriction applies specifically
 to the additional internal node/control protocol. This feature
 does not implement certificate revocation lists, impersonation, external client
 CA configuration or automatic custom-signer controllers.
+
+## Historical enrollment certificate compatibility
+
+Earlier internal enrollment copied requested subject attributes, including
+organizations, into cluster-root-signed client certificates. New enrollment
+issuance constructs only the validated bare node common name and discards all
+other requested subject attributes. This fixes future issuance; existing
+certificates, CA files and pins are unchanged. It does not retroactively remove
+organizations from previously issued certificates.
+
+Before enabling public client-certificate authentication by deploying this
+version against an existing cluster CA, deployments must audit historical
+root-signed client certificates and revoke or rotate affected credentials/trust.
+Those certificates follow the standard public CN/O authorization rule, including
+privileged `system:masters` organization membership. This implementation does
+not enforce per-certificate CRL revocation, so publishing a CRL alone does not
+remove trust; unsafe or unauditable historical credentials require an effective
+credential/issuer trust rotation before enablement. Generic root-signed clients
+are not filtered by the API-profile policy.
