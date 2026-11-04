@@ -48,9 +48,9 @@
       (is (= 0 (gethash "completions" spec)))
       (is (= 0 (gethash "backoffLimit" spec))))))
 
-(test jobs-reject-invalid-runtime-policy-and-unimplemented-non-null-policies
+(test jobs-reject-invalid-runtime-policy-and-accept-null-policies
   (dolist (pair '(("parallelism" -1) ("completions" -1) ("backoffLimit" -1)
-                  ("activeDeadlineSeconds" 0) ("completionMode" "") ("completionMode" "Indexed")
+                  ("activeDeadlineSeconds" 0) ("completionMode" "") ("completionMode" "Other")
                   ("podReplacementPolicy" "Invalid") ("suspend" "false")
                   ("backoffLimitPerIndex" 0) ("maxFailedIndexes" 0)))
     (let ((input (batch-test-job)))

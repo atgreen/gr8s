@@ -125,8 +125,14 @@
                               (reverse +container-quantity-decimal-suffixes+))))
           (format nil "~D~A" (* coefficient (expt 10 (- scale (cdr entry)))) (car entry))))))
 
+(defun extended-resource-name-p (name)
+  "Return whether NAME is a domain-qualified extended resource, which only the scheduler accounts."
+  (and (stringp name) (position #\/ name) (core-qualified-key-p name)
+       (not (uiop:string-prefix-p "kubernetes.io/" name))
+       (not (uiop:string-prefix-p "requests." name))))
+
 (defun normalize-container-resources (container &key (default-requests t))
-  "Validate CPU/memory requirements and round ResourceLists; copy limits to missing requests only for Pods."
+  "Validate compute and extended requirements and round ResourceLists; copy limits to missing requests only for Pods."
   (let ((resources (gethash "resources" container)))
     (unless resources (return-from normalize-container-resources nil))
     (when (eq resources 'null) (remhash "resources" container) (return-from normalize-container-resources nil))
@@ -139,10 +145,13 @@
         (when values
           (require-object values (format nil "resources.~A" kind))
           (maphash (lambda (name value)
-                     (unless (member name '("cpu" "memory") :test #'equal)
+                     (unless (or (member name '("cpu" "memory" "ephemeral-storage") :test #'equal)
+                                 (extended-resource-name-p name))
                        (invalid-pod "Resource ~S has no implemented enforcement" name))
                      (let ((quantity (container-quantity-round (parse-container-quantity value) -3)))
                        (when (minusp (container-quantity-coefficient quantity)) (invalid-pod "Resource quantities must be nonnegative"))
+                       (when (and (extended-resource-name-p name) (minusp (container-quantity-scale quantity)))
+                         (invalid-pod "Extended resource ~A must be a whole number" name))
                        (setf (gethash name values) (container-quantity-string quantity)))) values))))
     (let ((limits (gethash "limits" resources)) (requests (gethash "requests" resources)))
       (when (and default-requests limits)
@@ -153,8 +162,56 @@
                    (when (and limits (nth-value 1 (gethash name limits))
                               (plusp (container-quantity-compare (parse-container-quantity value)
                                         (parse-container-quantity (gethash name limits)))))
-                     (invalid-pod "Resource request ~A exceeds its limit" name))) requests)))
+                     (invalid-pod "Resource request ~A exceeds its limit" name))
+                   ;; Extended resources cannot be overcommitted, as devices have no shares.
+                   (when (extended-resource-name-p name)
+                     (let ((limit (and limits (gethash name limits))))
+                       (unless (and limit (zerop (container-quantity-compare (parse-container-quantity value)
+                                                                             (parse-container-quantity limit))))
+                         (invalid-pod "Extended resource ~A requires equal request and limit" name)))))
+                 requests))
+      (when limits
+        (maphash (lambda (name value)
+                   (declare (ignore value))
+                   (when (and (extended-resource-name-p name)
+                              (not (and requests (nth-value 1 (gethash name requests)))))
+                     (invalid-pod "Extended resource ~A requires equal request and limit" name)))
+                 limits)))
     resources))
+
+(defun add-resource-list (totals values)
+  "Add quantity strings in the resource list VALUES into the exact rational TOTALS table."
+  (when values
+    (maphash (lambda (name value)
+               (incf (gethash name totals 0)
+                     (let ((quantity (parse-container-quantity value)))
+                       (* (container-quantity-coefficient quantity) (expt 10 (container-quantity-scale quantity))))))
+             values))
+  totals)
+
+(defun pod-spec-resource-totals (spec &key (overhead t))
+  "Return a Pod's exact effective requests and limits: containers summed, each init container a floor."
+  (let ((requests (make-hash-table :test #'equal)) (limits (make-hash-table :test #'equal)))
+    (flet ((list-of (container kind)
+             (let ((resources (gethash "resources" container)))
+               (and resources (gethash kind resources)))))
+      (loop for container across (gethash "containers" spec #())
+            do (add-resource-list requests (list-of container "requests"))
+               (add-resource-list limits (list-of container "limits")))
+      (loop for container across (gethash "initContainers" spec #())
+            do (loop for (kind totals) in (list (list "requests" requests) (list "limits" limits))
+                     do (let ((own (add-resource-list (make-hash-table :test #'equal) (list-of container kind))))
+                          (maphash (lambda (name value)
+                                     (when (> value (gethash name totals 0)) (setf (gethash name totals) value)))
+                                   own)))))
+    (when (and overhead (gethash "overhead" spec))
+      (add-resource-list requests (gethash "overhead" spec))
+      (maphash (lambda (name value)
+                 (declare (ignore value))
+                 (when (nth-value 1 (gethash name limits))
+                   (add-resource-list limits (core-object name (gethash name (gethash "overhead" spec))))))
+               (gethash "overhead" spec)))
+    (values requests limits)))
 
 (defun container-resource-quantity (container kind name)
   "Return CONTAINER's parsed KIND (limits or requests) quantity for resource NAME, if declared."

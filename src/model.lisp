@@ -61,7 +61,11 @@
   (underlay-address "")
   (ready-p nil)
   last-heartbeat
-  lease-deadline)
+  lease-deadline
+  ;; Quantity strings the node's agent measured about itself.
+  capacity
+  ;; Quantity strings clients advertised through the Node status subresource.
+  extended-resources)
 
 (defun invalid-pod (control &rest arguments)
   "Signal an HTTP 422 Kubernetes error formatted by CONTROL and ARGUMENTS."
@@ -233,9 +237,9 @@
                (when (eq t (gethash "controller" owner)) (incf controllers))
                (when (and (eq t (gethash "blockOwnerDeletion" owner))
                           (not (and (eq t (gethash "controller" owner))
-                                    (equal "Job" (gethash "kind" owner))
+                                    (member (gethash "kind" owner) '("Job" "CronJob") :test #'equal)
                                     (equal "batch/v1" (gethash "apiVersion" owner)))))
-                 (invalid-pod "blocking foreground owner deletion requires a supported Job controller")))
+                 (invalid-pod "blocking foreground owner deletion requires a supported Job or CronJob controller")))
       (when (> controllers 1) (invalid-pod "an object can have only one controller owner")))))
 
 (defun pod-generate-name-prefix (metadata)
@@ -282,7 +286,9 @@
     (reject-unsupported-fields
      spec '("containers" "initContainers" "restartPolicy" "dnsPolicy" "nodeName" "volumes"
             "securityContext" "serviceAccountName" "automountServiceAccountToken"
-            "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig") "spec")
+            "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig"
+            "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
+            "affinity") "spec")
     (dolist (field '("hostname" "subdomain"))
       (when (eq (gethash field spec) 'null) (remhash field spec))
       (let ((value (gethash field spec "")))

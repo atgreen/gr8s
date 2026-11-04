@@ -2,6 +2,9 @@
 
 (defvar *core-resource-view-version* nil)
 
+(defvar *resource-quota-admission-exempt* nil
+  "True while the server creates its own bootstrap objects, which are counted but never refused.")
+
 ;; Core and bootstrap resources share a durable transaction and revision sequence.
 ;; Objects are copied at the boundary so clients cannot mutate indexed state.
 (defun core-object (&rest pairs)
@@ -29,6 +32,7 @@
     ("deployments" "Deployment" "apps/v1" t)
     ("replicasets" "ReplicaSet" "apps/v1" t)
     ("jobs" "Job" "batch/v1" t)
+    ("cronjobs" "CronJob" "batch/v1" t)
     ("mutatingwebhookconfigurations" "MutatingWebhookConfiguration" "admissionregistration.k8s.io/v1" nil)
     ("validatingwebhookconfigurations" "ValidatingWebhookConfiguration" "admissionregistration.k8s.io/v1" nil)
     ("roles" "Role" "rbac.authorization.k8s.io/v1" t)
@@ -262,8 +266,12 @@
     (setf (gethash "type" object) type)))
 
 (defun normalize-core-resource (resource input namespace &optional name store)
+  (when (cronjob-resource-p resource)
+    (return-from normalize-core-resource (normalize-cronjob-resource input namespace name)))
   (when (batch-resource-p resource)
     (return-from normalize-core-resource (normalize-batch-resource input namespace name)))
+  (when (policy-resource-p resource)
+    (return-from normalize-core-resource (normalize-policy-resource resource input namespace name store)))
   (when (admission-config-resource-p resource)
     (return-from normalize-core-resource (normalize-admission-config resource input name)))
   (when (csr-resource-p resource)
@@ -416,9 +424,12 @@
           (core-resource-error 409 "AlreadyExists" "~A ~A/~A already exists" (core-resource-kind resource) namespace name))
         (prepare-core-resource-metadata object nil revision)
         (prepare-workload-write resource object nil)
-        (when (batch-resource-p resource) (prepare-batch-write object nil))
+        (when (batch-resource-p resource)
+          (if (cronjob-resource-p resource) (prepare-cronjob-write object nil) (prepare-batch-write object nil)))
         (when (csr-resource-p resource) (prepare-csr-write object nil))
         (when (endpointslice-resource-p resource) (prepare-endpointslice-write object nil))
+        (when (equal resource "persistentvolumeclaims") (enforce-claim-limit-ranges-unlocked store namespace object))
+        (enforce-resource-quotas-unlocked store resource namespace object)
         (when (admission-config-resource-p resource) (prepare-admission-config-write object nil))
         (setf (gethash key resources) object)
         (unless dry-run (commit-core-resources store resources revision))
@@ -448,6 +459,9 @@
       (when (equal resource "events") (validate-event-update existing object))
       (when (storage-resource-p resource) (validate-storage-update store resource existing object))
       (when (endpointslice-resource-p resource) (validate-endpointslice-update existing object))
+      (when (policy-resource-p resource) (validate-policy-update resource existing object))
+      (when (member resource '("services" "persistentvolumeclaims") :test #'equal)
+        (enforce-resource-quotas-unlocked store resource namespace object existing))
       (when (and (gethash "uid" metadata) (not (equal (gethash "uid" metadata) (gethash "uid" existing-metadata))))
         (core-resource-error 409 "Conflict" "metadata.uid does not match the stored object"))
       (when (and (member resource '("rolebindings" "clusterrolebindings") :test #'equal)
@@ -467,7 +481,8 @@
         (core-resource-error 422 "Invalid" "Immutable resource data cannot change"))
       (prepare-core-resource-metadata object existing revision)
       (prepare-workload-write resource object existing)
-      (when (batch-resource-p resource) (prepare-batch-write object existing))
+      (when (batch-resource-p resource)
+        (if (cronjob-resource-p resource) (prepare-cronjob-write object existing) (prepare-batch-write object existing)))
       (when (csr-resource-p resource) (prepare-csr-write object existing))
       (when (endpointslice-resource-p resource) (prepare-endpointslice-write object existing))
       (when (admission-config-resource-p resource) (prepare-admission-config-write object existing))
@@ -494,6 +509,7 @@
         (return-from delete-core-resource (delete-csr-unlocked store existing dry-run)))
       (when (storage-resource-p resource)
         (return-from delete-core-resource (delete-storage-resource-unlocked store resource existing dry-run)))
+      (when (policy-resource-p resource) (validate-policy-delete resource existing))
       (let ((resources (copy-core-resource-index store)))
         (remhash (core-resource-key resource namespace name) resources)
         (unless dry-run (commit-core-resources store resources (1+ (pod-store-resource-revision store)))))

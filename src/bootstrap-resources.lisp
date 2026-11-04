@@ -185,11 +185,16 @@
                                                    ((equal resource "configmaps") #("cm"))
                                                    ((equal resource "services") #("svc"))
                                                    ((equal resource "events") #("ev"))
+                                                   ((equal resource "cronjobs") #("cj"))
                                                    ((equal resource "customresourcedefinitions") #("crd" "crds"))
                                                    ((equal resource "persistentvolumes") #("pv"))
                                                    ((equal resource "persistentvolumeclaims") #("pvc"))
-                                                   ((equal resource "storageclasses") #("sc")) (t #()))
+                                                   ((equal resource "storageclasses") #("sc"))
+                                                   ((equal resource "resourcequotas") #("quota"))
+                                                   ((equal resource "limitranges") #("limits"))
+                                                   ((equal resource "priorityclasses") #("pc")) (t #()))
                                 "verbs" (if (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource)
+                                                (policy-resource-p resource)
                                                 (admission-config-resource-p resource)
                                                 (member resource '("podtemplates" "events" "deployments" "replicasets" "customresourcedefinitions") :test #'equal))
                                             #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
@@ -209,6 +214,14 @@
         ((member :arm64 *features*) "arm64")
         (t (string-downcase (machine-type)))))
 
+(defun node-resource-list (node)
+  "Return a fresh list of NODE's measured and advertised resources."
+  (let ((list (core-object)))
+    (dolist (source (list (node-record-capacity node) (node-record-extended-resources node)))
+      (when source
+        (maphash (lambda (name value) (setf (gethash name list) value)) source)))
+    list))
+
 (defun node-api-object (node)
   "Serialize a registered worker with readiness taken from its live lease."
   (let ((address (node-reported-address node)))
@@ -227,6 +240,8 @@
                                                   "message" "Readiness follows the gr8s node session lease"))
                "addresses" (if (and address (plusp (length address)))
                                (vector (core-object "type" "InternalIP" "address" address)) #())
+               "capacity" (node-resource-list node)
+               "allocatable" (node-resource-list node)
                "nodeInfo" (core-object "operatingSystem" "linux" "architecture" (native-node-architecture)
                                         "kubeletVersion" "v1.36.0-gr8s.0")))))
 
