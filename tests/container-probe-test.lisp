@@ -402,3 +402,21 @@
              (unwind-protect
                   (progn (probe-request-lines tls) (write-probe-http-response tls 200 '(("Content-Length" . "0")) ""))
                (ignore-errors (close tls :abort t))))))))))
+
+(test probe-http-small-redirect-body-remains-inside-the-overall-deadline
+  (let ((release (bt:make-semaphore :name "release small redirect body")) (requests 0))
+    (call-with-probe-raw-server
+     (lambda (port)
+       (unwind-protect
+            (progn
+              (is-false (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port "/start")))
+              (is (= 1 requests)))
+         (bt:signal-semaphore release)))
+     (lambda (stream)
+       (let ((request (first (probe-request-lines stream))))
+         (incf requests)
+         (if (search "/start" request)
+             (progn
+               (write-probe-http-response stream 302 '(("Location" . "/ready") ("Content-Length" . "1")) "")
+               (bt:wait-on-semaphore release))
+             (write-probe-http-response stream 200 '(("Content-Length" . "0")) "")))))))

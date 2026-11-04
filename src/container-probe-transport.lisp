@@ -51,14 +51,19 @@
         (loop for index below count do (vector-push (elt source index) bytes))))
     (container-probe-output-string bytes)))
 
-(defun read-container-probe-http-body (body code headers)
+(defun container-probe-http-content-length (headers)
+  "Read a nonnegative Content-Length unless Transfer-Encoding owns the framing."
+  (let ((value (and (null (cdr (assoc :transfer-encoding headers))) (cdr (assoc :content-length headers)))))
+    (when value
+      (let ((length (parse-integer value)))
+        (when (minusp length) (error "Negative HTTP probe Content-Length"))
+        length))))
+
+(defun read-container-probe-http-body (body code headers &optional (body-limit 10240))
   "Read at most 10KiB of the final, framed response; reject a truncated known length."
   (unless (member code '(204 304))
-    (let* ((transfer (cdr (assoc :transfer-encoding headers)))
-           (length-header (and (null transfer) (cdr (assoc :content-length headers))))
-           (content-length (and length-header (parse-integer length-header)))
-           (limit (if content-length (min 10240 content-length) 10240)))
-      (when (and content-length (minusp content-length)) (error "Negative HTTP probe Content-Length"))
+    (let* ((content-length (container-probe-http-content-length headers))
+           (limit (if content-length (min body-limit content-length) body-limit)))
       ;; Drakma's streamed body decodes chunks, but does not otherwise frame
       ;; Content-Length or report EOF at the last chunk without this option.
       (let ((wrapped (and (typep body 'flexi-streams:flexi-stream) (flexi-streams:flexi-stream-stream body))))
@@ -70,6 +75,15 @@
           (when (and content-length (< read limit)) (error "Incomplete HTTP probe response body"))
           (return-from read-container-probe-http-body (container-probe-output-string (subseq bytes 0 read)))))))
   "")
+
+(defun drain-container-probe-redirect-body (body code headers)
+  "Match Go's redirect drain: at most 2KiB, skipping known larger bodies."
+  (let ((length (container-probe-http-content-length headers)))
+    (when (or (null length) (<= length 2048))
+      ;; Ordinary drain errors do not prevent a redirect. The operation's
+      ;; deadline and private cancellation are serious conditions, not ERROR,
+      ;; and must still abort the whole request.
+      (ignore-errors (read-container-probe-http-body body code headers 2048)))))
 
 (defun run-http-container-probe (action host port timeout)
   "Perform a bounded HTTP(S) GET, reading only the terminal response's framed body."
@@ -85,11 +99,11 @@
                              (next (and (member code '(301 302 303 307 308)) location (puri:merge-uris location uri))))
                         (cond
                           ((and next (equal original-host (puri:uri-host next)))
-                           ;; The HTTP client follows before kubelet reads the
-                           ;; terminal response. A slow intermediate body must
-                           ;; not consume the probe's remaining deadline.
+                           ;; Follow before kubelet's terminal body read. Go
+                           ;; drains only small/unknown intermediate bodies.
                            (when (>= redirects 9) (return (values nil "HTTP probe exceeded ten redirects")))
                            (unless (member (puri:uri-scheme next) '(:http :https)) (return (values nil "Unsupported probe redirect scheme")))
+                           (drain-container-probe-redirect-body body code response-headers)
                            (setf uri next))
                           (t
                            (let ((output (read-container-probe-http-body body code response-headers)))
