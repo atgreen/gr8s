@@ -496,6 +496,23 @@ Server-side apply and finalizer processing remain unsupported.
 Templates have a 2 MiB serialized storage limit so admitted objects can be read
 back by the durable JSON loader.
 
+`policy/v1` PodDisruptionBudgets have a `status` subresource and a disruption
+controller that computes status from observed Pod readiness with upstream's
+arithmetic. A selected Pod with a controller of unknown scale fails safe to no
+disruptions. The Pod `eviction` subresource spends a budget atomically and answers
+429 with the `DisruptionBudget` cause when nothing remains, honors
+`unhealthyPodEvictionPolicy`, and marks the Pod with a `DisruptionTarget` condition.
+
+Agents report `cpu`, `memory` and `pods` capacity in their session hello, and Nodes
+serve them as `status.capacity` and `status.allocatable`, which are equal because
+gr8s reserves nothing for system daemons. The scheduler keeps declared requests and
+TCP host ports within what a node has, leaving a Pod that does not fit Pending with
+the reason in its `PodScheduled` condition. A Pod that named its own node bypasses
+the scheduler, so it fails with `OutOfcpu`, `OutOfmemory`, `OutOfpods` or `NodePorts`
+as a kubelet would fail it. The agent makes a `hostPort` real with a userspace TCP
+relay, so a Pod sees the node, not the original client, as the connection's source;
+UDP host ports are refused.
+
 Deployments and ReplicaSets expose `apps/v1` JSON/protobuf CRUD, selectors,
 resumable watches, revision-consistent lists, strategic patches and separate
 `scale` and `status` subresources. ReplicaSet controllers create and scale real
