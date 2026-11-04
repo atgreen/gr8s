@@ -197,6 +197,10 @@
     (setf (gethash "dnsPolicy" pod-spec) "ClusterFirst" (gethash "restartPolicy" pod-spec) "Always"
           (gethash "args" (aref (gethash "containers" pod-spec) 0)) #()
           (gethash "creationTimestamp" (gethash "metadata" template)) 'null
+          ;; A typed client's protobuf carries these zero values.
+          (gethash "name" (gethash "metadata" template)) ""
+          (gethash "uid" (gethash "metadata" template)) ""
+          (gethash "generation" (gethash "metadata" template)) 0
           (gethash "nodeSelector" pod-spec) (gr8s::core-object))
     (is (equal (concatenate 'string
                  "{\"spec\":{\"template\":{\"$patch\":\"replace\",\"metadata\":{\"labels\":{\"daemonset-name\":\"ds\"}},"
@@ -462,3 +466,10 @@
                          :parameters '(("fieldValidation" . "Strict"))
                          :content-type "application/strategic-merge-patch+json"
                          :object (gr8s::core-object "updateStrategy" (gr8s::core-object "type" "RollingUpdate"))))))
+
+(test authenticated-accounts-may-read-openapi-documents
+  ;; kubectl fetches these to validate manifests, whatever its account may do otherwise.
+  (dolist (path '("/openapi/v2" "/openapi/v3" "/openapi/v3/api/v1" "/openapi/v3/apis/apps/v1"))
+    (is (gr8s::authenticated-discovery-request-p path :get)))
+  (is (not (gr8s::authenticated-discovery-request-p "/openapi/v3/api/v1" :post)))
+  (is (not (gr8s::authenticated-discovery-request-p "/openapi/secrets" :get))))

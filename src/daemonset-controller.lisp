@@ -63,6 +63,11 @@ Keys are sorted, unset and omitempty zero values vanish, and pointers to empty o
            (unless (go-json-empty-p field)
              (setf (gethash key result) (map 'vector (lambda (item) (go-json-view item type)) field))))
           ((and (gethash "omitEmpty" definition) (go-json-empty-p field)) nil)
+          ;; Typed requests carry ObjectMeta's zero values, which the pinned wire
+          ;; schema does not mark. All but one of its scalars are omitempty.
+          ((and (equal message "k8s.io.apimachinery.pkg.apis.meta.v1.ObjectMeta")
+                (not (equal key "deletionGracePeriodSeconds")) (go-json-empty-p field))
+           nil)
           (t (setf (gethash key result) (go-json-view field type))))))))
 
 (defun daemonset-revision-data (daemonset)
