@@ -280,7 +280,8 @@
     "finalFullHostSuite": {
       "passed": 2602,
       "skipped": 5,
-      "failed": 0
+      "failed": 0,
+      "sourceCommit": "6c719c1"
     }
   },
   "limitations": [
@@ -492,5 +493,15 @@
     "regression": "Actual silent bound UDP upstream returns SERVFAIL twice; DNS thread survives and answers an authoritative query. Explicit SB-EXT:TIMEOUT and SB-SYS:DEADLINE-TIMEOUT handlers; no deadline increase.",
     "checksPassed": 6,
     "serviceDNSImplemented": false
+  },
+  "integratedMainValidation": {
+    "sourceCommit": "7638cbdb8d07d517510721ed6642f7f8d12d7910",
+    "mergedMain": "79dd73341e1b2054d156417bcef6f76d0b550703",
+    "checks": 2765,
+    "passed": 2760,
+    "skipped": 5,
+    "failed": 0,
+    "log": "/tmp/gr8s-endpointslices-crd-full.log",
+    "independentEvidenceReview": "Verified upstream artifact hashes and two genuine passing JUnit cases; reviewed four actual native HTTP/restart/termination scenarios, native exits [0,0], zero owned shims."
   }
 }
