@@ -4,6 +4,7 @@
 (defparameter +gr8s-uid-label+ "io.gr8s.uid")
 (defparameter +gr8s-resource-version-label+ "io.gr8s.resource-version")
 (defparameter +gr8s-container-label+ "io.gr8s.container")
+(defparameter +gr8s-spec-fingerprint-label+ "io.gr8s.spec-fingerprint")
 
 (define-condition runtime-error (error)
   ((message :initarg :message :reader runtime-error-message))
@@ -13,17 +14,77 @@
 (defstruct runtime-pod
   uid
   resource-version
+  spec-fingerprint
   (phase "Running")
   (pod-ip "")
   status
+  container-details
   (logs (make-hash-table :test #'equal)))
+
+(defun canonical-workload-json (object)
+  "Encode a JSON value with sorted object keys and preserved array ordering."
+  (with-output-to-string (out)
+    (labels ((emit (value)
+               (cond
+                 ((hash-table-p value)
+                  (write-char #\{ out)
+                  (loop for key in (sort (loop for key being the hash-keys of value collect key) #'string<)
+                        for first = t then nil
+                        do (unless first (write-char #\, out))
+                           (write-string (com.inuoe.jzon:stringify key) out) (write-char #\: out)
+                           (emit (gethash key value)))
+                  (write-char #\} out))
+                 ((and (vectorp value) (not (stringp value)))
+                  (write-char #\[ out)
+                  (loop for item across value for first = t then nil
+                        do (unless first (write-char #\, out)) (emit item))
+                  (write-char #\] out))
+                 (t (write-string (com.inuoe.jzon:stringify value) out)))))
+      (emit object))))
+
+(defun pod-runtime-spec-fingerprint (pod)
+  "Identify container-affecting Pod spec content independently of metadata revisions."
+  (let ((spec (com.inuoe.jzon:parse (com.inuoe.jzon:stringify
+                                   (gethash "spec" (pod-to-object pod))))))
+    ;; Grace affects shutdown, never the running workload. Excluding the new
+    ;; default also preserves adoption of containers created by older gr8s.
+    (remhash "terminationGracePeriodSeconds" spec)
+    (octets-to-hex (ironclad:digest-sequence :sha256
+                  (trivial-utf-8:string-to-utf-8-bytes
+                   (canonical-workload-json spec))))))
+
+(defgeneric runtime-events (runtime uid)
+  (:documentation "Return actual runtime event occurrences for the assigned Pod transport."))
+(defmethod runtime-events ((runtime t) uid) (declare (ignore runtime uid)) nil)
 
 (defgeneric runtime-network-metrics (runtime))
 (defmethod runtime-network-metrics ((runtime t)) (declare (ignore runtime)) "")
 
 (defgeneric runtime-observe (runtime uid))
 (defgeneric runtime-ensure (runtime pod))
+(defgeneric runtime-reconcile-containers (runtime pod observed)
+  (:documentation "Advance container lifecycle in POD, preserving healthy siblings in native runtimes."))
+(defmethod runtime-reconcile-containers ((runtime t) pod observed)
+  "Provide whole-Pod restart fallback for simple runtime adapters."
+  (let ((policy (pod-restart-policy pod)) (phase (runtime-pod-phase observed)))
+    (if (or (and (equal policy "Always") (not (equal phase "Running")))
+            (and (equal policy "OnFailure") (equal phase "Failed")))
+        (runtime-ensure runtime pod)
+        observed)))
 (defgeneric runtime-delete (runtime uid))
+(defgeneric runtime-delete-pod (runtime pod)
+  (:documentation "Advance durable Pod shutdown; return true only when deletion is complete."))
+(defmethod runtime-delete-pod ((runtime t) pod)
+  (runtime-delete runtime (pod-uid pod))
+  t)
+(defgeneric runtime-forget-pod-finalization (runtime uid)
+  (:documentation "Forget retained native terminal history after finalizers release an API Pod."))
+(defmethod runtime-forget-pod-finalization ((runtime t) uid)
+  (declare (ignore runtime uid)) nil)
+
+(defgeneric stop-runtime-deletions (runtime)
+  (:documentation "Cancel and join background deletion operations before runtime services stop."))
+(defmethod stop-runtime-deletions ((runtime t)) nil)
 (defgeneric runtime-logs (runtime uid container &key tail))
 (defgeneric runtime-exec-url
     (runtime uid container command &key stdin stdout stderr tty))
@@ -90,7 +151,8 @@
   (incf (fake-runtime-ensure-count runtime))
   (let ((runtime-pod
           (make-runtime-pod :uid (pod-uid pod)
-                            :resource-version (pod-resource-version pod))))
+                            :resource-version (pod-resource-version pod)
+                            :spec-fingerprint (pod-runtime-spec-fingerprint pod))))
     (setf (gethash (pod-uid pod) (fake-runtime-pods runtime)) runtime-pod)
     runtime-pod))
 

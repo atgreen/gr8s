@@ -1,4 +1,4 @@
-;;;; SPDX-FileCopyrightText: 2026 gr8s contributors
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
 ;;;; SPDX-License-Identifier: MIT
 ;;;;
 ;;;; Purpose:
@@ -17,8 +17,26 @@
   (nodes (make-hash-table :test #'equal))
   (resources (make-hash-table :test #'equal))
   (resource-revision 0)
+  template-history
+  (template-history-floor 0)
+  (resource-history-start 0)
+  template-token-key
+  (event-expirations (make-hash-table :test #'equal))
+  in-cluster-config
+  (credential-lock (bt:make-lock "gr8s ServiceAccount credentials"))
+  (workload-lock (bt:make-lock "gr8s workload controllers"))
+  (workload-deletions (make-hash-table :test #'equal))
+  (pod-finalization-states (make-hash-table :test #'equal))
   (pod-observed-phases (make-hash-table :test #'equal))
   (pod-observed-statuses (make-hash-table :test #'equal))
+  (pod-observed-resource-versions (make-hash-table :test #'equal))
+  (pod-condition-histories (make-hash-table :test #'equal))
+  (pod-revision 0)
+  (pod-revision-ceiling 0)
+  (pod-watch-floor 0)
+  pod-watch-journal
+  (pod-watch-journal-length 0)
+  (pod-published-statuses (make-hash-table :test #'equal))
   (lock (bt:make-lock "gr8s store")))
 
 (defmacro with-store-lock ((store) &body body)
@@ -50,18 +68,30 @@
     (setf (gethash "id" object) (node-record-id node)
           (gethash "name" object) (node-record-name node)
           (gethash "podCIDR" object) (node-record-pod-cidr node)
-          (gethash "underlayAddress" object) (node-record-underlay-address node))
+          (gethash "underlayAddress" object) (node-record-underlay-address node)
+          (gethash "ready" object) (not (null (node-record-ready-p node))))
+    (when (node-record-last-heartbeat node)
+      (setf (gethash "lastHeartbeat" object) (node-record-last-heartbeat node)))
+    (when (node-record-lease-deadline node)
+      (setf (gethash "leaseDeadline" object) (node-record-lease-deadline node)))
     object))
 
 (defun parse-node-record (input)
   "Parse JSON text or an object into a NODE-RECORD."
-  (let ((object (if (hash-table-p input)
+  (let* ((object (if (hash-table-p input)
                     input
-                    (com.inuoe.jzon:parse input))))
+                    (com.inuoe.jzon:parse input)))
+         (heartbeat (gethash "lastHeartbeat" object))
+         (deadline (gethash "leaseDeadline" object)))
     (make-node-record :id (gethash "id" object)
                       :name (gethash "name" object)
                       :pod-cidr (gethash "podCIDR" object)
-                      :underlay-address (gethash "underlayAddress" object ""))))
+                      :underlay-address (gethash "underlayAddress" object "")
+                      :last-heartbeat (when (integerp heartbeat) heartbeat)
+                      :lease-deadline (when (integerp deadline) deadline)
+                      :ready-p (and (eq t (gethash "ready" object))
+                                    (integerp heartbeat) (integerp deadline)
+                                    (<= (get-universal-time) deadline)))))
 
 (defun secure-random-octets (count)
   "Read COUNT cryptographically secure random octets from the operating system."
@@ -88,10 +118,10 @@
             (aref octets 12) (aref octets 13) (aref octets 14)
             (aref octets 15))))
 
-(defun current-timestamp ()
+(defun current-timestamp (&optional (time (get-universal-time)))
   "Return the current UTC time in Kubernetes-compatible RFC 3339 form."
   (multiple-value-bind (second minute hour day month year)
-      (decode-universal-time (get-universal-time) 0)
+      (decode-universal-time time 0)
     (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ"
             year month day hour minute second)))
 
@@ -148,6 +178,8 @@
       (let ((node (parse-node-record file)))
         (setf (gethash (node-record-name node) (pod-store-nodes store)) node)))
     (load-core-resources store)
+    (load-pod-status-state store)
+    (load-pod-revision store)
     store))
 
 (defun get-pod-unlocked (store namespace name)
@@ -163,16 +195,46 @@
   (with-store-lock (store)
     (get-pod-unlocked store namespace name)))
 
-(defun list-pods (store namespace)
-  "Return all Pods in NAMESPACE from a consistent STORE snapshot."
+(defun list-pods (store &optional namespace)
+  "Return a consistent snapshot of Pods, optionally restricted to NAMESPACE."
   (with-store-lock (store)
     (loop for pod being the hash-values of (pod-store-pods store)
-          when (string= namespace (pod-namespace pod))
+          when (or (null namespace) (string= namespace (pod-namespace pod)))
             collect pod)))
+
+(defun generate-pod-name (prefix)
+  "Append five random characters to at most 58 prefix characters, matching upstream limits."
+  (let ((alphabet "bcdfghjklmnpqrstvwxz2456789"))
+    (concatenate 'string (subseq prefix 0 (min 58 (length prefix)))
+                 (map 'string (lambda (byte) (char alphabet (mod byte (length alphabet))))
+                      (secure-random-octets 5)))))
+
+(defparameter *pod-name-generator* #'generate-pod-name
+  "Generate a candidate Pod name; dynamically bound by deterministic collision tests.")
+
+(defun assign-generated-pod-name-unlocked (store pod)
+  "Choose an unused name under STORE's lock, retrying up to eight generated collisions."
+  (unless (pod-name pod)
+    (let* ((metadata (gethash "metadata" (pod-to-object pod)))
+           (prefix (pod-generate-name-prefix metadata)))
+      (unless (plusp (length prefix)) (invalid-pod "metadata.name or generateName is required"))
+      (loop repeat 8
+            for name = (require-dns-subdomain (funcall *pod-name-generator* prefix) "metadata.name")
+            unless (gethash (pod-key (pod-namespace pod) name) (pod-store-pods store))
+              do (setf (pod-name pod) name (gethash "name" metadata) name)
+                 (return-from assign-generated-pod-name-unlocked pod))
+      (error 'kubernetes-error :status-code 409 :reason "AlreadyExists"
+             :message "Could not generate an unused Pod name after eight attempts")))
+  pod)
 
 (defun create-pod (store pod)
   "Assign server metadata, persist POD, and reject duplicate names atomically."
   (with-store-lock (store)
+    (create-pod-unlocked store pod)))
+
+(defun create-pod-unlocked (store pod)
+  "Create POD while the caller holds STORE's lock, including owner-checked controller writes."
+    (assign-generated-pod-name-unlocked store pod)
     (when (gethash (pod-key (pod-namespace pod) (pod-name pod))
                    (pod-store-pods store))
       (error 'kubernetes-error
@@ -180,28 +242,39 @@
              :reason "AlreadyExists"
              :message (format nil "Pod ~A already exists" (pod-name pod))))
     (let ((metadata (gethash "metadata" (pod-to-object pod))))
+      (remhash "deletionTimestamp" metadata)
+      (remhash "deletionGracePeriodSeconds" metadata)
       (setf (pod-uid pod) (generate-uid)
-            (pod-resource-version pod) "1"
+            (pod-resource-version pod) (write-to-string (next-pod-revision-unlocked store))
             (gethash "namespace" metadata) (pod-namespace pod)
             (gethash "uid" metadata) (pod-uid pod)
             (gethash "resourceVersion" metadata) (pod-resource-version pod)
+            (gethash "generation" metadata) 1
             (gethash "creationTimestamp" metadata) (current-timestamp)))
     (persist-pod store pod)
     (index-pod store pod)
-    pod))
+    (publish-pod-spec-change-unlocked store nil pod)
+    pod)
 
 (defun update-pod (store replacement expected-resource-version)
   "Persist REPLACEMENT when EXPECTED-RESOURCE-VERSION matches the stored Pod."
   (with-store-lock (store)
+    (update-pod-unlocked store replacement expected-resource-version)))
+
+(defun update-pod-unlocked (store replacement expected-resource-version)
+  "Update a Pod while STORE's lock is already held by an owner/identity transaction."
     (let* ((existing (get-pod-unlocked
                       store (pod-namespace replacement) (pod-name replacement)))
            (actual (pod-resource-version existing)))
-      (unless (string= expected-resource-version actual)
+      (unless (pod-revision-satisfied-p store expected-resource-version actual)
         (error 'kubernetes-error
                :status-code 409
                :reason "Conflict"
                :message (format nil "expected resourceVersion ~A, found ~A"
                                 expected-resource-version actual)))
+      (validate-pod-hostname-update existing replacement)
+      (validate-pod-dns-update existing replacement)
+      (validate-pod-finalizer-update existing replacement)
       (when (pod-node-name existing)
         (when (and (pod-node-name replacement)
                    (not (string= (pod-node-name existing)
@@ -216,41 +289,79 @@
               (pod-node-name existing)))
       (let ((metadata (gethash "metadata" (pod-to-object replacement)))
             (existing-metadata (gethash "metadata" (pod-to-object existing))))
+        ;; Deletion is irreversible. An ordinary metadata/spec update cannot
+        ;; erase or extend a shutdown that an agent is already carrying out.
+        (dolist (key '("deletionTimestamp" "deletionGracePeriodSeconds"))
+          (remhash key metadata)
+          (when (gethash key existing-metadata)
+            (setf (gethash key metadata) (gethash key existing-metadata))))
+        (setf (gethash "generation" metadata)
+              (+ (gethash "generation" existing-metadata 1)
+                 (if (equalp (gethash "spec" (pod-to-object existing))
+                             (gethash "spec" (pod-to-object replacement))) 0 1)))
         (setf (pod-uid replacement) (pod-uid existing)
               (pod-resource-version replacement)
-              (write-to-string (1+ (parse-integer actual)))
+              (write-to-string (next-pod-revision-unlocked store))
               (gethash "namespace" metadata) (pod-namespace replacement)
               (gethash "uid" metadata) (pod-uid replacement)
               (gethash "resourceVersion" metadata)
               (pod-resource-version replacement)
               (gethash "creationTimestamp" metadata)
               (gethash "creationTimestamp" existing-metadata)))
-      (persist-pod store replacement)
-      (index-pod store replacement)
-      replacement)))
+      (let ((old (pod-published-view store existing)))
+        (persist-pod store replacement)
+        (index-pod store replacement)
+        (publish-pod-spec-change-unlocked store old replacement))
+      replacement))
 
-(defun remove-pod (store namespace name)
+(defun remove-pod (store namespace name &key uid)
   "Remove a Pod and its observed status from STORE, returning the removed Pod."
   (with-store-lock (store)
     (let ((pod (get-pod-unlocked store namespace name)))
+      (when (and uid (not (equal uid (pod-uid pod))))
+        (error 'kubernetes-error :status-code 409 :reason "Conflict" :message "Pod UID changed before removal"))
+      (when (pod-finalizers-present-p pod)
+        (error 'kubernetes-error :status-code 409 :reason "Conflict" :message "Pod finalizers still retain this object"))
+      (let ((status-path (pod-status-state-path store (pod-uid pod))))
+        (when (probe-file status-path) (delete-file status-path)))
       (delete-file (pod-path store pod))
       (remhash (pod-key namespace name) (pod-store-pods store))
+      (publish-pod-removal-unlocked store pod)
+      (remhash (pod-uid pod) (pod-store-pod-finalization-states store))
       (remhash (pod-uid pod) (pod-store-pod-observed-phases store))
       (remhash (pod-uid pod) (pod-store-pod-observed-statuses store))
+      (remhash (pod-uid pod) (pod-store-pod-observed-resource-versions store))
+      (remhash (pod-uid pod) (pod-store-pod-condition-histories store))
       pod)))
 
 (defun delete-pod (store namespace name)
   "Delete and return the Pod named NAME in NAMESPACE."
   (remove-pod store namespace name))
 
-(defun mark-pod-deleting (store namespace name)
+(defun mark-pod-deleting (store namespace name &key uid resource-version
+                                                (grace-period nil grace-supplied-p)
+                                                dry-run)
   "Set a Pod's deletion timestamp, advance its resource version, and persist it."
   (with-store-lock (store)
-    (let* ((pod (get-pod-unlocked store namespace name))
-           (metadata (gethash "metadata" (pod-to-object pod)))
-           (next-version (write-to-string
-                          (1+ (parse-integer (pod-resource-version pod))))))
-      (setf (gethash "deletionTimestamp" metadata) (current-timestamp)
-            (gethash "resourceVersion" metadata) next-version
-            (pod-resource-version pod) next-version)
-      (persist-pod store pod))))
+    (let* ((existing (get-pod-unlocked store namespace name))
+           (pod (parse-pod (com.inuoe.jzon:parse
+                            (com.inuoe.jzon:stringify (pod-to-object existing)))))
+           (metadata (gethash "metadata" (pod-to-object pod))))
+      (when (and uid (not (equal uid (pod-uid pod))))
+        (error 'kubernetes-error :status-code 409 :reason "Conflict"
+               :message "Pod UID no longer matches deletion precondition"))
+      (when (and resource-version
+                 (not (pod-revision-satisfied-p store resource-version (pod-resource-version pod))))
+        (error 'kubernetes-error :status-code 409 :reason "Conflict"
+               :message "Pod resourceVersion no longer matches deletion precondition"))
+      (unless (prepare-pod-deletion store pod grace-period grace-supplied-p)
+        (return-from mark-pod-deleting pod))
+      (unless dry-run
+        (let ((next-version (write-to-string (next-pod-revision-unlocked store)))
+              (old (pod-published-view store existing)))
+          (setf (gethash "resourceVersion" metadata) next-version
+                (pod-resource-version pod) next-version)
+          (persist-pod store pod)
+          (index-pod store pod)
+          (publish-pod-spec-change-unlocked store old pod)))
+      pod)))

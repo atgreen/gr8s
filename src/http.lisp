@@ -8,8 +8,10 @@
 
 (defun json-response (object &optional (status 200))
   (setf (hunchentoot:return-code*) status
-        (hunchentoot:content-type*) "application/json; charset=utf-8")
-  (com.inuoe.jzon:stringify object))
+        ;; client-go v0.27 discovery compares this media type literally. JSON
+        ;; is UTF-8 already; a charset parameter breaks its legacy fallback.
+        (hunchentoot:content-type*) "application/json")
+  (com.inuoe.jzon:stringify (crd-api-view (event-api-view object))))
 
 (defun status-response (status reason message code)
   (json-response
@@ -33,10 +35,26 @@
 (defun pod-response-object (pod status)
   (let ((object (copy-json-object (pod-to-object pod))))
     (setf (gethash "status" object) status)
+    (when (pod-status-revision pod)
+      (setf (gethash "resourceVersion" (gethash "metadata" object))
+            (write-to-string (pod-status-revision pod))))
     object))
 
-(defun request-object ()
-  (parse-pod (hunchentoot:raw-post-data :force-text t)))
+(defun request-pod-in-namespace (object namespace &key allow-generate-name)
+  "Validate the request namespace and default omitted Pod metadata.namespace."
+  (let* ((metadata (require-object (gethash "metadata" object) "metadata"))
+         (specified (gethash "namespace" metadata)))
+    (when (and specified (not (equal specified "")) (not (equal namespace specified)))
+      (core-resource-error 400 "BadRequest" "metadata.namespace does not match request namespace"))
+    (setf (gethash "namespace" metadata) namespace)
+    ;; Ordinary Pod writes cannot supply runtime status, including GET-to-PUT metadata edits.
+    (remhash "status" object)
+    (parse-pod object :allow-generate-name allow-generate-name)))
+
+(defun request-object (&optional (namespace "default"))
+  (request-pod-in-namespace
+   (core-resource-request-object "Pod")
+   namespace))
 
 (defun request-json-object ()
   (require-object
@@ -60,8 +78,8 @@
 (defun version-response ()
   (json-response
    (json-object "major" "1"
-                "minor" "0"
-                "gitVersion" "v1.0.0-gr8s"
+                "minor" "36"
+                "gitVersion" "v1.36.0-gr8s.0"
                 "gitCommit" "unknown"
                 "gitTreeState" "clean"
                 "buildDate" "1970-01-01T00:00:00Z"
@@ -76,53 +94,31 @@
                 "versions" #( "v1")
                 "serverAddressByClientCIDRs" #())))
 
-(defun api-groups-response ()
-  (json-response
-   (json-object "apiVersion" "v1"
-                "kind" "APIGroupList"
-                "groups" #())))
+(defun api-groups-response (&optional store)
+  "Describe builtin groups and actual store-scoped custom API groups."
+  (let ((groups (vector (json-object "name" "rbac.authorization.k8s.io"
+                                    "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
+                                    "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
+                       (event-api-group) (workload-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group))))
+    (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
+    (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
 (defun api-resources-response ()
   (json-response
    (json-object
-    "apiVersion" "v1"
-    "groupVersion" "v1"
-    "kind" "APIResourceList"
+    "apiVersion" "v1" "groupVersion" "v1" "kind" "APIResourceList"
     "resources"
-    (vector
-     (json-object "name" "pods"
-                  "singularName" ""
-                  "namespaced" t
-                  "kind" "Pod"
-                  "verbs" #( "create" "delete" "get" "list" "patch" "update")
-                  "shortNames" #( "po"))
-     (json-object "name" "pods/log"
-                  "singularName" ""
-                  "namespaced" t
-                  "kind" "Pod"
-                  "verbs" #( "get"))
-     (json-object "name" "pods/exec"
-                  "singularName" ""
-                  "namespaced" t
-                  "kind" "Pod"
-                  "verbs" #( "create"))
-     (json-object "name" "configmaps" "singularName" "configmap" "namespaced" t
-                  "kind" "ConfigMap" "shortNames" #( "cm")
-                  "verbs" #( "create" "delete" "get" "list" "patch" "update"))
-     (json-object "name" "secrets" "singularName" "secret" "namespaced" t
-                  "kind" "Secret" "verbs" #( "create" "delete" "get" "list" "patch" "update"))
-     (json-object "name" "events"
-                  "singularName" ""
-                  "namespaced" t
-                  "kind" "Event"
-                  "verbs" #( "get" "list"))))))
-
-(defun event-list-response ()
-  (json-response
-   (json-object "apiVersion" "v1"
-                "kind" "EventList"
-                "metadata" (json-object "resourceVersion" "0")
-                "items" #())))
+    (concatenate
+     'vector
+     (vector
+      (json-object "name" "pods" "singularName" "pod" "namespaced" t "kind" "Pod"
+                   "verbs" #("create" "delete" "get" "list" "patch" "update") "shortNames" #("po"))
+      (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
+      (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("create"))
+      (json-object "name" "pods/proxy" "singularName" "" "namespaced" t "kind" "PodProxyOptions"
+                   "verbs" #("get" "create" "update" "patch" "delete"))
+      (json-object "name" "nodes" "singularName" "node" "namespaced" nil "kind" "Node" "verbs" #("get" "list")))
+     (stored-resource-discovery "v1") (storage-status-discovery)))))
 
 (defvar *schema-reference-prefix* "#/definitions/")
 
@@ -144,6 +140,9 @@
                    "namespace" (json-object "type" "string")
                    "uid" (json-object "type" "string")
                    "resourceVersion" (json-object "type" "string")
+                   "generation" (json-object "type" "integer" "format" "int64")
+                   "deletionTimestamp" (json-object "type" "string" "format" "date-time")
+                   "deletionGracePeriodSeconds" (json-object "type" "integer" "format" "int64")
                    "labels" (json-object "type" "object"
                                          "additionalProperties"
                                          (json-object "type" "string"))
@@ -188,7 +187,8 @@
        "containers" (json-object
                      "type" "array"
                      "items" (reference-schema "io.k8s.api.core.v1.Container"))
-       "restartPolicy" (json-object "type" "string")))
+       "restartPolicy" (json-object "type" "string")
+       "terminationGracePeriodSeconds" (json-object "type" "integer" "format" "int64" "minimum" 0)))
      (gethash "io.k8s.api.core.v1.Pod" definitions)
      (json-object
       "type" "object"
@@ -207,7 +207,7 @@
 (defun openapi-document ()
   (json-object "swagger" "2.0"
                "info" (json-object "title" "gr8s" "version" "v1")
-               "paths" (make-hash-table :test #'equal)
+               "paths" (add-csr-openapi-v2-paths (make-hash-table :test #'equal))
                "definitions" (openapi-definitions)))
 
 (defun openapi-response ()
@@ -219,7 +219,15 @@
     "paths"
     (json-object
      "api/v1"
-     (json-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")))))
+     (json-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")
+     "apis/certificates.k8s.io/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/certificates.k8s.io/v1?hash=gr8s-certificates-v1")
+     "apis/discovery.k8s.io/v1"
+     (json-object "serverRelativeURL" "/openapi/v3/apis/discovery.k8s.io/v1?hash=gr8s-endpointslices-v1")
+     "apis/storage.k8s.io/v1"
+     (json-object "serverRelativeURL" "/openapi/v3/apis/storage.k8s.io/v1?hash=gr8s-storage-v1")
+     "apis/events.k8s.io/v1"
+     (json-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1")
+     "apis/apps/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/apps/v1?hash=gr8s-apps-v1")))))
 
 (defun pod-group-version-kind ()
   (json-object "group" "" "version" "v1" "kind" "Pod"))
@@ -298,53 +306,74 @@
         (json-object "schema"
                      (reference-schema "io.k8s.api.core.v1.Pod")))))))))
 
-(defun openapi-v3-response ()
+(defun openapi-v3-response (&optional (version "v1"))
   (let ((*schema-reference-prefix* "#/components/schemas/"))
     (json-response
      (json-object
       "openapi" "3.0.0"
       "info" (json-object "title" "gr8s" "version" "v1")
-      "paths" (add-core-resource-openapi-paths (openapi-v3-pod-paths))
+      "paths" (cond ((equal version "certificates.k8s.io/v1") (add-csr-openapi-paths (core-object)))
+                    ((equal version "discovery.k8s.io/v1") (add-endpointslice-openapi-paths (core-object)))
+                    ((equal version "events.k8s.io/v1") (add-event-openapi-paths (core-object) t))
+                    ((equal version "apps/v1") (add-workload-openapi-paths (core-object)))
+                    ((equal version "storage.k8s.io/v1") (add-storage-openapi-paths (core-object) version))
+                    (t (add-storage-openapi-paths (add-core-resource-openapi-paths (openapi-v3-pod-paths)))))
       "components" (json-object "schemas" (openapi-definitions))))))
 
-(defun create-pod-response (store reconciler)
-  (let* ((pod (create-pod store (request-object)))
+(defun create-pod-response (store reconciler &optional (namespace "default"))
+  (let* ((input (request-pod-in-namespace (core-resource-request-object "Pod") namespace :allow-generate-name t))
+         (pod (create-pod store (admit-in-cluster-pod store input)))
          (status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
     (json-response (pod-response-object pod status) 201)))
 
-(defun list-pods-response (store reconciler)
-  (json-response
-   (json-object
-    "apiVersion" "v1"
-    "kind" "PodList"
-    "metadata" (json-object "resourceVersion" "0")
-    "items" (map 'vector
-                 (lambda (pod)
-                   (pod-response-object
-                    pod
-                    (reconcile-pod reconciler
-                                   (pod-namespace pod)
-                                   (pod-name pod))))
-                 (list-pods store "default")))))
+(defun pod-list-observed-object (store reconciler snapshot)
+  "Skip vanished snapshot identities and never attach a replacement Pod's status to an old UID."
+  (handler-case
+      (let ((status (reconcile-pod reconciler (pod-namespace snapshot) (pod-name snapshot))))
+        (with-store-lock (store)
+          (let ((current (gethash (pod-key (pod-namespace snapshot) (pod-name snapshot)) (pod-store-pods store))))
+            (when (and current (equal (pod-uid snapshot) (pod-uid current)))
+              (pod-response-object current status)))))
+    (kubernetes-error (condition)
+      (unless (= 404 (kubernetes-error-status-code condition)) (error condition)))))
 
-(defun get-pod-response (store reconciler name)
-  (let ((pod (get-pod store "default" name)))
+(defun list-pods-response (store reconciler &optional (namespace "default"))
+  (when (true-parameter-p (hunchentoot:parameter "watch"))
+    (return-from list-pods-response (pod-watch-response store namespace)))
+  (let ((labels (core-selector-predicate (hunchentoot:parameter "labelSelector")))
+        (fields (core-selector-predicate (hunchentoot:parameter "fieldSelector") :fields t
+                                         :field-paths (pod-selector-field-paths)))
+        ;; Read before gathering items: a watch from here may repeat a change
+        ;; already in the list, which clients tolerate, but can never miss one.
+        (revision (with-store-lock (store) (pod-store-pod-revision store))))
     (json-response
-     (pod-response-object pod (reconcile-pod reconciler "default" name)))))
+     (json-object "apiVersion" "v1" "kind" "PodList"
+                  "metadata" (json-object "resourceVersion" (write-to-string revision))
+                  "items" (coerce
+                           (loop for pod in (list-pods store namespace)
+                                 for object = (pod-list-observed-object store reconciler pod)
+                                 when (and object (funcall labels object) (funcall fields object))
+                                   collect object) 'vector)))))
 
-(defun apply-pod-response (store reconciler name)
+(defun get-pod-response (store reconciler name &optional (namespace "default"))
+  (let ((pod (get-pod store namespace name)))
+    (json-response
+     (pod-response-object pod (reconcile-pod reconciler namespace name)))))
+
+(defun apply-pod-response (store reconciler name &optional (namespace "default"))
   (let* ((patch (request-json-object))
-         (existing (handler-case (get-pod store "default" name)
+         (existing (handler-case (get-pod store namespace name)
                      (kubernetes-error (error)
                        (if (= 404 (kubernetes-error-status-code error))
                            nil
                            (error error)))))
          (replacement
-           (parse-pod
+           (request-pod-in-namespace
             (if existing
                 (merge-json-object
                  (copy-json-object (pod-to-object existing)) patch)
-                patch))))
+                patch)
+            namespace)))
     (unless (string= name (pod-name replacement))
       (invalid-pod "request name does not match metadata.name"))
     (let ((pod (if existing
@@ -353,11 +382,11 @@
                    (create-pod store replacement))))
       (json-response
        (pod-response-object
-        pod (reconcile-pod reconciler "default" name))
+        pod (reconcile-pod reconciler namespace name))
        (if existing 200 201)))))
 
-(defun replace-pod-response (store reconciler name)
-  (let ((replacement (request-object)))
+(defun replace-pod-response (store reconciler name &optional (namespace "default"))
+  (let ((replacement (request-object namespace)))
     (unless (string= name (pod-name replacement))
       (invalid-pod "request name does not match metadata.name"))
     (unless (pod-resource-version replacement)
@@ -366,19 +395,59 @@
                            (pod-resource-version replacement))))
       (json-response
        (pod-response-object
-        pod (reconcile-pod reconciler "default" name))))))
+        pod (reconcile-pod reconciler namespace name))))))
 
-(defun delete-pod-response (store reconciler name)
+(defun pod-delete-request-arguments ()
+  "Decode JSON/protobuf DeleteOptions and query options without mutating desired state."
+  (let* ((body (hunchentoot:raw-post-data :force-binary t))
+         (options (if (and body (plusp (length body)))
+                      (core-resource-request-object "DeleteOptions") (json-object)))
+         (preconditions (gethash "preconditions" options))
+         (preview (gethash "dryRun" options))
+         (query-grace (hunchentoot:parameter "gracePeriodSeconds"))
+         (arguments nil))
+    (when preconditions
+      (require-object preconditions "preconditions")
+      (dolist (key '("uid" "resourceVersion"))
+        (when (gethash key preconditions)
+          (require-nonempty-string (gethash key preconditions) key))))
+    (when (and preview (not (eq preview 'null)))
+      (unless (and (vectorp preview) (not (stringp preview))
+                   (every (lambda (value) (equal value "All")) preview))
+        (core-resource-error 400 "BadRequest" "DeleteOptions.dryRun must contain only All")))
+    (let ((policy (or (gethash "propagationPolicy" options)
+                      (hunchentoot:parameter "propagationPolicy"))))
+      (when (and policy (not (eq policy 'null)) (not (equal policy "Background")))
+        (invalid-pod "Pod deletion currently supports Background propagation only")))
+    (when (eq t (gethash "orphanDependents" options))
+      (invalid-pod "Orphan propagation is not supported"))
+    (multiple-value-bind (grace supplied) (gethash "gracePeriodSeconds" options)
+      (when (eq grace 'null) (setf supplied nil))
+      (when (and query-grace (not supplied))
+        (setf grace (handler-case (parse-integer query-grace)
+                      (error () (core-resource-error 400 "BadRequest" "Invalid gracePeriodSeconds")))
+              supplied t))
+      (when supplied (setf arguments (list :grace-period grace))))
+    (append arguments
+            (list :uid (and preconditions (gethash "uid" preconditions))
+                  :resource-version (and preconditions (gethash "resourceVersion" preconditions))
+                  :dry-run (or (core-resource-dry-run-p)
+                               (and (vectorp preview) (not (stringp preview)) (plusp (length preview))))))))
+
+(defun delete-pod-response (store reconciler name &optional (namespace "default"))
+  "Start or shorten Pod shutdown and return promptly while its agent stops containers."
   (declare (ignore store))
-  (delete-reconciled-pod reconciler "default" name)
-  (status-response "Success" "Deleted"
-                   (format nil "Pod ~A deleted" name) 200))
+  (multiple-value-bind (status pod)
+      (apply #'delete-reconciled-pod reconciler namespace name (pod-delete-request-arguments))
+    (if (equal "Deleted" (and status (gethash "reason" status)))
+        (status-response "Success" "Deleted" (format nil "Pod ~A deleted" name) 200)
+        (json-response (pod-response-object pod (or status (pod-status "Running" :reason "Terminating")))))))
 
-(defun pod-logs-response (store reconciler name)
-  (let* ((pod (get-pod store "default" name))
+(defun pod-logs-response (store reconciler name &optional (namespace "default"))
+  (let* ((pod (get-pod store namespace name))
          (container (or (hunchentoot:parameter "container")
                         (container-spec-name (aref (pod-containers pod) 0)))))
-    (unless (find container (pod-containers pod)
+    (unless (find container (pod-all-containers pod)
                   :key #'container-spec-name :test #'string=)
       (error 'kubernetes-error
              :status-code 400
@@ -844,10 +913,10 @@
   (error 'kubernetes-error :status-code 400 :reason "BadRequest"
          :message message))
 
-(defun pod-exec-response (store reconciler name)
+(defun pod-exec-response (store reconciler name &optional (namespace "default"))
   (unless (upgrade-request-p)
     (bad-exec-request "Pod exec requires an upgraded connection"))
-  (let* ((pod (get-pod store "default" name))
+  (let* ((pod (get-pod store namespace name))
          (options
            (exec-options-from-parameters (hunchentoot:get-parameters*)))
          (container
@@ -855,7 +924,7 @@
                (container-spec-name (aref (pod-containers pod) 0)))))
     (unless (exec-options-command options)
       (bad-exec-request "Pod exec requires at least one command argument"))
-    (unless (find container (pod-containers pod)
+    (unless (find container (pod-all-containers pod)
                   :key #'container-spec-name :test #'string=)
       (bad-exec-request
        (format nil "container ~A is not valid for pod ~A" container name)))
@@ -879,65 +948,87 @@
               :tty (exec-options-tty options)))))))
 
 (defun pod-route-parts (path)
-  (let ((prefix "/api/v1/namespaces/default/pods"))
-    (when (and (>= (length path) (length prefix))
-               (string= prefix path :end2 (length prefix))
-               (or (= (length path) (length prefix))
-                   (char= #\/ (char path (length prefix)))))
-      (remove "" (uiop:split-string (subseq path (length prefix))
-                                    :separator '(#\/))
-              :test #'string=))))
+  "Return Pod subresource parts, namespace, and a route match indicator."
+  (let ((parts (uiop:split-string path :separator '(#\/))))
+    (when (and (<= 6 (length parts))
+               (equal (subseq parts 0 4) '("" "api" "v1" "namespaces"))
+               (dns-label-p (fifth parts)) (equal "pods" (sixth parts))
+               (every (lambda (part) (plusp (length part))) (nthcdr 6 parts)))
+      (values (nthcdr 6 parts) (fifth parts) t))))
 
 (defun dispatch-pod-request (store runtime reconciler path method)
   (declare (ignore runtime))
-  (let ((parts (pod-route-parts path)))
+  (multiple-value-bind (parts namespace matched) (pod-route-parts path)
+    (declare (ignore matched))
     (cond
       ((and (null parts) (eq method :post))
-       (create-pod-response store reconciler))
+       (create-pod-response store reconciler namespace))
       ((and (null parts) (eq method :get))
-       (list-pods-response store reconciler))
+       (list-pods-response store reconciler namespace))
       ((and (= 1 (length parts)) (eq method :get))
-       (get-pod-response store reconciler (first parts)))
+       (get-pod-response store reconciler (first parts) namespace))
       ((and (= 1 (length parts)) (eq method :patch))
-       (apply-pod-response store reconciler (first parts)))
+       (apply-pod-response store reconciler (first parts) namespace))
       ((and (= 1 (length parts)) (eq method :put))
-       (replace-pod-response store reconciler (first parts)))
+       (replace-pod-response store reconciler (first parts) namespace))
       ((and (= 1 (length parts)) (eq method :delete))
-       (delete-pod-response store reconciler (first parts)))
-      ((and (= 2 (length parts))
-            (string= "log" (second parts))
-            (eq method :get))
-       (pod-logs-response store reconciler (first parts)))
-      ((and (= 2 (length parts))
-            (string= "exec" (second parts))
-            (member method '(:get :post)))
-       (pod-exec-response store reconciler (first parts)))
-      (t
-       (status-response "Failure" "NotFound"
-                        (format nil "No route for ~A ~A" method path) 404)))))
+       (delete-pod-response store reconciler (first parts) namespace))
+      ((and (= 2 (length parts)) (string= "log" (second parts)) (eq method :get))
+       (pod-logs-response store reconciler (first parts) namespace))
+      ((and (= 2 (length parts)) (string= "exec" (second parts)) (member method '(:get :post)))
+       (pod-exec-response store reconciler (first parts) namespace))
+      (t (status-response "Failure" "NotFound"
+                          (format nil "No route for ~A ~A" method path) 404)))))
 
 (defun handle-http-request (store runtime reconciler request)
   (handler-case
       (let ((path (hunchentoot:script-name request))
-            (method (hunchentoot:request-method request)))
+            (method (hunchentoot:request-method request))
+            (*crd-field-validation* (crd-request-field-validation)))
         (cond
           ((string= path "/metrics")
            (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
            (runtime-network-metrics runtime))
           ((string= path "/version") (version-response))
           ((string= path "/api") (api-versions-response))
-          ((string= path "/apis") (api-groups-response))
-          ((string= path "/openapi/v2") (openapi-response))
-          ((string= path "/openapi/v3") (openapi-v3-discovery-response))
+          ((string= path "/apis") (api-groups-response store))
+          ((string= path "/apis/certificates.k8s.io") (json-response (csr-api-group)))
+          ((string= path "/apis/certificates.k8s.io/v1") (csr-discovery-response))
+          ((string= path "/openapi/v3/apis/certificates.k8s.io/v1") (openapi-v3-response "certificates.k8s.io/v1"))
+          ((csr-subresource-route path) (dispatch-csr-subresource store path method))
+          ((string= path "/apis/discovery.k8s.io") (json-response (endpointslice-api-group)))
+          ((string= path "/apis/discovery.k8s.io/v1") (endpointslice-discovery-response))
+          ((string= path "/openapi/v3/apis/discovery.k8s.io/v1") (openapi-v3-response "discovery.k8s.io/v1"))
+          ((string= path "/apis/storage.k8s.io") (json-response (storage-api-group)))
+          ((string= path "/apis/storage.k8s.io/v1") (storage-discovery-response))
+          ((string= path "/openapi/v3/apis/storage.k8s.io/v1") (openapi-v3-response "storage.k8s.io/v1"))
+          ((storage-status-route path) (dispatch-storage-status-request store path method))
+          ((string= path "/apis/events.k8s.io") (json-response (event-api-group)))
+          ((string= path "/apis/events.k8s.io/v1") (event-discovery-response))
+          ((string= path "/apis/rbac.authorization.k8s.io/v1") (rbac-resources-response))
+          ((string= path "/apis/apps") (json-response (workload-api-group)))
+          ((string= path "/apis/apps/v1") (workload-resources-response))
+          ((string= path "/openapi/v2") (json-response (crd-openapi-document store nil nil nil)))
+          ((string= path "/openapi/v3") (crd-openapi-discovery-response store))
+          ((string= path "/openapi/v3/apis/events.k8s.io/v1") (openapi-v3-response "events.k8s.io/v1"))
+          ((string= path "/openapi/v3/apis/apps/v1") (openapi-v3-response "apps/v1"))
           ((string= path "/openapi/v3/api/v1") (openapi-v3-response))
           ((string= path "/api/v1") (api-resources-response))
-          ((string= path "/api/v1/namespaces/default/events")
-           (event-list-response))
+          ((and (eq method :get) (string= path "/api/v1/nodes"))
+           (nodes-api-response store))
+          ((and (eq method :get) (uiop:string-prefix-p "/api/v1/nodes/" path)
+                (dns-subdomain-p (subseq path (length "/api/v1/nodes/"))))
+           (nodes-api-response store (subseq path (length "/api/v1/nodes/"))))
+          ((crd-special-route store path) (dispatch-crd-request store path method))
+          ((workload-subresource-route path) (dispatch-workload-subresource store path method))
           ((core-resource-route path)
            (dispatch-core-resource-request store path method))
-          ((pod-route-parts path)
-           (dispatch-pod-request store runtime reconciler path method))
-          ((string= path "/api/v1/namespaces/default/pods")
+          ((and (string= path "/api/v1/pods") (eq method :get))
+           (list-pods-response store reconciler nil))
+          ((nth-value 2 (pod-http-proxy-route path))
+           (multiple-value-bind (namespace id) (pod-http-proxy-route path)
+             (pod-http-proxy-response store namespace id method)))
+          ((nth-value 2 (pod-route-parts path))
            (dispatch-pod-request store runtime reconciler path method))
           (t (status-response "Failure" "NotFound" "route not found" 404))))
     (kubernetes-error (error)

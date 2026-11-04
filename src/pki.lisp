@@ -1,3 +1,11 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Persist cluster trust and node-bound enrollment credentials, validate real
+;;;; signed requests and internal certificate profiles, and issue only identities
+;;;; controlled by the appropriate enrollment or control-server issuer policy.
+
 (in-package #:gr8s)
 
 (define-condition pki-error (error)
@@ -25,16 +33,19 @@
 (defparameter +oid-client-auth+ '(1 3 6 1 5 5 7 3 2))
 
 (defun pki-fail (reason control &rest arguments)
+  "Signal a structured PKI failure with a stable reason and formatted message."
   (error 'pki-error
          :reason reason
          :message (apply #'format nil control arguments)))
 
 (defun octets-to-hex (octets)
+  "Encode octets as two hexadecimal digits each."
   (with-output-to-string (stream)
     (loop for octet across octets
           do (format stream "~2,'0x" octet))))
 
 (defun hex-to-octets (string)
+  "Decode hexadecimal token material or fail without using malformed identifiers."
   (unless (evenp (length string))
     (pki-fail "invalid-token" "Malformed hexadecimal token material"))
   (handler-case
@@ -51,6 +62,7 @@
       (pki-fail "invalid-token" "Malformed hexadecimal token material"))))
 
 (defun pki-ascii-octets (string)
+  "Encode ASCII characters as octets and reject non-ASCII input."
   (let ((octets (make-array (length string) :element-type '(unsigned-byte 8))))
     (loop for character across string
           for index from 0
@@ -61,6 +73,7 @@
     octets))
 
 (defun valid-node-name-p (name)
+  "Recognize a bounded node name using the existing enrollment character rules."
   (and (stringp name)
        (<= 1 (length name) 253)
        (not (member (char name 0) '(#\- #\.) :test #'char=))
@@ -71,11 +84,13 @@
                         (char= character #\.)))))
 
 (defun ensure-valid-node-name (name)
+  "Return a valid enrollment node name or signal a structured identity failure."
   (unless (valid-node-name-p name)
     (pki-fail "invalid-node-name" "Invalid node name ~S" name))
   name)
 
 (defun write-private-text-exclusively (path text)
+  "Create a new UTF-8 credential file with mode0600 and refuse existing paths."
   (ensure-directories-exist path)
   (let ((descriptor
           (sb-posix:open (namestring path)
@@ -92,6 +107,7 @@
   path)
 
 (defun private-temporary-path (target)
+  "Choose a random sibling pathname for an atomic credential update."
   (make-pathname
    :name (format nil ".~A-~A"
                  (pathname-name target)
@@ -100,6 +116,7 @@
    :defaults target))
 
 (defun write-private-text-atomically (path text)
+  "Replace credential text through an exclusive private temporary file."
   (let ((temporary (private-temporary-path path)))
     (unwind-protect
          (progn
@@ -110,6 +127,7 @@
   path)
 
 (defun write-public-text-exclusively (path text)
+  "Create new public certificate text without overwriting an existing file."
   (ensure-directories-exist path)
   (with-open-file (stream path
                           :direction :output
@@ -119,15 +137,24 @@
   path)
 
 (defun random-positive-serial ()
+  "Generate a nonzero random certificate serial number."
   (let ((serial (ironclad:octets-to-integer (ironclad:random-data 16))))
     (if (zerop serial) 1 serial)))
 
+(defun ecdsa-signature-der (raw-signature)
+  "Encode fixed-width ECDSA scalars as minimal positive DER integers."
+  ;; The ACME byte-array encoder retains redundant leading zeroes. The TLS
+  ;; encoder converts scalars to integers first, as required by strict DER.
+  (pure-tls::encode-ecdsa-signature-der raw-signature))
+
 (defun ecdsa-sign-der (private-key bytes)
-  (pure-tls/acme::encode-ecdsa-signature
+  "Sign certificate bytes using canonical DER without relaxing verification."
+  (ecdsa-signature-der
    (ironclad:sign-message private-key
                           (ironclad:digest-sequence :sha256 bytes))))
 
 (defun certificate-der (issuer subject subject-public-key extensions signer)
+  "Sign a direct leaf with the supplied issuer, subject, public key and policy extensions."
   (let* ((algorithm
            (pure-tls/acme::encode-sequence
             (pure-tls/acme::encode-oid pure-tls/acme::*oid-ecdsa-with-sha256*)))
@@ -149,6 +176,7 @@
      (pure-tls/acme::encode-bit-string (ecdsa-sign-der signer tbs)))))
 
 (defun ca-certificate-der (private-key public-key)
+  "Sign a self-issued cluster CA with a zero subordinate-CA path length."
   (let* ((name (pure-tls/acme::encode-subject +pki-ca-common-name+))
          (basic-constraints
            (pure-tls/acme::encode-critical-extension
@@ -181,6 +209,7 @@
        (pure-tls/acme::encode-bit-string (ecdsa-sign-der private-key tbs))))))
 
 (defun create-cluster-ca (certificate-path private-key-path)
+  "Create a fresh CA certificate and private key without overwriting persisted credentials."
   (multiple-value-bind (private-key public-key)
       (ironclad:generate-key-pair :secp256r1)
     (let* ((certificate-der (ca-certificate-der private-key public-key))
@@ -196,6 +225,7 @@
           (error condition))))))
 
 (defun ensure-cluster-pki (root)
+  "Load persisted cluster trust or create a new pair, rejecting incomplete state."
   (let* ((root (uiop:ensure-directory-pathname root))
          (pki-directory (merge-pathnames "pki/" root))
          (certificate-path (merge-pathnames "cluster-ca.crt" pki-directory))
@@ -230,15 +260,18 @@
         (pki-fail "invalid-ca" "Could not load cluster CA: ~A" condition)))))
 
 (defun token-path (pki identifier)
+  "Locate the server-owned state record for a validated token identifier."
   (merge-pathnames (format nil "~A.json" identifier)
                    (cluster-pki-token-directory pki)))
 
 (defun token-digest (salt secret)
+  "Hash a join secret together with its server-generated salt."
   (ironclad:digest-sequence
    :sha256
    (concatenate '(vector (unsigned-byte 8)) salt (pki-ascii-octets secret))))
 
 (defun token-record-json (node-name salt digest state)
+  "Serialize node binding, salted digest and one-time enrollment state."
   (let ((record (make-hash-table :test #'equal)))
     (setf (gethash "nodeName" record) node-name
           (gethash "salt" record) (octets-to-hex salt)
@@ -248,6 +281,7 @@
       (com.inuoe.jzon:stringify record :stream stream))))
 
 (defun create-join-token (pki node-name)
+  "Persist a new unused node-bound token digest and return its one-time secret."
   (ensure-valid-node-name node-name)
   (bt:with-lock-held ((cluster-pki-lock pki))
     (loop
@@ -262,6 +296,7 @@
              (return (format nil "~A.~A" identifier secret))))))
 
 (defun split-join-token (token)
+  "Validate token shape and hexadecimal identifier material before pathname use."
   (let ((separator (and (stringp token) (position #\. token))))
     (unless (and separator
                  (= separator 24)
@@ -275,6 +310,7 @@
       (values identifier secret))))
 
 (defun load-token-record (pki identifier)
+  "Read persisted issuance state or fail for an unknown or unreadable token."
   (let ((path (token-path pki identifier)))
     (unless (probe-file path)
       (pki-fail "invalid-token" "Unknown join token"))
@@ -284,6 +320,7 @@
         (pki-fail "invalid-token" "Unreadable join-token record")))))
 
 (defun validate-token (pki token node-name)
+  "Check secret digest, exact node binding and unused state before enrollment."
   (multiple-value-bind (identifier secret) (split-join-token token)
     (multiple-value-bind (record path) (load-token-record pki identifier)
       (let* ((salt (hex-to-octets (gethash "salt" record)))
@@ -298,6 +335,7 @@
         (values record path salt stored-digest)))))
 
 (defun generate-node-key-and-csr (node-name private-key-path)
+  "Reuse or create the private RSA node key and return its signed enrollment request."
   (ensure-valid-node-name node-name)
   (when (probe-file private-key-path)
     ;; Failed enrollment must be retryable without replacing its private key.
@@ -323,6 +361,7 @@
       (pure-tls/acme:generate-csr private-key public-key node-name))))
 
 (defun parse-and-verify-node-csr (csr expected-node-name)
+  "Verify the real RSA-SHA256 request and exact node CN before returning signed identity material."
   (handler-case
       (let* ((root (pure-tls::parse-der csr))
              (children (pure-tls::asn1-children root)))
@@ -367,6 +406,7 @@
       (pki-fail "invalid-csr" "Could not parse CSR: ~A" condition))))
 
 (defun node-certificate-der (pki subject subject-public-key)
+  "Sign the issuer-selected node subject and verified public key for client authentication."
   (let ((key-usage
           (pure-tls/acme::encode-critical-extension
            +oid-key-usage+
@@ -383,6 +423,7 @@
      (cluster-pki-ca-private-key pki))))
 
 (defun enroll-node-csr (pki node-name token ca-fingerprint csr)
+  "Issue only the validated internal node name and key; requested subject attributes cannot grant API user groups."
   (ensure-valid-node-name node-name)
   (unless (and (stringp ca-fingerprint)
                (string-equal ca-fingerprint (cluster-pki-ca-fingerprint pki)))
@@ -390,17 +431,19 @@
   (bt:with-lock-held ((cluster-pki-lock pki))
     (multiple-value-bind (record path salt digest)
         (validate-token pki token node-name)
-      (multiple-value-bind (subject subject-public-key)
+      (multiple-value-bind (requested-subject subject-public-key)
           (parse-and-verify-node-csr csr node-name)
+        (declare (ignore requested-subject))
         (setf (gethash "state" record) "used")
         (write-private-text-atomically
          path
          (token-record-json node-name salt digest "used"))
         (pure-tls/acme::wrap-pem
          "CERTIFICATE"
-         (node-certificate-der pki subject subject-public-key))))))
+         (node-certificate-der pki (pure-tls/acme::encode-subject node-name) subject-public-key))))))
 
 (defun certificate-from-pem (pem)
+  "Parse a real node certificate PEM or return a structured certificate failure."
   (handler-case
       (pure-tls:parse-certificate
        (pure-tls::pem-decode
@@ -409,8 +452,10 @@
       (pki-fail "invalid-certificate" "Could not parse node certificate: ~A" condition))))
 
 (defun verify-node-certificate (pki certificate-pem expected-node-name)
+  "Require a trusted internal-profile client certificate with exactly the expected node CN."
   (ensure-valid-node-name expected-node-name)
   (let ((certificate (certificate-from-pem certificate-pem)))
+    (require-internal-certificate-profile certificate (cluster-pki-ca-certificate pki))
     (handler-case
         (pure-tls::verify-certificate-chain
          (list certificate)
@@ -430,12 +475,15 @@
 (defparameter +node-server-common-name+ "gr8s-control")
 
 (defun verify-node-server-certificate (certificate ca)
+  "Require the trusted internal control-server profile, server purpose and hostname."
+  (require-internal-certificate-profile certificate ca)
   (pure-tls::verify-certificate-chain
    (list certificate) (list ca) :purpose :server-auth :trust-anchor-mode :replace)
   (pure-tls::verify-hostname certificate +node-server-common-name+)
   t)
 
 (defun ensure-node-server-credentials (pki)
+  "Reuse trusted internal server credentials or create a new persisted identity."
   (let ((certificate-path (merge-pathnames "pki/server.crt" (cluster-pki-root pki)))
         (key-path (merge-pathnames "pki/server.key" (cluster-pki-root pki))))
     (bt:with-lock-held ((cluster-pki-lock pki))

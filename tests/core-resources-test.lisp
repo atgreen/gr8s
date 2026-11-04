@@ -115,10 +115,10 @@
             (ag-proto::write-length-delimited
              (if (stringp value) (trivial-utf-8:string-to-utf-8-bytes value) value) buffer))))))
 
-(defun core-test-protobuf-envelope (kind fields)
+(defun core-test-protobuf-envelope (kind fields &optional (version "v1"))
   (concatenate '(vector (unsigned-byte 8)) #(107 56 115 0)
                (core-test-protobuf
-                (list (list 1 (core-test-protobuf (list (list 1 "v1") (list 2 kind))))
+                (list (list 1 (core-test-protobuf (list (list 1 version) (list 2 kind))))
                       (list 2 (core-test-protobuf fields))))))
 
 (test kubernetes-protobuf-secret-preserves-binary-data-and-false-immutable

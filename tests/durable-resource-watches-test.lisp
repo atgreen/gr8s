@@ -1,0 +1,163 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Exercise durable watches across resource kinds, including HTTP streams,
+;;;; historical lists, resource-bound tokens and pre-journal database upgrades.
+
+(in-package #:gr8s/tests)
+(def-suite durable-resource-watches :in gr8s)
+(in-suite durable-resource-watches)
+
+(defvar *durable-watch-csr-request* nil)
+
+(defun durable-watch-csr-request ()
+  "Cache only public signed CSR bytes after deleting the private fixture key."
+  (or *durable-watch-csr-request*
+      (setf *durable-watch-csr-request*
+            (with-temporary-store (store directory)
+              (declare (ignore store))
+              (csr-crypto-fixture directory "ec")))))
+
+(defun durable-watch-fixture (resource name)
+  "Build a valid stored resource with labels for cross-kind watch checks."
+  (let ((object (gr8s::core-object "apiVersion" (gr8s::core-resource-api-version resource)
+                                 "kind" (gr8s::core-resource-kind resource)
+                                 "metadata" (gr8s::core-object "name" name "labels" (gr8s::core-object "app" "watched")))))
+    (cond ((equal resource "certificatesigningrequests")
+           (setf (gethash "spec" object) (gethash "spec" (csr-fixture (durable-watch-csr-request) :name name))))
+          ((equal resource "endpointslices")
+           (setf (gethash "addressType" object) "IPv4" (gethash "endpoints" object) #() (gethash "ports" object) #()))
+          ((equal resource "customresourcedefinitions")
+           (setf object (crd-fixture :group "watch.example.test" :plural "watched"))
+           (setf (gethash "labels" (gethash "metadata" object)) (gr8s::core-object "app" "watched")))
+          ((equal resource "persistentvolumes")
+           (setf (gethash "spec" object)
+                 (gr8s::core-object "capacity" (gr8s::core-object "storage" "1Gi") "accessModes" #("ReadWriteOnce")
+                                    "hostPath" (gr8s::core-object "path" "/tmp/gr8s-watch-volume" "type" "DirectoryOrCreate"))))
+          ((equal resource "persistentvolumeclaims")
+           (setf (gethash "spec" object)
+                 (gr8s::core-object "resources" (gr8s::core-object "requests" (gr8s::core-object "storage" "1Gi"))
+                                    "accessModes" #("ReadWriteOnce") "storageClassName" "")))
+          ((equal resource "storageclasses") (setf (gethash "provisioner" object) "kubernetes.io/no-provisioner"))
+          ((equal resource "events") (setf (gethash "involvedObject" object) (gr8s::core-object)))
+          ((member resource '("deployments" "replicasets") :test #'equal)
+           (setf (gethash "spec" object) (gethash "spec" (workload-fixture (gr8s::core-resource-kind resource) name))))
+          ((equal resource "podtemplates")
+           (setf (gethash "template" object) (gethash "template" (podtemplate-fixture name))))
+          ((equal resource "services")
+           (setf (gethash "spec" object) (gr8s::core-object "ports" (vector (gr8s::core-object "port" 8080)))))
+          ((member resource '("roles" "clusterroles") :test #'equal) (setf (gethash "rules" object) #()))
+          ((member resource '("rolebindings" "clusterrolebindings") :test #'equal)
+           (setf (gethash "roleRef" object) (gr8s::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "ClusterRole" "name" "reader"))))
+    object))
+
+(test durable-resources-stream-real-http-selector-transitions
+  (with-core-api (store path)
+    (values path)
+    (dolist (descriptor gr8s::*stored-resource-types*)
+      (destructuring-bind (resource kind version namespaced) descriptor
+        (let* ((name (if (equal resource "customresourcedefinitions") "watched.watch.example.test" "watched"))
+               (namespace (and namespaced "alpha"))
+               (collection (if (equal version "v1") "/api/v1" (concatenate 'string "/apis/" version)))
+               (url (format nil "http://127.0.0.1:18089~A~A/~A" collection
+                            (if namespace (concatenate 'string "/namespaces/" namespace) "") resource)))
+          (gr8s::create-core-resource store resource (durable-watch-fixture resource name) namespace)
+          (sb-sys:with-deadline (:seconds 10)
+            (multiple-value-bind (stream code)
+                (drakma:http-request url :want-stream t
+                  :parameters '(("watch" . "true") ("resourceVersion" . "0") ("labelSelector" . "app=watched") ("timeoutSeconds" . "2")))
+              (unwind-protect
+                   (progn
+                     (is (= 200 code))
+                     (let* ((event (read-template-watch-event stream)) (object (gethash "object" event)))
+                       (is (equal "ADDED" (gethash "type" event)))
+                       (is (equal kind (gethash "kind" object)))
+                       (is (equal version (gethash "apiVersion" object))))
+                     (gr8s::update-core-resource store resource namespace name
+                       (lambda (object)
+                         (setf (gethash "app" (gethash "labels" (gethash "metadata" object))) "other") object))
+                     (is (equal "DELETED" (gethash "type" (read-template-watch-event stream))))
+                     (gr8s::update-core-resource store resource namespace name
+                       (lambda (object)
+                         (setf (gethash "app" (gethash "labels" (gethash "metadata" object))) "watched") object))
+                     (is (equal "ADDED" (gethash "type" (read-template-watch-event stream))))
+                     (gr8s::delete-core-resource store resource namespace name)
+                     (is (equal "DELETED" (gethash "type" (read-template-watch-event stream)))))
+                (close stream)))))))))
+
+(test durable-list-pages-survive-mixed-resource-mutations-and-restart
+  (with-temporary-store (store path)
+    (dolist (resource '("configmaps" "secrets"))
+      (dolist (name '("a" "b" "c"))
+        (gr8s::create-core-resource store resource (durable-watch-fixture resource name) "alpha")))
+    (let* ((page (gr8s::template-list-page store "alpha" "" "" :resource "configmaps" :limit 1))
+           (metadata (gethash "metadata" page))
+           (token (gethash "continue" metadata)))
+      (gr8s::delete-core-resource store "configmaps" "alpha" "b")
+      (gr8s::update-core-resource store "configmaps" "alpha" "c"
+        (lambda (object) (setf (gethash "data" object) (gr8s::core-object "mode" "updated")) object))
+      (gr8s::create-core-resource store "configmaps" (durable-watch-fixture "configmaps" "aa") "alpha")
+      (gr8s::delete-core-resource store "secrets" "alpha" "b")
+      (is (= 2 (gethash "version" (com.inuoe.jzon:parse (gr8s::core-resource-state-path store)))))
+      (let* ((reopened (open-store path))
+             (next (gr8s::template-list-page reopened "alpha" "" "" :resource "configmaps" :limit 10 :continuation token))
+             (items (gethash "items" next)))
+        (is (equal "ConfigMapList" (gethash "kind" next)))
+        (is (equal '("b" "c") (map 'list (lambda (object) (gethash "name" (gethash "metadata" object))) items)))
+        (is (null (gethash "data" (aref items 1))))
+        (is (equal (gethash "resourceVersion" metadata) (gethash "resourceVersion" (gethash "metadata" next))))
+        (is (= 400 (core-resource-status (lambda () (gr8s::template-list-page reopened "alpha" "" "" :resource "secrets" :continuation token)))))
+        (multiple-value-bind (events watermark) (gr8s::template-watch-events reopened "alpha" "" ""
+                                                 (parse-integer (gethash "resourceVersion" metadata)) :resource "configmaps")
+          (declare (ignore watermark))
+          (is (equal '("DELETED" "MODIFIED" "ADDED") (mapcar (lambda (event) (gethash "type" event)) events)))
+          (is (every (lambda (event) (equal "ConfigMap" (gethash "kind" (gethash "object" event)))) events)))))))
+
+(test durable-resource-history-expires-with-a-replacement-token
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((now 1000) (gr8s::*podtemplate-clock* (lambda () now)))
+      (dolist (name '("a" "b"))
+        (gr8s::create-core-resource store "secrets" (durable-watch-fixture "secrets" name) "alpha"))
+      (let* ((page (gr8s::template-list-page store "alpha" "" "" :resource "secrets" :limit 1))
+             (token (gethash "continue" (gethash "metadata" page))))
+        (setf now 1400)
+        (multiple-value-bind (error code) (gr8s::template-list-page store "alpha" "" "" :resource "secrets" :continuation token)
+          (is (= 410 code))
+          (let* ((replacement (gethash "continue" (gethash "metadata" error)))
+                 (resumed (gr8s::template-list-page store "alpha" "" "" :resource "secrets" :continuation replacement)))
+            (is (equal "b" (gethash "name" (gethash "metadata" (aref (gethash "items" resumed) 0)))))))))))
+
+(test legacy-template-history-upgrade-does-not-invent-other-resource-history
+  (with-temporary-store (store path)
+    (gr8s::create-core-resource store "configmaps" (durable-watch-fixture "configmaps" "settings") "alpha")
+    (dolist (name '("a" "b"))
+      (gr8s::create-core-resource store "podtemplates" (podtemplate-fixture name) "alpha"))
+    (let* ((state-path (gr8s::core-resource-state-path store))
+           (state (com.inuoe.jzon:parse state-path))
+           (revision (gethash "revision" state))
+           (token-object (gr8s::core-object "namespace" "alpha" "labels" "" "fields" "" "revision" revision
+                                           "lastKey" "alpha/a" "issuedAt" (get-universal-time)))
+           (payload (ag-grpc:base64-encode (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify token-object))))
+           (token (concatenate 'string payload "." (gr8s::template-token-signature store payload))))
+      ;; Exact shape written by versions that only tracked PodTemplates.
+      (setf (gethash "version" state) 1)
+      (remhash "resourceHistoryStart" state)
+      (setf (gethash "templateHistory" state)
+            (coerce (loop for entry across (gethash "templateHistory" state)
+                          when (equal "podtemplates" (gethash "resource" entry))
+                            collect (progn (remhash "resource" entry) entry)) 'vector))
+      (gr8s::write-private-text-atomically state-path (com.inuoe.jzon:stringify state))
+      (let* ((reopened (open-store path))
+             (page (gr8s::template-list-page reopened "alpha" "" "" :continuation token)))
+        (is (equal "b" (gethash "name" (gethash "metadata" (aref (gethash "items" page) 0)))))
+        (is (= 410 (core-resource-status (lambda () (gr8s::template-list-page reopened "alpha" "" "" :resource "configmaps" :resource-version "1")))))
+        (is (= 400 (core-resource-status (lambda () (gr8s::template-list-page reopened "alpha" "" "" :resource "configmaps" :continuation token)))))
+        (gr8s::update-core-resource reopened "configmaps" "alpha" "settings"
+          (lambda (object) (setf (gethash "data" object) (gr8s::core-object "key" "new")) object))
+        (multiple-value-bind (events watermark) (gr8s::template-watch-events (open-store path) "alpha" "" "" revision :resource "configmaps")
+          (declare (ignore watermark))
+          (is (equal '("MODIFIED") (mapcar (lambda (event) (gethash "type" event)) events))))))))
+
+(in-suite gr8s)

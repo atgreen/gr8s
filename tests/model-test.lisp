@@ -18,17 +18,16 @@
     (is (equalp #( "echo hello") (container-spec-args container)))
     (is (equal '(("GREETING" . "hello")) (container-spec-env container)))
     (is (equal '(8080) (container-spec-ports container)))
-    (is (equalp (com.inuoe.jzon:parse *valid-pod-json*)
-                (pod-to-object pod)))))
+    (let ((expected (com.inuoe.jzon:parse *valid-pod-json*)))
+      (setf (gethash "terminationGracePeriodSeconds" (gethash "spec" expected)) 30)
+      (is (equalp expected (pod-to-object pod))))))
 
-(test only-the-default-namespace-is-accepted
-  (handler-case
-      (progn
-        (parse-pod
-         "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\",\"namespace\":\"other\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}")
-        (fail "Expected a Kubernetes validation error"))
-    (kubernetes-error (error)
-      (is (string= "Invalid" (kubernetes-error-reason error))))))
+(test pods-accept-valid-namespaces
+  (let ((object (com.inuoe.jzon:parse *valid-pod-json*)))
+    (setf (gethash "namespace" (gethash "metadata" object)) "sonobuoy")
+    (is (string= "sonobuoy" (pod-namespace (parse-pod object))))
+    (setf (gethash "namespace" (gethash "metadata" object)) "Invalid/namespace")
+    (signals kubernetes-error (parse-pod object))))
 
 (test unsupported-pod-spec-fields-are-rejected
   (signals kubernetes-error
@@ -50,7 +49,7 @@
      "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"dnsPolicy\":\"None\",\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}"))
   (signals kubernetes-error
     (parse-pod
-     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\",\"resources\":{\"limits\":{\"cpu\":\"1\"}}}]}}")))
+     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\",\"resources\":{\"limits\":{\"nvidia.com/gpu\":\"1\"}}}]}}")))
 
 (test malformed-pod-shapes-are-kubernetes-errors
   (dolist (input

@@ -297,7 +297,8 @@
     (attach-node-topology server node-name snapshot)
     (bt:with-lock-held ((node-grpc-server-lock server))
       (let ((existing (gethash node-name (node-grpc-server-snapshots server))))
-        (if (same-node-snapshot-topology-p existing snapshot)
+        (if (and (same-node-desired-content-p existing snapshot)
+                 (>= (slot-value existing 'gr8s.node.v1::revision) last-applied))
             existing
           (let ((revision (1+ (max last-applied
                                    (gethash node-name
@@ -333,7 +334,8 @@
   (case (slot-value envelope 'gr8s.node.v1::payload-case)
     (:heartbeat
      (mark-node-ready (node-grpc-server-store server)
-                      node-name (get-universal-time)))
+                      node-name (get-universal-time)
+                      :lease-duration (node-grpc-server-heartbeat-timeout-seconds server)))
     (:snapshot-ack
      (note-node-snapshot-ack
       server node-name
@@ -364,7 +366,14 @@
                       (setf (gethash "podIP" object) (slot-value pod-status 'gr8s.node.v1::pod-ip)
                             (gethash "podIPs" object)
                             (vector (json-object "ip" (slot-value pod-status 'gr8s.node.v1::pod-ip)))))
-                    (update-pod-observed-status (node-grpc-server-store server) pod object)))))
+                    (let ((events (gethash "gr8sRuntimeEvents" object)))
+                      (remhash "gr8sRuntimeEvents" object)
+                      (update-pod-observed-status (node-grpc-server-store server) pod object)
+                      (record-node-runtime-events (node-grpc-server-store server) pod node-name events)
+                      ;; Cleanup is distinct from phase and API finalizer retention.
+                      ;; The authenticated peer still owns this exact UID/RV.
+                      (when (and (deletion-requested-p pod) (slot-value pod-status 'gr8s.node.v1::runtime-deleted))
+                        (save-pod-finalization-state (node-grpc-server-store server) pod object t)))))))
     (:operation-response
      (note-node-operation-response
       server (slot-value envelope 'gr8s.node.v1::operation-response)))
@@ -455,10 +464,10 @@
 
 (defun monitor-node-heartbeats (server)
   (loop until (node-grpc-server-stopping-p server)
-        do (expire-node-heartbeats
-            (node-grpc-server-store server)
-            (- (get-universal-time)
-               (node-grpc-server-heartbeat-timeout-seconds server)))
+        do (let ((now (get-universal-time)))
+             (expire-node-heartbeats
+              (node-grpc-server-store server)
+              (- now (node-grpc-server-heartbeat-timeout-seconds server)) :now now))
            (sleep 0.05)))
 
 (defun handle-node-enrollment (server request context)
@@ -556,7 +565,15 @@
       (ignore-errors (bt:join-thread thread))))
   server)
 
-(defun publish-node-desired-state (server node-name snapshot)
+(defun same-node-desired-content-p (left right)
+  "Compare workload assignments and topology independently of envelope revision."
+  (and left right (same-node-snapshot-topology-p left right)
+       (equalp (slot-value left 'gr8s.node.v1::service-discovery-objects-json)
+               (slot-value right 'gr8s.node.v1::service-discovery-objects-json))
+       (equalp (mapcar #'ag-proto:serialize-to-bytes (slot-value left 'gr8s.node.v1::pods))
+               (mapcar #'ag-proto:serialize-to-bytes (slot-value right 'gr8s.node.v1::pods)))))
+
+(defun publish-node-desired-state (server node-name snapshot &key deduplicate)
   (get-node (node-grpc-server-store server) node-name)
   (unless (typep snapshot 'gr8s.node.v1::desired-state-snapshot)
     (error "Desired state must be a DesiredStateSnapshot"))
@@ -564,6 +581,9 @@
   (let ((revision nil)
         (session nil))
     (bt:with-lock-held ((node-grpc-server-lock server))
+      (let ((existing (gethash node-name (node-grpc-server-snapshots server))))
+        (when (and deduplicate (same-node-desired-content-p existing snapshot))
+          (return-from publish-node-desired-state (slot-value existing 'gr8s.node.v1::revision))))
       (setf revision
             (1+ (gethash node-name (node-grpc-server-revisions server) 0)))
       (setf (slot-value snapshot 'gr8s.node.v1::revision) revision
@@ -683,17 +703,25 @@
      (make-agent-envelope
       variant payload :sequence (incf (agent-node-session-sequence session))))))
 
+(defun validate-node-snapshot-identity (identity snapshot)
+  "Reject another node allocation before an arrival observer can persist any deletion intent."
+  (let ((network (slot-value snapshot 'gr8s.node.v1::network))
+        (assigned (gethash "assignedPodCIDR" identity)))
+    (when (and network assigned
+               (not (string= assigned (slot-value network 'gr8s.node.v1::node-pod-cidr))))
+      (error "Snapshot Pod CIDR does not match the durable node allocation"))))
+
 (defun apply-node-snapshot-and-respond
-    (session identity identity-path snapshot apply-snapshot)
+    (session identity identity-path snapshot apply-snapshot &key replay)
   (let ((revision (slot-value snapshot 'gr8s.node.v1::revision))
         (last-applied (gethash "lastAppliedRevision" identity 0))
         (statuses nil))
-    (let ((network (slot-value snapshot 'gr8s.node.v1::network))
-          (assigned (gethash "assignedPodCIDR" identity)))
-      (when (and network assigned
-                 (not (string= assigned (slot-value network 'gr8s.node.v1::node-pod-cidr))))
-        (error "Snapshot Pod CIDR does not match the durable node allocation")))
-    (when (> revision last-applied)
+    (validate-node-snapshot-identity identity snapshot)
+    (when (or (> revision last-applied) (and replay (= revision last-applied)))
+      ;; A restarted agent can have completed deletion after its last durable
+      ;; snapshot ack but before the final status reached the server. Reapply
+      ;; the authoritative initial snapshot to rebuild that acknowledgement;
+      ;; ordinary duplicate envelopes within a session still remain no-ops.
       (let ((result (funcall apply-snapshot snapshot)))
         ;; Snapshot applicators written before status reporting commonly
         ;; return an incidental value. Only an explicit status list is sent.
@@ -717,15 +745,15 @@
                     :revision revision :applied t))))
 
 (defun handle-node-server-envelope
-    (session envelope identity identity-path apply-snapshot operation-handler)
+    (session envelope identity identity-path apply-snapshot operation-handler &optional snapshot-worker)
   (ensure-node-protocol-version
    (slot-value envelope 'gr8s.node.v1::protocol-version))
   (case (slot-value envelope 'gr8s.node.v1::payload-case)
     (:desired-state
-     (apply-node-snapshot-and-respond
-      session identity identity-path
-      (slot-value envelope 'gr8s.node.v1::desired-state)
-      apply-snapshot))
+     (let ((snapshot (slot-value envelope 'gr8s.node.v1::desired-state)))
+       (if snapshot-worker
+           (queue-agent-snapshot-work snapshot-worker snapshot)
+           (apply-node-snapshot-and-respond session identity identity-path snapshot apply-snapshot))))
     ((:operation-request :operation-input :operation-cancel)
      (unless operation-handler
        (error "Agent has no operation handler"))
@@ -812,6 +840,143 @@
       (error ()
         (funcall finish-session)))))
 
+(define-condition node-snapshot-stopped (serious-condition) ()
+  (:documentation "Unwind snapshot application without conversion into a recoverable runtime error."))
+
+(defstruct (agent-snapshot-worker (:constructor %make-agent-snapshot-worker))
+  "Apply snapshots serially while the session owner continues receiving operations."
+  function
+  receive-snapshot
+  finish-session
+  thread
+  pending
+  (highest-revision -1)
+  replay-revision
+  failure
+  stopping-p
+  started-p
+  finished-p
+  (lock (bt:make-lock "gr8s snapshot work"))
+  (changed (bt:make-condition-variable :name "gr8s snapshot work changed")))
+
+(defun retry-agent-snapshot-work (worker work)
+  "Retry an incomplete latest projection without growing a queue or acknowledging it."
+  (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+    (when (and (not (agent-snapshot-worker-stopping-p worker))
+               (null (agent-snapshot-worker-pending worker))
+               (= (slot-value (car work) 'gr8s.node.v1::revision)
+                  (agent-snapshot-worker-highest-revision worker)))
+      (setf (agent-snapshot-worker-pending worker) (list work))
+      ;; Async runtime deletion needs a later observation before admission can
+      ;; resume. Yield instead of spinning; new snapshots and stop wake us.
+      (bt:condition-wait (agent-snapshot-worker-changed worker)
+                         (agent-snapshot-worker-lock worker) :timeout .1))))
+
+(defun run-agent-snapshot-work (worker)
+  "Apply ordered work and close the session on failure without acknowledging pending revisions."
+  (handler-case
+      (unwind-protect
+           (progn
+             ;; Readiness is signalled only after the outer stop handler is
+             ;; installed. It also covers the application error handler below.
+             (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+               (setf (agent-snapshot-worker-started-p worker) t)
+               (bt:condition-notify (agent-snapshot-worker-changed worker)))
+             (handler-case
+                 (loop
+                   (let ((work
+                           (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+                             (loop while (and (null (agent-snapshot-worker-pending worker))
+                                              (not (agent-snapshot-worker-stopping-p worker)))
+                                   do (bt:condition-wait (agent-snapshot-worker-changed worker)
+                                                        (agent-snapshot-worker-lock worker)))
+                             (when (agent-snapshot-worker-stopping-p worker)
+                               (return-from run-agent-snapshot-work nil))
+                             (pop (agent-snapshot-worker-pending worker)))))
+                     (handler-case
+                         (progn
+                           (funcall (agent-snapshot-worker-function worker) (car work) (cdr work))
+                           (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+                             (when (eql (slot-value (car work) 'gr8s.node.v1::revision)
+                                        (agent-snapshot-worker-replay-revision worker))
+                               (setf (agent-snapshot-worker-replay-revision worker) nil))))
+                       ;; Durable urgent intent superseded this application.
+                       ;; Its revision was not applied and must not be acked.
+                       (pod-reconciliation-superseded () (retry-agent-snapshot-work worker work)))))
+               (error (condition)
+                 (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+                   (setf (agent-snapshot-worker-failure worker) condition
+                         (agent-snapshot-worker-stopping-p worker) t
+                         (agent-snapshot-worker-pending worker) nil))
+                 (funcall (agent-snapshot-worker-finish-session worker)))))
+        ;; A late interrupt must not signal after the outer handler is gone.
+        (setf (agent-snapshot-worker-finished-p worker) t))
+    (node-snapshot-stopped () nil)))
+
+(defun start-agent-snapshot-worker (function finish-session &key receive-snapshot)
+  "Start a session-owned ordered snapshot executor."
+  (let ((worker (%make-agent-snapshot-worker :function function :finish-session finish-session
+                                             :receive-snapshot receive-snapshot))
+        (ready nil))
+    (unwind-protect
+         (progn
+           (flet ((spawn ()
+                    (setf (agent-snapshot-worker-thread worker)
+                          (bt:make-thread (lambda () (run-agent-snapshot-work worker))
+                                          :name "gr8s agent snapshot work"))))
+             ;; The session monitor can cancel this owner at any instruction.
+             ;; Retain the created thread handle before delivering that signal.
+             #+sbcl (sb-sys:without-interrupts (spawn))
+             #-sbcl (spawn))
+           (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+             (loop until (agent-snapshot-worker-started-p worker)
+                   do (bt:condition-wait (agent-snapshot-worker-changed worker)
+                                        (agent-snapshot-worker-lock worker))))
+           (setf ready t)
+           worker)
+      (unless ready (stop-agent-snapshot-worker worker)))))
+
+(defun queue-agent-snapshot-work (worker snapshot &key replay)
+  "Retain only the newest unapplied full snapshot; skipped revisions are never acknowledged."
+  (let ((revision (slot-value snapshot 'gr8s.node.v1::revision)))
+    (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+      (unless (or (agent-snapshot-worker-stopping-p worker)
+                  (< revision (agent-snapshot-worker-highest-revision worker)))
+        (when (agent-snapshot-worker-receive-snapshot worker)
+          (funcall (agent-snapshot-worker-receive-snapshot worker) snapshot))
+        ;; Every envelope is a complete projection. An intermediate queued
+        ;; projection has no independent effect to preserve. Keep the current
+        ;; application ordered, and replace only work which has not started.
+        (when replay (setf (agent-snapshot-worker-replay-revision worker) revision))
+        (setf (agent-snapshot-worker-highest-revision worker) revision
+              (agent-snapshot-worker-pending worker)
+              (list (cons snapshot (or replay (eql revision (agent-snapshot-worker-replay-revision worker))))))
+        (bt:condition-notify (agent-snapshot-worker-changed worker)))))
+  worker)
+
+(defun stop-agent-snapshot-worker (worker)
+  "Cancel and join application before a disconnected session can be replaced."
+  (when worker
+    (let ((started-p nil)
+          (thread (agent-snapshot-worker-thread worker)))
+      (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+        (setf (agent-snapshot-worker-stopping-p worker) t
+              (agent-snapshot-worker-pending worker) nil
+              started-p (agent-snapshot-worker-started-p worker))
+        (bt:condition-notify (agent-snapshot-worker-changed worker)))
+      (when (and thread (not (eq thread (bt:current-thread))))
+        (when (and started-p (bt:thread-alive-p thread))
+          ;; Runtime wrappers catch ERROR and translate it to Pending. This
+          ;; private serious condition must unwind the whole application so
+          ;; shutdown cannot continue to another blocked Pod or persist an ack.
+          (ignore-errors
+            (bt:interrupt-thread thread
+              (lambda ()
+                (unless (agent-snapshot-worker-finished-p worker)
+                  (error 'node-snapshot-stopped))))))
+        (bt:join-thread thread))))
+  nil)
+
 (defun node-channel-underlay-address (channel)
   (let* ((connection (ag-grpc::channel-connection channel))
          (socket (ag-http2::connection-socket connection))
@@ -823,7 +988,7 @@
 (defun run-one-node-session
     (host port node-name identity-path apply-snapshot operation-handler
      one-shot-p control stop-predicate underlay-address status-provider
-     ca-certificate-path certificate-path private-key-path)
+     ca-certificate-path certificate-path private-key-path &optional snapshot-observer)
   (let* ((identity (load-agent-identity identity-path node-name))
          (session-thread (bt:current-thread))
          (session-timeout (and one-shot-p 5))
@@ -834,6 +999,7 @@
                                              :private-key-path private-key-path)
                       (ag-grpc:make-channel host port :timeout session-timeout)))
          (monitor-thread nil)
+         (snapshot-worker nil)
          (heartbeat-interval 1)
          (operation-session-p nil)
          (session-finished-p nil)
@@ -891,19 +1057,35 @@
              (let* ((snapshot
                       (require-server-envelope
                        (ag-grpc:stream-read-message stream) :desired-state)))
-               (apply-node-snapshot-and-respond
-                session identity identity-path snapshot apply-snapshot)
-               (setf operation-session-p t)
                (if one-shot-p
                    (progn
+                     (validate-node-snapshot-identity identity snapshot)
+                     (when snapshot-observer (funcall snapshot-observer snapshot))
+                     (apply-node-snapshot-and-respond
+                      session identity identity-path snapshot apply-snapshot :replay t)
+                     (setf operation-session-p t)
                      (ag-grpc:stream-close-send stream)
                      (loop while (ag-grpc:stream-read-message stream)))
-                   (loop for envelope = (ag-grpc:stream-read-message stream)
-                         while envelope
-                         do (handle-node-server-envelope
-                             session envelope identity identity-path
-                             apply-snapshot operation-handler))))))
+                   (progn
+                     (setf snapshot-worker
+                           (start-agent-snapshot-worker
+                            (lambda (snapshot replay)
+                              (apply-node-snapshot-and-respond
+                               session identity identity-path snapshot apply-snapshot :replay replay))
+                            #'finish-session
+                            :receive-snapshot
+                            (lambda (snapshot)
+                              (validate-node-snapshot-identity identity snapshot)
+                              (when snapshot-observer (funcall snapshot-observer snapshot)))))
+                     (queue-agent-snapshot-work snapshot-worker snapshot :replay t)
+                     (setf operation-session-p t)
+                     (loop for envelope = (ag-grpc:stream-read-message stream)
+                           while envelope
+                           do (handle-node-server-envelope
+                               session envelope identity identity-path
+                               apply-snapshot operation-handler snapshot-worker)))))))
       (finish-session)
+      (stop-agent-snapshot-worker snapshot-worker)
       (when (and operation-session-p operation-handler)
         ;; Operation emitters close over this gRPC session.  Give the agent a
         ;; lifecycle edge on every disconnect so it can close upstream
@@ -916,7 +1098,7 @@
 
 (defun run-node-session (host port node-name identity-path apply-snapshot
                          &key max-sessions (reconnect-delay 1)
-                           operation-handler underlay-address status-provider
+                           operation-handler underlay-address status-provider snapshot-observer
                            ca-certificate-path certificate-path private-key-path
                            control
                            (stop-predicate (constantly nil)))
@@ -929,7 +1111,7 @@
             (run-one-node-session host port node-name identity-path
                                   apply-snapshot operation-handler
                                   (not (null max-sessions)) control stop-predicate underlay-address status-provider
-                                  ca-certificate-path certificate-path private-key-path)
+                                  ca-certificate-path certificate-path private-key-path snapshot-observer)
             (incf completed)
             (when (and max-sessions (>= completed max-sessions))
               (return completed)))

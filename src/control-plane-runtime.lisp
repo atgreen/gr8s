@@ -6,10 +6,10 @@
   node-server)
 
 (defun control-plane-pod-by-uid (runtime uid)
-  (find uid (list-pods (control-plane-runtime-store runtime) "default")
+  (find uid (list-pods (control-plane-runtime-store runtime))
         :key #'pod-uid :test #'string=))
 
-(defun pod-assignment (pod)
+(defun pod-assignment (pod &optional store)
   (make-instance
    'gr8s.node.v1::pod-assignment
    :namespace (pod-namespace pod)
@@ -20,21 +20,27 @@
    (trivial-utf-8:string-to-utf-8-bytes
     (with-output-to-string (stream)
       (com.inuoe.jzon:stringify (pod-to-object pod) :stream stream)))
-   :deleting (deletion-requested-p pod)))
+   :deleting (deletion-requested-p pod)
+   :resource-objects-json
+   (when (and store (not (deletion-requested-p pod)))
+     (mapcar (lambda (object)
+               (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify object)))
+             (pod-referenced-resource-objects store pod)))))
 
 (defun node-desired-state-snapshot (store node-name &key excluded-uid)
   (make-instance
    'gr8s.node.v1::desired-state-snapshot
+   :service-discovery-objects-json (service-discovery-projection store)
    :pods
    (mapcar
-    #'pod-assignment
+    (lambda (pod) (pod-assignment pod store))
     (sort
      (remove-if
       (lambda (pod)
         (or (not (equal node-name (pod-node-name pod)))
             (and excluded-uid (string= excluded-uid (pod-uid pod)))))
-      (list-pods store "default"))
-     #'string< :key #'pod-name))))
+      (list-pods store))
+     #'string< :key (lambda (pod) (format nil "~A/~A" (pod-namespace pod) (pod-name pod)))))))
 
 (defun publish-node-snapshot (runtime node-name &key excluded-uid)
   (publish-node-desired-state
@@ -42,12 +48,18 @@
    node-name
    (node-desired-state-snapshot
     (control-plane-runtime-store runtime) node-name
-    :excluded-uid excluded-uid)))
+    :excluded-uid excluded-uid)
+   :deduplicate t))
+
+(defun publish-service-discovery-snapshots (runtime)
+  "Deliver public DNS changes even when every running Pod revision is unchanged."
+  (dolist (node (list-nodes (control-plane-runtime-store runtime)))
+    (publish-node-snapshot runtime (node-record-name node))))
 
 (defun control-plane-observation (runtime pod)
   (make-runtime-pod
    :uid (pod-uid pod)
-   :resource-version (pod-resource-version pod)
+   :resource-version (pod-observed-resource-version (control-plane-runtime-store runtime) pod)
    :phase (pod-scheduling-phase (control-plane-runtime-store runtime) pod)
    :status (pod-observed-status (control-plane-runtime-store runtime) pod)
    :pod-ip (let ((status (pod-observed-status (control-plane-runtime-store runtime) pod)))
@@ -72,6 +84,29 @@
       ;; stop it before the control-plane record is removed.
       (publish-node-snapshot runtime (pod-node-name pod) :excluded-uid uid)))
   nil)
+
+(defmethod runtime-delete-pod ((runtime control-plane-runtime) pod)
+  "Keep a graceful deletion assigned until its exact revision is acknowledged Deleted."
+  (let* ((store (control-plane-runtime-store runtime))
+         (status (pod-observed-status store pod)))
+    (when (pod-finalizers-present-p pod)
+      ;; Even grace=0 must wait for physical cleanup when the API retains the
+      ;; Pod. Keep its assignment until the finalizers have actually cleared.
+      (let ((finalization (pod-finalization-state store pod)))
+        (if (or (not (pod-node-name pod)) (and finalization (gethash "runtimeDeleted" finalization)))
+            (return-from runtime-delete-pod t)
+            (progn (publish-node-snapshot runtime (pod-node-name pod))
+                   (return-from runtime-delete-pod nil)))))
+    (cond
+      ((or (not (pod-node-name pod))
+           (zerop (gethash "deletionGracePeriodSeconds" (gethash "metadata" (pod-to-object pod)) 0))
+           (and (equal (pod-resource-version pod) (pod-observed-resource-version store pod))
+                (equal "Deleted" (and status (gethash "reason" status)))))
+       (runtime-delete runtime (pod-uid pod))
+       t)
+      (t
+       (publish-node-snapshot runtime (pod-node-name pod))
+       nil))))
 
 (defmethod runtime-logs ((runtime control-plane-runtime) uid container &key tail)
   (declare (ignore tail))
@@ -223,3 +258,7 @@
   (release-node-operation
    (control-plane-runtime-node-server runtime)
    (control-plane-exec-session-operation session)))
+
+(defmethod runtime-forget-pod-finalization ((runtime control-plane-runtime) uid)
+  "Withdraw the node's private desired projection only after public finalizers release UID."
+  (runtime-delete runtime uid))

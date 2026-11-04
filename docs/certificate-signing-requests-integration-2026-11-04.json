@@ -1,0 +1,50 @@
+{
+  "recordedAtUTC": "2026-11-04T04:38:26.687828+00:00",
+  "testedIntegrationCommit": "3a61406",
+  "integratedMain": "615a257264818f64e9225e7b5908afc8ec6f6b5c",
+  "reviewFixCommit": "4b931f8",
+  "fullSuite": {
+    "checks": 3340,
+    "passed": 3335,
+    "skipped": 5,
+    "failed": 0
+  },
+  "preservedEarlierFailure": {
+    "path": "/tmp/gr8s-csr-probes-proxy-full-1.log",
+    "checks": 3316,
+    "passed": 3310,
+    "skipped": 5,
+    "failed": 1,
+    "test": "SERVICE-DNS-ACTUAL-UDP-TCP-READS-LIVE-STORE-AND-SURVIVES-RECOVERY",
+    "reason": "Actual EADDRINUSE in old UDP-then-TCP ephemeral allocation; independently fixed by main PR53, not skipped or suppressed."
+  },
+  "multiCNInteroperability": "certificate-signing-requests-multicn-2026-11-04.json",
+  "upstreamBeforeClientAuthentication": "certificate-signing-requests-upstream-2026-11-04.json",
+  "separateClientAuthenticationPR": 51,
+  "isCertificationResult": false,
+  "integrationPreserved": [
+    "Probe/Event runtime hooks and test modules",
+    "Pod HTTP proxy routes and module",
+    "Bounded actual UDP/TCP port-pair allocation and deterministic regressions",
+    "All registry, schema, discovery, storage/workload resource unions",
+    "Certificate profile module before PKI source"
+  ],
+  "artifacts": [
+    {
+      "path": "/tmp/gr8s-csr-dns-fixed-full-1.log",
+      "sha256": "92f253ac16129771f6ed0ffd75cb5bab7ff894ef7bb4da9a9e3a9e48e2bf3ac6"
+    },
+    {
+      "path": "/tmp/gr8s-csr-probes-proxy-full-1.log",
+      "sha256": "1df0051a312dd759b60a3b022a54066dac3b3e73650033c8a5e4d1190c4ac078"
+    },
+    {
+      "path": "/tmp/gr8s-csr-multicn-tests-1.log",
+      "sha256": "be2386da8c742cb27ef1126987a089cc60fc9f53ec564ac9bed705cf27682008"
+    },
+    {
+      "path": "/tmp/gr8s-csr-multicn-proof.log",
+      "sha256": "9a51f08d9e8408ad09d505a9ae4320901ffa6d92c3ad8e06e463432f6917f2e1"
+    }
+  ]
+}

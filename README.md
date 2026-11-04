@@ -56,17 +56,23 @@ The current API supports Pods in the `default` namespace:
 - durable desired state and optimistic resource-version checks
 - periodic, idempotent reconciliation with transient-failure retry
 
+Pods support finalizers that retain API objects after actual runtime cleanup,
+including zero-grace deletion. Native validation covers real exit codes 0 and
+137, restart recovery, UID reuse, unrelated execution during finalizer retention,
+and cancellation of a blocked Exec probe. See the
+[finalizer evidence](docs/pod-finalizers-native-2026-11-04.json).
+
 Namespaced ConfigMap and Secret APIs support durable CRUD, list/selectors,
 pagination, patch, optimistic concurrency, and dry-run through current kubectl
 clients. See [ConfigMap and Secret APIs](docs/configmap-secret-api.md) for the
-supported surface. Pod environment/volume consumption, watch, server-side apply,
-and Namespace lifecycle are not yet implemented.
+supported surface. Pods can consume referenced environment keys and mounted
+files. Watch, server-side apply, and full Namespace lifecycle are not yet implemented.
 
 Pod logs and exec run through correlated agent operations, including interactive
-streams and nonzero exit status. Services, Deployments, volumes, complete
-agent-crash recovery, and Kubernetes API authentication/TLS remain outside the
-verified boundary. The API server
-refuses non-loopback listener addresses.
+streams and nonzero exit status. Complete agent-crash recovery
+remain outside the verified boundary. The administrative HTTP API refuses
+non-loopback listener addresses; native Pods use the authenticated HTTPS API
+described below.
 
 ## Runtime architecture
 
@@ -95,6 +101,13 @@ node hello, heartbeat, complete desired-state snapshots, observed Pod status,
 and durable revision acknowledgements. The agent persists assigned Pods,
 reconciles them through its node runtime, adopts matching runtime objects after
 a restart, and treats omission from an authoritative snapshot as deletion.
+Persistent agents apply snapshots in order on a session-owned worker, allowing
+the receive loop to serve log and exec requests while another Pod's runtime
+operation is still converging. Acknowledgements follow durable application;
+disconnect cancels and joins snapshot work before the session is replaced.
+The [node log validation record](docs/node-log-delivery-validation-2026-11-04.json)
+preserves the starvation reproducer, cancellation checks and the passing
+upstream Secret-volume mappings case.
 
 gr8s does not reimplement an OCI runtime. Its embedded containerd owns images,
 sandboxes, containers, and the OCI runtime lifecycle. gr8s owns desired state,
@@ -122,10 +135,16 @@ plus a link route and default route through it. CNI CHECK verifies these
 addresses, routes, and neighbor state; repeated ADD repairs drift and removes
 legacy gateway addresses from the endpoint veth. The agent keeps its gateway
 while durable leases exist and removes it on shutdown after all leases are gone.
-The agent serves DNS there and writes the standard `default.svc.cluster.local`,
+The agent serves DNS there and writes `<pod-namespace>.svc.cluster.local`,
 `svc.cluster.local`, and `cluster.local` searches into the Pod resolver. It
-answers `kubernetes.default.svc.cluster.local` authoritatively and forwards names
-outside `cluster.local` to the host's IPv4 resolvers, over UDP or TCP.
+answers Service A/AAAA address queries from durable local discovery data and
+forwards names outside `cluster.local` to the host's IPv4 resolvers, over UDP or TCP.
+Pod `dnsPolicy` selects actual cluster, host or explicitly configured resolver
+settings. `dnsConfig` merges validated nameservers, search paths and options;
+`None` uses only the supplied settings. DNS policy/configuration are immutable
+after Pod creation, and equivalent default metadata round trips preserve the
+runtime fingerprint. `scripts/test-pod-dns-config.py` verifies actual resolver
+files and custom UDP/TCP queries against a separate resolver in an owned guest.
 
 The Whistler classifier attaches to the host veth ingress for Pod egress. It uses an
 agent-initialized map to check the exact IPAM IPv4 address and interface MAC,
@@ -383,3 +402,232 @@ make clean         remove build outputs
 
 See [`docs/design.md`](docs/design.md) for the compatibility and architecture
 boundary.
+
+The Kubernetes API compatibility target is **1.36** (`/version` reports
+`v1.36.0-gr8s.0`). This selects the upstream client and conformance test version;
+it is not a claim that gr8s passes Kubernetes conformance. The gr8s project release
+version is maintained separately in `gr8s.asd`.
+
+The [fourth complete native conformance run](docs/conformance-full-fourth-2026-11-04.json)
+ran all **446** selected v1.36 conformance specs: **64 passed, 382 failed**.
+Compared with the [third run](docs/conformance-full-third-2026-11-04.json),
+16 previously failing cases passed and none regressed. The official JUnit archive,
+complete case inventory and artifact hashes were verified. The native process
+exited cleanly, but the original cleanup report records two leftover test-owned
+shims. A [separate recovery](docs/conformance-fourth-cleanup-2026-11-04.json)
+completed their cleanup and all pending Pod deletions with a clean exit, preserving
+the original report. This binary includes graceful
+deletion, readiness/reconnect and generated Pod-name fixes, but predates newer
+storage/workload APIs, per-container restarts and connection cleanup fixes.
+gr8s has not passed Kubernetes conformance. The earlier
+[bootstrap record](docs/conformance-bootstrap-2026-11-03.json) remains available.
+
+Bootstrap APIs also store Namespaces, ServiceAccounts, Roles, RoleBindings,
+ClusterRoles and ClusterRoleBindings with durable metadata and optimistic
+updates. All these durable resources accept JSON and typed Kubernetes protobuf
+requests with API group/version validation. They also support resumable JSON
+watches and
+revision-consistent paginated lists. Pod and Node watches remain pending.
+The Nodes API reports registered agents and their live readiness.
+The local administrative HTTP API remains loopback-only. Managed native clusters
+also expose a separate HTTPS API at `10.96.0.1:443`, authenticated with issued
+ServiceAccount tokens and authorized against live RoleBindings and
+ClusterRoleBindings.
+
+Events share durable identities and revisions between core `v1` and
+`events.k8s.io/v1`. Both versions support JSON/protobuf CRUD, patches, field and
+label selectors, collection deletion, consistent pagination and resumable
+watches. Timestamps preserve microseconds, and submitted Events expire one hour
+after their last write, producing real deletion events. Native runtime event
+emission remains pending.
+
+Pods accept JSON and typed Kubernetes protobuf requests. The decoder uses pinned
+Kubernetes wire definitions and Go JSON omission rules, preserving explicit
+pointer values and empty command arguments. Pod creation supports
+`metadata.generateName` with bounded generated names and collision retries;
+an explicit `metadata.name` takes precedence. Pod names accept DNS subdomains up
+to 253 characters, while runtime hostnames are limited to 63 characters.
+The [native name validation record](docs/generated-pod-names-validation-2026-11-04.json)
+captures real container hostname/name output, restart identities and cleanup.
+Runtime admission still validates
+the supported Pod feature set and rejects unsupported fields with HTTP 422.
+
+Pods report PodScheduled, Initialized, ContainersReady and Ready conditions.
+Readiness requires actual running, ready observations for every declared
+application container. Terminal Pods report false readiness, and unavailable node/runtime
+observations report unknown readiness. Condition transition history and actual
+observed revisions persist separately across restarts. Valid node readiness
+leases survive a control-plane restart, and reconnecting agents receive snapshot
+revisions beyond their saved acknowledgements. Startup, readiness and liveness
+probes execute real exec, HTTP(S), TCP and standard gRPC Health checks. Startup
+success gates readiness/liveness; consecutive thresholds control readiness and
+exact-container restart, preserving healthy siblings. Probe-specific termination
+grace and actual failure Events survive node process restarts. Ordinary init
+containers execute in declaration order; applications wait for real zero exits.
+Failed initialization obeys the Pod restart policy, and native restart retains
+actual attempts and retry history. Restartable init sidecars and readiness gates
+remain unsupported.
+
+All ten unchanged upstream probe conformance cases pass in the
+[focused result](docs/container-probes-upstream-2026-11-04.json). The
+[native validation record](docs/container-probes-native-2026-11-04.json)
+records seven real scenarios, including physical cleanup of a blocked exec probe.
+These focused results do not establish full Kubernetes certification.
+
+Pod HTTP proxy requests use the assigned Pod's actual observed address and
+first declared port (or an explicit numeric port). Ordinary GET, POST, PUT,
+PATCH, DELETE, HEAD and OPTIONS requests forward real bodies, status codes and
+application headers, with separate `pods/proxy` authorization. Same-server
+absolute redirects remain within the proxy URL. Connection upgrades and HTML
+link rewriting remain tracked gaps; upgrades return HTTP 501. The
+[proxy validation record](docs/pod-http-proxy-validation-2026-11-04.json)
+includes actual workload forwarding and preserved test failures.
+
+The [readiness validation record](docs/pod-readiness-validation-2026-11-03.json)
+captures seven passing native scenarios and the official graceful-generation
+case changing from failure to success, including verified archives and cleanup.
+
+PodTemplates support namespaced CRUD and cluster-wide lists, JSON and Kubernetes
+protobuf requests, selectors, dry-run, optimistic updates, strategic merge and
+JSON patches, delete-collection, and JSON watch streams. Templates use the pinned
+Kubernetes 1.36 structural schemas and retain nested PodSpec fields independently
+of the agent's execution subset; storing a template does not start any Pods.
+Server-side apply and finalizer processing remain unsupported.
+Templates have a 2 MiB serialized storage limit so admitted objects can be read
+back by the durable JSON loader.
+
+Deployments and ReplicaSets expose `apps/v1` JSON/protobuf CRUD, selectors,
+resumable watches, revision-consistent lists, strategic patches and separate
+`scale` and `status` subresources. ReplicaSet controllers create and scale real
+Pods, adopt matching orphans, release selector mismatches and preserve exact
+controller UIDs. Deployment controllers perform bounded rolling updates or
+recreate updates, retain revision history, honor pause and minimum readiness
+durations, and derive availability from actual Pod conditions. Controller state
+survives restart through the durable API objects and owner references.
+Templates retain the broad Kubernetes Pod schema; execution still uses the
+supported Pod subset. Rejected Pod admission produces a ReplicaFailure condition
+rather than reporting successful replicas. Background deletion cascades through
+the existing owner collector. Foreground and orphan workload deletion checkpoint
+their intent: foreground waits for owned children, while orphaning releases
+controller references before removing the parent. Custom finalizers remain
+unsupported.
+
+PersistentVolume, PersistentVolumeClaim and StorageClass APIs now support durable
+CRUD, typed protobuf, status subresources and resumable JSON watches. Static
+filesystem hostPath/local volumes bind to matching claims and mount real backing
+storage into native Pods. See [persistent storage](docs/persistent-storage.md)
+for supported behavior, protection, Retain reclamation and remaining extensions.
+
+CRDs in `apiextensions.k8s.io/v1` now establish real schema-backed custom APIs.
+Custom resources support durable JSON CRUD/status/watch, per-version discovery
+and OpenAPI, recursive defaults/pruning, strict field validation and finalizer
+cleanup. Definition UIDs isolate watches and historical lists across recreation.
+See [custom resources](docs/custom-resources.md) for the supported schema subset,
+validation evidence and remaining extensions.
+
+Stored-resource list continuations are signed and bound to their resource type,
+namespace and selectors. A shared durable change journal preserves a consistent
+resourceVersion across
+mutations and restarts, with five-minute retention and a 4,096-change bound.
+Compacted or expired continuations return HTTP 410 with a replacement token for
+resuming at the last key in a newer view. Restart the list without a token when a
+consistent full snapshot is required. Watch supports revision resumption,
+selector transitions, timeouts, bookmarks and initial events. Upgrades preserve
+legacy PodTemplate history and continuations; requests for older history of
+newly tracked resource types return HTTP 410. The expanded journal uses storage
+format 2, which older executables reject; downgrading requires restoring a
+pre-upgrade state backup.
+
+Run `sh scripts/test-podtemplate-api.sh` for real kubectl apply, ordering and
+restart checks against a native API with its fake workload runtime. Run the five
+upstream PodTemplate lifecycle and API chunking cases in a disposable privileged
+Linux guest with:
+
+```sh
+python3 scripts/test-podtemplates-sonobuoy.py \
+  --gr8s /path/to/gr8s.bin --sonobuoy /path/to/sonobuoy
+```
+
+Run the entire upstream certified selection with the same disposable harness:
+
+```sh
+python3 scripts/test-podtemplates-sonobuoy.py \
+  --gr8s /path/to/gr8s.bin --sonobuoy /path/to/sonobuoy \
+  --certified-conformance --timeout 21600
+```
+
+The runner preserves the official Sonobuoy archive, native and worker logs, and
+individual executed specs in its printed report directory. A timeout preserves
+partial worker logs. A passing result requires every selected spec to execute
+and pass; running this command alone does not establish certification.
+
+For the four supplemental upstream Event API cases, use
+`--focus '\[sig-instrumentation\].*Events.*\[Conformance\]' --expected-specs 4`.
+Custom focus/count arguments are rejected with `--certified-conformance`, which
+always runs the full upstream selection.
+
+This focused validation
+includes the normal five-minute continuation expiry; it is separate from a full
+certified-conformance run. Regenerate the pinned schemas with
+`python3 scripts/generate-podtemplate-schema.py`; input checksums are verified.
+The [native validation record](docs/podtemplate-conformance-2026-11-03.json)
+captures all five upstream cases passing, plus local API and persistence checks.
+
+Services accept JSON and typed Kubernetes protobuf requests, including numeric
+and named target ports. Managed native clusters allocate durable IPv4 TCP
+ClusterIP Services from
+`10.96.0.0/16`. Native listeners forward connections to ready Service backends, resolving numeric
+or named target ports against selected Pods or manually managed slices. The
+reserved `default/kubernetes` Service describes the HTTPS API at `10.96.0.1:443`.
+This initial implementation supports single-stack TCP without session affinity;
+UDP, NodePort, LoadBalancer and legacy Endpoints resources remain unsupported.
+TCP forwarding currently replaces the original client source address.
+
+EndpointSlices expose the stable `discovery.k8s.io/v1` JSON/protobuf API with
+selector lists, durable watches, strategic patches and collection deletion. The
+Service controller publishes actual Pod IPs, readiness and terminating conditions,
+resolves named target ports and partitions generated slices at 100 endpoints.
+Exact Service UID ownership and durable slice identities survive restart. Manual
+slices remain independently writable and provide real forwarding backends for
+selectorless Services. TCP headless Services and `publishNotReadyAddresses` are
+supported; generated Service addresses remain single-stack IPv4. Manual slices
+also admit IPv6 and deprecated FQDN address types.
+
+Run `scripts/test-endpointslices.py` in an isolated privileged guest for actual
+selector/manual HTTP forwarding, readiness withdrawal, container identity recovery
+and terminating-endpoint checks. Add `--verify-dns` to check actual UDP/TCP
+Service answers, headless Pod addresses, empty-headless NXDOMAIN, DNS recovery
+after restart and terminating address withdrawal.
+
+Native DNS publishes normal Service A/AAAA records from cluster IPs and headless
+Service/explicit endpoint-hostname records from ready EndpointSlice addresses.
+Public Service discovery data travels once per node in authenticated snapshots
+and installs atomically with Pod references, separately from namespace-scoped
+Secret delivery. Unchanged discovery does not advance node revisions or rewrite
+the agent journal. SRV, PTR, DNS schema TXT, generated endpoint hostname records
+and ExternalName are tracked separately in `podster-uqb.21.1`.
+
+Pods can mount referenced ConfigMaps, Secrets and disk-backed emptyDir volumes.
+The control plane sends only referenced objects to the assigned node over mTLS;
+the agent projects files into private host directories and maps numeric user,
+group and fsGroup settings to containerd. Downward environment fields include
+Pod identity, node name and Pod IP, plus namespace-local Secret and ConfigMap key
+references. Pod metadata revisions preserve running containers; canonical spec
+fingerprints in sandbox labels identify the actual workload across agent restarts.
+Native container retries follow Always, OnFailure and Never independently,
+preserving the sandbox and healthy sibling containers. Attempt history, actual
+last termination state and exponential retry deadlines persist across server
+restarts, with separate logs for each attempt. Missing CRI history and failed
+sandboxes recover from retained observations; mutable image/spec updates still
+replace the sandbox. The [native restart validation record](docs/container-restarts-validation-2026-11-04.json)
+captures four real policy scenarios and durable backoff across a server restart.
+Projected data is applied during Pod setup;
+live refresh is not yet implemented. Managed native startup projects namespace-bound
+ServiceAccount token/CA files automatically unless the Pod or account opts out.
+Deleting and recreating an account or its credential Secret revokes the old token.
+
+Supported nonblocking owner references are preserved on Pods and stored resources.
+The control plane collects dependents after all known owners disappear, comparing
+UIDs so a newly created object cannot inherit an old object's dependents by name.
+Outside Deployment and ReplicaSet deletion, blocking foreground deletion and
+finalizer controllers remain unsupported.

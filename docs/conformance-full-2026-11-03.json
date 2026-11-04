@@ -1,0 +1,2354 @@
+{
+  "date": "2026-11-03",
+  "scope": "Full upstream v1.36 certified-conformance selection on native gr8s",
+  "result": "failed",
+  "isCertificationResult": false,
+  "baselineMainCommit": "7d423d0f3c5a3312d115a9f4066340c7dac43d7e",
+  "baselineNote": "Binary includes PodTemplate support; run predates Pod/Service protobuf fixes (PR18/19) and general durable watches (PR20).",
+  "nativeSHA256": "3bc09ce9c2d2bd8fb11ae5132d2de141bfa00f09a4381af84def3dbda3aff7bc",
+  "version": {
+    "major": "1",
+    "minor": "36",
+    "gitVersion": "v1.36.0-gr8s.0",
+    "gitCommit": "unknown",
+    "gitTreeState": "clean",
+    "buildDate": "1970-01-01T00:00:00Z",
+    "goVersion": "common-lisp",
+    "compiler": "sbcl",
+    "platform": "linux/amd64"
+  },
+  "sonobuoyVersion": "v0.57.5",
+  "command": [
+    "/root/gr8s-test/sonobuoy",
+    "run",
+    "--kubeconfig",
+    "/var/tmp/gr8s-conformance.aush8e_u/kubeconfig",
+    "--dns-pod-labels=",
+    "--plugin=e2e",
+    "--mode=certified-conformance"
+  ],
+  "guestRunDirectory": "/var/tmp/gr8s-conformance.aush8e_u",
+  "localArtifacts": "build/conformance/2026-11-03-full-aush8e_u",
+  "suite": {
+    "seed": 1793739480,
+    "starts": 1,
+    "available": 7579,
+    "selected": 446,
+    "executed": 446,
+    "passed": 19,
+    "failed": 427,
+    "skipped": 7133,
+    "seconds": 1064.531
+  },
+  "officialSonobuoy": {
+    "status": "failed",
+    "total": 7586,
+    "passed": 26,
+    "failed": 427,
+    "skipped": 7133,
+    "extraPassingSuiteHooks": 7
+  },
+  "countsBySIG": {
+    "api-machinery": {
+      "passed": 5,
+      "failed": 94
+    },
+    "apps": {
+      "passed": 0,
+      "failed": 60
+    },
+    "architecture": {
+      "passed": 0,
+      "failed": 1
+    },
+    "auth": {
+      "passed": 0,
+      "failed": 10
+    },
+    "cli": {
+      "passed": 5,
+      "failed": 12
+    },
+    "instrumentation": {
+      "passed": 0,
+      "failed": 4
+    },
+    "network": {
+      "passed": 2,
+      "failed": 45
+    },
+    "node": {
+      "passed": 5,
+      "failed": 101
+    },
+    "scheduling": {
+      "passed": 0,
+      "failed": 11
+    },
+    "storage": {
+      "passed": 2,
+      "failed": 89
+    }
+  },
+  "cleanup": {
+    "nativeExitCode": 0,
+    "ownedShimsRemaining": [],
+    "cleanupError": null,
+    "harnessExitCode": 1
+  },
+  "interpretation": [
+    "All selected specs executed and JUnit was produced; the earlier chunking setup panic no longer aborts the suite.",
+    "Sonobuoy counts seven passing suite hooks in addition to the nineteen passing test specs.",
+    "A test failure may reflect a shared setup or transport error rather than the named feature alone. Inspect the official JUnit and native request log before implementation.",
+    "The baseline does not measure fixes merged after its binary was built; rerun the entire selection to measure those changes.",
+    "This is a failed conformance run, not Kubernetes certification."
+  ],
+  "observedGaps": [
+    "Typed Pod/Service protobuf requests (fixed after baseline in PR18/19)",
+    "Stored-resource watches (implemented after baseline in PR20; Pod/Node watches remain)",
+    "Event APIs and ancillary collection",
+    "Workload APIs/controllers including Deployments, StatefulSets, Jobs, CronJobs and ReplicationControllers",
+    "CRDs, admission webhooks, aggregation and additional discovery APIs",
+    "Persistent storage and volume lifecycle APIs",
+    "Additional Pod admission/runtime and Service/network behavior"
+  ],
+  "upstreamCases": [
+    {
+      "name": "[It] [sig-api-machinery] API priority and fairness should support FlowSchema API operations [Conformance]",
+      "seconds": "0.085309319",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] API priority and fairness should support PriorityLevelConfiguration API operations [Conformance]",
+      "seconds": "0.092613965",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] listing mutating webhooks should work [Conformance]",
+      "seconds": "0.725325093",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] listing validating webhooks should work [Conformance]",
+      "seconds": "0.687021755",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] patching/updating a mutating webhook should work [Conformance]",
+      "seconds": "0.974053315",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] patching/updating a validating webhook should work [Conformance]",
+      "seconds": "1.255179442",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should be able to create and update mutating webhook configurations with match conditions [Conformance]",
+      "seconds": "0.938178338",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should be able to create and update validating webhook configurations with match conditions [Conformance]",
+      "seconds": "1.15101778",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should be able to deny attaching pod [Conformance]",
+      "seconds": "0.595088287",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should be able to deny custom resource creation, update and deletion [Conformance]",
+      "seconds": "0.397482923",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should be able to deny pod and configmap creation [Conformance]",
+      "seconds": "0.752647999",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should deny crd creation [Conformance]",
+      "seconds": "0.440518113",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should honor timeout [Conformance]",
+      "seconds": "0.728503273",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should include webhook resources in discovery documents [Conformance]",
+      "seconds": "0.993656692",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should mutate configmap [Conformance]",
+      "seconds": "0.64197048",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should mutate custom resource [Conformance]",
+      "seconds": "0.948602946",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should mutate custom resource with different stored version [Conformance]",
+      "seconds": "0.869176026",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should mutate custom resource with pruning [Conformance]",
+      "seconds": "0.737880722",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should mutate everything except 'skip-me' configmaps [Conformance]",
+      "seconds": "0.823151646",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should mutate pod and apply defaults after mutation [Conformance]",
+      "seconds": "0.531355351",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should not be able to mutate or prevent deletion of webhook configuration objects [Conformance]",
+      "seconds": "1.517184239",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should reject mutating webhook configurations with invalid match conditions [Conformance]",
+      "seconds": "0.931892852",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should reject validating webhook configurations with invalid match conditions [Conformance]",
+      "seconds": "0.901595639",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should unconditionally reject operations on fail closed webhook [Conformance]",
+      "seconds": "0.359764187",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AggregatedDiscovery should support aggregated discovery interface [Conformance]",
+      "seconds": "0.039612457",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AggregatedDiscovery should support aggregated discovery interface for CRDs [Conformance]",
+      "seconds": "0.311369917",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AggregatedDiscovery should support raw aggregated discovery endpoint Accept headers [Conformance]",
+      "seconds": "0.238169227",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] AggregatedDiscovery should support raw aggregated discovery request for CRDs [Conformance]",
+      "seconds": "0.122909508",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Aggregator Should be able to support the 1.17 Sample API Server using the current Aggregator [LinuxOnly] [Conformance]",
+      "seconds": "0.783374628",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourceConversionWebhook [Privileged:ClusterAdmin] should be able to convert a non homogeneous list of CRs [Conformance]",
+      "seconds": "0.577735111",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourceConversionWebhook [Privileged:ClusterAdmin] should be able to convert from CR v1 to CR v2 [Conformance]",
+      "seconds": "0.448450077",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourceDefinition Watch [Privileged:ClusterAdmin] CustomResourceDefinition Watch watch on custom resource definition objects [Conformance]",
+      "seconds": "0.15103743",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] Simple CustomResourceDefinition creating/deleting custom resource definition objects works [Conformance]",
+      "seconds": "0.137806654",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] Simple CustomResourceDefinition getting/updating/patching custom resource definition status sub-resource works [Conformance]",
+      "seconds": "0.465084956",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] Simple CustomResourceDefinition listing custom resource definition objects works [Conformance]",
+      "seconds": "0.438186094",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] custom resource defaulting for requests and from storage works [Conformance]",
+      "seconds": "0.061634992",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] should include custom resource definition resources in discovery documents [Conformance]",
+      "seconds": "0.056525766",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourceFieldSelectors [Privileged:ClusterAdmin] CustomResourceFieldSelectors MUST list and watch custom resources matching the field selector [Conformance]",
+      "seconds": "0.601616581",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] removes definition from spec when one version gets changed to not be served [Conformance]",
+      "seconds": "30.056243956",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] updates the published spec when one version gets renamed [Conformance]",
+      "seconds": "30.239883018",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for CRD preserving unknown fields at the schema root [Conformance]",
+      "seconds": "30.307605203",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for CRD preserving unknown fields in an embedded object [Conformance]",
+      "seconds": "30.1115113",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for CRD with validation schema [Conformance]",
+      "seconds": "30.139047482",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for CRD without validation schema [Conformance]",
+      "seconds": "30.196313567",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for multiple CRDs of different groups [Conformance]",
+      "seconds": "30.038493947",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for multiple CRDs of same group and version but different kinds [Conformance]",
+      "seconds": "30.120448377",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for multiple CRDs of same group but different versions [Conformance]",
+      "seconds": "30.571543065",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Discovery should locate the groupVersion and a resource within each APIGroup [Conformance]",
+      "seconds": "0.703667351",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Discovery should validate PreferredVersion for each APIGroup [Conformance]",
+      "seconds": "0.575718491",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] FieldValidation should create/apply a CR with unknown fields for CRD with no validation schema [Conformance]",
+      "seconds": "0.193599986",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] FieldValidation should create/apply a valid CR for CRD with validation schema [Conformance]",
+      "seconds": "0.043078462",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] FieldValidation should create/apply an invalid CR with extra properties for CRD with validation schema [Conformance]",
+      "seconds": "0.115834631",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] FieldValidation should detect duplicates in a CR when preserving unknown fields [Conformance]",
+      "seconds": "0.137258434",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] FieldValidation should detect unknown and duplicate fields of a typed object [Conformance]",
+      "seconds": "0.060963619",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] FieldValidation should detect unknown metadata fields in both the root and embedded object of a CR [Conformance]",
+      "seconds": "0.225359906",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] FieldValidation should detect unknown metadata fields of a typed object [Conformance]",
+      "seconds": "0.274133819",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Garbage collector should delete RS created by deployment when not orphaning [Conformance]",
+      "seconds": "0.346110002",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Garbage collector should delete pods created by rc when not orphaning [Conformance]",
+      "seconds": "0.16885121",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Garbage collector should keep the rc around until all its pods are deleted if the deleteOptions says so [Serial] [Conformance]",
+      "seconds": "0.251368911",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Garbage collector should not be blocked by dependency circle [Conformance]",
+      "seconds": "0.134233323",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Garbage collector should not delete dependents that have both valid owner and owner that's waiting for dependents to be deleted [Serial] [Conformance]",
+      "seconds": "0.1296659",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Garbage collector should orphan RS created by deployment when deleteOptions.PropagationPolicy is Orphan [Conformance]",
+      "seconds": "0.121952694",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Garbage collector should orphan pods created by rc if delete options say so [Serial] [Conformance]",
+      "seconds": "0.340383381",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] MutatingAdmissionPolicy [Privileged:ClusterAdmin] should mutate a Deployment [Conformance]",
+      "seconds": "0.247385147",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] MutatingAdmissionPolicy [Privileged:ClusterAdmin] should mutate a Deployment with annotations [Conformance]",
+      "seconds": "0.15805382",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] MutatingAdmissionPolicy [Privileged:ClusterAdmin] should support MutatingAdmissionPolicy API operations [Conformance]",
+      "seconds": "0.164585179",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] MutatingAdmissionPolicy [Privileged:ClusterAdmin] should support MutatingAdmissionPolicyBinding API operations [Conformance]",
+      "seconds": "0.143673737",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Namespaces [Serial] should apply a finalizer to a Namespace [Conformance]",
+      "seconds": "0.057123435",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Namespaces [Serial] should apply an update to a Namespace [Conformance]",
+      "seconds": "0.264249002",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-api-machinery] Namespaces [Serial] should apply changes to a namespace status [Conformance]",
+      "seconds": "0.121891527",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Namespaces [Serial] should ensure that all pods are removed when a namespace is deleted [Conformance]",
+      "seconds": "0.184036339",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Namespaces [Serial] should ensure that all services are removed when a namespace is deleted [Conformance]",
+      "seconds": "0.349921285",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Namespaces [Serial] should patch a Namespace [Conformance]",
+      "seconds": "0.658804602",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-api-machinery] OrderedNamespaceDeletion namespace deletion should delete pod first [Conformance]",
+      "seconds": "0.371523754",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ResourceQuota should apply changes to a resourcequota status [Conformance]",
+      "seconds": "0.379983266",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ResourceQuota should be able to update and delete ResourceQuota. [Conformance]",
+      "seconds": "0.212237031",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ResourceQuota should create a ResourceQuota and capture the life of a configMap. [Conformance]",
+      "seconds": "18.400847801",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ResourceQuota should create a ResourceQuota and capture the life of a pod. [Conformance]",
+      "seconds": "1.27100276",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ResourceQuota should create a ResourceQuota and capture the life of a replica set. [Conformance]",
+      "seconds": "1.285509507",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ResourceQuota should create a ResourceQuota and capture the life of a replication controller. [Conformance]",
+      "seconds": "1.116092093",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ResourceQuota should create a ResourceQuota and capture the life of a secret. [Conformance]",
+      "seconds": "6.112690137",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ResourceQuota should create a ResourceQuota and capture the life of a service. [Conformance]",
+      "seconds": "1.042305231",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ResourceQuota should create a ResourceQuota and ensure its status is promptly calculated. [Conformance]",
+      "seconds": "1.385083488",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ResourceQuota should manage the lifecycle of a ResourceQuota [Conformance]",
+      "seconds": "0.455743542",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ResourceQuota should verify ResourceQuota with best effort scope. [Conformance]",
+      "seconds": "0.276336941",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ResourceQuota should verify ResourceQuota with terminating scopes. [Conformance]",
+      "seconds": "0.119204214",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Servers with support for API chunking should return chunks of results for list calls [Conformance]",
+      "seconds": "21.530578156",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-api-machinery] Servers with support for API chunking should support continue listing from the last key if the original version has been compacted away, though the list is inconsistent [Slow] [Conformance]",
+      "seconds": "338.049693253",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-api-machinery] Servers with support for Table transformation should return a 406 for a backend which does not implement metadata [Conformance]",
+      "seconds": "0.384593476",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ValidatingAdmissionPolicy [Privileged:ClusterAdmin] should allow expressions to refer variables. [Conformance]",
+      "seconds": "0.03553039",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ValidatingAdmissionPolicy [Privileged:ClusterAdmin] should support ValidatingAdmissionPolicy API operations [Conformance]",
+      "seconds": "0.505498856",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ValidatingAdmissionPolicy [Privileged:ClusterAdmin] should support ValidatingAdmissionPolicyBinding API operations [Conformance]",
+      "seconds": "0.256673394",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] ValidatingAdmissionPolicy [Privileged:ClusterAdmin] should validate against a Deployment [Conformance]",
+      "seconds": "0.277429838",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Watchers should be able to restart watching from the last resource version observed by the previous watch [Conformance]",
+      "seconds": "0.209324426",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Watchers should be able to start watching from a specific resource version [Conformance]",
+      "seconds": "0.327715532",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Watchers should observe add, update, and delete watch notifications on configmaps [Conformance]",
+      "seconds": "0.062141159",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Watchers should observe an object deletion if it stops meeting the requirements of the selector [Conformance]",
+      "seconds": "0.08135348",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] Watchers should receive events on concurrent watches in same order [Conformance]",
+      "seconds": "10.041880613",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-api-machinery] server version should find the server version [Conformance]",
+      "seconds": "0.310473298",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-apps] ControllerRevision [Serial] should manage the lifecycle of a ControllerRevision [Conformance]",
+      "seconds": "0.052162567",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] CronJob should not schedule jobs when suspended [Slow] [Conformance]",
+      "seconds": "0.08686309",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] CronJob should not schedule new jobs when ForbidConcurrent [Slow] [Conformance]",
+      "seconds": "0.196849557",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] CronJob should replace jobs when ReplaceConcurrent [Conformance]",
+      "seconds": "0.465127196",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] CronJob should schedule multiple jobs concurrently [Conformance]",
+      "seconds": "0.218595338",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] CronJob should support CronJob API operations [Conformance]",
+      "seconds": "0.123676884",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Daemon set [Serial] should list and delete a collection of DaemonSets [Conformance]",
+      "seconds": "0.310610931",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Daemon set [Serial] should retry creating failed daemon pods [Conformance]",
+      "seconds": "0.048427023",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Daemon set [Serial] should rollback without unnecessary restarts [Conformance]",
+      "seconds": "0.09169494",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Daemon set [Serial] should run and stop complex daemon [Conformance]",
+      "seconds": "0.047759564",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Daemon set [Serial] should run and stop simple daemon [Conformance]",
+      "seconds": "0.279489191",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Daemon set [Serial] should update pod when spec was updated and update strategy is RollingUpdate [Conformance]",
+      "seconds": "0.144836825",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Daemon set [Serial] should verify changes to a daemon set status [Conformance]",
+      "seconds": "0.223854975",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Deployment Deployment should have a working scale subresource [Conformance]",
+      "seconds": "0.118866881",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Deployment RecreateDeployment should delete old pods and create new ones [Conformance]",
+      "seconds": "0.269096346",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Deployment RollingUpdateDeployment should delete old pods and create new ones [Conformance]",
+      "seconds": "0.176506727",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Deployment deployment should delete old replica sets [Conformance]",
+      "seconds": "0.280063218",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Deployment deployment should support proportional scaling [Conformance]",
+      "seconds": "0.057878064",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Deployment deployment should support rollover [Conformance]",
+      "seconds": "0.185069984",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Deployment should run the lifecycle of a Deployment [Conformance]",
+      "seconds": "0.108692764",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Deployment should validate Deployment Status endpoints [Conformance]",
+      "seconds": "0.193509454",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] DisruptionController Listing PodDisruptionBudgets for all namespaces should list and delete a collection of PodDisruptionBudgets [Conformance]",
+      "seconds": "0.355167616",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] DisruptionController should block an eviction until the PDB is updated to allow it [Conformance]",
+      "seconds": "0.063200183",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] DisruptionController should create a PodDisruptionBudget [Conformance]",
+      "seconds": "0.270762601",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] DisruptionController should observe PodDisruptionBudget status updated [Conformance]",
+      "seconds": "0.077387541",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] DisruptionController should update/patch PodDisruptionBudget status [Conformance]",
+      "seconds": "0.242354675",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Job should adopt matching orphans and release non-matching pods [Conformance]",
+      "seconds": "0.129318564",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Job should allow to use a pod failure policy to ignore failure matching on DisruptionTarget condition [Conformance]",
+      "seconds": "0.040394349",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Job should allow to use the pod failure policy on exit code to fail the job early [Conformance]",
+      "seconds": "0.302163319",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Job should apply changes to a job status [Conformance]",
+      "seconds": "0.167921694",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Job should create pods for an Indexed job with completion indexes and specified hostname [Conformance]",
+      "seconds": "0.127644368",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Job should delete a job [Conformance]",
+      "seconds": "0.207782782",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Job should execute all indexes despite some failing when using backoffLimitPerIndex [Conformance]",
+      "seconds": "0.2838708",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Job should manage the lifecycle of a job [Conformance]",
+      "seconds": "0.418116754",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Job should mark indexes as failed when the FailIndex action is matched in podFailurePolicy [Conformance]",
+      "seconds": "0.248197271",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Job should run a job to completion when tasks sometimes fail and are locally restarted [Conformance]",
+      "seconds": "0.058498412",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Job should terminate job execution when the number of failed indexes exceeds maxFailedIndexes [Conformance]",
+      "seconds": "0.120591522",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Job with successPolicy should succeeded when all indexes succeeded [Conformance]",
+      "seconds": "0.158048946",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Job with successPolicy succeededCount rule should succeeded even when some indexes remain pending [Conformance]",
+      "seconds": "0.120004433",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] Job with successPolicy succeededIndexes rule should succeeded even when some indexes remain pending [Conformance]",
+      "seconds": "0.198462937",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] ReplicaSet Replace and Patch tests [Conformance]",
+      "seconds": "0.111835305",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] ReplicaSet Replicaset should have a working scale subresource [Conformance]",
+      "seconds": "0.038549168",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] ReplicaSet should adopt matching pods on creation and release no longer matching pods [Conformance]",
+      "seconds": "0.141043742",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] ReplicaSet should list and delete a collection of ReplicaSets [Conformance]",
+      "seconds": "0.19485567",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] ReplicaSet should serve a basic image on each replica with a public image [Conformance]",
+      "seconds": "0.201380154",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] ReplicaSet should validate Replicaset Status endpoints [Conformance]",
+      "seconds": "0.109085089",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] ReplicationController should adopt matching pods on creation [Conformance]",
+      "seconds": "0.039879813",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] ReplicationController should get and update a ReplicationController scale [Conformance]",
+      "seconds": "0.198406265",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] ReplicationController should release no longer matching pods [Conformance]",
+      "seconds": "0.159085022",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] ReplicationController should serve a basic image on each replica with a public image [Conformance]",
+      "seconds": "0.040586488",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] ReplicationController should surface a failure condition on a common issue like exceeded quota [Conformance]",
+      "seconds": "0.039009369",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] ReplicationController should test the lifecycle of a ReplicationController [Conformance]",
+      "seconds": "0.147648342",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] Burst scaling should run to completion even with unhealthy pods [Slow] [Conformance]",
+      "seconds": "3.8604578309999997",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] Scaling should happen in predictable order and halt if any stateful pod is unhealthy [Slow] [Conformance]",
+      "seconds": "0.043813753",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] Should recreate evicted statefulset [Conformance]",
+      "seconds": "0.316991043",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] should have a working scale subresource [Conformance]",
+      "seconds": "0.178327103",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] should list, patch and delete a collection of StatefulSets [Conformance]",
+      "seconds": "0.135541559",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] should perform canary updates and phased rolling updates of template modifications [Conformance]",
+      "seconds": "0.127347343",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] should perform rolling updates and roll backs of template modifications [Conformance]",
+      "seconds": "0.227897724",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] should validate Statefulset Status endpoints [Conformance]",
+      "seconds": "0.109663847",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-architecture] Conformance Tests should have at least two untainted nodes [Conformance]",
+      "seconds": "0.039990128",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-auth] Certificates API [Privileged:ClusterAdmin] should support CSR API operations [Conformance]",
+      "seconds": "0.725118566",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-auth] ServiceAccounts ServiceAccountIssuerDiscovery should support OIDC discovery of service account issuer [Conformance]",
+      "seconds": "0.324438097",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-auth] ServiceAccounts should allow opting out of API token automount [Conformance]",
+      "seconds": "0.035920455",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-auth] ServiceAccounts should create a serviceAccountToken and ensure a successful TokenReview [Conformance]",
+      "seconds": "0.21746126",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-auth] ServiceAccounts should guarantee kube-root-ca.crt exist in any namespace [Conformance]",
+      "seconds": "30.259553708",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-auth] ServiceAccounts should mount an API token into pods [Conformance]",
+      "seconds": "0.350504536",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-auth] ServiceAccounts should mount projected service account token [Conformance]",
+      "seconds": "0.491372664",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-auth] ServiceAccounts should run through the lifecycle of a ServiceAccount [Conformance]",
+      "seconds": "0.363723055",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-auth] ServiceAccounts should update a ServiceAccount [Conformance]",
+      "seconds": "0.183218385",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-auth] SubjectReview should support SubjectReview API operations [Conformance]",
+      "seconds": "0.184463251",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Guestbook application should create and stop a working application [Conformance]",
+      "seconds": "0.398897535",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Kubectl api-versions should check if v1 is in available api versions [Conformance]",
+      "seconds": "0.447750064",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Kubectl cluster-info should check if Kubernetes control plane services is included in cluster-info [Conformance]",
+      "seconds": "0.482812293",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Kubectl describe should check if kubectl describe prints relevant information for rc and pods [Conformance]",
+      "seconds": "0.385534849",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Kubectl diff should check if kubectl diff finds a difference for Deployments [Conformance]",
+      "seconds": "0.410445198",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Kubectl expose should create services for rc [Conformance]",
+      "seconds": "0.442160693",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Kubectl label should update the label on a resource [Conformance]",
+      "seconds": "0.508818895",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Kubectl patch should add annotations for pods in rc [Conformance]",
+      "seconds": "0.187533505",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Kubectl replace should update a single-container pod's image [Conformance]",
+      "seconds": "38.372586201",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Kubectl run pod should create a pod from an image when restart is Never [Conformance]",
+      "seconds": "0.581790291",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Kubectl server-side dry-run should check if kubectl can dry-run update Pods [Conformance]",
+      "seconds": "1.181886212",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Kubectl version should check is all data is printed [Conformance]",
+      "seconds": "0.34076247",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Proxy server should support --unix-socket=/path [Conformance]",
+      "seconds": "0.591680755",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Proxy server should support proxy with --port 0 [Conformance]",
+      "seconds": "0.299612351",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Update Demo should create and stop a replication controller [Conformance]",
+      "seconds": "0.484091977",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl client Update Demo should scale a replication controller [Conformance]",
+      "seconds": "0.779706894",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-cli] Kubectl logs logs should be able to retrieve and filter logs [Conformance]",
+      "seconds": "51.207748451",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-instrumentation] Events API should delete a collection of events [Conformance]",
+      "seconds": "0.310781207",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-instrumentation] Events API should ensure that an event can be fetched, patched, deleted, and listed [Conformance]",
+      "seconds": "0.669815494",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-instrumentation] Events should delete a collection of events [Conformance]",
+      "seconds": "0.030651402",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-instrumentation] Events should manage the lifecycle of an event [Conformance]",
+      "seconds": "0.191689522",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] API Server should have Endpoints and EndpointSlices pointing to API Server [Conformance]",
+      "seconds": "0.245817567",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] API Server should provide secure master service [Conformance]",
+      "seconds": "0.294357394",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-network] DNS should provide /etc/hosts entries for the cluster [Conformance]",
+      "seconds": "0.507628093",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] DNS should provide DNS for ExternalName services [Conformance]",
+      "seconds": "0.063098099",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] DNS should provide DNS for pods for Hostname [Conformance]",
+      "seconds": "0.498888055",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] DNS should provide DNS for pods for Subdomain [Conformance]",
+      "seconds": "0.270480746",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] DNS should provide DNS for services [Conformance]",
+      "seconds": "0.215401701",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] DNS should provide DNS for the cluster [Conformance]",
+      "seconds": "0.140494618",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] DNS should resolve DNS of partial qualified names for services [LinuxOnly] [Conformance]",
+      "seconds": "0.125025775",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] DNS should support configurable pod DNS nameservers [Conformance]",
+      "seconds": "0.20629528",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] EndpointSlice should create Endpoints and EndpointSlices for Pods matching a Service [Conformance]",
+      "seconds": "0.55386016",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] EndpointSlice should create and delete EndpointSlices for a Service with a selector that matches no pods [Conformance]",
+      "seconds": "0.4014551",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] EndpointSlice should support a Service with multiple endpoint IPs specified in multiple EndpointSlices [Conformance]",
+      "seconds": "0.105821019",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] EndpointSlice should support a Service with multiple ports specified in multiple EndpointSlices [Conformance]",
+      "seconds": "0.128091067",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] EndpointSlice should support creating EndpointSlice API operations [Conformance]",
+      "seconds": "0.040767584",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] EndpointSliceMirroring should mirror a custom Endpoints resource through create update and delete [Conformance]",
+      "seconds": "0.277474206",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Endpoints should test the lifecycle of an Endpoint [Conformance]",
+      "seconds": "0.260136379",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] EndpointsController should create Endpoints for Pods matching a Service [Conformance]",
+      "seconds": "0.182985666",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] EndpointsController should create and delete Endpoints for a Service with a selector that matches no pods [Conformance]",
+      "seconds": "0.109977042",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] HostPort validates that there is no conflict between pods with same hostPort but different hostIP and protocol [LinuxOnly] [Conformance]",
+      "seconds": "0.0548578",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Ingress API should support creating Ingress API operations [Conformance]",
+      "seconds": "0.035453499",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] IngressClass API should support creating IngressClass API operations [Conformance]",
+      "seconds": "0.106418998",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Networking Granular Checks: Pods should function for intra-pod communication: http [NodeConformance] [Conformance]",
+      "seconds": "0.071675964",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Networking Granular Checks: Pods should function for intra-pod communication: udp [NodeConformance] [Conformance]",
+      "seconds": "0.038522903",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Networking Granular Checks: Pods should function for node-pod communication: http [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.15871903",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Networking Granular Checks: Pods should function for node-pod communication: udp [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.315579221",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Proxy version v1 A set of valid responses are returned for both pod and service Proxy [Conformance]",
+      "seconds": "0.155968645",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Proxy version v1 A set of valid responses are returned for both pod and service ProxyWithPath [Conformance]",
+      "seconds": "0.071466542",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Proxy version v1 should proxy through a service and a pod [Conformance]",
+      "seconds": "0.191530386",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Service endpoints latency should not be very high [Conformance]",
+      "seconds": "0.052846611",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] ServiceCIDR and IPAddress API should support IPAddress API operations [Conformance]",
+      "seconds": "0.152901327",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] ServiceCIDR and IPAddress API should support ServiceCIDR API operations [Conformance]",
+      "seconds": "0.273154086",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Services should be able to change the type from ClusterIP to ExternalName [Conformance]",
+      "seconds": "0.033057498",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Services should be able to change the type from ExternalName to ClusterIP [Conformance]",
+      "seconds": "0.368377769",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Services should be able to change the type from ExternalName to NodePort [Conformance]",
+      "seconds": "0.129902979",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Services should be able to change the type from NodePort to ExternalName [Conformance]",
+      "seconds": "0.07977049",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Services should be able to create a functioning NodePort service [Conformance]",
+      "seconds": "0.167836679",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Services should be able to switch session affinity for NodePort service [LinuxOnly] [Conformance]",
+      "seconds": "0.195232042",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Services should be able to switch session affinity for service with type clusterIP [LinuxOnly] [Conformance]",
+      "seconds": "0.171076868",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Services should complete a service status lifecycle [Conformance]",
+      "seconds": "0.467717881",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Services should delete a collection of services [Conformance]",
+      "seconds": "0.030983336",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Services should find a service from listing all namespaces [Conformance]",
+      "seconds": "0.103880144",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-network] Services should have session affinity work for NodePort service [LinuxOnly] [Conformance]",
+      "seconds": "0.062399034",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Services should have session affinity work for service with type clusterIP [LinuxOnly] [Conformance]",
+      "seconds": "0.037119329",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Services should serve a basic endpoint from pods [Conformance]",
+      "seconds": "0.196658027",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Services should serve endpoints on same port and different protocols [Conformance]",
+      "seconds": "0.140459422",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-network] Services should serve multiport endpoints from pods [Conformance]",
+      "seconds": "0.109160138",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] ConfigMap should be consumable as environment variable names with various prefixes [Conformance]",
+      "seconds": "0.207085435",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] ConfigMap should be consumable via environment variable [NodeConformance] [Conformance]",
+      "seconds": "0.541891798",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] ConfigMap should be consumable via the environment [NodeConformance] [Conformance]",
+      "seconds": "0.060705028",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] ConfigMap should fail to create ConfigMap with empty key [Conformance]",
+      "seconds": "0.065669647",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-node] ConfigMap should run through a ConfigMap lifecycle [Conformance]",
+      "seconds": "0.048586802",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] ConfigMap should update ConfigMap successfully [NodeConformance] [Conformance]",
+      "seconds": "0.084701807",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Container Lifecycle Hook when create a pod with lifecycle hook should execute poststart exec hook properly [NodeConformance] [Conformance]",
+      "seconds": "0.349204817",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Container Lifecycle Hook when create a pod with lifecycle hook should execute poststart http hook properly [NodeConformance] [Conformance]",
+      "seconds": "0.233057982",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Container Lifecycle Hook when create a pod with lifecycle hook should execute prestop exec hook properly [NodeConformance] [Conformance]",
+      "seconds": "0.307173914",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Container Lifecycle Hook when create a pod with lifecycle hook should execute prestop http hook properly [NodeConformance] [Conformance]",
+      "seconds": "0.269280473",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Container Runtime blackbox test on terminated container should report termination message as empty when pod succeeds and TerminationMessagePolicy FallbackToLogsOnError is set [NodeConformance] [Conformance]",
+      "seconds": "0.0642402",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Container Runtime blackbox test on terminated container should report termination message from file when pod succeeds and TerminationMessagePolicy FallbackToLogsOnError is set [NodeConformance] [Conformance]",
+      "seconds": "0.160717827",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Container Runtime blackbox test on terminated container should report termination message from log output if TerminationMessagePolicy FallbackToLogsOnError is set [NodeConformance] [Conformance]",
+      "seconds": "0.25847641",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Container Runtime blackbox test on terminated container should report termination message if TerminationMessagePath is set as non-root user and at a non-default path [NodeConformance] [Conformance]",
+      "seconds": "0.143923205",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Container Runtime blackbox test when starting a container that exits should run with the expected status [NodeConformance] [Conformance]",
+      "seconds": "0.063954301",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Containers should be able to override the image's default arguments (container cmd) [NodeConformance] [Conformance]",
+      "seconds": "0.035842292",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Containers should be able to override the image's default command (container entrypoint) [NodeConformance] [Conformance]",
+      "seconds": "0.042691917",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Containers should be able to override the image's default command and arguments [NodeConformance] [Conformance]",
+      "seconds": "0.156891182",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Containers should use the image defaults if command and args are blank [NodeConformance] [Conformance]",
+      "seconds": "0.366881475",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Downward API should provide container's limits.cpu/memory and requests.cpu/memory as env vars [NodeConformance] [Conformance]",
+      "seconds": "0.317935886",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Downward API should provide default limits.cpu/memory from node allocatable [NodeConformance] [Conformance]",
+      "seconds": "0.041299059",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Downward API should provide host IP as an env var [NodeConformance] [Conformance]",
+      "seconds": "0.423966505",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Downward API should provide hostIPs as an env var [NodeConformance] [Conformance]",
+      "seconds": "0.161437485",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Downward API should provide pod UID as env vars [NodeConformance] [Conformance]",
+      "seconds": "0.621251806",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Downward API should provide pod name, namespace and IP address as env vars [NodeConformance] [Conformance]",
+      "seconds": "0.038741843",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Ephemeral Containers [NodeConformance] should update the ephemeral containers in an existing pod [Conformance]",
+      "seconds": "0.410698789",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Ephemeral Containers [NodeConformance] will start an ephemeral container in an existing pod [Conformance]",
+      "seconds": "0.263335196",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] ImageVolume should succeed with pod and pull policy of Always [LinuxOnly] [MinimumKubeletVersion:1.35] [Conformance]",
+      "seconds": "0.281336558",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] InitContainer [NodeConformance] should invoke init containers on a RestartAlways pod [Conformance]",
+      "seconds": "0.133356",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] InitContainer [NodeConformance] should invoke init containers on a RestartNever pod [Conformance]",
+      "seconds": "0.139665059",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] InitContainer [NodeConformance] should not start app containers and fail the pod if init containers fail on a RestartNever pod [Conformance]",
+      "seconds": "0.238606574",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] InitContainer [NodeConformance] should not start app containers if init containers fail on a RestartAlways pod [Conformance]",
+      "seconds": "0.081958648",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Kubelet when scheduling a busybox command in a pod should print the output to logs [NodeConformance] [Conformance]",
+      "seconds": "0.03646813",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Kubelet when scheduling a busybox command that always fails in a pod should be possible to delete [NodeConformance] [Conformance]",
+      "seconds": "0.454689278",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Kubelet when scheduling a busybox command that always fails in a pod should have an terminated reason [NodeConformance] [Conformance]",
+      "seconds": "0.213699713",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Kubelet when scheduling a read only busybox container should not write to root filesystem [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.188084172",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Kubelet when scheduling an agnhost Pod with hostAliases should write entries to /etc/hosts [NodeConformance] [Conformance]",
+      "seconds": "0.179804439",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] KubeletManagedEtcHosts should test kubelet managed /etc/hosts file [NodeConformance] [Conformance]",
+      "seconds": "0.379123734",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Lease lease API should be available [Conformance]",
+      "seconds": "0.193222138",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] NoExecuteTaintManager Multiple Pods [Serial] evicts pods with minTolerationSeconds [Disruptive] [Conformance]",
+      "seconds": "60.366136511",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] NoExecuteTaintManager Single Pod [Serial] removing taint cancels eviction [Disruptive] [Conformance]",
+      "seconds": "60.145465957",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Node Lifecycle should run through the lifecycle of a node [Conformance]",
+      "seconds": "0.887650148",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pod InPlace Resize Container burstable pods - extended 6 containers - various operations performed (including adding limits and requests) [MinimumKubeletVersion:1.34] [Conformance]",
+      "seconds": "0.305533076",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pod InPlace Resize Container burstable pods - extended resize with equivalents [MinimumKubeletVersion:1.34] [Conformance]",
+      "seconds": "0.151921595",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pod InPlace Resize Container guaranteed pods with multiple containers 3 containers - increase cpu & mem on c1, c2, decrease cpu & mem on c3 - net increase [MinimumKubeletVersion:1.34] [Conformance]",
+      "seconds": "0.19413819",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pod InPlace Resize Container guaranteed pods with multiple containers 3 containers - increase cpu & mem on c1, decrease cpu & mem on c2, c3 - net decrease [MinimumKubeletVersion:1.34] [Conformance]",
+      "seconds": "0.291024171",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pod InPlace Resize Container guaranteed pods with multiple containers 3 containers - increase: CPU (c1,c3), memory (c2, c3) ; decrease: CPU (c2) [MinimumKubeletVersion:1.34] [Conformance]",
+      "seconds": "0.09930239",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pod InPlace Resize Container resize pod via the replace endpoint [MinimumKubeletVersion:1.34] [Conformance]",
+      "seconds": "0.186712223",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] PodTemplates should delete a collection of pod templates [Conformance]",
+      "seconds": "0.469290319",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-node] PodTemplates should replace a pod template [Conformance]",
+      "seconds": "0.437703899",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-node] PodTemplates should run the lifecycle of PodTemplates [Conformance]",
+      "seconds": "0.195389387",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-node] Pods Extended (pod generation) Pod Generation custom-set generation on new pods and graceful delete [Conformance]",
+      "seconds": "0.292118057",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pods Extended (pod generation) Pod Generation issue 500 podspec updates and verify generation and observedGeneration eventually converge [MinimumKubeletVersion:1.34] [Conformance]",
+      "seconds": "0.344072808",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pods Extended (pod generation) Pod Generation pod generation should start at 1 and increment per update [MinimumKubeletVersion:1.34] [Conformance]",
+      "seconds": "0.384038129",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pods Extended Pods Set QOS Class should be set on Pods with matching resource requests and limits for memory and cpu [Conformance]",
+      "seconds": "0.148990995",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pods should allow activeDeadlineSeconds to be updated [NodeConformance] [Conformance]",
+      "seconds": "0.326609725",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pods should be submitted and removed [NodeConformance] [Conformance]",
+      "seconds": "0.140957302",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pods should be updated [NodeConformance] [Conformance]",
+      "seconds": "0.230892202",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pods should contain environment variables for services [NodeConformance] [Conformance]",
+      "seconds": "0.432728558",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pods should delete a collection of pods [Conformance]",
+      "seconds": "0.407138965",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pods should get a host IP [NodeConformance] [Conformance]",
+      "seconds": "0.441947199",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pods should patch a pod status [Conformance]",
+      "seconds": "0.295284948",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pods should run through the lifecycle of Pods and PodStatus [Conformance]",
+      "seconds": "0.307252789",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pods should support remote command execution over websockets [NodeConformance] [Conformance]",
+      "seconds": "0.075802547",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Pods should support retrieving logs from the container over websockets [NodeConformance] [Conformance]",
+      "seconds": "0.142669113",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] PreStop should call prestop when killing a pod [Conformance]",
+      "seconds": "0.126789146",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Probing container should *not* be restarted with a /healthz http liveness probe [NodeConformance] [Conformance]",
+      "seconds": "0.439352504",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Probing container should *not* be restarted with a GRPC liveness probe [NodeConformance] [Conformance]",
+      "seconds": "0.316685233",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Probing container should *not* be restarted with a exec \"cat /tmp/health\" liveness probe [NodeConformance] [Conformance]",
+      "seconds": "0.33651944",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Probing container should *not* be restarted with a tcp:8080 liveness probe [NodeConformance] [Conformance]",
+      "seconds": "0.290124075",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Probing container should be restarted with a /healthz http liveness probe [NodeConformance] [Conformance]",
+      "seconds": "0.37025049",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Probing container should be restarted with a GRPC liveness probe [NodeConformance] [Conformance]",
+      "seconds": "0.281078981",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Probing container should be restarted with a exec \"cat /tmp/health\" liveness probe [NodeConformance] [Conformance]",
+      "seconds": "0.392096213",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Probing container should have monotonically increasing restart count [NodeConformance] [Conformance]",
+      "seconds": "0.184508889",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Probing container with readiness probe should not be ready before initial delay and never restart [NodeConformance] [Conformance]",
+      "seconds": "0.040049902",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Probing container with readiness probe that fails should never be ready and never restart [NodeConformance] [Conformance]",
+      "seconds": "0.233765585",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] RuntimeClass should reject a Pod requesting a deleted RuntimeClass [NodeConformance] [Conformance]",
+      "seconds": "0.220814119",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] RuntimeClass should reject a Pod requesting a non-existent RuntimeClass [NodeConformance] [Conformance]",
+      "seconds": "0.072808655",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] RuntimeClass should schedule a Pod requesting a RuntimeClass and initialize its Overhead [NodeConformance] [Conformance]",
+      "seconds": "0.243975148",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] RuntimeClass should schedule a Pod requesting a RuntimeClass without PodOverhead [NodeConformance] [Conformance]",
+      "seconds": "0.054503483",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] RuntimeClass should support RuntimeClasses API operations [Conformance]",
+      "seconds": "0.034480783",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Secrets should be consumable as environment variable names variable names with various prefixes [Conformance]",
+      "seconds": "0.092001707",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Secrets should be consumable from pods in env vars [NodeConformance] [Conformance]",
+      "seconds": "0.348118153",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Secrets should be consumable via the environment [NodeConformance] [Conformance]",
+      "seconds": "0.235250581",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Secrets should fail to create secret due to empty secret key [Conformance]",
+      "seconds": "0.114683084",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-node] Secrets should patch a secret [Conformance]",
+      "seconds": "0.259102102",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Security Context When creating a container with runAsUser should run the container with uid 65534 [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.36646262",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Security Context When creating a pod with privileged should run the container as unprivileged when false [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.12744823",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Security Context When creating a pod with readOnlyRootFilesystem should run the container with writable rootfs when readOnlyRootFilesystem=false [NodeConformance] [Conformance]",
+      "seconds": "0.234921174",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Security Context should support container.SecurityContext.RunAsUser And container.SecurityContext.RunAsGroup [LinuxOnly] [Conformance]",
+      "seconds": "0.359599952",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Security Context should support pod.Spec.SecurityContext.RunAsUser And pod.Spec.SecurityContext.RunAsGroup [LinuxOnly] [Conformance]",
+      "seconds": "0.136376753",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Security Context when creating containers with AllowPrivilegeEscalation should not allow privilege escalation when false [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.345145145",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Sysctls [LinuxOnly] [NodeConformance] should reject invalid sysctls [Conformance]",
+      "seconds": "0.037715108",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Sysctls [LinuxOnly] [NodeConformance] should support sysctls [Environment:NotInUserNS] [Conformance]",
+      "seconds": "0.238847086",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Variable Expansion should allow composing env vars into new env vars [NodeConformance] [Conformance]",
+      "seconds": "0.040561135",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Variable Expansion should allow substituting values in a container's args [NodeConformance] [Conformance]",
+      "seconds": "0.128817597",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Variable Expansion should allow substituting values in a container's command [NodeConformance] [Conformance]",
+      "seconds": "0.202934228",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Variable Expansion should allow substituting values in a volume subpath [Conformance]",
+      "seconds": "0.099048841",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Variable Expansion should fail substituting values in a volume subpath with absolute path [Conformance]",
+      "seconds": "0.119380295",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Variable Expansion should fail substituting values in a volume subpath with backticks [Conformance]",
+      "seconds": "0.307810736",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Variable Expansion should succeed in writing subpaths in container [Conformance]",
+      "seconds": "0.240220798",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] Variable Expansion should verify that a failing subpath expansion can be modified during the lifecycle of a container [Slow] [Conformance]",
+      "seconds": "5.309409524",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] [DRA] CRUD Tests resource.k8s.io/v1 DeviceClass [Conformance]",
+      "seconds": "0.112109887",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] [DRA] CRUD Tests resource.k8s.io/v1 ResourceClaim [Conformance]",
+      "seconds": "0.063748396",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] [DRA] CRUD Tests resource.k8s.io/v1 ResourceClaimTemplate [Conformance]",
+      "seconds": "0.224744039",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-node] [DRA] CRUD Tests resource.k8s.io/v1 ResourceSlice [Conformance]",
+      "seconds": "0.066733957",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-scheduling] LimitRange should create a LimitRange with defaults and ensure pod has those defaults applied. [Conformance]",
+      "seconds": "0.036644654",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-scheduling] LimitRange should list, patch and delete a LimitRange by collection [Conformance]",
+      "seconds": "0.046097605",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-scheduling] SchedulerPredicates [Serial] validates resource limits of pods that are allowed to run [Conformance]",
+      "seconds": "0.041528273",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-scheduling] SchedulerPredicates [Serial] validates that NodeSelector is respected if matching [Conformance]",
+      "seconds": "0.167358202",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-scheduling] SchedulerPredicates [Serial] validates that NodeSelector is respected if not matching [Conformance]",
+      "seconds": "0.235735851",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-scheduling] SchedulerPredicates [Serial] validates that there exists conflict between pods with same hostPort and protocol but one using 0.0.0.0 hostIP [Conformance]",
+      "seconds": "0.162605047",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-scheduling] SchedulerPreemption [Serial] PreemptionExecutionPath runs ReplicaSets to verify preemption running path [Conformance]",
+      "seconds": "0.124691305",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-scheduling] SchedulerPreemption [Serial] PriorityClass endpoints verify PriorityClass endpoints can be operated with different HTTP methods [Conformance]",
+      "seconds": "0.040970551",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-scheduling] SchedulerPreemption [Serial] validates basic preemption works [Conformance]",
+      "seconds": "0.472732007",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-scheduling] SchedulerPreemption [Serial] validates lower priority pod preemption by critical pod [Conformance]",
+      "seconds": "0.404363204",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-scheduling] SchedulerPreemption [Serial] validates pod disruption condition is added to the preempted pod [Conformance]",
+      "seconds": "0.117793349",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] CSIInlineVolumes should run through the lifecycle of a CSIDriver [Conformance]",
+      "seconds": "0.265971497",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] CSIInlineVolumes should support CSIVolumeSource in Pod API [Conformance]",
+      "seconds": "0.150500568",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] CSINodes CSI Conformance should run through the lifecycle of a csinode [Conformance]",
+      "seconds": "0.066636002",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] CSIStorageCapacity should support CSIStorageCapacities API operations [Conformance]",
+      "seconds": "0.11157996",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] ConfigMap binary data should be reflected in volume [NodeConformance] [Conformance]",
+      "seconds": "0.464579739",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] ConfigMap optional updates should be reflected in volume [NodeConformance] [Conformance]",
+      "seconds": "0.29240678",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] ConfigMap should be consumable from pods in volume [NodeConformance] [Conformance]",
+      "seconds": "0.230117227",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] ConfigMap should be consumable from pods in volume as non-root [NodeConformance] [Conformance]",
+      "seconds": "0.256291391",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] ConfigMap should be consumable from pods in volume with defaultMode set [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.042081837",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] ConfigMap should be consumable from pods in volume with mappings [NodeConformance] [Conformance]",
+      "seconds": "0.377825004",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] ConfigMap should be consumable from pods in volume with mappings and Item mode set [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.162659232",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] ConfigMap should be consumable from pods in volume with mappings as non-root [NodeConformance] [Conformance]",
+      "seconds": "0.326889177",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] ConfigMap should be consumable in multiple volumes in the same pod [NodeConformance] [Conformance]",
+      "seconds": "0.066902824",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] ConfigMap should be immutable if `immutable` field is set [Conformance]",
+      "seconds": "0.469769485",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-storage] ConfigMap updates should be reflected in volume [NodeConformance] [Conformance]",
+      "seconds": "0.163193074",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Downward API volume should provide container's cpu limit [NodeConformance] [Conformance]",
+      "seconds": "0.191676262",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Downward API volume should provide container's cpu request [NodeConformance] [Conformance]",
+      "seconds": "0.20950209",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Downward API volume should provide container's memory limit [NodeConformance] [Conformance]",
+      "seconds": "0.137909177",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Downward API volume should provide container's memory request [NodeConformance] [Conformance]",
+      "seconds": "0.136176434",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Downward API volume should provide node allocatable (cpu) as default cpu limit if the limit is not set [NodeConformance] [Conformance]",
+      "seconds": "0.211178074",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Downward API volume should provide node allocatable (memory) as default memory limit if the limit is not set [NodeConformance] [Conformance]",
+      "seconds": "0.345074252",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Downward API volume should provide podname only [NodeConformance] [Conformance]",
+      "seconds": "0.037955898",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Downward API volume should set DefaultMode on files [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.221582435",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Downward API volume should set mode on item file [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.368133125",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Downward API volume should update annotations on modification [NodeConformance] [Conformance]",
+      "seconds": "0.39103603",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Downward API volume should update labels on modification [NodeConformance] [Conformance]",
+      "seconds": "0.130104979",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir volumes pod should support shared volumes between containers [Conformance]",
+      "seconds": "16.105806111",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir volumes should support (non-root,0644,default) [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.084170906",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir volumes should support (non-root,0644,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.275886729",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir volumes should support (non-root,0666,default) [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.258779677",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir volumes should support (non-root,0666,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.448589006",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir volumes should support (non-root,0777,default) [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.043146802",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir volumes should support (non-root,0777,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.335358324",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir volumes should support (root,0644,default) [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.069188726",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir volumes should support (root,0644,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.186420075",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir volumes should support (root,0666,default) [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "6.463363055",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir volumes should support (root,0666,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.067607989",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir volumes should support (root,0777,default) [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.275917418",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir volumes should support (root,0777,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.468767089",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir volumes volume on default medium should have the correct mode [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "7.126096474",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir volumes volume on tmpfs should have the correct mode [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.224633489",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir wrapper volumes should not cause race condition when used for configmaps [Serial] [Conformance]",
+      "seconds": "2.989013559",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] EmptyDir wrapper volumes should not conflict [Conformance]",
+      "seconds": "0.284145786",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] PersistentVolumes CSI Conformance should apply changes to a pv/pvc status [Conformance]",
+      "seconds": "0.285621976",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] PersistentVolumes CSI Conformance should run through the lifecycle of a PV and a PVC [Conformance]",
+      "seconds": "0.11315367",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected combined should project all components that make up the projection API [Projection] [NodeConformance] [Conformance]",
+      "seconds": "0.194608137",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected configMap optional updates should be reflected in volume [NodeConformance] [Conformance]",
+      "seconds": "0.109165803",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected configMap should be consumable from pods in volume [NodeConformance] [Conformance]",
+      "seconds": "0.393259128",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected configMap should be consumable from pods in volume as non-root [NodeConformance] [Conformance]",
+      "seconds": "0.216822302",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected configMap should be consumable from pods in volume with defaultMode set [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.227649203",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected configMap should be consumable from pods in volume with mappings [NodeConformance] [Conformance]",
+      "seconds": "0.279727466",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected configMap should be consumable from pods in volume with mappings and Item mode set [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.268536951",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected configMap should be consumable from pods in volume with mappings as non-root [NodeConformance] [Conformance]",
+      "seconds": "0.212649418",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected configMap should be consumable in multiple volumes in the same pod [NodeConformance] [Conformance]",
+      "seconds": "0.251976509",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected configMap updates should be reflected in volume [NodeConformance] [Conformance]",
+      "seconds": "0.110771276",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected downwardAPI should provide container's cpu limit [NodeConformance] [Conformance]",
+      "seconds": "0.353680879",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected downwardAPI should provide container's cpu request [NodeConformance] [Conformance]",
+      "seconds": "0.146725592",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected downwardAPI should provide container's memory limit [NodeConformance] [Conformance]",
+      "seconds": "0.129862613",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected downwardAPI should provide container's memory request [NodeConformance] [Conformance]",
+      "seconds": "0.208266443",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected downwardAPI should provide node allocatable (cpu) as default cpu limit if the limit is not set [NodeConformance] [Conformance]",
+      "seconds": "0.038677509",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected downwardAPI should provide node allocatable (memory) as default memory limit if the limit is not set [NodeConformance] [Conformance]",
+      "seconds": "0.071716522",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected downwardAPI should provide podname only [NodeConformance] [Conformance]",
+      "seconds": "0.243663115",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected downwardAPI should set DefaultMode on files [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.076719814",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected downwardAPI should set mode on item file [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.175624543",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected downwardAPI should update annotations on modification [NodeConformance] [Conformance]",
+      "seconds": "0.215325284",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected downwardAPI should update labels on modification [NodeConformance] [Conformance]",
+      "seconds": "0.263884077",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected secret optional updates should be reflected in volume [NodeConformance] [Conformance]",
+      "seconds": "0.301942125",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected secret should be consumable from pods in volume [NodeConformance] [Conformance]",
+      "seconds": "0.047760083",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected secret should be consumable from pods in volume as non-root with defaultMode and fsGroup set [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.103016458",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected secret should be consumable from pods in volume with defaultMode set [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.337917187",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected secret should be consumable from pods in volume with mappings [NodeConformance] [Conformance]",
+      "seconds": "0.073845477",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected secret should be consumable from pods in volume with mappings and Item Mode set [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.322282943",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Projected secret should be consumable in multiple volumes in a pod [NodeConformance] [Conformance]",
+      "seconds": "0.382627208",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Secrets optional updates should be reflected in volume [NodeConformance] [Conformance]",
+      "seconds": "0.047548367",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Secrets should be able to mount in a volume regardless of a different secret existing with same name in different namespace [NodeConformance] [Conformance]",
+      "seconds": "0.62175183",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Secrets should be consumable from pods in volume [NodeConformance] [Conformance]",
+      "seconds": "0.410567692",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Secrets should be consumable from pods in volume as non-root with defaultMode and fsGroup set [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "1.000669722",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Secrets should be consumable from pods in volume with defaultMode set [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.332739145",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Secrets should be consumable from pods in volume with mappings [NodeConformance] [Conformance]",
+      "seconds": "0.229549365",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Secrets should be consumable from pods in volume with mappings and Item Mode set [LinuxOnly] [NodeConformance] [Conformance]",
+      "seconds": "0.418778917",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Secrets should be consumable in multiple volumes in a pod [NodeConformance] [Conformance]",
+      "seconds": "0.579046488",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Secrets should be immutable if `immutable` field is set [Conformance]",
+      "seconds": "0.068463109",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-storage] StorageClasses CSI Conformance should run through the lifecycle of a StorageClass [Conformance]",
+      "seconds": "0.064541383",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Subpath Atomic writer volumes should support subpaths with configmap pod [Conformance]",
+      "seconds": "0.043959274",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Subpath Atomic writer volumes should support subpaths with configmap pod with mountPath of existing file [Conformance]",
+      "seconds": "0.134110714",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Subpath Atomic writer volumes should support subpaths with downward pod [Conformance]",
+      "seconds": "0.31076114",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Subpath Atomic writer volumes should support subpaths with projected pod [Conformance]",
+      "seconds": "0.231356617",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] Subpath Atomic writer volumes should support subpaths with secret pod [Conformance]",
+      "seconds": "0.089031561",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] VolumeAttachment Conformance should apply changes to a volumeattachment status [Conformance]",
+      "seconds": "0.116853171",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] VolumeAttachment Conformance should run through the lifecycle of a VolumeAttachment [Conformance]",
+      "seconds": "0.20936966",
+      "passed": false
+    },
+    {
+      "name": "[It] [sig-storage] VolumeAttributesClass [FeatureGate:VolumeAttributesClass] should run through the lifecycle of a VolumeAttributesClass [Conformance]",
+      "seconds": "0.072975988",
+      "passed": false
+    }
+  ],
+  "artifactSHA256": {
+    "report.json": "351fd810cfc7806f4f7227326baa343715a311741029dfe21ed667ae35d7d9b0",
+    "sonobuoy-results.tar.gz": "1c4fb5bc6ba8abc974fa9a6450ebbe9665713de60e0b73a647d6c5e09a3b5f3a",
+    "sonobuoy-results.txt": "ddff5ae28215ce84ce6548de6359466341c459058665ae0b0b7847b1dfc86a80",
+    "e2e.log": "cf65436d13f34df2532dafde6fb936eb5c6a2720ef1734416f96d65eb506d84c",
+    "gr8s.log": "8f7e134cd1dcc4be35f067293830b57602faffb0cdab5840258adfe3742b350d"
+  }
+}

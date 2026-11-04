@@ -28,7 +28,7 @@
                               :key (lambda (object) (gethash "name" object)))))
           (is (hash-table-p resource))
           (is (eq t (gethash "namespaced" resource)))
-          (is (equal '("create" "delete" "get" "list" "patch" "update")
+          (is (equal '("create" "delete" "get" "list" "patch" "update" "watch")
                      (coerce (gethash "verbs" resource) 'list))))))
     (let* ((openapi (check-core-status 200 "/openapi/v3/api/v1"))
            (schemas (gethash "schemas" (gethash "components" openapi))))
@@ -99,10 +99,11 @@
              (item (aref (gethash "items" next) 0)))
         (is (string= "beta" (gethash "name" (gethash "metadata" item)))))
       (gr8s::create-core-resource store "configmaps" (core-fixture "ConfigMap" "delta") "default")
-      (check-core-status 410 collection :parameters parameters)
+      (let ((page (check-core-status 200 collection :parameters parameters)))
+        (is (equal "beta" (gethash "name" (gethash "metadata" (aref (gethash "items" page) 0))))))
       (let ((filtered (check-core-status 200 collection :parameters '(("fieldSelector" . "metadata.name=gamma")))))
         (is (= 1 (length (gethash "items" filtered)))))
-      (check-core-status 400 collection :parameters '(("watch" . "true")))
+      (check-core-status 400 collection :parameters '(("watch" . "true") ("resourceVersion" . "invalid")))
       (check-core-status 400 collection :parameters '(("fieldSelector" . "data.key=x"))))))
 
 (test core-resource-json-patch-tests-values-case-sensitively-and-atomically
@@ -158,5 +159,114 @@
       (check-core-status 400 item :method :delete :content-type "application/vnd.kubernetes.protobuf"
                          :octets (subseq input 0 5))
       (check-core-status 200 item))))
+
+(test namespace-http-accepts-upstream-protobuf-with-generate-name
+  (with-core-api (store path)
+    (values store path)
+    (let* ((label (core-test-protobuf '((1 "pod-security.kubernetes.io/enforce") (2 "privileged"))))
+           (metadata (core-test-protobuf (list (list 2 "e2e-framework-") (list 11 label))))
+           (input (core-test-protobuf-envelope "Namespace"
+                    (list (list 1 metadata) (list 2 (core-test-protobuf nil))
+                          (list 3 (core-test-protobuf nil)))))
+           (created (check-core-status 201 "/api/v1/namespaces" :method :post
+                      :content-type "application/vnd.kubernetes.protobuf" :octets input))
+           (name (gethash "name" (gethash "metadata" created))))
+      (is (uiop:string-prefix-p "e2e-framework-" name))
+      (is (equal "Active" (gethash "phase" (gethash "status" created))))
+      (check-core-status 200 (concatenate 'string "/api/v1/namespaces/" name)))))
+
+(in-suite core-resource-http)
+
+(test pod-http-accepts-typed-protobuf-with-go-zero-values
+  (with-core-api (store path)
+    (values path)
+    (let* ((field-ref (core-test-protobuf '((1 "v1") (2 "metadata.name"))))
+           (from (core-test-protobuf (list (list 1 field-ref))))
+           (env (core-test-protobuf (list (list 1 "POD_NAME") (list 2 "") (list 3 from))))
+           (container (core-test-protobuf (list (list 1 "main") (list 2 "web:v1")
+                                               (list 3 "echo") (list 4 "") (list 5 "")
+                                               (list 7 env) (list 8 #()) (list 13 "")
+                                               (list 14 "") (list 16 0) (list 17 0) (list 18 0) (list 20 ""))))
+           (spec (core-test-protobuf (list (list 2 container) (list 3 "") (list 6 "")
+                                          (list 8 "") (list 9 "") (list 10 "")
+                                          (list 11 0) (list 12 0) (list 13 0)
+                                          (list 16 "") (list 17 "") (list 19 ""))))
+           (input (core-test-protobuf-envelope "Pod" (list (list 1 (core-test-protobuf '((1 "wire-pod"))))
+                                                           (list 2 spec) (list 3 #()))))
+           (created (check-core-status 201 "/api/v1/namespaces/alpha/pods" :method :post
+                        :content-type "application/vnd.kubernetes.protobuf" :octets input))
+           (actual (gethash "spec" created))
+           (main (aref (gethash "containers" actual) 0)))
+      (is (equal "alpha" (gethash "namespace" (gethash "metadata" created))))
+      (is (equal "wire-pod" (gethash "name" (gethash "metadata" created))))
+      (is (equalp #("echo") (gethash "command" main)))
+      (is (equalp #("" ) (gethash "args" main)))
+      (is (equal "metadata.name" (gethash "fieldPath" (gethash "fieldRef" (gethash "valueFrom" (aref (gethash "env" main) 0))))))
+      (is (= 1 (length (list-pods store "alpha"))))
+      (check-core-status 400 "/api/v1/namespaces/alpha/pods" :method :post
+                         :content-type "application/vnd.kubernetes.protobuf" :octets (subseq input 0 (1- (length input))))
+      (check-core-status 400 "/api/v1/namespaces/alpha/pods" :method :post
+                         :content-type "application/vnd.kubernetes.protobuf"
+                         :octets (core-test-protobuf-envelope "ConfigMap" (list (list 1 #()))))
+      (check-core-status 415 "/api/v1/namespaces/alpha/pods" :method :post
+                         :content-type "text/plain" :octets input))))
+
+(test pod-protobuf-retains-explicit-pointer-zero-and-unsupported-features
+  (let* ((container (core-test-protobuf '((1 "main") (2 "web:v1"))))
+         (spec (core-test-protobuf (list (list 2 container) (list 21 0) (list 11 1))))
+         (input (core-test-protobuf-envelope "Pod" (list (list 1 (core-test-protobuf '((1 "unsupported")))) (list 2 spec))))
+         (decoded (gr8s::decode-core-resource-protobuf input "Pod")))
+    (is (not (null (nth-value 1 (gethash "automountServiceAccountToken" (gethash "spec" decoded))))))
+    (is (null (gethash "automountServiceAccountToken" (gethash "spec" decoded))))
+    (is (eq t (gethash "hostNetwork" (gethash "spec" decoded))))
+    (with-core-api (store path)
+      (values path)
+      (check-core-status 422 "/api/v1/namespaces/alpha/pods" :method :post
+                         :content-type "application/vnd.kubernetes.protobuf" :octets input)
+      (is (null (list-pods store "alpha"))))))
+
+(defun service-wire-fixture (name &key (target 0) (type ""))
+  "Return a Kubernetes typed Service with Go's serialized zero fields."
+  (let* ((target-message (core-test-protobuf (if (stringp target)
+                                              (list (list 1 1) (list 2 0) (list 3 target))
+                                              (list (list 1 0) (list 2 target) (list 3 "")))))
+         (port (core-test-protobuf (list (list 1 "") (list 2 "") (list 3 8080) (list 4 target-message) (list 5 0))))
+         (selector (core-test-protobuf '((1 "app") (2 ""))))
+         (spec (core-test-protobuf (list (list 1 port) (list 2 selector) (list 3 "")
+                                        (list 4 type) (list 7 "") (list 8 "") (list 10 "")
+                                        (list 11 "") (list 12 0) (list 13 0))))
+         (metadata (core-test-protobuf (list (list 1 name)))))
+    (core-test-protobuf-envelope "Service" (list (list 1 metadata) (list 2 spec) (list 3 #())))))
+
+(test service-http-accepts-typed-protobuf-with-allocation-and-port-defaults
+  (with-core-api (store path)
+    (values path)
+    (let* ((input (service-wire-fixture "wire-service"))
+           (created (check-core-status 201 "/api/v1/namespaces/alpha/services" :method :post
+                                      :content-type "application/vnd.kubernetes.protobuf" :octets input))
+           (actual (gethash "spec" created))
+           (port (aref (gethash "ports" actual) 0)))
+      (is (equal "ClusterIP" (gethash "type" actual)))
+      (is (equal "None" (gethash "sessionAffinity" actual)))
+      (is (equal "" (gethash "app" (gethash "selector" actual))))
+      (is (not (null (gr8s::service-ip-index (gethash "clusterIP" actual)))))
+      (is (= 8080 (gethash "targetPort" port)))
+      (is (equal "TCP" (gethash "protocol" port)))
+      (is (= 1 (length (gr8s::list-core-resources store "services" "alpha"))))
+      (check-core-status 400 "/api/v1/namespaces/alpha/services" :method :post
+                         :content-type "application/vnd.kubernetes.protobuf" :octets (subseq input 0 5)))))
+
+(test service-protobuf-retains-named-targets-and-unsupported-types
+  (with-core-api (store path)
+    (values path)
+    (let* ((input (service-wire-fixture "named-service" :target "http"))
+           (created (check-core-status 201 "/api/v1/namespaces/alpha/services" :method :post
+                                      :content-type "application/vnd.kubernetes.protobuf" :octets input))
+           (port (aref (gethash "ports" (gethash "spec" created)) 0)))
+      (is (equal "http" (gethash "targetPort" port)))
+      (check-core-status 422 "/api/v1/namespaces/alpha/services" :method :post
+                         :content-type "application/vnd.kubernetes.protobuf"
+                         :octets (service-wire-fixture "nodeport" :type "NodePort"))
+      (is (= 1 (length (gr8s::list-core-resources store "services" "alpha")))))))
 
 (in-suite gr8s)

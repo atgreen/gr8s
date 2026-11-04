@@ -3,18 +3,28 @@
 (defparameter +podman-command-timeout-seconds+ 30)
 
 (defun run-podman-program (argv)
-  (uiop:run-program
-                    (append (list "timeout" "--signal=TERM" "--kill-after=2s"
-                                  (format nil "~Ds"
-                                          +podman-command-timeout-seconds+))
-                            argv)
-                    :output :string
-                    :error-output :string
-                    :ignore-error-status t))
+  "Run a bounded Podman command and make deletion jobs able to cancel its process."
+  (uiop:with-temporary-file (:pathname stdout)
+    (uiop:with-temporary-file (:pathname stderr)
+      (let ((process (uiop:launch-program
+                      (append (list "timeout" "--signal=TERM" "--kill-after=2s"
+                                    (format nil "~Ds" +podman-command-timeout-seconds+)) argv)
+                      :output stdout :error-output stderr
+                      :if-output-exists :supersede :if-error-output-exists :supersede)))
+        (unwind-protect
+             (progn
+               (register-runtime-deletion-cancel
+                (lambda () (when (uiop:process-alive-p process) (uiop:terminate-process process))))
+               (let ((status (uiop:wait-process process)))
+                 (values (uiop:read-file-string stdout) (uiop:read-file-string stderr) status)))
+          (when (uiop:process-alive-p process)
+            (uiop:terminate-process process)
+            (uiop:wait-process process)))))))
 
 (defstruct (podman-runtime (:constructor %make-podman-runtime))
   executable
-  runner)
+  runner
+  (deletions (make-deletion-controller)))
 
 (defun make-podman-runtime (&key (executable "podman")
                                  (runner #'run-podman-program))
@@ -139,6 +149,7 @@
        :phase (podman-phase (gethash "Status" record ""))))))
 
 (defmethod runtime-delete ((runtime podman-runtime) uid)
+  (cancel-runtime-pod-deletion (podman-runtime-deletions runtime) uid)
   (let ((record (owned-pod-record runtime uid)))
     (when record
       (podman-command
@@ -146,6 +157,25 @@
        (list (podman-runtime-executable runtime)
              "pod" "rm" "--force" (gethash "Id" record)))))
   nil)
+
+(defmethod runtime-terminate-pod ((runtime podman-runtime) pod deadline)
+  "Ask Podman to stop all containers with the remaining grace before removal."
+  (let ((record (owned-pod-record runtime (pod-uid pod)))
+        (remaining (max 0 (- deadline (funcall *pod-deletion-clock*)))))
+    (when record
+      (let ((+podman-command-timeout-seconds+ (+ remaining 30)))
+        (podman-command runtime (list (podman-runtime-executable runtime) "pod" "stop"
+                                     "--time" (write-to-string remaining) (gethash "Id" record))))
+      (podman-command runtime (list (podman-runtime-executable runtime) "pod" "rm"
+                                   "--force" (gethash "Id" record))))))
+
+(defmethod runtime-delete-pod ((runtime podman-runtime) pod)
+  "Poll Podman shutdown without blocking API or snapshot processing."
+  (poll-runtime-pod-deletion (podman-runtime-deletions runtime) runtime pod))
+
+(defmethod stop-runtime-deletions ((runtime podman-runtime))
+  "Cancel and join owned Podman deletion commands."
+  (stop-runtime-deletion-controller (podman-runtime-deletions runtime)))
 
 (defmethod runtime-ensure ((runtime podman-runtime) pod)
   (runtime-delete runtime (pod-uid pod))

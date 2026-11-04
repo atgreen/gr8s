@@ -3,7 +3,87 @@
 (defstruct (reconciler (:constructor make-reconciler (store runtime)))
   store
   runtime
-  (lock (bt:make-lock "gr8s reconciler")))
+  (lock (bt:make-lock "gr8s reconciler"))
+  active-convergence
+  (urgent-deletions (make-hash-table :test #'equal))
+  (convergence-lock (bt:make-lock "gr8s running convergence ownership")))
+
+(define-condition pod-reconciliation-superseded (serious-condition) ()
+  (:documentation "Unwind obsolete creation without translating cancellation into a Pod failure."))
+
+(defstruct running-pod-convergence
+  "A narrowly owned, cancellable running-Pod operation; deletion never registers here."
+  thread uid finished-p)
+
+(defun cancel-running-pod-convergence (reconciler)
+  "Yield blocked creation to durable urgent deletion without interrupting deletion itself."
+  (let ((operation (bt:with-lock-held ((reconciler-convergence-lock reconciler))
+                     (reconciler-active-convergence reconciler))))
+    (when operation
+      (ignore-errors
+        (bt:interrupt-thread
+         (running-pod-convergence-thread operation)
+         (lambda ()
+           ;; This callback runs in the owner. A late callback must not escape
+           ;; after that operation's unwind-protect has released ownership.
+           ;; Only the owner changes this flag. Do not acquire an ownership
+           ;; mutex here: an asynchronous interrupt may arrive while its
+           ;; target is inside that same mutex.
+           (unless (running-pod-convergence-finished-p operation)
+             (error 'pod-reconciliation-superseded)))))))
+  nil)
+
+(defun prioritize-reconciler-deletions (reconciler uids)
+  "Reserve creation capacity for durable urgent UIDs until their physical cleanup completes."
+  (bt:with-lock-held ((reconciler-convergence-lock reconciler))
+    (dolist (uid uids) (setf (gethash uid (reconciler-urgent-deletions reconciler)) t)))
+  (cancel-running-pod-convergence reconciler))
+
+(defun finish-reconciler-urgent-deletion (reconciler uid)
+  "Release UID's creation fence only after its actual runtime cleanup has completed."
+  (bt:with-lock-held ((reconciler-convergence-lock reconciler))
+    (remhash uid (reconciler-urgent-deletions reconciler))))
+
+(defun prune-reconciler-urgent-deletions (reconciler)
+  "Discard finished exact UIDs without treating a new Pod sharing its name as old ownership."
+  (let ((uids (mapcar #'pod-uid (list-pods (reconciler-store reconciler)))))
+    (bt:with-lock-held ((reconciler-convergence-lock reconciler))
+      (maphash (lambda (uid ignored)
+                 (declare (ignore ignored))
+                 (unless (member uid uids :test #'equal)
+                   (remhash uid (reconciler-urgent-deletions reconciler))))
+               (reconciler-urgent-deletions reconciler)))))
+
+(defun converge-cancellable-running-pod (reconciler pod)
+  "Register cancellation only around running convergence and recheck durable deletion first."
+  (let ((operation (make-running-pod-convergence :thread (bt:current-thread)
+                                                :uid (pod-uid pod))))
+    (unwind-protect
+         (progn
+           (prune-reconciler-urgent-deletions reconciler)
+           (bt:with-lock-held ((reconciler-convergence-lock reconciler))
+             (setf (reconciler-active-convergence reconciler) operation)
+             ;; New or retried creation must not grab the global lock while a
+             ;; finite urgent cleanup job still needs its completion observed.
+             (when (plusp (hash-table-count (reconciler-urgent-deletions reconciler)))
+               (error 'pod-reconciliation-superseded)))
+           ;; Urgent snapshot projection uses the store lock, never this global
+           ;; reconciler lock. Register before checking so its cancellation
+           ;; cannot miss the gap between reading a Pod and entering CRI.
+           (let ((current (get-pod (reconciler-store reconciler)
+                                   (pod-namespace pod) (pod-name pod))))
+             (unless (and (equal (pod-uid current) (pod-uid pod))
+                          (not (deletion-requested-p current)))
+               (error 'pod-reconciliation-superseded)))
+           (converge-running-pod reconciler pod))
+      (flet ((release-ownership ()
+               (bt:with-lock-held ((reconciler-convergence-lock reconciler))
+                 (setf (running-pod-convergence-finished-p operation) t)
+                 (when (eq operation (reconciler-active-convergence reconciler))
+                   (setf (reconciler-active-convergence reconciler) nil)))))
+        ;; Cancellation must not interrupt its own ownership release halfway.
+        #+sbcl (sb-sys:without-interrupts (release-ownership))
+        #-sbcl (release-ownership)))))
 
 (defun deletion-requested-p (pod)
   (nth-value 1
@@ -32,45 +112,88 @@
 (defun converge-running-pod (reconciler pod)
   (let* ((runtime (reconciler-runtime reconciler))
          (observed (runtime-observe runtime (pod-uid pod))))
-    (when (or (null observed)
-              (not (string= (runtime-pod-resource-version observed)
-                            (pod-resource-version pod)))
-              (and (string= "Always" (pod-restart-policy pod))
-                   (not (string= "Running" (runtime-pod-phase observed)))))
-      (setf observed (runtime-ensure runtime pod)))
-    (observed-status observed)))
+    (when (and observed (runtime-pod-spec-fingerprint observed)
+               (equal (runtime-pod-spec-fingerprint observed) (pod-runtime-spec-fingerprint pod)))
+      ;; Metadata updates advance API resourceVersion but do not change the
+      ;; running workload. The durable runtime fingerprint proves adoption.
+      (setf (runtime-pod-resource-version observed) (pod-resource-version pod)))
+    (if (or (null observed)
+            (not (string= (runtime-pod-resource-version observed)
+                          (pod-resource-version pod))))
+        (setf observed (runtime-ensure runtime pod))
+        (setf observed (runtime-reconcile-containers runtime pod observed)))
+    (let ((status (observed-status observed)))
+      (when (equal (pod-resource-version pod) (runtime-pod-resource-version observed))
+        (setf (gethash "observedGeneration" status)
+              (gethash "generation" (gethash "metadata" (pod-to-object pod)) 1)))
+      status)))
 
 (defun converge-deleting-pod (reconciler pod)
-  (runtime-delete (reconciler-runtime reconciler) (pod-uid pod))
-  (remove-pod (reconciler-store reconciler)
-              (pod-namespace pod)
-              (pod-name pod))
-  (pod-status "Succeeded" :reason "Deleted"))
+  (when (or (pod-finalizers-present-p pod) (pod-finalization-state (reconciler-store reconciler) pod))
+    (return-from converge-deleting-pod (converge-finalized-pod-deletion reconciler pod)))
+  (if (runtime-delete-pod (reconciler-runtime reconciler) pod)
+      (progn
+        (runtime-forget-pod-finalization (reconciler-runtime reconciler) (pod-uid pod))
+        (finish-reconciler-urgent-deletion reconciler (pod-uid pod))
+        (remove-pod (reconciler-store reconciler)
+                    (pod-namespace pod) (pod-name pod) :uid (pod-uid pod))
+        (pod-status "Succeeded" :reason "Deleted"))
+      (let* ((runtime (reconciler-runtime reconciler))
+             (observed (handler-case (runtime-observe runtime (pod-uid pod))
+                         ;; Concurrent container removal may invalidate a CRI
+                         ;; status lookup. The deletion remains accepted.
+                         (runtime-error () nil)))
+             (status (if observed (observed-status observed) (pod-status "Unknown"))))
+        ;; Shutdown intent does not prove that a still-running container has
+        ;; become unready. Keep actual container observations during grace;
+        ;; the Service controller separately excludes terminating endpoints.
+        (when (and observed (runtime-pod-spec-fingerprint observed)
+                   (equal (runtime-pod-spec-fingerprint observed) (pod-runtime-spec-fingerprint pod)))
+          (setf (gethash "observedGeneration" status)
+                (gethash "generation" (gethash "metadata" (pod-to-object pod)) 1)))
+        (setf (gethash "reason" status) "Terminating")
+        status)))
 
 (defun reconcile-pod (reconciler namespace name)
   (bt:with-lock-held ((reconciler-lock reconciler))
     (let ((pod (get-pod (reconciler-store reconciler) namespace name)))
       (handler-case
-          (if (deletion-requested-p pod)
-              (converge-deleting-pod reconciler pod)
-              (converge-running-pod reconciler pod))
+          (add-pod-status-conditions
+           (reconciler-store reconciler) pod
+           (if (deletion-requested-p pod)
+               (converge-deleting-pod reconciler pod)
+               (converge-cancellable-running-pod reconciler pod)))
         (runtime-error (error)
-          (pod-status "Pending"
-                      :reason "RuntimeError"
-                      :message (runtime-error-message error)))))))
+          (format *error-output* "gr8s Pod ~A/~A runtime error: ~A~%" namespace name (runtime-error-message error))
+          (add-pod-status-conditions
+           (reconciler-store reconciler) pod
+           (or (when (deletion-requested-p pod)
+                 (let ((state (pod-finalization-state (reconciler-store reconciler) pod)))
+                   (when state (gethash "status" state))))
+               (pod-status "Pending"
+                           :reason "RuntimeError"
+                           :message (runtime-error-message error)))))))))
 
-(defun delete-reconciled-pod (reconciler namespace name)
+(defun delete-reconciled-pod (reconciler namespace name &key uid resource-version
+                                                      (grace-period nil grace-supplied-p)
+                                                      dry-run)
   (bt:with-lock-held ((reconciler-lock reconciler))
-    (mark-pod-deleting (reconciler-store reconciler) namespace name)
-    (converge-deleting-pod
-     reconciler
-     (get-pod (reconciler-store reconciler) namespace name))))
+    (let ((pod (apply #'mark-pod-deleting (reconciler-store reconciler) namespace name
+                      :uid uid :resource-version resource-version :dry-run dry-run
+                      (when grace-supplied-p (list :grace-period grace-period)))))
+      (values (unless dry-run
+                (add-pod-status-conditions (reconciler-store reconciler) pod
+                                          (converge-deleting-pod reconciler pod))) pod))))
 
 (defun reconcile-all (reconciler &key observer)
-  (loop for pod in (list-pods (reconciler-store reconciler) "default")
-        for status = (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))
-        do (when observer (funcall observer pod status))
-        collect status))
+  (loop for pod in (stable-sort (copy-list (list-pods (reconciler-store reconciler)))
+                                (lambda (left right)
+                                  (and (deletion-requested-p left) (not (deletion-requested-p right)))))
+        append (handler-case
+                   (let ((status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
+                     (when observer (funcall observer pod status))
+                     (list status))
+                 (pod-reconciliation-superseded () nil))))
 
 (defun reconciler-logs (reconciler uid container &key tail)
   (bt:with-lock-held ((reconciler-lock reconciler))

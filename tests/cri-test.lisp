@@ -2,6 +2,17 @@
 
 (in-suite gr8s)
 
+(test cri-user-decodes-packed-and-unpacked-supplemental-groups
+  ;; Captured from containerd's real conformance ContainerStatus response.
+  (let ((user (ag-proto:deserialize-from-bytes 'gr8s.cri.v1::linux-container-user #(26 1 0))))
+    (is (equal '(0) (gr8s.cri.v1::supplemental-groups user))))
+  (let ((user (ag-proto:deserialize-from-bytes 'gr8s.cri.v1::linux-container-user
+                #(8 232 7 16 184 23 26 3 0 208 15 24 42 26 0))))
+    (is (= 1000 (gr8s.cri.v1::uid user)))
+    (is (= 3000 (gr8s.cri.v1::gid user)))
+    (is (equal '(0 2000 42) (gr8s.cri.v1::supplemental-groups user))))
+  (signals error (ag-proto:deserialize-from-bytes 'gr8s.cri.v1::linux-container-user #(26 1 128))))
+
 (test cri-version-reports-containerd-over-a-unix-socket
   (if (string= "1" (or (uiop:getenv "GR8S_RUN_CONTAINERD_TESTS") ""))
       (if (not (fboundp 'gr8s::cri-runtime-version))
