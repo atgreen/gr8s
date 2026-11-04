@@ -457,8 +457,12 @@
              :reason "BadRequest"
              :message (format nil "container ~A is not valid for pod ~A"
                               container name)))
-    (setf (hunchentoot:content-type*) "text/plain; charset=utf-8")
-    (or (reconciler-logs reconciler (pod-uid pod) container) "")))
+    (let ((text (format-pod-logs-for-request (or (reconciler-logs reconciler (pod-uid pod) container) ""))))
+      (if (upgrade-request-p)
+          (serve-pod-logs-websocket text)
+          (progn
+            (setf (hunchentoot:content-type*) "text/plain; charset=utf-8")
+            text)))))
 
 (defstruct exec-options
   command
@@ -676,7 +680,7 @@
               (error 'runtime-error :message (princ-to-string condition))))))))
 
 (defparameter *kubernetes-websocket-protocols*
-  '("v5.channel.k8s.io" "v4.channel.k8s.io"))
+  '("v5.channel.k8s.io" "v4.channel.k8s.io" "channel.k8s.io"))
 
 (defun requested-kubernetes-websocket-protocol ()
   (let ((requested
@@ -727,6 +731,16 @@
         status)
       :stream output))))
 
+(defun exec-status-frame-bytes (exit-code)
+  "Return the status channel's payload for EXIT-CODE, or NIL when none is sent.
+The unversioned protocol predates structured status: it has no success frame, and
+its clients treat any other multi-byte frame as an error message."
+  (cond ((not (equal "channel.k8s.io" (requested-kubernetes-websocket-protocol)))
+         (exec-exit-status-bytes exit-code))
+        ((zerop exit-code) nil)
+        (t (trivial-utf-8:string-to-utf-8-bytes
+            (format nil "command terminated with exit code ~D" exit-code)))))
+
 (defun serve-runtime-exec-sync (result stdout-p stderr-p)
   (let ((key (hunchentoot:header-in* :sec-websocket-key))
         (protocol (requested-kubernetes-websocket-protocol)))
@@ -749,9 +763,8 @@
       (when stderr-p
         (write-kubernetes-channel-frame
          client 2 (runtime-exec-result-stderr result)))
-      (write-kubernetes-channel-frame
-       client 3
-       (exec-exit-status-bytes (runtime-exec-result-exit-code result)))
+      (let ((status (exec-status-frame-bytes (runtime-exec-result-exit-code result))))
+        (when status (write-kubernetes-channel-frame client 3 status)))
       (write-websocket-frame
        client 8 (make-array 2 :element-type '(unsigned-byte 8)
                             :initial-contents '(3 232))))))
@@ -892,8 +905,8 @@
              (let ((exit-code
                      (reconciler-exec-session-exit-code reconciler session)))
                (bt:with-lock-held (write-lock)
-                 (write-kubernetes-channel-frame
-                  client 3 (exec-exit-status-bytes exit-code))))
+                 (let ((status (exec-status-frame-bytes exit-code)))
+                   (when status (write-kubernetes-channel-frame client 3 status)))))
              (mark-finished)
              (bt:with-lock-held (write-lock)
                (write-websocket-frame
