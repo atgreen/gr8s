@@ -120,6 +120,7 @@
                              (:file "pod-deletion-test")
                              (:file "generated-pod-names-test")
                              (:file "pod-conditions-test")
+                             (:file "node-log-delivery-test")
                              (:file "garbage-collection-test")
                              (:file "services-test")
                              (:file "telemetry-test"))))
