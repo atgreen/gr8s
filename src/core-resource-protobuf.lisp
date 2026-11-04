@@ -134,6 +134,8 @@
                        (member (core-protobuf-string envelope 4) '("" "application/vnd.kubernetes.protobuf") :test #'equal))
             (error "Invalid Kubernetes protobuf envelope"))
           (when (string= kind "DeleteOptions") (return-from decode-core-resource-protobuf (core-protobuf-delete-options raw)))
+          (when (equal kind "CustomResourceDefinition")
+            (return-from decode-core-resource-protobuf (decode-crd-protobuf raw)))
           (when (member kind '("Deployment" "ReplicaSet" "Scale") :test #'equal)
             (return-from decode-core-resource-protobuf (decode-workload-protobuf raw kind)))
 

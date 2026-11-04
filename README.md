@@ -484,6 +484,13 @@ filesystem hostPath/local volumes bind to matching claims and mount real backing
 storage into native Pods. See [persistent storage](docs/persistent-storage.md)
 for supported behavior, protection, Retain reclamation and remaining extensions.
 
+CRDs in `apiextensions.k8s.io/v1` now establish real schema-backed custom APIs.
+Custom resources support durable JSON CRUD/status/watch, per-version discovery
+and OpenAPI, recursive defaults/pruning, strict field validation and finalizer
+cleanup. Definition UIDs isolate watches and historical lists across recreation.
+See [custom resources](docs/custom-resources.md) for the supported schema subset,
+validation evidence and remaining extensions.
+
 Stored-resource list continuations are signed and bound to their resource type,
 namespace and selectors. A shared durable change journal preserves a consistent
 resourceVersion across

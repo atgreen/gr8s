@@ -511,6 +511,8 @@
                            :reconciler reconciler))
                     (setf worker (start-reconciliation-worker reconciler
                                   :before-reconcile (lambda ()
+                                      (reconcile-crd-deletions store)
+                                      (collect-orphaned-custom-resources store)
                                       (reconcile-storage-bindings store)
                                       (collect-orphaned-api-objects reconciler)
                                       (reconcile-workloads reconciler)

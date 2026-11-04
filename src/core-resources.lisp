@@ -86,6 +86,15 @@
                                            (gethash "name" metadata))
               do (when (gethash key (pod-store-resources store))
                    (error "Duplicate persisted core resource ~S" key))
+                 (setf (gethash key (pod-store-resources store)) object))
+        (loop for entry across (gethash "customResourceItems" state #())
+              for resource = (gethash "resource" entry)
+              for object = (gethash "object" entry)
+              for metadata = (gethash "metadata" object)
+              for key = (core-resource-key resource (gethash "namespace" metadata) (gethash "name" metadata))
+              do (unless (and (custom-resource-key-p resource) (crd-definition-unlocked store resource))
+                   (error "Persisted custom resource has no matching definition"))
+                 (when (gethash key (pod-store-resources store)) (error "Duplicate persisted custom resource"))
                  (setf (gethash key (pod-store-resources store)) object)))))
   store)
 
@@ -103,8 +112,11 @@
                  "templateTokenKey" (ag-grpc:base64-encode token-key)
                  "resourceHistoryStart" (pod-store-resource-history-start store)
                  "eventExpirations" event-expirations
-                 "items" (coerce (loop for object being the hash-values of resources
-                                       collect object) 'vector))))
+                 "items" (coerce (loop for key being the hash-keys of resources using (hash-value object)
+                                       unless (custom-resource-key-p (first key)) collect object) 'vector)
+                 "customResourceItems" (coerce (loop for key being the hash-keys of resources using (hash-value object)
+                                       when (custom-resource-key-p (first key))
+                                         collect (core-object "resource" (first key) "object" object)) 'vector))))
   (setf (pod-store-resources store) resources
         (pod-store-workload-deletions store) workload-deletions
         (pod-store-resource-revision store) revision
@@ -236,6 +248,10 @@
 (defun normalize-core-resource (resource input namespace &optional name store)
   (when (endpointslice-resource-p resource)
     (return-from normalize-core-resource (normalize-endpointslice-resource input namespace name)))
+  (when (equal resource "customresourcedefinitions")
+    (return-from normalize-core-resource (normalize-crd-resource input namespace name store)))
+  (when (custom-resource-key-p resource)
+    (return-from normalize-core-resource (normalize-custom-resource resource input namespace name store)))
   (when (storage-resource-p resource)
     (return-from normalize-core-resource (normalize-storage-resource resource input namespace name store)))
   (unless (member resource '("configmaps" "secrets") :test #'equal)
@@ -303,6 +319,7 @@
 
 (defun get-core-resource (store resource namespace name)
   (with-store-lock (store)
+    (check-crd-resource-context-unlocked store resource)
     (expire-core-events-unlocked store)
     (copy-core-object (get-core-resource-unlocked store resource namespace name))))
 
@@ -379,9 +396,11 @@
     (expire-core-events-unlocked store)
     (let* ((existing (get-core-resource-unlocked store resource namespace name))
            (existing-metadata (gethash "metadata" existing))
-           (object (normalize-core-resource resource (funcall transform (if (equal resource "events")
+           (object (normalize-core-resource resource (funcall transform (if (custom-resource-key-p resource)
+                                                   (crd-api-view (copy-core-object existing))
+                                                   (if (equal resource "events")
                                                    (event-api-view (copy-core-object existing) (or *core-resource-view-version* "v1"))
-                                                   (copy-core-object existing))) namespace name store))
+                                                   (copy-core-object existing)))) namespace name store))
            (metadata (gethash "metadata" object))
            (expected (gethash "resourceVersion" metadata))
            (revision (1+ (pod-store-resource-revision store))))
@@ -413,7 +432,10 @@
       (prepare-workload-write resource object existing)
       (when (endpointslice-resource-p resource) (prepare-endpointslice-write object existing))
       (let ((resources (copy-core-resource-index store)))
-        (setf (gethash (core-resource-key resource namespace name) resources) object)
+        (if (and (custom-resource-key-p resource)
+                 (gethash "deletionTimestamp" metadata) (zerop (length (gethash "finalizers" metadata #()))))
+            (remhash (core-resource-key resource namespace name) resources)
+            (setf (gethash (core-resource-key resource namespace name) resources) object))
         (unless dry-run (commit-core-resources store resources revision)))
       (copy-core-object object))))
 
@@ -425,6 +447,8 @@
       (when (or (and uid (not (equal uid (gethash "uid" metadata))))
                 (and resource-version (not (equal resource-version (gethash "resourceVersion" metadata)))))
         (core-resource-error 409 "Conflict" "Delete precondition does not match the stored object"))
+      (when (or (equal resource "customresourcedefinitions") (custom-resource-key-p resource))
+        (return-from delete-core-resource (delete-crd-object-unlocked store resource existing dry-run)))
       (when (storage-resource-p resource)
         (return-from delete-core-resource (delete-storage-resource-unlocked store resource existing dry-run)))
       (let ((resources (copy-core-resource-index store)))
