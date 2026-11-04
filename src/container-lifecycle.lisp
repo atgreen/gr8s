@@ -380,6 +380,7 @@
       ;; A changed specification recreates containers, not the Pod: emptyDirs persist.
       (containerd-replace-uid runtime uid)
       (setf sandbox nil state (load-container-lifecycle-state runtime uid)))
+    (when sandbox (refresh-pod-projected-volumes runtime pod))
     (incorporate-container-log-history runtime uid state)
     (remember-init-container-declarations state pod)
     (setf (gethash "resourceVersion" state) (pod-resource-version pod)
