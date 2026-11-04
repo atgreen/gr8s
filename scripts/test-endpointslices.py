@@ -150,7 +150,7 @@ def main():
             good &= all(e["conditions"].get("ready") and e["conditions"].get("serving") and not e["conditions"].get("terminating") for e in endpoints)
             good &= {e["targetRef"]["uid"] for e in endpoints} == {p["metadata"]["uid"] for p in children}
             good &= {e["addresses"][0] for e in endpoints} == {p.get("status", {}).get("podIP") for p in children}
-            good &= all(s["ports"][0]["port"] == 8080 for s in current)
+            good &= all(len(s["ports"]) == 1 and s["ports"][0]["port"] == 8080 for s in current)
             return (children, current) if good else None
         children, current = wait(observed, "actual selector Service EndpointSlices")
         expected = {namespace + "-one", namespace + "-two"}
