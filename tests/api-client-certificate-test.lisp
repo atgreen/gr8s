@@ -62,6 +62,9 @@
       (is (equal "subject-user" (gr8s::api-identity-username identity)))
       (is (equal "subject-uid" (gr8s::api-user-identity-uid identity)))
       (is (find "subject-group" (gr8s::api-identity-groups identity) :test #'equal))
+      (let ((multi (certificate-api-test-subject-leaf pki
+                     '(((2 5 4 3) . "first-user") ((2 5 4 3) . "last-user") ((2 5 4 10) . "subject-group")))))
+        (is (equal "last-user" (gr8s::api-identity-username (gr8s::certificate-api-identity (list multi) ca)))))
       (signals kubernetes-error (gr8s::certificate-api-identity (list leaf) (gr8s::cluster-pki-ca-certificate foreign)))
       (dolist (uids '(("first" "second") ("")))
         (signals kubernetes-error
