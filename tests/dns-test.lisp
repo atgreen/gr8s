@@ -13,6 +13,7 @@
   "kubernetes.default.svc.cluster.local")
 
 (defun dns-a-query (name &optional (id #x4752))
+  "Encode an A-record query with a stable test identifier."
   (0conf:encode-message
    (0conf:make-dns-message
     :id id
@@ -94,6 +95,7 @@
                events))))
 
 (defun test-dns-answer (query address)
+  "Construct an A-record response for the original test question."
   (let* ((message (0conf:decode-message query))
          (question (first (0conf:dns-message-questions message))))
     (0conf:encode-message
@@ -107,6 +109,7 @@
                                     :ttl 30))))))
 
 (defun test-udp-dns-query (port name)
+  "Exchange an actual UDP query with the local DNS test server."
   (let ((socket (make-instance 'sb-bsd-sockets:inet-socket
                                :type :datagram :protocol :udp))
         (query (dns-a-query name))
@@ -122,18 +125,21 @@
       (sb-bsd-sockets:socket-close socket))))
 
 (defun write-test-dns-frame (stream packet)
+  "Write a complete length-prefixed test DNS packet."
   (write-byte (ldb (byte 8 8) (length packet)) stream)
   (write-byte (ldb (byte 8 0) (length packet)) stream)
   (write-sequence packet stream)
   (finish-output stream))
 
 (defun read-test-dns-frame (stream)
+  "Read and verify a complete length-prefixed test DNS packet."
   (let* ((length (+ (ash (read-byte stream) 8) (read-byte stream)))
          (packet (make-array length :element-type '(unsigned-byte 8))))
     (is (= length (read-sequence packet stream)))
     packet))
 
 (defun test-tcp-dns-query (port name)
+  "Exchange a framed TCP query with the local DNS test server."
   (let ((socket (make-instance 'sb-bsd-sockets:inet-socket
                                :type :stream :protocol :tcp))
         (stream nil))
@@ -151,6 +157,7 @@
       (ignore-errors (sb-bsd-sockets:socket-close socket)))))
 
 (defun dns-first-a-address (packet)
+  "Read the first A-record address from a test response."
   (0conf:a-address
    (first (0conf:dns-message-answers (0conf:decode-message packet)))))
 
