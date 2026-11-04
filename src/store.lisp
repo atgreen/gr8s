@@ -31,6 +31,12 @@
   (pod-observed-statuses (make-hash-table :test #'equal))
   (pod-observed-resource-versions (make-hash-table :test #'equal))
   (pod-condition-histories (make-hash-table :test #'equal))
+  (pod-revision 0)
+  (pod-revision-ceiling 0)
+  (pod-watch-floor 0)
+  pod-watch-journal
+  (pod-watch-journal-length 0)
+  (pod-published-statuses (make-hash-table :test #'equal))
   (lock (bt:make-lock "gr8s store")))
 
 (defmacro with-store-lock ((store) &body body)
@@ -173,6 +179,7 @@
         (setf (gethash (node-record-name node) (pod-store-nodes store)) node)))
     (load-core-resources store)
     (load-pod-status-state store)
+    (load-pod-revision store)
     store))
 
 (defun get-pod-unlocked (store namespace name)
@@ -238,7 +245,7 @@
       (remhash "deletionTimestamp" metadata)
       (remhash "deletionGracePeriodSeconds" metadata)
       (setf (pod-uid pod) (generate-uid)
-            (pod-resource-version pod) "1"
+            (pod-resource-version pod) (write-to-string (next-pod-revision-unlocked store))
             (gethash "namespace" metadata) (pod-namespace pod)
             (gethash "uid" metadata) (pod-uid pod)
             (gethash "resourceVersion" metadata) (pod-resource-version pod)
@@ -246,6 +253,7 @@
             (gethash "creationTimestamp" metadata) (current-timestamp)))
     (persist-pod store pod)
     (index-pod store pod)
+    (publish-pod-spec-change-unlocked store nil pod)
     pod)
 
 (defun update-pod (store replacement expected-resource-version)
@@ -258,7 +266,7 @@
     (let* ((existing (get-pod-unlocked
                       store (pod-namespace replacement) (pod-name replacement)))
            (actual (pod-resource-version existing)))
-      (unless (string= expected-resource-version actual)
+      (unless (pod-revision-satisfied-p store expected-resource-version actual)
         (error 'kubernetes-error
                :status-code 409
                :reason "Conflict"
@@ -293,15 +301,17 @@
                              (gethash "spec" (pod-to-object replacement))) 0 1)))
         (setf (pod-uid replacement) (pod-uid existing)
               (pod-resource-version replacement)
-              (write-to-string (1+ (parse-integer actual)))
+              (write-to-string (next-pod-revision-unlocked store))
               (gethash "namespace" metadata) (pod-namespace replacement)
               (gethash "uid" metadata) (pod-uid replacement)
               (gethash "resourceVersion" metadata)
               (pod-resource-version replacement)
               (gethash "creationTimestamp" metadata)
               (gethash "creationTimestamp" existing-metadata)))
-      (persist-pod store replacement)
-      (index-pod store replacement)
+      (let ((old (pod-published-view store existing)))
+        (persist-pod store replacement)
+        (index-pod store replacement)
+        (publish-pod-spec-change-unlocked store old replacement))
       replacement))
 
 (defun remove-pod (store namespace name &key uid)
@@ -316,6 +326,7 @@
         (when (probe-file status-path) (delete-file status-path)))
       (delete-file (pod-path store pod))
       (remhash (pod-key namespace name) (pod-store-pods store))
+      (publish-pod-removal-unlocked store pod)
       (remhash (pod-uid pod) (pod-store-pod-finalization-states store))
       (remhash (pod-uid pod) (pod-store-pod-observed-phases store))
       (remhash (pod-uid pod) (pod-store-pod-observed-statuses store))
@@ -335,21 +346,22 @@
     (let* ((existing (get-pod-unlocked store namespace name))
            (pod (parse-pod (com.inuoe.jzon:parse
                             (com.inuoe.jzon:stringify (pod-to-object existing)))))
-           (metadata (gethash "metadata" (pod-to-object pod)))
-           (next-version (write-to-string
-                          (1+ (parse-integer (pod-resource-version pod))))))
+           (metadata (gethash "metadata" (pod-to-object pod))))
       (when (and uid (not (equal uid (pod-uid pod))))
         (error 'kubernetes-error :status-code 409 :reason "Conflict"
                :message "Pod UID no longer matches deletion precondition"))
-      (when (and resource-version (not (equal resource-version (pod-resource-version pod))))
+      (when (and resource-version
+                 (not (pod-revision-satisfied-p store resource-version (pod-resource-version pod))))
         (error 'kubernetes-error :status-code 409 :reason "Conflict"
                :message "Pod resourceVersion no longer matches deletion precondition"))
       (unless (prepare-pod-deletion store pod grace-period grace-supplied-p)
         (return-from mark-pod-deleting pod))
-      (setf
-            (gethash "resourceVersion" metadata) next-version
-            (pod-resource-version pod) next-version)
       (unless dry-run
-        (persist-pod store pod)
-        (index-pod store pod))
+        (let ((next-version (write-to-string (next-pod-revision-unlocked store)))
+              (old (pod-published-view store existing)))
+          (setf (gethash "resourceVersion" metadata) next-version
+                (pod-resource-version pod) next-version)
+          (persist-pod store pod)
+          (index-pod store pod)
+          (publish-pod-spec-change-unlocked store old pod)))
       pod)))

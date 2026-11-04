@@ -123,5 +123,6 @@ list as 'nothing is running': Sonobuoy's worker takes it to mean all containers 
           (when (and (current-status-pod-p store pod) (not (equalp conditions history)))
             (persist-pod-status-state store pod :conditions conditions)
             (setf (gethash (pod-uid pod) (pod-store-pod-condition-histories store))
-                  (copy-pod-status-value conditions)))))))
+                  (copy-pod-status-value conditions)))
+          (publish-pod-status-unlocked store pod status)))))
   status)
