@@ -212,18 +212,14 @@
   (managed-containerd-directory manager "containerd/containerd.log"))
 
 (defun managed-containerd-cni-config-text (manager)
-  (let ((whistler-program
-          (merge-pathnames
-           "gr8s-whistler.bpf.o"
-           (uiop:ensure-directory-pathname
-            (managed-containerd-cni-bin-directory manager))))
-        (map-pin-root (managed-containerd-bpf-directory manager)))
+  ;; The egress guard is JIT-compiled in-process by the agent; the conflist
+  ;; carries no ELF "program" path.
+  (let ((map-pin-root (managed-containerd-bpf-directory manager)))
     (format
      nil
-     "{\"cniVersion\":\"1.0.0\",\"name\":\"gr8s\",\"plugins\":[{\"type\":\"gr8s\",\"socket\":~A,\"direction\":\"egress\",\"program\":~A,\"mapPinRoot\":~A}]}~%"
+     "{\"cniVersion\":\"1.0.0\",\"name\":\"gr8s\",\"plugins\":[{\"type\":\"gr8s\",\"socket\":~A,\"direction\":\"egress\",\"mapPinRoot\":~A}]}~%"
      (com.inuoe.jzon:stringify
       (managed-containerd-agent-cni-socket-path manager))
-     (com.inuoe.jzon:stringify (namestring whistler-program))
      (com.inuoe.jzon:stringify (namestring map-pin-root)))))
 
 (defun managed-containerd-cni-config-path (manager)

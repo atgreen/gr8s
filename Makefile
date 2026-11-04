@@ -78,10 +78,12 @@ test-agent-network:
 test-node-topology:
 	unshare -Urn $(SBCL) --noinform --non-interactive --load scripts/test-node-topology.lisp
 
-build/gr8s-endpoint-test.bpf.o: network/gr8s-egress-guard.lisp scripts/build-whistler-program.lisp
-	$(SBCL) --noinform --script scripts/build-whistler-program.lisp $< $@
+# The egress guard is JIT-compiled in-process; the fixture is its raw bytecode +
+# map descriptors as JSON, not an ELF object.
+build/gr8s-endpoint-test.json: src/egress-guard-program.lisp src/egress-guard.lisp scripts/compile-endpoint-policy-fixture.lisp
+	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@
 
-test-endpoint-policy: build/gr8s-endpoint-test.bpf.o
+test-endpoint-policy: build/gr8s-endpoint-test.json
 	python3 scripts/test-endpoint-policy.py $<
 
 # Real-root verification that the Service LB JIT-compiles, loads, attaches to a
@@ -94,7 +96,7 @@ test-service-lb:
 smoke-service-lb:
 	sudo $(SBCL) --noinform --non-interactive --load scripts/smoke-service-lb.lisp
 
-test-endpoint-policy-kernel: build/gr8s-endpoint-test.bpf.o
+test-endpoint-policy-kernel: build/gr8s-endpoint-test.json
 	python3 scripts/test-endpoint-policy.py $< --kernel
 
 test-core-api:

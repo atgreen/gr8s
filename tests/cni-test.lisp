@@ -195,16 +195,21 @@
   (let ((configuration (gr8s::parse-cni-configuration *valid-cni-config*
                                                        :require-previous t)))
     (is (string= "egress" (gr8s::cni-configuration-direction configuration)))
-    (is (string= "gr8s" (gr8s::cni-configuration-type configuration)))
-    (is (string= "/runtime/gr8s-whistler.bpf.o"
-                 (gr8s::cni-configuration-program configuration))))
+    (is (string= "gr8s" (gr8s::cni-configuration-type configuration))))
+  ;; The egress guard is JIT-compiled in-process, so a config with no "program"
+  ;; ELF path parses fine.
+  (is (gr8s::parse-cni-configuration
+       "{\"cniVersion\":\"1.0.0\",\"mapPinRoot\":\"/run/bpf\",\"prevResult\":{}}"
+       :require-previous t))
+  ;; mapPinRoot must still be an absolute path.
   (signals error
     (gr8s::parse-cni-configuration
-     "{\"cniVersion\":\"1.0.0\",\"program\":\"relative.o\",\"mapPinRoot\":\"/run/bpf\",\"prevResult\":{}}"
+     "{\"cniVersion\":\"1.0.0\",\"mapPinRoot\":\"relative-bpf\",\"prevResult\":{}}"
      :require-previous t))
+  ;; A previous result is still required when chained.
   (signals error
     (gr8s::parse-cni-configuration
-     "{\"cniVersion\":\"1.0.0\",\"program\":\"/program.o\",\"mapPinRoot\":\"/run/bpf\"}"
+     "{\"cniVersion\":\"1.0.0\",\"mapPinRoot\":\"/run/bpf\"}"
      :require-previous t)))
 
 (test cni-pin-paths-are-confined-to-the-sandbox-directory

@@ -14,3 +14,71 @@
   "JIT-compile the per-endpoint egress guard. Returns (values map-specs
 prog-specs), the same shape as compile-service-lb."
   (compile-whistler-program *egress-guard-map-forms* *egress-guard-program-forms*))
+
+;;; ---------------------------------------------------------------------------
+;;; In-process policy object for the CNI installer.
+;;;
+;;; install-cni-policy (src/cni.lisp) was written against an ELF object with
+;;; open/load/map/program/close operations.  This provides the same shape backed
+;;; by in-process JIT: compile the program, create the maps (reusing any
+;;; already-pinned fds so counters survive repeated ADD), load the program with
+;;; map-fd relocations, and expose its maps and program.  No ELF is read.
+
+(defstruct (egress-policy-object (:constructor %make-egress-policy-object (map-specs program-specs)))
+  map-specs
+  program-specs
+  (maps nil)        ; alist (map name . map-info), populated by load
+  (program nil))    ; prog-info, populated by load
+
+(defun compile-egress-policy-object (&rest ignored)
+  "Compile the egress guard in-process. IGNORED absorbs the ELF path the CNI
+installer still passes; there is no ELF to open."
+  (declare (ignore ignored))
+  (multiple-value-bind (map-specs program-specs) (compile-egress-guard)
+    (%make-egress-policy-object map-specs program-specs)))
+
+(defun load-egress-policy-object
+    (object replacements
+     &key (create-map #'whistler/loader::create-map)
+          (load-programs #'whistler/loader::session-load-progs))
+  "Create the egress maps and load the program.  REPLACEMENTS is an alist of
+(map-name . fd) for maps already pinned on bpffs; those fds are reused so their
+counters persist, and only the remaining maps are created fresh.  CREATE-MAP and
+LOAD-PROGRAMS are injected so the orchestration is testable without CAP_BPF."
+  (let ((maps (loop for spec in (egress-policy-object-map-specs object)
+                    for name = (getf spec :name)
+                    for fd = (cdr (assoc name replacements :test #'string=))
+                    for info = (whistler/loader::make-map-info
+                                :name name
+                                :type (whistler/compiler:resolve-map-type (getf spec :type))
+                                :key-size (getf spec :key-size)
+                                :value-size (getf spec :value-size)
+                                :max-entries (getf spec :max-entries)
+                                :flags (getf spec :flags))
+                    do (if fd
+                           (setf (whistler/loader:map-info-fd info) fd)
+                           (funcall create-map info))
+                    collect (cons name info))))
+    (setf (egress-policy-object-maps object) maps
+          (egress-policy-object-program object)
+          (cdr (first (funcall load-programs
+                               (egress-policy-object-program-specs object) maps))))
+    object))
+
+(defun egress-policy-object-find-map (object name)
+  "Return the map-info named NAME, or NIL."
+  (cdr (assoc name (egress-policy-object-maps object) :test #'string=)))
+
+(defun egress-policy-object-find-program (object name)
+  "Return the loaded program's prog-info. NAME is the program's section symbol."
+  (declare (ignore name))
+  (egress-policy-object-program object))
+
+(defun close-egress-policy-object (object &key (close-fd #'sb-posix:close))
+  "Close the program fd and every map fd the object holds."
+  (when (egress-policy-object-program object)
+    (let ((fd (whistler/loader:prog-info-fd (egress-policy-object-program object))))
+      (when (and fd (plusp fd)) (ignore-errors (funcall close-fd fd)))))
+  (dolist (entry (egress-policy-object-maps object))
+    (let ((fd (whistler/loader:map-info-fd (cdr entry))))
+      (when (and fd (plusp fd)) (ignore-errors (funcall close-fd fd))))))

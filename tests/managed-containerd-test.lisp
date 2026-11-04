@@ -167,7 +167,10 @@
                            (gr8s::managed-containerd-agent-cni-socket-path
                             manager)))
                   cni-config))
-             (is (search "gr8s-whistler.bpf.o" cni-config))
+             ;; The egress guard is JIT-compiled in-process; the conflist carries
+             ;; no ELF "program" path.
+             (is (not (search "gr8s-whistler.bpf.o" cni-config)))
+             (is (not (search "\"program\"" cni-config)))
              (is (search
                   "\"mapPinRoot\":\""
                   cni-config))

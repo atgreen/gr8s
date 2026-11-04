@@ -36,22 +36,51 @@
       (is (zerop (mod (length insns) 8)))
       (is (>= (length (getf (first prog-specs) :relocs)) 3)))))
 
-(defun compile-legacy-egress-guard ()
-  "Compile the standalone network/gr8s-egress-guard.lisp forms in-process."
-  (let ((map-forms nil) (prog-forms nil))
-    (with-open-file (stream "network/gr8s-egress-guard.lisp")
-      (let ((*package* (find-package :whistler)))
-        (loop for form = (read stream nil :eof) until (eq form :eof)
-              do (case (and (consp form) (car form))
-                   (whistler::defmap (push form map-forms))
-                   (whistler::defprog (push form prog-forms))))))
-    (gr8s::compile-whistler-program (nreverse map-forms) (nreverse prog-forms))))
+;;; In-process policy object for the CNI installer.  create-map and the program
+;;; loader are injected, so the create/reuse/load orchestration runs rootless.
 
-(test egress-guard-in-image-source-matches-legacy
-  ;; The in-image forms and the legacy standalone source must compile to the
-  ;; exact same bytecode and map specs, so neither drifts before the legacy
-  ;; source is removed.
-  (multiple-value-bind (image-maps image-progs) (gr8s::compile-egress-guard)
-    (multiple-value-bind (legacy-maps legacy-progs) (compile-legacy-egress-guard)
-      (is (equalp image-maps legacy-maps))
-      (is (equalp (getf (first image-progs) :insns) (getf (first legacy-progs) :insns))))))
+(test egress-policy-object-reuses-pinned-maps-and-creates-the-rest
+  (let ((object (gr8s::compile-egress-policy-object "/ignored/path.o"))
+        (created nil) (loaded-with nil))
+    (gr8s::load-egress-policy-object
+     object
+     ;; endpoint_identity is already pinned (fd 555); the others are created.
+     '(("endpoint_identity" . 555))
+     :create-map (lambda (info)
+                   (push (whistler/loader:map-info-name info) created)
+                   (setf (whistler/loader:map-info-fd info) 900)
+                   info)
+     :load-programs (lambda (specs maps)
+                      (declare (ignore specs))
+                      (setf loaded-with maps)
+                      (list (cons "gr8s_egress_guard"
+                                  (whistler/loader::make-prog-info
+                                   :name "gr8s_egress_guard" :section-name "classifier"
+                                   :type 3 :insns #() :fd 901)))))
+    ;; Only the two unpinned maps were created; endpoint_identity was reused.
+    (is (= 2 (length created)))
+    (is (not (member "endpoint_identity" created :test #'string=)))
+    (is (member "rejected_spoofs" created :test #'string=))
+    (is (member "traffic_stats" created :test #'string=))
+    ;; The reused map keeps its pinned fd; the program loads against all 3 maps.
+    (is (= 555 (whistler/loader:map-info-fd
+                (gr8s::egress-policy-object-find-map object "endpoint_identity"))))
+    (is (= 3 (length loaded-with)))
+    (is (= 901 (whistler/loader:prog-info-fd
+                (gr8s::egress-policy-object-find-program object "gr8s_egress_guard"))))))
+
+(test egress-policy-object-close-releases-all-fds
+  (let ((object (gr8s::compile-egress-policy-object))
+        (closed nil))
+    (gr8s::load-egress-policy-object
+     object '()
+     :create-map (lambda (info) (setf (whistler/loader:map-info-fd info) 900) info)
+     :load-programs (lambda (specs maps) (declare (ignore specs maps))
+                      (list (cons "gr8s_egress_guard"
+                                  (whistler/loader::make-prog-info
+                                   :name "gr8s_egress_guard" :section-name "classifier"
+                                   :type 3 :insns #() :fd 901)))))
+    (gr8s::close-egress-policy-object object :close-fd (lambda (fd) (push fd closed)))
+    ;; Program fd plus all three map fds are closed.
+    (is (member 901 closed))
+    (is (= 4 (length closed)))))

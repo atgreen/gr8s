@@ -24,22 +24,7 @@ for executable in containerd containerd-shim-runc-v2 runc \
   fi
 done
 
-whistler_object="$runtime_directory/bin/gr8s-whistler.bpf.o"
-if [ ! -r "$whistler_object" ]; then
-  echo "missing Whistler program: $whistler_object" >&2
-  exit 1
-fi
-if ! readelf -h "$whistler_object" | grep -q 'Machine:.*Linux BPF'; then
-  echo "Whistler program is not an eBPF ELF object" >&2
-  exit 1
-fi
-if ! readelf -S "$whistler_object" | grep -q 'classifier'; then
-  echo "Whistler program has no classifier section" >&2
-  exit 1
-fi
-if ! readelf -S "$whistler_object" | grep -q '\.maps'; then
-  echo "Whistler program has no eBPF maps section" >&2
-  exit 1
-fi
+# The egress guard is JIT-compiled in-process by the agent, not shipped as an
+# eBPF ELF object, so there is no Whistler object to verify here.
 
 echo "gr8s runtime payload is statically linked"

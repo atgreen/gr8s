@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Exercise Whistler TC bytecode with an interpreter or Linux BPF test-run.
 
-Use --kernel with BPF privileges to verify and execute the same ELF in Linux.
-The default interpreter also checks short buffers and non-linear skb lengths.
+The program is JIT-compiled in-process by scripts/compile-endpoint-policy-fixture.lisp
+and read here from that JSON fixture (raw bytecode, map descriptors, map-fd
+relocation sites) -- no ELF object is produced. Use --kernel with BPF privileges
+to load and execute the same bytecode in Linux. The default interpreter also
+checks short buffers and non-linear skb lengths.
 """
 import ctypes
+import json
 import os
 import platform
 import struct
@@ -18,47 +22,22 @@ def signed(value, bits):
 
 
 def read_program(path):
-    elf = open(path, 'rb').read()
-    assert elf[:6] == b'\x7fELF\x02\x01'
-    assert struct.unpack_from('<H', elf, 18)[0] == 247
-    start = struct.unpack_from('<Q', elf, 40)[0]
-    width, count, names_index = struct.unpack_from('<HHH', elf, 58)
-    sections = [struct.unpack_from('<IIQQQQIIQQ', elf, start + i * width) for i in range(count)]
-    def data(section):
-        return elf[section[4]:section[4] + section[5]]
-    def string(table, offset):
-        return table[offset:table.index(0, offset)].decode()
-    names = data(sections[names_index])
-    named = {string(names, s[0]): (i, s) for i, s in enumerate(sections)}
-    program_index, program = named['classifier']
-    code = bytearray(data(program))
-    symbols_index = next(i for i, s in enumerate(sections) if s[1] == 2)
-    symbol_section = sections[symbols_index]
-    strings = data(sections[symbol_section[6]])
-    symbols = [struct.unpack_from('<IBBHQQ', data(symbol_section), i)
-               for i in range(0, symbol_section[5], 24)]
-    maps = {}
-    descriptors = {}
-    for name_offset, _, _, section_index, value, _ in symbols:
-        name = string(strings, name_offset)
-        if name in ('rejected_spoofs', 'endpoint_identity', 'traffic_stats'):
-            descriptor = struct.unpack_from('<IIIII', data(sections[section_index]), value)
-            descriptors[name] = descriptor
-            maps[name] = len(maps) + 100
+    document = json.load(open(path))
+    code = bytearray(document['code'])
+    specs = document['maps']
+    descriptors = {spec['name']: (spec['type'], spec['key_size'], spec['value_size'],
+                                  spec['max_entries'], spec['flags'])
+                   for spec in specs}
+    maps = {spec['name']: index + 100 for index, spec in enumerate(specs)}
     assert descriptors == {'rejected_spoofs': (2, 4, 8, 1, 0),
                            'endpoint_identity': (2, 4, 16, 1, 128),
                            'traffic_stats': (2, 4, 8, 6, 0)}, descriptors
     relocations = 0
-    for section in sections:
-        if section[1] != 9 or section[7] != program_index:
-            continue
-        for offset in range(0, section[5], 16):
-            instruction, info = struct.unpack_from('<QQ', data(section), offset)
-            symbol = symbols[info >> 32]
-            name = string(strings, symbol[0])
-            assert name in maps and code[instruction] == 0x18
-            struct.pack_into('<i', code, instruction + 4, maps[name])
-            relocations += 1
+    for offset, map_index in document['relocations']:
+        name = specs[map_index]['name']
+        assert name in maps and code[offset] == 0x18
+        struct.pack_into('<i', code, offset + 4, maps[name])
+        relocations += 1
     assert relocations >= 3
     return bytes(code), maps, descriptors
 
