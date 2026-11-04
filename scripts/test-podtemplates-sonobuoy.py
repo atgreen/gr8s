@@ -121,13 +121,55 @@ def main():
         report["version"] = json.loads(request("/version")[1])
         report["sonobuoyVersion"] = subprocess.check_output([str(args.sonobuoy), "version", "--short"], text=True).strip()
         if args.state_directory:
-            cleanup_command = [str(args.sonobuoy), "delete", "--kubeconfig", str(root / "kubeconfig"), "--wait=1"]
-            report["stateReuseCleanupCommand"] = cleanup_command
-            cleanup = subprocess.run(cleanup_command, capture_output=True, text=True, timeout=90)
-            report["stateReuseCleanupExitCode"] = cleanup.returncode
-            (root / "state-reuse-cleanup.log").write_text(cleanup.stdout + cleanup.stderr)
-            if cleanup.returncode:
-                raise RuntimeError("Prior owned Sonobuoy resources did not clean up before state reuse")
+            operations = []
+            code, body = request("/api/v1/namespaces/sonobuoy/pods")
+            if code != 200:
+                raise RuntimeError("Could not list prior owned Sonobuoy Pods")
+            for obj in json.loads(body)["items"]:
+                metadata = obj["metadata"]
+                code, _ = request("/api/v1/namespaces/sonobuoy/pods/" + metadata["name"], "DELETE")
+                operations.append({"resource": "pods", "name": metadata["name"], "uid": metadata["uid"], "code": code})
+                if code not in (200, 404):
+                    raise RuntimeError("Could not remove prior owned Sonobuoy Pod")
+            deadline = time.monotonic() + 90
+            while json.loads(request("/api/v1/namespaces/sonobuoy/pods")[1])["items"]:
+                if time.monotonic() > deadline:
+                    raise RuntimeError("Prior owned Sonobuoy Pod API deletion did not finish")
+                time.sleep(.2)
+            for prefix, resources in (("/api/v1", ("configmaps", "secrets", "serviceaccounts", "services")),
+                                      ("/apis/rbac.authorization.k8s.io/v1", ("roles", "rolebindings"))):
+                for resource in resources:
+                    collection = prefix + "/namespaces/sonobuoy/" + resource
+                    code, body = request(collection)
+                    if code != 200:
+                        raise RuntimeError("Could not list prior owned Sonobuoy namespace resources")
+                    for obj in json.loads(body)["items"]:
+                        metadata = obj["metadata"]
+                        code, _ = request(collection + "/" + metadata["name"], "DELETE")
+                        operations.append({"resource": resource, "name": metadata["name"], "uid": metadata["uid"], "code": code})
+                        if code not in (200, 404):
+                            raise RuntimeError("Could not remove prior owned Sonobuoy namespace resource")
+            for resource in ("clusterrolebindings", "clusterroles"):
+                collection = "/apis/rbac.authorization.k8s.io/v1/" + resource
+                code, body = request(collection + "?labelSelector=component%3Dsonobuoy%2Cnamespace%3Dsonobuoy")
+                if code != 200:
+                    raise RuntimeError("Could not list prior owned Sonobuoy RBAC resources")
+                for obj in json.loads(body)["items"]:
+                    metadata = obj["metadata"]
+                    code, _ = request(collection + "/" + metadata["name"], "DELETE")
+                    operations.append({"resource": resource, "name": metadata["name"], "uid": metadata["uid"], "code": code})
+                    if code not in (200, 404):
+                        raise RuntimeError("Could not remove prior owned Sonobuoy RBAC resource")
+            code, _ = request("/api/v1/namespaces/sonobuoy", "DELETE")
+            operations.append({"resource": "namespaces", "name": "sonobuoy", "code": code})
+            if code not in (200, 404):
+                raise RuntimeError("Could not remove prior owned Sonobuoy namespace")
+            deadline = time.monotonic() + 60
+            while request("/api/v1/namespaces/sonobuoy")[0] != 404:
+                if time.monotonic() > deadline:
+                    raise RuntimeError("Prior owned Sonobuoy namespace deletion did not finish")
+                time.sleep(.2)
+            report["stateReuseCleanupOperations"] = operations
         command = [str(args.sonobuoy), "run", "--kubeconfig", str(root / "kubeconfig"), "--dns-pod-labels=", "--plugin=e2e",
                    *(["--mode=certified-conformance"] if args.certified_conformance else ["--e2e-focus=" + args.focus, "--e2e-skip="])]
         report["command"] = command
