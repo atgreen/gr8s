@@ -162,6 +162,12 @@
       (remhash connection (tcp-service-proxy-connections proxy)))
     (dolist (socket sockets) (when socket (ignore-errors (usocket:socket-close socket))))))
 
+(defun service-proxy-shutdown-upstream-output (proxy client upstream)
+  "Half-close only while this exact connection still owns UPSTREAM's descriptor."
+  (bt:with-lock-held ((tcp-service-proxy-lock proxy))
+    (when (eq upstream (second (gethash client (tcp-service-proxy-connections proxy))))
+      (ignore-errors (usocket:socket-shutdown upstream :output)))))
+
 (defun service-proxy-connection (proxy client)
   "Relay one TCP connection to an endpoint chosen from the live Service definition."
   (let ((upstream nil) (input-thread nil))
@@ -182,7 +188,7 @@
                           (unwind-protect
                                (ignore-errors (copy-binary-stream (usocket:socket-stream client)
                                                                   (usocket:socket-stream upstream)))
-                            (ignore-errors (usocket:socket-shutdown upstream :output))))
+                            (service-proxy-shutdown-upstream-output proxy client upstream)))
                         :name "gr8s Service request stream"))
                  (copy-binary-stream (usocket:socket-stream upstream) (usocket:socket-stream client))))
            (error (condition)
