@@ -51,9 +51,18 @@
                 (gethash "ports" container) (vector (gr8s::core-object "name" "http" "containerPort" 7777)))
           (let ((pod (create-pod store (parse-pod object))))
             (gr8s::persist-pod-assignment store pod "worker-a")
-            (gr8s::update-pod-observed-status store pod (gr8s::core-object "phase" "Running" "podIP" "192.0.2.5")))))
+            (gr8s::update-pod-observed-status store pod
+             (gr8s::core-object "phase" "Running" "podIP" "192.0.2.5"
+                                "conditions" (vector (gr8s::core-object "type" "Ready" "status" "True")))))))
       (let ((port (aref (gethash "ports" (gethash "spec" service)) 0)))
         (is (equal '(("192.0.2.5" 7777)) (gr8s::service-pod-endpoints store service port)))
+        (let* ((pod (get-pod store "alpha" "hello"))
+               (status (gr8s::copy-core-object (gr8s::pod-observed-status store pod))))
+          (setf (gethash "status" (aref (gethash "conditions" status) 0)) "False")
+          (gr8s::update-pod-observed-status store pod status)
+          (is (null (gr8s::service-pod-endpoints store service port)))
+          (setf (gethash "status" (aref (gethash "conditions" status) 0)) "True")
+          (gr8s::update-pod-observed-status store pod status))
         (gr8s::mark-pod-deleting store "alpha" "hello")
         (is (null (gr8s::service-pod-endpoints store service port)))))))
 

@@ -427,6 +427,19 @@ to 253 characters, while runtime hostnames are limited to 63 characters.
 Runtime admission still validates
 the supported Pod feature set and rejects unsupported fields with HTTP 422.
 
+Pods report PodScheduled, Initialized, ContainersReady and Ready conditions.
+Readiness requires actual running, ready observations for every declared
+container. Terminal Pods report false readiness, and unavailable node/runtime
+observations report unknown readiness. Condition transition history and actual
+observed revisions persist separately across restarts. Valid node readiness
+leases survive a control-plane restart, and reconnecting agents receive snapshot
+revisions beyond their saved acknowledgements. Probes, init containers and
+readiness gates remain unsupported.
+
+The [readiness validation record](docs/pod-readiness-validation-2026-11-03.json)
+captures seven passing native scenarios and the official graceful-generation
+case changing from failure to success, including verified archives and cleanup.
+
 PodTemplates support namespaced CRUD and cluster-wide lists, JSON and Kubernetes
 protobuf requests, selectors, dry-run, optimistic updates, strategic merge and
 JSON patches, delete-collection, and JSON watch streams. Templates use the pinned
@@ -487,8 +500,8 @@ captures all five upstream cases passing, plus local API and persistence checks.
 Services accept JSON and typed Kubernetes protobuf requests, including numeric
 and named target ports. Managed native clusters allocate durable IPv4 TCP
 ClusterIP Services from
-`10.96.0.0/16`. Native listeners forward connections to running, selector-matched
-Pods in the Service namespace, resolving numeric or named target ports. The
+`10.96.0.0/16`. Native listeners forward connections to running, Ready=True,
+selector-matched Pods in the Service namespace, resolving numeric or named target ports. The
 reserved `default/kubernetes` Service describes the HTTPS API at `10.96.0.1:443`.
 This initial implementation supports single-stack TCP without session affinity;
 headless Services, UDP, NodePort, LoadBalancer, manual Endpoints, and general

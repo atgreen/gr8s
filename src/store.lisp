@@ -27,6 +27,7 @@
   (pod-observed-phases (make-hash-table :test #'equal))
   (pod-observed-statuses (make-hash-table :test #'equal))
   (pod-observed-resource-versions (make-hash-table :test #'equal))
+  (pod-condition-histories (make-hash-table :test #'equal))
   (lock (bt:make-lock "gr8s store")))
 
 (defmacro with-store-lock ((store) &body body)
@@ -58,18 +59,30 @@
     (setf (gethash "id" object) (node-record-id node)
           (gethash "name" object) (node-record-name node)
           (gethash "podCIDR" object) (node-record-pod-cidr node)
-          (gethash "underlayAddress" object) (node-record-underlay-address node))
+          (gethash "underlayAddress" object) (node-record-underlay-address node)
+          (gethash "ready" object) (not (null (node-record-ready-p node))))
+    (when (node-record-last-heartbeat node)
+      (setf (gethash "lastHeartbeat" object) (node-record-last-heartbeat node)))
+    (when (node-record-lease-deadline node)
+      (setf (gethash "leaseDeadline" object) (node-record-lease-deadline node)))
     object))
 
 (defun parse-node-record (input)
   "Parse JSON text or an object into a NODE-RECORD."
-  (let ((object (if (hash-table-p input)
+  (let* ((object (if (hash-table-p input)
                     input
-                    (com.inuoe.jzon:parse input))))
+                    (com.inuoe.jzon:parse input)))
+         (heartbeat (gethash "lastHeartbeat" object))
+         (deadline (gethash "leaseDeadline" object)))
     (make-node-record :id (gethash "id" object)
                       :name (gethash "name" object)
                       :pod-cidr (gethash "podCIDR" object)
-                      :underlay-address (gethash "underlayAddress" object ""))))
+                      :underlay-address (gethash "underlayAddress" object "")
+                      :last-heartbeat (when (integerp heartbeat) heartbeat)
+                      :lease-deadline (when (integerp deadline) deadline)
+                      :ready-p (and (eq t (gethash "ready" object))
+                                    (integerp heartbeat) (integerp deadline)
+                                    (<= (get-universal-time) deadline)))))
 
 (defun secure-random-octets (count)
   "Read COUNT cryptographically secure random octets from the operating system."
@@ -156,6 +169,7 @@
       (let ((node (parse-node-record file)))
         (setf (gethash (node-record-name node) (pod-store-nodes store)) node)))
     (load-core-resources store)
+    (load-pod-status-state store)
     store))
 
 (defun get-pod-unlocked (store namespace name)
@@ -280,11 +294,14 @@
   "Remove a Pod and its observed status from STORE, returning the removed Pod."
   (with-store-lock (store)
     (let ((pod (get-pod-unlocked store namespace name)))
+      (let ((status-path (pod-status-state-path store (pod-uid pod))))
+        (when (probe-file status-path) (delete-file status-path)))
       (delete-file (pod-path store pod))
       (remhash (pod-key namespace name) (pod-store-pods store))
       (remhash (pod-uid pod) (pod-store-pod-observed-phases store))
       (remhash (pod-uid pod) (pod-store-pod-observed-statuses store))
       (remhash (pod-uid pod) (pod-store-pod-observed-resource-versions store))
+      (remhash (pod-uid pod) (pod-store-pod-condition-histories store))
       pod)))
 
 (defun delete-pod (store namespace name)

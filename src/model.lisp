@@ -53,7 +53,8 @@
   pod-cidr
   (underlay-address "")
   (ready-p nil)
-  last-heartbeat)
+  last-heartbeat
+  lease-deadline)
 
 (defun invalid-pod (control &rest arguments)
   "Signal an HTTP 422 Kubernetes error formatted by CONTROL and ARGUMENTS."
