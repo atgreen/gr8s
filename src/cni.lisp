@@ -19,9 +19,15 @@
   (error 'cni-error :message (apply #'format nil control arguments)))
 
 (defparameter +cni-policy-map-specs+
-  '(("rejected_spoofs" 8 1 0)
-    ("endpoint_identity" 16 1 128)
-    ("traffic_stats" 8 6 0)))
+  ;; (name bpf-map-type key-size value-size max-entries flags). Types: 1=HASH,
+  ;; 2=ARRAY, 11=LPM_TRIE. The netpol_* maps hold the per-Pod NetworkPolicy and
+  ;; are updated as data by the agent (no program recompile).
+  '(("rejected_spoofs"     2 4 8  1    0)
+    ("endpoint_identity"   2 4 16 1    128)
+    ("traffic_stats"       2 4 8  7    0)
+    ("netpol_egress_mode"  2 4 4  1    0)
+    ("netpol_egress_cidr" 11 8 4  1024 1)
+    ("netpol_egress_port"  1 8 1  1024 0)))
 
 (defstruct cni-configuration
   version name type direction program map-pin-root previous-result endpoint-address policy-interface-name)
