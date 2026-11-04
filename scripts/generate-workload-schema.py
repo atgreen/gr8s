@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
 # SPDX-License-Identifier: MIT
-"""Generate pinned apps/v1 workload and autoscaling/v1 Scale schema additions."""
+"""Generate pinned apps/v1 workload, core/v1 ReplicationController and autoscaling/v1 Scale schema additions."""
 
 import argparse
 import hashlib
@@ -41,7 +41,9 @@ def main():
         sources[name] = data.decode()
     baseline = json.loads((ROOT / "schema/podtemplate-v1.json").read_text())
     all_messages = core.proto_messages(sources)
-    roots = ["k8s.io.api.apps.v1.Deployment", "k8s.io.api.apps.v1.ReplicaSet", "k8s.io.api.autoscaling.v1.Scale"]
+    roots = ["k8s.io.api.apps.v1.Deployment", "k8s.io.api.apps.v1.ReplicaSet", "k8s.io.api.apps.v1.DaemonSet",
+             "k8s.io.api.apps.v1.ControllerRevision", "k8s.io.api.core.v1.ReplicationController",
+             "k8s.io.api.autoscaling.v1.Scale"]
     pending, messages = roots[:], {}
     while pending:
         name = pending.pop()
@@ -49,7 +51,8 @@ def main():
             continue
         messages[name] = all_messages[name]
         pending.extend(f["type"] for f in messages[name].values() if f["type"] not in core.SCALARS)
-    for source, package in [("apps-types.go", "k8s.io.api.apps.v1."), ("autoscaling-types.go", "k8s.io.api.autoscaling.v1.")]:
+    for source, package in [("apps-types.go", "k8s.io.api.apps.v1."), ("autoscaling-types.go", "k8s.io.api.autoscaling.v1."),
+                            ("core-types.go", "k8s.io.api.core.v1.")]:
         for structure in re.finditer(r"type (\w+) struct \{(.*?)^\}", sources[source], re.S | re.M):
             fields = messages.get(package + structure[1], {})
             for line in structure[2].splitlines():
@@ -64,7 +67,9 @@ def main():
                         f["omitEmpty"] = True
     all_definitions = json.loads(sources["swagger.json"])["definitions"]
     pending = [n.replace("k8s.io.", "io.k8s.", 1) for n in roots]
-    pending += ["io.k8s.api.apps.v1.DeploymentList", "io.k8s.api.apps.v1.ReplicaSetList"]
+    pending += ["io.k8s.api.apps.v1.DeploymentList", "io.k8s.api.apps.v1.ReplicaSetList",
+                "io.k8s.api.apps.v1.DaemonSetList", "io.k8s.api.apps.v1.ControllerRevisionList",
+                "io.k8s.api.core.v1.ReplicationControllerList"]
     definitions = {}
     while pending:
         name = pending.pop()
