@@ -256,6 +256,16 @@ def main():
         before_slices = {s["metadata"]["uid"] for s in current}
         report["scenarios"]["selectorServiceActualEndpoints"] = {"passed": True, "identities": before_ids,
                                                                   "sliceUIDs": sorted(before_slices), "actualHTTPResponses": sorted(responses)}
+        if args.verify_dns_records:
+            observed_pod = children[0]
+            proxy_url = base + path("pods", observed_pod["metadata"]["name"]) + "/proxy/"
+            with opener.open(proxy_url, timeout=5) as response:
+                proxy_body = response.read().decode().strip()
+                assert response.status == 200
+            assert proxy_body == namespace + "-" + observed_pod["metadata"]["name"], proxy_body
+            report["scenarios"]["actualPodHTTPProxy"] = {"passed": True, "podUID": observed_pod["metadata"]["uid"],
+                                                       "actualObservedPodIP": observed_pod["status"]["podIP"], "implicitFirstDeclaredPort": 8080,
+                                                       "apiProxyHTTPResponse": proxy_body}
         if args.verify_dns:
             create("services", {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "dns-headless"},
                                 "spec": {"clusterIP": "None", "selector": {"app": "web"},
