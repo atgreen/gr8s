@@ -27,6 +27,13 @@ import xml.etree.ElementTree as ET
 FOCUS = "PodTemplates|Servers with support for API chunking"
 
 
+def official_e2e_log(archive):
+    """Read the suite's log from the official results archive."""
+    with tarfile.open(archive) as bundle:
+        member = bundle.extractfile("plugins/e2e/results/global/e2e.log")
+        return member.read().decode(errors="replace")
+
+
 def verify_upstream_results(archive, e2e_log, summary, expected_specs=5):
     """Count actual specs separately from suite hooks and require complete upstream success."""
     cases = []
@@ -214,7 +221,9 @@ def main():
                 (root / (container["name"] + ".log")).write_text(logs_for(pod, container["name"]))
         result = subprocess.run([str(args.sonobuoy), "results", str(root / "sonobuoy-results.tar.gz")], text=True, capture_output=True, timeout=30)
         (root / "sonobuoy-results.txt").write_text(result.stdout + result.stderr)
-        e2e = (root / "e2e.log").read_text()
+        # Sonobuoy's cleanup can delete the job Pod first, so the archive is the source.
+        e2e = official_e2e_log(root / "sonobuoy-results.tar.gz")
+        (root / "e2e.log").write_text(e2e)
         report.update(verify_upstream_results(root / "sonobuoy-results.tar.gz", e2e, result.stdout,
                                               expected_specs=None if args.certified_conformance else args.expected_specs))
         if not report["passed"]:

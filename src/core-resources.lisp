@@ -420,7 +420,8 @@
            (metadata (gethash "metadata" object))
            (expected (gethash "resourceVersion" metadata))
            (revision (1+ (pod-store-resource-revision store))))
-      (when (and (or (equal resource "events") (endpointslice-resource-p resource)) (member expected '(nil "") :test #'equal))
+      ;; An omitted revision is an unconditional update, except for custom resources.
+      (when (and (not (custom-resource-key-p resource)) (member expected '(nil "") :test #'equal))
         (setf expected (gethash "resourceVersion" existing-metadata)))
       (unless expected (core-resource-error 422 "Invalid" "metadata.resourceVersion is required for update"))
       (unless (equal expected (gethash "resourceVersion" existing-metadata))

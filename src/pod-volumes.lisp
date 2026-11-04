@@ -10,21 +10,25 @@
 
 (in-package #:gr8s)
 
-(defun pod-volume-resource-reference (volume)
-  "Return the referenced collection, object name and optional flag for VOLUME."
-  (cond ((gethash "configMap" volume)
-         (let ((source (gethash "configMap" volume)))
-           (values "configmaps" (gethash "name" source) (eq t (gethash "optional" source)))))
-        ((gethash "secret" volume)
-         (let ((source (gethash "secret" volume)))
-           (values "secrets" (gethash "secretName" source) (eq t (gethash "optional" source)))))))
+(defun pod-volume-resource-references (volume)
+  "Return (collection name optional) for each object VOLUME reads, including projected sources."
+  (flet ((reference (resource source name-field)
+           (list resource (gethash name-field source) (eq t (gethash "optional" source)))))
+    (append
+     (when (gethash "configMap" volume) (list (reference "configmaps" (gethash "configMap" volume) "name")))
+     (when (gethash "secret" volume) (list (reference "secrets" (gethash "secret" volume) "secretName")))
+     (when (gethash "projected" volume)
+       (loop for source across (gethash "sources" (gethash "projected" volume) #())
+             when (gethash "configMap" source)
+               collect (reference "configmaps" (gethash "configMap" source) "name")
+             when (gethash "secret" source)
+               collect (reference "secrets" (gethash "secret" source) "name"))))))
 
 (defun pod-resource-reference-declarations (pod)
   "Collect namespace-local resource declarations from volumes and environment sources."
   (let* ((spec (gethash "spec" (pod-to-object pod))) (references nil))
     (loop for volume across (gethash "volumes" spec #())
-          do (multiple-value-bind (resource name optional) (pod-volume-resource-reference volume)
-               (when resource (push (list resource name optional) references))))
+          do (setf references (append (pod-volume-resource-references volume) references)))
     (loop for container across (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec))
           do (loop for variable across (gethash "env" container #())
                    for from = (gethash "valueFrom" variable)
@@ -192,28 +196,8 @@
         (ensure-pod-memory-volume directory source)))
     ;; Applied after mounting because the tmpfs root replaces the directory's mode.
     (set-pod-volume-permissions directory (if group #o2770 #o777) group)
-    (multiple-value-bind (resource name optional) (pod-volume-resource-reference volume)
-      (when resource
-        (let* ((source (or (gethash "configMap" volume) (gethash "secret" volume)))
-               (object (handler-case (get-core-resource (containerd-runtime-resource-store runtime)
-                                                        resource (pod-namespace pod) name)
-                         (kubernetes-error (condition)
-                           (unless (and optional (= 404 (kubernetes-error-status-code condition))) (error condition)))))
-               (data (pod-volume-data resource object))
-               (items (gethash "items" source))
-               (files (if items (coerce items 'list)
-                          (loop for key being the hash-keys of data
-                                collect (core-object "key" key "path" key)))))
-          (dolist (item files)
-            (let* ((key (gethash "key" item)) (relative (gethash "path" item))
-                   (mode (gethash "mode" item (gethash "defaultMode" source #o644)))
-                   (bytes (gethash key data)))
-              (unless (safe-volume-relative-path-p relative) (invalid-pod "unsafe volume projection path"))
-              (unless (or bytes optional)
-                (error 'runtime-error :message (format nil "Volume ~A lacks key ~A" name key)))
-              (when bytes
-                (let ((target (merge-pathnames relative directory)))
-                  (write-projected-volume-file target bytes (if group (logior mode #o440) mode) group))))))))
+    (multiple-value-bind (files projection) (pod-volume-desired-files runtime pod volume)
+      (when projection (publish-pod-volume-files directory files group)))
     directory))
 
 (defun containerd-pod-mounts (runtime pod container &optional environment)
@@ -231,6 +215,8 @@
                                    :container-path (gethash "mountPath" mount) :host-path (namestring path)
                                    :readonly (or forced-readonly (not (null (gethash "configMap" volume)))
                                                  (not (null (gethash "secret" volume)))
+                                                 (not (null (gethash "downwardAPI" volume)))
+                                                 (not (null (gethash "projected" volume)))
                                                  (eq t (gethash "readOnly" mount))))))))
 
 (defun containerd-key-environment-value (runtime pod resource reference)

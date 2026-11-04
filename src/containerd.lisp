@@ -238,6 +238,8 @@
 (defmethod runtime-reconcile-containers ((runtime containerd-runtime) pod observed)
   "Retry only eligible native containers, even while a sibling keeps the Pod Running."
   (checkpoint-container-lifecycle-observation runtime (pod-uid pod) observed)
+  ;; A healthy Pod converges no further, so this is where live volumes must update.
+  (refresh-pod-projected-volumes runtime pod)
   (setf observed (reconcile-container-probes runtime pod observed))
   (if (or (native-container-progress-required-p pod observed)
           (container-probe-restart-required-p runtime pod observed))
