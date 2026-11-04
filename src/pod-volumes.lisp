@@ -44,7 +44,7 @@
             (unless (and optional (= 404 (kubernetes-error-status-code condition))) (error condition))))))
     (remove-duplicates (append result (pod-persistent-resource-objects store pod)) :test #'equalp)))
 
-(defun install-assigned-resource-objects (store assignments)
+(defun install-assigned-resource-objects (store assignments &optional service-discovery)
   "Install only authenticated, Pod-referenced resources and exact PVC/PV bindings."
   (let ((resources (make-hash-table :test #'equal)))
     (dolist (assignment assignments)
@@ -72,6 +72,7 @@
             (let ((*storage-status-write* (not (null (storage-resource-p resource)))))
               (setf (gethash (core-resource-key resource namespace name) resources)
                     (normalize-core-resource resource object namespace name)))))))
+    (install-service-discovery-projection resources service-discovery)
     (with-store-lock (store)
       (unless (equalp resources (pod-store-resources store))
         (commit-core-resources store resources (1+ (pod-store-resource-revision store)))))))

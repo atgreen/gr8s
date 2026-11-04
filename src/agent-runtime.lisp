@@ -276,8 +276,10 @@
         (if (node-runtime-manager node-runtime)
             (call-with-agent-cni-server
              node-runtime
-             (lambda () (call-with-dns-server body)))
-            (call-with-dns-server body))
+             (lambda () (call-with-dns-server body :service-resolver
+                                        (store-service-dns-resolver (node-runtime-store node-runtime)))))
+            (call-with-dns-server body :service-resolver
+                                        (store-service-dns-resolver (node-runtime-store node-runtime))))
         (funcall body))))
 
 (defun node-runtime-thread-main (node-runtime)
@@ -484,7 +486,9 @@
                          (node-runtime-assigned-versions node-runtime))
                 (slot-value assignment 'gr8s.node.v1::resource-version))))
       (remove-unassigned-pods node-runtime assignments)
-      (install-assigned-resource-objects (node-runtime-store node-runtime) assignments)
+      (install-assigned-resource-objects
+       (node-runtime-store node-runtime) assignments
+       (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json))
       (loop for assignment in assignments
             for pod = (put-assigned-pod
                        (node-runtime-store node-runtime)

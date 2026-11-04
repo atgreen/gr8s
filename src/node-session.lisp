@@ -297,7 +297,7 @@
     (attach-node-topology server node-name snapshot)
     (bt:with-lock-held ((node-grpc-server-lock server))
       (let ((existing (gethash node-name (node-grpc-server-snapshots server))))
-        (if (and (same-node-snapshot-topology-p existing snapshot)
+        (if (and (same-node-desired-content-p existing snapshot)
                  (>= (slot-value existing 'gr8s.node.v1::revision) last-applied))
             existing
           (let ((revision (1+ (max last-applied
@@ -561,6 +561,8 @@
 (defun same-node-desired-content-p (left right)
   "Compare workload assignments and topology independently of envelope revision."
   (and left right (same-node-snapshot-topology-p left right)
+       (equalp (slot-value left 'gr8s.node.v1::service-discovery-objects-json)
+               (slot-value right 'gr8s.node.v1::service-discovery-objects-json))
        (equalp (mapcar #'ag-proto:serialize-to-bytes (slot-value left 'gr8s.node.v1::pods))
                (mapcar #'ag-proto:serialize-to-bytes (slot-value right 'gr8s.node.v1::pods)))))
 
