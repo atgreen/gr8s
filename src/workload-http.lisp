@@ -167,9 +167,11 @@
                "preferredVersion" (core-object "groupVersion" "batch/v1" "version" "v1")))
 
 (defun batch-resources-response ()
-  "Advertise Jobs and their separately authorized status subresource."
+  "Advertise Jobs, CronJobs and their separately authorized status subresources."
   (json-response
    (core-object "apiVersion" "v1" "kind" "APIResourceList" "groupVersion" "batch/v1" "resources"
                 (concatenate 'vector (stored-resource-discovery "batch/v1")
                              (vector (core-object "name" "jobs/status" "namespaced" t "kind" "Job"
+                                                  "verbs" #("get" "patch" "update"))
+                                     (core-object "name" "cronjobs/status" "namespaced" t "kind" "CronJob"
                                                   "verbs" #("get" "patch" "update")))))))

@@ -118,6 +118,8 @@
                    "verbs" #("get" "patch" "update"))
       (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
       (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("create"))
+      (json-object "name" "pods/eviction" "singularName" "" "namespaced" t "kind" "Eviction"
+                   "group" "policy" "version" "v1" "verbs" #("create"))
       (json-object "name" "pods/proxy" "singularName" "" "namespaced" t "kind" "PodProxyOptions"
                    "verbs" #("get" "create" "update" "patch" "delete"))
       (json-object "name" "nodes" "singularName" "node" "namespaced" nil "kind" "Node" "verbs" #("get" "list")))
@@ -1016,6 +1018,8 @@ its clients treat any other multi-byte frame as an error message."
        (pod-logs-response store reconciler (first parts) namespace))
       ((and (= 2 (length parts)) (string= "exec" (second parts)) (member method '(:get :post)))
        (pod-exec-response store reconciler (first parts) namespace))
+      ((and (= 2 (length parts)) (string= "eviction" (second parts)) (eq method :post))
+       (pod-eviction-response store reconciler (first parts) namespace))
       ((and (= 2 (length parts)) (string= "attach" (second parts)) (member method '(:get :post)))
        (pod-attach-response store (first parts) namespace))
       (t (status-response "Failure" "NotFound"

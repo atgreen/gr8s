@@ -233,9 +233,9 @@
                (when (eq t (gethash "controller" owner)) (incf controllers))
                (when (and (eq t (gethash "blockOwnerDeletion" owner))
                           (not (and (eq t (gethash "controller" owner))
-                                    (equal "Job" (gethash "kind" owner))
+                                    (member (gethash "kind" owner) '("Job" "CronJob") :test #'equal)
                                     (equal "batch/v1" (gethash "apiVersion" owner)))))
-                 (invalid-pod "blocking foreground owner deletion requires a supported Job controller")))
+                 (invalid-pod "blocking foreground owner deletion requires a supported Job or CronJob controller")))
       (when (> controllers 1) (invalid-pod "an object can have only one controller owner")))))
 
 (defun pod-generate-name-prefix (metadata)

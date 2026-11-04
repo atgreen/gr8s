@@ -3,8 +3,9 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Admit executing batch/v1 Jobs through pinned Kubernetes wire/structural
-;;;; schemas and defaults, automatic UID selectors and immutable templates.
-;;;; Unsupported advanced policies are rejected rather than stored inertly.
+;;;; schemas and defaults, automatic UID selectors and immutable templates,
+;;;; with the validation of completion modes and of Pod failure, per-index
+;;;; backoff and success policies. CronJob admission is in cronjob-resources.
 
 (in-package #:gr8s)
 
@@ -17,14 +18,127 @@
   "Hold terminal Pod identities until real Job accounting is durable.")
 
 (defun batch-resource-p (resource)
-  "Recognize the implemented batch collection without advertising CronJobs."
-  (equal resource "jobs"))
+  "Recognize the implemented batch collections."
+  (member resource '("jobs" "cronjobs") :test #'equal))
 
 (defun batch-boolean (value context &optional default)
   "Apply a boolean default while preserving explicit false values."
   (when (eq value 'null) (setf value default))
   (unless (member value '(t nil)) (core-resource-error 422 "Invalid" "~A must be a boolean" context))
   value)
+
+(defun validate-job-exit-codes (requirement containers)
+  "Require a valid onExitCodes requirement: known container, operator, sorted unique codes."
+  (require-object requirement "onExitCodes")
+  (reject-unsupported-fields requirement '("containerName" "operator" "values") "onExitCodes")
+  (let ((name (gethash "containerName" requirement)) (values (gethash "values" requirement))
+        (operator (gethash "operator" requirement)))
+    (when (eq name 'null) (remhash "containerName" requirement) (setf name nil))
+    (when (and name (not (member name containers :test #'equal)))
+      (core-resource-error 422 "Invalid" "onExitCodes.containerName ~S is not a container of the Pod template" name))
+    (unless (member operator '("In" "NotIn") :test #'equal)
+      (core-resource-error 422 "Invalid" "onExitCodes.operator must be In or NotIn"))
+    (unless (and (vectorp values) (not (stringp values)) (<= 1 (length values) 255) (every #'integerp values))
+      (core-resource-error 422 "Invalid" "onExitCodes.values must hold 1 to 255 exit codes"))
+    (unless (loop for index from 1 below (length values) always (< (aref values (1- index)) (aref values index)))
+      (core-resource-error 422 "Invalid" "onExitCodes.values must be ordered and unique"))
+    (when (and (equal operator "In") (find 0 values))
+      (core-resource-error 422 "Invalid" "onExitCodes.values cannot contain 0 for the In operator"))))
+
+(defun validate-job-condition-patterns (patterns)
+  "Require 1 to 20 Pod condition patterns with a qualified type and a condition status."
+  (unless (and (vectorp patterns) (not (stringp patterns)) (<= 1 (length patterns) 20))
+    (core-resource-error 422 "Invalid" "onPodConditions must hold 1 to 20 patterns"))
+  (loop for pattern across patterns
+        do (require-object pattern "onPodConditions entry")
+           (reject-unsupported-fields pattern '("type" "status") "onPodConditions entry")
+           (unless (core-qualified-key-p (gethash "type" pattern))
+             (core-resource-error 422 "Invalid" "onPodConditions.type must be a qualified name"))
+           (when (eq (gethash "status" pattern) 'null) (remhash "status" pattern))
+           (unless (member (gethash "status" pattern "True") '("True" "False" "Unknown") :test #'equal)
+             (core-resource-error 422 "Invalid" "onPodConditions.status must be True, False or Unknown"))
+           (setf (gethash "status" pattern) (gethash "status" pattern "True"))))
+
+(defun validate-job-failure-policy (spec pod-spec)
+  "Validate podFailurePolicy rules against this Job's restart policy and failure counting."
+  (let ((policy (require-object (gethash "podFailurePolicy" spec) "podFailurePolicy"))
+        (containers (loop for field in '("containers" "initContainers")
+                          append (map 'list (lambda (container) (gethash "name" container))
+                                      (let ((list (gethash field pod-spec))) (if (or (null list) (eq list 'null)) #() list))))))
+    (reject-unsupported-fields policy '("rules") "podFailurePolicy")
+    (unless (equal "Never" (gethash "restartPolicy" pod-spec))
+      (core-resource-error 422 "Invalid" "podFailurePolicy requires the Pod restartPolicy Never"))
+    (let ((rules (gethash "rules" policy)))
+      (unless (and (vectorp rules) (not (stringp rules)) (<= (length rules) 20))
+        (core-resource-error 422 "Invalid" "podFailurePolicy.rules must hold at most 20 rules"))
+      (loop for rule across rules
+            do (require-object rule "podFailurePolicy rule")
+               (reject-unsupported-fields rule '("action" "onExitCodes" "onPodConditions") "podFailurePolicy rule")
+               (dolist (field '("onExitCodes" "onPodConditions"))
+                 (when (eq (gethash field rule) 'null) (remhash field rule)))
+               (let ((action (gethash "action" rule)) (exit-codes (gethash "onExitCodes" rule))
+                     (conditions (gethash "onPodConditions" rule)))
+                 (when (and (vectorp conditions) (zerop (length conditions)) exit-codes)
+                   (remhash "onPodConditions" rule) (setf conditions nil))
+                 (unless (member action '("FailJob" "FailIndex" "Ignore" "Count") :test #'equal)
+                   (core-resource-error 422 "Invalid" "podFailurePolicy action must be FailJob, FailIndex, Ignore or Count"))
+                 (when (and (equal action "FailIndex") (not (gethash "backoffLimitPerIndex" spec)))
+                   (core-resource-error 422 "Invalid" "podFailurePolicy action FailIndex requires backoffLimitPerIndex"))
+                 (unless (if exit-codes (null conditions) conditions)
+                   (core-resource-error 422 "Invalid" "A podFailurePolicy rule needs exactly one of onExitCodes and onPodConditions"))
+                 (if exit-codes
+                     (validate-job-exit-codes exit-codes containers)
+                     (validate-job-condition-patterns conditions)))))))
+
+(defun validate-job-success-policy (spec)
+  "Validate successPolicy rules against this Job's Indexed completions."
+  (let* ((policy (require-object (gethash "successPolicy" spec) "successPolicy"))
+         (rules (gethash "rules" policy)) (completions (gethash "completions" spec)))
+    (reject-unsupported-fields policy '("rules") "successPolicy")
+    (unless (equal "Indexed" (gethash "completionMode" spec))
+      (core-resource-error 422 "Invalid" "successPolicy requires Indexed completion mode"))
+    (unless (and (vectorp rules) (not (stringp rules)) (<= 1 (length rules) 20))
+      (core-resource-error 422 "Invalid" "successPolicy.rules must hold 1 to 20 rules"))
+    (loop for rule across rules
+          do (require-object rule "successPolicy rule")
+             (reject-unsupported-fields rule '("succeededIndexes" "succeededCount") "successPolicy rule")
+             (dolist (field '("succeededIndexes" "succeededCount"))
+               (when (eq (gethash field rule) 'null) (remhash field rule)))
+             (let ((text (gethash "succeededIndexes" rule)) (count (gethash "succeededCount" rule)))
+               (unless (or text count)
+                 (core-resource-error 422 "Invalid" "A successPolicy rule needs succeededIndexes or succeededCount"))
+               (when (and count (not (typep count `(integer 0 ,completions))))
+                 (core-resource-error 422 "Invalid" "succeededCount must be between 0 and completions"))
+               (when text
+                 (multiple-value-bind (intervals invalid) (parse-job-indexes (if (stringp text) text "-") completions)
+                   (when (or invalid (zerop (length text)) (> (length text) 65536))
+                     (core-resource-error 422 "Invalid" "succeededIndexes must list indexes below completions, as in 1,3-5"))
+                   (when (and count (> count (job-indexes-total intervals)))
+                     (core-resource-error 422 "Invalid" "succeededCount cannot exceed the number of succeededIndexes"))))))))
+
+(defun validate-job-completion-mode (spec metadata pod-spec)
+  "Validate Indexed mode and the per-index fields that only it supports."
+  (let ((mode (gethash "completionMode" spec)) (limit (gethash "backoffLimitPerIndex" spec))
+        (allowed (gethash "maxFailedIndexes" spec)) (completions (gethash "completions" spec)))
+    (unless (member mode '("NonIndexed" "Indexed") :test #'equal)
+      (core-resource-error 422 "Invalid" "Job completionMode must be NonIndexed or Indexed"))
+    (when (equal mode "Indexed")
+      (unless completions
+        (core-resource-error 422 "Invalid" "Indexed Jobs require spec.completions"))
+      (when (plusp completions)
+        (let ((hostname (format nil "~A-~D" (gethash "name" metadata) (1- completions))))
+          (unless (and (<= (length hostname) 63) (dns-label-p hostname))
+            (core-resource-error 422 "Invalid" "Indexed Job name cannot form the valid Pod hostname ~A" hostname)))))
+    (when limit
+      (unless (equal mode "Indexed")
+        (core-resource-error 422 "Invalid" "backoffLimitPerIndex requires Indexed completion mode"))
+      (unless (equal "Never" (gethash "restartPolicy" pod-spec))
+        (core-resource-error 422 "Invalid" "backoffLimitPerIndex requires the Pod restartPolicy Never")))
+    (when allowed
+      (unless limit
+        (core-resource-error 422 "Invalid" "maxFailedIndexes requires backoffLimitPerIndex"))
+      (when (> allowed completions)
+        (core-resource-error 422 "Invalid" "maxFailedIndexes cannot exceed completions")))))
 
 (defun normalize-batch-resource (input namespace name)
   "Validate genuine executable Job state; ordinary writes never submit runtime status."
@@ -41,20 +155,22 @@
     (setf (gethash "namespace" metadata) namespace (gethash "apiVersion" object) "batch/v1" (gethash "kind" object) "Job")
     (remhash "status" object)
     (validate-template-shape object (template-schema "io.k8s.api.batch.v1.Job") "Job")
-    ;; Kubernetes nullable optional pointers do not request an unsupported
-    ;; policy. Preserve explicit non-null requests for admission rejection.
+    ;; Kubernetes nullable optional pointers request nothing.
     (dolist (field '("podFailurePolicy" "successPolicy" "backoffLimitPerIndex" "maxFailedIndexes"))
       (when (eq (gethash field spec) 'null) (remhash field spec)))
     (reject-unsupported-fields spec '("parallelism" "completions" "activeDeadlineSeconds" "backoffLimit" "selector"
                                        "manualSelector" "template" "ttlSecondsAfterFinished" "completionMode"
-                                       "suspend" "podReplacementPolicy" "managedBy") "Job.spec")
+                                       "suspend" "podReplacementPolicy" "managedBy" "podFailurePolicy" "successPolicy"
+                                       "backoffLimitPerIndex" "maxFailedIndexes") "Job.spec")
     (when (and (member (gethash "parallelism" spec) '(nil null)) (member (gethash "completions" spec) '(nil null)))
       (setf (gethash "parallelism" spec) 1 (gethash "completions" spec) 1))
-    (setf (gethash "parallelism" spec) (workload-int (gethash "parallelism" spec) "Job.spec.parallelism" 1)
-          (gethash "backoffLimit" spec) (workload-int (gethash "backoffLimit" spec) "Job.spec.backoffLimit" 6))
-    (dolist (field '("completions" "ttlSecondsAfterFinished"))
+    (dolist (field '("completions" "ttlSecondsAfterFinished" "backoffLimitPerIndex" "maxFailedIndexes"))
       (if (member (gethash field spec) '(nil null)) (remhash field spec)
           (setf (gethash field spec) (workload-int (gethash field spec) field))))
+    ;; Per-index counting replaces the Job-wide limit unless one is requested.
+    (setf (gethash "parallelism" spec) (workload-int (gethash "parallelism" spec) "Job.spec.parallelism" 1)
+          (gethash "backoffLimit" spec) (workload-int (gethash "backoffLimit" spec) "Job.spec.backoffLimit"
+                                                      (if (gethash "backoffLimitPerIndex" spec) 2147483647 6)))
     (let ((deadline (gethash "activeDeadlineSeconds" spec)))
       (if (member deadline '(nil null)) (remhash "activeDeadlineSeconds" spec)
           (unless (typep deadline '(integer 1 9223372036854775807))
@@ -63,15 +179,24 @@
       (setf (gethash field spec) (batch-boolean (gethash field spec) field)))
     (when (member (gethash "completionMode" spec) '(nil null) :test #'equal)
       (setf (gethash "completionMode" spec) "NonIndexed"))
-    (unless (equal "NonIndexed" (gethash "completionMode" spec))
-      (core-resource-error 422 "Invalid" "Indexed Jobs require the executing index controller"))
     (when (member (gethash "podReplacementPolicy" spec) '(nil null) :test #'equal)
-      (setf (gethash "podReplacementPolicy" spec) "TerminatingOrFailed"))
+      (setf (gethash "podReplacementPolicy" spec)
+            (if (gethash "podFailurePolicy" spec) "Failed" "TerminatingOrFailed")))
     (unless (member (gethash "podReplacementPolicy" spec) '("Failed" "TerminatingOrFailed") :test #'equal)
       (core-resource-error 422 "Invalid" "Invalid Job podReplacementPolicy"))
+    (when (and (gethash "podFailurePolicy" spec) (not (equal "Failed" (gethash "podReplacementPolicy" spec))))
+      (core-resource-error 422 "Invalid" "podFailurePolicy requires podReplacementPolicy Failed"))
+    (validate-job-completion-mode spec metadata pod-spec)
+    (when (gethash "podFailurePolicy" spec) (validate-job-failure-policy spec pod-spec))
+    (when (gethash "successPolicy" spec) (validate-job-success-policy spec))
     (when (eq (gethash "managedBy" spec) 'null) (remhash "managedBy" spec))
-    (when (and (gethash "managedBy" spec) (not (equal "kubernetes.io/job-controller" (gethash "managedBy" spec))))
-      (core-resource-error 422 "Invalid" "External Job controllers are not implemented"))
+    (let ((manager (gethash "managedBy" spec)))
+      (when manager
+        (unless (and (stringp manager) (<= 1 (length manager) 63) (= 1 (count #\/ manager))
+                     (plusp (position #\/ manager))
+                     (dns-subdomain-p (subseq manager 0 (position #\/ manager)))
+                     (core-label-name-p (subseq manager (1+ (position #\/ manager)))))
+          (core-resource-error 422 "Invalid" "Job.spec.managedBy must be a domain-prefixed path of at most 63 characters"))))
     (let ((embedded (gethash "metadata" template)))
       (when (member embedded '(nil null)) (setf embedded (core-object)))
       (setf (gethash "metadata" template) embedded)
@@ -130,7 +255,8 @@
             unless (find name (gethash "finalizers" (gethash "metadata" existing) #()) :test #'equal)
               do (core-resource-error 422 "Invalid" "Job finalizers cannot be added after deletion begins")))
     (when existing
-      (dolist (field '("selector" "template" "completions" "completionMode" "manualSelector" "managedBy"))
+      (dolist (field '("selector" "template" "completions" "completionMode" "manualSelector" "managedBy"
+                       "podFailurePolicy" "successPolicy" "backoffLimitPerIndex"))
         (unless (workload-equal-p (gethash field spec) (gethash field (gethash "spec" existing)))
           (core-resource-error 422 "Invalid" "Job.spec.~A is immutable" field))))
     (remhash "deletionTimestamp" metadata)
@@ -142,10 +268,10 @@
           (gethash "status" object) (if existing (copy-core-object (gethash "status" existing (core-object))) (core-object)))
     object))
 
-(defun decode-batch-protobuf (bytes)
-  "Decode typed Job input with the pinned batch/v1 field numbers and omission rules."
-  (let* ((object (template-protobuf-message "k8s.io.api.batch.v1.Job" bytes))
+(defun decode-batch-protobuf (bytes &optional (kind "Job"))
+  "Decode typed Job or CronJob input with the pinned batch/v1 field numbers and omission rules."
+  (let* ((object (template-protobuf-message (concatenate 'string "k8s.io.api.batch.v1." kind) bytes))
          (metadata (core-protobuf-value (core-protobuf-fields bytes) 1)))
     (setf (gethash "metadata" object) (if metadata (core-protobuf-metadata metadata) (core-object))
-          (gethash "apiVersion" object) "batch/v1" (gethash "kind" object) "Job")
+          (gethash "apiVersion" object) "batch/v1" (gethash "kind" object) kind)
     object))
