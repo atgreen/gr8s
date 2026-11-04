@@ -471,3 +471,19 @@
     (is (null (gr8s::pod-ephemeral-violation pod (list (cons "main" 1024)) 0)))
     (is (search "Container main" (gr8s::pod-ephemeral-violation pod (list (cons "main" 1025)) 0)))
     (is (search "total limit" (gr8s::pod-ephemeral-violation pod (list (cons "main" 1000)) 100)))))
+
+(test node-measures-its-own-capacity-and-directory-usage
+  (let ((capacity (gr8s::node-reported-capacity)))
+    (is (plusp (gr8s::policy-value (gethash "cpu" capacity))))
+    (is (plusp (gr8s::policy-value (gethash "memory" capacity))))
+    (is (plusp (gr8s::policy-value (gethash "ephemeral-storage" capacity))))
+    (is (equal "110" (gethash "pods" capacity))))
+  (with-temporary-store (store path)
+    (values store)
+    (let ((root (merge-pathnames "usage/nested/" path)))
+      (ensure-directories-exist root)
+      (with-open-file (out (merge-pathnames "file" root) :direction :output :element-type '(unsigned-byte 8))
+        (write-sequence (make-array 4096 :element-type '(unsigned-byte 8) :initial-element 0) out))
+      (sb-posix:symlink "/etc/passwd" (namestring (merge-pathnames "link" root)))
+      ;; The symbolic link counts only itself, never its target.
+      (is (<= 4096 (gr8s::directory-disk-bytes (namestring (merge-pathnames "usage/" path))) 4200)))))
