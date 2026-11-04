@@ -3,8 +3,8 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Serve actual certificate-request discovery and separately authorized status
-;;;; and approval endpoints. Resolve actors only from verified ServiceAccount
-;;;; tokens, share durable ordinary CRUD/watches, and publish typed OpenAPI paths.
+;;;; and approval endpoints. Resolve actors only from verified request credentials,
+;;;; share durable ordinary CRUD/watches, and publish typed OpenAPI paths.
 
 (in-package #:gr8s)
 

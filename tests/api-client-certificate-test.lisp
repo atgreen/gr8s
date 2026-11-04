@@ -24,6 +24,30 @@
          (boundary (position #\Newline text :from-end t)))
     (values (parse-integer text :start (1+ boundary)) (com.inuoe.jzon:parse (subseq text 0 boundary)))))
 
+(defun certificate-api-test-invalid-proof-rejected-p (pki certificate wrong-key token)
+  "Require actual TLS to reject a certificate presented with another private key, despite a valid token."
+  (sb-sys:with-deadline (:seconds 10)
+    (let ((socket (usocket:socket-connect "127.0.0.1" 18096 :element-type '(unsigned-byte 8))) (tls nil))
+      (unwind-protect
+           (handler-case
+               (progn
+                 (setf tls (pure-tls:make-tls-client-stream
+                             (usocket:socket-stream socket) :hostname "kubernetes.default.svc"
+                             :client-certificate certificate :client-key wrong-key
+                             :context (pure-tls:make-tls-context :verify-mode pure-tls:+verify-required+
+                                        :ca-file (namestring (gr8s:cluster-pki-ca-certificate-path pki))
+                                        :auto-load-system-ca nil)))
+                 (write-sequence
+                   (trivial-utf-8:string-to-utf-8-bytes
+                     (format nil "GET /version HTTP/1.1~C~CHost: kubernetes.default.svc~C~CAuthorization: Bearer ~A~C~CConnection: close~C~C~C~C"
+                             #\Return #\Linefeed #\Return #\Linefeed token #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed)) tls)
+                 (finish-output tls)
+                 (null (read-byte tls nil nil)))
+             (pure-tls:tls-error () t)
+             (stream-error () t))
+        (when tls (ignore-errors (close tls)))
+        (ignore-errors (usocket:socket-close socket))))))
+
 (defun certificate-api-test-grant (store name subject rules)
   "Create a real cluster role and binding for a certificate User or Group."
   (gr8s::create-core-resource store "clusterroles"
@@ -32,10 +56,9 @@
     (gr8s::core-object "metadata" (gr8s::core-object "name" name) "subjects" (vector subject)
       "roleRef" (gr8s::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "ClusterRole" "name" name)) nil))
 
-(defun certificate-api-test-subject-leaf (pki attributes)
+(defun certificate-api-test-subject-leaf (pki attributes &key expired)
   "Sign a real client leaf with explicit subject OIDs for user mapping edge cases."
   (multiple-value-bind (private public) (ironclad:generate-key-pair :secp256r1)
-    (declare (ignore private))
     (let* ((subject (apply #'pure-tls/acme::encode-sequence
                      (loop for (oid . value) in attributes
                            collect (pure-tls/acme::encode-der #x31
@@ -47,7 +70,16 @@
                   (list (pure-tls/acme::encode-extension gr8s::+oid-extended-key-usage+
                           (pure-tls/acme::encode-sequence (pure-tls/acme::encode-oid '(1 3 6 1 5 5 7 3 2)))))
                   (gr8s::cluster-pki-ca-private-key pki))))
-      (pure-tls::parse-certificate der))))
+      (when expired
+        (let* ((fields (pure-tls::asn1-children (first (pure-tls::asn1-children (pure-tls::parse-der der)))))
+               (tbs (apply #'pure-tls/acme::encode-sequence
+                      (loop for field in fields for index from 0
+                            collect (if (= index 4)
+                                        (pure-tls/acme::encode-validity (- (get-universal-time) 7200) (- (get-universal-time) 3600))
+                                        (pure-tls::asn1-node-raw-bytes field))))))
+          (setf der (pure-tls/acme::encode-sequence tbs (pure-tls::asn1-node-raw-bytes (third fields))
+                      (pure-tls/acme::encode-bit-string (gr8s::ecdsa-sign-der (gr8s::cluster-pki-ca-private-key pki) tbs))))))
+      (values (pure-tls::parse-certificate der) private))))
 
 (test certificate-user-uid-mapping-and-purpose-verification
   (with-temporary-store (store directory)
@@ -77,6 +109,52 @@
         (declare (ignore server-key))
         (signals kubernetes-error
           (gr8s::certificate-api-identity (pure-tls:load-certificate-chain server-certificate) ca))))))
+
+(test certificate-authentication-errors-allow-live-token-alternatives-at-http
+  (with-temporary-store (store directory)
+    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
+           (foreign (gr8s:ensure-cluster-pki (merge-pathnames "foreign/" directory)))
+           (runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
+           (collection "/apis/certificates.k8s.io/v1/certificatesigningrequests")
+           (attributes '(((2 5 4 3) . "certificate-user")))
+           (server nil))
+      (service-account-test-store store)
+      (let* ((secret (gr8s::ensure-service-account-credential store "alpha" "reader"))
+             (token (service-account-test-token secret))
+             (headers (list (concatenate 'string "Authorization: Bearer " token))))
+        (certificate-api-test-grant store "token-csr-create"
+          (gr8s::core-object "kind" "ServiceAccount" "name" "reader" "namespace" "alpha")
+          (vector (gr8s::core-object "apiGroups" #("certificates.k8s.io") "resources" #("certificatesigningrequests") "verbs" #("create"))))
+        (unwind-protect
+             (progn
+               (setf server (gr8s::start-in-cluster-api store runtime reconciler pki :address "127.0.0.1" :port 18096))
+               (dolist (kind '(:expired :untrusted :valid))
+                 (multiple-value-bind (leaf private)
+                     (certificate-api-test-subject-leaf (if (eq kind :untrusted) foreign pki) attributes :expired (eq kind :expired))
+                   (let ((certificate (merge-pathnames (format nil "~(~A~).pem" kind) directory))
+                         (key (merge-pathnames (format nil "~(~A~).key" kind) directory)))
+                     (gr8s::write-private-text-exclusively certificate
+                       (pure-tls/acme::wrap-pem "CERTIFICATE" (pure-tls::x509-certificate-raw-der leaf)))
+                     (gr8s::write-private-text-exclusively key (pure-tls/acme::encode-ec-private-key-pem private))
+                     (is (= (if (eq kind :valid) 200 401) (certificate-api-test-request pki certificate key "/version")))
+                     (is (= 200 (certificate-api-test-request pki certificate key "/version" :headers headers)))
+                     (let* ((request (csr-crypto-fixture directory "ec"))
+                            (fixture (csr-fixture request :name (string-downcase (symbol-name kind)))))
+                       (multiple-value-bind (code created)
+                           (certificate-api-test-request pki certificate key collection :method "POST" :object fixture :headers headers)
+                         ;; A valid certificate wins authentication even when only
+                         ;; the alternative token has the required resource grant.
+                         (is (= (if (eq kind :valid) 403 201) code))
+                         (unless (eq kind :valid)
+                           (is (equal "system:serviceaccount:alpha:reader" (gethash "username" (gethash "spec" created))))
+                           (is (equal (gr8s::api-service-account-identity-uid (gr8s::authenticate-service-account-token store token))
+                                      (gethash "uid" (gethash "spec" created))))))))))
+               (multiple-value-bind (certificate key) (gr8s::ensure-kubernetes-api-credentials pki)
+                 (is (= 401 (certificate-api-test-request pki certificate key "/version")))
+                 (is (= 200 (certificate-api-test-request pki certificate key "/version" :headers headers)))
+                 (is-true (certificate-api-test-invalid-proof-rejected-p pki
+                            (merge-pathnames "valid.pem" directory) key token))))
+          (when server (stop-server server)))))))
 
 (test approved-certificate-authenticates-actual-api-and-server-owned-csr-actor
   (with-temporary-store (store directory)

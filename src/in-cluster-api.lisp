@@ -3,7 +3,7 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Serve the in-cluster Kubernetes API over pure-tls with a distinct server
-;;;; certificate, cluster service DNS/IP SANs, ServiceAccount authentication and
+;;;; certificate, cluster service DNS/IP SANs, token/certificate authentication and
 ;;;; live RBAC checks. The existing local administrative HTTP endpoint remains
 ;;;; separate from this authenticated listener.
 
@@ -63,21 +63,23 @@
   t)
 
 (defvar *api-connection-certificate-chain* nil
-  "Verified peer chain scoped to one connection, including all keepalive requests.")
+  "TLS peer chain with verified key possession, scoped to one connection including keepalive requests.")
 
 (defmethod hunchentoot:process-connection :around ((acceptor gr8s-in-cluster-acceptor) socket)
   "Isolate TLS peer identity across worker reuse and retain it across keepalive requests."
   (let ((*api-connection-certificate-chain* nil)) (call-next-method)))
 
 (defmethod hunchentoot:initialize-connection-stream ((acceptor gr8s-in-cluster-acceptor) stream)
-  "Request optional verified client credentials while retaining bearer-token clients."
+  "Request optional client proof-of-possession; HTTP authenticators verify trust and token alternatives."
   (sb-sys:with-deadline (:seconds 10)
     ;; This TLS implementation's resumption tickets do not retain peer chains.
     ;; Fresh ticket keys require a full certificate handshake on every connection.
     (let* ((pure-tls:*server-ticket-key* (ironclad:random-data 32))
            (tls (pure-tls:make-tls-server-stream stream :certificate (in-cluster-certificate acceptor)
                     :key (in-cluster-private-key acceptor) :verify pure-tls:+verify-peer+
-                    :trust-store (pure-tls::make-trust-store :certificates (list (in-cluster-client-ca acceptor))))))
+                    ;; Preserve TLS CertificateVerify proof, but defer CA/expiry/purpose
+                    ;; checks to HTTP so another authenticator may accept a valid token.
+                    :trust-store nil)))
       (setf *api-connection-certificate-chain* (pure-tls:tls-peer-certificate-chain tls))
       tls)))
 
@@ -110,8 +112,10 @@
   "Authenticate a verified certificate or live bearer token, then enforce current RBAC."
   (let* ((header (hunchentoot:header-in :authorization request))
          (token (when (and header (uiop:string-prefix-p "Bearer " header)) (subseq header 7)))
-         (identity (or (certificate-api-identity *api-connection-certificate-chain*
-                                                 (in-cluster-client-ca (hunchentoot:request-acceptor request)))
+         (identity (or (handler-case
+                           (certificate-api-identity *api-connection-certificate-chain*
+                             (in-cluster-client-ca (hunchentoot:request-acceptor request)))
+                         (kubernetes-error () nil))
                        (and token (authenticate-service-account-token store token))))
          (path (hunchentoot:script-name request)) (method (hunchentoot:request-method request)))
     (unless identity (core-resource-error 401 "Unauthorized" "A valid client certificate or ServiceAccount bearer token is required"))

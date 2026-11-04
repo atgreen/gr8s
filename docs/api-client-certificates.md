@@ -1,8 +1,10 @@
 # Kubernetes API client certificates
 
 The public Kubernetes TLS API accepts client certificates signed by its cluster
-CA. It verifies the actual TLS CertificateVerify proof and certificate chain,
-validity, key usage and client-authentication purpose. A certificate's common
+CA. TLS requests optional client certificates and verifies the actual
+CertificateVerify signature proving possession of the private key. HTTP
+certificate authentication then verifies the chain, validity, key usage and
+client-authentication purpose. A certificate's common
 name becomes the username; organization attributes become groups, together
 with `system:authenticated`. An optional subject UID uses Kubernetes' published
 OID `1.3.6.1.4.1.57683.2`, requires exactly one nonempty string, and is copied to
@@ -25,7 +27,14 @@ actor fields, impersonation headers and forwarded identity headers cannot
 supply that identity.
 
 TLS client certificates are optional so existing ServiceAccount bearer-token
-clients continue working. Peer certificate identity is isolated per connection
+clients continue working. The pinned Kubernetes [serving configuration](https://github.com/kubernetes/apiserver/blob/v0.36.0/pkg/server/secure_serving.go#L72)
+requests certificates, and its [authenticator union](https://github.com/kubernetes/apiserver/blob/v0.36.0/pkg/authentication/request/union/union.go#L30)
+continues after certificate authentication errors. Expired, untrusted or
+wrong-purpose certificates cannot supply an identity, but a valid live bearer
+token can still authenticate that HTTP request. When neither credential works,
+the response is HTTP 401. Invalid TLS proof of possession still fails TLS.
+A valid certificate wins before bearer authentication; an RBAC denial does not
+retry authorization using another identity. Peer certificate identity is isolated per connection
 and retained across keepalive requests. Every request rechecks certificate
 validity and current RBAC bindings. This TLS implementation's resumption tickets
 do not retain verified peer chains, so each new connection uses a full handshake
@@ -35,6 +44,10 @@ existing explicit administrative trust model.
 [API certificate profile policies](certificate-signing-requests.md) continue to
 separate API credentials from internal enrollment credentials. API-issued
 certificates cannot authenticate an internal node or control server; enrollment
-credentials, cluster CA and pins retain their existing behavior. This feature
+credentials, cluster CA and pins retain their existing behavior. On the public
+Kubernetes interface, a legacy enrollment certificate follows the same signed
+CN/O identity and RBAC rule as every other trusted client certificate, including
+its existing bare common name. The API-profile restriction applies specifically
+to the additional internal node/control protocol. This feature
 does not implement certificate revocation lists, impersonation, external client
 CA configuration or automatic custom-signer controllers.
