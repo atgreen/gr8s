@@ -1,0 +1,168 @@
+{
+  "focus": "Certificates API",
+  "mode": "focused",
+  "isCertificationResult": false,
+  "nativeSHA256": "907facb86774aeeef75a6b468a8b95b03a3ae241e44f459c8b55453fb120c845",
+  "stateDirectory": "/var/tmp/gr8s-podtemplates.vd3wzxyp/state",
+  "reusedState": true,
+  "nativeAgentReady": true,
+  "version": {
+    "major": "1",
+    "minor": "36",
+    "gitVersion": "v1.36.0-gr8s.0",
+    "gitCommit": "unknown",
+    "gitTreeState": "clean",
+    "buildDate": "1970-01-01T00:00:00Z",
+    "goVersion": "common-lisp",
+    "compiler": "sbcl",
+    "platform": "linux/amd64"
+  },
+  "sonobuoyVersion": "v0.57.5",
+  "stateReuseCleanupOperations": [
+    {
+      "resource": "pods",
+      "name": "sonobuoy",
+      "uid": "4540C039-65D1-4017-9489-AF83DD858EC4",
+      "code": 200
+    },
+    {
+      "resource": "configmaps",
+      "name": "kube-root-ca.crt",
+      "uid": "84EBC1DF-E26B-4144-A9CB-F5249BAC88B2",
+      "code": 200
+    },
+    {
+      "resource": "configmaps",
+      "name": "sonobuoy-config-cm",
+      "uid": "FE201066-B010-4C4F-8DDD-D03CFD20188F",
+      "code": 200
+    },
+    {
+      "resource": "configmaps",
+      "name": "sonobuoy-plugins-cm",
+      "uid": "EDC9E094-FD07-492D-8F3C-A0D8E088ADEC",
+      "code": 200
+    },
+    {
+      "resource": "secrets",
+      "name": "sonobuoy-plugin-e2e-103956d1c4044735",
+      "uid": "D449E2D1-13FF-451E-9C6E-015BC8E832EE",
+      "code": 200
+    },
+    {
+      "resource": "secrets",
+      "name": "sonobuoy-serviceaccount-token-dd0b3c81",
+      "uid": "7EB8E3B2-4690-4189-B412-B77E1F4BB9EE",
+      "code": 200
+    },
+    {
+      "resource": "serviceaccounts",
+      "name": "default",
+      "uid": "A7BA40ED-F5B1-470C-AF43-82431D49D6AB",
+      "code": 200
+    },
+    {
+      "resource": "serviceaccounts",
+      "name": "sonobuoy-serviceaccount",
+      "uid": "DD0B3C81-90A7-4B95-8A25-5447D537E0EF",
+      "code": 200
+    },
+    {
+      "resource": "services",
+      "name": "sonobuoy-aggregator",
+      "uid": "91CEE48B-B4A8-4859-9D58-3C34A4AE1551",
+      "code": 200
+    },
+    {
+      "resource": "clusterrolebindings",
+      "name": "sonobuoy-serviceaccount-sonobuoy",
+      "uid": "D1A530C5-B09B-4FDA-9D10-1EB48DD45170",
+      "code": 200
+    },
+    {
+      "resource": "clusterroles",
+      "name": "sonobuoy-serviceaccount-sonobuoy",
+      "uid": "ED61803F-63E9-4CE4-846E-3C511D21B157",
+      "code": 200
+    },
+    {
+      "resource": "namespaces",
+      "name": "sonobuoy",
+      "code": 200
+    }
+  ],
+  "sonobuoyRunExitCode": 0,
+  "passed": true,
+  "suiteStarts": 1,
+  "selectedSpecs": [
+    [
+      "2",
+      "7579"
+    ]
+  ],
+  "upstreamCases": [
+    {
+      "name": "[It] [sig-auth] Certificates API [Privileged:ClusterAdmin] should support CSR API operations [Conformance]",
+      "seconds": "1.024207143",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-auth] Certificates API [Privileged:ClusterAdmin] should support building a client with a CSR",
+      "seconds": "10.52840034",
+      "passed": true
+    }
+  ],
+  "suiteHookEntries": 7,
+  "nativeExitCode": 0,
+  "ownedShimsRemaining": [],
+  "artifactSHA256": {
+    "gr8s.log": "a1f04f0f52957b12c9386ccf65eb4d9974db0861a43c616b710e1bea47ea0cb0",
+    "sonobuoy.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sonobuoy.stderr.log": "98492befb5f11bb165ca330baf77da016043e83606089794f961a0fa6562d3e0",
+    "sonobuoy-results.tar.gz": "27a4e9885640676947c58afa1279fcf2d18f9e923c51cdaf4f7948d74d14c12f",
+    "kube-sonobuoy.log": "325b3d8509a0b997a69369d81dfeb94be8bb625ed87e3519eb42577cf9a1ac78",
+    "e2e.log": "772a74022c7186547091b1d3861ecb10a95fda5f5816a7ac52774cb6a9e4d388",
+    "sonobuoy-worker.log": "c64a59a008926ee67c3417a01f31c3bdde05e255a3255a3ada6126d46360bac3",
+    "sonobuoy-results.txt": "3dfd53d30ec640a9eb7e9b22a091c703607e93bd0c1b63331b6d18ff7d5df7d9"
+  },
+  "sourceCommit": "a02f61f",
+  "copiedArtifactHashesVerified": true,
+  "independentJUnitCases": [
+    {
+      "name": "[It] [sig-auth] Certificates API [Privileged:ClusterAdmin] should support CSR API operations [Conformance]",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-auth] Certificates API [Privileged:ClusterAdmin] should support building a client with a CSR",
+      "passed": true
+    }
+  ],
+  "beforeAuthEvidence": "certificate-signing-requests-upstream-2026-11-04.json",
+  "recordedAtUTC": "2026-11-04T04:14:37.494457+00:00",
+  "hostValidation": {
+    "fullGate": {
+      "checks": 2966,
+      "passed": 2961,
+      "skipped": 5,
+      "failed": 0
+    },
+    "newMeaningfulChecks": 27,
+    "documentationAudit": "5 source files passed",
+    "artifacts": [
+      {
+        "path": "/tmp/gr8s-api-client-auth-full-2.log",
+        "sha256": "ea4560af30993f11c1e327e260c3a251b1da762a8ccd576d2302ecb88d62eb28"
+      },
+      {
+        "path": "/tmp/gr8s-api-client-auth-native-build-1.log",
+        "sha256": "e39f71c01e6dcfdc16b82819900ff71dc43471aa9da26b2d975a004dc02019f1"
+      }
+    ]
+  },
+  "preservedEarlierHostFailure": {
+    "path": "/tmp/gr8s-api-client-auth-full-1.log",
+    "checks": 2965,
+    "failed": 1,
+    "cause": "Original ServiceAccount group order changed; restored original ordering and unchanged regression/full gate now passes."
+  }
+}

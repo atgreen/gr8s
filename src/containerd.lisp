@@ -139,7 +139,7 @@
               (gethash "resourceVersion" state ""))
           :spec-fingerprint (or (and sandbox (cdr (assoc +gr8s-spec-fingerprint-label+ (cri-pod-sandbox-info-labels sandbox) :test #'string=)))
                                 (gethash "specFingerprint" state))
-          :pod-ip (if sandbox (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime) (cri-pod-sandbox-info-id sandbox)) "")
+          :pod-ip (if sandbox (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime) (cri-pod-sandbox-info-id sandbox)) (gethash "podIP" state ""))
           :phase (container-lifecycle-phase statuses (and sandbox (= gr8s.cri.v1::+podsandboxstate-sandbox_ready+
                                                                          (cri-pod-sandbox-info-state sandbox))))
           :container-details details
@@ -182,7 +182,10 @@
 
 (defmethod runtime-terminate-pod ((runtime containerd-runtime) pod deadline)
   "Carry out one cancellable native Pod shutdown job."
-  (containerd-delete-uid runtime (pod-uid pod) deadline))
+  (stop-container-probes runtime (pod-uid pod))
+  (when (pod-finalizers-present-p pod)
+    (capture-containerd-finalized-pod runtime pod deadline))
+  (containerd-delete-uid runtime (pod-uid pod) deadline :preserve-lifecycle (pod-finalizers-present-p pod)))
 
 (defmethod runtime-delete-pod ((runtime containerd-runtime) pod)
   "Poll the native Pod shutdown job without holding reconciliation until exit."
@@ -203,15 +206,16 @@
       (when (or (equal policy "Always")
                 (and (equal policy "IfNotPresent") (not (cri-image-present-p socket (container-spec-image spec)))))
         (cri-pull-image socket (container-spec-image spec))))
-    (let ((container-id
+    (let* ((environment (containerd-pod-environment runtime pod spec sandbox-id))
+           (container-id
             (cri-create-container
              socket sandbox-id sandbox-config
              :name (container-spec-name spec)
              :image (container-spec-image spec)
-             :command (coerce (container-spec-command spec) 'list)
-             :args (coerce (container-spec-args spec) 'list)
-             :env (containerd-pod-environment runtime pod spec sandbox-id)
-             :mounts (containerd-pod-mounts runtime pod spec)
+             :command (expand-container-command (container-spec-command spec) environment)
+             :args (expand-container-command (container-spec-args spec) environment)
+             :env environment
+             :mounts (containerd-container-mounts runtime pod spec sandbox-id)
              :security-context (containerd-pod-security-context pod spec)
              :working-directory (gethash "workingDir" (pod-runtime-container-object pod spec))
              :uid (pod-uid pod)

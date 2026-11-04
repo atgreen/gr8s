@@ -24,6 +24,7 @@
          (equal (pod-resource-version pod) (pod-resource-version current)))))
 
 (defun persist-pod-status-state (store pod &key
+                                         (finalization (gethash (pod-uid pod) (pod-store-pod-finalization-states store)))
                                          (conditions (gethash (pod-uid pod) (pod-store-pod-condition-histories store)))
                                          (status (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)))
                                          (resource-version (gethash (pod-uid pod) (pod-store-pod-observed-resource-versions store))))
@@ -37,6 +38,7 @@
           (gethash "namespace" record) (pod-namespace pod)
           (gethash "name" record) (pod-name pod)
           (gethash "conditions" record) (or conditions #()))
+    (when finalization (setf (gethash "finalization" record) finalization))
     (when status
       (setf (gethash "status" record) status
             (gethash "observedResourceVersion" record) resource-version))
@@ -58,11 +60,17 @@
         (error "Unsupported Pod observation checkpoint format in ~A" path))
       (if (and pod (equal uid (pod-uid pod)) (equal uid (pathname-name path)))
           (let ((status (gethash "status" record))
+                (finalization (gethash "finalization" record))
                 (conditions (gethash "conditions" record #()))
                 (revision (gethash "observedResourceVersion" record)))
             (unless (and (vectorp conditions) (not (stringp conditions)))
               (error "Invalid Pod condition checkpoint in ~A" path))
             (setf (gethash uid (pod-store-pod-condition-histories store)) conditions)
+            (when finalization
+              (unless (and (hash-table-p finalization) (member (gethash "runtimeDeleted" finalization) '(t nil))
+                           (or (null (gethash "status" finalization)) (pod-terminal-status-p (gethash "status" finalization))))
+                (error "Invalid Pod finalization checkpoint in ~A" path))
+              (setf (gethash uid (pod-store-pod-finalization-states store)) finalization))
             (when status
               (unless (and (hash-table-p status) (stringp revision))
                 (error "Invalid Pod observation checkpoint in ~A" path))
