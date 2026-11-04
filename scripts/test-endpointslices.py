@@ -188,6 +188,14 @@ def main():
                 record["address"] = socket.inet_ntoa(response[offset:offset + size])
             elif kind in (5, 12):
                 record["target"], _ = read_name(offset)
+            elif kind == 16:
+                cursor, end = offset, offset + size
+                record["strings"] = []
+                while cursor < end:
+                    length = response[cursor]
+                    cursor += 1
+                    record["strings"].append(response[cursor:cursor + length].decode())
+                    cursor += length
             elif kind == 33:
                 record["priority"], record["weight"], record["port"] = struct.unpack_from("!3H", response, offset)
                 record["target"], _ = read_name(offset + 6)
@@ -199,6 +207,11 @@ def main():
         """Inspect actual IPv4 DNS addresses while retaining the authoritative result code."""
         code, records = dns_query(name, tcp)
         return code, {record["address"] for record in records if record["type"] == 1}
+
+    def dns_targets(name, qtype=5, tcp=False):
+        """Observe actual alias targets without indexing a legitimately empty transitional answer."""
+        code, records = dns_query(name, tcp, qtype)
+        return code, {record["target"] for record in records if record["type"] == qtype and "target" in record}
 
     def shims():
         """Inspect only runtime shims belonging to this explicitly owned state."""
@@ -280,6 +293,37 @@ def main():
                 assert dns(fqdn) == (0, {address})
             report["scenarios"]["actualDNSRecords"] = {"passed": True, "normalServiceSRV": records, "headlessActualTargetSRV": headless_records,
                                                        "realPodHostnamesAndHosts": True, "escapedCommandActuallyExecuted": True, "resolvedCommandEnvironment": True}
+        if args.verify_dns_records:
+            alias = create("services", {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "alias"},
+                           "spec": {"type": "ExternalName", "externalName": "foo.example.org"}})
+            alias_owner = f"alias.{namespace}.svc.cluster.local"
+            wait(lambda: dns_targets(alias_owner) == (0, {"foo.example.org"}), "actual ExternalName CNAME publication")
+            for tcp in (False, True):
+                assert dns_query(alias_owner, tcp, 5)[1][0]["target"] == "foo.example.org"
+                assert dns_query("dns-version.cluster.local", tcp, 16)[1][0]["strings"] == ["1.1.0"]
+            code, value = request(path("services", "alias"), "PATCH", {"spec": {"externalName": "bar.example.org"}},
+                                  content_type="application/merge-patch+json")
+            assert code == 200, (code, value)
+            wait(lambda: dns_targets(alias_owner) == (0, {"bar.example.org"}), "actual changed ExternalName CNAME")
+            code, cluster_alias = request(path("services", "alias"), "PATCH",
+                                  {"spec": {"type": "ClusterIP", "selector": {"app": "web"},
+                                            "ports": [{"name": "http", "port": 8083, "targetPort": "http"}]}},
+                                  content_type="application/merge-patch+json")
+            assert code == 200, (code, cluster_alias)
+            alias_ip = cluster_alias["spec"]["clusterIP"]
+            wait(lambda: dns(alias_owner) == (0, {alias_ip}), "actual ExternalName to ClusterIP DNS conversion")
+            actual_alias_http = wait(lambda: http(alias_ip, 8083), "actual forwarding after ExternalName to ClusterIP conversion")
+            assert actual_alias_http in expected, actual_alias_http
+            code, external_alias = request(path("services", "alias"), "PATCH",
+                                  {"spec": {"type": "ExternalName", "externalName": "final.example.org"}},
+                                  content_type="application/merge-patch+json")
+            assert code == 200 and not external_alias["spec"].get("clusterIP"), (code, external_alias)
+            wait(lambda: dns_targets(alias_owner) == (0, {"final.example.org"}), "actual restored ExternalName CNAME")
+            assert alias["metadata"]["uid"] == external_alias["metadata"]["uid"]
+            report["scenarios"]["actualExternalNameDNS"] = {"passed": True, "initialTarget": "foo.example.org", "mutatedTarget": "bar.example.org",
+                                                          "allocatedClusterIP": alias_ip, "actualConvertedServiceHTTPResponse": actual_alias_http,
+                                                          "finalTarget": "final.example.org", "sameServiceUID": alias["metadata"]["uid"] == external_alias["metadata"]["uid"],
+                                                          "actualSchemaTXT": "1.1.0"}
         target = children[0]
         manual_service = service("manual")
         manual = create("endpointslices", {"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice",
@@ -320,6 +364,8 @@ def main():
             if args.verify_dns_records:
                 assert {r["target"] for r in dns_query(headless_owner, True, 33)[1]} == expected_targets
                 report["scenarios"]["actualDNSRecords"]["restartRecovered"] = True
+                assert dns_query(alias_owner, True, 5)[1][0]["target"] == "final.example.org"
+                report["scenarios"]["actualExternalNameDNS"]["restartRecovered"] = True
         code, value = request(path("pods", target["metadata"]["name"]), "DELETE", {"gracePeriodSeconds": 30, "preconditions": {"uid": target["metadata"]["uid"]}})
         assert code == 200, (code, value)
         def terminating():
