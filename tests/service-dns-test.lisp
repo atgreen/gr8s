@@ -151,3 +151,60 @@
                          (service-dns-test-message store "web.alpha.svc.cluster.local")))))
     (is (= 3 (logand 15 (0conf:dns-message-flags
                          (service-dns-test-message store "web.alpha.svc.cluster.local" 0conf:+type-aaaa+)))))))
+
+(def-suite service-dns-records :in gr8s)
+(in-suite service-dns-records)
+
+(defun dns-srv-tuples (message)
+  "Inspect the decoded endpoint targets and ports instead of only counting records."
+  (sort (mapcar (lambda (record) (list (0conf:srv-port record)
+                                      (gr8s::canonical-dns-name (0conf:srv-target record))))
+                (0conf:dns-message-answers message))
+        #'string< :key (lambda (entry) (format nil "~A/~A" (second entry) (first entry)))))
+
+(test service-dns-srv-normal-port-is-service-port
+  (with-temporary-store (store directory)
+    (let* ((object (service-test-object "web" 7777))
+           (port (aref (gethash "ports" (gethash "spec" object)) 0)))
+      (setf (gethash "name" port) "http")
+      (gr8s::create-core-resource store "services" object "alpha")
+      (is (equal '((8080 "web.alpha.svc.cluster.local"))
+                 (dns-srv-tuples (service-dns-test-message store "_HTTP._TCP.web.alpha.svc.cluster.local" 0conf:+type-srv+))))
+      (is (= 3 (logand 15 (0conf:dns-message-flags
+                           (service-dns-test-message store "_other._tcp.web.alpha.svc.cluster.local" 0conf:+type-srv+)))))
+      (is (= 3 (logand 15 (0conf:dns-message-flags
+                           (service-dns-test-message store "_http._udp.web.alpha.svc.cluster.local" 0conf:+type-srv+)))))
+      (is (= 3 (logand 15 (0conf:dns-message-flags
+                           (service-dns-test-message store "_http._tcp.web.other.svc.cluster.local" 0conf:+type-srv+))))))))
+
+(test service-dns-srv-headless-uses-ready-actual-endpoint-targets
+  (with-temporary-store (store directory)
+    (let* ((object (service-test-object "web" "http"))
+           (port (aref (gethash "ports" (gethash "spec" object)) 0))
+           (slice (endpointslice-test-object "one" "192.0.2.11" 7777)))
+      (setf (gethash "clusterIP" (gethash "spec" object)) "None" (gethash "name" port) "http")
+      (gr8s::create-core-resource store "services" object "alpha")
+      (is (= 3 (logand 15 (0conf:dns-message-flags
+                           (service-dns-test-message store "_http._tcp.web.alpha.svc.cluster.local" 0conf:+type-srv+)))))
+      (setf (gethash "name" (aref (gethash "ports" slice) 0)) "http"
+            (gethash "endpoints" slice)
+            (vector (gr8s::core-object "hostname" "first" "addresses" #("192.0.2.11"))
+                    (gr8s::core-object "addresses" #("192.0.2.12"))
+                    (gr8s::core-object "hostname" "notready" "addresses" #("192.0.2.13")
+                                      "conditions" (gr8s::core-object "ready" nil))))
+      (gr8s::create-core-resource store "endpointslices" slice "alpha")
+      (let ((other (endpointslice-test-object "two" "192.0.2.14" 8888)))
+        (setf (gethash "name" (aref (gethash "ports" other) 0)) "http")
+        (gr8s::create-core-resource store "endpointslices" other "alpha"))
+      (is (equal '((7777 "192-0-2-12.web.alpha.svc.cluster.local")
+                   (8888 "192-0-2-14.web.alpha.svc.cluster.local")
+                   (7777 "first.web.alpha.svc.cluster.local"))
+                 (dns-srv-tuples (service-dns-test-message store "_http._tcp.web.alpha.svc.cluster.local" 0conf:+type-srv+))))
+      (is (equalp #(192 0 2 12)
+                  (0conf:a-address (first (0conf:dns-message-answers
+                                          (service-dns-test-message store "192-0-2-12.web.alpha.svc.cluster.local"))))))
+      (is (= 3 (logand 15 (0conf:dns-message-flags
+                           (service-dns-test-message store "notready.web.alpha.svc.cluster.local")))))
+      (gr8s::delete-core-resource store "services" "alpha" "web")
+      (is (= 3 (logand 15 (0conf:dns-message-flags
+                           (service-dns-test-message store "_http._tcp.web.alpha.svc.cluster.local" 0conf:+type-srv+))))))))

@@ -69,6 +69,8 @@
 
 (defun resolve-store-service-question (store question)
   "Resolve a normal or headless Service and optional headless endpoint hostname."
+  (when (= (0conf:question-qtype question) 0conf:+type-srv+)
+    (return-from resolve-store-service-question (resolve-store-service-srv store question)))
   (let* ((name (canonical-dns-name (0conf:question-name question)))
          (labels (uiop:split-string name :separator "."))
          (count (length labels)))
@@ -86,12 +88,11 @@
                              (equal service-name (gethash "kubernetes.io/service-name"
                                                     (gethash "labels" (gethash "metadata" slice) (core-object)))))
                     (loop for endpoint across (gethash "endpoints" slice #())
-                          unless (or (let ((conditions (gethash "conditions" endpoint (core-object))))
-                                       (and (nth-value 1 (gethash "ready" conditions))
-                                            (null (gethash "ready" conditions))))
-                                     (and hostname (not (equal hostname (gethash "hostname" endpoint)))))
+                          unless (service-dns-endpoint-unready-p endpoint)
                             do (loop for address across (gethash "addresses" endpoint #())
-                                     do (pushnew address addresses :test #'equal)))))
+                                     when (or (null hostname)
+                                              (equal hostname (service-dns-endpoint-hostname endpoint address)))
+                                       do (pushnew address addresses :test #'equal)))))
                 (unless hostname
                   (setf addresses (coerce (gethash "clusterIPs" spec
                                                    (vector (gethash "clusterIP" spec))) 'list))))
@@ -106,3 +107,61 @@
 (defun store-service-dns-resolver (store)
   "Capture the agent's durable store for both DNS worker threads."
   (lambda (question) (resolve-store-service-question store question)))
+
+(defun service-dns-endpoint-unready-p (endpoint)
+  "Exclude explicitly unready endpoints while retaining unspecified or null readiness."
+  (let ((conditions (gethash "conditions" endpoint (core-object))))
+    (and (nth-value 1 (gethash "ready" conditions)) (null (gethash "ready" conditions)))))
+
+(defun service-dns-endpoint-hostname (endpoint address)
+  "Use the explicit endpoint hostname or a stable unique address-derived DNS label."
+  (let ((hostname (gethash "hostname" endpoint)))
+    (if (and (stringp hostname) (plusp (length hostname))) hostname
+        (substitute #\- #\: (substitute #\- #\. (canonical-dns-name address))))))
+
+(defun service-dns-srv-record (question port target)
+  "Return a named-port record whose target and port refer to the actual selected backend."
+  (make-instance '0conf:srv-record :name (0conf:question-name question)
+                 :priority 10 :weight 100 :port port :target target :ttl 5))
+
+(defun resolve-store-service-srv (store question)
+  "Resolve named Service ports or actual ready headless endpoint ports and hostnames."
+  (let* ((labels (uiop:split-string (canonical-dns-name (0conf:question-name question)) :separator "."))
+         (port-label (first labels)) (protocol-label (second labels)))
+    (unless (and (= 7 (length labels)) (equal (last labels 3) '("svc" "cluster" "local"))
+                 (> (length port-label) 1) (char= #\_ (char port-label 0))
+                 (> (length protocol-label) 1) (char= #\_ (char protocol-label 0)))
+      (return-from resolve-store-service-srv (values nil nil)))
+    (let* ((port-name (subseq port-label 1)) (protocol (string-upcase (subseq protocol-label 1)))
+           (name (third labels)) (namespace (fourth labels))
+           (fqdn (format nil "~A.~A.svc.cluster.local" name namespace)))
+      (handler-case
+          (let* ((service (get-core-resource store "services" namespace name))
+                 (spec (gethash "spec" service))
+                 (port (find-if (lambda (candidate)
+                                  (and (equal port-name (gethash "name" candidate))
+                                       (equal protocol (gethash "protocol" candidate "TCP"))))
+                                (gethash "ports" spec #()))))
+            (unless port (return-from resolve-store-service-srv (values nil nil)))
+            (unless (equal "None" (gethash "clusterIP" spec))
+              (return-from resolve-store-service-srv
+                (values (list (service-dns-srv-record question (gethash "port" port) fqdn)) t)))
+            (let ((targets nil))
+              (dolist (slice (list-core-resources store "endpointslices" namespace))
+                (when (and (member (gethash "addressType" slice) '("IPv4" "IPv6") :test #'equal)
+                           (equal name (gethash "kubernetes.io/service-name"
+                                                (gethash "labels" (gethash "metadata" slice) (core-object)))))
+                  (loop for backend-port across (gethash "ports" slice #())
+                        when (and (equal port-name (gethash "name" backend-port))
+                                  (equal protocol (gethash "protocol" backend-port "TCP"))
+                                  (integerp (gethash "port" backend-port)))
+                          do (loop for endpoint across (gethash "endpoints" slice #())
+                                   unless (service-dns-endpoint-unready-p endpoint)
+                                     do (loop for address across (gethash "addresses" endpoint #())
+                                              for target = (format nil "~A.~A" (service-dns-endpoint-hostname endpoint address) fqdn)
+                                              do (pushnew (list (gethash "port" backend-port) target) targets :test #'equal))))))
+              (values (mapcar (lambda (target) (service-dns-srv-record question (first target) (second target)))
+                              (sort targets #'string< :key (lambda (target) (format nil "~A/~A" (second target) (first target)))))
+                      (not (null targets)))))
+        (kubernetes-error (condition)
+          (if (= 404 (kubernetes-error-status-code condition)) (values nil nil) (error condition)))))))
