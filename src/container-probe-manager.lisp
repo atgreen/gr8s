@@ -17,6 +17,7 @@
   (targets (make-hash-table :test #'equal))
   (jobs (make-hash-table :test #'equal))
   (lock (bt:make-lock "native container probes"))
+  (shutdown-lock (bt:make-lock "native probe shutdown"))
   (clock #'container-lifecycle-now)
   (executor #'execute-container-probe)
   (event-outbox (make-hash-table :test #'equal))
@@ -386,25 +387,52 @@
                thereis (and request (gethash "terminated" (gethash "state" status))
                             (equal (gethash "containerID" status) (concatenate 'string "containerd://" (gethash "containerID" request))))))))
 
+(defun preserve-stopped-container-probe-events (runtime manager)
+  "Merge retired Events only into existing checkpoints, serialized with deletion."
+  (let ((uids nil))
+    (bt:with-lock-held ((container-probe-manager-lock manager))
+      (maphash (lambda (key event) (declare (ignore event)) (pushnew (first key) uids :test #'equal))
+               (container-probe-manager-event-outbox manager)))
+    (dolist (uid uids)
+      ;; Lifecycle writes take this lock at the public save/forget boundary.
+      ;; Here the read/existence check and private save form one transaction,
+      ;; so a concurrent deletion cannot be undone by an outbox flush.
+      (bt:with-lock-held ((containerd-runtime-lifecycle-lock runtime))
+        (when (probe-file (container-lifecycle-path runtime uid))
+          (let* ((state (load-container-lifecycle-state runtime uid))
+                 (events (collect-container-probe-events manager uid (gethash "probeEvents" state))))
+            (unless (equalp events (gethash "probeEvents" state))
+              (setf (gethash "probeEvents" state) events)
+              (%save-container-lifecycle-state runtime uid state))))))))
+
 (defun stop-container-probes (runtime &optional uid)
-  "Withdraw and join probe workers/stops before deleting a Pod or stopping its runtime."
+  "Withdraw and join probes; full shutdown persists owned Events then releases its manager."
   (let ((manager (containerd-runtime-probes runtime)))
     (when manager
-      (unless uid (setf (container-probe-manager-stopping-p manager) t))
-      (retire-container-probe-targets manager (lambda (target) (or (null uid) (equal uid (container-probe-target-uid target)))))
-      (let ((jobs nil))
-        (bt:with-lock-held ((container-probe-manager-lock manager))
-          (maphash (lambda (id job)
-                     (when (or (null uid) (equal uid (container-probe-stop-job-uid job)))
-                       (setf (container-probe-stop-job-cancelled-p job) t)
-                       (remhash id (container-probe-manager-jobs manager)) (push job jobs)))
-                   (container-probe-manager-jobs manager)))
-        (dolist (job jobs)
-          (let ((thread (container-probe-stop-job-thread job)))
-            (when thread
-              (when (and (container-probe-stop-job-started-p job) (bt:thread-alive-p thread))
-                (ignore-errors (bt:interrupt-thread thread (lambda () (unless (container-probe-stop-job-finished-p job) (error 'container-probe-stopped))))))
-              (bt:join-thread thread)))))))
+      ;; Serialize retirement/join as well as release: a concurrent stop must
+      ;; not publish a fresh manager while another caller is still joining.
+      (bt:with-lock-held ((container-probe-manager-shutdown-lock manager))
+        (unless uid
+          (bt:with-lock-held ((container-probe-manager-lock manager))
+            (setf (container-probe-manager-stopping-p manager) t)))
+        (retire-container-probe-targets manager (lambda (target) (or (null uid) (equal uid (container-probe-target-uid target)))))
+        (let ((jobs nil))
+          (bt:with-lock-held ((container-probe-manager-lock manager))
+            (maphash (lambda (id job)
+                       (when (or (null uid) (equal uid (container-probe-stop-job-uid job)))
+                         (setf (container-probe-stop-job-cancelled-p job) t)
+                         (remhash id (container-probe-manager-jobs manager)) (push job jobs)))
+                     (container-probe-manager-jobs manager)))
+          (dolist (job jobs)
+            (let ((thread (container-probe-stop-job-thread job)))
+              (when thread
+                (when (and (container-probe-stop-job-started-p job) (bt:thread-alive-p thread))
+                  (ignore-errors (bt:interrupt-thread thread (lambda () (unless (container-probe-stop-job-finished-p job) (error 'container-probe-stopped))))))
+                (bt:join-thread thread)))))
+        (unless uid
+          (preserve-stopped-container-probe-events runtime manager)
+          (when (eq manager (containerd-runtime-probes runtime))
+            (setf (containerd-runtime-probes runtime) nil))))))
   nil)
 
 (defmethod runtime-events ((runtime containerd-runtime) uid)
