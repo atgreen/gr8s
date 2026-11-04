@@ -110,8 +110,10 @@
 
 (defstruct (gateway-controller (:constructor %make-gateway-controller))
   store resolver cert-dir
-  (listeners (make-hash-table))         ; port -> (handle . tls-signature)
-  start-fn stop-fn swap-fn)
+  (listeners (make-hash-table))         ; HTTP/HTTPS port -> (handle . tls-signature)
+  start-fn stop-fn swap-fn
+  (l4-listeners (make-hash-table))      ; TCP/TLS port -> (mode . handle)
+  l4-start-fn l4-stop-fn l4-swap-fn)
 
 (defun gateway-write-octets (path octets)
   (with-open-file (stream path :direction :output :element-type '(unsigned-byte 8)
@@ -138,7 +140,8 @@
           (gateway-write-octets key-path (ag-grpc:base64-decode key))
           (list :certificate (namestring cert-path) :key (namestring key-path)))))))
 
-(defun make-gateway-controller (store &key resolver cert-dir start-fn stop-fn swap-fn)
+(defun make-gateway-controller (store &key resolver cert-dir start-fn stop-fn swap-fn
+                                           l4-start-fn l4-stop-fn l4-swap-fn)
   "A controller over STORE. RESOLVER maps a GW-BACKEND to an address (defaults to
    the ClusterIP service resolver). CERT-DIR is where HTTPS listener certs are
    materialized. START-FN/STOP-FN/SWAP-FN manage listener lifecycle and default
@@ -152,7 +155,12 @@
                    (start-gateway-listener :port port :router router :resolver resolver :tls tls)))
    :stop-fn (or stop-fn #'stop-gateway-listener)
    :swap-fn (or swap-fn
-                (lambda (handle router) (setf (gateway-acceptor-router handle) router)))))
+                (lambda (handle router) (setf (gateway-acceptor-router handle) router)))
+   :l4-start-fn (or l4-start-fn
+                    (lambda (port mode dispatcher resolver)
+                      (start-l4-listener :port port :mode mode :dispatcher dispatcher :resolver resolver)))
+   :l4-stop-fn (or l4-stop-fn #'stop-l4-listener)
+   :l4-swap-fn (or l4-swap-fn #'l4-listener-swap-dispatcher)))
 
 (defun gateway-listener-signature (protocol tls-paths)
   "Transport identity of a listener; a change forces a restart (a router change
@@ -200,6 +208,87 @@
         (remhash port running)))
     (gateway-controller-listeners controller)))
 
+;;; ---------------------------------------------------------------------------
+;;; L4 (TCPRoute / TLSRoute / GRPCRoute) planning and convergence.
+
+(defun gateway-l4-plan (gateways tcproutes tlsroutes grpcroutes controlled-p)
+  "Pure planner for L4 listeners: a list of per-port plists
+   (:port P :mode :tcp|:tls :tcp-routes (...) :sni-routes (...)) for TCP and TLS
+   listeners on controlled Gateways. TCP uses attached TCPRoutes; TLS routes by
+   SNI using attached TLSRoutes and GRPCRoutes."
+  (let ((tcp-by-port (make-hash-table)) (sni-by-port (make-hash-table)) (ports '()))
+    (dolist (gateway gateways)
+      (when (funcall controlled-p gateway)
+        (let* ((metadata (gethash "metadata" gateway))
+               (gns (gethash "namespace" metadata))
+               (gname (gethash "name" metadata))
+               (spec (gethash "spec" gateway))
+               (listeners (and spec (gethash "listeners" spec))))
+          (when listeners
+            (loop for listener across listeners
+                  for protocol = (gethash "protocol" listener)
+                  for port = (gethash "port" listener)
+                  for lname = (gethash "name" listener)
+                  do (cond
+                       ((equal protocol "TCP")
+                        (pushnew port ports)
+                        (dolist (route tcproutes)
+                          (when (gateway-route-attaches-p route gns gname lname port)
+                            (push route (gethash port tcp-by-port)))))
+                       ((equal protocol "TLS")
+                        (pushnew port ports)
+                        (dolist (route (append tlsroutes grpcroutes))
+                          (when (gateway-route-attaches-p route gns gname lname port)
+                            (push route (gethash port sni-by-port)))))))))))
+    (loop for port in (nreverse ports)
+          for tcp = (gethash port tcp-by-port)
+          for sni = (gethash port sni-by-port)
+          collect (if tcp
+                      (list :port port :mode :tcp
+                            :tcp-routes (loop for o in (remove-duplicates (nreverse tcp))
+                                              for r = (ignore-errors (parse-tcproute o)) when r collect r)
+                            :sni-routes nil)
+                      (list :port port :mode :tls :tcp-routes nil
+                            :sni-routes (loop for o in (remove-duplicates (nreverse sni))
+                                              for r = (ignore-errors (parse-sni-route o)) when r collect r))))))
+
+(defun gateway-l4-dispatcher (mode tcp-routes sni-routes)
+  "Build the dispatcher closure for an L4 listener."
+  (if (eq mode :tcp)
+      (let ((routes tcp-routes)) (lambda (sni) (declare (ignore sni)) (l4-tcp-dispatch routes)))
+      (let ((routes sni-routes)) (lambda (sni) (l4-sni-dispatch routes sni)))))
+
+(defun converge-gateway-l4-listeners (controller)
+  "Reconcile L4 (TCP/TLS) proxy listeners to the plan: start new ports, hot-swap
+   the dispatcher when routes change, restart on a mode change, and stop ports no
+   longer desired."
+  (let* ((store (gateway-controller-store controller))
+         (resolver (gateway-controller-resolver controller))
+         (plan (gateway-l4-plan (list-core-resources store "gateways")
+                                (list-core-resources store "tcproutes")
+                                (list-core-resources store "tlsroutes")
+                                (list-core-resources store "grpcroutes")
+                                (lambda (gateway) (gateway-controlled-p store gateway))))
+         (running (gateway-controller-l4-listeners controller))
+         (desired '()))
+    (dolist (entry plan)
+      (destructuring-bind (&key port mode tcp-routes sni-routes) entry
+        (push port desired)
+        (let ((dispatcher (gateway-l4-dispatcher mode tcp-routes sni-routes))
+              (existing (gethash port running)))
+          (if (and existing (eq (car existing) mode))
+              (funcall (gateway-controller-l4-swap-fn controller) (cdr existing) dispatcher)
+              (progn
+                (when existing (funcall (gateway-controller-l4-stop-fn controller) (cdr existing)))
+                (setf (gethash port running)
+                      (cons mode (funcall (gateway-controller-l4-start-fn controller)
+                                          port mode dispatcher resolver))))))))
+    (dolist (port (loop for p being the hash-keys of running collect p))
+      (unless (member port desired)
+        (funcall (gateway-controller-l4-stop-fn controller) (cdr (gethash port running)))
+        (remhash port running)))
+    running))
+
 (defun stop-gateway-controller (controller)
   "Stop every running listener this controller owns (node shutdown)."
   (let ((running (gateway-controller-listeners controller)))
@@ -207,4 +296,10 @@
                (declare (ignore port))
                (ignore-errors (funcall (gateway-controller-stop-fn controller) (car entry))))
              running)
-    (clrhash running)))
+    (clrhash running))
+  (let ((l4 (gateway-controller-l4-listeners controller)))
+    (maphash (lambda (port entry)
+               (declare (ignore port))
+               (ignore-errors (funcall (gateway-controller-l4-stop-fn controller) (cdr entry))))
+             l4)
+    (clrhash l4)))

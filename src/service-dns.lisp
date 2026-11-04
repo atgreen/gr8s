@@ -12,7 +12,7 @@
   (let* ((kind (gethash "kind" object)) (source (gethash "metadata" object))
          (metadata (core-object)) (result (core-object)))
     (unless (member kind '("Service" "EndpointSlice" "NetworkPolicy"
-                           "GatewayClass" "Gateway" "HTTPRoute") :test #'equal)
+                           "GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
       (invalid-pod "unsupported public Service discovery kind"))
     (dolist (key '("name" "namespace" "uid" "resourceVersion"))
       (when (gethash key source) (setf (gethash key metadata) (gethash key source))))
@@ -23,7 +23,7 @@
     (setf (gethash "kind" result) kind
           (gethash "apiVersion" result) (cond ((equal kind "Service") "v1")
                                               ((equal kind "NetworkPolicy") "networking.k8s.io/v1")
-                                              ((member kind '("GatewayClass" "Gateway" "HTTPRoute") :test #'equal)
+                                              ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
                                                "gateway.networking.k8s.io/v1")
                                               (t "discovery.k8s.io/v1"))
           (gethash "metadata" result) metadata)
@@ -38,7 +38,7 @@
        ;; The whole spec (podSelector, policyTypes, ingress/egress rules) is what
        ;; the agent needs to resolve and compile the per-Pod classifier.
        (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
-      ((member kind '("GatewayClass" "Gateway" "HTTPRoute") :test #'equal)
+      ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
        ;; The agent's Gateway controller reconciles these into L7 proxy listeners,
        ;; so it needs the full spec (controllerName / listeners / parentRefs+rules).
        (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
@@ -57,7 +57,10 @@
                         (list-core-resources store "networkpolicies")
                         (list-core-resources store "gatewayclasses")
                         (list-core-resources store "gateways")
-                        (list-core-resources store "httproutes"))
+                        (list-core-resources store "httproutes")
+                        (list-core-resources store "tcproutes")
+                        (list-core-resources store "tlsroutes")
+                        (list-core-resources store "grpcroutes"))
                 #'string< :key (lambda (object)
                                  (let ((metadata (gethash "metadata" object)))
                                    (format nil "~A/~A/~A" (gethash "kind" object)
@@ -76,6 +79,9 @@
                            ((equal "GatewayClass" (gethash "kind" public)) "gatewayclasses")
                            ((equal "Gateway" (gethash "kind" public)) "gateways")
                            ((equal "HTTPRoute" (gethash "kind" public)) "httproutes")
+                           ((equal "TCPRoute" (gethash "kind" public)) "tcproutes")
+                           ((equal "TLSRoute" (gethash "kind" public)) "tlsroutes")
+                           ((equal "GRPCRoute" (gethash "kind" public)) "grpcroutes")
                            (t "endpointslices"))))
       (unless (and (stringp name) (plusp (length name))
                    ;; GatewayClass is cluster-scoped (no namespace); all others are namespaced.

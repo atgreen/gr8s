@@ -61,7 +61,16 @@
           ((equal resource "httproutes")
            (setf (gethash "spec" object)
                  (gr8s::core-object "rules" (vector (gr8s::core-object "backendRefs"
-                                                                       (vector (gr8s::core-object "name" "svc" "port" 8080))))))))
+                                                                       (vector (gr8s::core-object "name" "svc" "port" 8080)))))))
+          ((equal resource "tcproutes")
+           (setf (gethash "spec" object)
+                 (gr8s::core-object "rules" (vector (gr8s::core-object "backendRefs"
+                                                                       (vector (gr8s::core-object "name" "svc" "port" 3306)))))))
+          ((member resource '("tlsroutes" "grpcroutes") :test #'equal)
+           (setf (gethash "spec" object)
+                 (gr8s::core-object "hostnames" (vector "watched.example.com")
+                                    "rules" (vector (gr8s::core-object "backendRefs"
+                                                                       (vector (gr8s::core-object "name" "svc" "port" 8443))))))))
     object))
 
 (test durable-resources-stream-real-http-selector-transitions

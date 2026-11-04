@@ -91,6 +91,52 @@
       (is (equal '((:stop (:handle 8080))) actions))
       (is (zerop (hash-table-count (gr8s::gateway-controller-listeners controller)))))))
 
+(test gateway-controller-plans-and-converges-l4-listeners
+  (with-temporary-store (store directory)
+    (values directory)
+    (flet ((create (resource namespace json)
+             (gr8s::create-core-resource store resource (com.inuoe.jzon:parse json) namespace)))
+      (create "gatewayclasses" nil
+              "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"GatewayClass\",\"metadata\":{\"name\":\"gr8s\"},\"spec\":{\"controllerName\":\"gr8s.io/gateway-controller\"}}")
+      (create "gateways" "default"
+              "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"Gateway\",\"metadata\":{\"name\":\"l4gw\",\"namespace\":\"default\"},\"spec\":{\"gatewayClassName\":\"gr8s\",\"listeners\":[{\"name\":\"db\",\"port\":3306,\"protocol\":\"TCP\"},{\"name\":\"sni\",\"port\":8443,\"protocol\":\"TLS\"}]}}")
+      (create "tcproutes" "default"
+              "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"TCPRoute\",\"metadata\":{\"name\":\"db\",\"namespace\":\"default\"},\"spec\":{\"parentRefs\":[{\"name\":\"l4gw\",\"sectionName\":\"db\"}],\"rules\":[{\"backendRefs\":[{\"name\":\"mysql\",\"port\":3306}]}]}}")
+      (create "tlsroutes" "default"
+              "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"TLSRoute\",\"metadata\":{\"name\":\"edge\",\"namespace\":\"default\"},\"spec\":{\"parentRefs\":[{\"name\":\"l4gw\",\"sectionName\":\"sni\"}],\"hostnames\":[\"secure.example.com\"],\"rules\":[{\"backendRefs\":[{\"name\":\"tls-svc\",\"port\":8443}]}]}}"))
+    (let ((plan (gr8s::gateway-l4-plan
+                 (gr8s::list-core-resources store "gateways")
+                 (gr8s::list-core-resources store "tcproutes")
+                 (gr8s::list-core-resources store "tlsroutes")
+                 (gr8s::list-core-resources store "grpcroutes")
+                 (lambda (gw) (gr8s::gateway-controlled-p store gw)))))
+      (is (= 2 (length plan)))
+      (let ((tcp (find :tcp plan :key (lambda (e) (getf e :mode))))
+            (tls (find :tls plan :key (lambda (e) (getf e :mode)))))
+        (is (equal 3306 (getf tcp :port)))
+        (is (= 1 (length (getf tcp :tcp-routes))))
+        (is (equal 8443 (getf tls :port)))
+        (is (= 1 (length (getf tls :sni-routes))))
+        (is (equal '("secure.example.com")
+                   (gr8s::l4-sni-route-hostnames (first (getf tls :sni-routes)))))))
+    (let* ((actions '())
+           (controller (gr8s::make-gateway-controller
+                        store :resolver (lambda (b) (declare (ignore b)) nil)
+                        :l4-start-fn (lambda (port mode dispatcher resolver)
+                                       (declare (ignore dispatcher resolver))
+                                       (push (list :start port mode) actions) (list :l4 port))
+                        :l4-stop-fn (lambda (handle) (push (list :stop handle) actions))
+                        :l4-swap-fn (lambda (handle dispatcher)
+                                      (declare (ignore dispatcher))
+                                      (push (list :swap handle) actions)))))
+      (gr8s::converge-gateway-l4-listeners controller)
+      (is (= 2 (count :start actions :key #'first)))
+      ;; Second convergence hot-swaps both dispatchers (no new starts).
+      (setf actions '())
+      (gr8s::converge-gateway-l4-listeners controller)
+      (is (= 2 (count :swap actions :key #'first)))
+      (is (= 0 (count :start actions :key #'first))))))
+
 (test gateway-controller-starts-https-listener-with-secret-cert
   (with-temporary-store (store directory)
     (flet ((create (resource namespace json)

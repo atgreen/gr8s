@@ -99,7 +99,7 @@
                   (require-nonempty-string (gethash "name" listener) "listener.name")
                   (require-nonempty-string (gethash "protocol" listener) "listener.protocol")
                   (validate-gateway-port (gethash "port" listener) "listener.port"))))
-      ((equal resource "httproutes")
+      ((member resource '("httproutes" "tcproutes" "tlsroutes" "grpcroutes") :test #'equal)
        (let ((rules (gethash "rules" spec)))
          (when rules
            (unless (and (vectorp rules) (not (stringp rules)))
@@ -128,7 +128,9 @@
                        ((member resource '("roles" "clusterroles") :test #'equal) '("rules"))
                        ((equal resource "networkpolicies") '("spec"))
                        ((equal resource "gatewayclasses") '("spec" "status"))
-                       ((member resource '("gateways" "httproutes") :test #'equal) '("spec" "status"))
+                       ((member resource '("gateways" "httproutes"
+                                           "tcproutes" "tlsroutes" "grpcroutes") :test #'equal)
+                        '("spec" "status"))
                        (t '("roleRef" "subjects")))))
     (unless (and (equal version (gethash "apiVersion" object version))
                  (equal kind (gethash "kind" object kind)))
@@ -166,7 +168,8 @@
        (let ((spec (gethash "spec" object)))
          (when (and spec (not (hash-table-p spec)))
            (core-resource-error 422 "Invalid" "NetworkPolicy spec must be an object"))))
-      ((member resource '("gatewayclasses" "gateways" "httproutes") :test #'equal)
+      ((member resource '("gatewayclasses" "gateways" "httproutes"
+                          "tcproutes" "tlsroutes" "grpcroutes") :test #'equal)
        (validate-gateway-resource resource object))
       (t (validate-rbac-binding object (equal resource "clusterrolebindings"))))
     object))

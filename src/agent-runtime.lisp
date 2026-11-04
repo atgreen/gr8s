@@ -661,7 +661,8 @@ snapshot application."
                      (node-runtime-store node-runtime)
                      :cert-dir (merge-pathnames "gateway-certs/"
                                                 (node-runtime-state-directory node-runtime)))))
-            (converge-gateway-listeners (node-runtime-gateway-controller node-runtime)))
+            (converge-gateway-listeners (node-runtime-gateway-controller node-runtime))
+            (converge-gateway-l4-listeners (node-runtime-gateway-controller node-runtime)))
         (error (condition)
           (format *error-output* "gr8s: Gateway convergence failed: ~A~%" condition)))
       (loop for assignment in

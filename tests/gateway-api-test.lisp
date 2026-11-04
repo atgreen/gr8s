@@ -71,8 +71,8 @@
     (let* ((discovery (check-core-status 200 "/apis/gateway.networking.k8s.io/v1"))
            (resources (gethash "resources" discovery))
            (names (map 'list (lambda (r) (gethash "name" r)) resources)))
-      (is (= 3 (length resources)))
-      (dolist (n '("gatewayclasses" "gateways" "httproutes"))
+      (is (= 6 (length resources)))
+      (dolist (n '("gatewayclasses" "gateways" "httproutes" "tcproutes" "tlsroutes" "grpcroutes"))
         (is (member n names :test #'equal))))))
 
 (test gateway-validation-fails-closed-on-missing-required-fields
