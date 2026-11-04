@@ -62,4 +62,12 @@
     (is (= 7 (gr8s::crd-validate-value 7 schema "logical")))
     (signals kubernetes-error (gr8s::crd-validate-value 3 schema "logical"))))
 
+(test custom-schema-false-values-have-real-enum-and-set-identity
+  (let ((schema (gr8s::core-object "type" "boolean" "enum" #(nil))))
+    (is-false (gr8s::crd-validate-value nil schema "false"))
+    (signals kubernetes-error (gr8s::crd-validate-value t schema "false")))
+  (signals kubernetes-error
+    (gr8s::crd-validate-value #(nil nil) (gr8s::core-object "type" "array" "uniqueItems" t
+                                     "items" (gr8s::core-object "type" "boolean")) "set")))
+
 (in-suite gr8s)

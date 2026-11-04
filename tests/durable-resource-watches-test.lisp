@@ -14,7 +14,10 @@
   (let ((object (gr8s::core-object "apiVersion" (gr8s::core-resource-api-version resource)
                                  "kind" (gr8s::core-resource-kind resource)
                                  "metadata" (gr8s::core-object "name" name "labels" (gr8s::core-object "app" "watched")))))
-    (cond ((equal resource "events") (setf (gethash "involvedObject" object) (gr8s::core-object)))
+    (cond ((equal resource "customresourcedefinitions")
+           (setf object (crd-fixture :group "watch.example.test" :plural "watched"))
+           (setf (gethash "labels" (gethash "metadata" object)) (gr8s::core-object "app" "watched")))
+          ((equal resource "events") (setf (gethash "involvedObject" object) (gr8s::core-object)))
           ((equal resource "podtemplates")
            (setf (gethash "template" object) (gethash "template" (podtemplate-fixture name))))
           ((equal resource "services")
@@ -29,11 +32,12 @@
     (values path)
     (dolist (descriptor gr8s::*stored-resource-types*)
       (destructuring-bind (resource kind version namespaced) descriptor
-        (let* ((namespace (and namespaced "alpha"))
+        (let* ((name (if (equal resource "customresourcedefinitions") "watched.watch.example.test" "watched"))
+               (namespace (and namespaced "alpha"))
                (collection (if (equal version "v1") "/api/v1" (concatenate 'string "/apis/" version)))
                (url (format nil "http://127.0.0.1:18089~A~A/~A" collection
                             (if namespace (concatenate 'string "/namespaces/" namespace) "") resource)))
-          (gr8s::create-core-resource store resource (durable-watch-fixture resource "watched") namespace)
+          (gr8s::create-core-resource store resource (durable-watch-fixture resource name) namespace)
           (sb-sys:with-deadline (:seconds 10)
             (multiple-value-bind (stream code)
                 (drakma:http-request url :want-stream t
@@ -45,15 +49,15 @@
                        (is (equal "ADDED" (gethash "type" event)))
                        (is (equal kind (gethash "kind" object)))
                        (is (equal version (gethash "apiVersion" object))))
-                     (gr8s::update-core-resource store resource namespace "watched"
+                     (gr8s::update-core-resource store resource namespace name
                        (lambda (object)
                          (setf (gethash "app" (gethash "labels" (gethash "metadata" object))) "other") object))
                      (is (equal "DELETED" (gethash "type" (read-template-watch-event stream))))
-                     (gr8s::update-core-resource store resource namespace "watched"
+                     (gr8s::update-core-resource store resource namespace name
                        (lambda (object)
                          (setf (gethash "app" (gethash "labels" (gethash "metadata" object))) "watched") object))
                      (is (equal "ADDED" (gethash "type" (read-template-watch-event stream))))
-                     (gr8s::delete-core-resource store resource namespace "watched")
+                     (gr8s::delete-core-resource store resource namespace name)
                      (is (equal "DELETED" (gethash "type" (read-template-watch-event stream)))))
                 (close stream)))))))))
 

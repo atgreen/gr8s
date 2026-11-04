@@ -58,7 +58,7 @@
            (last-bookmark (get-internal-real-time)))
       (labels ((emit (event)
                  (write-sequence (trivial-utf-8:string-to-utf-8-bytes
-                                  (concatenate 'string (com.inuoe.jzon:stringify (event-api-view event)) (string #\Newline))) out)
+                                  (concatenate 'string (com.inuoe.jzon:stringify (crd-api-view (event-api-view event))) (string #\Newline))) out)
                  (finish-output out))
                (bookmark (&optional initial-end)
                  (let ((metadata (core-object "resourceVersion" (write-to-string revision))))

@@ -1,7 +1,10 @@
 (in-package #:gr8s)
 
+(defvar *crd-route* nil)
+
 (defun core-resource-route (path)
   "Resolve a durable resource URL to its collection, namespace and name."
+  (when *crd-route* (return-from core-resource-route *crd-route*))
   (let* ((parts (uiop:split-string path :separator '(#\/)))
          (version (cond ((equal (subseq parts 0 (min 3 (length parts))) '("" "api" "v1")) "v1")
                         ((and (>= (length parts) 4) (equal (second parts) "apis"))
@@ -27,6 +30,7 @@
     (not (null value))))
 
 (defun core-resource-request-object (expected-kind)
+  (when (and *crd-view-definition* (not (equal expected-kind "DeleteOptions"))) (return-from core-resource-request-object (crd-read-json)))
   (let ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;)))))
     (cond
       ((string= content-type "application/vnd.kubernetes.protobuf")

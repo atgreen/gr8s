@@ -11,7 +11,7 @@
         ;; client-go v0.27 discovery compares this media type literally. JSON
         ;; is UTF-8 already; a charset parameter breaks its legacy fallback.
         (hunchentoot:content-type*) "application/json")
-  (com.inuoe.jzon:stringify (event-api-view object)))
+  (com.inuoe.jzon:stringify (crd-api-view (event-api-view object))))
 
 (defun status-response (status reason message code)
   (json-response
@@ -89,15 +89,14 @@
                 "versions" #( "v1")
                 "serverAddressByClientCIDRs" #())))
 
-(defun api-groups-response ()
-  (json-response
-   (json-object "apiVersion" "v1"
-                "kind" "APIGroupList"
-                "groups"
-                (vector (json-object "name" "rbac.authorization.k8s.io"
-                                     "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
-                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
-                        (event-api-group)))))
+(defun api-groups-response (&optional store)
+  "Describe builtin groups and actual store-scoped custom API groups."
+  (let ((groups (vector (json-object "name" "rbac.authorization.k8s.io"
+                                    "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
+                                    "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
+                       (event-api-group))))
+    (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
+    (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
 (defun api-resources-response ()
   (json-response
@@ -961,12 +960,12 @@
            (runtime-network-metrics runtime))
           ((string= path "/version") (version-response))
           ((string= path "/api") (api-versions-response))
-          ((string= path "/apis") (api-groups-response))
+          ((string= path "/apis") (api-groups-response store))
           ((string= path "/apis/events.k8s.io") (json-response (event-api-group)))
           ((string= path "/apis/events.k8s.io/v1") (event-discovery-response))
           ((string= path "/apis/rbac.authorization.k8s.io/v1") (rbac-resources-response))
-          ((string= path "/openapi/v2") (openapi-response))
-          ((string= path "/openapi/v3") (openapi-v3-discovery-response))
+          ((string= path "/openapi/v2") (json-response (crd-openapi-document store nil nil nil)))
+          ((string= path "/openapi/v3") (crd-openapi-discovery-response store))
           ((string= path "/openapi/v3/apis/events.k8s.io/v1") (openapi-v3-response "events.k8s.io/v1"))
           ((string= path "/openapi/v3/api/v1") (openapi-v3-response))
           ((string= path "/api/v1") (api-resources-response))
@@ -975,6 +974,7 @@
           ((and (eq method :get) (uiop:string-prefix-p "/api/v1/nodes/" path)
                 (dns-subdomain-p (subseq path (length "/api/v1/nodes/"))))
            (nodes-api-response store (subseq path (length "/api/v1/nodes/"))))
+          ((crd-special-route store path) (dispatch-crd-request store path method))
           ((core-resource-route path)
            (dispatch-core-resource-request store path method))
           ((and (string= path "/api/v1/pods") (eq method :get))
