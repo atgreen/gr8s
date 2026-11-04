@@ -36,7 +36,8 @@
                (statuses (coerce (mapcar #'containerd-container-status-object infos) 'vector)))
           (unless (every (lambda (status) (gethash "terminated" (gethash "state" status))) statuses)
             (error 'runtime-error :message "Finalized Pod still has nonterminal containers after StopContainer"))
-          (setf (gethash "podIP" state) (cri-pod-sandbox-ip socket (cri-pod-sandbox-info-id sandbox)))
+          (setf (gethash "podIP" state) (cri-pod-sandbox-ip socket (cri-pod-sandbox-info-id sandbox))
+                (gethash "terminalShutdown" state) t)
           (remember-container-lifecycle-statuses state statuses)
           (loop for status across statuses
                 for entry = (gethash (gethash "name" status) (gethash "containers" state))
