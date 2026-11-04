@@ -28,6 +28,7 @@
     ("events" "Event" "v1" t)
     ("deployments" "Deployment" "apps/v1" t)
     ("replicasets" "ReplicaSet" "apps/v1" t)
+    ("jobs" "Job" "batch/v1" t)
     ("roles" "Role" "rbac.authorization.k8s.io/v1" t)
     ("rolebindings" "RoleBinding" "rbac.authorization.k8s.io/v1" t)
     ("clusterroles" "ClusterRole" "rbac.authorization.k8s.io/v1" nil)
@@ -71,6 +72,7 @@
           (error "Invalid resource history start at ~A" path))
         (setf (pod-store-resource-revision store) (gethash "revision" state)
               (pod-store-workload-deletions store) (gethash "workloadDeletions" state (make-hash-table :test #'equal))
+              (pod-store-job-controller-states store) (gethash "jobControllerStates" state (make-hash-table :test #'equal))
               (pod-store-event-expirations store) (gethash "eventExpirations" state (make-hash-table :test #'equal))
               (pod-store-template-history store) (coerce (gethash "templateHistory" state #()) 'list)
               (pod-store-template-history-floor store) (gethash "templateHistoryFloor" state (gethash "revision" state))
@@ -98,7 +100,10 @@
                  (setf (gethash key (pod-store-resources store)) object)))))
   store)
 
-(defun commit-core-resources (store resources revision &key (workload-deletions (pod-store-workload-deletions store)))
+(defun commit-core-resources (store resources revision
+                              &key (workload-deletions (pod-store-workload-deletions store))
+                                (job-controller-states (pod-store-job-controller-states store)))
+  "Atomically commit API status, Job retry state and durable deletion/history indexes before publishing memory."
   ;; Write the complete new state before publishing it in memory. A failed
   ;; atomic write leaves both the old disk state and the old index intact.
   (multiple-value-bind (history floor) (next-template-history store resources revision)
@@ -108,6 +113,7 @@
    (core-resource-state-path store)
    (com.inuoe.jzon:stringify
     (core-object "version" 2 "revision" revision "workloadDeletions" workload-deletions
+                 "jobControllerStates" job-controller-states
                  "templateHistory" (coerce history 'vector) "templateHistoryFloor" floor
                  "templateTokenKey" (ag-grpc:base64-encode token-key)
                  "resourceHistoryStart" (pod-store-resource-history-start store)
@@ -119,6 +125,7 @@
                                          collect (core-object "resource" (first key) "object" object)) 'vector))))
   (setf (pod-store-resources store) resources
         (pod-store-workload-deletions store) workload-deletions
+        (pod-store-job-controller-states store) job-controller-states
         (pod-store-resource-revision store) revision
         (pod-store-template-history store) history
         (pod-store-template-history-floor store) floor
@@ -246,6 +253,8 @@
     (setf (gethash "type" object) type)))
 
 (defun normalize-core-resource (resource input namespace &optional name store)
+  (when (batch-resource-p resource)
+    (return-from normalize-core-resource (normalize-batch-resource input namespace name)))
   (when (csr-resource-p resource)
     (return-from normalize-core-resource (normalize-csr-resource input name store)))
   (when (endpointslice-resource-p resource)
@@ -391,6 +400,7 @@
           (core-resource-error 409 "AlreadyExists" "~A ~A/~A already exists" (core-resource-kind resource) namespace name))
         (prepare-core-resource-metadata object nil revision)
         (prepare-workload-write resource object nil)
+        (when (batch-resource-p resource) (prepare-batch-write object nil))
         (when (csr-resource-p resource) (prepare-csr-write object nil))
         (when (endpointslice-resource-p resource) (prepare-endpointslice-write object nil))
         (setf (gethash key resources) object)
@@ -437,6 +447,7 @@
         (core-resource-error 422 "Invalid" "Immutable resource data cannot change"))
       (prepare-core-resource-metadata object existing revision)
       (prepare-workload-write resource object existing)
+      (when (batch-resource-p resource) (prepare-batch-write object existing))
       (when (csr-resource-p resource) (prepare-csr-write object existing))
       (when (endpointslice-resource-p resource) (prepare-endpointslice-write object existing))
       (let ((resources (copy-core-resource-index store)))

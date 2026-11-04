@@ -220,8 +220,11 @@
                  (multiple-value-bind (value present) (gethash key owner)
                    (when (and present (not (member value '(t nil)))) (invalid-pod "ownerReference flag must be boolean"))))
                (when (eq t (gethash "controller" owner)) (incf controllers))
-               (when (eq t (gethash "blockOwnerDeletion" owner))
-                 (invalid-pod "blocking foreground owner deletion is not supported")))
+               (when (and (eq t (gethash "blockOwnerDeletion" owner))
+                          (not (and (eq t (gethash "controller" owner))
+                                    (equal "Job" (gethash "kind" owner))
+                                    (equal "batch/v1" (gethash "apiVersion" owner)))))
+                 (invalid-pod "blocking foreground owner deletion requires a supported Job controller")))
       (when (> controllers 1) (invalid-pod "an object can have only one controller owner")))))
 
 (defun pod-generate-name-prefix (metadata)

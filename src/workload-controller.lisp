@@ -96,18 +96,28 @@
          (time (and ready (ignore-errors (pod-deletion-time (gethash "lastTransitionTime" ready))))))
     (and (pod-status-ready-p status) (or (zerop minimum) (and time (>= (funcall *workload-clock*) (+ time minimum)))))))
 
-(defun change-controller-pod-owner (store owner pod adopt)
+(defun change-controller-pod-owner (store owner pod adopt
+                                    &key (resource "replicasets") tracking-finalizer
+                                      (reference (workload-owner-reference owner)))
   "Adopt or release a Pod atomically with exact owner and dependent UID checks."
   (with-store-lock (store)
-    (when (workload-current-unlocked store "replicasets" owner :generation t :allow-deleting (not adopt))
+    (when (workload-current-unlocked store resource owner :generation t :allow-deleting (not adopt))
       (let ((current (gethash (pod-key (pod-namespace pod) (pod-name pod)) (pod-store-pods store))))
         (when (and current (equal (pod-uid current) (pod-uid pod))
-                   (if adopt (null (workload-controller-reference (pod-to-object current)))
+                   (if adopt (and (not (deletion-requested-p current))
+                                  (null (workload-controller-reference (pod-to-object current))))
                        (workload-owned-p (pod-to-object current) owner)))
           (let* ((object (copy-core-object (pod-to-object current))) (metadata (workload-metadata object))
                  (owners (remove-if (lambda (ref) (eq t (gethash "controller" ref))) (gethash "ownerReferences" metadata #()))))
             (setf (gethash "ownerReferences" metadata)
-                  (if adopt (concatenate 'vector owners (vector (workload-owner-reference owner))) owners))
+                  (if adopt (concatenate 'vector owners (vector reference)) owners))
+            (when tracking-finalizer
+              (let ((finalizers (gethash "finalizers" metadata #())))
+                (setf (gethash "finalizers" metadata)
+                      (if adopt
+                          (if (find tracking-finalizer finalizers :test #'equal) finalizers
+                              (concatenate 'vector finalizers (vector tracking-finalizer)))
+                          (remove tracking-finalizer finalizers :test #'equal)))))
             (update-pod-unlocked store (parse-pod object) (pod-resource-version current))))))))
 
 (defun replica-set-pods (reconciler owner &key claim)
@@ -468,6 +478,7 @@
   (let ((store (reconciler-store reconciler)))
     (bt:with-lock-held ((pod-store-workload-lock store))
       (process-workload-deletions reconciler)
+      (reconcile-jobs reconciler)
       (dolist (resource '("deployments" "replicasets"))
         (dolist (object (list-core-resources store resource))
           (handler-case

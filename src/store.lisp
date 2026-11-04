@@ -26,6 +26,7 @@
   (credential-lock (bt:make-lock "gr8s ServiceAccount credentials"))
   (workload-lock (bt:make-lock "gr8s workload controllers"))
   (workload-deletions (make-hash-table :test #'equal))
+  (job-controller-states (make-hash-table :test #'equal))
   (pod-finalization-states (make-hash-table :test #'equal))
   (pod-observed-phases (make-hash-table :test #'equal))
   (pod-observed-statuses (make-hash-table :test #'equal))
