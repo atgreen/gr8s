@@ -255,3 +255,85 @@
         (is (eq :agent (getf options :command)))
         (is-false (getf options :token))
         (is-false (getf options :ca-pin))))))
+
+(defun run-with-stale-timeout-guard (function)
+  "Call FUNCTION with the process-wide timeout guard installed, then remove it."
+  (let ((hook sb-ext:*invoke-debugger-hook*) (installed gr8s::*stale-timeout-guard-installed*))
+    (unwind-protect
+         (progn
+           (setf gr8s::*stale-timeout-guard-installed* nil)
+           (gr8s::install-stale-timeout-guard)
+           (funcall function))
+      (setf sb-ext:*invoke-debugger-hook* hook
+            gr8s::*stale-timeout-guard-installed* installed))))
+
+(test a-late-timeout-interrupt-cannot-end-a-thread-holding-a-lock
+  ;; This is what crashed a full run: a timer fired after its scope, during a lock wait.
+  (let ((*error-output* (make-broadcast-stream))
+        (lock (bt:make-lock "held by another thread"))
+        (waiting (sb-thread:make-semaphore))
+        (finished nil))
+    (run-with-stale-timeout-guard
+     (lambda ()
+       (let* ((worker
+                (bt:with-lock-held (lock)
+                  (prog1
+                      (sb-thread:make-thread
+                       (lambda ()
+                         (sb-thread:signal-semaphore waiting)
+                         (bt:with-lock-held (lock) (setf finished t))))
+                    (sb-thread:wait-on-semaphore waiting)
+                    (sleep 0.2)))))
+         (values worker)
+         (sb-thread:join-thread worker :timeout 10)
+         (is-true finished))
+       (let* ((gate (sb-thread:make-semaphore)) (result nil)
+              (worker (sb-thread:make-thread
+                       (lambda ()
+                         (sb-thread:wait-on-semaphore gate)
+                         (setf result :completed)))))
+         (sleep 0.2)
+         (sb-thread:interrupt-thread worker
+                                     (lambda () (cerror "Continue" 'sb-ext:timeout :seconds 30)))
+         (sleep 0.2)
+         (is (sb-thread:thread-alive-p worker))
+         (sb-thread:signal-semaphore gate)
+         (sb-thread:join-thread worker :timeout 10)
+         (is (eq :completed result)))))))
+
+(test the-guard-only-continues-timeouts
+  (let ((hook sb-ext:*invoke-debugger-hook*) (installed gr8s::*stale-timeout-guard-installed*)
+        (seen nil))
+    (unwind-protect
+         (progn
+           (setf gr8s::*stale-timeout-guard-installed* nil
+                 sb-ext:*invoke-debugger-hook* (lambda (condition hook)
+                                                 (declare (ignore hook))
+                                                 (push condition seen)))
+           (gr8s::install-stale-timeout-guard)
+           ;; Other conditions, and a timeout with nothing to continue, reach the old hook.
+           (let ((real (make-condition 'simple-error :format-control "real"))
+                 (bare (make-condition 'sb-ext:timeout)))
+             (funcall sb-ext:*invoke-debugger-hook* real nil)
+             (funcall sb-ext:*invoke-debugger-hook* bare nil)
+             (is (equal (list bare real) seen))))
+      (setf sb-ext:*invoke-debugger-hook* hook
+            gr8s::*stale-timeout-guard-installed* installed))))
+
+(test the-worker-loop-survives-a-timeout
+  (with-temporary-store (store directory)
+    (declare (ignorable directory))
+    (let* ((calls 0)
+           (*error-output* (make-broadcast-stream))
+           (worker (gr8s::start-reconciliation-worker
+                    (gr8s::make-reconciler store (make-fake-runtime))
+                    :interval 0.05
+                    :before-reconcile (lambda ()
+                                        (when (= 1 (incf calls))
+                                          (signal 'sb-ext:timeout :seconds 30)
+                                          (error 'sb-ext:timeout :seconds 30))))))
+      (unwind-protect
+           (progn
+             (loop repeat 100 until (> calls 2) do (sleep 0.05))
+             (is (> calls 2)))
+        (gr8s::stop-reconciliation-worker worker)))))

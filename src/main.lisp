@@ -406,6 +406,32 @@
   (declare (ignore ignored))
   (setf *shutdown-requested* t))
 
+(defvar *stale-timeout-guard-installed* nil
+  "True once unhandled timeouts no longer end the process.")
+
+(defun install-stale-timeout-guard ()
+  "Continue from a timeout that nothing handles, rather than ending the whole process.
+Timers interrupt their target thread, so one firing as its WITH-TIMEOUT scope exits can
+arrive afterward, in unrelated code such as a lock wait. A timeout still in scope has a
+handler and never gets here. A busy host makes this race likely."
+  (unless *stale-timeout-guard-installed*
+    (let ((previous sb-ext:*invoke-debugger-hook*))
+      (setf *stale-timeout-guard-installed* t
+            sb-ext:*invoke-debugger-hook*
+            (lambda (condition hook)
+              (when (typep condition '(or sb-ext:timeout bt2:timeout))
+                ;; Only the signal's own restart: FIND-RESTART also returns unrelated outer ones.
+                (let ((restart (find-if (lambda (candidate)
+                                          (and (eq 'continue (restart-name candidate))
+                                               (member condition
+                                                       (sb-kernel::restart-associated-conditions candidate))))
+                                        (compute-restarts condition))))
+                  (when restart
+                    (format *error-output* "gr8s ignored a late timeout in thread ~A: ~A~%"
+                            (sb-thread:thread-name sb-thread:*current-thread*) condition)
+                    (invoke-restart restart))))
+              (when previous (funcall previous condition hook)))))))
+
 (defun install-shutdown-handlers ()
   #+sbcl
   (progn
@@ -435,7 +461,8 @@
                    (funcall (reconciliation-worker-before-reconcile worker)))
                  (reconcile-all (reconciliation-worker-reconciler worker)
                                 :observer (reconciliation-worker-observer worker)))
-             (error (error)
+             ;; Timeouts are serious conditions, not errors, and a late one can land here.
+             ((or error sb-ext:timeout bt2:timeout) (error)
                (format *error-output* "gr8s reconciliation error: ~A~%" error)))
            (bt:with-lock-held ((reconciliation-worker-lock worker))
              (unless (reconciliation-worker-stop-requested worker)
@@ -570,6 +597,8 @@
       (funcall cni-entry)
       (handler-case
           (let ((options (parse-cli-options arguments)))
+            (when (member (getf options :command) '(:serve :agent))
+              (install-stale-timeout-guard))
             (case (getf options :command)
               (:help (print-help) 0)
               (:kubeconfig
