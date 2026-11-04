@@ -110,6 +110,8 @@
                    "verbs" #("create" "delete" "get" "list" "patch" "update") "shortNames" #("po"))
       (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
       (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("create"))
+      (json-object "name" "pods/proxy" "singularName" "" "namespaced" t "kind" "PodProxyOptions"
+                   "verbs" #("get" "create" "update" "patch" "delete"))
       (json-object "name" "nodes" "singularName" "node" "namespaced" nil "kind" "Node" "verbs" #("get" "list")))
      (stored-resource-discovery "v1") (storage-status-discovery)))))
 
@@ -1015,6 +1017,9 @@
            (dispatch-core-resource-request store path method))
           ((and (string= path "/api/v1/pods") (eq method :get))
            (list-pods-response store reconciler nil))
+          ((nth-value 2 (pod-http-proxy-route path))
+           (multiple-value-bind (namespace id) (pod-http-proxy-route path)
+             (pod-http-proxy-response store namespace id method)))
           ((nth-value 2 (pod-route-parts path))
            (dispatch-pod-request store runtime reconciler path method))
           (t (status-response "Failure" "NotFound" "route not found" 404))))
