@@ -59,6 +59,7 @@ def main():
     parser.add_argument("--gr8s", required=True, type=Path)
     parser.add_argument("--sonobuoy", required=True, type=Path)
     parser.add_argument("--state-parent", type=Path, default=Path("/var/tmp"))
+    parser.add_argument("--state-directory", type=Path, help="Reuse an explicitly owned, stopped state and its image cache")
     parser.add_argument("--api-port", type=int, default=18190)
     parser.add_argument("--node-port", type=int, default=17447)
     parser.add_argument("--timeout", type=int, default=1200)
@@ -74,11 +75,12 @@ def main():
     if os.geteuid() != 0:
         parser.error("Run this privileged integration test inside a disposable Linux guest")
     root = Path(tempfile.mkdtemp(prefix="gr8s-conformance." if args.certified_conformance else "gr8s-podtemplates.", dir=args.state_parent))
-    state = root / "state"
+    state = args.state_directory or root / "state"
     base = f"http://127.0.0.1:{args.api_port}"
     report = {"focus": None if args.certified_conformance else args.focus,
               "mode": "certified-conformance" if args.certified_conformance else "focused",
-              "isCertificationResult": False, "nativeSHA256": hashlib.sha256(args.gr8s.read_bytes()).hexdigest()}
+              "isCertificationResult": False, "nativeSHA256": hashlib.sha256(args.gr8s.read_bytes()).hexdigest(),
+              "stateDirectory": str(state), "reusedState": args.state_directory is not None}
     native_log = (root / "gr8s.log").open("w")
     process = subprocess.Popen([str(args.gr8s), "serve", "--runtime", "containerd", "--state-directory", str(state),
                                 "--port", str(args.api_port), "--node-port", str(args.node_port), "--kubeconfig", str(root / "kubeconfig")],
@@ -118,6 +120,56 @@ def main():
         report["nativeAgentReady"] = True
         report["version"] = json.loads(request("/version")[1])
         report["sonobuoyVersion"] = subprocess.check_output([str(args.sonobuoy), "version", "--short"], text=True).strip()
+        if args.state_directory:
+            operations = []
+            code, body = request("/api/v1/namespaces/sonobuoy/pods")
+            if code != 200:
+                raise RuntimeError("Could not list prior owned Sonobuoy Pods")
+            for obj in json.loads(body)["items"]:
+                metadata = obj["metadata"]
+                code, _ = request("/api/v1/namespaces/sonobuoy/pods/" + metadata["name"], "DELETE")
+                operations.append({"resource": "pods", "name": metadata["name"], "uid": metadata["uid"], "code": code})
+                if code not in (200, 404):
+                    raise RuntimeError("Could not remove prior owned Sonobuoy Pod")
+            deadline = time.monotonic() + 90
+            while json.loads(request("/api/v1/namespaces/sonobuoy/pods")[1])["items"]:
+                if time.monotonic() > deadline:
+                    raise RuntimeError("Prior owned Sonobuoy Pod API deletion did not finish")
+                time.sleep(.2)
+            for prefix, resources in (("/api/v1", ("configmaps", "secrets", "serviceaccounts", "services")),
+                                      ("/apis/rbac.authorization.k8s.io/v1", ("roles", "rolebindings"))):
+                for resource in resources:
+                    collection = prefix + "/namespaces/sonobuoy/" + resource
+                    code, body = request(collection)
+                    if code != 200:
+                        raise RuntimeError("Could not list prior owned Sonobuoy namespace resources")
+                    for obj in json.loads(body)["items"]:
+                        metadata = obj["metadata"]
+                        code, _ = request(collection + "/" + metadata["name"], "DELETE")
+                        operations.append({"resource": resource, "name": metadata["name"], "uid": metadata["uid"], "code": code})
+                        if code not in (200, 404):
+                            raise RuntimeError("Could not remove prior owned Sonobuoy namespace resource")
+            for resource in ("clusterrolebindings", "clusterroles"):
+                collection = "/apis/rbac.authorization.k8s.io/v1/" + resource
+                code, body = request(collection + "?labelSelector=component%3Dsonobuoy%2Cnamespace%3Dsonobuoy")
+                if code != 200:
+                    raise RuntimeError("Could not list prior owned Sonobuoy RBAC resources")
+                for obj in json.loads(body)["items"]:
+                    metadata = obj["metadata"]
+                    code, _ = request(collection + "/" + metadata["name"], "DELETE")
+                    operations.append({"resource": resource, "name": metadata["name"], "uid": metadata["uid"], "code": code})
+                    if code not in (200, 404):
+                        raise RuntimeError("Could not remove prior owned Sonobuoy RBAC resource")
+            code, _ = request("/api/v1/namespaces/sonobuoy", "DELETE")
+            operations.append({"resource": "namespaces", "name": "sonobuoy", "code": code})
+            if code not in (200, 404):
+                raise RuntimeError("Could not remove prior owned Sonobuoy namespace")
+            deadline = time.monotonic() + 60
+            while request("/api/v1/namespaces/sonobuoy")[0] != 404:
+                if time.monotonic() > deadline:
+                    raise RuntimeError("Prior owned Sonobuoy namespace deletion did not finish")
+                time.sleep(.2)
+            report["stateReuseCleanupOperations"] = operations
         command = [str(args.sonobuoy), "run", "--kubeconfig", str(root / "kubeconfig"), "--dns-pod-labels=", "--plugin=e2e",
                    *(["--mode=certified-conformance"] if args.certified_conformance else ["--e2e-focus=" + args.focus, "--e2e-skip="])]
         report["command"] = command

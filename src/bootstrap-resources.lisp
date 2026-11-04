@@ -75,6 +75,8 @@
 
 (defun normalize-bootstrap-resource (resource input namespace name &optional store)
   "Copy, validate and default an implemented bootstrap API object."
+  (when (workload-resource-p resource)
+    (return-from normalize-bootstrap-resource (normalize-workload-resource resource input namespace name)))
   (when (equal resource "events")
     (return-from normalize-bootstrap-resource (normalize-event-resource input namespace name)))
   (when (equal resource "services")
@@ -135,7 +137,8 @@
                                                    ((equal resource "persistentvolumes") #("pv"))
                                                    ((equal resource "persistentvolumeclaims") #("pvc"))
                                                    ((equal resource "storageclasses") #("sc")) (t #()))
-                                "verbs" (if (or (storage-resource-p resource) (endpointslice-resource-p resource) (member resource '("podtemplates" "events") :test #'equal))
+                                "verbs" (if (or (storage-resource-p resource) (endpointslice-resource-p resource)
+                                                (member resource '("podtemplates" "events" "deployments" "replicasets") :test #'equal))
                                             #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
                                             #("create" "delete" "get" "list" "patch" "update" "watch"))))
    'vector))

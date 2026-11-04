@@ -134,6 +134,9 @@
                        (member (core-protobuf-string envelope 4) '("" "application/vnd.kubernetes.protobuf") :test #'equal))
             (error "Invalid Kubernetes protobuf envelope"))
           (when (string= kind "DeleteOptions") (return-from decode-core-resource-protobuf (core-protobuf-delete-options raw)))
+          (when (member kind '("Deployment" "ReplicaSet" "Scale") :test #'equal)
+            (return-from decode-core-resource-protobuf (decode-workload-protobuf raw kind)))
+
           (when (equal kind "EndpointSlice")
             (let ((object (template-protobuf-message "k8s.io.api.discovery.v1.EndpointSlice" raw)))
               (setf (gethash "apiVersion" object) version (gethash "kind" object) kind)

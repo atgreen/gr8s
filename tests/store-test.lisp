@@ -9,12 +9,26 @@
         #(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)))))
 
 (defmacro with-temporary-store ((store path) &body body)
-  `(let* ((,path (merge-pathnames
-                  (format nil "gr8s-test-~36R/" (random (expt 36 8)))
-                  (uiop:temporary-directory)))
-          (,store (open-store ,path)))
-     (unwind-protect (progn ,@body)
+  "Reserve an independent store directory atomically, including across test processes."
+  `(let ((,path (uiop:ensure-directory-pathname
+                (sb-posix:mkdtemp
+                 (namestring (merge-pathnames "gr8s-test-XXXXXX" (uiop:temporary-directory)))))))
+     (unwind-protect (let ((,store (open-store ,path))) ,@body)
        (uiop:delete-directory-tree ,path :validate t :if-does-not-exist :ignore))))
+
+(test temporary-stores-remain-isolated-with-identical-random-states
+  (let ((seed (make-random-state nil)) (first-path nil))
+    (let ((*random-state* (make-random-state seed)))
+      (with-temporary-store (first-store path)
+        (setf first-path path)
+        (create-pod first-store (parse-pod *valid-pod-json*))
+        (let ((*random-state* (make-random-state seed)))
+          (with-temporary-store (second-store other-path)
+            (is (not (equal path other-path)))
+            (is (null (list-pods second-store "default")))
+            (create-pod second-store (parse-pod *valid-pod-json*))
+            (is (= 1 (length (list-pods first-store "default"))))))))
+    (is (not (probe-file first-path)))))
 
 (test store-persists-pods-across-instances
   (with-temporary-store (store path)

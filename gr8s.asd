@@ -18,11 +18,14 @@
                "sb-posix" "trivial-utf-8" "usocket" "whistler/loader")
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
+               (:static-file "schema/workloads-v1.json")
+
                (:static-file "schema/storage-v1.json")
                (:static-file "schema/endpointslices-v1.json")
                (:module "src"
                 :serial t
                 :components ((:file "package")
+                             (:file "grpc-close-compat")
                              (:file "cri-v1-generated")
                              (:file "cri-wire-compat")
                              (:file "node-v1-generated")
@@ -44,6 +47,8 @@
                              (:file "service-account")
                              (:file "core-resource-protobuf")
                              (:file "podtemplates")
+                             (:file "workload-resources")
+
                              (:file "storage-api")
                              (:file "endpointslice-api")
                              (:file "storage-controller")
@@ -80,6 +85,9 @@
                              (:file "endpointslice-controller")
                              (:file "endpointslice-http")
                              (:file "garbage-collection")
+                             (:file "workload-controller")
+                             (:file "workload-deletion")
+                             (:file "workload-http")
                              (:file "main"))))
   :in-order-to ((test-op (test-op "gr8s/tests"))))
 
@@ -101,6 +109,7 @@
                              (:file "reconciler-test")
                              (:file "agent-runtime-test")
                              (:file "grpc-unix-test")
+                             (:file "grpc-close-test")
                              (:file "cri-test")
                              (:file "runtime-assets-test")
                              (:file "cni-test")
@@ -128,7 +137,8 @@
                              (:file "garbage-collection-test")
                              (:file "services-test")
                              (:file "endpointslices-test")
-                             (:file "telemetry-test"))))
+                             (:file "telemetry-test")
+                             (:file "workloads-test"))))
   :perform (test-op (operation component)
              (declare (ignore operation component))
              (unless (uiop:symbol-call
