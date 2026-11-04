@@ -45,6 +45,18 @@
         "failed": 0
       },
       "includesIndependentProxyCommit": "03552bf"
+    },
+    {
+      "sourceCommit": "4cd7b5b6d8172642b734c06ca016e881617176ee",
+      "integratedMain": "2a4c9d808cc144ae37b3ccc1a8e9191dc54a63b0",
+      "checks": 3596,
+      "passed": 3591,
+      "skipped": 5,
+      "failed": 0,
+      "exitCode": 0,
+      "logSHA256": "2ddbae9ea52638d4409fc021af048f92f892e5410c30106b60d62a4307fcc302",
+      "artifactDirectory": "build/conformance/2026-11-04-service-dns-finalizer-union-4cd7b5b",
+      "checkpoint": "finalizerIntegration"
     }
   ],
   "nativeRuns": [
