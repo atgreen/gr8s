@@ -125,6 +125,15 @@
       "passed": 141,
       "skipped": 0,
       "failed": 0
+    },
+    "finalIntegratedFullSuite": {
+      "sourceCommit": "0cdef1d",
+      "checks": 2187,
+      "passed": 2182,
+      "skipped": 5,
+      "failed": 0,
+      "log": "/tmp/gr8s-workload-storage-integrated-host-gate.log",
+      "logSHA256": "bf0f56bb3eac1a6017e919fc605d1480e2afed69d02da46c4a04f2d3135e9064"
     }
   },
   "limitations": [
@@ -132,6 +141,65 @@
     "The passing native controller build is f858ff0. Follow-up b3a9427 changes only empty resourceVersion handling for unconditional Scale updates and adds its HTTP regression.",
     "These four native scenarios do not replace the unchanged upstream conformance suite or establish certification.",
     "Pod templates preserve the broad schema, but actual execution remains subject to supported Pod admission; unsupported fields produce ReplicaFailure.",
-    "Global Pod watches and arbitrary owner-reference blocking finalizers remain unsupported outside this change."
+    "Global Pod watches and arbitrary owner-reference blocking finalizers remain unsupported outside this change.",
+    "Official Deployment scale uses4133d55; it adds typed-client empty embedded template namespace admission after b3a9427. The initial official run failed that admission before correction; its unchanged case now passes.",
+    "The focused runner reuses its explicitly owned stopped image cache and deletes prior Sonobuoy resources by exact name because RBAC DeleteCollection remains unsupported. This changes setup cleanup only; official test selection and body are unchanged.",
+    "Targeted official scale success is separate from the completed full446-case baseline; full Kubernetes certification remains unproven."
+  ],
+  "officialScaleRuns": [
+    {
+      "sourceCommit": "4133d55",
+      "artifactDirectory": "build/conformance/2026-11-04-workload-scale-b9ivf9vs",
+      "binarySHA256": "0e019cd44cb62cbc14d19c60def39dee7f1b93ca5bf938abd0d6e6e7980e7951",
+      "focus": "\\[sig-apps\\] Deployment Deployment should have a working scale subresource \\[Conformance\\]$",
+      "passed": true,
+      "upstreamCases": [
+        {
+          "name": "[It] [sig-apps] Deployment Deployment should have a working scale subresource [Conformance]",
+          "passed": true
+        }
+      ],
+      "nativeExitCode": 0,
+      "ownedShimsRemaining": [],
+      "artifactSHA256": {
+        "report.json": "ad68c1d6f294417c1e74eb7a901651622520f7c2f114e8e37e9cceff7c775db4",
+        "e2e.log": "94092a351ac5829f4147ddd2420192b0d056b6c2ec1840924be712ea0b80bf0a",
+        "gr8s.log": "f3818cabb3672815d20bdf5618242081df3200a524fc0ef8beafc10bc0f940cb",
+        "kube-sonobuoy.log": "8fca7733613b6feb542448ba9e7d895c01c5356f1c14fac4e0fcf5768c58c755",
+        "sonobuoy-worker.log": "3c99d53e5bba7d2756d049269ee8b72d7987de70ccc7da04d97cafb158cbd385",
+        "sonobuoy.stderr.log": "e00fec4a9304d8c449cbd00a03f51d7d469d77a1e8a5ecdc495804402a287ace",
+        "sonobuoy.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sonobuoy-results.txt": "3ccc4e1a00c97308accc216ba9de1c4aa9f0beee3e3bf7bee939072ef81e161c",
+        "sonobuoy-results.tar.gz": "81dacac7d9f949899d76b804d18eaf2fd4e55ddf10c65bacfd77b8e55a7646db"
+      },
+      "runnerSHA256": "bb07ae3d86883d1d4d982d4cd8d177c3754d7ca32cdff0a56616b7f0914923a0"
+    },
+    {
+      "sourceCommit": "b3a9427",
+      "artifactDirectory": "build/conformance/2026-11-04-workload-scale-undx9ppv",
+      "binarySHA256": "4b5a3b1030538b16755e1794d64ec97680497e42707fcd723868cdcc4b3fd37d",
+      "focus": "\\[sig-apps\\] Deployment Deployment should have a working scale subresource \\[Conformance\\]$",
+      "passed": false,
+      "upstreamCases": [
+        {
+          "name": "[It] [sig-apps] Deployment Deployment should have a working scale subresource [Conformance]",
+          "passed": false
+        }
+      ],
+      "nativeExitCode": 0,
+      "ownedShimsRemaining": [],
+      "artifactSHA256": {
+        "report.json": "fcf9b1510192cbd8d71a73aaad18b3d8792082255fb244633e2cb49787e05fa2",
+        "e2e.log": "8bc2b8a4ab484f023680ef2c41acf1703193291e9a9164dcb0047ec142e82149",
+        "gr8s.log": "f36db66ffe9ff22ec44cd9aa609aa34a1e1dd013c6bd7bd67393f7a84da2a445",
+        "kube-sonobuoy.log": "2fcee66960f18ee9f43a27270e046a59c506a729bf66cdc3fa7527d3ddc7dc3f",
+        "sonobuoy-worker.log": "abfb26fd1ccf5406ca7a3aef9d446ad9da79a6b8b1d46e7173b41c0a476cbe3a",
+        "sonobuoy.stderr.log": "944915de2056cc7fc6f62baa825d12c14b18b7f6ba4e0f19551311a3728b0711",
+        "sonobuoy.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sonobuoy-results.txt": "1ce200946497fdd6957649969572aa0115e649fabc4d52254f33e08f20cdef52",
+        "sonobuoy-results.tar.gz": "7441269b8e656611630f69195c8bed732a1b5704a6325826fe2a31f2e94ba3b1"
+      },
+      "runnerSHA256": null
+    }
   ]
 }
