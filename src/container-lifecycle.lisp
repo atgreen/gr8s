@@ -254,36 +254,30 @@
 
 (defun containerd-sandbox-config (runtime pod)
   "Build the sandbox configuration used for initial and subsequent container attempts."
-  (make-cri-pod-sandbox-config
-   (pod-name pod) (pod-uid pod) (pod-namespace pod) 0
-   (namestring (containerd-pod-log-directory runtime (pod-uid pod)))
-   (containerd-runtime-host-network runtime)
-   :resource-version (pod-resource-version pod) :spec-fingerprint (pod-runtime-spec-fingerprint pod)
-   :privileged (pod-requests-privileged-container-p pod)
-   :hostname (pod-runtime-hostname pod)
-   :dns-servers (containerd-runtime-dns-servers runtime)
-   :dns-searches (when (containerd-runtime-dns-searches runtime)
-                   (cons (format nil "~A.svc.cluster.local" (pod-namespace pod))
-                         (cdr (containerd-runtime-dns-searches runtime))))
-   :dns-options (containerd-runtime-dns-options runtime)))
+  (multiple-value-bind (servers searches options) (containerd-pod-dns-configuration runtime pod)
+    (make-cri-pod-sandbox-config
+     (pod-name pod) (pod-uid pod) (pod-namespace pod) 0
+     (namestring (containerd-pod-log-directory runtime (pod-uid pod)))
+     (containerd-runtime-host-network runtime)
+     :resource-version (pod-resource-version pod) :spec-fingerprint (pod-runtime-spec-fingerprint pod)
+     :privileged (pod-requests-privileged-container-p pod)
+     :hostname (pod-runtime-hostname pod)
+     :dns-servers servers :dns-searches searches :dns-options options)))
 
 (defun containerd-start-sandbox (runtime pod)
   "Create the native sandbox once; partial container creation never withdraws it."
-  (let ((directory (containerd-pod-log-directory runtime (pod-uid pod))))
-    (ensure-directories-exist directory)
-    (make-cri-pod-sandbox-info
-     :id (cri-run-pod-sandbox
-          (containerd-runtime-socket-path runtime)
-          :name (pod-name pod) :uid (pod-uid pod) :namespace (pod-namespace pod)
-          :log-directory (namestring directory) :host-network (containerd-runtime-host-network runtime)
-          :resource-version (pod-resource-version pod) :spec-fingerprint (pod-runtime-spec-fingerprint pod)
-          :privileged (pod-requests-privileged-container-p pod)
-          :hostname (pod-runtime-hostname pod)
-          :dns-servers (containerd-runtime-dns-servers runtime)
-          :dns-searches (when (containerd-runtime-dns-searches runtime)
-                          (cons (format nil "~A.svc.cluster.local" (pod-namespace pod))
-                                (cdr (containerd-runtime-dns-searches runtime))))
-          :dns-options (containerd-runtime-dns-options runtime)))))
+  (multiple-value-bind (servers searches options) (containerd-pod-dns-configuration runtime pod)
+    (let ((directory (containerd-pod-log-directory runtime (pod-uid pod))))
+      (ensure-directories-exist directory)
+      (make-cri-pod-sandbox-info
+       :id (cri-run-pod-sandbox
+            (containerd-runtime-socket-path runtime)
+            :name (pod-name pod) :uid (pod-uid pod) :namespace (pod-namespace pod)
+            :log-directory (namestring directory) :host-network (containerd-runtime-host-network runtime)
+            :resource-version (pod-resource-version pod) :spec-fingerprint (pod-runtime-spec-fingerprint pod)
+            :privileged (pod-requests-privileged-container-p pod)
+            :hostname (pod-runtime-hostname pod)
+            :dns-servers servers :dns-searches searches :dns-options options)))))
 
 (defun containerd-prune-old-attempts (runtime infos &optional created-names)
   "Keep the latest attempt and one predecessor per name, bounding dead CRI objects."
