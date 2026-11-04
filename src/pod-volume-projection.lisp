@@ -41,19 +41,6 @@
           ((equal path "metadata.annotations") (format-downward-map (gethash "annotations" metadata)))
           (t (error 'runtime-error :message (format nil "Unsupported downward field ~A" path))))))
 
-(defun node-allocatable-cpu ()
-  "Return this node's online CPU count."
-  (sb-alien:alien-funcall
-   (sb-alien:extern-alien "sysconf" (function sb-alien:long sb-alien:int)) 84))
-
-(defun node-allocatable-memory ()
-  "Return this node's total memory in bytes."
-  (with-open-file (in #P"/proc/meminfo")
-    (loop for line = (read-line in nil) while line
-          when (uiop:string-prefix-p "MemTotal:" line)
-            return (* 1024 (parse-integer line :start (length "MemTotal:") :junk-allowed t))
-          finally (error 'runtime-error :message "Could not read node memory"))))
-
 (defun container-quantity-nanos (quantity)
   "Return QUANTITY in exact billionths, large enough for any node's memory."
   (container-quantity-integer quantity :scale -9 :maximum (expt 10 40)))

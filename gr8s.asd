@@ -40,6 +40,7 @@
                              (:file "model")
                              (:file "pod-runtime-model")
                              (:file "container-resources")
+                             (:file "node-capacity")
                              (:file "container-probe-spec")
                              (:file "store")
                              (:file "pod-status-store")

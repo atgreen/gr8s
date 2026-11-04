@@ -76,6 +76,8 @@
       (setf (gethash "lastHeartbeat" object) (node-record-last-heartbeat node)))
     (when (node-record-lease-deadline node)
       (setf (gethash "leaseDeadline" object) (node-record-lease-deadline node)))
+    (when (node-record-capacity node)
+      (setf (gethash "capacity" object) (node-record-capacity node)))
     object))
 
 (defun parse-node-record (input)
@@ -91,6 +93,7 @@
                       :underlay-address (gethash "underlayAddress" object "")
                       :last-heartbeat (when (integerp heartbeat) heartbeat)
                       :lease-deadline (when (integerp deadline) deadline)
+                      :capacity (gethash "capacity" object)
                       :ready-p (and (eq t (gethash "ready" object))
                                     (integerp heartbeat) (integerp deadline)
                                     (<= (get-universal-time) deadline)))))

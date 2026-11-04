@@ -3,8 +3,9 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Manage node registration, readiness leases, PodCIDR allocation, underlay
-;;;; identity, and deterministic Pod placement.  Scheduling prefers the ready
-;;;; node with the fewest nonterminal Pods, preserves explicit assignments, and
+;;;; identity, and deterministic Pod placement.  Scheduling keeps requests within
+;;;; each node's capacity, prefers the ready node with the fewest nonterminal Pods,
+;;;; preserves explicit assignments, and
 ;;;; keeps observed workload status separate from desired Pod objects.
 
 (in-package #:gr8s)
@@ -184,6 +185,22 @@
             (error condition))))))
   t)
 
+(defun update-node-capacity (store node-name reported)
+  "Persist the (resource . quantity) pairs NODE-NAME's agent REPORTED; none changes nothing."
+  (when reported
+    (let ((capacity (make-hash-table :test #'equal)))
+      (loop for (name . value) in reported
+            do (parse-container-quantity value (format nil "node capacity ~A" name))
+               (setf (gethash name capacity) value))
+      (with-store-lock (store)
+        (let ((node (get-node-unlocked store node-name)))
+          (unless node (node-conflict "Node ~A is not registered" node-name))
+          (unless (equalp capacity (node-record-capacity node))
+            (let ((updated (copy-node-record node)))
+              (setf (node-record-capacity updated) capacity)
+              (persist-node store updated)
+              (setf (node-record-capacity node) capacity))))))))
+
 (defun allocate-node-pod-cidr (store cluster-cidr node-prefix)
   "Return the first free NODE-PREFIX block within CLUSTER-CIDR."
   (multiple-value-bind (address cluster-prefix) (parse-ipv4-cidr cluster-cidr)
@@ -252,6 +269,7 @@
                         of (pod-store-nodes store)
                       when (and (node-record-ready-p candidate)
                                 (pod-node-selector-matches-p pod candidate)
+                                (null (node-pod-fit-failures store pod candidate))
                                 (pod-node-storage-compatible-p store pod candidate))
                         collect candidate)
                 (lambda (left right)

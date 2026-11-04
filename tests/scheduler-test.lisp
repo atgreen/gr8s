@@ -137,3 +137,92 @@
               (fail "a scheduled Pod must not move through an update"))
           (kubernetes-error (condition)
             (is (string= "Conflict" (kubernetes-error-reason condition)))))))))
+
+(defun capacity-test-pod (name &key cpu memory node init-cpu)
+  "Build a Pod requesting CPU and MEMORY, optionally pinned to NODE or with an init container."
+  (let* ((requests (gr8s::core-object)) (spec (gr8s::core-object
+                                               "containers"
+                                               (vector (gr8s::core-object "name" "c" "image" "busybox"
+                                                                          "resources" (gr8s::core-object "requests" requests))))))
+    (when cpu (setf (gethash "cpu" requests) cpu))
+    (when memory (setf (gethash "memory" requests) memory))
+    (when node (setf (gethash "nodeName" spec) node))
+    (when init-cpu
+      (setf (gethash "initContainers" spec)
+            (vector (gr8s::core-object "name" "i" "image" "busybox"
+                                       "resources" (gr8s::core-object "requests" (gr8s::core-object "cpu" init-cpu))))))
+    (parse-pod (gr8s::core-object "apiVersion" "v1" "kind" "Pod" "spec" spec
+                                  "metadata" (gr8s::core-object "name" name "namespace" "default")))))
+
+(defun register-capacity-node (store name id cidr cpu memory &optional (pods "110"))
+  "Register a ready node whose agent reported CPU, MEMORY and PODS capacity."
+  (gr8s:register-node store (make-test-node name id cidr))
+  (gr8s::update-node-capacity store name (list (cons "cpu" cpu) (cons "memory" memory) (cons "pods" pods)))
+  (gr8s:mark-node-ready store name 100))
+
+(test node-api-reports-the-capacity-its-agent-reported
+  (with-temporary-store (store path)
+    (gr8s:register-node store (make-test-node "worker-a" "node-a" "10.64.0.0/20"))
+    (is-false (gethash "capacity" (gethash "status" (gr8s::node-api-object (gr8s:get-node store "worker-a")))))
+    (gr8s::update-node-capacity store "worker-a" (list (cons "cpu" "4") (cons "memory" "8192Ki") (cons "pods" "110")))
+    (let* ((reopened (open-store path))
+           (status (gethash "status" (gr8s::node-api-object (gr8s:get-node reopened "worker-a")))))
+      (is (equal "4" (gethash "cpu" (gethash "capacity" status))))
+      (is (equal "8192Ki" (gethash "memory" (gethash "allocatable" status))))
+      (is (equal "110" (gethash "pods" (gethash "allocatable" status)))))
+    (signals gr8s::kubernetes-error
+      (gr8s::update-node-capacity store "worker-a" (list (cons "cpu" "many"))))))
+
+(test local-node-capacity-matches-what-the-downward-api-reports
+  (let ((capacity (gr8s::local-node-capacity)))
+    (is (equal (write-to-string (gr8s::node-allocatable-cpu)) (cdr (assoc "cpu" capacity :test #'equal))))
+    (is (= (* 1024 (floor (gr8s::node-allocatable-memory) 1024))
+           (gr8s::container-quantity-integer (gr8s::parse-container-quantity (cdr (assoc "memory" capacity :test #'equal))))))))
+
+(test requests-keep-pods-within-a-nodes-capacity
+  (with-temporary-store (store path)
+    (register-capacity-node store "worker-a" "node-a" "10.64.0.0/20" "2" "1Gi")
+    (let ((first (create-pod store (capacity-test-pod "first" :cpu "1500m")))
+          (second (create-pod store (capacity-test-pod "second" :cpu "1")))
+          (third (create-pod store (capacity-test-pod "third" :memory "2Gi")))
+          (free (create-pod store (capacity-test-pod "free"))))
+      (is (gr8s:schedule-pod store first))
+      (is-false (gr8s:schedule-pod store second))
+      (is-false (gr8s:pod-node-name second))
+      (is-false (gr8s:schedule-pod store third))
+      (is (search "1 Insufficient cpu"
+                  (gr8s::with-store-lock (store) (gr8s::pod-unschedulable-message store second))))
+      (is (search "1 Insufficient memory"
+                  (gr8s::with-store-lock (store) (gr8s::pod-unschedulable-message store third))))
+      ;; A Pod that requests nothing fits however full the node is.
+      (is (gr8s:schedule-pod store free))
+      ;; A finished Pod no longer holds what it requested.
+      (gr8s::update-pod-observed-phase store first "Succeeded")
+      (is (gr8s:schedule-pod store second)))))
+
+(test the-largest-init-container-request-counts-against-capacity
+  (with-temporary-store (store path)
+    (register-capacity-node store "worker-a" "node-a" "10.64.0.0/20" "2" "1Gi")
+    (let ((large (create-pod store (capacity-test-pod "large" :cpu "100m" :init-cpu "3")))
+          (small (create-pod store (capacity-test-pod "small" :cpu "1" :init-cpu "500m"))))
+      (is (equal '(3000 0) (multiple-value-list (gr8s::pod-effective-requests large))))
+      (is (equal '(1000 0) (multiple-value-list (gr8s::pod-effective-requests small))))
+      (is-false (gr8s:schedule-pod store large))
+      (is (gr8s:schedule-pod store small)))))
+
+(test a-node-accepts-only-as-many-pods-as-it-reports
+  (with-temporary-store (store path)
+    (register-capacity-node store "worker-a" "node-a" "10.64.0.0/20" "2" "1Gi" "1")
+    (let ((first (create-pod store (capacity-test-pod "first")))
+          (second (create-pod store (capacity-test-pod "second"))))
+      (is (gr8s:schedule-pod store first))
+      (is-false (gr8s:schedule-pod store second))
+      (is (search "1 Too many pods"
+                  (gr8s::with-store-lock (store) (gr8s::pod-unschedulable-message store second)))))))
+
+(test a-second-node-takes-a-pod-the-first-has-no-room-for
+  (with-temporary-store (store path)
+    (register-capacity-node store "worker-a" "node-a" "10.64.0.0/20" "1" "1Gi")
+    (register-capacity-node store "worker-b" "node-b" "10.64.16.0/20" "4" "1Gi")
+    (let ((pod (create-pod store (capacity-test-pod "wide" :cpu "2"))))
+      (is (string= "worker-b" (gr8s:node-record-name (gr8s:schedule-pod store pod)))))))

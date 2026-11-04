@@ -167,8 +167,20 @@
         (t (string-downcase (machine-type)))))
 
 (defun node-api-object (node)
-  "Serialize a registered worker with readiness taken from its live lease."
-  (let ((address (node-reported-address node)))
+  "Serialize a registered worker with readiness from its live lease and capacity from its agent."
+  (let* ((address (node-reported-address node))
+         (status (core-object
+                  "conditions" (vector (core-object "type" "Ready"
+                                                    "status" (if (node-record-ready-p node) "True" "False")
+                                                    "reason" (if (node-record-ready-p node) "AgentReady" "AgentNotReady")
+                                                    "message" "Readiness follows the gr8s node session lease"))
+                  "addresses" (if (and address (plusp (length address)))
+                                  (vector (core-object "type" "InternalIP" "address" address)) #())
+                  "nodeInfo" (core-object "operatingSystem" "linux" "architecture" (native-node-architecture)
+                                          "kubeletVersion" "v1.36.0-gr8s.0"))))
+    (when (node-record-capacity node)
+      (setf (gethash "capacity" status) (copy-core-object (node-record-capacity node))
+            (gethash "allocatable" status) (copy-core-object (node-record-capacity node))))
     (core-object
      "apiVersion" "v1" "kind" "Node"
      "metadata" (core-object "name" (node-record-name node) "uid" (node-record-id node)
@@ -177,15 +189,7 @@
                                                    "kubernetes.io/hostname" (node-record-name node)))
      "spec" (core-object "unschedulable" nil "podCIDR" (node-record-pod-cidr node)
                          "podCIDRs" (vector (node-record-pod-cidr node)))
-     "status" (core-object
-               "conditions" (vector (core-object "type" "Ready"
-                                                  "status" (if (node-record-ready-p node) "True" "False")
-                                                  "reason" (if (node-record-ready-p node) "AgentReady" "AgentNotReady")
-                                                  "message" "Readiness follows the gr8s node session lease"))
-               "addresses" (if (and address (plusp (length address)))
-                               (vector (core-object "type" "InternalIP" "address" address)) #())
-               "nodeInfo" (core-object "operatingSystem" "linux" "architecture" (native-node-architecture)
-                                        "kubeletVersion" "v1.36.0-gr8s.0")))))
+     "status" status)))
 
 (defun nodes-api-response (store &optional name)
   "Return the actual registered worker list or one node by NAME."

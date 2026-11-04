@@ -61,7 +61,9 @@
   (underlay-address "")
   (ready-p nil)
   last-heartbeat
-  lease-deadline)
+  lease-deadline
+  ;; Quantity strings by resource name, from the agent; NIL until it first reports.
+  capacity)
 
 (defun invalid-pod (control &rest arguments)
   "Signal an HTTP 422 Kubernetes error formatted by CONTROL and ARGUMENTS."
