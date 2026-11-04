@@ -459,6 +459,15 @@ All ten unchanged upstream probe conformance cases pass in the
 records seven real scenarios, including physical cleanup of a blocked exec probe.
 These focused results do not establish full Kubernetes certification.
 
+Pod HTTP proxy requests use the assigned Pod's actual observed address and
+first declared port (or an explicit numeric port). Ordinary GET, POST, PUT,
+PATCH, DELETE, HEAD and OPTIONS requests forward real bodies, status codes and
+application headers, with separate `pods/proxy` authorization. Same-server
+absolute redirects remain within the proxy URL. Connection upgrades and HTML
+link rewriting remain tracked gaps; upgrades return HTTP 501. The
+[proxy validation record](docs/pod-http-proxy-validation-2026-11-04.json)
+includes actual workload forwarding and preserved test failures.
+
 The [readiness validation record](docs/pod-readiness-validation-2026-11-03.json)
 captures seven passing native scenarios and the official graceful-generation
 case changing from failure to success, including verified archives and cleanup.
