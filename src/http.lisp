@@ -1021,9 +1021,39 @@ its clients treat any other multi-byte frame as an error message."
       (t (status-response "Failure" "NotFound"
                           (format nil "No route for ~A ~A" method path) 404)))))
 
+(defun read-complete-body (stream content-length)
+  "Read a whole request body, of CONTENT-LENGTH octets or else until end of file.
+A single read is not enough: pure-tls returns what one TLS record holds rather
+than wait for the next, which truncates any body that spans records in flight."
+  (let ((buffer (make-array (or content-length 65536) :element-type '(unsigned-byte 8))) (filled 0))
+    (loop
+      (when (= filled (length buffer))
+        (when content-length (return))
+        (setf buffer (let ((larger (make-array (* 2 (length buffer)) :element-type '(unsigned-byte 8))))
+                       (replace larger buffer))))
+      (let ((next (read-sequence buffer stream :start filled)))
+        (when (= next filled)
+          (when content-length
+            (core-resource-error 400 "BadRequest" "Request body ended after ~D of ~D octets" filled content-length))
+          (return))
+        (setf filled next)))
+    (if (= filled (length buffer)) buffer (subseq buffer 0 filled))))
+
+(defun read-request-body (request)
+  "Hold the current request's entire body before any handler parses it."
+  (let* ((header (hunchentoot:header-in :content-length request))
+         (content-length (and header (parse-integer header :junk-allowed t)))
+         (chunked (hunchentoot::input-chunking-p))
+         (form (uiop:string-prefix-p "application/x-www-form-urlencoded" (or (hunchentoot:header-in :content-type request) ""))))
+    (when (and (or chunked (and content-length (plusp content-length)))
+               (not form)
+               (not (uiop:string-prefix-p "multipart/form-data" (or (hunchentoot:header-in :content-type request) ""))))
+      (setf (slot-value request 'hunchentoot::raw-post-data)
+            (read-complete-body (hunchentoot::content-stream request) (unless chunked content-length))))))
+
 (defun handle-http-request (store runtime reconciler request)
   (handler-case
-      (let ((path (hunchentoot:script-name request))
+      (let ((path (progn (read-request-body request) (hunchentoot:script-name request)))
             (method (hunchentoot:request-method request))
             (*crd-field-validation* (crd-request-field-validation)))
         (cond

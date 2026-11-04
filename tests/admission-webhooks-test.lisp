@@ -27,6 +27,7 @@
   (let ((object (com.inuoe.jzon:parse "{\"metadata\":{\"name\":\"skip-me\",\"labels\":{\"a\":\"b\"}},\"spec\":{\"items\":[1,2,3],\"on\":false}}")))
     (is-false (admission-test-cel "object.metadata.name != 'skip-me'" "object" object))
     (is-true (admission-test-cel "object.metadata.name == \"skip-me\"" "object" object))
+    (signals gr8s::cel-evaluation-error (admission-test-cel "object.metadata.namespace == 'production'" "object" object))
     (is-true (admission-test-cel "has(object.metadata.labels) && !has(object.metadata.other)" "object" object))
     (is-true (admission-test-cel "'a' in object.metadata.labels && 2 in object.spec.items" "object" object))
     (is-true (admission-test-cel "object.spec.items.all(x, x > 0) && object.spec.items.exists_one(x, x == 2)" "object" object))
@@ -57,6 +58,8 @@
   (is (search "Syntax error" (admission-test-compile-message "object.metadata.")))
   (is (search "Syntax error" (admission-test-compile-message "true true")))
   (is (search "Syntax error" (admission-test-compile-message "let == 1")))
+  (is (search "Syntax error" (admission-test-compile-message "namespace == 1")))
+  (is (null (admission-test-compile-message "object.metadata.namespace == 'production'")))
   (is (search "must evaluate to bool" (admission-test-compile-message "object.metadata.name")))
   (is (search "must evaluate to bool" (admission-test-compile-message "1 + 1")))
   (is (search "undeclared reference" (admission-test-compile-message "params.x == 1")))
@@ -248,6 +251,27 @@
 (defun admission-test-configmap (name &rest data)
   "Build a ConfigMap with DATA given as a key/value plist."
   (core-fixture "ConfigMap" name "data" (apply #'gr8s::core-object data)))
+
+(defclass admission-test-trickle-stream (trivial-gray-streams:fundamental-binary-input-stream)
+  ((octets :initarg :octets :accessor admission-test-trickle-octets)
+   (position :initform 0 :accessor admission-test-trickle-position))
+  (:documentation "Answer each read with at most three octets, as a stream between TLS records does."))
+
+(defmethod trivial-gray-streams:stream-read-sequence
+    ((stream admission-test-trickle-stream) sequence start end &key)
+  "Copy at most three octets into SEQUENCE and report the new fill position."
+  (let* ((from (admission-test-trickle-position stream))
+         (count (min 3 (- end start) (- (length (admission-test-trickle-octets stream)) from))))
+    (replace sequence (admission-test-trickle-octets stream) :start1 start :start2 from :end2 (+ from count))
+    (incf (admission-test-trickle-position stream) count)
+    (+ start count)))
+
+(test request-bodies-survive-short-reads
+  (let ((octets (coerce (loop for index below 200000 collect (mod index 251)) '(vector (unsigned-byte 8)))))
+    (flet ((trickle () (make-instance 'admission-test-trickle-stream :octets octets)))
+      (is (equalp octets (gr8s::read-complete-body (trickle) (length octets))) "known length")
+      (is (equalp octets (gr8s::read-complete-body (trickle) nil)) "chunked, until end of file")
+      (signals kubernetes-error (gr8s::read-complete-body (trickle) (1+ (length octets)))))))
 
 ;;; Configuration API
 
@@ -661,6 +685,10 @@
       (failure (apply #'admission-test-allow (admission-test-patch (admission-test-add "/x" "y")))
                "validating webhook may not return"))))
 
+(defun admission-test-labels (object)
+  "Return OBJECT's metadata labels."
+  (gethash "labels" (gethash "metadata" object)))
+
 (defun admission-test-pod-object (name &rest fields)
   "Build a minimal Pod manifest named NAME."
   (let ((pod (gr8s::copy-core-object (pod-to-object (parse-pod *valid-pod-json*)))))
@@ -686,9 +714,9 @@
                       (admission-test-patch
                        (admission-test-add "/spec/initContainers"
                                            (vector (gr8s::core-object "name" "added" "image" "added-image" "resources" (gr8s::core-object)))))))
-              ((gethash "denied" (or (gethash "labels" (gethash "metadata" (or (let ((o (gethash "object" request))) (if (hash-table-p o) o nil))
-                                                                               (gethash "oldObject" request)))
-                                                       (gr8s::core-object)))
+              ((let* ((object (gethash "object" request))
+                      (labels (admission-test-labels (if (hash-table-p object) object (gethash "oldObject" request)))))
+                 (and labels (gethash "denied" labels)))
                (admission-test-deny "the pod is denied"))
               (t (admission-test-allow))))
       (admission-test-config "ValidatingWebhookConfiguration" "pods-validate"
@@ -703,7 +731,9 @@
                         :object (admission-test-pod-object "mutated")))
              (init (aref (gethash "initContainers" (gethash "spec" created)) 0)))
         (is (equal "added" (gethash "name" init)))
-        (is (equal "File" (gethash "terminationMessagePolicy" init)) "defaults apply after the mutation"))
+        (is (equal "File" (gethash "terminationMessagePolicy" init)) "defaults apply after the mutation")
+        (is (equal "/dev/termination-log" (gethash "terminationMessagePath" init)))
+        (is (equal "File" (gethash "terminationMessagePolicy" (aref (gethash "containers" (gethash "spec" created)) 0)))))
       (check-core-status 400 "/api/v1/namespaces/alpha/pods/mutated" :method :patch
         :content-type "application/merge-patch+json"
         :object (gr8s::core-object "metadata" (gr8s::core-object "labels" (gr8s::core-object "denied" "yes"))))
@@ -727,8 +757,7 @@
       (check-core-status 201 "/api/v1/namespaces/alpha/pods" :method :post :object (admission-test-pod-object "held"))
       (admission-test-config "ValidatingWebhookConfiguration" "attach"
                              (admission-test-pod-webhook "attach.example.com" "/attach" '("pods/attach") '("CONNECT")))
-      (let ((body (check-core-status 400 "/api/v1/namespaces/alpha/pods/held/attach" :method :post
-                    :parameters '(("container" . "first") ("stdin" . "true")))))
+      (let ((body (check-core-status 400 "/api/v1/namespaces/alpha/pods/held/attach?container=first&stdin=true" :method :post)))
         (is (search "attaching to pod 'held' is not allowed" (gethash "message" body))))
       (let ((request (first seen)))
         (is (equal "CONNECT" (gethash "operation" request)))
@@ -738,9 +767,42 @@
         (is (equal "held" (gethash "name" request)))
         (is (equal "PodAttachOptions" (gethash "kind" (gethash "object" request)))))
       ;; The runtime has no attach yet, which an allowed request learns plainly.
-      (let ((body (check-core-status 501 "/api/v1/namespaces/alpha/pods/held/attach" :method :post
-                    :parameters '(("container" . "other") ("stdin" . "true")))))
+      (let ((body (check-core-status 501 "/api/v1/namespaces/alpha/pods/held/attach?container=other&stdin=true" :method :post)))
         (is (search "not implemented" (gethash "message" body)))))))
+
+(test containers-refuse-termination-messages-they-cannot-honor
+  (flet ((pod-with (field value)
+           (let* ((object (gr8s::copy-core-object (pod-to-object (parse-pod *valid-pod-json*))))
+                  (container (aref (gethash "containers" (gethash "spec" object)) 0)))
+             (setf (gethash field container) value)
+             object)))
+    (is (gr8s::pod-name (parse-pod (pod-with "terminationMessagePolicy" "File"))))
+    (signals kubernetes-error (parse-pod (pod-with "terminationMessagePolicy" "FallbackToLogsOnError")))
+    (signals kubernetes-error (parse-pod (pod-with "terminationMessagePath" "/elsewhere")))))
+
+(test webhook-configurations-accept-hyphenated-custom-kinds
+  (with-admission-api (store)
+    (values store)
+    (with-admission-handler (path request) (admission-test-deny "the crd contains unwanted label"))
+    (admission-test-config "ValidatingWebhookConfiguration" "crd"
+                           (admission-test-webhook "crd.example.com" "/crd"
+                             "rules" (vector (gr8s::core-object "operations" #("CREATE") "apiGroups" #("apiextensions.k8s.io")
+                                                                "apiVersions" #("*") "resources" #("customresourcedefinitions")))))
+    (let ((body (check-core-status 400 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post
+                  :object (gr8s::core-object
+                           "apiVersion" "apiextensions.k8s.io/v1" "kind" "CustomResourceDefinition"
+                           "metadata" (gr8s::core-object "name" "e2e-deny-crds.webhook.example.com")
+                           "spec" (gr8s::core-object
+                                   "group" "webhook.example.com" "scope" "Namespaced"
+                                   "names" (gr8s::core-object "plural" "e2e-deny-crds" "singular" "e2e-deny-crd"
+                                                              "kind" "E2e-deny-crd" "listKind" "E2e-deny-crdList")
+                                   "versions" (vector (gr8s::core-object
+                                                       "name" "v1" "served" t "storage" t
+                                                       "schema" (gr8s::core-object
+                                                                 "openAPIV3Schema" (gr8s::core-object
+                                                                                    "type" "object"
+                                                                                    "x-kubernetes-preserve-unknown-fields" t)))))))))
+      (is (search "the crd contains unwanted label" (gethash "message" body))))))
 
 (test workload-scale-subresource-passes-through-webhooks
   (with-admission-api (store)
@@ -824,4 +886,4 @@
                     :content-type "application/merge-patch+json"
                     :object (gr8s::core-object "data" (gr8s::core-object "mine" "3")))))
         (is (equal "2" (gethash "other" (gethash "data" body))) "the concurrent write survives")
-        (is (equal "3" (gethash "mine" (gethash "data" body)))))))))
+        (is (equal "3" (gethash "mine" (gethash "data" body))))))))

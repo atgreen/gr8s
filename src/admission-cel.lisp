@@ -178,8 +178,6 @@
                             ((equal word "false") (token :bool nil cursor))
                             ((equal word "null") (token :null 'null cursor))
                             ((equal word "in") (token :op "in" cursor))
-                            ((member word +cel-reserved-words+ :test #'equal)
-                             (cel-syntax-error cursor "reserved identifier: ~A" word))
                             (t (token :identifier word cursor)))
                       (setf cursor end)))
                    (t
@@ -347,6 +345,9 @@
          (cel-syntax-error (third token) "integer literal is out of range"))
        (list :lit value type))
       (:identifier
+       ;; Reserved words remain legal after a dot, as in object.metadata.namespace.
+       (when (member value +cel-reserved-words+ :test #'equal)
+         (cel-syntax-error (third token) "reserved identifier: ~A" value))
        (incf (cel-parser-position parser))
        (if (cel-accept parser "(")
            (cel-expand-global parser value (cel-parse-arguments parser))
