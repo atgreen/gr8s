@@ -32,6 +32,35 @@
           unless (gethash address used) return address
           finally (core-resource-error 503 "ServiceUnavailable" "Service address pool is exhausted"))))
 
+(defun service-external-name-p (service)
+  "Recognize a DNS-only Service without allocating a cluster address or listeners."
+  (equal "ExternalName" (gethash "type" (gethash "spec" service))))
+
+(defun normalize-external-name-service (object store)
+  "Validate a real DNS alias and clear allocation fields only on a genuine type transition."
+  (let* ((spec (gethash "spec" object)) (metadata (gethash "metadata" object))
+         (name (gethash "externalName" spec))
+         (target (and (stringp name) (if (and (plusp (length name)) (char= #\. (char name (1- (length name)))))
+                                       (subseq name 0 (1- (length name))) name)))
+         (existing (and store (gethash (core-resource-key "services" (gethash "namespace" metadata) (gethash "name" metadata))
+                                      (pod-store-resources store))))
+         (transition (and existing (not (service-external-name-p existing))
+                          (gethash "resourceVersion" metadata))))
+    (when (and (equal "default" (gethash "namespace" metadata)) (equal "kubernetes" (gethash "name" metadata)))
+      (invalid-pod "the API Service must remain ClusterIP"))
+    (unless (and (stringp target) (plusp (length target)) (dns-subdomain-p target))
+      (invalid-pod "externalName must be a nonempty DNS subdomain"))
+    (unless transition
+      (when (or (let ((ip (gethash "clusterIP" spec))) (and ip (not (equal ip ""))))
+                (plusp (length (optional-vector spec "clusterIPs" "Service.spec")))
+                (plusp (length (gethash "ipFamilies" spec #())))
+                (gethash "ipFamilyPolicy" spec))
+        (invalid-pod "ExternalName Services do not allocate cluster IPs or IP families")))
+    (dolist (field '("clusterIP" "clusterIPs" "ipFamilies" "ipFamilyPolicy")) (remhash field spec))
+    (setf (gethash "type" spec) "ExternalName" (gethash "externalName" spec) name
+          (gethash "status" object) (core-object "loadBalancer" (core-object)))
+    object))
+
 (defun normalize-service-resource (input namespace name store)
   "Validate and default supported single-stack TCP ClusterIP Service specifications."
   (let* ((object (copy-core-object (require-object input "Service")))
@@ -48,9 +77,9 @@
     (setf (gethash "apiVersion" object) "v1" (gethash "kind" object) "Service"
           (gethash "namespace" metadata) namespace)
     (reject-unsupported-fields spec '("type" "ports" "selector" "clusterIP" "clusterIPs" "ipFamilies"
-                                     "ipFamilyPolicy" "sessionAffinity" "internalTrafficPolicy" "publishNotReadyAddresses") "Service.spec")
-    (unless (equal "ClusterIP" (gethash "type" spec "ClusterIP"))
-      (invalid-pod "only ClusterIP Services are supported"))
+                                     "ipFamilyPolicy" "sessionAffinity" "internalTrafficPolicy" "publishNotReadyAddresses" "externalName") "Service.spec")
+    (unless (member (gethash "type" spec "ClusterIP") '("ClusterIP" "ExternalName") :test #'equal)
+      (invalid-pod "only ClusterIP and DNS ExternalName Services are supported"))
     (unless (and (equal "None" (gethash "sessionAffinity" spec "None"))
                  (equal "Cluster" (gethash "internalTrafficPolicy" spec "Cluster")))
       (invalid-pod "only cluster traffic with no session affinity is supported"))
@@ -67,7 +96,8 @@
                    (unless (and (core-qualified-key-p key) (core-label-name-p value :empty t))
                      (invalid-pod "Service selector must contain valid label requirements"))) selector)))
     (let ((ports (optional-vector spec "ports" "Service.spec")) (names nil) (numbers nil))
-      (unless (plusp (length ports)) (invalid-pod "Service requires at least one port"))
+      (unless (or (service-external-name-p object) (plusp (length ports)))
+        (invalid-pod "ClusterIP Service requires at least one port"))
       (loop for port across ports
             do (reject-unsupported-fields port '("name" "port" "targetPort" "protocol" "appProtocol") "Service port")
                (let* ((number (gethash "port" port)) (name (gethash "name" port))
@@ -87,6 +117,14 @@
                  (unless (equal "TCP" (gethash "protocol" port "TCP"))
                    (invalid-pod "only TCP Service ports are supported"))
                  (setf (gethash "targetPort" port) target (gethash "protocol" port) "TCP"))))
+    (when (service-external-name-p object)
+      (return-from normalize-service-resource (normalize-external-name-service object store)))
+    (when (gethash "externalName" spec)
+      (let ((existing (and store (gethash (core-resource-key "services" namespace (gethash "name" metadata))
+                                         (pod-store-resources store)))))
+        (unless (and existing (service-external-name-p existing))
+          (invalid-pod "externalName requires type ExternalName"))
+        (remhash "externalName" spec)))
     (let* ((specified (gethash "clusterIP" spec))
            (address (if (or (null specified) (equal specified ""))
                         (if store (allocate-service-ip-unlocked store)
@@ -249,7 +287,7 @@
   (let ((index 0) (lock (bt:make-lock "gr8s Service endpoint rotation")))
     (lambda ()
       (let* ((service (handler-case (get-core-resource store "services" namespace name) (kubernetes-error () nil)))
-             (port (and service (equal uid (gethash "uid" (gethash "metadata" service)))
+             (port (and service (not (service-external-name-p service)) (equal uid (gethash "uid" (gethash "metadata" service)))
                         (find port-number (gethash "ports" (gethash "spec" service))
                               :key (lambda (port) (gethash "port" port)))))
              (endpoints (when port (service-pod-endpoints store service port))))
@@ -265,7 +303,7 @@
       (let* ((metadata (gethash "metadata" service)) (spec (gethash "spec" service))
              (namespace (gethash "namespace" metadata)) (name (gethash "name" metadata))
              (uid (gethash "uid" metadata)) (address (gethash "clusterIP" spec)))
-        (unless (or (equal address "None") (equal address "10.96.0.1"))
+        (unless (or (service-external-name-p service) (equal address "None") (equal address "10.96.0.1"))
           (setf (gethash address addresses) t)
           (loop for port across (gethash "ports" spec)
                 for number = (gethash "port" port)

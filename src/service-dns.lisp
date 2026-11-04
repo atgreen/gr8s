@@ -24,7 +24,7 @@
           (gethash "metadata" result) metadata)
     (if (equal kind "Service")
         (let ((spec (core-object)))
-          (dolist (key '("clusterIP" "clusterIPs" "ipFamilies" "ports" "type"))
+          (dolist (key '("clusterIP" "clusterIPs" "ipFamilies" "ports" "type" "externalName"))
             (when (gethash key (gethash "spec" object))
               (setf (gethash key spec) (copy-core-object (gethash key (gethash "spec" object))))))
           (setf (gethash "spec" result) spec))
@@ -69,6 +69,10 @@
 
 (defun resolve-store-service-question (store question)
   "Resolve a normal or headless Service and optional headless endpoint hostname."
+  (when (equal "dns-version.cluster.local" (canonical-dns-name (0conf:question-name question)))
+    (return-from resolve-store-service-question
+      (values (when (member (0conf:question-qtype question) (list 0conf:+type-txt+ 0conf:+type-any+))
+                (list (make-instance '0conf:txt-record :name (0conf:question-name question) :strings '("1.1.0") :ttl 30))) t)))
   (when (= (0conf:question-qtype question) 0conf:+type-srv+)
     (return-from resolve-store-service-question (resolve-store-service-srv store question)))
   (let* ((name (canonical-dns-name (0conf:question-name question)))
@@ -82,6 +86,9 @@
       (handler-case
           (let* ((service (get-core-resource store "services" namespace service-name))
                  (spec (gethash "spec" service)) (addresses nil))
+            (when (and (null hostname) (service-external-name-p service))
+              (return-from resolve-store-service-question
+                (values (list (service-dns-cname-record question (gethash "externalName" spec))) t)))
             (if (equal "None" (gethash "clusterIP" spec))
                 (dolist (slice (list-core-resources store "endpointslices" namespace))
                   (when (and (member (gethash "addressType" slice) '("IPv4" "IPv6") :test #'equal)
@@ -107,7 +114,8 @@
 (defun store-service-dns-resolver (store)
   "Capture the agent's durable store for both DNS worker threads."
   (lambda (question)
-    (if (= (0conf:question-qtype question) 0conf:+type-ptr+)
+    (if (and (= (0conf:question-qtype question) 0conf:+type-ptr+)
+             (service-dns-reverse-address (0conf:question-name question)))
         (resolve-store-service-ptr store question)
         (resolve-store-service-question store question))))
 
@@ -145,7 +153,8 @@
                                   (and (equal port-name (gethash "name" candidate))
                                        (equal protocol (gethash "protocol" candidate "TCP"))))
                                 (gethash "ports" spec #()))))
-            (unless port (return-from resolve-store-service-srv (values nil nil)))
+            (when (or (service-external-name-p service) (null port))
+              (return-from resolve-store-service-srv (values nil nil)))
             (unless (equal "None" (gethash "clusterIP" spec))
               (return-from resolve-store-service-srv
                 (values (list (service-dns-srv-record question (gethash "port" port) fqdn)) t)))
@@ -168,3 +177,12 @@
                       (not (null targets)))))
         (kubernetes-error (condition)
           (if (= 404 (kubernetes-error-status-code condition)) (values nil nil) (error condition)))))))
+
+(defun service-dns-cname-record (question target)
+  "Encode a genuine CNAME wire record without modifying the upstream DNS codec."
+  (let ((writer (0conf:make-writer)))
+    ;; A separate writer deliberately emits an uncompressed DNS name. This is
+    ;; valid CNAME RDATA and remains independently decodable by the generic codec.
+    (0conf:write-name writer target)
+    (make-instance '0conf:unknown-record :rtype 0conf:+type-cname+
+                   :name (0conf:question-name question) :rdata (0conf:writer-result writer) :ttl 5)))

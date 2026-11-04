@@ -245,3 +245,87 @@
       (let ((message (service-dns-test-message store "22.2.0.192.in-addr.arpa" 0conf:+type-ptr+)))
         (is (= 3 (logand 15 (0conf:dns-message-flags message))))
         (is (null (0conf:dns-message-answers message)))))))
+
+(defun external-name-test-object (name target)
+  "Build a DNS-only Service without an allocated address or artificial backend."
+  (gr8s::core-object "apiVersion" "v1" "kind" "Service"
+                    "metadata" (gr8s::core-object "name" name)
+                    "spec" (gr8s::core-object "type" "ExternalName" "externalName" target)))
+
+(defun dns-test-cname-target (message)
+  "Decode the actual CNAME RDATA written on the wire, rather than checking a local target slot."
+  (let ((answer (first (0conf:dns-message-answers message))))
+    (is (= 0conf:+type-cname+ (0conf:rr-type answer)))
+    (gr8s::canonical-dns-name (0conf:read-name (0conf:make-reader (0conf:rr-rdata answer))))))
+
+(test service-dns-externalname-mutates-real-cname-and-transitions-type
+  (with-temporary-store (store directory)
+    (let* ((created (gr8s::create-core-resource store "services" (external-name-test-object "alias" "foo.example.com") "alpha"))
+           (uid (gethash "uid" (gethash "metadata" created))))
+      (is (null (gethash "clusterIP" (gethash "spec" created))))
+      (is (null (gethash "clusterIPs" (gethash "spec" created))))
+      (is (equal "foo.example.com" (dns-test-cname-target
+                                    (service-dns-test-message store "alias.alpha.svc.cluster.local" 0conf:+type-cname+))))
+      (gr8s::update-core-resource store "services" "alpha" "alias"
+        (lambda (old) (setf (gethash "externalName" (gethash "spec" old)) "bar.example.com.") old))
+      (is (equal "bar.example.com" (dns-test-cname-target
+                                    (service-dns-test-message store "alias.alpha.svc.cluster.local"))))
+      (with-temporary-store (agent agent-directory)
+        (gr8s::install-assigned-resource-objects agent nil (gr8s::service-discovery-projection store))
+        (is (equal "bar.example.com" (dns-test-cname-target
+                                      (service-dns-test-message (open-store agent-directory) "alias.alpha.svc.cluster.local" 0conf:+type-cname+)))))
+      (let ((cluster (gr8s::update-core-resource store "services" "alpha" "alias"
+                       (lambda (old)
+                         (setf (gethash "type" (gethash "spec" old)) "ClusterIP"
+                               (gethash "ports" (gethash "spec" old)) (vector (gr8s::core-object "name" "http" "port" 80))) old))))
+        (is (equal "10.96.0.10" (gethash "clusterIP" (gethash "spec" cluster))))
+        (is (equal uid (gethash "uid" (gethash "metadata" cluster))))
+        (is (null (gethash "externalName" (gethash "spec" cluster))))
+        (is (equalp #(10 96 0 10) (0conf:a-address (first (0conf:dns-message-answers
+                                                        (service-dns-test-message store "alias.alpha.svc.cluster.local")))))))
+      (let ((external (gr8s::update-core-resource store "services" "alpha" "alias"
+                        (lambda (old) (setf (gethash "type" (gethash "spec" old)) "ExternalName"
+                                            (gethash "externalName" (gethash "spec" old)) "again.example.com") old))))
+        (is (null (gethash "clusterIP" (gethash "spec" external))))
+        (is (null (funcall (gr8s::native-service-backend-resolver store "alpha" "alias" uid 80))))
+        (is (equal "again.example.com" (dns-test-cname-target
+                                        (service-dns-test-message store "alias.alpha.svc.cluster.local" 0conf:+type-cname+))))))))
+
+(test service-dns-externalname-validation-and-typed-creation
+  (with-temporary-store (store directory)
+    (dolist (target '("" "bad name" "bad..example" "Upper.example" "https://example.org"))
+      (signals gr8s:kubernetes-error (gr8s::create-core-resource store "services" (external-name-test-object "invalid" target) "alpha")))
+    (signals gr8s:kubernetes-error (gr8s::create-core-resource store "services" (external-name-test-object "kubernetes" "example.org") "default"))
+    (let ((object (external-name-test-object "allocated" "example.org")))
+      (setf (gethash "clusterIP" (gethash "spec" object)) "10.96.0.20")
+      (signals gr8s:kubernetes-error (gr8s::create-core-resource store "services" object "alpha")))
+    (let* ((metadata (core-test-protobuf '((1 "typed-alias") (6 ""))))
+           (spec (core-test-protobuf '((3 "") (4 "ExternalName") (7 "") (8 "") (10 "typed.example.org") (11 "") (12 0) (13 0))))
+           (wire (core-test-protobuf-envelope "Service" (list (list 1 metadata) (list 2 spec) (list 3 #()))))
+           (created (gr8s::create-core-resource store "services" (gr8s::decode-core-resource-protobuf wire "Service") "alpha")))
+      (is (equal "typed.example.org" (gethash "externalName" (gethash "spec" created))))
+      (is (null (gethash "clusterIP" (gethash "spec" created)))))))
+
+(test service-dns-schema-version-record-is-actual-txt
+  (with-temporary-store (store directory)
+    (let ((answers (0conf:dns-message-answers (service-dns-test-message store "dns-version.cluster.local" 0conf:+type-txt+))))
+      (is (= 1 (length answers)))
+      (is (equal '("1.1.0") (0conf:txt-strings (first answers)))))))
+
+(test service-dns-externalname-transition-releases-generated-slices-without-adopting-manual
+  (with-temporary-store (store directory)
+    (let ((service (gr8s::create-core-resource store "services" (service-test-object "web" "http") "alpha")))
+      (create-endpointslice-test-pod store "backend" "alpha" "192.0.2.55")
+      (gr8s::reconcile-endpointslices store)
+      (is (= 1 (length (gr8s::list-core-resources store "endpointslices" "alpha"))))
+      (let ((manual (gr8s::create-core-resource store "endpointslices" (endpointslice-test-object "manual") "alpha")))
+        (gr8s::update-core-resource store "services" "alpha" "web"
+          (lambda (old) (setf (gethash "type" (gethash "spec" old)) "ExternalName"
+                              (gethash "externalName" (gethash "spec" old)) "outside.example.org") old))
+        (gr8s::reconcile-endpointslices store)
+        (let ((remaining (gr8s::list-core-resources store "endpointslices" "alpha")))
+          (is (= 1 (length remaining)))
+          (is (equal (gethash "uid" (gethash "metadata" manual))
+                     (gethash "uid" (gethash "metadata" (first remaining))))))
+        (is (null (funcall (gr8s::native-service-backend-resolver store "alpha" "web"
+                            (gethash "uid" (gethash "metadata" service)) 8080))))))))
