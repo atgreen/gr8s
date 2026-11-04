@@ -148,7 +148,7 @@
   (cancel-runtime-pod-deletion (containerd-runtime-deletions runtime) uid)
   (containerd-delete-uid runtime uid (funcall *pod-deletion-clock*)))
 
-(defun containerd-delete-uid (runtime uid deadline)
+(defun containerd-delete-uid (runtime uid deadline &key preserve-lifecycle)
   "Stop UID's containers concurrently against DEADLINE before removing its sandbox."
   (call-containerd-runtime
    (lambda ()
@@ -175,7 +175,7 @@
          (cri-delete-pod-sandbox
           (containerd-runtime-socket-path runtime)
           (cri-pod-sandbox-info-id sandbox))))
-     (forget-container-lifecycle-state runtime uid)
+     (unless preserve-lifecycle (forget-container-lifecycle-state runtime uid))
      nil)))
 
 (defmethod runtime-terminate-pod ((runtime containerd-runtime) pod deadline)

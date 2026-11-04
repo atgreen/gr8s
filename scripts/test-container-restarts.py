@@ -220,7 +220,7 @@ def main():
             "passed": True, "uid": crash["metadata"]["uid"], "retryDeadline": deadline,
             "nextAttempt": next_attempt, "actualNextStartedUnix": started, "healthyContainerIDUnchanged": True}
         report["passed"] = True
-    except Exception as error:
+    except (Exception, KeyboardInterrupt) as error:
         report["error"] = repr(error)
     finally:
         try:
