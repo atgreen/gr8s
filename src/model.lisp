@@ -45,7 +45,9 @@
   uid
   resource-version
   node-name
-  object)
+  object
+  ;; Newer client-visible revision from status alone, never acknowledged by agents.
+  status-revision)
 
 (defun pod-all-containers (pod)
   "Return init and application containers for shared credentials, mounts and named operations."

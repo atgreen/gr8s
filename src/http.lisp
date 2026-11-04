@@ -35,6 +35,9 @@
 (defun pod-response-object (pod status)
   (let ((object (copy-json-object (pod-to-object pod))))
     (setf (gethash "status" object) status)
+    (when (pod-status-revision pod)
+      (setf (gethash "resourceVersion" (gethash "metadata" object))
+            (write-to-string (pod-status-revision pod))))
     object))
 
 (defun request-pod-in-namespace (object namespace &key allow-generate-name)
@@ -335,14 +338,17 @@
       (unless (= 404 (kubernetes-error-status-code condition)) (error condition)))))
 
 (defun list-pods-response (store reconciler &optional (namespace "default"))
+  (when (true-parameter-p (hunchentoot:parameter "watch"))
+    (return-from list-pods-response (pod-watch-response store namespace)))
   (let ((labels (core-selector-predicate (hunchentoot:parameter "labelSelector")))
         (fields (core-selector-predicate (hunchentoot:parameter "fieldSelector") :fields t
-                                         :field-paths '("metadata.name" "metadata.namespace" "spec.nodeName"
-                                                        "spec.serviceAccountName" "spec.restartPolicy"
-                                                        "status.phase" "status.podIP"))))
+                                         :field-paths (pod-selector-field-paths)))
+        ;; Read before gathering items: a watch from here may repeat a change
+        ;; already in the list, which clients tolerate, but can never miss one.
+        (revision (with-store-lock (store) (pod-store-pod-revision store))))
     (json-response
      (json-object "apiVersion" "v1" "kind" "PodList"
-                  "metadata" (json-object "resourceVersion" "0")
+                  "metadata" (json-object "resourceVersion" (write-to-string revision))
                   "items" (coerce
                            (loop for pod in (list-pods store namespace)
                                  for object = (pod-list-observed-object store reconciler pod)

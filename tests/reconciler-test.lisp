@@ -17,7 +17,7 @@
         (update-pod store (parse-pod object) "1"))
       (reconcile-pod reconciler "default" "hello")
       (is (= 2 (fake-runtime-ensure-count runtime)))
-      (is (string= "2"
+      (is (string= (pod-resource-version (get-pod store "default" "hello"))
                    (runtime-pod-resource-version
                     (runtime-observe runtime (pod-uid pod))))))))
 
