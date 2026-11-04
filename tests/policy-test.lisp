@@ -324,6 +324,22 @@
         (is (equal phase (gethash "phase" (gr8s::workload-pod-status reconciler pod)))))
       (check-core-status 201 "/api/v1/namespaces/alpha/pods/pod-0/eviction" :method :post :object (eviction-body "pod-0")))))
 
+(test eviction-asks-webhooks-about-its-creation-not-a-deletion
+  (with-budget-api (store runtime reconciler)
+    (budget-test-pod store "pod-0")
+    (settle-budgets reconciler runtime store)
+    (let ((seen nil))
+      (let ((original (fdefinition 'gr8s::admission-active-p)))
+        (unwind-protect
+             (progn
+               (setf (fdefinition 'gr8s::admission-active-p)
+                     (lambda (active-store attributes)
+                       (push (list (gr8s::admission-operation attributes) (gr8s::admission-subresource attributes)) seen)
+                       (funcall original active-store attributes)))
+               (check-core-status 201 "/api/v1/namespaces/alpha/pods/pod-0/eviction" :method :post :object (eviction-body "pod-0")))
+          (setf (fdefinition 'gr8s::admission-active-p) original)))
+      (is (equal '(("CREATE" "eviction")) seen)))))
+
 (test typed-eviction-carries-its-delete-options
   (with-budget-api (store runtime reconciler)
     (budget-test-pod store "pod-0")

@@ -480,6 +480,7 @@
       (process-workload-deletions reconciler)
       (reconcile-jobs reconciler)
       (reconcile-disruption-budgets reconciler)
+      (reconcile-cronjobs reconciler)
       (dolist (resource '("deployments" "replicasets"))
         (dolist (object (list-core-resources store resource))
           (handler-case

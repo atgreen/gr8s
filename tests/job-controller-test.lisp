@@ -219,8 +219,15 @@
       (is (= 1 (length (list-pods store "alpha"))))
       (incf now 31)
       (gr8s::reconcile-jobs reconciler)
-      (let ((condition (gr8s::job-terminal-condition (gethash "status" (job-now store)))))
-        (is (equal "DeadlineExceeded" (gethash "reason" condition))))
+      ;; The outcome is fixed at once, but Failed waits for the Pod to stop.
+      (let ((status (gethash "status" (job-now store))))
+        (is (equal "DeadlineExceeded" (gethash "reason" (gr8s::job-finishing-condition status))))
+        (is-false (gr8s::job-terminal-condition status)))
+      (gr8s::reconcile-jobs reconciler)
+      (gr8s::reconcile-jobs reconciler)
+      (let ((status (gethash "status" (job-now store))))
+        (is (equal "DeadlineExceeded" (gethash "reason" (gr8s::job-terminal-condition status))))
+        (is (= 1 (gethash "failed" status))))
       (dolist (pod (list-pods store "alpha"))
         (is-false (gr8s::job-pod-tracked-p pod))))))
 

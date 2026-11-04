@@ -78,12 +78,3 @@
     (setf (gethash "metadata" object) (if metadata (core-protobuf-metadata metadata) (core-object))
           (gethash "apiVersion" object) "policy/v1" (gethash "kind" object) "PodDisruptionBudget")
     object))
-
-(defun decode-eviction-protobuf (bytes)
-  "Decode a typed Eviction, keeping only its identity and delete options."
-  (let* ((fields (core-protobuf-fields bytes))
-         (metadata (core-protobuf-value fields 1)) (options (core-protobuf-value fields 2))
-         (object (core-object "apiVersion" "policy/v1" "kind" "Eviction"
-                              "metadata" (if metadata (core-protobuf-metadata metadata) (core-object)))))
-    (when options (setf (gethash "deleteOptions" object) (core-protobuf-delete-options options)))
-    object))

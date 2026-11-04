@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
 # SPDX-License-Identifier: MIT
-"""Generate pinned batch/v1 Job wire and structural schema additions."""
+"""Generate pinned batch/v1 Job and CronJob wire and structural schema additions."""
 
 import argparse
 import hashlib
@@ -39,7 +39,7 @@ def main():
         sources[name] = data.decode()
     baseline = json.loads((ROOT / "schema/podtemplate-v1.json").read_text())
     all_messages = core.proto_messages(sources)
-    roots = ["k8s.io.api.batch.v1.Job"]
+    roots = ["k8s.io.api.batch.v1.Job", "k8s.io.api.batch.v1.CronJob"]
     pending, messages = roots[:], {}
     while pending:
         name = pending.pop()
@@ -62,7 +62,7 @@ def main():
                         f["omitEmpty"] = True
     all_definitions = json.loads(sources["swagger.json"])["definitions"]
     pending = [n.replace("k8s.io.", "io.k8s.", 1) for n in roots]
-    pending += ["io.k8s.api.batch.v1.JobList"]
+    pending += ["io.k8s.api.batch.v1.JobList", "io.k8s.api.batch.v1.CronJobList"]
     definitions = {}
     while pending:
         name = pending.pop()

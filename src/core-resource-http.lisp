@@ -35,10 +35,8 @@
     (cond
       ((string= content-type "application/vnd.kubernetes.protobuf")
        (decode-core-resource-protobuf (hunchentoot:raw-post-data :force-binary t) expected-kind
-                                      (cond ((equal expected-kind "Scale") "autoscaling/v1")
-                                                ((equal expected-kind "Eviction") "policy/v1")
-                                                (t
-                                          (when (member expected-kind '("Event" "DeleteOptions") :test #'equal) *core-resource-view-version*)))))
+                                      (if (equal expected-kind "Scale") "autoscaling/v1"
+                                          (when (member expected-kind '("Event" "DeleteOptions") :test #'equal) *core-resource-view-version*))))
       ((member content-type '("" "application/json") :test #'string=)
        (require-object (if (member expected-kind '("CustomResourceDefinition" "CertificateSigningRequest") :test #'equal)
                            (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))

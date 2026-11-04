@@ -26,6 +26,10 @@
                                  "metadata" (gr8s::core-object "name" name "labels" (gr8s::core-object "app" "watched")))))
     (cond ((equal resource "jobs")
            (setf (gethash "spec" object) (gethash "spec" (batch-test-job))))
+          ((equal resource "cronjobs")
+           (setf (gethash "spec" object)
+                 (gr8s::core-object "schedule" "0 0 1 1 *"
+                                    "jobTemplate" (gr8s::core-object "spec" (gethash "spec" (batch-test-job))))))
           ((equal resource "certificatesigningrequests")
            (setf (gethash "spec" object) (gethash "spec" (csr-fixture (durable-watch-csr-request) :name name))))
           ((equal resource "endpointslices")
