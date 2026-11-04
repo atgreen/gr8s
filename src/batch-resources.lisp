@@ -93,8 +93,12 @@
     (unless (member (gethash "restartPolicy" pod-spec) '("Never" "OnFailure") :test #'equal)
       (core-resource-error 422 "Invalid" "Job Pod restartPolicy must be Never or OnFailure"))
     ;; Execute only Pod features that pass the same admission used at creation.
-    (let ((embedded (copy-core-object (gethash "metadata" template))))
-      (setf (gethash "name" embedded) "job-template" (gethash "namespace" embedded) namespace)
+    ;; Only these fields reach created Pods. Typed requests also carry empty
+    ;; server-owned template fields such as selfLink, which a Pod would refuse.
+    (let ((embedded (core-object "name" "job-template" "namespace" namespace)))
+      (dolist (field '("labels" "annotations" "finalizers"))
+        (when (gethash field (gethash "metadata" template))
+          (setf (gethash field embedded) (copy-core-object (gethash field (gethash "metadata" template))))))
       (let ((checked (parse-pod (core-object "apiVersion" "v1" "kind" "Pod" "metadata" embedded "spec" (copy-core-object pod-spec)))))
         (setf (gethash "spec" template) (copy-core-object (gethash "spec" (pod-to-object checked))))))
     object))

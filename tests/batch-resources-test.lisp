@@ -103,3 +103,13 @@
       (is (= 0 (gethash "completions" normalized)))
       (is (= 0 (gethash "backoffLimit" normalized)))
       (is-false (gethash "suspend" normalized)))))
+
+(test typed-template-metadata-with-empty-server-fields-is-accepted
+  ;; Protobuf decoding of ObjectMeta fills in fields such as an empty selfLink.
+  (let* ((input (batch-test-job))
+         (metadata (gethash "metadata" (gethash "template" (gethash "spec" input)))))
+    (setf (gethash "selfLink" metadata) "" (gethash "uid" metadata) ""
+          (gethash "labels" metadata) (gr8s::core-object "job" "work"))
+    (let ((object (normalize-test-job input)))
+      (is (equal "work" (gethash "job" (gethash "labels" (gethash "metadata" (gethash "template" (gethash "spec" object))))))))))
+
