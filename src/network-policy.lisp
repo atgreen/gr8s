@@ -3,11 +3,12 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Resolve Kubernetes NetworkPolicy resources into the per-Pod normalized rule
-;;;; set that network-policy-program.lisp compiles into a classifier. This is the
-;;;; bridge from declarative policy (podSelector, ipBlock/podSelector peers,
-;;;; ports) to the concrete (CIDR, proto, port) rules a given Pod's compiled
-;;;; firewall enforces. Pure functions over an in-memory cluster view, so the
-;;;; whole mapping is unit-testable without a kernel or a live API.
+;;;; set, then write that rule set into the egress guard's per-Pod BPF maps. This
+;;;; is the bridge from declarative policy (podSelector, ipBlock/podSelector
+;;;; peers, ports) to the concrete (CIDR, proto, port) entries the guard enforces
+;;;; in-kernel. Resolution is pure functions over an in-memory cluster view, so
+;;;; it is unit-testable without a kernel or a live API; the map writes use
+;;;; injectable loader seams for the same reason.
 ;;;;
 ;;;; Supported subset of networking.k8s.io/v1: matchLabels podSelector, ipBlock
 ;;;; (cidr) and podSelector peers, and ports. Deferred (tracked under the epic):
@@ -41,6 +42,26 @@ is a list of \"Ingress\"/\"Egress\" strings."
 (defstruct (np-pod (:constructor make-np-pod (&key name namespace labels ip)))
   "A cluster Pod as seen during resolution."
   name namespace (labels '()) ip)
+
+;;; The normalized per-Pod policy that resolution produces and the map writer
+;;; consumes: a direction plus flattened allow rules.
+
+(defstruct (netpol-rule (:constructor make-netpol-rule (cidr &optional ports)))
+  "One allow rule: destination CIDR plus optional (proto . port) pairs. PORTS nil
+means every protocol/port to CIDR is allowed."
+  (cidr "0.0.0.0/0" :type string)
+  (ports '() :type list))
+
+(defstruct (network-policy (:constructor make-network-policy (&key (direction :egress) rules)))
+  "A Pod's flattened policy for one direction."
+  (direction :egress)
+  (rules '() :type list))
+
+(defun netpol-proto-number (proto)
+  "Map a protocol keyword (:tcp :udp :sctp) or integer to its IP protocol number."
+  (etypecase proto
+    (integer proto)
+    (keyword (ecase proto (:tcp 6) (:udp 17) (:sctp 132)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Resolution.
@@ -115,16 +136,6 @@ is unrestricted and no program should be attached."
                                      (:ingress (np-spec-ingress spec))
                                      (:egress (np-spec-egress spec)))))
                          matching))))))
-
-(defun compile-pod-policy (pod specs pods direction)
-  "Resolve and JIT-compile POD's DIRECTION policy in one step.
-Returns (values isolated-p map-specs prog-specs); when POD is not isolated for
-DIRECTION, returns (values nil nil nil) and nothing need be attached."
-  (multiple-value-bind (isolated policy) (resolve-pod-policy pod specs pods direction)
-    (if isolated
-        (multiple-value-bind (maps progs) (compile-network-policy policy)
-          (values t maps progs))
-        (values nil nil nil))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Parse a networking.k8s.io/v1 NetworkPolicy object (a jzon hash-table) into

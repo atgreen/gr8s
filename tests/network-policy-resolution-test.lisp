@@ -83,22 +83,21 @@
       (is (not isolated))
       (is (null policy)))))
 
-(test npr-resolved-policy-compiles-to-a-classifier
+(test npr-resolved-policy-has-rules
   (let* ((pod (gr8s::make-np-pod :name "web" :namespace "prod" :labels '(("app" . "web")) :ip "10.0.0.1"))
          (spec (gr8s::make-np-spec
                 :namespace "prod" :pod-selector '(("app" . "web")) :policy-types '("Egress")
                 :egress (list (gr8s::make-np-rule :peers (list (gr8s::make-np-peer :cidr "10.0.0.0/8"))
                                                   :ports (list (gr8s::make-np-port :tcp 443)))))))
-    (multiple-value-bind (isolated maps progs) (gr8s::compile-pod-policy pod (list spec) (list pod) :egress)
+    (multiple-value-bind (isolated policy) (gr8s::resolve-pod-policy pod (list spec) (list pod) :egress)
       (is (not (null isolated)))
-      (is (null maps))
-      (is (= 1 (length progs)))
-      (is (plusp (length (getf (first progs) :insns)))))
-    ;; Not isolated -> compile short-circuits with nothing to attach.
-    (multiple-value-bind (isolated maps progs) (gr8s::compile-pod-policy pod (list spec) (list pod) :ingress)
+      (is (equal '("10.0.0.0/8") (npr-cidrs policy)))
+      (is (equal '((:tcp . 443))
+                 (gr8s::netpol-rule-ports (first (gr8s::network-policy-rules policy))))))
+    ;; Ingress is not governed here -> not isolated.
+    (multiple-value-bind (isolated policy) (gr8s::resolve-pod-policy pod (list spec) (list pod) :ingress)
       (is (not isolated))
-      (is (null maps))
-      (is (null progs)))))
+      (is (null policy)))))
 
 (defparameter +npr-manifest+
   "{\"apiVersion\":\"networking.k8s.io/v1\",\"kind\":\"NetworkPolicy\",
@@ -125,9 +124,9 @@
       (is (eq :udp (gr8s::np-port-protocol (first ports))))
       (is (= 53 (gr8s::np-port-port (first ports)))))))
 
-(test npr-manifest-end-to-end-resolves-and-compiles
-  ;; Parse a real manifest, resolve for a selected Pod, and compile -- the whole
-  ;; API-object -> compiled-firewall path.
+(test npr-manifest-end-to-end-resolves
+  ;; Parse a real manifest and resolve for a selected Pod -- the whole
+  ;; API-object -> per-Pod rule set path.
   (let* ((spec (gr8s::parse-network-policy +npr-manifest+))
          (web (gr8s::make-np-pod :name "web" :namespace "prod" :labels '(("app" . "web")) :ip "10.1.0.1"))
          (dns (gr8s::make-np-pod :name "dns" :namespace "prod" :labels '(("app" . "dns")) :ip "10.9.9.9")))
@@ -135,11 +134,7 @@
       (is (not (null isolated)))
       (let ((cidrs (npr-cidrs policy)))
         (is (member "10.0.0.0/8" cidrs :test #'string=))
-        (is (member "10.9.9.9/32" cidrs :test #'string=))))   ; dns Pod resolved from podSelector
-    (multiple-value-bind (isolated maps progs) (gr8s::compile-pod-policy web (list spec) (list web dns) :egress)
-      (is (not (null isolated)))
-      (is (null maps))
-      (is (plusp (length (getf (first progs) :insns)))))))
+        (is (member "10.9.9.9/32" cidrs :test #'string=))))))   ; dns Pod resolved from podSelector
 
 (test npr-manifest-rejects-unsupported-ports-closed
   ;; A protocol-only (all-port) rule must error, never silently widen to allow-all.
