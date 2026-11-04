@@ -55,6 +55,16 @@
       "log": "/tmp/gr8s-pod-dns-config-final-union.log",
       "logSHA256": "9237e78b402ae99d14cf4d4042f0d86c8e48500370d3df13462e1bdb50b4c547",
       "artifactDirectory": "build/conformance/2026-11-04-pod-dns-config-host-de06095"
+    },
+    "finalizerIntegratedFullHostSuite": {
+      "sourceCommit": "92865fa",
+      "checks": 3627,
+      "passed": 3622,
+      "skipped": 5,
+      "failed": 0,
+      "exitCode": 0,
+      "logSHA256": "45dfcc7631f1fec87cba177d39f0fee2ddf55b2b41361be2576cc82f359f35b0",
+      "artifactDirectory": "build/conformance/2026-11-04-pod-dns-config-finalizer-union-92865fa"
     }
   },
   "nativeValidation": {
