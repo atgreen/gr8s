@@ -178,9 +178,35 @@
           when (or (null namespace) (string= namespace (pod-namespace pod)))
             collect pod)))
 
+(defun generate-pod-name (prefix)
+  "Append five random characters to at most 58 prefix characters, matching upstream limits."
+  (let ((alphabet "bcdfghjklmnpqrstvwxz2456789"))
+    (concatenate 'string (subseq prefix 0 (min 58 (length prefix)))
+                 (map 'string (lambda (byte) (char alphabet (mod byte (length alphabet))))
+                      (secure-random-octets 5)))))
+
+(defparameter *pod-name-generator* #'generate-pod-name
+  "Generate a candidate Pod name; dynamically bound by deterministic collision tests.")
+
+(defun assign-generated-pod-name-unlocked (store pod)
+  "Choose an unused name under STORE's lock, retrying up to eight generated collisions."
+  (unless (pod-name pod)
+    (let* ((metadata (gethash "metadata" (pod-to-object pod)))
+           (prefix (pod-generate-name-prefix metadata)))
+      (unless (plusp (length prefix)) (invalid-pod "metadata.name or generateName is required"))
+      (loop repeat 8
+            for name = (require-dns-subdomain (funcall *pod-name-generator* prefix) "metadata.name")
+            unless (gethash (pod-key (pod-namespace pod) name) (pod-store-pods store))
+              do (setf (pod-name pod) name (gethash "name" metadata) name)
+                 (return-from assign-generated-pod-name-unlocked pod))
+      (error 'kubernetes-error :status-code 409 :reason "AlreadyExists"
+             :message "Could not generate an unused Pod name after eight attempts")))
+  pod)
+
 (defun create-pod (store pod)
   "Assign server metadata, persist POD, and reject duplicate names atomically."
   (with-store-lock (store)
+    (assign-generated-pod-name-unlocked store pod)
     (when (gethash (pod-key (pod-namespace pod) (pod-name pod))
                    (pod-store-pods store))
       (error 'kubernetes-error

@@ -118,7 +118,7 @@
   "Return true when VALUE is a valid Kubernetes-style DNS subdomain."
   (and (stringp value)
        (<= (length value) 253)
-       (every #'dns-label-p
+       (every (lambda (label) (dns-label-p label 253))
               (uiop:split-string value :separator '(#\.)))))
 
 (defun require-dns-label (value context)
@@ -215,7 +215,21 @@
                  (invalid-pod "blocking foreground owner deletion is not supported")))
       (when (> controllers 1) (invalid-pod "an object can have only one controller owner")))))
 
-(defun parse-pod (input)
+(defun pod-generate-name-prefix (metadata)
+  "Validate an optional Pod name prefix, allowing a trailing dash as Kubernetes does."
+  (let ((prefix (gethash "generateName" metadata "")))
+    (when (eq prefix 'null) (setf prefix ""))
+    (unless (stringp prefix) (invalid-pod "metadata.generateName must be a string"))
+    (when (plusp (length prefix))
+      (require-dns-subdomain
+       ;; Match apimachinery's maskTrailingDash, including its two-byte cut.
+       (if (and (> (length prefix) 1) (char= #\- (char prefix (1- (length prefix)))))
+           (concatenate 'string (subseq prefix 0 (- (length prefix) 2)) "a")
+           prefix)
+       "metadata.generateName"))
+    prefix))
+
+(defun parse-pod (input &key allow-generate-name)
   "Parse JSON text or an object into the supported, validated POD model."
   (let* ((object (require-object
                   (if (hash-table-p input)
@@ -236,7 +250,7 @@
                              "kind"))
       (invalid-pod "kind must be Pod"))
     (reject-unsupported-fields
-     metadata '("name" "namespace" "labels" "annotations" "uid"
+     metadata '("name" "generateName" "namespace" "labels" "annotations" "uid"
                 "resourceVersion" "creationTimestamp" "deletionTimestamp"
                 "deletionGracePeriodSeconds" "generation" "ownerReferences")
      "metadata")
@@ -256,8 +270,12 @@
                  (not (and (stringp dns-policy)
                            (string= dns-policy "ClusterFirst"))))
         (invalid-pod "only dnsPolicy ClusterFirst is supported")))
-    (let* ((name (require-dns-subdomain
-                  (object-value metadata "name" "metadata") "metadata.name"))
+    (let* ((prefix (pod-generate-name-prefix metadata))
+           (specified (gethash "name" metadata))
+           (name (if (and allow-generate-name (plusp (length prefix))
+                          (or (null specified) (eq specified 'null) (equal specified "")))
+                     nil
+                     (require-dns-subdomain specified "metadata.name")))
            (namespace (gethash "namespace" metadata "default"))
            (containers (object-value spec "containers" "spec"))
            (restart-policy (gethash "restartPolicy" spec "Always"))
