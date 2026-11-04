@@ -158,14 +158,17 @@
                   (write-projected-volume-file target bytes (if group (logior mode #o440) mode) group))))))))
     directory))
 
-(defun containerd-pod-mounts (runtime pod container)
+(defun containerd-pod-mounts (runtime pod container &optional environment)
   "Build CRI bind mounts from validated, materialized Pod volume declarations."
   (let ((volumes (gethash "volumes" (gethash "spec" (pod-to-object pod)) #()))
         (object (pod-runtime-container-object pod container)))
-    (loop for mount across (gethash "volumeMounts" object #())
+    (loop for mount across (gethash "volumeMounts" object #()) for index from 0
           for volume = (find (gethash "name" mount) volumes :test #'equal
                              :key (lambda (volume) (gethash "name" volume)))
           collect (multiple-value-bind (path forced-readonly) (materialize-pod-volume runtime pod volume)
+                    (let ((relative (container-mount-subpath mount environment)))
+                      (when (plusp (length relative))
+                        (setf path (stage-container-volume-subpath runtime pod container mount index path relative))))
                     (make-instance 'gr8s.cri.v1::mount
                                    :container-path (gethash "mountPath" mount) :host-path (namestring path)
                                    :readonly (or forced-readonly (not (null (gethash "configMap" volume)))
@@ -204,12 +207,16 @@
                  (containerd-key-environment-value runtime pod "secrets" (gethash "secretKeyRef" from)))
                 ((gethash "configMapKeyRef" from)
                  (containerd-key-environment-value runtime pod "configmaps" (gethash "configMapKeyRef" from)))
-                (t (let ((field (gethash "fieldPath" (gethash "fieldRef" from))))
+                (t (let* ((field (gethash "fieldPath" (gethash "fieldRef" from)))
+                          (reference (pod-metadata-subscript-reference field)))
                      (values
                       (cond ((equal field "metadata.name") (pod-name pod))
                             ((equal field "metadata.namespace") (pod-namespace pod))
                             ((equal field "metadata.uid") (pod-uid pod))
                             ((equal field "spec.nodeName") (or (pod-node-name pod) ""))
+                            (reference
+                             (let ((metadata (gethash "metadata" (pod-to-object pod))))
+                               (gethash (cdr reference) (gethash (car reference) metadata (core-object)) "")))
                             ((equal field "status.podIP")
                              (or pod-ip (setf pod-ip (cri-pod-sandbox-ip
                                                      (containerd-runtime-socket-path runtime) sandbox-id))))) t))))

@@ -73,3 +73,57 @@
         (declare (ignore index))
         (handler-case (gr8s::pin-volume-subpath root "absent") (gr8s::runtime-error () nil)))
       (is (= before (subpath-test-fd-count))))))
+
+(test subpath-allows-absolute-links-inside-the-root-and-preserves-real-directory-mode
+  (with-temporary-store (store directory)
+    (values store)
+    (let* ((root (merge-pathnames "volume/" directory)) (file (merge-pathnames "real/value" root)))
+      (subpath-test-write file "bounded")
+      (sb-posix:chmod (namestring root) #o2770)
+      (sb-posix:symlink (namestring file) (namestring (merge-pathnames "absolute-link" root)))
+      (let ((descriptor (gr8s::pin-volume-subpath root "absolute-link" :create-directory t)))
+        (unwind-protect (is (equal "bounded" (uiop:read-file-string (format nil "/proc/self/fd/~D" descriptor))))
+          (sb-posix:close descriptor)))
+      (let ((descriptor (gr8s::pin-volume-subpath root "new/child" :create-directory t)))
+        (unwind-protect (is (= #o2770 (logand #o7777 (sb-posix:stat-mode (sb-posix:fstat descriptor)))))
+          (sb-posix:close descriptor))))))
+
+(defun subpath-test-object (mount)
+  "Build a real admitted Pod with a shared emptyDir and the supplied mount declaration."
+  (let* ((object (com.inuoe.jzon:parse *valid-pod-json*)) (spec (gethash "spec" object)))
+    (setf (gethash "volumes" spec) (vector (gr8s::core-object "name" "data" "emptyDir" (gr8s::core-object)))
+          (gethash "volumeMounts" (aref (gethash "containers" spec) 0)) (vector mount))
+    object))
+
+(test subpath-admission-rejects-traversal-and-mutually-exclusive-fields
+  (dolist (path '("../escape" "safe/../escape" "/absolute"))
+    (dolist (field '("subPath" "subPathExpr"))
+      (signals gr8s:kubernetes-error
+        (parse-pod (subpath-test-object (gr8s::core-object "name" "data" "mountPath" "/data" field path))))))
+  (signals gr8s:kubernetes-error
+    (parse-pod (subpath-test-object (gr8s::core-object "name" "data" "mountPath" "/data"
+                                                     "subPath" "one" "subPathExpr" "$(NAME)"))))
+  (is (typep (parse-pod (subpath-test-object (gr8s::core-object "name" "data" "mountPath" "/data"
+                                                             "subPathExpr" "$(ANNOTATION)/$(POD_NAME)"))) 'gr8s::pod)))
+
+(test subpath-annotation-environment-retries-use-the-actual-updated-pod
+  (with-temporary-store (store directory)
+    (let* ((object (subpath-test-object (gr8s::core-object "name" "data" "mountPath" "/data" "subPathExpr" "$(ANNOTATION)/$(POD_NAME)")))
+           (runtime (gr8s::make-containerd-runtime :log-root directory)))
+      (setf (gethash "env" (aref (gethash "containers" (gethash "spec" object)) 0))
+            (vector (gr8s::core-object "name" "ANNOTATION" "valueFrom"
+                     (gr8s::core-object "fieldRef" (gr8s::core-object "fieldPath" "metadata.annotations['mysubpath']")))
+                    (gr8s::core-object "name" "POD_NAME" "valueFrom"
+                     (gr8s::core-object "fieldRef" (gr8s::core-object "fieldPath" "metadata.name")))))
+      (let* ((pod (create-pod store (parse-pod object))) (container (aref (pod-containers pod) 0))
+             (mount (aref (gethash "volumeMounts" (aref (gethash "containers" (gethash "spec" (pod-to-object pod))) 0)) 0)))
+        (signals gr8s::runtime-error
+          (gr8s::container-mount-subpath mount (gr8s::containerd-pod-environment runtime pod container "unused")))
+        (let* ((replacement (gr8s::copy-core-object (pod-to-object pod)))
+               (before (gr8s::pod-runtime-spec-fingerprint pod)))
+          (setf (gethash "annotations" (gethash "metadata" replacement)) (gr8s::core-object "mysubpath" "actual-directory"))
+          (let* ((updated (gr8s::update-pod store (parse-pod replacement) (pod-resource-version pod)))
+                 (environment (gr8s::containerd-pod-environment runtime updated (aref (pod-containers updated) 0) "unused")))
+            (is (equal before (gr8s::pod-runtime-spec-fingerprint updated)))
+            (is (equal (format nil "actual-directory/~A" (pod-name pod))
+                       (gr8s::container-mount-subpath mount environment)))))))))

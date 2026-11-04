@@ -39,9 +39,9 @@
       (if domain (format out "~A~C~A.~A~C~A~%" address #\Tab hostname domain #\Tab hostname)
           (format out "~A~C~A~%" address #\Tab hostname)))))
 
-(defun containerd-container-mounts (runtime pod container sandbox-id)
+(defun containerd-container-mounts (runtime pod container sandbox-id &optional environment)
   "Append the real Pod hosts mount unless host networking or an explicit user mount applies."
-  (let ((mounts (containerd-pod-mounts runtime pod container)))
+  (let ((mounts (containerd-pod-mounts runtime pod container environment)))
     (if (or (containerd-runtime-host-network runtime)
             (find "/etc/hosts" mounts :test #'equal
                   :key (lambda (mount) (slot-value mount 'gr8s.cri.v1::container-path))))

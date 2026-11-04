@@ -39,6 +39,16 @@
                (eql 0 (gethash "runAsUser" context)))
       (invalid-pod "runAsNonRoot cannot be combined with runAsUser 0"))))
 
+(defun pod-metadata-subscript-reference (field)
+  "Recognize a valid single-key label/annotation downward environment reference."
+  (when (stringp field)
+    (loop for kind in '("labels" "annotations")
+          for prefix = (format nil "metadata.~A['" kind)
+          when (and (uiop:string-prefix-p prefix field) (uiop:string-suffix-p field "']")
+                    (> (length field) (+ (length prefix) 2)))
+            do (let ((key (subseq field (length prefix) (- (length field) 2))))
+                 (when (core-qualified-key-p key) (return (cons kind key)))))))
+
 (defun validate-pod-field-reference (variable)
   "Validate downward fields and namespace-local Secret/ConfigMap key environment sources."
   (when (nth-value 1 (gethash "value" variable))
@@ -52,8 +62,9 @@
           (progn
             (reject-unsupported-fields ref '("fieldPath" "apiVersion") "fieldRef")
             (unless (and (equal "v1" (gethash "apiVersion" ref "v1"))
-                         (member (gethash "fieldPath" ref)
-                                 '("metadata.name" "metadata.namespace" "metadata.uid" "spec.nodeName" "status.podIP") :test #'equal))
+                         (or (member (gethash "fieldPath" ref)
+                                     '("metadata.name" "metadata.namespace" "metadata.uid" "spec.nodeName" "status.podIP") :test #'equal)
+                             (pod-metadata-subscript-reference (gethash "fieldPath" ref))))
               (invalid-pod "unsupported downward API field reference")))
           (progn
             (reject-unsupported-fields ref '("name" "key" "optional") "environment key reference")
@@ -77,8 +88,15 @@
       (invalid-pod "workingDir must be absolute")))
   (validate-linux-security-context (gethash "securityContext" container))
   (loop for mount across (optional-vector container "volumeMounts" "container")
-        do (reject-unsupported-fields mount '("name" "mountPath" "readOnly") "volumeMount")
+        do (reject-unsupported-fields mount '("name" "mountPath" "readOnly" "subPath" "subPathExpr") "volumeMount")
            (require-dns-label (gethash "name" mount) "volumeMount.name")
+           (dolist (field '("subPath" "subPathExpr"))
+             (when (nth-value 1 (gethash field mount))
+               (unless (valid-container-subpath-p (gethash field mount))
+                 (invalid-pod "volumeMount.~A must be relative without parent traversal" field))))
+           (when (and (plusp (length (gethash "subPath" mount "")))
+                      (plusp (length (gethash "subPathExpr" mount ""))))
+             (invalid-pod "volumeMount.subPath and subPathExpr are mutually exclusive"))
            (let ((path (gethash "mountPath" mount)))
              (unless (and (stringp path) (plusp (length path)) (char= #\/ (char path 0))
                           (not (find #\Null path))
