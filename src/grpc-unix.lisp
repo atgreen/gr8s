@@ -52,5 +52,6 @@
 
 #-sbcl
 (defun make-unix-grpc-channel (path &key (timeout 30))
+  "Report the unsupported native Unix transport on other Lisp implementations."
   (declare (ignore path timeout))
   (error "gr8s's Unix gRPC transport currently requires SBCL"))
