@@ -239,7 +239,7 @@
   (with-core-api (store path)
     (let* ((labels (core-test-protobuf '((1 "app") (2 "wire"))))
            (selector (core-test-protobuf (list (list 1 labels))))
-           (template-meta (core-test-protobuf (list (list 11 labels))))
+           (template-meta (core-test-protobuf (list (list 3 "") (list 11 labels))))
            (container (core-test-protobuf '((1 "main") (2 "busybox:1.36.1"))))
            (pod-spec (core-test-protobuf (list (list 2 container))))
            (template (core-test-protobuf (list (list 1 template-meta) (list 2 pod-spec))))
