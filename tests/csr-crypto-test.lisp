@@ -120,3 +120,32 @@
                                   (pure-tls::asn1-node-raw-bytes (third info)))
                               (pure-tls::asn1-node-raw-bytes (fourth info)))))))
           (signals kubernetes-error (gr8s::parse-and-verify-certificate-request rewritten)))))))
+
+(test signed-csr-with-malformed-ip-or-nonascii-dns-san-is-rejected-before-storage
+  (with-temporary-store (store directory)
+    (declare (ignore store))
+    (let ((request (csr-crypto-fixture directory "rsa")))
+      (dolist (name '((#x87 . #(127 0 0)) (#x82 . #(195 169))))
+        (let ((rewritten (rewrite-and-resign-rsa-csr request directory
+                          (lambda (info)
+                            (pure-tls/acme::encode-sequence
+                             (pure-tls::asn1-node-raw-bytes (first info)) (pure-tls::asn1-node-raw-bytes (second info))
+                             (pure-tls::asn1-node-raw-bytes (third info))
+                             (pure-tls/acme::encode-der #xa0
+                               (pure-tls/acme::encode-sequence
+                                 (pure-tls/acme::encode-oid '(1 2 840 113549 1 9 14))
+                                 (pure-tls/acme::encode-der #x31
+                                   (pure-tls/acme::encode-sequence
+                                     (pure-tls/acme::encode-extension '(2 5 29 17)
+                                       (pure-tls/acme::encode-sequence (pure-tls/acme::encode-der (car name) (cdr name)))))))))))))
+          (signals kubernetes-error (gr8s::parse-and-verify-certificate-request rewritten)))))))
+
+(test certificate-status-validates-every-der-object-inside-a-pem-block
+  (with-temporary-store (store directory)
+    (declare (ignore store))
+    (let* ((certificate (csr-crypto-fixture directory "ec" :certificate t))
+           (der (cdar (gr8s::csr-pem-blocks certificate)))
+           (pair (pure-tls/acme::wrap-pem "CERTIFICATE" (concatenate '(vector (unsigned-byte 8)) der der)))
+           (garbage (pure-tls/acme::wrap-pem "CERTIFICATE" (concatenate '(vector (unsigned-byte 8)) der #(1)))))
+      (finishes (gr8s::validate-csr-certificate-chain (trivial-utf-8:string-to-utf-8-bytes pair)))
+      (signals kubernetes-error (gr8s::validate-csr-certificate-chain (trivial-utf-8:string-to-utf-8-bytes garbage))))))

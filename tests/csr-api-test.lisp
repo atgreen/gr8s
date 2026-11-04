@@ -51,6 +51,10 @@
         (let ((updated (csr-api-request 200 item :method :put :object created)))
           (is (gr8s::core-json-equal-p spec (gethash "spec" updated)))
           (is-false (gethash "certificate" (gethash "status" updated))))
+        (csr-api-request 409 item :method :put :object created)
+        (let ((unconditional (csr-api-request 200 item)))
+          (remhash "resourceVersion" (gethash "metadata" unconditional))
+          (csr-api-request 200 item :method :put :object unconditional))
         (csr-api-request 422 (concatenate 'string item "/status") :method :patch :content-type "application/merge-patch+json"
                          :object (gr8s::core-object "status" (gr8s::core-object "conditions" (vector (gr8s::core-object "type" "Approved" "status" "True")))))
         (let* ((approved (csr-api-request 200 (concatenate 'string item "/approval") :method :patch :content-type "application/merge-patch+json"
