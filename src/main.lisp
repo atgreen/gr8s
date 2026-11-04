@@ -512,6 +512,7 @@
                     (setf worker (start-reconciliation-worker reconciler
                                   :before-reconcile (lambda ()
                                       (collect-orphaned-api-objects reconciler)
+                                      (reconcile-workloads reconciler)
                                       (when service-controller
                                         (ensure-in-cluster-network pki)
                                         (reconcile-native-services service-controller)))))

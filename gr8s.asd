@@ -18,6 +18,7 @@
                "sb-posix" "trivial-utf-8" "usocket" "whistler/loader")
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
+               (:static-file "schema/workloads-v1.json")
                (:module "src"
                 :serial t
                 :components ((:file "package")
@@ -42,6 +43,7 @@
                              (:file "service-account")
                              (:file "core-resource-protobuf")
                              (:file "podtemplates")
+                             (:file "workload-resources")
                              (:file "events")
                              (:file "node-session")
                              (:file "runtime")
@@ -71,6 +73,8 @@
                              (:file "in-cluster-api")
                              (:file "services")
                              (:file "garbage-collection")
+                             (:file "workload-controller")
+                             (:file "workload-http")
                              (:file "main"))))
   :in-order-to ((test-op (test-op "gr8s/tests"))))
 
@@ -115,7 +119,8 @@
                              (:file "pod-conditions-test")
                              (:file "garbage-collection-test")
                              (:file "services-test")
-                             (:file "telemetry-test"))))
+                             (:file "telemetry-test")
+                             (:file "workloads-test"))))
   :perform (test-op (operation component)
              (declare (ignore operation component))
              (unless (uiop:symbol-call

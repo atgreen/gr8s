@@ -15,6 +15,8 @@
                                  "kind" (gr8s::core-resource-kind resource)
                                  "metadata" (gr8s::core-object "name" name "labels" (gr8s::core-object "app" "watched")))))
     (cond ((equal resource "events") (setf (gethash "involvedObject" object) (gr8s::core-object)))
+          ((member resource '("deployments" "replicasets") :test #'equal)
+           (setf (gethash "spec" object) (gethash "spec" (workload-fixture (gr8s::core-resource-kind resource) name))))
           ((equal resource "podtemplates")
            (setf (gethash "template" object) (gethash "template" (podtemplate-fixture name))))
           ((equal resource "services")

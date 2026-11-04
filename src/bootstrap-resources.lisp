@@ -75,6 +75,8 @@
 
 (defun normalize-bootstrap-resource (resource input namespace name &optional store)
   "Copy, validate and default an implemented bootstrap API object."
+  (when (workload-resource-p resource)
+    (return-from normalize-bootstrap-resource (normalize-workload-resource resource input namespace name)))
   (when (equal resource "events")
     (return-from normalize-bootstrap-resource (normalize-event-resource input namespace name)))
   (when (equal resource "services")
@@ -132,7 +134,7 @@
                                 "shortNames" (cond ((equal resource "configmaps") #("cm"))
                                                    ((equal resource "services") #("svc"))
                                                    ((equal resource "events") #("ev")) (t #()))
-                                "verbs" (if (member resource '("podtemplates" "events") :test #'equal)
+                                "verbs" (if (member resource '("podtemplates" "events" "deployments" "replicasets") :test #'equal)
                                             #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
                                             #("create" "delete" "get" "list" "patch" "update" "watch"))))
    'vector))

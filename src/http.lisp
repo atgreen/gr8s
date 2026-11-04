@@ -97,7 +97,7 @@
                 (vector (json-object "name" "rbac.authorization.k8s.io"
                                      "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                                      "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
-                        (event-api-group)))))
+                        (event-api-group) (workload-api-group)))))
 
 (defun api-resources-response ()
   (json-response
@@ -215,7 +215,8 @@
      "api/v1"
      (json-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")
      "apis/events.k8s.io/v1"
-     (json-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1")))))
+     (json-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1")
+     "apis/apps/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/apps/v1?hash=gr8s-apps-v1")))))
 
 (defun pod-group-version-kind ()
   (json-object "group" "" "version" "v1" "kind" "Pod"))
@@ -300,9 +301,9 @@
      (json-object
       "openapi" "3.0.0"
       "info" (json-object "title" "gr8s" "version" "v1")
-      "paths" (if (equal version "events.k8s.io/v1")
-                  (add-event-openapi-paths (core-object) t)
-                  (add-core-resource-openapi-paths (openapi-v3-pod-paths)))
+      "paths" (cond ((equal version "events.k8s.io/v1") (add-event-openapi-paths (core-object) t))
+                    ((equal version "apps/v1") (add-workload-openapi-paths (core-object)))
+                    (t (add-core-resource-openapi-paths (openapi-v3-pod-paths))))
       "components" (json-object "schemas" (openapi-definitions))))))
 
 (defun create-pod-response (store reconciler &optional (namespace "default"))
@@ -965,9 +966,12 @@
           ((string= path "/apis/events.k8s.io") (json-response (event-api-group)))
           ((string= path "/apis/events.k8s.io/v1") (event-discovery-response))
           ((string= path "/apis/rbac.authorization.k8s.io/v1") (rbac-resources-response))
+          ((string= path "/apis/apps") (json-response (workload-api-group)))
+          ((string= path "/apis/apps/v1") (workload-resources-response))
           ((string= path "/openapi/v2") (openapi-response))
           ((string= path "/openapi/v3") (openapi-v3-discovery-response))
           ((string= path "/openapi/v3/apis/events.k8s.io/v1") (openapi-v3-response "events.k8s.io/v1"))
+          ((string= path "/openapi/v3/apis/apps/v1") (openapi-v3-response "apps/v1"))
           ((string= path "/openapi/v3/api/v1") (openapi-v3-response))
           ((string= path "/api/v1") (api-resources-response))
           ((and (eq method :get) (string= path "/api/v1/nodes"))
@@ -975,6 +979,7 @@
           ((and (eq method :get) (uiop:string-prefix-p "/api/v1/nodes/" path)
                 (dns-subdomain-p (subseq path (length "/api/v1/nodes/"))))
            (nodes-api-response store (subseq path (length "/api/v1/nodes/"))))
+          ((workload-subresource-route path) (dispatch-workload-subresource store path method))
           ((core-resource-route path)
            (dispatch-core-resource-request store path method))
           ((and (string= path "/api/v1/pods") (eq method :get))

@@ -63,7 +63,7 @@ supported surface. Pods can consume referenced environment keys and mounted
 files. Watch, server-side apply, and full Namespace lifecycle are not yet implemented.
 
 Pod logs and exec run through correlated agent operations, including interactive
-streams and nonzero exit status. Deployments and complete agent-crash recovery
+streams and nonzero exit status. Complete agent-crash recovery
 remain outside the verified boundary. The administrative HTTP API refuses
 non-loopback listener addresses; native Pods use the authenticated HTTPS API
 described below.
@@ -450,6 +450,20 @@ of the agent's execution subset; storing a template does not start any Pods.
 Server-side apply and finalizer processing remain unsupported.
 Templates have a 2 MiB serialized storage limit so admitted objects can be read
 back by the durable JSON loader.
+
+Deployments and ReplicaSets expose `apps/v1` JSON/protobuf CRUD, selectors,
+resumable watches, revision-consistent lists, strategic patches and separate
+`scale` and `status` subresources. ReplicaSet controllers create and scale real
+Pods, adopt matching orphans, release selector mismatches and preserve exact
+controller UIDs. Deployment controllers perform bounded rolling updates or
+recreate updates, retain revision history, honor pause and minimum readiness
+durations, and derive availability from actual Pod conditions. Controller state
+survives restart through the durable API objects and owner references.
+Templates retain the broad Kubernetes Pod schema; execution still uses the
+supported Pod subset. Rejected Pod admission produces a ReplicaFailure condition
+rather than reporting successful replicas. Deletion cascades through the existing
+background owner collector; blocking foreground deletion and finalizers remain
+unsupported.
 
 Stored-resource list continuations are signed and bound to their resource type,
 namespace and selectors. A shared durable change journal preserves a consistent

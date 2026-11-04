@@ -31,7 +31,8 @@
     (cond
       ((string= content-type "application/vnd.kubernetes.protobuf")
        (decode-core-resource-protobuf (hunchentoot:raw-post-data :force-binary t) expected-kind
-                                      (when (member expected-kind '("Event" "DeleteOptions") :test #'equal) *core-resource-view-version*)))
+                                      (if (equal expected-kind "Scale") "autoscaling/v1"
+                                          (when (member expected-kind '("Event" "DeleteOptions") :test #'equal) *core-resource-view-version*))))
       ((member content-type '("" "application/json") :test #'string=)
        (require-object (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)
                                            :max-string-length (* 2 1024 1024)) "request"))
@@ -246,8 +247,11 @@
       (lambda (old)
         (if (string= content-type "application/json-patch+json")
             (apply-core-json-patch old patch)
-            (if (and (equal resource "podtemplates") (equal content-type "application/strategic-merge-patch+json"))
-                (template-strategic-merge old (require-object patch "patch") (template-schema "io.k8s.api.core.v1.PodTemplate"))
+            (if (and (member resource '("podtemplates" "deployments" "replicasets") :test #'equal)
+                     (equal content-type "application/strategic-merge-patch+json"))
+                (template-strategic-merge old (require-object patch "patch")
+                  (template-schema (if (equal resource "podtemplates") "io.k8s.api.core.v1.PodTemplate"
+                                       (concatenate 'string "io.k8s.api.apps.v1." (core-resource-kind resource)))))
                 (merge-json-object old (require-object patch "patch")))))
       :dry-run dry-run))))
 
@@ -275,7 +279,7 @@
            (json-response (update-core-resource store resource namespace name
                                                (lambda (old) (declare (ignore old)) replacement) :dry-run dry-run))))
         ((and writable-scope name (eq method :patch)) (core-resource-patch-response store resource namespace name dry-run))
-        ((and writable-scope (null name) (member resource '("podtemplates" "events") :test #'equal) (eq method :delete))
+        ((and writable-scope (null name) (member resource '("podtemplates" "events" "deployments" "replicasets") :test #'equal) (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
                 (options (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions")))
                 (preview (gethash "dryRun" (or options (core-object)))))
@@ -325,9 +329,11 @@
                          "x-kubernetes-group-version-kind"
                          (vector (json-object "group" "" "version" "v1" "kind" kind))))))
   (labels ((alias (name)
-             (if (member name '("io.k8s.api.core.v1.PodTemplate" "io.k8s.api.core.v1.PodTemplateList"
+             (if (or (uiop:string-prefix-p "io.k8s.api.apps.v1." name)
+                     (uiop:string-prefix-p "io.k8s.api.autoscaling.v1." name)
+                     (member name '("io.k8s.api.core.v1.PodTemplate" "io.k8s.api.core.v1.PodTemplateList"
                                   "io.k8s.api.core.v1.Event" "io.k8s.api.core.v1.EventList"
-                                  "io.k8s.api.events.v1.Event" "io.k8s.api.events.v1.EventList") :test #'equal)
+                                  "io.k8s.api.events.v1.Event" "io.k8s.api.events.v1.EventList") :test #'equal))
                  name (concatenate 'string "io.gr8s.template." name)))
            (rewrite (schema)
              (cond ((hash-table-p schema)
