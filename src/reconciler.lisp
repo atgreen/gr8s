@@ -86,9 +86,12 @@
           (format *error-output* "gr8s Pod ~A/~A runtime error: ~A~%" namespace name (runtime-error-message error))
           (add-pod-status-conditions
            (reconciler-store reconciler) pod
-           (pod-status "Pending"
-                       :reason "RuntimeError"
-                       :message (runtime-error-message error))))))))
+           (or (when (deletion-requested-p pod)
+                 (let ((state (pod-finalization-state (reconciler-store reconciler) pod)))
+                   (when state (gethash "status" state))))
+               (pod-status "Pending"
+                           :reason "RuntimeError"
+                           :message (runtime-error-message error)))))))))
 
 (defun delete-reconciled-pod (reconciler namespace name &key uid resource-version
                                                       (grace-period nil grace-supplied-p)

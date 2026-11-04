@@ -1168,7 +1168,9 @@
            (STATUS-JSON :INITARG :STATUS-JSON :ACCESSOR
             GR8S.NODE.V1::STATUS-JSON :INITFORM
             (MAKE-ARRAY 0 :ELEMENT-TYPE '(UNSIGNED-BYTE 8)) :TYPE
-            (VECTOR (UNSIGNED-BYTE 8))))
+            (VECTOR (UNSIGNED-BYTE 8)))
+           (RUNTIME-DELETED :INITARG :RUNTIME-DELETED :ACCESSOR
+            GR8S.NODE.V1::RUNTIME-DELETED :INITFORM NIL :TYPE BOOLEAN))
           (:DOCUMENTATION "Proto message: PodObservedStatus"))
 
 
@@ -1221,6 +1223,14 @@
       (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
         (AG-PROTO::WRITE-FIELD-TAG 9 2 AG-PROTO::BUFFER)
         (AG-PROTO::WRITE-LENGTH-DELIMITED AG-PROTO::VALUE AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'RUNTIME-DELETED)))
+      (WHEN AG-PROTO::VALUE
+        (AG-PROTO::WRITE-FIELD-TAG 10 0 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-VARINT
+         (IF AG-PROTO::VALUE
+             1
+             0)
+         AG-PROTO::BUFFER)))
     AG-PROTO::BUFFER))
 
 
@@ -1277,6 +1287,10 @@
                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'STATUS-JSON)
                           (AG-PROTO::READ-LENGTH-DELIMITED-VIEW
                            AG-PROTO::BUFFER)))
+                 (10
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'RUNTIME-DELETED)
+                          (NOT
+                           (ZEROP (AG-PROTO::READ-VARINT AG-PROTO::BUFFER)))))
                  (OTHERWISE
                   (AG-PROTO::SKIP-FIELD AG-PROTO::BUFFER
                                         AG-PROTO::WIRE-TYPE)))))

@@ -19,7 +19,7 @@
 (defun test-terminal-pod-status ()
   "Provide an explicit failed runtime observation, including its real test exit status."
   (gr8s::core-object "phase" "Failed" "containerStatuses"
-    (vector (gr8s::core-object "name" "hello" "restartCount" 0 "ready" nil
+    (vector (gr8s::core-object "name" "web" "restartCount" 0 "ready" nil
                               "state" (gr8s::core-object "terminated"
                                          (gr8s::core-object "exitCode" 17 "reason" "Error"))))))
 
@@ -128,3 +128,133 @@
                (is-false (find :delete (lifecycle-cri-fixture-calls fixture) :key #'car))
                (is-false (find :delete-sandbox (lifecycle-cri-fixture-calls fixture) :key #'car)))
           (setf (symbol-function 'gr8s::save-container-lifecycle-state) save))))))
+
+(defstruct (finalizer-failing-runtime (:include gr8s::fake-runtime))
+  "Fail cleanup while preserving a separately supplied real terminal observation."
+  (fail-cleanup t))
+
+(defmethod gr8s::runtime-delete-pod ((runtime finalizer-failing-runtime) pod)
+  "Exercise a retryable cleanup failure after actual terminal observation."
+  (if (finalizer-failing-runtime-fail-cleanup runtime)
+      (error 'gr8s:runtime-error :message "Native removal is temporarily unavailable")
+      (call-next-method)))
+
+(test cleanup-errors-preserve-an-actually-observed-terminal-phase
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let* ((pod (create-pod store (finalized-test-pod))) (runtime (make-finalizer-failing-runtime))
+           (reconciler (make-reconciler store runtime)))
+      (setf (gethash (pod-uid pod) (gr8s::fake-runtime-pods runtime))
+            (gr8s::make-runtime-pod :uid (pod-uid pod) :phase "Failed" :status (test-terminal-pod-status)))
+      (mark-pod-deleting store "default" "hello" :grace-period 0)
+      (is (equal "Failed" (gethash "phase" (reconcile-pod reconciler "default" "hello"))))
+      (let ((state (gr8s::pod-finalization-state store pod)))
+        (is-false (gethash "runtimeDeleted" state))
+        (is (equal "Failed" (gethash "phase" (gethash "status" state)))))
+      (setf (finalizer-failing-runtime-fail-cleanup runtime) nil)
+      (is (equal "Failed" (gethash "phase" (reconcile-pod reconciler "default" "hello"))))
+      (is-true (gethash "runtimeDeleted" (gr8s::pod-finalization-state store pod))))))
+
+(test finalized-pod-cleanup-ack-is-additive-and-not-a-public-phase
+  (let* ((legacy (make-instance 'gr8s.node.v1::pod-observed-status :phase "Failed"))
+         (current (make-instance 'gr8s.node.v1::pod-observed-status :phase "Failed" :runtime-deleted t)))
+    (is-false (slot-value (ag-proto:deserialize-from-bytes 'gr8s.node.v1::pod-observed-status
+                           (ag-proto:serialize-to-bytes legacy)) 'gr8s.node.v1::runtime-deleted))
+    (let ((decoded (ag-proto:deserialize-from-bytes 'gr8s.node.v1::pod-observed-status (ag-proto:serialize-to-bytes current))))
+      (is-true (slot-value decoded 'gr8s.node.v1::runtime-deleted))
+      (is (equal "Failed" (slot-value decoded 'gr8s.node.v1::phase))))))
+
+(test finalized-pod-control-plane-waits-for-authenticated-physical-cleanup-at-zero-grace
+  (with-temporary-store (store directory)
+    (let* ((server (gr8s::%make-node-grpc-server :store store))
+           (runtime (gr8s::make-control-plane-runtime store server))
+           (reconciler (make-reconciler store runtime))
+           (backend (make-fake-runtime))
+           (agent (gr8s::make-node-runtime (merge-pathnames "agent/" directory) backend nil))
+           (object (gr8s::copy-core-object (pod-to-object (finalized-test-pod))))
+           (pod nil))
+      (setf (gethash "restartPolicy" (gethash "spec" object)) "Never"
+            pod (create-pod store (parse-pod object)))
+      (gr8s::register-node store (gr8s::make-node-record :id "worker-a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+      (gr8s::mark-node-ready store "worker-a" (get-universal-time))
+      (unwind-protect
+           (progn
+             (gr8s::start-node-runtime agent)
+             (reconcile-pod reconciler "default" "hello")
+             (gr8s::reconcile-node-snapshot agent (grace-snapshot-without-network (gr8s::current-node-snapshot server "worker-a")))
+             (let ((actual (runtime-observe backend (pod-uid pod))))
+               (setf (gr8s::runtime-pod-phase actual) "Failed"
+                     (gr8s::runtime-pod-status actual) (test-terminal-pod-status)))
+             (gr8s::delete-reconciled-pod reconciler "default" "hello" :uid (pod-uid pod) :grace-period 0)
+             (is (equal (pod-uid pod) (pod-uid (get-pod store "default" "hello"))))
+             (is-false (gethash "runtimeDeleted" (gr8s::pod-finalization-state store pod)))
+             (let ((snapshot (gr8s::current-node-snapshot server "worker-a")))
+               (is (= 1 (length (slot-value snapshot 'gr8s.node.v1::pods))))
+               (gr8s::reconcile-node-snapshot agent (grace-snapshot-without-network snapshot)))
+             (let* ((status (gr8s::node-runtime-status agent))
+                    (message (first (slot-value status 'gr8s.node.v1::pods)))
+                    (version (slot-value message 'gr8s.node.v1::resource-version)))
+               (is-true (slot-value message 'gr8s.node.v1::runtime-deleted))
+               (is (equal "Failed" (slot-value message 'gr8s.node.v1::phase)))
+               (gr8s::handle-node-agent-envelope server "other-node" (gr8s::make-agent-envelope :status status))
+               (is-false (gethash "runtimeDeleted" (gr8s::pod-finalization-state store pod)))
+               (setf (slot-value message 'gr8s.node.v1::resource-version) "stale-version")
+               (gr8s::handle-node-agent-envelope server "worker-a" (gr8s::make-agent-envelope :status status))
+               (is-false (gethash "runtimeDeleted" (gr8s::pod-finalization-state store pod)))
+               (setf (slot-value message 'gr8s.node.v1::resource-version) version
+                     (slot-value message 'gr8s.node.v1::uid) "stale-uid")
+               (gr8s::handle-node-agent-envelope server "worker-a" (gr8s::make-agent-envelope :status status))
+               (is-false (gethash "runtimeDeleted" (gr8s::pod-finalization-state store pod)))
+               (setf (slot-value message 'gr8s.node.v1::uid) (pod-uid pod))
+               (gr8s::handle-node-agent-envelope server "worker-a" (gr8s::make-agent-envelope :status status))
+               (is-true (gethash "runtimeDeleted" (gr8s::pod-finalization-state store pod))))
+             (let ((actual (reconcile-pod reconciler "default" "hello")))
+               (is (equal "Failed" (gethash "phase" actual)))
+               (is (= 17 (gethash "exitCode" (gethash "terminated" (gethash "state" (aref (gethash "containerStatuses" actual) 0))))))
+               (is-false (nth-value 1 (gethash "runtimeDeleted" actual))))
+             (is-true (get-pod (gr8s::node-runtime-store agent) "default" "hello"))
+             (let* ((current (get-pod store "default" "hello")) (copy (gr8s::copy-core-object (pod-to-object current))))
+               (setf (gethash "finalizers" (gethash "metadata" copy)) #())
+               (update-pod store (parse-pod copy) (pod-resource-version current)))
+             (reconcile-pod reconciler "default" "hello")
+             (signals kubernetes-error (get-pod store "default" "hello"))
+             (gr8s::reconcile-node-snapshot agent (grace-snapshot-without-network (gr8s::current-node-snapshot server "worker-a")))
+             (signals kubernetes-error (get-pod (gr8s::node-runtime-store agent) "default" "hello"))
+             (is (null (slot-value (gr8s::node-runtime-status agent) 'gr8s.node.v1::pods))))
+        (gr8s::stop-node-runtime agent)))))
+
+(test typed-pod-metadata-preserves-finalizers-and-rejects-invalid-wire-values
+  (let ((metadata (gr8s::core-protobuf-metadata
+                   (core-test-protobuf '((1 "wire") (14 "example.com/one") (14 "example.com/two"))))))
+    (is (equalp #("example.com/one" "example.com/two") (gethash "finalizers" metadata))))
+  (signals error (gr8s::core-protobuf-metadata (core-test-protobuf '((14 1)))))
+  (signals kubernetes-error (gr8s::core-protobuf-metadata (core-test-protobuf '((14 "invalid name"))))))
+
+(test typed-pod-force-deletion-and-json-get-to-put-finalizer-removal
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
+           (server (start-server :address "127.0.0.1" :port 18089 :store store :runtime runtime :reconciler reconciler))
+           (item "/api/v1/namespaces/default/pods/wire-finalizer"))
+      (unwind-protect
+           (let* ((metadata (core-test-protobuf '((1 "wire-finalizer") (14 "example.com/cleanup"))))
+                  (container (core-test-protobuf '((1 "web") (2 "busybox"))))
+                  (spec (core-test-protobuf (list (list 2 container) (list 3 "Never") (list 10 "worker-a"))))
+                  (created (check-core-status 201 "/api/v1/namespaces/default/pods" :method :post
+                             :content-type "application/vnd.kubernetes.protobuf"
+                             :octets (core-test-protobuf-envelope "Pod" (list (list 1 metadata) (list 2 spec)))))
+                  (uid (gethash "uid" (gethash "metadata" created)))
+                  (actual (runtime-observe runtime uid)))
+             (is (equalp #("example.com/cleanup") (gethash "finalizers" (gethash "metadata" created))))
+             (setf (gr8s::runtime-pod-phase actual) "Failed" (gr8s::runtime-pod-status actual) (test-terminal-pod-status))
+             (check-core-status 200 item :method :delete :object (gr8s::core-object "gracePeriodSeconds" 0))
+             (let ((retained (check-core-status 200 item)))
+               (is (equal uid (gethash "uid" (gethash "metadata" retained))))
+               (is (equal "Failed" (gethash "phase" (gethash "status" retained))))
+               (is-false (runtime-observe runtime uid))
+               ;; Keep the returned nonempty server-owned status in the JSON
+               ;; request: metadata-only GET-to-PUT must work without edits.
+               (setf (gethash "finalizers" (gethash "metadata" retained)) #())
+               (check-core-status 200 item :method :put :object retained))
+             (check-core-status 404 item))
+        (stop-server server)))))

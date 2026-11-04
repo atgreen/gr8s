@@ -366,7 +366,11 @@
                       (setf (gethash "podIP" object) (slot-value pod-status 'gr8s.node.v1::pod-ip)
                             (gethash "podIPs" object)
                             (vector (json-object "ip" (slot-value pod-status 'gr8s.node.v1::pod-ip)))))
-                    (update-pod-observed-status (node-grpc-server-store server) pod object)))))
+                    (update-pod-observed-status (node-grpc-server-store server) pod object)
+                    ;; The authenticated peer must still own this exact UID/RV.
+                    ;; Cleanup is separate from public phase and finalizers.
+                    (when (and (deletion-requested-p pod) (slot-value pod-status 'gr8s.node.v1::runtime-deleted))
+                      (save-pod-finalization-state (node-grpc-server-store server) pod object t))))))
     (:operation-response
      (note-node-operation-response
       server (slot-value envelope 'gr8s.node.v1::operation-response)))

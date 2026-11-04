@@ -89,6 +89,14 @@
   "Keep a graceful deletion assigned until its exact revision is acknowledged Deleted."
   (let* ((store (control-plane-runtime-store runtime))
          (status (pod-observed-status store pod)))
+    (when (pod-finalizers-present-p pod)
+      ;; Even grace=0 must wait for physical cleanup when the API retains the
+      ;; Pod. Keep its assignment until the finalizers have actually cleared.
+      (let ((finalization (pod-finalization-state store pod)))
+        (if (or (not (pod-node-name pod)) (and finalization (gethash "runtimeDeleted" finalization)))
+            (return-from runtime-delete-pod t)
+            (progn (publish-node-snapshot runtime (pod-node-name pod))
+                   (return-from runtime-delete-pod nil)))))
     (cond
       ((or (not (pod-node-name pod))
            (zerop (gethash "deletionGracePeriodSeconds" (gethash "metadata" (pod-to-object pod)) 0))
@@ -250,3 +258,7 @@
   (release-node-operation
    (control-plane-runtime-node-server runtime)
    (control-plane-exec-session-operation session)))
+
+(defmethod runtime-forget-pod-finalization ((runtime control-plane-runtime) uid)
+  "Withdraw the node's private desired projection only after public finalizers release UID."
+  (runtime-delete runtime uid))
