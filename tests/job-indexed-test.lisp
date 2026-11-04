@@ -278,6 +278,18 @@
       (let ((job (ignore-errors (job-now store))))
         (is (or (null job) (gethash "deletionTimestamp" (gethash "metadata" job))))))))
 
+(test job-managed-elsewhere-gets-no-pods-or-status-from-this-controller
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable runtime directory))
+    (job-with-spec store "managedBy" "example.com/custom-job-controller")
+    (reconcile-until-settled reconciler)
+    (is (null (list-pods store "alpha")))
+    (is (zerop (hash-table-count (gethash "status" (job-now store))))))
+  (dolist (manager '("no-domain" "a/b/c" "/x" ""))
+    (let ((input (batch-test-job)))
+      (setf (gethash "managedBy" (gethash "spec" input)) manager)
+      (signals gr8s::kubernetes-error (normalize-test-job input)))))
+
 (defstruct (job-slow-delete-runtime (:include gr8s::fake-runtime)
                                     (:constructor make-job-slow-delete-runtime ()))
   "A runtime whose containers have not yet stopped when deletion is requested."

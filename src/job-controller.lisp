@@ -481,6 +481,11 @@ any other, and a Job already failing, counts it at once."
           (when (and (workload-owned-p (pod-to-object pod) job) (job-pod-tracked-p pod))
             (remove-accounted-job-finalizer store job pod :deleting t)))))))
 
+(defun job-managed-here-p (job)
+  "Report whether this controller, not one named by spec.managedBy, runs JOB."
+  (member (gethash "managedBy" (gethash "spec" job) "kubernetes.io/job-controller")
+          '("kubernetes.io/job-controller") :test #'equal))
+
 (defun collect-finished-job (store job)
   "Delete a finished Job once ttlSecondsAfterFinished has passed since it finished."
   (let* ((ttl (gethash "ttlSecondsAfterFinished" (gethash "spec" job)))
@@ -514,7 +519,8 @@ any other, and a Job already failing, counts it at once."
     (dolist (job (list-core-resources store "jobs"))
       (handler-case
           (unless (gethash "deletionTimestamp" (workload-metadata job))
-            (reconcile-job reconciler job)
+            ;; A Job managed elsewhere is left to its controller until it finishes.
+            (when (job-managed-here-p job) (reconcile-job reconciler job))
             (collect-finished-job store job))
         (kubernetes-error (condition)
           (unless (member (kubernetes-error-status-code condition) '(404 409))
