@@ -135,6 +135,7 @@
                                                    ((equal resource "configmaps") #("cm"))
                                                    ((equal resource "services") #("svc"))
                                                    ((equal resource "events") #("ev"))
+                                                   ((equal resource "cronjobs") #("cj"))
                                                    ((equal resource "customresourcedefinitions") #("crd" "crds"))
                                                    ((equal resource "persistentvolumes") #("pv"))
                                                    ((equal resource "persistentvolumeclaims") #("pvc"))
