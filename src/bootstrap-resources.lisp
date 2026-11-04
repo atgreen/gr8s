@@ -92,6 +92,7 @@
          (fields (cond ((equal resource "namespaces") '("spec" "status"))
                        ((equal resource "serviceaccounts") '("secrets" "imagePullSecrets" "automountServiceAccountToken"))
                        ((member resource '("roles" "clusterroles") :test #'equal) '("rules"))
+                       ((equal resource "networkpolicies") '("spec"))
                        (t '("roleRef" "subjects")))))
     (unless (and (equal version (gethash "apiVersion" object version))
                  (equal kind (gethash "kind" object kind)))
@@ -123,6 +124,12 @@
                    do (core-resource-error 422 "Invalid" "~A references require valid names" field)))))
       ((member resource '("roles" "clusterroles") :test #'equal)
        (validate-rbac-rules (gethash "rules" object #()) (equal resource "clusterroles")))
+      ((equal resource "networkpolicies")
+       ;; The spec is stored as-is; it is validated when parsed into an np-spec
+       ;; at resolution time (which fails closed on unsupported constructs).
+       (let ((spec (gethash "spec" object)))
+         (when (and spec (not (hash-table-p spec)))
+           (core-resource-error 422 "Invalid" "NetworkPolicy spec must be an object"))))
       (t (validate-rbac-binding object (equal resource "clusterrolebindings"))))
     object))
 

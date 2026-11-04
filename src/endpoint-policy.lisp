@@ -19,16 +19,18 @@
 (defun cni-policy-map-info (fd name &key (object-info #'bpf-object-kernel-info))
   (let* ((spec (assoc name +cni-policy-map-specs+ :test #'string=))
          (info (funcall object-info fd)))
-    (unless (and spec (>= (length info) 24)
-                 (= 2 (netlink-read-integer info 0 4)) ; ARRAY
-                 (= 4 (netlink-read-integer info 8 4))
-                 (= (second spec) (netlink-read-integer info 12 4))
-                 (= (third spec) (netlink-read-integer info 16 4))
-                 (= (fourth spec) (netlink-read-integer info 20 4)))
-      (invalid-cni "pinned Whistler map ~A has an incompatible schema" name))
-    (whistler/loader::make-map-info
-     :name name :type 2 :key-size 4 :value-size (second spec)
-     :max-entries (third spec) :flags (fourth spec) :fd fd)))
+    (destructuring-bind (&optional sname type key-size value-size max-entries flags) spec
+      (declare (ignore sname))
+      (unless (and spec (>= (length info) 24)
+                   (= type (netlink-read-integer info 0 4))
+                   (= key-size (netlink-read-integer info 8 4))
+                   (= value-size (netlink-read-integer info 12 4))
+                   (= max-entries (netlink-read-integer info 16 4))
+                   (= flags (netlink-read-integer info 20 4)))
+        (invalid-cni "pinned Whistler map ~A has an incompatible schema" name))
+      (whistler/loader::make-map-info
+       :name name :type type :key-size key-size :value-size value-size
+       :max-entries max-entries :flags flags :fd fd))))
 
 (defun encode-cni-endpoint-identity (address mac)
   (unless (and mac (= 6 (length mac)))

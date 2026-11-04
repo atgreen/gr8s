@@ -29,8 +29,15 @@
      ,(ecase reason
         (:spoof '(add-pod-counter spoofs 1))
         (:malformed '(add-pod-counter malformed 1))
-        (:unsupported '(add-pod-counter unsupported 1)))
+        (:unsupported '(add-pod-counter unsupported 1))
+        (:policy '(add-pod-counter policy-drops 1)))
      (return TC_ACT_SHOT)))
+
+;; Keys for the map-driven NetworkPolicy egress rules. The LPM-trie key is the
+;; kernel's {prefixlen, data} layout for IPv4 (addr stored in network order);
+;; the port key ties an allowed (proto, port) to the CIDR's rule group.
+(defstruct netpol-lpm-key (prefixlen u32) (addr u32))
+(defstruct netpol-port-key (group u32) (proto u8) (pad u8) (port u16))
 
 (defparameter gr8s::*egress-guard-map-forms*
   '((defmap rejected-spoofs :type :array
@@ -39,9 +46,19 @@
     ;; schema version. A zero-initialized/unconfigured endpoint fails closed.
     (defmap endpoint-identity :type :array
       :key-size 4 :value-size 16 :max-entries 1 :map-flags 128) ; RDONLY_PROG
-    ;; Allowed packets/bytes, dropped packets/bytes, malformed, unsupported.
+    ;; Allowed packets/bytes, dropped packets/bytes, malformed, unsupported, policy.
     (defmap traffic-stats :type :array
-      :key-size 4 :value-size 8 :max-entries 6)))
+      :key-size 4 :value-size 8 :max-entries 7)
+    ;; NetworkPolicy egress (data-only, updated by the agent on policy change):
+    ;; mode 0 = Pod not egress-isolated (policy not enforced); 1 = default-deny.
+    (defmap netpol-egress-mode :type :array
+      :key-size 4 :value-size 4 :max-entries 1)
+    ;; Allowed destination CIDRs -> rule-group id (#xffffffff = all ports).
+    (defmap netpol-egress-cidr :type :lpm-trie
+      :key-size 8 :value-size 4 :max-entries 1024 :map-flags 1) ; BPF_F_NO_PREALLOC
+    ;; Allowed (group, proto, port) tuples for port-restricted rules.
+    (defmap netpol-egress-port :type :hash
+      :key-size 8 :value-size 1 :max-entries 1024)))
 
 (defparameter gr8s::*egress-guard-program-forms*
   '((defprog gr8s-egress-guard (:type :tc :section "classifier" :license "GPL")
@@ -53,8 +70,10 @@
             (dropped-bytes (map-lookup traffic-stats 3))
             (malformed (map-lookup traffic-stats 4))
             (unsupported (map-lookup traffic-stats 5))
+            (policy-drops (map-lookup traffic-stats 6))
             (spoofs (map-lookup rejected-spoofs 0))
             (identity (map-lookup endpoint-identity 0))
+            (mode (map-lookup netpol-egress-mode 0))
             (data u64 (tc-data)) (data-end u64 (tc-data-end)))
         (when (> (+ data 14) data-end) (drop-pod-packet :malformed))
         ;; Keep all helpers before packet bounds proofs. Whistler may otherwise
@@ -100,7 +119,40 @@
                        (add-pod-counter allowed-bytes (ctx u32 0))
                        (store u32 data 0 0)                        ; zero dst MAC bytes 0-3
                        (store u16 data 4 0)                        ; zero dst MAC bytes 4-5
-                       (return (redirect 1 1))))))               ; lo = ifindex 1, BPF_F_INGRESS
+                       (return (redirect 1 1))))                   ; lo = ifindex 1, BPF_F_INGRESS
+                   ;; NetworkPolicy egress (map-driven; agent updates the maps on
+                   ;; policy change, no recompile). When the Pod is egress-isolated
+                   ;; (mode=1): the destination must match an allowed CIDR, and for
+                   ;; port-restricted rules the (group, proto, dport) must be listed.
+                   (when (/= mode 0)
+                     (when (/= (load u32 mode 0) 0)
+                       ;; Read every packet field BEFORE any map lookup:
+                       ;; bpf_map_lookup_elem resets the verifier's proven packet
+                       ;; range, so a packet deref after a lookup is rejected.
+                       (let ((dst u32 (load u32 ip 16))
+                             (proto u8 (load u8 ip 9))
+                             (ihl u8 (logand (load u8 ip 0) 15))
+                             (dport u16 0)
+                             (has-port u8 0))
+                         (when (and (= ihl 5) (<= (+ data 38) data-end))
+                           (setf dport (ntohs (load u16 ip 22)) has-port 1))
+                         (let ((lkey (make-netpol-lpm-key)))
+                           (setf (netpol-lpm-key-prefixlen lkey) 32
+                                 (netpol-lpm-key-addr lkey) dst)
+                           (let ((hit (map-lookup netpol-egress-cidr lkey)))
+                             (if (/= hit 0)
+                                 (let ((grp u32 (load u32 hit 0)))
+                                   (when (/= grp #xffffffff)
+                                     (if (= has-port 1)
+                                         (let ((pkey (make-netpol-port-key)))
+                                           (setf (netpol-port-key-group pkey) grp
+                                                 (netpol-port-key-proto pkey) proto
+                                                 (netpol-port-key-pad pkey) 0
+                                                 (netpol-port-key-port pkey) dport)
+                                           (when (= (map-lookup netpol-egress-port pkey) 0)
+                                             (drop-pod-packet :policy)))
+                                         (drop-pod-packet :policy))))
+                                 (drop-pod-packet :policy)))))))))
                 ((= protocol #x0806)
                  (when (> (+ data 42) data-end) (drop-pod-packet :malformed))
                  (let ((arp u64 (+ data 14)))

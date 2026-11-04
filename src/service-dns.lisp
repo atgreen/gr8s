@@ -11,7 +11,7 @@
   "Copy only public DNS fields; exclude arbitrary annotations and unrelated resources."
   (let* ((kind (gethash "kind" object)) (source (gethash "metadata" object))
          (metadata (core-object)) (result (core-object)))
-    (unless (member kind '("Service" "EndpointSlice") :test #'equal)
+    (unless (member kind '("Service" "EndpointSlice" "NetworkPolicy") :test #'equal)
       (invalid-pod "unsupported public Service discovery kind"))
     (dolist (key '("name" "namespace" "uid" "resourceVersion"))
       (when (gethash key source) (setf (gethash key metadata) (gethash key source))))
@@ -20,16 +20,24 @@
             (core-object "kubernetes.io/service-name"
                          (gethash "kubernetes.io/service-name" (gethash "labels" source (core-object))))))
     (setf (gethash "kind" result) kind
-          (gethash "apiVersion" result) (if (equal kind "Service") "v1" "discovery.k8s.io/v1")
+          (gethash "apiVersion" result) (cond ((equal kind "Service") "v1")
+                                              ((equal kind "NetworkPolicy") "networking.k8s.io/v1")
+                                              (t "discovery.k8s.io/v1"))
           (gethash "metadata" result) metadata)
-    (if (equal kind "Service")
-        (let ((spec (core-object)))
-          (dolist (key '("clusterIP" "clusterIPs" "ipFamilies" "ports" "type" "externalName"))
-            (when (gethash key (gethash "spec" object))
-              (setf (gethash key spec) (copy-core-object (gethash key (gethash "spec" object))))))
-          (setf (gethash "spec" result) spec))
-        (dolist (key '("addressType" "endpoints" "ports"))
-          (setf (gethash key result) (copy-core-object (gethash key object)))))
+    (cond
+      ((equal kind "Service")
+       (let ((spec (core-object)))
+         (dolist (key '("clusterIP" "clusterIPs" "ipFamilies" "ports" "type" "externalName"))
+           (when (gethash key (gethash "spec" object))
+             (setf (gethash key spec) (copy-core-object (gethash key (gethash "spec" object))))))
+         (setf (gethash "spec" result) spec)))
+      ((equal kind "NetworkPolicy")
+       ;; The whole spec (podSelector, policyTypes, ingress/egress rules) is what
+       ;; the agent needs to resolve and compile the per-Pod classifier.
+       (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
+      (t
+       (dolist (key '("addressType" "endpoints" "ports"))
+         (setf (gethash key result) (copy-core-object (gethash key object))))))
     result))
 
 (defun service-discovery-projection (store)
@@ -38,7 +46,8 @@
             (trivial-utf-8:string-to-utf-8-bytes
              (endpointslice-canonical-json (service-discovery-public-object object))))
           (sort (append (list-core-resources store "services")
-                        (list-core-resources store "endpointslices"))
+                        (list-core-resources store "endpointslices")
+                        (list-core-resources store "networkpolicies"))
                 #'string< :key (lambda (object)
                                  (let ((metadata (gethash "metadata" object)))
                                    (format nil "~A/~A/~A" (gethash "kind" object)
@@ -52,7 +61,9 @@
            (public (service-discovery-public-object object))
            (metadata (gethash "metadata" public))
            (namespace (gethash "namespace" metadata)) (name (gethash "name" metadata))
-           (resource (if (equal "Service" (gethash "kind" public)) "services" "endpointslices")))
+           (resource (cond ((equal "Service" (gethash "kind" public)) "services")
+                           ((equal "NetworkPolicy" (gethash "kind" public)) "networkpolicies")
+                           (t "endpointslices"))))
       (unless (and (dns-label-p namespace) (stringp name) (plusp (length name)))
         (invalid-pod "public Service discovery metadata is invalid"))
       (setf (gethash (core-resource-key resource namespace name) resources) public))))
