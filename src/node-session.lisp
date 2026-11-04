@@ -366,11 +366,14 @@
                       (setf (gethash "podIP" object) (slot-value pod-status 'gr8s.node.v1::pod-ip)
                             (gethash "podIPs" object)
                             (vector (json-object "ip" (slot-value pod-status 'gr8s.node.v1::pod-ip)))))
-                    (update-pod-observed-status (node-grpc-server-store server) pod object)
-                    ;; The authenticated peer must still own this exact UID/RV.
-                    ;; Cleanup is separate from public phase and finalizers.
-                    (when (and (deletion-requested-p pod) (slot-value pod-status 'gr8s.node.v1::runtime-deleted))
-                      (save-pod-finalization-state (node-grpc-server-store server) pod object t))))))
+                    (let ((events (gethash "gr8sRuntimeEvents" object)))
+                      (remhash "gr8sRuntimeEvents" object)
+                      (update-pod-observed-status (node-grpc-server-store server) pod object)
+                      (record-node-runtime-events (node-grpc-server-store server) pod node-name events)
+                      ;; Cleanup is distinct from phase and API finalizer retention.
+                      ;; The authenticated peer still owns this exact UID/RV.
+                      (when (and (deletion-requested-p pod) (slot-value pod-status 'gr8s.node.v1::runtime-deleted))
+                        (save-pod-finalization-state (node-grpc-server-store server) pod object t)))))))
     (:operation-response
      (note-node-operation-response
       server (slot-value envelope 'gr8s.node.v1::operation-response)))
@@ -700,16 +703,20 @@
      (make-agent-envelope
       variant payload :sequence (incf (agent-node-session-sequence session))))))
 
+(defun validate-node-snapshot-identity (identity snapshot)
+  "Reject another node allocation before an arrival observer can persist any deletion intent."
+  (let ((network (slot-value snapshot 'gr8s.node.v1::network))
+        (assigned (gethash "assignedPodCIDR" identity)))
+    (when (and network assigned
+               (not (string= assigned (slot-value network 'gr8s.node.v1::node-pod-cidr))))
+      (error "Snapshot Pod CIDR does not match the durable node allocation"))))
+
 (defun apply-node-snapshot-and-respond
     (session identity identity-path snapshot apply-snapshot &key replay)
   (let ((revision (slot-value snapshot 'gr8s.node.v1::revision))
         (last-applied (gethash "lastAppliedRevision" identity 0))
         (statuses nil))
-    (let ((network (slot-value snapshot 'gr8s.node.v1::network))
-          (assigned (gethash "assignedPodCIDR" identity)))
-      (when (and network assigned
-                 (not (string= assigned (slot-value network 'gr8s.node.v1::node-pod-cidr))))
-        (error "Snapshot Pod CIDR does not match the durable node allocation")))
+    (validate-node-snapshot-identity identity snapshot)
     (when (or (> revision last-applied) (and replay (= revision last-applied)))
       ;; A restarted agent can have completed deletion after its last durable
       ;; snapshot ack but before the final status reached the server. Reapply
@@ -839,15 +846,31 @@
 (defstruct (agent-snapshot-worker (:constructor %make-agent-snapshot-worker))
   "Apply snapshots serially while the session owner continues receiving operations."
   function
+  receive-snapshot
   finish-session
   thread
   pending
+  (highest-revision -1)
+  replay-revision
   failure
   stopping-p
   started-p
   finished-p
   (lock (bt:make-lock "gr8s snapshot work"))
   (changed (bt:make-condition-variable :name "gr8s snapshot work changed")))
+
+(defun retry-agent-snapshot-work (worker work)
+  "Retry an incomplete latest projection without growing a queue or acknowledging it."
+  (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+    (when (and (not (agent-snapshot-worker-stopping-p worker))
+               (null (agent-snapshot-worker-pending worker))
+               (= (slot-value (car work) 'gr8s.node.v1::revision)
+                  (agent-snapshot-worker-highest-revision worker)))
+      (setf (agent-snapshot-worker-pending worker) (list work))
+      ;; Async runtime deletion needs a later observation before admission can
+      ;; resume. Yield instead of spinning; new snapshots and stop wake us.
+      (bt:condition-wait (agent-snapshot-worker-changed worker)
+                         (agent-snapshot-worker-lock worker) :timeout .1))))
 
 (defun run-agent-snapshot-work (worker)
   "Apply ordered work and close the session on failure without acknowledging pending revisions."
@@ -870,7 +893,16 @@
                              (when (agent-snapshot-worker-stopping-p worker)
                                (return-from run-agent-snapshot-work nil))
                              (pop (agent-snapshot-worker-pending worker)))))
-                     (funcall (agent-snapshot-worker-function worker) (car work) (cdr work))))
+                     (handler-case
+                         (progn
+                           (funcall (agent-snapshot-worker-function worker) (car work) (cdr work))
+                           (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+                             (when (eql (slot-value (car work) 'gr8s.node.v1::revision)
+                                        (agent-snapshot-worker-replay-revision worker))
+                               (setf (agent-snapshot-worker-replay-revision worker) nil))))
+                       ;; Durable urgent intent superseded this application.
+                       ;; Its revision was not applied and must not be acked.
+                       (pod-reconciliation-superseded () (retry-agent-snapshot-work worker work)))))
                (error (condition)
                  (bt:with-lock-held ((agent-snapshot-worker-lock worker))
                    (setf (agent-snapshot-worker-failure worker) condition
@@ -881,9 +913,10 @@
         (setf (agent-snapshot-worker-finished-p worker) t))
     (node-snapshot-stopped () nil)))
 
-(defun start-agent-snapshot-worker (function finish-session)
+(defun start-agent-snapshot-worker (function finish-session &key receive-snapshot)
   "Start a session-owned ordered snapshot executor."
-  (let ((worker (%make-agent-snapshot-worker :function function :finish-session finish-session))
+  (let ((worker (%make-agent-snapshot-worker :function function :finish-session finish-session
+                                             :receive-snapshot receive-snapshot))
         (ready nil))
     (unwind-protect
          (progn
@@ -904,12 +937,21 @@
       (unless ready (stop-agent-snapshot-worker worker)))))
 
 (defun queue-agent-snapshot-work (worker snapshot &key replay)
-  "Queue a snapshot without making the stream receiver wait for runtime convergence."
-  (bt:with-lock-held ((agent-snapshot-worker-lock worker))
-    (unless (agent-snapshot-worker-stopping-p worker)
-      (setf (agent-snapshot-worker-pending worker)
-            (nconc (agent-snapshot-worker-pending worker) (list (cons snapshot replay))))
-      (bt:condition-notify (agent-snapshot-worker-changed worker))))
+  "Retain only the newest unapplied full snapshot; skipped revisions are never acknowledged."
+  (let ((revision (slot-value snapshot 'gr8s.node.v1::revision)))
+    (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+      (unless (or (agent-snapshot-worker-stopping-p worker)
+                  (< revision (agent-snapshot-worker-highest-revision worker)))
+        (when (agent-snapshot-worker-receive-snapshot worker)
+          (funcall (agent-snapshot-worker-receive-snapshot worker) snapshot))
+        ;; Every envelope is a complete projection. An intermediate queued
+        ;; projection has no independent effect to preserve. Keep the current
+        ;; application ordered, and replace only work which has not started.
+        (when replay (setf (agent-snapshot-worker-replay-revision worker) revision))
+        (setf (agent-snapshot-worker-highest-revision worker) revision
+              (agent-snapshot-worker-pending worker)
+              (list (cons snapshot (or replay (eql revision (agent-snapshot-worker-replay-revision worker))))))
+        (bt:condition-notify (agent-snapshot-worker-changed worker)))))
   worker)
 
 (defun stop-agent-snapshot-worker (worker)
@@ -946,7 +988,7 @@
 (defun run-one-node-session
     (host port node-name identity-path apply-snapshot operation-handler
      one-shot-p control stop-predicate underlay-address status-provider
-     ca-certificate-path certificate-path private-key-path)
+     ca-certificate-path certificate-path private-key-path &optional snapshot-observer)
   (let* ((identity (load-agent-identity identity-path node-name))
          (session-thread (bt:current-thread))
          (session-timeout (and one-shot-p 5))
@@ -1017,6 +1059,8 @@
                        (ag-grpc:stream-read-message stream) :desired-state)))
                (if one-shot-p
                    (progn
+                     (validate-node-snapshot-identity identity snapshot)
+                     (when snapshot-observer (funcall snapshot-observer snapshot))
                      (apply-node-snapshot-and-respond
                       session identity identity-path snapshot apply-snapshot :replay t)
                      (setf operation-session-p t)
@@ -1028,7 +1072,11 @@
                             (lambda (snapshot replay)
                               (apply-node-snapshot-and-respond
                                session identity identity-path snapshot apply-snapshot :replay replay))
-                            #'finish-session))
+                            #'finish-session
+                            :receive-snapshot
+                            (lambda (snapshot)
+                              (validate-node-snapshot-identity identity snapshot)
+                              (when snapshot-observer (funcall snapshot-observer snapshot)))))
                      (queue-agent-snapshot-work snapshot-worker snapshot :replay t)
                      (setf operation-session-p t)
                      (loop for envelope = (ag-grpc:stream-read-message stream)
@@ -1050,7 +1098,7 @@
 
 (defun run-node-session (host port node-name identity-path apply-snapshot
                          &key max-sessions (reconnect-delay 1)
-                           operation-handler underlay-address status-provider
+                           operation-handler underlay-address status-provider snapshot-observer
                            ca-certificate-path certificate-path private-key-path
                            control
                            (stop-predicate (constantly nil)))
@@ -1063,7 +1111,7 @@
             (run-one-node-session host port node-name identity-path
                                   apply-snapshot operation-handler
                                   (not (null max-sessions)) control stop-predicate underlay-address status-provider
-                                  ca-certificate-path certificate-path private-key-path)
+                                  ca-certificate-path certificate-path private-key-path snapshot-observer)
             (incf completed)
             (when (and max-sessions (>= completed max-sessions))
               (return completed)))

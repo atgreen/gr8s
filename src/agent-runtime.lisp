@@ -23,7 +23,9 @@
   (operations-lock (bt:make-lock "gr8s node runtime operations"))
   (lock (bt:make-lock "gr8s node runtime"))
   (state-changed (bt:make-condition-variable :name "gr8s node runtime state"))
-  (apply-lock (bt:make-lock "gr8s node snapshot application")))
+  (apply-lock (bt:make-lock "gr8s node snapshot application"))
+  (received-revision -1)
+  (arrival-lock (bt:make-lock "gr8s node snapshot arrival")))
 
 (defun make-node-runtime (state-directory runtime manager
                           &key (network-reconciler
@@ -47,7 +49,12 @@
                                           :persist (not (null pending)))))
       (dolist (pod (list-pods store))
         (setf (gethash (pod-uid pod) (node-runtime-assigned-versions node-runtime))
-              (pod-resource-version pod)))
+              (pod-resource-version pod))
+        ;; Rebuild the finite cleanup admission fence before the background
+        ;; reconciler starts, including when the control plane is unavailable.
+        (when (pod-runtime-cleanup-pending-p store pod)
+          (setf (gethash (pod-uid pod)
+                         (reconciler-urgent-deletions (node-runtime-reconciler node-runtime))) t)))
       node-runtime)))
 
 (defun node-runtime-network-path (node-runtime)
@@ -394,24 +401,26 @@
         (delete-reconciled-pod (node-runtime-reconciler node-runtime)
                                (pod-namespace pod) (pod-name pod) :uid (pod-uid pod) :grace-period 0)))))
 
-(defun pod-observed-status-message (pod status &key runtime-deleted)
-  (make-instance
-   'gr8s.node.v1::pod-observed-status
-   :namespace (pod-namespace pod)
-   :name (pod-name pod)
-   :uid (pod-uid pod)
-   :resource-version (pod-resource-version pod)
-   :phase (gethash "phase" status "Unknown")
-   :reason (gethash "reason" status "")
-   :message (gethash "message" status "")
-   :pod-ip (gethash "podIP" status "")
-   :status-json (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify status))
-   :runtime-deleted runtime-deleted))
+(defun pod-observed-status-message (pod status &optional events runtime-deleted)
+  "Encode real observations, private Event transport and independent physical cleanup acknowledgement."
+  (let ((wire-status (copy-core-object status)))
+    (when events (setf (gethash "gr8sRuntimeEvents" wire-status) events))
+    (make-instance
+     'gr8s.node.v1::pod-observed-status
+     :namespace (pod-namespace pod) :name (pod-name pod) :uid (pod-uid pod)
+     :resource-version (pod-resource-version pod)
+     :phase (gethash "phase" status "Unknown") :reason (gethash "reason" status "")
+     :message (gethash "message" status "") :pod-ip (gethash "podIP" status "")
+     :status-json (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify wire-status))
+     :runtime-deleted runtime-deleted)))
 
 (defun cache-node-observation (node-runtime pod status)
+  "Persist actual status and transport Events without confusing runtime deletion with public phase."
   (save-pod-observation (node-runtime-store node-runtime) pod status)
   (let* ((finalization (pod-finalization-state (node-runtime-store node-runtime) pod))
-         (message (pod-observed-status-message pod status :runtime-deleted (and finalization (gethash "runtimeDeleted" finalization)))))
+         (message (pod-observed-status-message
+                   pod status (runtime-events (node-runtime-runtime node-runtime) (pod-uid pod))
+                   (and finalization (gethash "runtimeDeleted" finalization)))))
     (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
       (setf (gethash (pod-uid pod) (node-runtime-observed-statuses node-runtime)) message))
     message))
@@ -483,10 +492,53 @@
                 collect message)))
      :endpoints (node-runtime-endpoint-telemetry node-runtime counter-reader))))
 
+(defun receive-node-snapshot-intent (node-runtime snapshot)
+  "Persist exact urgent deletion intent before cancelling creation or waiting for runtime I/O."
+  ;; Parse and validate every assignment before changing any local intent.
+  (let ((pods (mapcar #'assignment-pod (slot-value snapshot 'gr8s.node.v1::pods)))
+        (revision (slot-value snapshot 'gr8s.node.v1::revision))
+        (urgent nil))
+    (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
+      (when (< revision (node-runtime-received-revision node-runtime))
+        (return-from receive-node-snapshot-intent nil))
+      (dolist (existing (list-pods (node-runtime-store node-runtime)))
+        (let ((assigned (find (pod-uid existing) pods :key #'pod-uid :test #'equal)))
+          (when (or (null assigned) (deletion-requested-p assigned))
+            (handler-case
+                (let ((projected
+                        (if assigned
+                            ;; Preserve the server's RV, timestamp and grace.
+                            ;; Existing earlier deadlines cannot be extended.
+                            (put-assigned-pod (node-runtime-store node-runtime) assigned)
+                            (mark-pod-deleting (node-runtime-store node-runtime)
+                                               (pod-namespace existing) (pod-name existing)
+                                               :uid (pod-uid existing) :grace-period 0))))
+                  (when (pod-runtime-cleanup-pending-p (node-runtime-store node-runtime) projected)
+                    (pushnew (pod-uid projected) urgent :test #'equal)))
+              (kubernetes-error (condition)
+                ;; An independently completed deletion or replacement is not
+                ;; authority to cancel the new UID that now owns this name.
+                (unless (member (kubernetes-error-status-code condition) '(404 409))
+                  (error condition)))))))
+      ;; A failed persist never publishes the revision or cancels CRI. A retry
+      ;; may repeat already durable deletion intent, but cannot undo it.
+      (setf (node-runtime-received-revision node-runtime) revision))
+    (when urgent
+      (prioritize-reconciler-deletions (node-runtime-reconciler node-runtime) urgent))
+    (not (null urgent))))
+
+(defun ensure-node-snapshot-current (node-runtime snapshot)
+  "Fence obsolete application before it can create another Pod or acknowledge a revision."
+  (when (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
+          (< (slot-value snapshot 'gr8s.node.v1::revision)
+             (node-runtime-received-revision node-runtime)))
+    (error 'pod-reconciliation-superseded)))
+
 (defun reconcile-node-snapshot (node-runtime snapshot)
   (unless (eq :running (node-runtime-state node-runtime))
     (error 'runtime-error :message "node runtime is not running"))
   (bt:with-lock-held ((node-runtime-apply-lock node-runtime))
+    (ensure-node-snapshot-current node-runtime snapshot)
     (apply-node-runtime-network node-runtime snapshot)
     (let ((assignments (slot-value snapshot 'gr8s.node.v1::pods)))
       (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
@@ -499,16 +551,23 @@
       (install-assigned-resource-objects
        (node-runtime-store node-runtime) assignments
        (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json))
-      (loop for assignment in assignments
-            for pod = (put-assigned-pod
-                       (node-runtime-store node-runtime)
-                       (assignment-pod assignment))
-            for status = (reconcile-pod
-                          (node-runtime-reconciler node-runtime)
-                          (pod-namespace pod) (pod-name pod))
+      (loop for assignment in
+              (stable-sort (copy-list assignments)
+                           (lambda (left right)
+                             (and (deletion-requested-p (assignment-pod left))
+                                  (not (deletion-requested-p (assignment-pod right))))))
+            for pod = (progn
+                        (ensure-node-snapshot-current node-runtime snapshot)
+                        (put-assigned-pod (node-runtime-store node-runtime)
+                                          (assignment-pod assignment)))
+            for status = (progn
+                           (ensure-node-snapshot-current node-runtime snapshot)
+                           (reconcile-pod (node-runtime-reconciler node-runtime)
+                                          (pod-namespace pod) (pod-name pod)))
             collect (cache-node-observation node-runtime pod status)
               into statuses
-            finally (return statuses)))))
+            finally (ensure-node-snapshot-current node-runtime snapshot)
+                    (return statuses)))))
 
 (defun node-operation-response (request status &key (exit-code 0) (message ""))
   (make-instance

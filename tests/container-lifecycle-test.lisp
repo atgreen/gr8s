@@ -437,3 +437,32 @@
           (is (equal '((:stop "side-0")) (lifecycle-cri-fixture-calls fixture)))
           (is (equal "ContainerStatusUnknown" (gethash "reason" (gethash "waiting" (gethash "state" (lifecycle-side-status after))))))
           (is (null (gethash "lastTermination" (gethash "side" (gethash "containers" (gr8s::load-container-lifecycle-state runtime (pod-uid pod))))))))))))
+
+(test cancelled-create-recovers-the-owned-created-attempt-without-duplicating-siblings
+  (with-temporary-store (store directory)
+    (let* ((pod (lifecycle-pod store))
+           (runtime (gr8s::make-containerd-runtime :log-root directory))
+           (now 4000000000) (gr8s::*container-lifecycle-clock* (lambda () now))
+           (healthy (lifecycle-info "side" 0 gr8s.cri.v1::+containerstate-container_running+ now)))
+      (with-lifecycle-cri (fixture pod (list healthy))
+        (let ((create (symbol-function 'gr8s::containerd-create-container)))
+          (unwind-protect
+               (progn
+                 (setf (symbol-function 'gr8s::containerd-create-container)
+                       (lambda (&rest arguments)
+                         ;; CRI committed the labeled attempt, but the client
+                         ;; never received its reply or saved its watermark.
+                         (apply create arguments)
+                         (setf (gr8s::cri-container-info-state (first (lifecycle-cri-fixture-infos fixture)))
+                               gr8s.cri.v1::+containerstate-container_created+)
+                         (error 'gr8s::pod-reconciliation-superseded)))
+                 (signals gr8s::pod-reconciliation-superseded (gr8s::runtime-ensure runtime pod)))
+            (setf (symbol-function 'gr8s::containerd-create-container) create)))
+        (gr8s::runtime-ensure runtime pod)
+        (is (= 1 (count :create (lifecycle-cri-fixture-calls fixture) :key #'first)))
+        (is (= 1 (count '(:start "main-0") (lifecycle-cri-fixture-calls fixture) :test #'equal)))
+        (is (= 2 (length (lifecycle-cri-fixture-infos fixture))))
+        (is (eq healthy (find "side-0" (lifecycle-cri-fixture-infos fixture)
+                             :key #'gr8s::cri-container-info-id :test #'equal)))
+        (is (null (find :stop (lifecycle-cri-fixture-calls fixture) :key #'first)))
+        (is (null (find :new-sandbox (lifecycle-cri-fixture-calls fixture) :key #'first)))))))

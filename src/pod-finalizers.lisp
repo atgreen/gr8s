@@ -39,6 +39,11 @@
   (with-store-lock (store)
     (copy-pod-status-value (gethash (pod-uid pod) (pod-store-pod-finalization-states store)))))
 
+(defun pod-runtime-cleanup-pending-p (store pod)
+  "Keep physical deletion admission separate from an API object retained by user finalizers."
+  (and (deletion-requested-p pod)
+       (not (gethash "runtimeDeleted" (or (pod-finalization-state store pod) (core-object))))))
+
 (defun save-pod-finalization-state (store pod status deleted)
   "Checkpoint real terminal status and runtime completion before retiring native metadata."
   (with-store-lock (store)
@@ -70,6 +75,9 @@
       (setf done (runtime-delete-pod runtime pod))
       (let ((after (observe-finalizing-pod reconciler pod)))
         (setf state (save-pod-finalization-state store pod (if (pod-terminal-status-p after) after before) done))))
+    ;; Physical cleanup releases creation capacity even when a controller or
+    ;; user deliberately retains the API object for arbitrarily long.
+    (when done (finish-reconciler-urgent-deletion reconciler (pod-uid pod)))
     (cond
       ((and done (not (pod-finalizers-present-p pod)))
        (runtime-forget-pod-finalization runtime (pod-uid pod))

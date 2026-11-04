@@ -332,6 +332,7 @@
                 host port node-name identity
                 (lambda (snapshot)
                   (reconcile-node-snapshot node-runtime snapshot))
+                :snapshot-observer (lambda (snapshot) (receive-node-snapshot-intent node-runtime snapshot))
                 :operation-handler
                 (lambda (variant payload emit)
                   (dispatch-node-operation node-runtime variant payload emit))
@@ -513,6 +514,7 @@
                                   :before-reconcile (lambda ()
                                       (reconcile-crd-deletions store)
                                       (collect-orphaned-custom-resources store)
+                                      (reconcile-certificate-signing-requests store pki)
                                       (reconcile-storage-bindings store)
                                       (collect-orphaned-api-objects reconciler)
                                       (reconcile-workloads reconciler)

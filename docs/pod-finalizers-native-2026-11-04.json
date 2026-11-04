@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "title": "General Pod finalizer lifecycle with actual native terminal history",
+  "copyright": "2026 Anthony Green",
+  "isCertificationResult": false,
+  "sourceCommit": "c3fdb34d0ef916f2986ce91b897bd4a6126f4f03",
+  "harnessCommit": "7c76959c060c331afa4d6febecc237a0667dce8c",
+  "mainBase": "de08a7ce",
+  "nativeSHA256": "efed5d73377d11ed67a5e176b40e6a2fa6049221d6e428b9736132a182ee1d46",
+  "behavior": [
+    "Zero-grace and ordinary deletion retain API Pods until their last user/controller finalizer is removed.",
+    "Actual exit codes, terminal state, container identity and Pod IP survive physical runtime deletion and native restart.",
+    "Exact-UID cleanup acknowledgements require the assigned authenticated node and current resourceVersion; they do not fabricate public completion or desired-state acknowledgements.",
+    "Physical cleanup releases the urgent creation fence before finalizer API retention ends; reopen and new snapshots preserve that distinction.",
+    "Finalizer GET-to-PUT removal, typed protobuf metadata, private withdrawal and same-name/new-UID replacement preserve ownership.",
+    "Node probe Event transport remains separate from public/finalization status; active probes stop before actual terminal CRI capture."
+  ],
+  "hostValidation": {
+    "focusedChecks": 291,
+    "focusedPassed": 291,
+    "focusedFailed": 0,
+    "fullChecks": 3513,
+    "fullPassed": 3508,
+    "fullSkipped": 5,
+    "fullFailed": 0,
+    "documentationCheckFiles": [
+      "src/pod-finalizers.lisp",
+      "src/containerd-pod-finalizers.lisp",
+      "tests/pod-finalizers-test.lisp",
+      "scripts/test-pod-finalizers.py"
+    ],
+    "documentationCheckPassed": true
+  },
+  "preflightRecovery": {
+    "directory": "/var/tmp/gr8s-finalizer-cache-replay.02asfazg",
+    "mode": "preflight-owned-deletion-recovery",
+    "description": "A released warm CSR cache retained one already-deleting API Pod with no finalizers; physical runtime and private desired state were empty. Start the compatible native runtime and observe normal replay/API convergence without deleting JSON files.",
+    "originalPodUID": "9184E82C-3666-4F6B-BCBA-D6DA1CB2A16F",
+    "seconds": 10.542,
+    "deadlineSeconds": 120,
+    "nativeExitCode": 0,
+    "ownedProcessesRemaining": [],
+    "privateDesiredRemaining": [],
+    "originalReportsUnchanged": true,
+    "originalReportSHA256": {
+      "/var/tmp/gr8s-podtemplates.vd3wzxyp/report.json": "74b20498e231ffec91134be3798ab61969aaf021f3a7946f5905a75260d2bd57",
+      "/var/tmp/gr8s-podtemplates.hdzz9dbn/report.json": "237c5bea5446c03f1c4b3b54f2ef196f4767d6a159a2e98aff7559f9fb02c46c"
+    }
+  },
+  "nativeValidation": {
+    "directory": "/var/tmp/gr8s-finalizers-native.d7rd3p6x",
+    "stateDirectory": "/var/tmp/gr8s-podtemplates.vd3wzxyp/state",
+    "passed": true,
+    "scenarios": {
+      "successRetainsActualExitAfterPhysicalCleanup": {
+        "passed": true,
+        "uid": "81319A4F-9F01-4FDA-8760-DFC9446C10AF",
+        "exitCode": 0
+      },
+      "retainedFinalizerDoesNotBlockUnrelatedExecution": {
+        "passed": true,
+        "uid": "E216416E-48F0-4CF8-93E7-D08B2D394B96",
+        "exitCode": 0
+      },
+      "restartRetainsActualTerminalAttempt": {
+        "passed": true
+      },
+      "uidReuseAndActualFailedExit": {
+        "passed": true,
+        "uid": "DC17F75E-05F9-4178-82AF-1CE3D924B23D",
+        "exitCode": 137
+      },
+      "blockedProbeCancellation": {
+        "passed": true,
+        "seconds": 5.517438591999962
+      }
+    },
+    "nativeExitCodes": [
+      0,
+      0
+    ],
+    "cleanupError": null,
+    "shutdownError": null,
+    "desiredPodFilesRemaining": [],
+    "ownedShimsRemaining": [],
+    "independentFinalProcessCheckOwnedNativeDaemonAndShims": 0,
+    "independentFinalAPIPodFileCount": 0,
+    "independentFinalPrivateDesiredPodFileCount": 0,
+    "reportSHA256": "87dc23a6bb4e0429aa1bff6c17ffb69ec58f5e445210bbf3d1281cfcb20979b6",
+    "actualTerminalHistoryIndependentlyVerified": {
+      "successful": 0,
+      "unrelated": 0,
+      "failed": 137,
+      "blocked-probe": 137
+    },
+    "rawSuccessfulCommandsIndependentlyVerifiedInCRILogs": true,
+    "containerdLogCapture": {
+      "source": "/var/tmp/gr8s-podtemplates.vd3wzxyp/state/agent/containerd/containerd.log",
+      "startOffset": 80267,
+      "endOffset": 139505
+    },
+    "interpretation": "These are native integration scenarios, not additional upstream Kubernetes conformance passes."
+  },
+  "artifactSHA256": {
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/report.json": "87dc23a6bb4e0429aa1bff6c17ffb69ec58f5e445210bbf3d1281cfcb20979b6",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/blocked-probe-api-retained-runtime-removed.json": "36faaf8f585a80fb40e83b1b13daa66d21bce8c3851bf3279ac3c4deaa5e888e",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/blocked-probe-cri.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/blocked-probe-lifecycle.json": "f12db839e307d911ee2ea94d979380ae66b2c20c4c56edbc4055fdaf8dcdabe5",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/containerd.log": "9f9d4a95c54baade4c8e96bb3ebe6031683ff9d360547b9dc28505041ba56d97",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/failed-api-retained-runtime-removed.json": "63d7679de19b1d7488757eb7edde1c198d77bcfc8ed1c3e610e8a30702df6525",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/failed-cri.log": "99d432d718fb8be3519ab9ec58d05c220760dec602cf726bc5423e1e338a1d22",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/failed-lifecycle.json": "05119da4d4a4640043f02f6f1285bf8b2c278115e9615267d4adc7cbed11b554",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/gr8s.log": "73e4b3881688f9f913ea493746ab617420e5361df5f21c30ac1dc2b1f2a93e8c",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/same-name-replacement-running.json": "b14f040c2e2e346b57b12e76ae466d60fe0cf5087053baacfb37a23cb9c09cc1",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/successful-after-native-restart.json": "3f1a2d6fe186ec08771edf14bd0119e0b52aae26c0386d2d03e66148721714ec",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/successful-api-retained-runtime-removed.json": "e10c4e39387a7ea409ff82cb05d864537dccad432893cee1ed36d4275f099211",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/successful-before-delete.json": "90954d2fc7259e6356c92c8a5c6caaeddbd27d62c92ccf399b7c506baed8b5da",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/successful-cri.log": "66f8d59e6d668344fd4c55104ad4320a3c12514977017ff825195f0de9ac6a37",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/successful-lifecycle.json": "86142f2accaf6141c10e8238d01b631159f8e6d294b8ba29d25960cbbba00d0a",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/unrelated-cri.log": "b476d87940242c6f45917421aff185da64b9328aad85f31c58728075496c0eab",
+    "build/validation/pod-finalizers-2026-11-04/native-d7rd3p6x/unrelated-lifecycle.json": "ab1aa452f65c6129f07f054936f58f3cd28242703ed3260dcf4735415cd8b082",
+    "build/validation/pod-finalizers-2026-11-04/cache-replay-02asfazg/report.json": "223a17fd53a3fc30a31d43394728e2f1a458e35ad1eba14e2ca81fbdc40dbe20",
+    "build/validation/pod-finalizers-2026-11-04/cache-replay-02asfazg/gr8s.log": "6d2e6ea9041a45d7b6cf7b8e804078986892b427ed46a207fed53155d303279e",
+    "build/validation/pod-finalizers-2026-11-04/cache-replay-02asfazg/original-deleting-api-pod.json": "dfcc5f12c9e37d201e891c6ed3db84e6c1f8c96725dd57707c47498799de9433",
+    "build/validation/pod-finalizers-2026-11-04/cache-replay-02asfazg/recovery.py": "3729435290813df1a0ab1092357f7c99cdc93e750d893415366b71daffca4176",
+    "build/validation/pod-finalizers-2026-11-04/gr8s-pod-finalizers-integrated-focused.log": "ac0cfa20cc411caf9cf8ad1ce507ba7767ef6c70d71688a578886e94bc3898b9",
+    "build/validation/pod-finalizers-2026-11-04/gr8s-pod-finalizers-integrated-full.log": "7c938bb7e740c7b6c70f09cf3fabd0f7b7713780cd0a4aa0f7f41cf2ac42310b",
+    "build/validation/pod-finalizers-2026-11-04/gr8s-pod-finalizers-integrated-native-build.log": "4fbab012dfef31e468a63aa58b068999b01c29b4fc50ca7b31b329e27c6962bd"
+  }
+}
