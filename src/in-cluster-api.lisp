@@ -3,7 +3,7 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Serve the in-cluster Kubernetes API over pure-tls with a distinct server
-;;;; certificate, cluster service DNS/IP SANs, ServiceAccount authentication and
+;;;; certificate, cluster service DNS/IP SANs, token/certificate authentication and
 ;;;; live RBAC checks. The existing local administrative HTTP endpoint remains
 ;;;; separate from this authenticated listener.
 
@@ -54,18 +54,34 @@
 
 (defclass gr8s-in-cluster-acceptor (gr8s-acceptor)
   ((certificate :initarg :certificate :reader in-cluster-certificate)
-   (private-key :initarg :private-key :reader in-cluster-private-key))
+   (private-key :initarg :private-key :reader in-cluster-private-key)
+   (client-ca :initarg :client-ca :reader in-cluster-client-ca))
   (:documentation "Serve authenticated Kubernetes API requests over pure-tls."))
 
 (defmethod hunchentoot:acceptor-ssl-p ((acceptor gr8s-in-cluster-acceptor))
   "Identify this acceptor as HTTPS for request URL handling."
   t)
 
+(defvar *api-connection-certificate-chain* nil
+  "TLS peer chain with verified key possession, scoped to one connection including keepalive requests.")
+
+(defmethod hunchentoot:process-connection :around ((acceptor gr8s-in-cluster-acceptor) socket)
+  "Isolate TLS peer identity across worker reuse and retain it across keepalive requests."
+  (let ((*api-connection-certificate-chain* nil)) (call-next-method)))
+
 (defmethod hunchentoot:initialize-connection-stream ((acceptor gr8s-in-cluster-acceptor) stream)
-  "Perform the server TLS handshake before Hunchentoot reads any HTTP headers."
+  "Request optional client proof-of-possession; HTTP authenticators verify trust and token alternatives."
   (sb-sys:with-deadline (:seconds 10)
-    (pure-tls:make-tls-server-stream stream :certificate (in-cluster-certificate acceptor)
-                                          :key (in-cluster-private-key acceptor))))
+    ;; This TLS implementation's resumption tickets do not retain peer chains.
+    ;; Fresh ticket keys require a full certificate handshake on every connection.
+    (let* ((pure-tls:*server-ticket-key* (ironclad:random-data 32))
+           (tls (pure-tls:make-tls-server-stream stream :certificate (in-cluster-certificate acceptor)
+                    :key (in-cluster-private-key acceptor) :verify pure-tls:+verify-peer+
+                    ;; Preserve TLS CertificateVerify proof, but defer CA/expiry/purpose
+                    ;; checks to HTTP so another authenticator may accept a valid token.
+                    :trust-store nil)))
+      (setf *api-connection-certificate-chain* (pure-tls:tls-peer-certificate-chain tls))
+      tls)))
 
 (defun kubernetes-authorization-target (path method &key watch)
   "Return verb, group, resource, name and namespace for Kubernetes request PATH."
@@ -93,26 +109,29 @@
              (and (member (length parts) '(2 3)) (equal "apis" (first parts)))))))
 
 (defun authorize-in-cluster-request (store request)
-  "Authenticate a bearer token and enforce RBAC before dispatching the request."
+  "Authenticate a verified certificate or live bearer token, then enforce current RBAC."
   (let* ((header (hunchentoot:header-in :authorization request))
          (token (when (and header (uiop:string-prefix-p "Bearer " header)) (subseq header 7)))
-         (identity (and token (authenticate-service-account-token store token)))
+         (identity (or (handler-case
+                           (certificate-api-identity *api-connection-certificate-chain*
+                             (in-cluster-client-ca (hunchentoot:request-acceptor request)))
+                         (kubernetes-error () nil))
+                       (and token (authenticate-service-account-token store token))))
          (path (hunchentoot:script-name request)) (method (hunchentoot:request-method request)))
-    (unless identity (core-resource-error 401 "Unauthorized" "A valid ServiceAccount bearer token is required"))
+    (unless identity (core-resource-error 401 "Unauthorized" "A valid client certificate or ServiceAccount bearer token is required"))
     (unless (authenticated-discovery-request-p path method)
       (multiple-value-bind (verb group resource name namespace)
           (kubernetes-authorization-target path method :watch (true-parameter-p (hunchentoot:parameter "watch")))
         (unless (service-account-authorized-p store identity verb group resource name namespace path)
-          (core-resource-error 403 "Forbidden" "ServiceAccount ~A/~A is not allowed to ~A ~A"
-                               (api-service-account-identity-namespace identity)
-                               (api-service-account-identity-name identity) verb (or resource path)))))
+          (core-resource-error 403 "Forbidden" "User ~A is not allowed to ~A ~A"
+                               (api-identity-username identity) verb (or resource path)))))
     identity))
 
 (defmethod hunchentoot:acceptor-dispatch-request ((acceptor gr8s-in-cluster-acceptor) request)
   "Enforce authentication and authorization on the dedicated TLS API listener."
   (handler-case
-      (progn (authorize-in-cluster-request (acceptor-store acceptor) request)
-             (call-next-method))
+      (let ((*authenticated-api-identity* (authorize-in-cluster-request (acceptor-store acceptor) request)))
+        (call-next-method))
     (kubernetes-error (condition) (kubernetes-error-response condition))))
 
 (defun start-in-cluster-api (store runtime reconciler pki &key (address "10.96.0.1") (port 443))
@@ -121,7 +140,8 @@
     (hunchentoot:start
      (make-instance 'gr8s-in-cluster-acceptor :address address :port port :store store
                     :runtime runtime :reconciler reconciler
-                    :certificate (namestring certificate) :private-key (namestring key)))))
+                    :certificate (namestring certificate) :private-key (namestring key)
+                    :client-ca (cluster-pki-ca-certificate pki)))))
 
 (defparameter +service-network-interface+ "gr8s-services")
 
