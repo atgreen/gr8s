@@ -9,12 +9,24 @@
 (def-suite durable-resource-watches :in gr8s)
 (in-suite durable-resource-watches)
 
+(defvar *durable-watch-csr-request* nil)
+
+(defun durable-watch-csr-request ()
+  "Cache only public signed CSR bytes after deleting the private fixture key."
+  (or *durable-watch-csr-request*
+      (setf *durable-watch-csr-request*
+            (with-temporary-store (store directory)
+              (declare (ignore store))
+              (csr-crypto-fixture directory "ec")))))
+
 (defun durable-watch-fixture (resource name)
   "Build a valid stored resource with labels for cross-kind watch checks."
   (let ((object (gr8s::core-object "apiVersion" (gr8s::core-resource-api-version resource)
                                  "kind" (gr8s::core-resource-kind resource)
                                  "metadata" (gr8s::core-object "name" name "labels" (gr8s::core-object "app" "watched")))))
-    (cond ((equal resource "endpointslices")
+    (cond ((equal resource "certificatesigningrequests")
+           (setf (gethash "spec" object) (gethash "spec" (csr-fixture (durable-watch-csr-request) :name name))))
+          ((equal resource "endpointslices")
            (setf (gethash "addressType" object) "IPv4" (gethash "endpoints" object) #() (gethash "ports" object) #()))
           ((equal resource "customresourcedefinitions")
            (setf object (crd-fixture :group "watch.example.test" :plural "watched"))

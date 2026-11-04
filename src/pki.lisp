@@ -418,6 +418,7 @@
 (defun verify-node-certificate (pki certificate-pem expected-node-name)
   (ensure-valid-node-name expected-node-name)
   (let ((certificate (certificate-from-pem certificate-pem)))
+    (require-internal-certificate-profile certificate (cluster-pki-ca-certificate pki))
     (handler-case
         (pure-tls::verify-certificate-chain
          (list certificate)
@@ -437,6 +438,7 @@
 (defparameter +node-server-common-name+ "gr8s-control")
 
 (defun verify-node-server-certificate (certificate ca)
+  (require-internal-certificate-profile certificate ca)
   (pure-tls::verify-certificate-chain
    (list certificate) (list ca) :purpose :server-auth :trust-anchor-mode :replace)
   (pure-tls::verify-hostname certificate +node-server-common-name+)

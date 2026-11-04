@@ -144,6 +144,7 @@
 (defun core-resource-field-paths (resource)
   "Return field selectors backed by actual attributes of this resource."
   (append '("metadata.name" "metadata.namespace")
+          (when (csr-resource-p resource) '("spec.signerName"))
           (when (equal resource "events")
             '("involvedObject.kind" "involvedObject.namespace" "involvedObject.name" "involvedObject.uid"
               "involvedObject.apiVersion" "involvedObject.resourceVersion" "involvedObject.fieldPath"

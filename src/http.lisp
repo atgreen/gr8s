@@ -94,7 +94,7 @@
   (let ((groups (vector (json-object "name" "rbac.authorization.k8s.io"
                                     "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
-                       (event-api-group) (workload-api-group) (storage-api-group) (endpointslice-api-group))))
+                       (event-api-group) (workload-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group))))
     (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
@@ -202,7 +202,7 @@
 (defun openapi-document ()
   (json-object "swagger" "2.0"
                "info" (json-object "title" "gr8s" "version" "v1")
-               "paths" (make-hash-table :test #'equal)
+               "paths" (add-csr-openapi-v2-paths (make-hash-table :test #'equal))
                "definitions" (openapi-definitions)))
 
 (defun openapi-response ()
@@ -215,6 +215,7 @@
     (json-object
      "api/v1"
      (json-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")
+     "apis/certificates.k8s.io/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/certificates.k8s.io/v1?hash=gr8s-certificates-v1")
      "apis/discovery.k8s.io/v1"
      (json-object "serverRelativeURL" "/openapi/v3/apis/discovery.k8s.io/v1?hash=gr8s-endpointslices-v1")
      "apis/storage.k8s.io/v1"
@@ -306,7 +307,8 @@
      (json-object
       "openapi" "3.0.0"
       "info" (json-object "title" "gr8s" "version" "v1")
-      "paths" (cond ((equal version "discovery.k8s.io/v1") (add-endpointslice-openapi-paths (core-object)))
+      "paths" (cond ((equal version "certificates.k8s.io/v1") (add-csr-openapi-paths (core-object)))
+                    ((equal version "discovery.k8s.io/v1") (add-endpointslice-openapi-paths (core-object)))
                     ((equal version "events.k8s.io/v1") (add-event-openapi-paths (core-object) t))
                     ((equal version "apps/v1") (add-workload-openapi-paths (core-object)))
                     ((equal version "storage.k8s.io/v1") (add-storage-openapi-paths (core-object) version))
@@ -982,6 +984,10 @@
           ((string= path "/version") (version-response))
           ((string= path "/api") (api-versions-response))
           ((string= path "/apis") (api-groups-response store))
+          ((string= path "/apis/certificates.k8s.io") (json-response (csr-api-group)))
+          ((string= path "/apis/certificates.k8s.io/v1") (csr-discovery-response))
+          ((string= path "/openapi/v3/apis/certificates.k8s.io/v1") (openapi-v3-response "certificates.k8s.io/v1"))
+          ((csr-subresource-route path) (dispatch-csr-subresource store path method))
           ((string= path "/apis/discovery.k8s.io") (json-response (endpointslice-api-group)))
           ((string= path "/apis/discovery.k8s.io/v1") (endpointslice-discovery-response))
           ((string= path "/openapi/v3/apis/discovery.k8s.io/v1") (openapi-v3-response "discovery.k8s.io/v1"))

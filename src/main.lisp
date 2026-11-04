@@ -514,6 +514,7 @@
                                   :before-reconcile (lambda ()
                                       (reconcile-crd-deletions store)
                                       (collect-orphaned-custom-resources store)
+                                      (reconcile-certificate-signing-requests store pki)
                                       (reconcile-storage-bindings store)
                                       (collect-orphaned-api-objects reconciler)
                                       (reconcile-workloads reconciler)
