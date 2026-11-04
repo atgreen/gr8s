@@ -55,6 +55,7 @@
                              (:file "core-resource-protobuf")
                              (:file "podtemplates")
                              (:file "workload-resources")
+                             (:file "batch-resources")
 
                              (:file "storage-api")
                              (:file "endpointslice-api")
@@ -112,6 +113,8 @@
                              (:file "garbage-collection")
                              (:file "crd-garbage-collection")
                              (:file "workload-controller")
+                             (:file "job-policy")
+                             (:file "job-controller")
                              (:file "workload-deletion")
                              (:file "workload-http")
                              (:file "main"))))
