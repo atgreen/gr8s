@@ -94,7 +94,7 @@
   },
   "remaining": [
     "Root node-session issue25 retains the earlier independent operation timeout evidence; the integrated source passed its complete3384-check gate without deadline changes.",
-    "All three selected unchanged DNS cases passed with clean zero-shim cleanup on de06095. Remaining five DNS cases are running once on the same frozen binary/cache; no result claimed yet.",
+    "All eight pinned unchanged DNS conformance cases passed across clean3+5 runs ey7un2zg/u38pt475 on identical source de06095 and binaryafa68c83. Actual JUnit selections and all copied declared artifact hashes verified. Independent process check confirms no owned native/daemon/shims, and custom169.254.1.2 absent from every interface after normal gateway removal.",
     "Truncation emits actual DNSConfigForming runtime warnings; forwarding those warnings as Kubernetes Events is a follow-up to the generic runtime-event bridge."
   ],
   "upstreamRuns": [
@@ -125,6 +125,53 @@
         }
       ],
       "actualJUnitPassedCases": 3,
+      "suiteHookEntriesExcluded": 7,
+      "cleanRun": true,
+      "nativeExitCode": 0,
+      "cleanupError": null,
+      "ownedShimsRemaining": [],
+      "allPresentDeclaredArtifactHashesVerified": true,
+      "privateKubeconfigNotCopied": true,
+      "includesFunctionalRecoveryCommit": "67fcba479a0d6bc50163cad52c0439bcb05205b9",
+      "original33y_tdhgRemainsFailed": true
+    },
+    {
+      "sourceCommit": "de06095a61553146a7fd94e73a175f103d32c032",
+      "sourceBranch": "feat/pod-dns-config",
+      "nativeSHA256": "afa68c8326f89147816d75e0d7a521a59ca984dc8e3604e9eda8ef2faebcc67f",
+      "harnessSHA256": "bb07ae3d86883d1d4d982d4cd8d177c3754d7ca32cdff0a56616b7f0914923a0",
+      "artifactDirectory": "build/conformance/2026-11-04-service-dns-five-u38pt475",
+      "reportSHA256": "097594a6e9b332d666bebda3c7212ab829bb8f79d7d1dfd27b749d55b1ea0f92",
+      "archiveSHA256": "dc2ed651e04e451ac573557fc71913c6a0fd1172ba8630d9b00d9be3f1ffdd9b",
+      "focus": "\\[sig-network\\] DNS (should provide /etc/hosts entries for the cluster|should provide DNS for pods for Hostname|should provide DNS for pods for Subdomain|should provide DNS for the cluster|should resolve DNS of partial qualified names for services \\[LinuxOnly\\]) \\[Conformance\\]$",
+      "actualSelectedCases": [
+        {
+          "name": "[It] [sig-network] DNS should provide /etc/hosts entries for the cluster [Conformance]",
+          "seconds": "45.520950812",
+          "passed": true
+        },
+        {
+          "name": "[It] [sig-network] DNS should provide DNS for pods for Hostname [Conformance]",
+          "seconds": "73.669492863",
+          "passed": true
+        },
+        {
+          "name": "[It] [sig-network] DNS should provide DNS for pods for Subdomain [Conformance]",
+          "seconds": "98.056149985",
+          "passed": true
+        },
+        {
+          "name": "[It] [sig-network] DNS should provide DNS for the cluster [Conformance]",
+          "seconds": "65.630295294",
+          "passed": true
+        },
+        {
+          "name": "[It] [sig-network] DNS should resolve DNS of partial qualified names for services [LinuxOnly] [Conformance]",
+          "seconds": "78.05411638",
+          "passed": true
+        }
+      ],
+      "actualJUnitPassedCases": 5,
       "suiteHookEntriesExcluded": 7,
       "cleanRun": true,
       "nativeExitCode": 0,
