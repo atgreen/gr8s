@@ -62,8 +62,8 @@
     (is (equal "1Gi" (gethash "memory" requests)))))
 
 (test unenforceable-or-inconsistent-resources-are-refused
-  (dolist (resources '("{\"limits\":{\"nvidia.com/gpu\":\"1\"}}"
-                       "{\"requests\":{\"ephemeral-storage\":\"1Gi\"}}"
+  (dolist (resources '("{\"limits\":{\"hugepages-2Mi\":\"1Gi\"}}"
+                       "{\"requests\":{\"nvidia.com/gpu\":\"1\"}}"
                        "{\"limits\":{\"cpu\":\"-1\"}}"
                        "{\"limits\":{\"cpu\":\"100m\"},\"requests\":{\"cpu\":\"200m\"}}"
                        "{\"claims\":[{\"name\":\"gpu\"}]}"

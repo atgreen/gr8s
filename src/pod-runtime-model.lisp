@@ -314,13 +314,73 @@
              (loop for mount across (optional-vector container "volumeMounts" "container")
                    unless (member (gethash "name" mount) names :test #'equal)
                      do (invalid-pod "volumeMount references an unknown volume"))))
-  (let ((selector (gethash "nodeSelector" spec)))
-    (when (and selector (not (eq selector 'null)))
-      (require-object selector "nodeSelector")
-      (maphash (lambda (key value)
-                 (unless (and (core-qualified-key-p key) (core-label-name-p value :empty t))
-                   (invalid-pod "nodeSelector requires valid label keys and values")))
-               selector)))
+  (when (gethash "nodeSelector" spec) (validate-pod-node-selector (gethash "nodeSelector" spec)))
+  (validate-pod-tolerations spec)
+  (validate-pod-policy-fields spec)
+  (validate-pod-affinity spec))
+
+(defun validate-node-selector-term (term)
+  "Validate a NodeSelectorTerm's label expressions and metadata.name field requirements."
+  (drop-null-fields (require-object term "nodeSelectorTerm"))
+  (reject-unsupported-fields term '("matchExpressions" "matchFields") "nodeSelectorTerm")
+  (flet ((check (requirement)
+           (drop-null-fields (require-object requirement "node selector requirement"))
+           (reject-unsupported-fields requirement '("key" "operator" "values") "node selector requirement")
+           (let ((operator (gethash "operator" requirement)) (values (gethash "values" requirement #())))
+             (cond ((member operator '("In" "NotIn") :test #'equal)
+                    (when (zerop (length values)) (invalid-pod "node selector operator ~A requires values" operator)))
+                   ((member operator '("Exists" "DoesNotExist") :test #'equal)
+                    (when (plusp (length values)) (invalid-pod "node selector operator ~A forbids values" operator)))
+                   ((member operator '("Gt" "Lt") :test #'equal)
+                    (unless (and (= 1 (length values))
+                                 (ignore-errors (parse-integer (aref values 0))))
+                      (invalid-pod "node selector operator ~A requires one integer value" operator)))
+                   (t (invalid-pod "Invalid node selector operator ~S" operator))))))
+    (loop for requirement across (optional-vector term "matchExpressions" "nodeSelectorTerm")
+          do (check requirement)
+             (unless (core-qualified-key-p (gethash "key" requirement))
+               (invalid-pod "Invalid node selector key ~S" (gethash "key" requirement))))
+    (loop for requirement across (optional-vector term "matchFields" "nodeSelectorTerm")
+          do (check requirement)
+             (unless (and (equal "metadata.name" (gethash "key" requirement))
+                          (member (gethash "operator" requirement) '("In" "NotIn") :test #'equal)
+                          (= 1 (length (gethash "values" requirement))))
+               (invalid-pod "matchFields only supports one metadata.name value with In or NotIn")))))
+
+(defun validate-pod-affinity (spec)
+  "Accept node affinity, which the scheduler evaluates; Pod affinity has no implementation and is refused."
+  (when (eq (gethash "affinity" spec) 'null) (remhash "affinity" spec))
+  (let ((affinity (gethash "affinity" spec)))
+    (when affinity
+      (drop-null-fields (require-object affinity "spec.affinity"))
+      (reject-unsupported-fields affinity '("nodeAffinity") "spec.affinity")
+      (let ((node-affinity (gethash "nodeAffinity" affinity)))
+        (when node-affinity
+          (drop-null-fields (require-object node-affinity "nodeAffinity"))
+          (reject-unsupported-fields node-affinity '("requiredDuringSchedulingIgnoredDuringExecution"
+                                                     "preferredDuringSchedulingIgnoredDuringExecution")
+                                     "nodeAffinity")
+          (let ((required (gethash "requiredDuringSchedulingIgnoredDuringExecution" node-affinity)))
+            (when required
+              (let ((terms (optional-vector required "nodeSelectorTerms" "nodeAffinity")))
+                (when (zerop (length terms)) (invalid-pod "nodeAffinity requires at least one nodeSelectorTerm"))
+                (map nil #'validate-node-selector-term terms))))
+          (loop for entry across (optional-vector node-affinity "preferredDuringSchedulingIgnoredDuringExecution" "nodeAffinity")
+                do (reject-unsupported-fields entry '("weight" "preference") "preferred node affinity")
+                   (unless (typep (gethash "weight" entry) '(integer 1 100))
+                     (invalid-pod "preferred node affinity weight must be between 1 and 100"))
+                   (validate-node-selector-term (require-object (gethash "preference" entry) "preference"))))))))
+
+(defun validate-pod-node-selector (selector)
+  "Accept any qualified label; a label no node carries simply leaves the Pod unscheduled."
+  (require-object selector "nodeSelector")
+  (maphash (lambda (key value)
+             (unless (core-qualified-key-p key) (invalid-pod "nodeSelector key ~S is invalid" key))
+             (unless (core-label-name-p value :empty t) (invalid-pod "nodeSelector value for ~S is invalid" key)))
+           selector))
+
+(defun validate-pod-tolerations (spec)
+  "Validate the toleration list of a Pod or RuntimeClass scheduling SPEC."
   (loop for toleration across (optional-vector spec "tolerations" "spec")
         do (reject-unsupported-fields toleration '("key" "operator" "value" "effect" "tolerationSeconds") "toleration")
            (unless (member (gethash "operator" toleration "Equal") '("Equal" "Exists") :test #'equal)
@@ -328,6 +388,32 @@
            (when (gethash "effect" toleration)
              (unless (member (gethash "effect" toleration) '("" "NoSchedule" "PreferNoSchedule" "NoExecute") :test #'equal)
                (invalid-pod "invalid toleration effect")))))
+
+(defun validate-pod-policy-fields (spec)
+  "Validate the runtime class, priority, overhead and active deadline fields admission resolves."
+  (dolist (field '("runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"))
+    (when (eq (gethash field spec) 'null) (remhash field spec)))
+  (when (gethash "runtimeClassName" spec)
+    (require-dns-subdomain (gethash "runtimeClassName" spec) "spec.runtimeClassName"))
+  (when (equal "" (gethash "priorityClassName" spec)) (remhash "priorityClassName" spec))
+  (when (gethash "priorityClassName" spec)
+    (require-dns-subdomain (gethash "priorityClassName" spec) "spec.priorityClassName"))
+  (when (nth-value 1 (gethash "priority" spec))
+    (unless (typep (gethash "priority" spec) '(signed-byte 32)) (invalid-pod "spec.priority must be an int32")))
+  (when (gethash "preemptionPolicy" spec)
+    (unless (member (gethash "preemptionPolicy" spec) '("PreemptLowerPriority" "Never") :test #'equal)
+      (invalid-pod "spec.preemptionPolicy must be PreemptLowerPriority or Never")))
+  (when (gethash "activeDeadlineSeconds" spec)
+    (unless (typep (gethash "activeDeadlineSeconds" spec) '(integer 1 9223372036854775807))
+      (invalid-pod "spec.activeDeadlineSeconds must be a positive int64")))
+  (let ((overhead (gethash "overhead" spec)))
+    (when overhead
+      (require-object overhead "spec.overhead")
+      (dolist (name (loop for name being the hash-keys of overhead collect name))
+        (unless (member name '("cpu" "memory") :test #'equal)
+          (invalid-pod "spec.overhead[~A] has no implemented accounting" name))
+        (setf (gethash name overhead)
+              (container-quantity-string (container-quantity-round (parse-container-quantity (gethash name overhead)) -3)))))))
 
 (defun node-builtin-labels (node)
   "Return the labels gr8s derives from what NODE actually is."
@@ -350,8 +436,19 @@
               always (equal expected (gethash key labels))))))
 
 (defun pod-node-selector-matches-p (pod node)
-  "Match POD's node labels against a registered worker NODE."
-  (node-selector-matches-p (gethash "nodeSelector" (gethash "spec" (pod-to-object pod))) node))
+  "Match POD's node selector against the labels registered worker NODE exposes."
+  (let ((selector (gethash "nodeSelector" (gethash "spec" (pod-to-object pod)))))
+    (or (null selector)
+        (let ((labels (storage-node-labels node)))
+          (loop for key being the hash-keys of selector using (hash-value expected)
+                always (equal expected (gethash key labels)))))))
+
+(defun pod-runtime-handler (pod)
+  "Return the admission-resolved CRI handler of POD's RuntimeClass, or NIL for the default runtime."
+  (let* ((object (pod-to-object pod))
+         (annotations (gethash "annotations" (gethash "metadata" object))))
+    (when (and annotations (gethash "runtimeClassName" (gethash "spec" object)))
+      (gethash "node.gr8s.io/runtime-handler" annotations))))
 
 (defun pod-requests-privileged-container-p (pod)
   "Return whether any validated container needs a privileged sandbox."

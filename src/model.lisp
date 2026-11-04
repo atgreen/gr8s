@@ -65,6 +65,10 @@
   (labels nil)
   (annotations nil)
   (resource-version "1"))
+  ;; Quantity strings the node's agent measured about itself.
+  capacity
+  ;; Quantity strings clients advertised through the Node status subresource.
+  extended-resources)
 
 (defun invalid-pod (control &rest arguments)
   "Signal an HTTP 422 Kubernetes error formatted by CONTROL and ARGUMENTS."
@@ -186,13 +190,24 @@
               (invalid-pod "only TCP container ports are supported"))
             number))))
 
+(defun default-container-termination-message (object)
+  "Apply the Kubernetes termination message defaults, refusing any other requested behavior."
+  (loop for (field default) in '(("terminationMessagePath" "/dev/termination-log")
+                                 ("terminationMessagePolicy" "File"))
+        do (let ((value (gethash field object)))
+             (cond ((member value '(nil null "") :test #'equal) (setf (gethash field object) default))
+                   ((not (equal value default))
+                    (invalid-pod "container.~A other than ~S is not implemented" field default))))))
+
 (defun parse-container (object)
   "Validate a container JSON OBJECT and return a CONTAINER-SPEC."
   (reject-unsupported-fields
    object '("name" "image" "command" "args" "env" "envFrom" "ports" "resources"
             "imagePullPolicy" "volumeMounts" "securityContext" "workingDir"
-            "startupProbe" "readinessProbe" "livenessProbe")
+            "startupProbe" "readinessProbe" "livenessProbe"
+            "terminationMessagePath" "terminationMessagePolicy")
    "container")
+  (default-container-termination-message object)
   (normalize-container-resources object)
   (validate-runtime-container object)
   (make-container-spec
@@ -269,7 +284,9 @@
     (reject-unsupported-fields
      spec '("containers" "initContainers" "restartPolicy" "dnsPolicy" "nodeName" "volumes"
             "securityContext" "serviceAccountName" "automountServiceAccountToken"
-            "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig") "spec")
+            "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig"
+            "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
+            "affinity") "spec")
     (dolist (field '("hostname" "subdomain"))
       (when (eq (gethash field spec) 'null) (remhash field spec))
       (let ((value (gethash field spec "")))

@@ -77,7 +77,7 @@
       (setf (gethash "selector" (gethash "spec" mismatch)) (gr8s::core-object "app" "other"))
       (signals kubernetes-error (gr8s::create-core-resource store "replicationcontrollers" mismatch "alpha")))
     (let ((unrunnable (rc-fixture "bad")))
-      (setf (gethash "affinity" (gethash "spec" (gethash "template" (gethash "spec" unrunnable)))) (gr8s::core-object))
+      (setf (gethash "shareProcessNamespace" (gethash "spec" (gethash "template" (gethash "spec" unrunnable)))) t)
       (signals kubernetes-error (gr8s::create-core-resource store "replicationcontrollers" unrunnable "alpha")))))
 
 (test replication-controller-selector-may-change-after-creation
@@ -238,6 +238,21 @@
       (run-workload-passes reconciler)
       (is (null (live-pods store "alpha")))
       (is (= 0 (gethash "desiredNumberScheduled" (workload-status store "daemonsets" "ds")))))))
+
+(test daemonset-placement-honors-required-node-affinity
+  (with-temporary-store (store path)
+    (register-test-nodes store "node-a" "node-b")
+    (let* ((reconciler (make-reconciler store (make-fake-runtime)))
+           (daemonset (daemonset-fixture "ds")))
+      (setf (gethash "affinity" (gethash "spec" (gethash "template" (gethash "spec" daemonset))))
+            (gr8s::core-object "nodeAffinity" (gr8s::core-object "requiredDuringSchedulingIgnoredDuringExecution"
+              (gr8s::core-object "nodeSelectorTerms"
+                (vector (gr8s::core-object "matchExpressions"
+                          (vector (gr8s::core-object "key" "color" "operator" "In" "values" #("blue")))))))))
+      (gr8s::create-core-resource store "daemonsets" daemonset "alpha")
+      (setf (gr8s::node-record-labels (gr8s:get-node store "node-b")) (gr8s::core-object "color" "blue"))
+      (run-workload-passes reconciler)
+      (is (equal '("node-b") (mapcar #'gr8s::pod-node-name (live-pods store "alpha")))))))
 
 (test daemonset-replaces-deleted-and-failed-pods-and-removes-extras
   (with-temporary-store (store path)

@@ -89,7 +89,7 @@
     (signals kubernetes-error (parse-pod object)))
   (let* ((object (pod-to-object (volume-test-pod)))
          (spec (gethash "spec" object)))
-    (setf (gethash "nodeSelector" spec) (gr8s::core-object "disk" "not a label value"))
+    (setf (gethash "nodeSelector" spec) (gr8s::core-object "bad key!" "ssd"))
     (signals kubernetes-error (parse-pod object))))
 
 (test scheduler-honors-node-label-selectors
@@ -100,6 +100,10 @@
     (let* ((object (pod-to-object (volume-test-pod)))
            (spec (gethash "spec" object)))
       (setf (gethash "nodeSelector" spec) (gr8s::core-object "kubernetes.io/os" "windows"))
+      (is (null (gr8s::schedule-pod store (create-pod store (parse-pod object)))))
+      ;; A label no node carries is valid and leaves the Pod pending.
+      (setf (gethash "nodeSelector" spec) (gr8s::core-object "x-test.k8s.io/unsatisfiable" "not-schedulable")
+            (gethash "name" (gethash "metadata" object)) "unsatisfiable")
       (is (null (gr8s::schedule-pod store (create-pod store (parse-pod object)))))
       (setf (gethash "nodeSelector" spec) (gr8s::core-object "kubernetes.io/hostname" "worker-a")
             (gethash "name" (gethash "metadata" object)) "selected")

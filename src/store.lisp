@@ -39,6 +39,8 @@
   (pod-watch-journal-length 0)
   (pod-published-statuses (make-hash-table :test #'equal))
   (pod-client-statuses (make-hash-table :test #'equal))
+  ;; Pod UID to the node reserved for it while its preemption victims terminate.
+  (nominated-nodes (make-hash-table :test #'equal))
   (lock (bt:make-lock "gr8s store")))
 
 (defmacro with-store-lock ((store) &body body)
@@ -79,6 +81,10 @@
     (when (node-record-labels node) (setf (gethash "labels" object) (node-record-labels node)))
     (when (node-record-annotations node) (setf (gethash "annotations" object) (node-record-annotations node)))
     (setf (gethash "resourceVersion" object) (node-record-resource-version node))
+    (when (node-record-capacity node)
+      (setf (gethash "capacity" object) (node-record-capacity node)))
+    (when (node-record-extended-resources node)
+      (setf (gethash "extendedResources" object) (node-record-extended-resources node)))
     object))
 
 (defun parse-node-record (input)
@@ -97,6 +103,8 @@
                       :labels (gethash "labels" object)
                       :annotations (gethash "annotations" object)
                       :resource-version (gethash "resourceVersion" object "1")
+                      :capacity (gethash "capacity" object)
+                      :extended-resources (gethash "extendedResources" object)
                       :ready-p (and (eq t (gethash "ready" object))
                                     (integerp heartbeat) (integerp deadline)
                                     (<= (get-universal-time) deadline)))))
@@ -249,6 +257,7 @@
              :status-code 409
              :reason "AlreadyExists"
              :message (format nil "Pod ~A already exists" (pod-name pod))))
+    (enforce-resource-quotas-unlocked store "pods" (pod-namespace pod) (pod-to-object pod))
     (let ((metadata (gethash "metadata" (pod-to-object pod))))
       (remhash "deletionTimestamp" metadata)
       (remhash "deletionGracePeriodSeconds" metadata)
@@ -283,6 +292,7 @@
       (validate-pod-hostname-update existing replacement)
       (validate-pod-dns-update existing replacement)
       (validate-pod-finalizer-update existing replacement)
+      (validate-pod-policy-update existing replacement)
       (when (pod-node-name existing)
         (when (and (pod-node-name replacement)
                    (not (string= (pod-node-name existing)
@@ -341,6 +351,7 @@
       (remhash (pod-uid pod) (pod-store-pod-observed-resource-versions store))
       (remhash (pod-uid pod) (pod-store-pod-condition-histories store))
       (remhash (pod-uid pod) (pod-store-pod-client-statuses store))
+      (remhash (pod-uid pod) (pod-store-nominated-nodes store))
       pod)))
 
 (defun delete-pod (store namespace name)

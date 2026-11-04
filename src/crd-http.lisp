@@ -209,6 +209,8 @@
                                (cond ((equal type "application/merge-patch+json") (merge-json-object view patch))
                                      ((equal type "application/json-patch+json") (apply-core-json-patch view patch))
                                      (t (core-resource-error 415 "UnsupportedMediaType" "Custom status supports JSON/merge patches"))))))
+                  (input (admit-subresource-write store resource "status" namespace name input view
+                                                  :dry-run (core-resource-dry-run-p)))
                   (*crd-status-write* t))
              (json-response
                (update-core-resource store resource namespace name (lambda (old) (declare (ignore old)) input)
@@ -252,6 +254,7 @@
                 (dolist (object (list-core-resources store resource namespace))
                   (when (and (funcall label-test object) (funcall field-test object))
                     (let ((metadata (gethash "metadata" object)))
+                      (admit-core-delete store resource (gethash "namespace" metadata) (gethash "name" metadata) options dry-run)
                       (delete-core-resource store resource (gethash "namespace" metadata) (gethash "name" metadata) :uid (gethash "uid" metadata) :dry-run dry-run))))
                 (status-response "Success" "Deleted" "Custom resource collection deleted" 200)))
              (t (dispatch-core-resource-request store path method)))))))))

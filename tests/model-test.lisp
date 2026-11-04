@@ -20,6 +20,9 @@
     (is (equal '(8080) (container-spec-ports container)))
     (let ((expected (com.inuoe.jzon:parse *valid-pod-json*)))
       (setf (gethash "terminationGracePeriodSeconds" (gethash "spec" expected)) 30)
+      (let ((expected-container (aref (gethash "containers" (gethash "spec" expected)) 0)))
+        (setf (gethash "terminationMessagePath" expected-container) "/dev/termination-log"
+              (gethash "terminationMessagePolicy" expected-container) "File"))
       (is (equalp expected (pod-to-object pod))))))
 
 (test pods-accept-valid-namespaces
@@ -32,7 +35,7 @@
 (test unsupported-pod-spec-fields-are-rejected
   (signals kubernetes-error
     (parse-pod
-     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"affinity\":{},\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}")))
+     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"shareProcessNamespace\":true,\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}")))
 
 (test kubectl-generated-default-pod-fields-are-accepted
   (let ((pod
@@ -49,7 +52,7 @@
      "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"dnsPolicy\":\"None\",\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}"))
   (signals kubernetes-error
     (parse-pod
-     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\",\"resources\":{\"limits\":{\"nvidia.com/gpu\":\"1\"}}}]}}")))
+     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\",\"resources\":{\"limits\":{\"hugepages-2Mi\":\"1Gi\"}}}]}}")))
 
 (test malformed-pod-shapes-are-kubernetes-errors
   (dolist (input

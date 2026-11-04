@@ -145,11 +145,17 @@
                                                    ((equal resource "services") #("svc"))
                                                    ((equal resource "replicationcontrollers") #("rc"))
                                                    ((equal resource "events") #("ev"))
+                                                   ((equal resource "cronjobs") #("cj"))
                                                    ((equal resource "customresourcedefinitions") #("crd" "crds"))
                                                    ((equal resource "persistentvolumes") #("pv"))
                                                    ((equal resource "persistentvolumeclaims") #("pvc"))
-                                                   ((equal resource "storageclasses") #("sc")) (t #()))
+                                                   ((equal resource "storageclasses") #("sc"))
+                                                   ((equal resource "resourcequotas") #("quota"))
+                                                   ((equal resource "limitranges") #("limits"))
+                                                   ((equal resource "priorityclasses") #("pc")) (t #()))
                                 "verbs" (if (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource)
+                                                (policy-resource-p resource)
+                                                (admission-config-resource-p resource)
                                                 (member resource '("podtemplates" "events" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "controllerrevisions" "customresourcedefinitions") :test #'equal))
                                             #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
                                             #("create" "delete" "get" "list" "patch" "update" "watch"))))
@@ -167,6 +173,14 @@
   (cond ((member :x86-64 *features*) "amd64")
         ((member :arm64 *features*) "arm64")
         (t (string-downcase (machine-type)))))
+
+(defun node-resource-list (node)
+  "Return a fresh list of NODE's measured and advertised resources."
+  (let ((list (core-object)))
+    (dolist (source (list (node-record-capacity node) (node-record-extended-resources node)))
+      (when source
+        (maphash (lambda (name value) (setf (gethash name list) value)) source)))
+    list))
 
 (defun node-api-object (node)
   "Serialize a registered worker with readiness taken from its live lease."
@@ -188,6 +202,8 @@
                                                   "message" "Readiness follows the gr8s node session lease"))
                "addresses" (if (and address (plusp (length address)))
                                (vector (core-object "type" "InternalIP" "address" address)) #())
+               "capacity" (node-resource-list node)
+               "allocatable" (node-resource-list node)
                "nodeInfo" (core-object "operatingSystem" "linux" "architecture" (native-node-architecture)
                                         "kubeletVersion" "v1.36.0-gr8s.0")))))
 
@@ -202,21 +218,6 @@
               ((member content-type '("application/merge-patch+json" "application/strategic-merge-patch+json") :test #'equal)
                (merge-json-object current (require-object patch "patch")))
               (t (core-resource-error 415 "UnsupportedMediaType" "Unsupported Node patch format"))))))
-
-(defun decode-node-protobuf (bytes)
-  "Decode the writable parts of a typed Node, keeping unenforceable spec fields visible to admission."
-  (let* ((fields (core-protobuf-fields bytes))
-         (metadata (core-protobuf-value fields 1))
-         (spec-bytes (core-protobuf-value fields 2))
-         (spec (core-object)))
-    (when spec-bytes
-      (let ((spec-fields (core-protobuf-fields spec-bytes)))
-        (let ((cidr (core-protobuf-string spec-fields 1)))
-          (when (plusp (length cidr)) (setf (gethash "podCIDR" spec) cidr)))
-        (setf (gethash "unschedulable" spec) (eql 1 (core-protobuf-value spec-fields 4 0)))
-        (when (find 5 spec-fields :key #'first) (setf (gethash "taints" spec) (vector (core-object))))))
-    (core-object "apiVersion" "v1" "kind" "Node" "spec" spec
-                 "metadata" (if metadata (core-protobuf-metadata metadata) (core-object)))))
 
 (defun validate-node-write (input node)
   "Refuse Node changes gr8s could not enforce, and return the requested labels and annotations."

@@ -67,11 +67,39 @@ clients. See [ConfigMap and Secret APIs](docs/configmap-secret-api.md) for the
 supported surface. Pods can consume referenced environment keys and mounted
 files. Watch, server-side apply, and full Namespace lifecycle are not yet implemented.
 
+ResourceQuota, LimitRange, RuntimeClass and PriorityClass are served with real
+effects. Quota usage is computed from the live objects and checked under the store
+lock at admission, so a write that would exceed a hard limit gets a 403; the
+`Terminating`, `NotTerminating`, `BestEffort`, `NotBestEffort` and `PriorityClass`
+scopes apply. LimitRange defaults and bounds new Pods and bounds new claims.
+RuntimeClass admission resolves overhead and scheduling constraints, and the handler
+reaches CRI `RunPodSandbox`, so an unconfigured handler leaves the Pod pending with
+the runtime's error. PriorityClass resolves `spec.priority`.
+
+The scheduler charges Pod requests and overhead against the CPU, memory, storage
+and Pod count agents report, and against extended resources advertised through
+Node status. It evaluates node selectors and node affinity, and when nothing fits
+it preempts lower-priority Pods, marking them with a `DisruptionTarget` condition.
+Pod affinity and anti-affinity are refused. `spec.activeDeadlineSeconds` is counted
+from Pod creation rather than from the first node's acceptance. A declared
+`ephemeral-storage` limit counts for quota, LimitRange and scheduling, and the node
+evicts a Pod whose writable layers and disk-backed emptyDirs exceed it, checking
+every ten seconds. Container logs are not included in that measurement.
+
 Pod logs and exec run through correlated agent operations, including interactive
 streams and nonzero exit status. Complete agent-crash recovery
 remain outside the verified boundary. The administrative HTTP API refuses
 non-loopback listener addresses; native Pods use the authenticated HTTPS API
 described below.
+
+`admissionregistration.k8s.io/v1` webhook configurations call their backends
+with AdmissionReview on API writes and Pod connections, over TLS verified against
+the `caBundle` and within `timeoutSeconds`, with rules, selectors, `failurePolicy`,
+ordered JSON patches and `reinvocationPolicy` applied as upstream does. A Service
+backend is reached directly at a ready endpoint. `matchConditions` run a bounded
+CEL subset (`src/admission-cel.lisp`): `authorizer`, `matches`, uint, bytes and
+other unsupported CEL fail at registration instead of being misjudged. Objects
+written by in-process controllers do not pass through webhooks yet.
 
 ## Runtime architecture
 

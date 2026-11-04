@@ -111,9 +111,13 @@
                                        (workload-schema-name resource "")))))
       (cond ((eq method :get) (json-response representation))
             ((member method '(:put :patch))
-             (let* ((input (workload-read-subresource-input representation kind schema method))
-                    (metadata (require-object (gethash "metadata" input) "metadata"))
-                    (dry-run (core-resource-dry-run-p)))
+             (let* ((dry-run (core-resource-dry-run-p))
+                    (input (admit-subresource-write store resource subresource namespace name
+                                                    (workload-read-subresource-input representation kind schema method)
+                                                    representation
+                                                    :kind (when scale "Scale") :kind-api-version (when scale "autoscaling/v1")
+                                                    :dry-run dry-run))
+                    (metadata (require-object (gethash "metadata" input) "metadata")))
                (when (and (gethash "name" metadata) (not (equal name (gethash "name" metadata))))
                  (core-resource-error 400 "BadRequest" "metadata.name does not match request name"))
                (when (and (gethash "namespace" metadata) (not (member (gethash "namespace" metadata) (list "" namespace) :test #'equal)))
@@ -173,9 +177,11 @@
                "preferredVersion" (core-object "groupVersion" "batch/v1" "version" "v1")))
 
 (defun batch-resources-response ()
-  "Advertise Jobs and their separately authorized status subresource."
+  "Advertise Jobs, CronJobs and their separately authorized status subresources."
   (json-response
    (core-object "apiVersion" "v1" "kind" "APIResourceList" "groupVersion" "batch/v1" "resources"
                 (concatenate 'vector (stored-resource-discovery "batch/v1")
                              (vector (core-object "name" "jobs/status" "namespaced" t "kind" "Job"
+                                                  "verbs" #("get" "patch" "update"))
+                                     (core-object "name" "cronjobs/status" "namespaced" t "kind" "CronJob"
                                                   "verbs" #("get" "patch" "update")))))))

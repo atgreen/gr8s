@@ -112,9 +112,12 @@
 
 (defun crd-openapi-discovery-response (store)
   "Expose current schema URLs for every actually served group/version."
-  (let ((paths (core-object "apis/discovery.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/discovery.k8s.io/v1?hash=gr8s-endpointslices-v1")
+  (let ((paths (core-object "apis/admissionregistration.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/admissionregistration.k8s.io/v1?hash=gr8s-admissionregistration-v1")
+                            "apis/discovery.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/discovery.k8s.io/v1?hash=gr8s-endpointslices-v1")
                             "apis/certificates.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/certificates.k8s.io/v1?hash=gr8s-certificates-v1")
                             "apis/apps/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/apps/v1?hash=gr8s-apps-v1")
+                            "apis/node.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/node.k8s.io/v1?hash=gr8s-node-v1")
+                            "apis/scheduling.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/scheduling.k8s.io/v1?hash=gr8s-scheduling-v1")
                             "apis/storage.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/storage.k8s.io/v1?hash=gr8s-storage-v1")
                             "api/v1" (core-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")
                             "apis/events.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1"))))

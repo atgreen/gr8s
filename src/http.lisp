@@ -99,7 +99,8 @@
   (let ((groups (vector (json-object "name" "rbac.authorization.k8s.io"
                                     "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
-                       (event-api-group) (workload-api-group) (batch-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group))))
+                       (event-api-group) (workload-api-group) (batch-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group)
+                       (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object))))
     (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
@@ -118,6 +119,8 @@
                    "verbs" #("get" "patch" "update"))
       (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
       (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("create"))
+      (json-object "name" "pods/eviction" "singularName" "" "namespaced" t "kind" "Eviction"
+                   "group" "policy" "version" "v1" "verbs" #("create"))
       (json-object "name" "pods/proxy" "singularName" "" "namespaced" t "kind" "PodProxyOptions"
                    "verbs" #("get" "create" "update" "patch" "delete"))
       (json-object "name" "nodes" "singularName" "node" "namespaced" nil "kind" "Node"
@@ -126,7 +129,7 @@
                    "kind" "ReplicationController" "verbs" #("get" "patch" "update"))
       (json-object "name" "replicationcontrollers/scale" "singularName" "" "namespaced" t
                    "kind" "Scale" "group" "autoscaling" "version" "v1" "verbs" #("get" "patch" "update")))
-     (stored-resource-discovery "v1") (storage-status-discovery)))))
+     (stored-resource-discovery "v1") (storage-status-discovery) (policy-status-discovery)))))
 
 (defvar *schema-reference-prefix* "#/definitions/")
 
@@ -229,12 +232,15 @@
      "api/v1"
      (json-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")
      "apis/certificates.k8s.io/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/certificates.k8s.io/v1?hash=gr8s-certificates-v1")
+     "apis/admissionregistration.k8s.io/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/admissionregistration.k8s.io/v1?hash=gr8s-admissionregistration-v1")
      "apis/discovery.k8s.io/v1"
      (json-object "serverRelativeURL" "/openapi/v3/apis/discovery.k8s.io/v1?hash=gr8s-endpointslices-v1")
      "apis/storage.k8s.io/v1"
      (json-object "serverRelativeURL" "/openapi/v3/apis/storage.k8s.io/v1?hash=gr8s-storage-v1")
      "apis/events.k8s.io/v1"
      (json-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1")
+     "apis/node.k8s.io/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/node.k8s.io/v1?hash=gr8s-node-v1")
+     "apis/scheduling.k8s.io/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/scheduling.k8s.io/v1?hash=gr8s-scheduling-v1")
      "apis/apps/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/apps/v1?hash=gr8s-apps-v1")))))
 
 (defun pod-group-version-kind ()
@@ -321,18 +327,34 @@
       "openapi" "3.0.0"
       "info" (json-object "title" "gr8s" "version" "v1")
       "paths" (cond ((equal version "certificates.k8s.io/v1") (add-csr-openapi-paths (core-object)))
+                    ((equal version +admission-api-version+) (add-admission-openapi-paths (core-object)))
                     ((equal version "discovery.k8s.io/v1") (add-endpointslice-openapi-paths (core-object)))
                     ((equal version "events.k8s.io/v1") (add-event-openapi-paths (core-object) t))
                     ((equal version "apps/v1") (add-workload-openapi-paths (core-object)))
                     ((equal version "storage.k8s.io/v1") (add-storage-openapi-paths (core-object) version))
-                    (t (add-storage-openapi-paths (add-core-resource-openapi-paths (openapi-v3-pod-paths)))))
+                    ((member version '("node.k8s.io/v1" "scheduling.k8s.io/v1") :test #'equal)
+                     (add-policy-openapi-paths (core-object) version))
+                    (t (add-policy-openapi-paths
+                        (add-storage-openapi-paths (add-core-resource-openapi-paths (openapi-v3-pod-paths))) "v1")))
       "components" (json-object "schemas" (openapi-definitions))))))
 
 (defun create-pod-response (store reconciler &optional (namespace "default"))
-  (let* ((input (request-pod-in-namespace (core-resource-request-object "Pod") namespace :allow-generate-name t))
-         (pod (create-pod store (admit-in-cluster-pod store input)))
-         (status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
-    (json-response (pod-response-object pod status) 201)))
+  "Admit a new Pod; a dry run runs every admission and quota check but stores nothing."
+  (let ((raw (core-resource-request-object "Pod")))
+    (multiple-value-bind (admitted attributes)
+        (admit-pod-input store "CREATE" namespace
+                         (let ((metadata (gethash "metadata" raw))) (and (hash-table-p metadata) (gethash "name" metadata)))
+                         raw nil)
+      (let* ((input (request-pod-in-namespace admitted namespace :allow-generate-name t))
+             (final (admit-pod-result store attributes (admit-in-cluster-pod store input))))
+        (if (core-resource-dry-run-p)
+            (progn
+              (with-store-lock (store)
+                (enforce-resource-quotas-unlocked store "pods" namespace (pod-to-object final)))
+              (json-response (pod-response-object final (pod-status "Pending")) 201))
+            (let* ((pod (create-pod store final))
+                   (status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
+              (json-response (pod-response-object pod status) 201)))))))
 
 (defun pod-list-observed-object (store reconciler snapshot)
   "Skip vanished snapshot identities and never attach a replacement Pod's status to an old UID."
@@ -374,36 +396,42 @@
                      (kubernetes-error (error)
                        (if (= 404 (kubernetes-error-status-code error))
                            nil
-                           (error error)))))
-         (replacement
-           (request-pod-in-namespace
-            (if existing
-                (merge-json-object
-                 (copy-json-object (pod-to-object existing)) patch)
-                patch)
-            namespace)))
-    (unless (string= name (pod-name replacement))
-      (invalid-pod "request name does not match metadata.name"))
-    (let ((pod (if existing
-                   (update-pod store replacement
-                               (pod-resource-version existing))
-                   (create-pod store replacement))))
-      (json-response
-       (pod-response-object
-        pod (reconcile-pod reconciler namespace name))
-       (if existing 200 201)))))
+                           (error error))))))
+    (multiple-value-bind (admitted attributes)
+        (admit-pod-input store (if existing "UPDATE" "CREATE") namespace name
+                         (if existing
+                             (merge-json-object
+                              (copy-json-object (pod-to-object existing)) patch)
+                             patch)
+                         existing)
+      (let ((replacement (request-pod-in-namespace admitted namespace)))
+        (unless (string= name (pod-name replacement))
+          (invalid-pod "request name does not match metadata.name"))
+        (admit-pod-result store attributes replacement)
+        (let ((pod (if existing
+                       (update-pod store replacement
+                                   (pod-resource-version existing))
+                       (create-pod store (admit-in-cluster-pod store replacement)))))
+          (json-response
+           (pod-response-object
+            pod (reconcile-pod reconciler namespace name))
+           (if existing 200 201)))))))
 
 (defun replace-pod-response (store reconciler name &optional (namespace "default"))
-  (let ((replacement (request-object namespace)))
-    (unless (string= name (pod-name replacement))
-      (invalid-pod "request name does not match metadata.name"))
-    ;; An omitted revision is an unconditional update.
-    (let ((pod (update-pod store replacement
-                           (or (pod-resource-version replacement)
-                               (pod-resource-version (get-pod store namespace name))))))
-      (json-response
-       (pod-response-object
-        pod (reconcile-pod reconciler namespace name))))))
+  (let ((raw (core-resource-request-object "Pod")))
+    (multiple-value-bind (admitted attributes)
+        (admit-pod-input store "UPDATE" namespace name raw (get-pod store namespace name))
+      (let ((replacement (request-pod-in-namespace admitted namespace)))
+        (unless (string= name (pod-name replacement))
+          (invalid-pod "request name does not match metadata.name"))
+        (admit-pod-result store attributes replacement)
+        ;; An omitted revision is an unconditional update.
+        (let ((pod (update-pod store replacement
+                               (or (pod-resource-version replacement)
+                                   (pod-resource-version (get-pod store namespace name))))))
+          (json-response
+           (pod-response-object
+            pod (reconcile-pod reconciler namespace name))))))))
 
 (defun pod-delete-request-arguments ()
   "Decode JSON/protobuf DeleteOptions and query options without mutating desired state."
@@ -447,6 +475,9 @@
 
 (defun delete-pod-response (store reconciler name &optional (namespace "default"))
   "Start or shorten Pod shutdown and return promptly while its agent stops containers."
+  (let ((body (hunchentoot:raw-post-data :force-binary t)))
+    (admit-pod-delete store namespace name
+                      (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions"))))
   (multiple-value-bind (status pod)
       (multiple-value-bind (arguments foreground) (pod-delete-request-arguments)
         ;; A Pod with blocking dependents stays until they are gone.
@@ -954,6 +985,7 @@ its clients treat any other multi-byte frame as an error message."
                (container-spec-name (aref (pod-containers pod) 0)))))
     (unless (exec-options-command options)
       (bad-exec-request "Pod exec requires at least one command argument"))
+    (admit-pod-exec store namespace name options)
     (unless (find container (pod-all-containers pod)
                   :key #'container-spec-name :test #'string=)
       (bad-exec-request
@@ -1013,12 +1045,46 @@ its clients treat any other multi-byte frame as an error message."
        (pod-logs-response store reconciler (first parts) namespace))
       ((and (= 2 (length parts)) (string= "exec" (second parts)) (member method '(:get :post)))
        (pod-exec-response store reconciler (first parts) namespace))
+      ((and (= 2 (length parts)) (string= "eviction" (second parts)) (eq method :post))
+       (pod-eviction-response store reconciler (first parts) namespace))
+      ((and (= 2 (length parts)) (string= "attach" (second parts)) (member method '(:get :post)))
+       (pod-attach-response store (first parts) namespace))
       (t (status-response "Failure" "NotFound"
                           (format nil "No route for ~A ~A" method path) 404)))))
 
+(defun read-complete-body (stream content-length)
+  "Read a whole request body, of CONTENT-LENGTH octets or else until end of file.
+A single read is not enough: pure-tls returns what one TLS record holds rather
+than wait for the next, which truncates any body that spans records in flight."
+  (let ((buffer (make-array (or content-length 65536) :element-type '(unsigned-byte 8))) (filled 0))
+    (loop
+      (when (= filled (length buffer))
+        (when content-length (return))
+        (setf buffer (let ((larger (make-array (* 2 (length buffer)) :element-type '(unsigned-byte 8))))
+                       (replace larger buffer))))
+      (let ((next (read-sequence buffer stream :start filled)))
+        (when (= next filled)
+          (when content-length
+            (core-resource-error 400 "BadRequest" "Request body ended after ~D of ~D octets" filled content-length))
+          (return))
+        (setf filled next)))
+    (if (= filled (length buffer)) buffer (subseq buffer 0 filled))))
+
+(defun read-request-body (request)
+  "Hold the current request's entire body before any handler parses it."
+  (let* ((header (hunchentoot:header-in :content-length request))
+         (content-length (and header (parse-integer header :junk-allowed t)))
+         (chunked (hunchentoot::input-chunking-p))
+         (form (uiop:string-prefix-p "application/x-www-form-urlencoded" (or (hunchentoot:header-in :content-type request) ""))))
+    (when (and (or chunked (and content-length (plusp content-length)))
+               (not form)
+               (not (uiop:string-prefix-p "multipart/form-data" (or (hunchentoot:header-in :content-type request) ""))))
+      (setf (slot-value request 'hunchentoot::raw-post-data)
+            (read-complete-body (hunchentoot::content-stream request) (unless chunked content-length))))))
+
 (defun handle-http-request (store runtime reconciler request)
   (handler-case
-      (let ((path (hunchentoot:script-name request))
+      (let ((path (progn (read-request-body request) (hunchentoot:script-name request)))
             (method (hunchentoot:request-method request))
             (*crd-field-validation* (crd-request-field-validation)))
         (cond
@@ -1028,6 +1094,9 @@ its clients treat any other multi-byte frame as an error message."
           ((string= path "/version") (version-response))
           ((string= path "/api") (api-versions-response))
           ((string= path "/apis") (api-groups-response store))
+          ((string= path "/apis/admissionregistration.k8s.io") (json-response (admission-api-group-object)))
+          ((string= path "/apis/admissionregistration.k8s.io/v1") (admission-discovery-response))
+          ((string= path "/openapi/v3/apis/admissionregistration.k8s.io/v1") (openapi-v3-response +admission-api-version+))
           ((string= path "/apis/certificates.k8s.io") (json-response (csr-api-group)))
           ((string= path "/apis/certificates.k8s.io/v1") (csr-discovery-response))
           ((string= path "/openapi/v3/apis/certificates.k8s.io/v1") (openapi-v3-response "certificates.k8s.io/v1"))
@@ -1039,6 +1108,13 @@ its clients treat any other multi-byte frame as an error message."
           ((string= path "/apis/storage.k8s.io/v1") (storage-discovery-response))
           ((string= path "/openapi/v3/apis/storage.k8s.io/v1") (openapi-v3-response "storage.k8s.io/v1"))
           ((storage-status-route path) (dispatch-storage-status-request store path method))
+          ((string= path "/apis/node.k8s.io") (json-response (policy-api-group "node.k8s.io")))
+          ((string= path "/apis/node.k8s.io/v1") (policy-discovery-response "node.k8s.io"))
+          ((string= path "/openapi/v3/apis/node.k8s.io/v1") (openapi-v3-response "node.k8s.io/v1"))
+          ((string= path "/apis/scheduling.k8s.io") (json-response (policy-api-group "scheduling.k8s.io")))
+          ((string= path "/apis/scheduling.k8s.io/v1") (policy-discovery-response "scheduling.k8s.io"))
+          ((string= path "/openapi/v3/apis/scheduling.k8s.io/v1") (openapi-v3-response "scheduling.k8s.io/v1"))
+          ((policy-status-route path) (dispatch-policy-status-request store path method))
           ((string= path "/apis/events.k8s.io") (json-response (event-api-group)))
           ((string= path "/apis/events.k8s.io/v1") (event-discovery-response))
           ((string= path "/apis/rbac.authorization.k8s.io/v1") (rbac-resources-response))
@@ -1052,6 +1128,7 @@ its clients treat any other multi-byte frame as an error message."
           ((string= path "/openapi/v3/apis/apps/v1") (openapi-v3-response "apps/v1"))
           ((string= path "/openapi/v3/api/v1") (openapi-v3-response))
           ((string= path "/api/v1") (api-resources-response))
+          ((node-status-route path) (dispatch-node-status-request store path method))
           ((and (eq method :get) (string= path "/api/v1/nodes"))
            (nodes-api-response store))
           ((and (eq method :get) (uiop:string-prefix-p "/api/v1/nodes/" path)

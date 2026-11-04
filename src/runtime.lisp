@@ -49,9 +49,19 @@
     ;; Grace affects shutdown, never the running workload. Excluding the new
     ;; default also preserves adoption of containers created by older gr8s.
     (remhash "terminationGracePeriodSeconds" spec)
+    ;; A lowered active deadline changes when the Pod stops, never what runs.
+    (remhash "activeDeadlineSeconds" spec)
     (octets-to-hex (ironclad:digest-sequence :sha256
                   (trivial-utf-8:string-to-utf-8-bytes
                    (canonical-workload-json spec))))))
+
+(defgeneric runtime-runs-containers-p (runtime)
+  (:documentation "Return whether RUNTIME itself stops containers, rather than delegating to a node.")
+  (:method (runtime) (declare (ignore runtime)) t))
+
+(defgeneric runtime-ephemeral-usage (runtime pod)
+  (:documentation "Return POD's writable-layer bytes as (container . bytes) entries and its emptyDir bytes, or NIL when unmeasurable.")
+  (:method (runtime pod) (declare (ignore runtime pod)) nil))
 
 (defgeneric runtime-events (runtime uid)
   (:documentation "Return actual runtime event occurrences for the assigned Pod transport."))

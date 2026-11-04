@@ -491,6 +491,7 @@ NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the templat
     (bt:with-lock-held ((pod-store-workload-lock store))
       (process-workload-deletions reconciler)
       (reconcile-jobs reconciler)
+      (reconcile-cronjobs reconciler)
       (dolist (resource '("deployments" "replicasets" "replicationcontrollers" "daemonsets"))
         (dolist (object (list-core-resources store resource))
           (handler-case
