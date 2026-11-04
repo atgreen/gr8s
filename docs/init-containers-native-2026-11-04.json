@@ -61,7 +61,7 @@
   "remainingWork": [
     "Three pinned init cases require genuine CPU resource limits under independent implementation.",
     "Restartable init sidecars are tracked separately and remain rejected.",
-    "Later main/finalizer integration and terminal-shutdown marker require their own final-source gate/native proof."
+    "Later main/finalizer integration host gate passed; final-source native terminal-shutdown proof remains pending."
   ],
   "artifactSHA256": {
     "build/conformance/2026-11-04-init-native-ngzri8yq/gr8s.log": "4fb0c6d9a4d4be4f5031c4c3ad31e99b32d5fe1db87095440f0c368f21a790e4",
@@ -87,6 +87,20 @@
     "build/validation/init-containers-2026-11-04/gr8s-init-focused-2.log": "eba23be025d79ddf3c5258705db5492fb1951e4ce650a35cc73cfb74abc4ac2e",
     "build/validation/init-containers-2026-11-04/gr8s-init-affected.log": "14c956aa1a6fc2d1a493f088a7d8e76b58482c7176299c79f98b87ca2339e3c7",
     "build/validation/init-containers-2026-11-04/gr8s-init-full.log": "72e379f47780cece811afc8ea0f5c2279b95127c41e4d742a288c8fc76a36d2c",
-    "build/validation/init-containers-2026-11-04/gr8s-init-native-build.log": "816551625f6b0569f8acb2b494e5764ed236d7474af72ed7e3ea227269f9b18c"
+    "build/validation/init-containers-2026-11-04/gr8s-init-native-build.log": "816551625f6b0569f8acb2b494e5764ed236d7474af72ed7e3ea227269f9b18c",
+    "build/validation/init-containers-2026-11-04/gr8s-init-finalizers-focused-2.log": "313de3d5f7da76c67a8030507e07c4b6a0895ad3b6fe413140aad1e5052a5982",
+    "build/validation/init-containers-2026-11-04/gr8s-init-integrated-full.log": "ead3d9bf9873c68e211f6d574264c226017187871672397b4c10324821844d3b"
+  },
+  "laterIntegrationHostValidation": {
+    "runtimeSourceCommit": "e3ad53999bd4beadd6496f10b1b281a286521153",
+    "mainBase": "4ac84898e6547df552c80d9e00378b7ca6cf6e79",
+    "initChecks": 56,
+    "initPassed": 56,
+    "fullChecks": 3744,
+    "fullPassed": 3739,
+    "optionalSkips": 5,
+    "fullFailed": 0,
+    "change": "Physical finalizer shutdown during an unfinished Always init is terminal Failed with retained actual exit137; otherwise retry logic leaves it Pending.",
+    "nativeValidationPending": true
   }
 }
