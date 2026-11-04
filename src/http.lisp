@@ -392,10 +392,10 @@
   (let ((replacement (request-object namespace)))
     (unless (string= name (pod-name replacement))
       (invalid-pod "request name does not match metadata.name"))
-    (unless (pod-resource-version replacement)
-      (invalid-pod "PUT requires metadata.resourceVersion"))
+    ;; An omitted revision is an unconditional update.
     (let ((pod (update-pod store replacement
-                           (pod-resource-version replacement))))
+                           (or (pod-resource-version replacement)
+                               (pod-resource-version (get-pod store namespace name))))))
       (json-response
        (pod-response-object
         pod (reconcile-pod reconciler namespace name))))))

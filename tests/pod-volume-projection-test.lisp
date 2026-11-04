@@ -189,3 +189,41 @@
   (is (equal "\"plain\"" (gr8s::go-quoted-string "plain")))
   (is (equal "\"a\\\"b\\\\c\\nd\"" (gr8s::go-quoted-string (format nil "a\"b\\c~%d"))))
   (is (equal "" (gr8s::format-downward-map nil))))
+
+(test a-healthy-pods-reconcile-pass-refreshes-its-volumes
+  ;; Steady-state Pods never reach convergence, so this must happen on reconcile.
+  (let ((refreshed nil) (runtime (gr8s::make-containerd-runtime :log-root "/tmp/gr8s-unused-refresh/")))
+    (flet ((stub (name value)
+             (sb-int:encapsulate name 'stub (lambda (f &rest arguments) (declare (ignore f arguments)) value))))
+      (stub 'gr8s::checkpoint-container-lifecycle-observation nil)
+      (stub 'gr8s::native-container-progress-required-p nil)
+      (stub 'gr8s::container-probe-restart-required-p nil)
+      (sb-int:encapsulate 'gr8s::reconcile-container-probes 'stub
+                          (lambda (f r p observed) (declare (ignore f r p)) observed))
+      (sb-int:encapsulate 'gr8s::refresh-pod-projected-volumes 'stub
+                          (lambda (f &rest arguments) (declare (ignore f arguments)) (setf refreshed t))))
+    (unwind-protect
+         (progn
+           (gr8s::runtime-reconcile-containers runtime (parse-pod *valid-pod-json*) :observed)
+           (is-true refreshed))
+      (dolist (name '(gr8s::checkpoint-container-lifecycle-observation gr8s::native-container-progress-required-p
+                      gr8s::container-probe-restart-required-p gr8s::reconcile-container-probes
+                      gr8s::refresh-pod-projected-volumes))
+        (sb-int:unencapsulate name 'stub)))))
+
+(test updates-without-a-resource-version-are-unconditional
+  (with-temporary-store (store directory)
+    (declare (ignorable directory))
+    (gr8s::create-core-resource store "configmaps"
+      (gr8s::core-object "metadata" (gr8s::core-object "name" "cfg") "data" (gr8s::core-object "a" "1")) "alpha")
+    (let ((updated (gr8s::update-core-resource store "configmaps" "alpha" "cfg"
+                     (lambda (current)
+                       (remhash "resourceVersion" (gethash "metadata" current))
+                       (setf (gethash "a" (gethash "data" current)) "2")
+                       current))))
+      (is (equal "2" (gethash "a" (gethash "data" updated)))))
+    ;; A stated revision is still checked.
+    (signals kubernetes-error
+      (gr8s::update-core-resource store "configmaps" "alpha" "cfg"
+        (lambda (current) (setf (gethash "resourceVersion" (gethash "metadata" current)) "1") current)))))
+
