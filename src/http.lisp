@@ -1059,7 +1059,7 @@ than wait for the next, which truncates any body that spans records in flight."
         (cond
           ((string= path "/metrics")
            (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
-           (runtime-network-metrics runtime))
+           (concatenate 'string (runtime-network-metrics runtime) (gateway-metrics-text)))
           ((string= path "/version") (version-response))
           ((string= path "/api") (api-versions-response))
           ((string= path "/apis") (api-groups-response store))

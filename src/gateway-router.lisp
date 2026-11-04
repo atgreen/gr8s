@@ -45,10 +45,15 @@
 (defstruct gw-dispatch
   (backend nil)                         ; chosen GW-BACKEND, or NIL (filter-only rule)
   (filters '() :type list)              ; the matched rule's GW-FILTERs
-  (match nil))                          ; the matched GW-MATCH (for prefix rewrite)
+  (match nil)                           ; the matched GW-MATCH (for prefix rewrite)
+  (route-name nil)                      ; matched HTTPRoute name (metrics)
+  (route-key nil)                       ; "namespace/name" identity (rate-limit bucket + metrics)
+  (rate-limit nil))                     ; requests/sec cap for this route, or NIL
 
 (defstruct gw-route
   (namespace nil)                       ; the HTTPRoute's namespace (backendRef default)
+  (name nil)                            ; the HTTPRoute's name (metrics label)
+  (rate-limit nil)                      ; requests/sec cap from gr8s.io/rate-limit-rps, or NIL
   (hostnames '() :type list)            ; "api.example.com" / "*.example.com"; () = all
   (rules '() :type list))               ; list of GW-RULE
 
@@ -165,6 +170,13 @@
      :backends (when backend-refs
                  (map 'list (lambda (r) (gw-parse-backend r route-namespace)) backend-refs)))))
 
+(defun gw-parse-rate-limit (annotations)
+  "Read the gr8s.io/rate-limit-rps annotation (a positive integer rps) or NIL."
+  (let ((value (and (hash-table-p annotations) (gethash "gr8s.io/rate-limit-rps" annotations))))
+    (when value
+      (let ((rps (handler-case (if (stringp value) (parse-integer value) value) (error () nil))))
+        (when (and (integerp rps) (plusp rps)) rps)))))
+
 (defun parse-httproute (object)
   "Normalize a stored HTTPRoute (gateway.networking.k8s.io/v1) into a GW-ROUTE.
    Signals GATEWAY-ROUTE-ERROR on unsupported constructs (fail closed)."
@@ -174,6 +186,8 @@
          (rules (and spec (gethash "rules" spec))))
     (make-gw-route
      :namespace namespace
+     :name (and metadata (gethash "name" metadata))
+     :rate-limit (gw-parse-rate-limit (and metadata (gethash "annotations" metadata)))
      :hostnames (gw-string-list (and spec (gethash "hostnames" spec)))
      :rules (when rules (map 'list (lambda (r) (gw-parse-rule r namespace)) rules)))))
 
@@ -227,7 +241,8 @@ NIL uses cl:random.")
         ((= 1 (gw-host-tier hostname)) (- (length hostname) 2)) ; drop "*."
         (t (length hostname))))
 
-(defstruct gw-candidate hostname match filters backends key)
+(defstruct gw-candidate hostname match filters backends key
+  route-name route-key rate-limit)
 
 (defun gw-candidate-precedence (hostname match)
   "Descending-sort key per Gateway-API precedence: hostname specificity, then
@@ -248,14 +263,19 @@ path (Exact > longer PathPrefix), then method present, then #headers."
 (defun gw-route-candidates (routes)
   (let ((cands '()))
     (dolist (route routes)
-      (dolist (rule (gw-route-rules route))
-        (dolist (m (gw-rule-matches rule))
-          (dolist (host (or (gw-route-hostnames route) (list nil)))
-            (push (make-gw-candidate :hostname host :match m
-                                     :filters (gw-rule-filters rule)
-                                     :backends (gw-rule-backends rule)
-                                     :key (gw-candidate-precedence host m))
-                  cands)))))
+      (let ((route-key (format nil "~A/~A" (or (gw-route-namespace route) "")
+                               (or (gw-route-name route) ""))))
+        (dolist (rule (gw-route-rules route))
+          (dolist (m (gw-rule-matches rule))
+            (dolist (host (or (gw-route-hostnames route) (list nil)))
+              (push (make-gw-candidate :hostname host :match m
+                                       :filters (gw-rule-filters rule)
+                                       :backends (gw-rule-backends rule)
+                                       :route-name (gw-route-name route)
+                                       :route-key route-key
+                                       :rate-limit (gw-route-rate-limit route)
+                                       :key (gw-candidate-precedence host m))
+                    cands))))))
     (stable-sort (nreverse cands) #'gw-key> :key #'gw-candidate-key)))
 
 ;;; ---------------------------------------------------------------------------
@@ -283,7 +303,10 @@ path (Exact > longer PathPrefix), then method present, then #headers."
          ,(gw-match-test-form (gw-candidate-match candidate)))
     (make-gw-dispatch :backend (gw-pick-weighted ',(gw-candidate-backends candidate))
                       :filters ',(gw-candidate-filters candidate)
-                      :match ',(gw-candidate-match candidate))))
+                      :match ',(gw-candidate-match candidate)
+                      :route-name ',(gw-candidate-route-name candidate)
+                      :route-key ',(gw-candidate-route-key candidate)
+                      :rate-limit ',(gw-candidate-rate-limit candidate))))
 
 (defun compile-gateway-router (routes)
   "Compile ROUTES (a list of GW-ROUTE) into a native function

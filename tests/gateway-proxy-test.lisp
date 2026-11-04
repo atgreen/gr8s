@@ -116,6 +116,44 @@
       (gr8s::stop-gateway-listener gateway)
       (hunchentoot:stop backend))))
 
+(test gateway-rate-limiter-admits-then-throttles
+  ;; Unit-level token bucket: capacity = rps, starts full; rapid calls drain it.
+  (let ((gr8s::*gateway-rate-buckets* (make-hash-table :test 'equal)))
+    (is (gr8s::gateway-rate-allow-p "ns/r" 1))        ; first token
+    (is (not (gr8s::gateway-rate-allow-p "ns/r" 1)))  ; drained, throttled
+    ;; A different route has its own bucket.
+    (is (gr8s::gateway-rate-allow-p "ns/other" 1))))
+
+(test gateway-proxy-rate-limits-and-counts-metrics
+  (let* ((backend (hunchentoot:start (make-instance 'gw-echo-acceptor
+                                                    :address "127.0.0.1" :port +gw-backend-port+)))
+         (routes (list (gr8s::make-gw-route
+                        :namespace "default" :name "rl" :rate-limit 1 :hostnames '("rl.test")
+                        :rules (list (gr8s::make-gw-rule
+                                      :matches (list (gr8s::make-gw-match :path-type :prefix :path "/"))
+                                      :backends (list (gr8s::make-gw-backend :name "echo" :port +gw-backend-port+)))))))
+         (router (gr8s::compile-gateway-router routes))
+         (resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" +gw-backend-port+)))
+         (gateway (gr8s::start-gateway-listener :port +gw-listener-port+
+                                                :router router :resolver resolver :name "rl-gw")))
+    ;; The acceptor handles requests on its own thread, so dynamic rebinding would
+    ;; not reach it; clear the process-global tables instead.
+    (clrhash gr8s::*gateway-rate-buckets*)
+    (clrhash gr8s::*gateway-request-counts*)
+    (unwind-protect
+         (progn
+           ;; First request passes to the backend; the immediate second is throttled.
+           (is (= 200 (gw-raw-request +gw-listener-port+ "rl.test" "/a")))
+           (is (= 429 (gw-raw-request +gw-listener-port+ "rl.test" "/a")))
+           ;; Metrics recorded both outcomes for this route.
+           (let ((text (gr8s::gateway-metrics-text)))
+             (is (search "gr8s_gateway_requests_total" text))
+             (is (search "route=\"default/rl\"" text))
+             (is (search "code=\"200\"" text))
+             (is (search "code=\"429\"" text))))
+      (gr8s::stop-gateway-listener gateway)
+      (hunchentoot:stop backend))))
+
 (test gateway-proxy-applies-http-filters
   (let* ((backend (hunchentoot:start (make-instance 'gw-echo-acceptor
                                                     :address "127.0.0.1" :port +gw-backend-port+)))

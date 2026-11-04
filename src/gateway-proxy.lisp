@@ -60,6 +60,53 @@
   (apply #'format nil fmt args))
 
 ;;; ---------------------------------------------------------------------------
+;;; Per-route observability + token-bucket rate limiting (podster-43k.8).
+;;; Counters and buckets are process-global (routes are unique by namespace/name);
+;;; the eBPF token-bucket fast path is a later refinement.
+
+(defvar *gateway-metrics-lock* (bt:make-lock "gr8s gateway metrics"))
+(defvar *gateway-request-counts* (make-hash-table :test 'equal)
+  "Prometheus label string -> request count.")
+
+(defun gateway-count-request (gateway route code)
+  (let ((key (format nil "gateway=\"~A\",route=\"~A\",code=\"~A\""
+                     (prometheus-label (or gateway "")) (prometheus-label (or route "")) code)))
+    (bt:with-lock-held (*gateway-metrics-lock*)
+      (incf (gethash key *gateway-request-counts* 0)))))
+
+(defun gateway-metrics-text ()
+  "Render the gateway request counters in Prometheus text format."
+  (with-output-to-string (stream)
+    (bt:with-lock-held (*gateway-metrics-lock*)
+      (when (plusp (hash-table-count *gateway-request-counts*))
+        (format stream "# HELP gr8s_gateway_requests_total Gateway HTTP requests by route and code.~%")
+        (format stream "# TYPE gr8s_gateway_requests_total counter~%")
+        (loop for key being the hash-keys of *gateway-request-counts* using (hash-value count)
+              do (format stream "gr8s_gateway_requests_total{~A} ~D~%" key count))))))
+
+(defstruct gw-token-bucket (tokens 0d0 :type double-float) (last 0d0 :type double-float))
+(defvar *gateway-rate-lock* (bt:make-lock "gr8s gateway rate"))
+(defvar *gateway-rate-buckets* (make-hash-table :test 'equal)
+  "Route key -> GW-TOKEN-BUCKET.")
+
+(defun gateway-rate-allow-p (key rps)
+  "Token-bucket admission for route KEY at RPS/sec (capacity = one second's
+   burst). Returns T when a token is available, NIL when the route is throttled."
+  (let ((now (/ (get-internal-real-time) (float internal-time-units-per-second 1d0)))
+        (capacity (float rps 1d0)))
+    (bt:with-lock-held (*gateway-rate-lock*)
+      (let* ((bucket (or (gethash key *gateway-rate-buckets*)
+                         (setf (gethash key *gateway-rate-buckets*)
+                               (make-gw-token-bucket :tokens capacity :last now))))
+             (refilled (min capacity
+                            (+ (gw-token-bucket-tokens bucket)
+                               (* (- now (gw-token-bucket-last bucket)) (float rps 1d0))))))
+        (setf (gw-token-bucket-last bucket) now)
+        (if (>= refilled 1d0)
+            (progn (setf (gw-token-bucket-tokens bucket) (- refilled 1d0)) t)
+            (progn (setf (gw-token-bucket-tokens bucket) refilled) nil))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; HTTP filters (podster-43k.7): header modifiers, redirect, URL rewrite.
 
 (defun gateway-find-filter (filters type)
@@ -178,25 +225,35 @@
 
 (defmethod hunchentoot:acceptor-dispatch-request ((acceptor gateway-acceptor) request)
   (let ((dispatch (gateway-dispatch-for-request acceptor request)))
-    (cond
-      ((null dispatch)
-       (gateway-error-response 404 "No route matched for ~A ~A"
-                               (hunchentoot:host request) (hunchentoot:script-name request)))
-      ;; A RequestRedirect filter short-circuits before any backend connect.
-      ((gateway-find-filter (gw-dispatch-filters dispatch) :redirect)
-       (gateway-apply-redirect dispatch request))
-      (t
-       (let ((backend (gw-dispatch-backend dispatch)))
-         (if (null backend)
-             (gateway-error-response 500 "Matched rule has no backend")
-             (multiple-value-bind (host port) (gateway-resolve-backend acceptor backend)
-               (if host
-                   (gateway-proxy-exchange
-                    dispatch request
-                    (format nil "http://~A:~A" (if (find #\: host) (format nil "[~A]" host) host) port)
-                    (hunchentoot:request-method request))
-                   (gateway-error-response 503 "No reachable backend for ~A"
-                                           (gw-backend-name backend))))))))))
+    (prog1
+        (cond
+          ((null dispatch)
+           (gateway-error-response 404 "No route matched for ~A ~A"
+                                   (hunchentoot:host request) (hunchentoot:script-name request)))
+          ;; Per-route token-bucket rate limit (gr8s.io/rate-limit-rps annotation).
+          ((and (gw-dispatch-rate-limit dispatch)
+                (not (gateway-rate-allow-p (gw-dispatch-route-key dispatch)
+                                           (gw-dispatch-rate-limit dispatch))))
+           (gateway-error-response 429 "Too Many Requests for route ~A"
+                                   (or (gw-dispatch-route-name dispatch) "")))
+          ;; A RequestRedirect filter short-circuits before any backend connect.
+          ((gateway-find-filter (gw-dispatch-filters dispatch) :redirect)
+           (gateway-apply-redirect dispatch request))
+          (t
+           (let ((backend (gw-dispatch-backend dispatch)))
+             (if (null backend)
+                 (gateway-error-response 500 "Matched rule has no backend")
+                 (multiple-value-bind (host port) (gateway-resolve-backend acceptor backend)
+                   (if host
+                       (gateway-proxy-exchange
+                        dispatch request
+                        (format nil "http://~A:~A" (if (find #\: host) (format nil "[~A]" host) host) port)
+                        (hunchentoot:request-method request))
+                       (gateway-error-response 503 "No reachable backend for ~A"
+                                               (gw-backend-name backend))))))))
+      (gateway-count-request (gateway-acceptor-name acceptor)
+                             (and dispatch (gw-dispatch-route-key dispatch))
+                             (hunchentoot:return-code*)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Backend resolution + listener lifecycle.

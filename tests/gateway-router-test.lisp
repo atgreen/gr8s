@@ -137,6 +137,19 @@
       (is (equal "https" (getf (gr8s::gw-filter-data rd) :scheme)))
       (is (= 301 (getf (gr8s::gw-filter-data rd) :status-code))))))
 
+(test gateway-router-parses-name-and-rate-limit
+  (let* ((object (com.inuoe.jzon:parse
+                  "{\"metadata\":{\"name\":\"shop\",\"namespace\":\"store\",
+                     \"annotations\":{\"gr8s.io/rate-limit-rps\":\"50\"}},
+                    \"spec\":{\"rules\":[{\"backendRefs\":[{\"name\":\"svc\",\"port\":80}]}]}}"))
+         (route (gr8s::parse-httproute object)))
+    (is (equal "shop" (gr8s::gw-route-name route)))
+    (is (equal 50 (gr8s::gw-route-rate-limit route)))
+    (let ((dispatch (funcall (gr8s::compile-gateway-router (list route)) "any" "/x" "GET" '())))
+      (is (equal "shop" (gr8s::gw-dispatch-route-name dispatch)))
+      (is (equal "store/shop" (gr8s::gw-dispatch-route-key dispatch)))
+      (is (equal 50 (gr8s::gw-dispatch-rate-limit dispatch))))))
+
 (test gateway-router-rejects-unsupported-matches
   (signals gr8s::gateway-route-error
     (gr8s::parse-httproute
