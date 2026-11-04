@@ -51,7 +51,17 @@
            (setf (gethash "spec" object) (gr8s::core-object "ports" (vector (gr8s::core-object "port" 8080)))))
           ((member resource '("roles" "clusterroles") :test #'equal) (setf (gethash "rules" object) #()))
           ((member resource '("rolebindings" "clusterrolebindings") :test #'equal)
-           (setf (gethash "roleRef" object) (gr8s::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "ClusterRole" "name" "reader"))))
+           (setf (gethash "roleRef" object) (gr8s::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "ClusterRole" "name" "reader")))
+          ((equal resource "gatewayclasses")
+           (setf (gethash "spec" object) (gr8s::core-object "controllerName" "gr8s.io/gateway-controller")))
+          ((equal resource "gateways")
+           (setf (gethash "spec" object)
+                 (gr8s::core-object "gatewayClassName" "gr8s"
+                                    "listeners" (vector (gr8s::core-object "name" "http" "port" 80 "protocol" "HTTP")))))
+          ((equal resource "httproutes")
+           (setf (gethash "spec" object)
+                 (gr8s::core-object "rules" (vector (gr8s::core-object "backendRefs"
+                                                                       (vector (gr8s::core-object "name" "svc" "port" 8080))))))))
     object))
 
 (test durable-resources-stream-real-http-selector-transitions

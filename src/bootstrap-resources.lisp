@@ -73,6 +73,42 @@
                  (unless (equal "rbac.authorization.k8s.io" (gethash "apiGroup" subject))
                    (core-resource-error 422 "Invalid" "User and Group subjects require the RBAC apiGroup"))))))
 
+(defun validate-gateway-port (value context)
+  "Validate a Gateway listener/port number is an integer in 1..65535."
+  (unless (and (integerp value) (<= 1 value 65535))
+    (core-resource-error 422 "Invalid" "~A must be a port number in 1..65535" context)))
+
+(defun validate-gateway-resource (resource object)
+  "Validate a gateway.networking.k8s.io/v1 object's spec against the subset of
+   the Gateway API gr8s implements. Fails closed (422) on missing required
+   fields or malformed shapes; the spec is otherwise stored as supplied."
+  (let ((spec (gethash "spec" object)))
+    (unless (hash-table-p spec)
+      (core-resource-error 422 "Invalid" "~A spec must be an object"
+                           (core-resource-kind resource)))
+    (cond
+      ((equal resource "gatewayclasses")
+       (require-nonempty-string (gethash "controllerName" spec) "spec.controllerName"))
+      ((equal resource "gateways")
+       (require-nonempty-string (gethash "gatewayClassName" spec) "spec.gatewayClassName")
+       (let ((listeners (gethash "listeners" spec)))
+         (unless (and (vectorp listeners) (not (stringp listeners)) (plusp (length listeners)))
+           (core-resource-error 422 "Invalid" "spec.listeners must be a nonempty array"))
+         (loop for listener across listeners
+               do (require-object listener "listener")
+                  (require-nonempty-string (gethash "name" listener) "listener.name")
+                  (require-nonempty-string (gethash "protocol" listener) "listener.protocol")
+                  (validate-gateway-port (gethash "port" listener) "listener.port"))))
+      ((equal resource "httproutes")
+       (let ((rules (gethash "rules" spec)))
+         (when rules
+           (unless (and (vectorp rules) (not (stringp rules)))
+             (core-resource-error 422 "Invalid" "spec.rules must be an array"))
+           (loop for rule across rules do (require-object rule "rule"))))
+       (let ((hostnames (gethash "hostnames" spec)))
+         (when hostnames
+           (bootstrap-string-array hostnames "spec.hostnames")))))))
+
 (defun normalize-bootstrap-resource (resource input namespace name &optional store)
   "Copy, validate and default an implemented bootstrap API object."
   (when (workload-resource-p resource)
@@ -91,6 +127,8 @@
                        ((equal resource "serviceaccounts") '("secrets" "imagePullSecrets" "automountServiceAccountToken"))
                        ((member resource '("roles" "clusterroles") :test #'equal) '("rules"))
                        ((equal resource "networkpolicies") '("spec"))
+                       ((equal resource "gatewayclasses") '("spec" "status"))
+                       ((member resource '("gateways" "httproutes") :test #'equal) '("spec" "status"))
                        (t '("roleRef" "subjects")))))
     (unless (and (equal version (gethash "apiVersion" object version))
                  (equal kind (gethash "kind" object kind)))
@@ -128,6 +166,8 @@
        (let ((spec (gethash "spec" object)))
          (when (and spec (not (hash-table-p spec)))
            (core-resource-error 422 "Invalid" "NetworkPolicy spec must be an object"))))
+      ((member resource '("gatewayclasses" "gateways" "httproutes") :test #'equal)
+       (validate-gateway-resource resource object))
       (t (validate-rbac-binding object (equal resource "clusterrolebindings"))))
     object))
 
