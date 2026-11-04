@@ -69,7 +69,7 @@
                          :address +dns-kubernetes-service-address+
                          :ttl 30))))
 
-(defun answer-dns-query (packet forward)
+(defun answer-dns-query (packet forward &optional service-resolver)
   "Answer cluster-authoritative names and forward queries outside the cluster zone."
   (let* ((query (0conf:decode-message packet))
          (questions (0conf:dns-message-questions query))
@@ -80,6 +80,11 @@
                      +dns-kubernetes-service+))
        (dns-authoritative-response
         query :answers (kubernetes-service-answer question)))
+      ((and service-resolver (= 1 (length questions))
+            (dns-name-in-zone-p (0conf:question-name question) +dns-cluster-zone+))
+       (multiple-value-bind (answers exists) (funcall service-resolver question)
+         (dns-authoritative-response query :answers answers
+                                     :rcode (if exists 0 +dns-name-error+))))
       ((and question
             (dns-name-in-zone-p (0conf:question-name question)
                                 +dns-cluster-zone+))
@@ -92,6 +97,7 @@
   port
   upstreams
   timeout
+  service-resolver
   udp-forwarder
   tcp-forwarder
   udp-socket
@@ -176,7 +182,8 @@
                     (:tcp (dns-server-tcp-forwarder server)))
                   query
                   (dns-server-upstreams server)
-                  (dns-server-timeout server))))
+                  (dns-server-timeout server)))
+       (dns-server-service-resolver server))
     (error (condition)
       (format *error-output* "gr8s DNS query failed: ~A~%" condition)
       (handler-case (dns-servfail-response packet)
@@ -338,7 +345,7 @@
 
 (defun start-dns-server
     (&key (address +dns-pod-server-address+) (port 53) upstreams
-          (timeout 2.0)
+          (timeout 2.0) service-resolver
           (udp-forwarder #'forward-dns-udp)
           (tcp-forwarder #'forward-dns-tcp))
   "Bind owned UDP and TCP listeners and start the DNS worker threads."
@@ -357,7 +364,7 @@
           (setf server
                 (%make-dns-server
                  :address address :port selected-port :upstreams upstreams
-                 :timeout timeout :udp-forwarder udp-forwarder
+                 :timeout timeout :service-resolver service-resolver :udp-forwarder udp-forwarder
                  :tcp-forwarder tcp-forwarder :udp-socket udp-socket
                  :tcp-socket tcp-socket))
           (setf (dns-server-udp-thread server)
@@ -394,10 +401,11 @@
                 (stopper #'stop-dns-server)
                 (address +dns-pod-server-address+)
                 (port 53)
-                (upstreams (host-dns-upstreams)))
+                (upstreams (host-dns-upstreams)) service-resolver)
   "Run a body with an owned DNS service and always stop it afterward."
-  (let ((server (funcall starter :address address :port port
-                         :upstreams upstreams)))
+  (let ((server (apply starter :address address :port port
+                       :upstreams upstreams
+                       (when service-resolver (list :service-resolver service-resolver)))))
     (unwind-protect
          (funcall function)
       (funcall stopper server))))

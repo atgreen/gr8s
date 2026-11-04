@@ -129,10 +129,10 @@ plus a link route and default route through it. CNI CHECK verifies these
 addresses, routes, and neighbor state; repeated ADD repairs drift and removes
 legacy gateway addresses from the endpoint veth. The agent keeps its gateway
 while durable leases exist and removes it on shutdown after all leases are gone.
-The agent serves DNS there and writes the standard `default.svc.cluster.local`,
+The agent serves DNS there and writes `<pod-namespace>.svc.cluster.local`,
 `svc.cluster.local`, and `cluster.local` searches into the Pod resolver. It
-answers `kubernetes.default.svc.cluster.local` authoritatively and forwards names
-outside `cluster.local` to the host's IPv4 resolvers, over UDP or TCP.
+answers Service A/AAAA address queries from durable local discovery data and
+forwards names outside `cluster.local` to the host's IPv4 resolvers, over UDP or TCP.
 
 The Whistler classifier attaches to the host veth ingress for Pod egress. It uses an
 agent-initialized map to check the exact IPAM IPv4 address and interface MAC,
@@ -546,9 +546,8 @@ ClusterIP Services from
 or named target ports against selected Pods or manually managed slices. The
 reserved `default/kubernetes` Service describes the HTTPS API at `10.96.0.1:443`.
 This initial implementation supports single-stack TCP without session affinity;
-UDP, NodePort, LoadBalancer, legacy Endpoints resources, and general
-Service DNS records remain unsupported. Native DNS resolves the Kubernetes API
-service. TCP forwarding currently replaces the original client source address.
+UDP, NodePort, LoadBalancer and legacy Endpoints resources remain unsupported.
+TCP forwarding currently replaces the original client source address.
 
 EndpointSlices expose the stable `discovery.k8s.io/v1` JSON/protobuf API with
 selector lists, durable watches, strategic patches and collection deletion. The
@@ -562,7 +561,17 @@ also admit IPv6 and deprecated FQDN address types.
 
 Run `scripts/test-endpointslices.py` in an isolated privileged guest for actual
 selector/manual HTTP forwarding, readiness withdrawal, container identity recovery
-and terminating-endpoint checks.
+and terminating-endpoint checks. Add `--verify-dns` to check actual UDP/TCP
+Service answers, headless Pod addresses, empty-headless NXDOMAIN, DNS recovery
+after restart and terminating address withdrawal.
+
+Native DNS publishes normal Service A/AAAA records from cluster IPs and headless
+Service/explicit endpoint-hostname records from ready EndpointSlice addresses.
+Public Service discovery data travels once per node in authenticated snapshots
+and installs atomically with Pod references, separately from namespace-scoped
+Secret delivery. Unchanged discovery does not advance node revisions or rewrite
+the agent journal. SRV, PTR, DNS schema TXT, generated endpoint hostname records
+and ExternalName are tracked separately in `podster-uqb.21.1`.
 
 Pods can mount referenced ConfigMaps, Secrets and disk-backed emptyDir volumes.
 The control plane sends only referenced objects to the assigned node over mTLS;
