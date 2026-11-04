@@ -44,7 +44,19 @@
                       (progn
                         (unless (member content-type '("application/merge-patch+json" "application/strategic-merge-patch+json" "application/json-patch+json") :test #'equal)
                           (core-resource-error 415 "UnsupportedMediaType" "Unsupported storage status patch type"))
-                        (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t))))))
+                        (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)))))
+           (admit (lambda (requested old)
+                    (admit-subresource-write store resource "status" namespace name requested old :dry-run dry-run)))
+           (admission-probe (admission-attributes-for store "UPDATE" resource namespace name :subresource "status")))
+      ;; Webhooks cannot run inside the update's transaction, so settle a selected write first.
+      (when (admission-active-p store admission-probe)
+        (let* ((old (get-core-resource store resource namespace name)))
+          (setf input (funcall admit (if (eq method :put) input
+                                         (if (equal content-type "application/json-patch+json")
+                                             (apply-core-json-patch (copy-core-object old) input)
+                                             (merge-json-object (copy-core-object old) (require-object input "patch"))))
+                               old)
+                method :put)))
       (json-response
        (update-core-resource
         store resource namespace name

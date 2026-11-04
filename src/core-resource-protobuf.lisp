@@ -141,6 +141,8 @@
             (return-from decode-core-resource-protobuf (decode-csr-protobuf raw)))
           (when (equal kind "CustomResourceDefinition")
             (return-from decode-core-resource-protobuf (decode-crd-protobuf raw)))
+          (when (member kind '("MutatingWebhookConfiguration" "ValidatingWebhookConfiguration") :test #'equal)
+            (return-from decode-core-resource-protobuf (decode-admission-protobuf raw kind)))
           (when (string= kind "Job")
             (return-from decode-core-resource-protobuf (decode-batch-protobuf raw)))
           (when (member kind '("Deployment" "ReplicaSet" "Scale") :test #'equal)
