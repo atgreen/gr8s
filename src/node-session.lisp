@@ -504,8 +504,8 @@
 (defun start-node-grpc-server (store &key (host "127.0.0.1") (port 0)
                                             (heartbeat-timeout-seconds 15)
                                             pki
-                                            (cluster-pod-cidr "10.88.0.0/16")
-                                            (node-prefix 24))
+                                            (cluster-pod-cidr +default-cluster-pod-cidr+)
+                                            (node-prefix +default-node-pod-prefix+))
   (unless (plusp heartbeat-timeout-seconds)
     (error "Heartbeat timeout must be positive"))
   (let* ((grpc-server (apply #'ag-grpc:make-grpc-server port :host host
