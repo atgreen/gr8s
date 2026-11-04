@@ -41,6 +41,8 @@ def main():
                         help="Reuse an owned, stopped test cluster and its cached images")
     parser.add_argument("--check-readiness", action="store_true",
                         help="Also verify real Pod conditions, restart timestamps and Service readiness")
+    parser.add_argument("--check-generated-names", action="store_true",
+                        help="Also execute generated and long-named Pods and verify actual runtime hostnames")
     args = parser.parse_args()
     root = Path(tempfile.mkdtemp(prefix="gr8s-pod-termination.", dir="/var/tmp"))
     base = f"http://127.0.0.1:{args.api_port}"
@@ -322,6 +324,47 @@ def main():
                 assert response.read() == b"service-ready\n", "HTTP server itself stopped"
             report["scenarios"]["serviceReadiness"] = {"passed": True, "phaseAfterSidecarExit": "Running",
                                                        "readyAfterSidecarExit": "False", "directPodStillServes": True}
+        if args.check_generated_names:
+            identities = []
+            for metadata in ({"generateName": "native-generated-"}, {"generateName": "native-generated-"},
+                             {"generateName": "a" * 253}, {"name": "b" * 62 + "--" + "b" * 189}):
+                code, pod = request("/api/v1/namespaces/default/pods", "POST",
+                                    {"apiVersion": "v1", "kind": "Pod", "metadata": metadata,
+                                     "spec": {"restartPolicy": "Never", "terminationGracePeriodSeconds": 0,
+                                              "containers": [{"name": "main", "image": "docker.io/library/busybox:1.36.1",
+                                                              "imagePullPolicy": "IfNotPresent",
+                                                              "command": ["sh", "-c", 'echo HOSTNAME=$(hostname); echo POD_NAME=$POD_NAME'],
+                                                              "env": [{"name": "POD_NAME", "valueFrom": {
+                                                                  "fieldRef": {"fieldPath": "metadata.name"}}}]}]}})
+                assert code == 201, (code, pod)
+                pods.append(pod)
+                name = pod["metadata"]["name"]
+                expected = metadata.get("name") or metadata["generateName"][:58]
+                assert name.startswith(expected), pod
+                assert len(name) == (len(metadata["name"]) if "name" in metadata else len(expected) + 5), pod
+
+                def completed_named_pod():
+                    """Require actual successful container execution for the allocated name."""
+                    code, current = request(pod_path(name))
+                    return current if code == 200 and current.get("status", {}).get("phase") == "Succeeded" else None
+
+                current = wait_for(completed_named_pod, 120, "generated/long Pod actual completion")
+                pod.clear()
+                pod.update(current)
+                hostname = name if len(name) <= 63 else name[:63].rstrip("-.")
+                output = logs(pod)
+                assert "HOSTNAME=" + hostname + "\n" in output, output
+                assert "POD_NAME=" + name + "\n" in output, output
+                assert current["status"]["containerStatuses"][0]["state"]["terminated"]["exitCode"] == 0, current
+                identities.append({"name": name, "uid": current["metadata"]["uid"], "hostname": hostname})
+            assert len({item["name"] for item in identities}) == 4, identities
+            report["scenarios"]["generatedNamesAndHostnames"] = {"passed": True, "identities": identities}
+            stop()
+            process = start()
+            for identity in identities:
+                code, current = request(pod_path(identity["name"]))
+                assert code == 200 and current["metadata"]["uid"] == identity["uid"], current
+            report["scenarios"]["generatedNamePersistence"] = {"passed": True, "restoredIdentities": 4}
         report["passed"] = True
     except Exception as error:
         report["error"] = repr(error)
@@ -350,7 +393,7 @@ def main():
                           for pod in pods]
         for pod in pods:
             for container in pod["spec"]["containers"]:
-                (root / (pod["metadata"]["name"] + "-" + pod["metadata"]["uid"] + "-" + container["name"] + ".log")).write_text(logs(pod, container["name"]))
+                (root / (pod["metadata"]["name"][:63] + "-" + pod["metadata"]["uid"] + "-" + container["name"] + ".log")).write_text(logs(pod, container["name"]))
         report["ownedShimsRemaining"] = owned_shims()
         if report["ownedShimsRemaining"]:
             report["passed"] = False
