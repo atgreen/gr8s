@@ -14,7 +14,7 @@
   :version "0.1.0"
   :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cl-cancel"
                "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
-               "pure-tls/acme"
+               "pure-tls/acme" "drakma"
                "sb-posix" "trivial-utf-8" "usocket" "whistler/loader")
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
@@ -84,6 +84,7 @@
                              (:file "storage-volumes")
                              (:file "telemetry")
                              (:file "agent-runtime")
+                             (:file "pod-http-proxy")
                              (:file "http")
                              (:file "core-resource-http")
                              (:file "storage-http")
@@ -135,6 +136,7 @@
                              (:file "podman-test")
                              (:file "main-test")
                              (:file "http-test")
+                             (:file "pod-http-proxy-test")
                              (:file "core-resource-http-test")
                              (:file "crd-api-test")
                              (:file "crd-protobuf-test")
