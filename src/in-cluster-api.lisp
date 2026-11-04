@@ -90,7 +90,7 @@
   (and (member method '(:get :head))
        (or (member path '("/version" "/api" "/apis" "/api/v1") :test #'equal)
            (let ((parts (remove "" (uiop:split-string path :separator '(#\/)) :test #'equal)))
-             (and (= 3 (length parts)) (equal "apis" (first parts)))))))
+             (and (member (length parts) '(2 3)) (equal "apis" (first parts)))))))
 
 (defun authorize-in-cluster-request (store request)
   "Authenticate a bearer token and enforce RBAC before dispatching the request."

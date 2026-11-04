@@ -26,6 +26,8 @@
     ("services" "Service" "v1" t)
     ("podtemplates" "PodTemplate" "v1" t)
     ("events" "Event" "v1" t)
+    ("deployments" "Deployment" "apps/v1" t)
+    ("replicasets" "ReplicaSet" "apps/v1" t)
     ("roles" "Role" "rbac.authorization.k8s.io/v1" t)
     ("rolebindings" "RoleBinding" "rbac.authorization.k8s.io/v1" t)
     ("clusterroles" "ClusterRole" "rbac.authorization.k8s.io/v1" nil)
@@ -68,6 +70,7 @@
                    (not (typep (gethash "resourceHistoryStart" state) `(integer 0 ,(gethash "revision" state)))))
           (error "Invalid resource history start at ~A" path))
         (setf (pod-store-resource-revision store) (gethash "revision" state)
+              (pod-store-workload-deletions store) (gethash "workloadDeletions" state (make-hash-table :test #'equal))
               (pod-store-event-expirations store) (gethash "eventExpirations" state (make-hash-table :test #'equal))
               (pod-store-template-history store) (coerce (gethash "templateHistory" state #()) 'list)
               (pod-store-template-history-floor store) (gethash "templateHistoryFloor" state (gethash "revision" state))
@@ -86,7 +89,7 @@
                  (setf (gethash key (pod-store-resources store)) object)))))
   store)
 
-(defun commit-core-resources (store resources revision)
+(defun commit-core-resources (store resources revision &key (workload-deletions (pod-store-workload-deletions store)))
   ;; Write the complete new state before publishing it in memory. A failed
   ;; atomic write leaves both the old disk state and the old index intact.
   (multiple-value-bind (history floor) (next-template-history store resources revision)
@@ -95,7 +98,7 @@
     (write-private-text-atomically
    (core-resource-state-path store)
    (com.inuoe.jzon:stringify
-    (core-object "version" 2 "revision" revision
+    (core-object "version" 2 "revision" revision "workloadDeletions" workload-deletions
                  "templateHistory" (coerce history 'vector) "templateHistoryFloor" floor
                  "templateTokenKey" (ag-grpc:base64-encode token-key)
                  "resourceHistoryStart" (pod-store-resource-history-start store)
@@ -103,6 +106,7 @@
                  "items" (coerce (loop for object being the hash-values of resources
                                        collect object) 'vector))))
   (setf (pod-store-resources store) resources
+        (pod-store-workload-deletions store) workload-deletions
         (pod-store-resource-revision store) revision
         (pod-store-template-history store) history
         (pod-store-template-history-floor store) floor
@@ -337,6 +341,7 @@
     (expire-core-events-unlocked store)
     (let* ((input (copy-core-object input))
            (metadata (require-object (gethash "metadata" input) "metadata")))
+      (when (workload-resource-p resource) (assign-generated-workload-name-unlocked store resource input namespace))
       (when (and (not (gethash "name" metadata)) (gethash "generateName" metadata))
         (let ((prefix (gethash "generateName" metadata)))
           (unless (and (stringp prefix) (<= 1 (length prefix) 247)
@@ -357,6 +362,7 @@
         (when (gethash key resources)
           (core-resource-error 409 "AlreadyExists" "~A ~A/~A already exists" (core-resource-kind resource) namespace name))
         (prepare-core-resource-metadata object nil revision)
+        (prepare-workload-write resource object nil)
         (setf (gethash key resources) object)
         (unless dry-run (commit-core-resources store resources revision))
         (copy-core-object object)))))
@@ -396,6 +402,7 @@
                  (or (not (core-resource-immutable-p object)) (not (core-resource-data-equal-p existing object))))
         (core-resource-error 422 "Invalid" "Immutable resource data cannot change"))
       (prepare-core-resource-metadata object existing revision)
+      (prepare-workload-write resource object existing)
       (let ((resources (copy-core-resource-index store)))
         (setf (gethash (core-resource-key resource namespace name) resources) object)
         (unless dry-run (commit-core-resources store resources revision)))
