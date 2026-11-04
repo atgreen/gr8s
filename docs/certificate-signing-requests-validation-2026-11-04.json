@@ -73,7 +73,7 @@
     "stateDirectory": "/var/tmp/gr8s-podtemplates.vd3wzxyp"
   },
   "remainingTrackedGaps": [
-    "podster-uqb.22.1: automatic custom-signer controllers",
+    "podster-uqb.22.1: optional custom-signer controller extension; Pending without an external signer is normal Kubernetes behavior",
     "podster-uqb.22.2: Kubernetes API user client-certificate HTTP authentication"
   ],
   "artifacts": [

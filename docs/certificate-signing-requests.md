@@ -47,7 +47,8 @@ Denied/Failed, the three built-ins issue actual CA-signed certificates:
 
 Policy failures receive a real Failed condition. Custom signers remain Pending
 unless an authorized external signer supplies an actual certificate through
-status (`podster-uqb.22.1`). Certificate status accepts real PEM certificate
+status. This is normal Kubernetes behavior; optional custom-signer controller
+automation is tracked in `podster-uqb.22.1`. Certificate status accepts real PEM certificate
 chains without pretending that an uploaded external certificate was issued by
 this controller. Issuance honors requested lifetime up to the configured
 one-year maximum and CA expiry, with upstream five-minute backdating rules.
@@ -80,8 +81,8 @@ verified with actual Go X.509/TLS and OpenSSL, without relaxing verification.
 The Kubernetes API TLS listener currently authenticates ServiceAccount tokens;
 user client-certificate HTTP authentication is tracked in `podster-uqb.22.2`.
 Real certificate issuance does not imply that this separate authentication
-feature is implemented. Server-side apply and custom signer automation remain
-outside this surface.
+feature is implemented. Server-side apply remains outside this surface;
+custom signer automation is an optional controller extension.
 
 Run the focused native proof with strict validation enabled:
 
