@@ -168,6 +168,8 @@
     (unwind-protect
          (handler-case
              (let ((endpoint (funcall (tcp-service-proxy-backend proxy))))
+               (when (uiop:getenv "GR8S_TRACE_SERVICE_PROXY")
+                 (format *error-output* "gr8s Service selected backend ~S~%" endpoint))
                (when endpoint
                  (setf upstream (usocket:socket-connect (first endpoint) (second endpoint)
                                                          :element-type '(unsigned-byte 8) :timeout 2))
@@ -183,7 +185,9 @@
                             (ignore-errors (usocket:socket-shutdown upstream :output))))
                         :name "gr8s Service request stream"))
                  (copy-binary-stream (usocket:socket-stream upstream) (usocket:socket-stream client))))
-           (error () nil))
+           (error (condition)
+             (when (uiop:getenv "GR8S_TRACE_SERVICE_PROXY")
+               (format *error-output* "gr8s Service backend connection failed: ~A~%" condition))))
       (service-proxy-close-connection proxy client)
       ;; The connection can be stopped while connect() is in progress, before
       ;; the upstream socket becomes visible in its ownership record.

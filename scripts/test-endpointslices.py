@@ -191,6 +191,8 @@ def main():
         assert identities() == before_ids
         assert {s["metadata"]["uid"] for s in slices("selected")} == before_slices
         assert request(path("endpointslices", "manual"))[1]["metadata"]["uid"] == manual["metadata"]["uid"]
+        report["stage"] = "restart-selected-service-http"
+        assert {http(selected["spec"]["clusterIP"]) for _ in range(6)} == expected
         assert http(manual_service["spec"]["clusterIP"]) == body
         report["scenarios"]["restartPersistence"] = {"passed": True, "unchangedIdentities": before_ids}
         code, value = request(path("pods", target["metadata"]["name"]), "DELETE", {"gracePeriodSeconds": 30, "preconditions": {"uid": target["metadata"]["uid"]}})
@@ -219,6 +221,22 @@ def main():
     except Exception as error:
         report["error"] = repr(error)
         report["traceback"] = traceback.format_exc()
+        if process and process.poll() is None:
+            try:
+                diagnostic_pods = pods()
+                report["failureSnapshot"] = {"pods": diagnostic_pods,
+                    "services": request(path("services"))[1],
+                    "endpointSlices": request(path("endpointslices"))[1],
+                    "nodes": request("/api/v1/nodes")[1], "directHTTP": {}}
+                for pod in diagnostic_pods:
+                    address = pod.get("status", {}).get("podIP")
+                    if address:
+                        try:
+                            report["failureSnapshot"]["directHTTP"][pod["metadata"]["name"]] = http(address)
+                        except Exception as failure:
+                            report["failureSnapshot"]["directHTTP"][pod["metadata"]["name"]] = repr(failure)
+            except Exception as failure:
+                report["diagnosticError"] = repr(failure)
     finally:
         try:
             if process:
