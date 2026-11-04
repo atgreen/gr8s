@@ -87,13 +87,36 @@
 
 (define-condition http2-close-cancelled (serious-condition) ())
 
-(test interrupted-ownership-handoff-still-releases-the-socket-once
+(test interrupted-ownership-handoff-cleans-stream-and-flow-control-waiters
   (with-http2-close-connection (connection socket peer listener)
-    (let ((entered (bt:make-semaphore :name "HTTP/2 upstream handoff"))
-          (release (bt:make-semaphore :name "HTTP/2 upstream paused"))
-          (cancelled nil) (thread nil))
+    (let* ((entered (bt:make-semaphore :name "HTTP/2 upstream handoff"))
+           (release (bt:make-semaphore :name "HTTP/2 upstream paused"))
+           (reader-entered (bt:make-semaphore :name "HTTP/2 message reader entered"))
+           (flow-entered (bt:make-semaphore :name "HTTP/2 flow waiter entered"))
+           (buffer (ag-grpc::make-stream-message-buffer))
+           (cleanup-count 0) (reader-result :pending) (flow-result :pending)
+           (cancelled nil) (thread nil) (reader nil) (flow-waiter nil))
+      (setf (ag-http2::stream-cleanup-callback (ag-http2::connection-new-stream connection))
+            (lambda (stream) (declare (ignore stream))
+              (incf cleanup-count) (ag-grpc::buffer-close buffer)))
       (unwind-protect
            (progn
+             (setf reader (bt:make-thread
+                           (lambda ()
+                             (bt:signal-semaphore reader-entered)
+                             (setf reader-result (multiple-value-list (ag-grpc::buffer-pop-message buffer))))
+                           :name "HTTP/2 pending message reader")
+                   flow-waiter (bt:make-thread
+                                (lambda ()
+                                  (bt2:with-lock-held ((ag-http2::connection-flow-control-lock connection))
+                                    (bt:signal-semaphore flow-entered)
+                                    (loop until (eq :closed (ag-http2:connection-state connection))
+                                          do (bt2:condition-wait (ag-http2::connection-flow-control-cv connection)
+                                                                  (ag-http2::connection-flow-control-lock connection)))
+                                    (setf flow-result :closed)))
+                                :name "HTTP/2 flow-control waiter"))
+             (is (bt:wait-on-semaphore reader-entered :timeout 2))
+             (is (bt:wait-on-semaphore flow-entered :timeout 2))
              (setf thread
                    (bt:make-thread
                     (lambda ()
@@ -113,6 +136,17 @@
              (is-true cancelled)
              (is (eq :closed (ag-http2:connection-state connection)))
              (is (not (open-stream-p (usocket:socket-stream socket))))
+             (is (wait-until (lambda () (not (eq :pending reader-result))) :timeout 2))
+             (is (equal '(nil nil) reader-result))
+             (is (wait-until (lambda () (eq :closed flow-result)) :timeout 2))
+             (is (= 1 cleanup-count))
+             (ag-http2:connection-close connection)
+             (is (= 1 cleanup-count))
              (check-fresh-connection-after-repeated-close connection listener socket))
         (bt:signal-semaphore release)
-        (when thread (bt:join-thread thread))))))
+        (ag-grpc::buffer-close buffer)
+        (setf (ag-http2:connection-state connection) :closed)
+        (bt2:with-lock-held ((ag-http2::connection-flow-control-lock connection))
+          (bt2:condition-broadcast (ag-http2::connection-flow-control-cv connection)))
+        (dolist (worker (list thread reader flow-waiter))
+          (when worker (bt:join-thread worker)))))))

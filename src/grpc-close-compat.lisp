@@ -27,13 +27,28 @@ Weak keys on SBCL, gr8s's supported native runtime, do not retain dead connectio
       (setf (gethash connection *http2-close-owners*) t))))
 
 (defun finish-open-http2-socket (connection)
-  "Cover cancellation before upstream entered, without touching a closed/reused FD."
-  (let ((socket (ag-http2::connection-socket connection)))
-    (when (and socket (open-stream-p (usocket:socket-stream socket)))
-      (setf (ag-http2:connection-state connection) :closed)
-      (bt2:condition-broadcast (ag-http2::connection-flow-control-cv connection))
-      (ignore-errors (usocket:socket-shutdown socket :io))
-      (ignore-errors (usocket:socket-close socket)))))
+  "Finish pending stream cleanup after a cancelled handoff; never reuse a closed FD.
+Socket and flow-control wakeups cannot wake a server STREAM-RECV waiter: its
+message buffer is closed only by the stream callback. Upstream atomically
+claims each callback, so this sweep cannot repeat an already invoked callback."
+  (unwind-protect
+       (let ((mux (ag-http2:connection-multiplexer connection)))
+         (when mux
+           (maphash
+            (lambda (id stream)
+              (declare (ignore id))
+              ;; Keep attempting other pending callbacks if one fails, while
+              ;; preserving the caller's original error/cancellation condition.
+              (handler-case (ag-http2::stream-run-cleanup stream)
+                (serious-condition () nil)))
+            (ag-http2::multiplexer-streams mux))))
+    (setf (ag-http2:connection-state connection) :closed)
+    (bt2:with-lock-held ((ag-http2::connection-flow-control-lock connection))
+      (bt2:condition-broadcast (ag-http2::connection-flow-control-cv connection)))
+    (let ((socket (ag-http2::connection-socket connection)))
+      (when (and socket (open-stream-p (usocket:socket-stream socket)))
+        (ignore-errors (usocket:socket-shutdown socket :io))
+        (ignore-errors (usocket:socket-close socket))))))
 
 (defun ag-http2:connection-close (connection &key (error-code ag-http2::+error-no-error+) debug-data)
   "Run the pinned upstream finalizer once; never retry a potentially reused FD.
