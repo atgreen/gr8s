@@ -218,13 +218,16 @@
   (let* ((object (pod-to-object pod))
          (spec (gethash "spec" object))
          (metadata (gethash "metadata" object))
-         (next-version
-           (write-to-string (1+ (parse-integer (pod-resource-version pod))))))
+         (old (pod-published-view store pod))
+         (next-version (write-to-string (next-pod-revision-unlocked store))))
     (setf (pod-node-name pod) node-name
           (gethash "nodeName" spec) node-name
           (pod-resource-version pod) next-version
+          (pod-status-revision pod) nil
           (gethash "resourceVersion" metadata) next-version)
-    (persist-pod store pod)))
+    (persist-pod store pod)
+    (publish-pod-spec-change-unlocked store old pod)
+    pod))
 
 (defun schedule-pod (store pod)
   "Return POD's selected node, assigning it to the least-loaded ready node."

@@ -80,8 +80,8 @@
         (incf now 10)
         (let* ((reopened (open-store path))
                (after-restart (gr8s::add-pod-status-conditions reopened pod (running-status-for-test "web"))))
-          (is (equal "2" (pod-resource-version pod)))
-          (is (equal "1" (gr8s::pod-observed-resource-version reopened pod)))
+          (is (< (parse-integer (gr8s::pod-observed-resource-version reopened pod))
+                 (parse-integer (pod-resource-version pod))))
           (is (equal ready-time (gethash "lastTransitionTime" (condition-status-for-test after-restart "Ready")))))
         (let ((unknown (gr8s::copy-pod-status-value ready)))
           (setf (gethash "phase" unknown) "Unknown")
@@ -197,3 +197,34 @@
              (is (= 65 (gethash "lastAppliedRevision" (com.inuoe.jzon:parse identity-path))))
              (is (= 65 (gr8s::node-session-acknowledged-revision server "worker-a"))))
         (gr8s::stop-node-grpc-server server)))))
+
+(test assigned-pods-report-every-declared-container-before-the-agent-does
+  (with-temporary-store (store path)
+    (declare (ignorable path))
+    (let* ((pod (parse-pod "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"two\"},\"spec\":{\"nodeName\":\"n1\",\"containers\":[{\"name\":\"first\",\"image\":\"busybox:latest\"},{\"name\":\"second\",\"image\":\"busybox:latest\"}]}}"))
+           (names (lambda (status) (map 'list (lambda (item) (gethash "name" item))
+                                        (gethash "containerStatuses" status #())))))
+      (setf pod (create-pod store pod))
+      ;; An empty list would tell Sonobuoy's worker that all containers completed.
+      (let ((status (gr8s::add-pod-status-conditions store pod (gr8s::pod-status "Pending"))))
+        (is (equal '("first" "second") (funcall names status)))
+        (is (gethash "waiting" (gethash "state" (aref (gethash "containerStatuses" status) 1)))))
+      ;; Real reports win; only the missing container is added.
+      (let* ((running (gr8s::core-object "name" "second" "ready" t "state"
+                                         (gr8s::core-object "running" (gr8s::core-object))))
+             (status (gr8s::add-pod-status-conditions
+                      store pod (gr8s::core-object "phase" "Running" "containerStatuses" (vector running)))))
+        (is (equal '("second" "first") (funcall names status)))
+        (is (eq running (aref (gethash "containerStatuses" status) 0)))
+        (is (equal "False" (gethash "status" (find "Ready" (gethash "conditions" status) :test #'equal
+                                                   :key (lambda (item) (gethash "type" item)))))))
+      ;; Deletion and terminal reports stay exactly what was observed.
+      (let ((status (gr8s::add-pod-status-conditions store pod (gr8s::pod-status "Unknown"))))
+        (is (null (funcall names status)))))))
+
+(test unassigned-pods-have-no-container-statuses-yet
+  (with-temporary-store (store path)
+    (declare (ignorable path))
+    (let ((pod (create-pod store (parse-pod *valid-pod-json*))))
+      (is (null (gethash "containerStatuses"
+                         (gr8s::add-pod-status-conditions store pod (gr8s::pod-status "Pending"))))))))

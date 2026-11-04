@@ -160,10 +160,11 @@
                           :content "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\",\"resourceVersion\":\"1\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"docker.io/library/busybox:latest\"}]}}"
                           :content-type "application/json")
                (is (= 200 status))
-               (is (string= "2"
-                            (gethash "resourceVersion"
-                                     (gethash "metadata"
-                                              (response-object body))))))
+               (is (< 1
+                      (parse-integer
+                       (gethash "resourceVersion"
+                                (gethash "metadata"
+                                         (response-object body)))))))
              (multiple-value-bind (body status)
                  (request "/api/v1/namespaces/default/pods/hello"
                           :method :put
@@ -178,10 +179,11 @@
                           :content "{\"metadata\":{\"annotations\":{\"deployed-by\":\"kubectl\"}}}"
                           :content-type "application/strategic-merge-patch+json")
                (is (= 200 status))
-               (is (string= "3"
-                            (gethash "resourceVersion"
-                                     (gethash "metadata"
-                                              (response-object body)))))
+               (is (< 2
+                      (parse-integer
+                       (gethash "resourceVersion"
+                                (gethash "metadata"
+                                         (response-object body))))))
                (is (string= "kubectl"
                             (gethash "deployed-by"
                                      (gethash "annotations"
