@@ -24,6 +24,8 @@
   (event-expirations (make-hash-table :test #'equal))
   in-cluster-config
   (credential-lock (bt:make-lock "gr8s ServiceAccount credentials"))
+  (workload-lock (bt:make-lock "gr8s workload controllers"))
+  (workload-deletions (make-hash-table :test #'equal))
   (pod-observed-phases (make-hash-table :test #'equal))
   (pod-observed-statuses (make-hash-table :test #'equal))
   (pod-observed-resource-versions (make-hash-table :test #'equal))
@@ -220,6 +222,10 @@
 (defun create-pod (store pod)
   "Assign server metadata, persist POD, and reject duplicate names atomically."
   (with-store-lock (store)
+    (create-pod-unlocked store pod)))
+
+(defun create-pod-unlocked (store pod)
+  "Create POD while the caller holds STORE's lock, including owner-checked controller writes."
     (assign-generated-pod-name-unlocked store pod)
     (when (gethash (pod-key (pod-namespace pod) (pod-name pod))
                    (pod-store-pods store))
@@ -239,11 +245,15 @@
             (gethash "creationTimestamp" metadata) (current-timestamp)))
     (persist-pod store pod)
     (index-pod store pod)
-    pod))
+    pod)
 
 (defun update-pod (store replacement expected-resource-version)
   "Persist REPLACEMENT when EXPECTED-RESOURCE-VERSION matches the stored Pod."
   (with-store-lock (store)
+    (update-pod-unlocked store replacement expected-resource-version)))
+
+(defun update-pod-unlocked (store replacement expected-resource-version)
+  "Update a Pod while STORE's lock is already held by an owner/identity transaction."
     (let* ((existing (get-pod-unlocked
                       store (pod-namespace replacement) (pod-name replacement)))
            (actual (pod-resource-version existing)))
@@ -288,7 +298,7 @@
               (gethash "creationTimestamp" existing-metadata)))
       (persist-pod store replacement)
       (index-pod store replacement)
-      replacement)))
+      replacement))
 
 (defun remove-pod (store namespace name)
   "Remove a Pod and its observed status from STORE, returning the removed Pod."
