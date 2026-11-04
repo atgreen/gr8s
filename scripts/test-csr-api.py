@@ -17,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -56,10 +57,12 @@ def wait_for(predicate, timeout=30):
     raise RuntimeError(f"observed-state timeout; last client failure: {last}")
 
 
-def watch(base, revision, name):
+def watch(base, revision, name, timeout=1, ready=None):
     """Read actual durable watch events from the server, including replayed mutations."""
-    query = urllib.parse.urlencode({"watch": "true", "resourceVersion": revision, "fieldSelector": "metadata.name=" + name, "timeoutSeconds": 1})
-    with urllib.request.urlopen(base + "/apis/certificates.k8s.io/v1/certificatesigningrequests?" + query, timeout=10) as response:
+    query = urllib.parse.urlencode({"watch": "true", "resourceVersion": revision, "fieldSelector": "metadata.name=" + name, "timeoutSeconds": timeout})
+    with urllib.request.urlopen(base + "/apis/certificates.k8s.io/v1/certificatesigningrequests?" + query, timeout=timeout + 5) as response:
+        if ready is not None:
+            ready.set()
         return [json.loads(line) for line in response if line.strip()]
 
 
@@ -115,6 +118,20 @@ def main():
         group = request(base, "/apis/certificates.k8s.io/v1")
         assert {entry["name"] for entry in group["resources"]} == {"certificatesigningrequests", "certificatesigningrequests/approval", "certificatesigningrequests/status"}
         initial = request(base, collection)["metadata"]["resourceVersion"]
+        # RV=0 denotes an initial snapshot, so observe future mutations rather
+        # than mistaking a current snapshot for historical replay.
+        watch_ready, observed_events, watch_errors = threading.Event(), [], []
+
+        def collect_watch():
+            """Retain the real stream started before the create/approve mutations."""
+            try:
+                observed_events.extend(watch(base, initial, "native-client", timeout=10, ready=watch_ready))
+            except Exception as error:
+                watch_errors.append(error)
+
+        watch_thread = threading.Thread(target=collect_watch, daemon=True)
+        watch_thread.start()
+        assert watch_ready.wait(5), "native watch did not establish before mutations"
         created = create("native-client", "kubernetes.io/kube-apiserver-client")
         uid = created["metadata"]["uid"]
         assert not created["status"].get("certificate") and not created["status"].get("conditions")
@@ -131,8 +148,10 @@ def main():
         external = json.loads(run([args.go, "run", helper, "--certificate", root / "client.crt", "--ca", ca, "--key", root / "client.key", "--purpose", "client", "--dns-name", "gr8s-control", "--server-certificate", server_certificate, "--server-key", server_key]))
         assert external["verified"] and external["singleLeaf"] and external["ordinaryTLSHandshakeVerified"]
         report["externalGoVerification"] = external
-        events = watch(base, initial, "native-client")
-        assert {entry["type"] for entry in events} >= {"ADDED", "MODIFIED"}
+        watch_thread.join(timeout=15)
+        assert not watch_thread.is_alive() and not watch_errors, f"watch stream failed: {watch_errors}"
+        events = observed_events
+        assert {entry["type"] for entry in events} >= {"ADDED", "MODIFIED"}, f"missing live watch mutations: {events}"
         assert all(entry["object"]["metadata"]["uid"] == uid for entry in events)
         report["creationWatchTypes"] = [entry["type"] for entry in events]
         create("native-denied", "kubernetes.io/kube-apiserver-client")
