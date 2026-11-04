@@ -2,9 +2,9 @@
 ;;;; SPDX-License-Identifier: MIT
 ;;;;
 ;;;; Purpose:
-;;;; Transfer only referenced core objects in authenticated Pod assignments and
+;;;; Install authenticated Pod references and public Service discovery together;
 ;;;; materialize ConfigMap, Secret and emptyDir mounts in agent-owned directories.
-;;;; Resource data stays scoped to the Pod namespace; relative paths are validated
+;;;; Private resource data stays scoped to the Pod namespace; paths are validated
 ;;;; before touching the filesystem and fsGroup controls mounted data access.
 
 (in-package #:gr8s)
@@ -45,7 +45,7 @@
     (remove-duplicates (append result (pod-persistent-resource-objects store pod)) :test #'equalp)))
 
 (defun install-assigned-resource-objects (store assignments &optional service-discovery)
-  "Install only authenticated, Pod-referenced resources and exact PVC/PV bindings."
+  "Atomically install Pod-scoped references, exact PVC/PV bindings and public Service discovery."
   (let ((resources (make-hash-table :test #'equal)))
     (dolist (assignment assignments)
       (let* ((pod (assignment-pod assignment))
