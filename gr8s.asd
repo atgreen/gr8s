@@ -125,6 +125,7 @@
                              (:file "websocket-test")
                              (:file "node-protocol-test")
                              (:file "dns-test")
+                             (:file "dns-port-pair-test")
                              (:file "model-test")
                              (:file "store-test")
                              (:file "core-resources-test")
