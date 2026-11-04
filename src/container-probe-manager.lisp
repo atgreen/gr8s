@@ -19,6 +19,8 @@
   (lock (bt:make-lock "native container probes"))
   (clock #'container-lifecycle-now)
   (executor #'execute-container-probe)
+  (event-outbox (make-hash-table :test #'equal))
+  (event-cursors (make-hash-table :test #'equal))
   stopping-p)
 
 (defstruct container-probe-target
@@ -140,16 +142,76 @@
         (bt:join-thread thread))))
   nil)
 
+(defparameter *container-probe-event-capacity* 4096
+  "Bound cumulative retained occurrences across all Pod UIDs in one native runtime.")
+
+(defun probe-event-live-p (event now)
+  "Expire occurrences by their actual last occurrence, never by replay time."
+  (handler-case
+      (< now (+ (pod-deletion-time (gethash "lastTimestamp" event)) *event-ttl-seconds*))
+    (error () nil)))
+
+(defun retain-container-probe-event (manager uid event)
+  "Coalesce exact UID/EventID records; caller holds the manager ownership lock."
+  (let* ((key (list uid (gethash "id" event)))
+         (old (gethash key (container-probe-manager-event-outbox manager))))
+    (when (or (null old) (> (gethash "count" event) (gethash "count" old)))
+      (setf (gethash key (container-probe-manager-event-outbox manager)) (copy-core-object event)))))
+
+(defun retain-target-probe-events (manager target)
+  "Retain an attempt's real occurrences independently of its probe ownership."
+  (dolist (worker (container-probe-target-workers target))
+    (maphash (lambda (reason event)
+               (declare (ignore reason))
+               (let ((copy (copy-core-object event)))
+                 (setf (gethash "container" copy) (container-probe-target-name target)
+                       (gethash "kind" copy) (container-probe-worker-kind worker))
+                 (retain-container-probe-event manager (container-probe-target-uid target) copy)))
+             (container-probe-worker-events worker))))
+
+(defun prune-container-probe-events (manager now)
+  "Bound outbox memory and expire old UIDs/cursors under the manager lock."
+  (let ((outbox (container-probe-manager-event-outbox manager)) (entries nil)
+        (uids (make-hash-table :test #'equal)))
+    (maphash (lambda (key event)
+               (if (probe-event-live-p event now) (push (cons key event) entries) (remhash key outbox))) outbox)
+    ;; Overflow discards oldest occurrences first; Event delivery is best effort
+    ;; under sustained pressure, and never allocates an unbounded retry queue.
+    (when (> (length entries) *container-probe-event-capacity*)
+      (setf entries (sort entries #'string< :key (lambda (entry) (gethash "lastTimestamp" (cdr entry)))))
+      (loop repeat (- (length entries) *container-probe-event-capacity*)
+            for entry in entries do (remhash (car entry) outbox)))
+    (maphash (lambda (key event) (declare (ignore event)) (setf (gethash (first key) uids) t)) outbox)
+    (maphash (lambda (uid cursor) (declare (ignore cursor))
+               (unless (gethash uid uids) (remhash uid (container-probe-manager-event-cursors manager))))
+             (container-probe-manager-event-cursors manager))))
+
+(defun collect-container-probe-events (manager uid saved)
+  "Merge durable and live occurrences and return UID's bounded cumulative map."
+  (bt:with-lock-held ((container-probe-manager-lock manager))
+    (when (hash-table-p saved)
+      (maphash (lambda (id event) (declare (ignore id)) (retain-container-probe-event manager uid event)) saved))
+    (maphash (lambda (key target) (declare (ignore key)) (retain-target-probe-events manager target))
+             (container-probe-manager-targets manager))
+    (prune-container-probe-events manager (funcall (container-probe-manager-clock manager)))
+    (let ((result (core-object)))
+      (maphash (lambda (key event)
+                 (when (equal uid (first key)) (setf (gethash (second key) result) (copy-core-object event))))
+               (container-probe-manager-event-outbox manager))
+      result)))
+
 (defun retire-container-probe-targets (manager predicate)
   "Withdraw matching target ownership atomically before cancellation or replacement."
   (let ((retired nil))
     (bt:with-lock-held ((container-probe-manager-lock manager))
       (maphash (lambda (key target)
                  (when (funcall predicate target)
+                   (retain-target-probe-events manager target)
                    (setf (container-probe-target-stopping-p target) t)
                    (remhash key (container-probe-manager-targets manager))
                    (push target retired)))
-               (container-probe-manager-targets manager)))
+               (container-probe-manager-targets manager))
+      (prune-container-probe-events manager (funcall (container-probe-manager-clock manager))))
     (dolist (target retired) (stop-container-probe-target target))))
 
 (defun make-native-probe-target (pod container status observed state)
@@ -248,6 +310,8 @@
                                  "deadline" (+ now (gethash "terminationGracePeriodSeconds" spec
                                                             (gethash "terminationGracePeriodSeconds" (gethash "spec" (pod-to-object pod)) 30)))))))
           (setf (gethash name (gethash "containers" state)) entry))))
+    (setf (gethash "probeEvents" state)
+          (collect-container-probe-events manager uid (gethash "probeEvents" state)))
     (unless (equalp before state) (save-container-lifecycle-state runtime uid state))
     state))
 
@@ -344,21 +408,16 @@
   nil)
 
 (defmethod runtime-events ((runtime containerd-runtime) uid)
-  "Expose actual cumulative probe occurrences only to the node observation transport."
-  (let ((manager (containerd-runtime-probes runtime)) (events nil))
-    (when manager
+  "Send fair bounded cumulative pages, including retired and reconstructed attempts."
+  (let* ((manager (ensure-container-probe-manager runtime))
+         (state (load-container-lifecycle-state runtime uid))
+         (records (collect-container-probe-events manager uid (gethash "probeEvents" state)))
+         (events (sort (loop for event being the hash-values of records collect event)
+                       #'string< :key (lambda (event) (gethash "id" event))))
+         (count (length events)))
+    (when (plusp count)
       (bt:with-lock-held ((container-probe-manager-lock manager))
-        (maphash
-         (lambda (key target)
-           (declare (ignore key))
-           (when (equal uid (container-probe-target-uid target))
-             (dolist (worker (container-probe-target-workers target))
-               (maphash (lambda (reason event)
-                          (declare (ignore reason))
-                          (let ((copy (copy-core-object event)))
-                            (setf (gethash "container" copy) (container-probe-target-name target)
-                                  (gethash "kind" copy) (container-probe-worker-kind worker))
-                            (push copy events)))
-                        (container-probe-worker-events worker)))))
-         (container-probe-manager-targets manager))))
-    (when events (coerce events 'vector))))
+        (let* ((offset (mod (gethash uid (container-probe-manager-event-cursors manager) 0) count))
+               (page (loop for index below (min 64 count) collect (nth (mod (+ offset index) count) events))))
+          (setf (gethash uid (container-probe-manager-event-cursors manager)) (mod (+ offset (length page)) count))
+          (coerce page 'vector))))))
