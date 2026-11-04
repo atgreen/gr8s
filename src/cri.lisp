@@ -198,8 +198,8 @@
 (defun cri-run-pod-sandbox
     (socket-path &key name uid (namespace "default") (attempt 0)
                    log-directory host-network resource-version spec-fingerprint
-                   dns-servers dns-searches dns-options privileged hostname security (timeout 120))
-  "Create and start a CRI pod sandbox, returning its runtime ID."
+                   dns-servers dns-searches dns-options privileged hostname security runtime-handler (timeout 120))
+  "Create and start a CRI pod sandbox under RUNTIME-HANDLER, returning its runtime ID."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
          (let* ((stub (gr8s.cri.v1::make-runtime-service-stub channel))
@@ -215,7 +215,7 @@
                (gr8s.cri.v1::runtime-service-run-pod-sandbox
                 stub
                 (make-instance 'gr8s.cri.v1::run-pod-sandbox-request
-                               :config config)
+                               :config config :runtime-handler (or runtime-handler ""))
                 :timeout timeout)
              (ensure-cri-status "RunPodSandbox" status)
              (gr8s.cri.v1::pod-sandbox-id response)))
@@ -382,6 +382,28 @@
               :timeout timeout)
            (declare (ignore response))
            (ensure-cri-status "StartContainer" status))
+      (ag-grpc:channel-close channel))))
+
+(defun cri-container-writable-bytes (socket-path sandbox-id &key (timeout 30))
+  "Return (container-name . writable-layer-bytes) entries for SANDBOX-ID's containers."
+  (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
+    (unwind-protect
+         (multiple-value-bind (response status)
+             (gr8s.cri.v1::runtime-service-list-container-stats
+              (gr8s.cri.v1::make-runtime-service-stub channel)
+              (make-instance 'gr8s.cri.v1::list-container-stats-request
+                             :filter (make-instance 'gr8s.cri.v1::container-stats-filter
+                                                    :pod-sandbox-id sandbox-id))
+              :timeout timeout)
+           (ensure-cri-status "ListContainerStats" status)
+           (loop for stats in (gr8s.cri.v1::stats response)
+                 for attributes = (gr8s.cri.v1::attributes stats)
+                 for metadata = (and attributes (gr8s.cri.v1::metadata attributes))
+                 for layer = (gr8s.cri.v1::writable-layer stats)
+                 for used = (and layer (gr8s.cri.v1::used-bytes layer))
+                 when metadata
+                   collect (cons (gr8s.cri.v1::name metadata)
+                                 (if used (gr8s.cri.v1::value used) 0))))
       (ag-grpc:channel-close channel))))
 
 (defun cri-container-status (socket-path container-id &key (timeout 30))
