@@ -1,0 +1,56 @@
+{
+  "date": "2026-11-04",
+  "isCertificationResult": false,
+  "scope": "Actual normal/headless Service A/AAAA address discovery over public durable node snapshots; no SRV/PTR/ExternalName claim",
+  "upstreamFocusedRuns": [
+    {
+      "sourceCommit": "55c418e",
+      "binarySHA256": "dbd30d5728b87f91823e79952810d4d5115a02eed1ce99023cfcbfd15900b6bb",
+      "guestReportDirectory": "/var/tmp/gr8s-podtemplates.6arql7ke",
+      "localArtifacts": "build/conformance/2026-11-04-service-dns-upstream-6arql7ke",
+      "reportSHA256": "13e6c215ab21acb70d68477cd73a85b61d1fd2acd74795e09c55dae791fe23b9",
+      "verifiedArtifacts": {
+        "gr8s.log": "a4d63c995d713e153c66868112fc8a8be296fb3a192fab3a8d716d82e6604916",
+        "sonobuoy.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sonobuoy.stderr.log": "da596a969a16929a7e31ad9883fdc740a5fa6af472f8ea230426b4ad7de7b17d",
+        "sonobuoy-results.tar.gz": "53719fde9794dc9f0604c7de52f4230395997beb9816101400c2304f36e144fb",
+        "kube-sonobuoy.log": "ab6ddd26281cdeccd779c16014dab98fe42af85df51744324e90d391140f6b20",
+        "e2e.log": "c9ad9d65d078c2d9301d3be829088e8fe4a7eec99600d77b8758528add6fbb63",
+        "sonobuoy-worker.log": "175da663032a28d71f4441bc9961da739735a23fad8fca5f97bb9ecb73fcd16d",
+        "sonobuoy-results.txt": "523ce3ebb27d99aaf26a06452667212464378f71ef5d86b559bccf68de1ff493"
+      },
+      "focus": "\\[sig-network\\] Services should serve a basic endpoint from pods \\[Conformance\\]$",
+      "actualSelectedJUnitCases": [
+        {
+          "name": "[It] [sig-network] Services should serve a basic endpoint from pods [Conformance]",
+          "passed": true,
+          "seconds": "64.07579605"
+        }
+      ],
+      "passed": true,
+      "nativeExitCode": 0,
+      "ownedShimsRemaining": [],
+      "cleanupError": null
+    }
+  ],
+  "localValidation": {
+    "sourceCommit": "55c418e",
+    "fullHostSuite": {
+      "passed": 2622,
+      "skipped": 5,
+      "failed": 0
+    },
+    "latestFocusedSource": "e024c22",
+    "serviceDNS": {
+      "passed": 38,
+      "skipped": 0,
+      "failed": 0
+    }
+  },
+  "limitations": [
+    "This passing source predates e024c22 empty-headless NXDOMAIN correction and later integration; final combined validation is recorded separately.",
+    "Normal Service A/AAAA and ready headless/explicit endpoint-hostname address records are implemented.",
+    "SRV, PTR, DNS schema TXT, generated endpoint hostnames and ExternalName are follow-up podster-uqb.21.1.",
+    "Existing Pod namespace-specific DNS search paths from per-container lifecycle support are preserved."
+  ]
+}

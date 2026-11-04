@@ -8,6 +8,8 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import socket
+import struct
 import tempfile
 import time
 import traceback
@@ -23,6 +25,7 @@ def main():
     parser.add_argument("--state-directory", type=Path)
     parser.add_argument("--api-port", type=int, default=18207)
     parser.add_argument("--node-port", type=int, default=17464)
+    parser.add_argument("--verify-dns", action="store_true", help="also verify actual UDP/TCP Service and headless DNS")
     args = parser.parse_args()
     root = Path(tempfile.mkdtemp(prefix="gr8s-endpointslices.", dir="/var/tmp"))
     state = args.state_directory or root / "state"
@@ -125,6 +128,51 @@ def main():
             spec["selector"] = selector
         return create("services", {"apiVersion": "v1", "kind": "Service", "metadata": {"name": name}, "spec": spec})
 
+    def dns(name, tcp=False):
+        """Query the actual agent resolver and decode only genuine IPv4 answers."""
+        wire_name = b"".join(bytes([len(label)]) + label.encode() for label in name.split(".")) + b"\0"
+        packet = struct.pack("!6H", 19101, 256, 1, 0, 0, 0) + wire_name + struct.pack("!2H", 1, 1)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM if tcp else socket.SOCK_DGRAM) as sock:
+            sock.settimeout(2)
+            sock.connect(("169.254.1.1", 53))
+            if tcp:
+                sock.sendall(struct.pack("!H", len(packet)) + packet)
+                def read_exact(size):
+                    """Read a complete DNS frame without mistaking a partial read for EOF."""
+                    result = b""
+                    while len(result) < size:
+                        part = sock.recv(size - len(result))
+                        if not part:
+                            raise EOFError("DNS TCP frame ended early")
+                        result += part
+                    return result
+                response = read_exact(struct.unpack("!H", read_exact(2))[0])
+            else:
+                sock.send(packet)
+                response = sock.recv(65535)
+        ident, flags, questions, count, _, _ = struct.unpack_from("!6H", response)
+        assert ident == 19101 and flags & 32768, (ident, flags)
+        def skip_name(offset):
+            """Skip an encoded DNS owner name, including compressed name pointers."""
+            while response[offset]:
+                length = response[offset]
+                if length & 192 == 192:
+                    return offset + 2
+                offset += length + 1
+            return offset + 1
+        offset = 12
+        for _ in range(questions):
+            offset = skip_name(offset) + 4
+        addresses = []
+        for _ in range(count):
+            offset = skip_name(offset)
+            kind, cls, ttl, size = struct.unpack_from("!HHIH", response, offset)
+            offset += 10
+            if kind == 1 and cls == 1 and size == 4:
+                addresses.append(socket.inet_ntoa(response[offset:offset + size]))
+            offset += size
+        return flags & 15, set(addresses)
+
     def shims():
         """Inspect only runtime shims belonging to this explicitly owned state."""
         return [l for l in subprocess.check_output(["ps", "-eo", "comm=,args="], text=True).splitlines()
@@ -161,6 +209,18 @@ def main():
         before_slices = {s["metadata"]["uid"] for s in current}
         report["scenarios"]["selectorServiceActualEndpoints"] = {"passed": True, "identities": before_ids,
                                                                   "sliceUIDs": sorted(before_slices), "actualHTTPResponses": sorted(responses)}
+        if args.verify_dns:
+            create("services", {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "dns-headless"},
+                                "spec": {"clusterIP": "None", "selector": {"app": "web"},
+                                         "ports": [{"port": 8080, "targetPort": "http"}]}})
+            create("services", {"apiVersion": "v1", "kind": "Service", "metadata": {"name": "dns-empty"},
+                                "spec": {"clusterIP": "None", "ports": [{"port": 8080}]}})
+            actual_ips = {pod["status"]["podIP"] for pod in children}
+            wait(lambda: dns(f"dns-headless.{namespace}.svc.cluster.local") == (0, actual_ips), "actual headless DNS addresses")
+            for tcp in (False, True):
+                assert dns(f"selected.{namespace}.svc.cluster.local", tcp) == (0, {selected["spec"]["clusterIP"]})
+            assert dns(f"dns-empty.{namespace}.svc.cluster.local")[0] == 3
+            report["scenarios"]["actualServiceDNS"] = {"passed": True, "udpAndTCPClusterIP": selected["spec"]["clusterIP"], "headlessActualPodIPs": sorted(actual_ips), "emptyHeadlessNXDOMAIN": True}
         target = children[0]
         manual_service = service("manual")
         manual = create("endpointslices", {"apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice",
@@ -195,6 +255,9 @@ def main():
         assert {http(selected["spec"]["clusterIP"]) for _ in range(6)} == expected
         assert http(manual_service["spec"]["clusterIP"]) == body
         report["scenarios"]["restartPersistence"] = {"passed": True, "unchangedIdentities": before_ids}
+        if args.verify_dns:
+            wait(lambda: dns(f"dns-headless.{namespace}.svc.cluster.local") == (0, actual_ips), "headless DNS recovery after process restart")
+            report["scenarios"]["actualServiceDNS"]["restartRecovered"] = True
         code, value = request(path("pods", target["metadata"]["name"]), "DELETE", {"gracePeriodSeconds": 30, "preconditions": {"uid": target["metadata"]["uid"]}})
         assert code == 200, (code, value)
         def terminating():
@@ -209,6 +272,10 @@ def main():
         survivor = (expected - {body}).pop()
         report["stage"] = "terminating-service-withdrawal"
         assert {http(selected["spec"]["clusterIP"]) for _ in range(4)} == {survivor}
+        if args.verify_dns:
+            surviving_ips = actual_ips - {target["status"]["podIP"]}
+            wait(lambda: dns(f"dns-headless.{namespace}.svc.cluster.local") == (0, surviving_ips), "terminating address withdrawal from actual DNS")
+            report["scenarios"]["actualServiceDNS"]["terminatingAddressWithdrawn"] = True
         wait(lambda: request(path("pods", target["metadata"]["name"]))[0] == 404, "actual deleting Pod removal", 60)
         wait(lambda: all(e["targetRef"]["uid"] != target["metadata"]["uid"] for s in slices("selected") for e in s["endpoints"]), "deleted endpoint removal")
         try:
