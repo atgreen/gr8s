@@ -67,6 +67,24 @@ clients. See [ConfigMap and Secret APIs](docs/configmap-secret-api.md) for the
 supported surface. Pods can consume referenced environment keys and mounted
 files. Watch, server-side apply, and full Namespace lifecycle are not yet implemented.
 
+ResourceQuota, LimitRange, RuntimeClass and PriorityClass are served with real
+effects. Quota usage is computed from the live objects and checked under the store
+lock at admission, so a write that would exceed a hard limit gets a 403; the
+`Terminating`, `NotTerminating`, `BestEffort`, `NotBestEffort` and `PriorityClass`
+scopes apply. LimitRange defaults and bounds new Pods and bounds new claims.
+RuntimeClass admission resolves overhead and scheduling constraints, and the handler
+reaches CRI `RunPodSandbox`, so an unconfigured handler leaves the Pod pending with
+the runtime's error. PriorityClass resolves `spec.priority`.
+
+The scheduler charges Pod requests and overhead against the CPU, memory, storage
+and Pod count agents report, and against extended resources advertised through
+Node status. It evaluates node selectors and node affinity, and when nothing fits
+it preempts lower-priority Pods, marking them with a `DisruptionTarget` condition.
+Pod affinity and anti-affinity are refused. `spec.activeDeadlineSeconds` is counted
+from Pod creation rather than from the first node's acceptance. A declared
+`ephemeral-storage` limit counts for quota, LimitRange and scheduling, but the node
+does not yet evict a Pod that exceeds it.
+
 Pod logs and exec run through correlated agent operations, including interactive
 streams and nonzero exit status. Complete agent-crash recovery
 remain outside the verified boundary. The administrative HTTP API refuses
