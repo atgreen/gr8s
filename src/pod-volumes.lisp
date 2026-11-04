@@ -29,14 +29,19 @@
   (let* ((spec (gethash "spec" (pod-to-object pod))) (references nil))
     (loop for volume across (gethash "volumes" spec #())
           do (setf references (append (pod-volume-resource-references volume) references)))
-    (loop for container across (gethash "containers" spec)
+    (loop for container across (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec))
           do (loop for variable across (gethash "env" container #())
                    for from = (gethash "valueFrom" variable)
                    when from
                      do (dolist (source '(("secretKeyRef" "secrets") ("configMapKeyRef" "configmaps")))
                           (let ((ref (gethash (first source) from)))
                             (when ref (push (list (second source) (gethash "name" ref)
-                                                 (eq t (gethash "optional" ref))) references))))))
+                                                 (eq t (gethash "optional" ref))) references)))))
+             (loop for source across (gethash "envFrom" container #())
+                   do (dolist (kind '(("secretRef" "secrets") ("configMapRef" "configmaps")))
+                        (let ((ref (gethash (first kind) source)))
+                          (when ref (push (list (second kind) (gethash "name" ref)
+                                               (eq t (gethash "optional" ref))) references))))))
     references))
 
 (defun pod-referenced-resource-objects (store pod)
@@ -233,33 +238,119 @@
         (when (find #\Null text) (error 'runtime-error :message "Environment values cannot contain NUL"))
         (values text t)))))
 
+(defun environment-source-pairs (runtime pod source)
+  "Return (name . value) pairs from one envFrom entry, prefixing every key."
+  (let* ((secret (gethash "secretRef" source))
+         (reference (or secret (gethash "configMapRef" source)))
+         (resource (if secret "secrets" "configmaps"))
+         (name (gethash "name" reference))
+         (object (handler-case (get-core-resource (containerd-runtime-resource-store runtime)
+                                                  resource (pod-namespace pod) name)
+                   (kubernetes-error (condition)
+                     (unless (and (eq t (gethash "optional" reference))
+                                  (= 404 (kubernetes-error-status-code condition)))
+                       (error 'runtime-error
+                              :message (format nil "Missing environment source ~A/~A" resource name))))))
+         (data (and object (gethash "data" object))))
+    (when data
+      (loop for key being the hash-keys of data using (hash-value value)
+            for variable = (concatenate 'string (gethash "prefix" source "") key)
+            ;; As in Kubernetes, a key that cannot name a variable is skipped.
+            unless (find #\= variable)
+              collect (cons variable
+                            (if secret
+                                (handler-case (trivial-utf-8:utf-8-bytes-to-string
+                                               (core-base64-bytes value "Secret environment"))
+                                  (error () (error 'runtime-error :message "Secret environment value is not valid UTF-8")))
+                                value))))))
+
+(defun service-environment-name (name)
+  "Convert a Service or port name to its environment variable spelling."
+  (substitute #\_ #\- (string-upcase name)))
+
+(defun service-environment-pairs (service)
+  "Return a ClusterIP Service's variables, including the legacy Docker link form."
+  (let* ((spec (gethash "spec" service))
+         (address (gethash "clusterIP" spec))
+         (ports (coerce (gethash "ports" spec #()) 'list))
+         (prefix (service-environment-name (gethash "name" (gethash "metadata" service)))))
+    (when (and (stringp address) (plusp (length address)) (not (equal address "None")) ports)
+      (flet ((variable (control &rest arguments)
+               (concatenate 'string prefix (apply #'format nil control arguments))))
+        (let* ((first-port (first ports))
+               (first-number (gethash "port" first-port))
+               (first-protocol (string-downcase (gethash "protocol" first-port "TCP"))))
+          (append
+           (list (cons (variable "_SERVICE_HOST") address)
+                 (cons (variable "_SERVICE_PORT") (write-to-string first-number))
+                 (cons (variable "_PORT") (format nil "~A://~A:~D" first-protocol address first-number)))
+           (loop for port in ports
+                 for number = (gethash "port" port)
+                 for protocol = (gethash "protocol" port "TCP")
+                 for lower = (string-downcase protocol)
+                 for base = (variable "_PORT_~D_~A" number (string-upcase protocol))
+                 append (append
+                         (when (plusp (length (gethash "name" port "")))
+                           (list (cons (variable "_SERVICE_PORT_~A" (service-environment-name (gethash "name" port)))
+                                       (write-to-string number))))
+                         (list (cons base (format nil "~A://~A:~D" lower address number))
+                               (cons (concatenate 'string base "_PROTO") lower)
+                               (cons (concatenate 'string base "_PORT") (write-to-string number))
+                               (cons (concatenate 'string base "_ADDR") address))))))))))
+
+(defun pod-service-environment (runtime pod)
+  "Return variables for the API Service and, unless disabled, Services in POD's namespace."
+  (let* ((store (containerd-runtime-resource-store runtime))
+         (links (gethash "enableServiceLinks" (gethash "spec" (pod-to-object pod)) t))
+         (services (remove-duplicates
+                    (append (when (eq t links) (list-core-resources store "services" (pod-namespace pod)))
+                            (remove-if-not (lambda (service)
+                                             (equal "kubernetes" (gethash "name" (gethash "metadata" service))))
+                                           (list-core-resources store "services" "default")))
+                    :key (lambda (service) (gethash "uid" (gethash "metadata" service))) :test #'equal)))
+    (mapcan #'service-environment-pairs services)))
+
+(defun merge-environment (&rest layers)
+  "Combine (name . value) LAYERS in order, each later definition replacing an earlier one."
+  (let ((result nil))
+    (dolist (layer layers (nreverse result))
+      (dolist (pair layer)
+        (let ((existing (assoc (car pair) result :test #'equal)))
+          (if existing
+              (setf (cdr existing) (cdr pair))
+              (push (cons (car pair) (cdr pair)) result)))))))
+
 (defun containerd-pod-environment (runtime pod container sandbox-id)
-  "Resolve environment declarations in order, including local object key references."
+  "Resolve a container's variables: Services, then envFrom in order, then explicit env."
   (let* ((object (pod-runtime-container-object pod container)) (pod-ip nil))
-    (loop for variable across (gethash "env" object #())
-          for from = (gethash "valueFrom" variable)
-          append
-          (multiple-value-bind (value include)
-              (cond
-                ((null from) (values (gethash "value" variable "") t))
-                ((gethash "secretKeyRef" from)
-                 (containerd-key-environment-value runtime pod "secrets" (gethash "secretKeyRef" from)))
-                ((gethash "configMapKeyRef" from)
-                 (containerd-key-environment-value runtime pod "configmaps" (gethash "configMapKeyRef" from)))
-                (t (let* ((field (gethash "fieldPath" (gethash "fieldRef" from)))
-                          (reference (pod-metadata-subscript-reference field)))
-                     (values
-                      (cond ((equal field "metadata.name") (pod-name pod))
-                            ((equal field "metadata.namespace") (pod-namespace pod))
-                            ((equal field "metadata.uid") (pod-uid pod))
-                            ((equal field "spec.nodeName") (or (pod-node-name pod) ""))
-                            (reference
-                             (let ((metadata (gethash "metadata" (pod-to-object pod))))
-                               (gethash (cdr reference) (gethash (car reference) metadata (core-object)) "")))
-                            ((equal field "status.podIP")
-                             (or pod-ip (setf pod-ip (cri-pod-sandbox-ip
-                                                     (containerd-runtime-socket-path runtime) sandbox-id))))) t))))
-            (when include (list (cons (gethash "name" variable) value)))))))
+    (merge-environment
+     (when (and runtime (containerd-runtime-resource-store runtime)) (pod-service-environment runtime pod))
+     (loop for source across (gethash "envFrom" object #())
+           append (environment-source-pairs runtime pod source))
+     (loop for variable across (gethash "env" object #())
+           for from = (gethash "valueFrom" variable)
+           append
+           (multiple-value-bind (value include)
+               (cond
+                 ((null from) (values (gethash "value" variable "") t))
+                 ((gethash "secretKeyRef" from)
+                  (containerd-key-environment-value runtime pod "secrets" (gethash "secretKeyRef" from)))
+                 ((gethash "configMapKeyRef" from)
+                  (containerd-key-environment-value runtime pod "configmaps" (gethash "configMapKeyRef" from)))
+                 (t (let* ((field (gethash "fieldPath" (gethash "fieldRef" from)))
+                           (reference (pod-metadata-subscript-reference field)))
+                      (values
+                       (cond ((equal field "metadata.name") (pod-name pod))
+                             ((equal field "metadata.namespace") (pod-namespace pod))
+                             ((equal field "metadata.uid") (pod-uid pod))
+                             ((equal field "spec.nodeName") (or (pod-node-name pod) ""))
+                             (reference
+                              (let ((metadata (gethash "metadata" (pod-to-object pod))))
+                                (gethash (cdr reference) (gethash (car reference) metadata (core-object)) "")))
+                             ((equal field "status.podIP")
+                              (or pod-ip (setf pod-ip (cri-pod-sandbox-ip
+                                                      (containerd-runtime-socket-path runtime) sandbox-id))))) t))))
+             (when include (list (cons (gethash "name" variable) value))))))))
 
 (defun cri-seccomp-profile (context)
   "Map a validated seccompProfile to CRI, leaving an unset profile to mean Unconfined."

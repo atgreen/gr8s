@@ -77,7 +77,30 @@
                              (> (+ 14 (ntohs (load u16 ip 2))) (ctx u32 0)))
                      (drop-pod-packet :malformed))
                    (when (/= (ntohl (ipv4-src-addr ip)) (load u32 identity 0))
-                     (drop-pod-packet :spoof))))
+                     (drop-pod-packet :spoof))
+                   ;; DNS to the node gateway (169.254.1.1:53, UDP or TCP):
+                   ;; redirect the query to the loopback ingress so it is
+                   ;; delivered with iif=lo, which the host firewall trusts,
+                   ;; instead of crossing the (possibly default-deny) INPUT path
+                   ;; on port 53. Zeroing the destination MAC first makes lo's
+                   ;; eth_type_trans classify the reinjected frame as PACKET_HOST,
+                   ;; not PACKET_OTHERHOST (which drops it before INPUT). The node
+                   ;; DNS server answers on 169.254.1.1:53; its reply is host-
+                   ;; originated (OUTPUT) and routes back to the Pod normally.
+                   ;; TCP and UDP carry the destination port at the same L4 offset
+                   ;; (bytes 2-3), so one dport test covers both; for TCP every
+                   ;; inbound segment of the flow is redirected the same way.
+                   (let ((l4-proto u8 (load u8 ip 9)))
+                     (when (and (or (= l4-proto 17) (= l4-proto 6)) ; UDP or TCP
+                                (= (logand (load u8 ip 0) 15) 5)   ; no IP options (ihl = 5)
+                                (= (ntohl (load u32 ip 16)) #xa9fe0101) ; dst = 169.254.1.1
+                                (<= (+ data 42) data-end)          ; L4 ports in bounds
+                                (= (ntohs (load u16 ip 22)) 53))   ; dport = 53
+                       (add-pod-counter allowed-packets 1)
+                       (add-pod-counter allowed-bytes (ctx u32 0))
+                       (store u32 data 0 0)                        ; zero dst MAC bytes 0-3
+                       (store u16 data 4 0)                        ; zero dst MAC bytes 4-5
+                       (return (redirect 1 1))))))               ; lo = ifindex 1, BPF_F_INGRESS
                 ((= protocol #x0806)
                  (when (> (+ data 42) data-end) (drop-pod-packet :malformed))
                  (let ((arp u64 (+ data 14)))

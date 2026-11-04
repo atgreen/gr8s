@@ -322,3 +322,109 @@
            (is (equal '(:volumes :sandbox) calls)))
       (setf (symbol-function 'gr8s::containerd-delete-uid) delete-uid
             (symbol-function 'gr8s::cleanup-pod-volumes) cleanup))))
+
+(defun environment-test-pod (container-fields &optional spec-fields)
+  "Return an unsaved sonobuoy Pod with extra JSON CONTAINER-FIELDS and SPEC-FIELDS."
+  (parse-pod (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"env\",\"namespace\":\"sonobuoy\"},\"spec\":{~@[~A,~]\"containers\":[{\"name\":\"c\",\"image\":\"busybox:latest\"~@[,~A~]}]}}" spec-fields container-fields)))
+
+(defun environment-test-service (store namespace name address ports-json)
+  "Create a Service directly, as the agent's discovery projection provides one."
+  (gr8s::create-core-resource
+   store "services"
+   (com.inuoe.jzon:parse (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"name\":~S},\"spec\":{\"clusterIP\":~S,\"ports\":~A}}" name address ports-json))
+   namespace))
+
+(defmacro with-environment-runtime ((runtime store) &body body)
+  "Run BODY with a containerd runtime reading resources from a fresh store."
+  (let ((directory (gensym "DIRECTORY")))
+    `(with-temporary-store (,store ,directory)
+       (create-volume-test-data ,store "sonobuoy")
+       (let ((,runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "logs/" ,directory))))
+         (setf (gr8s::containerd-runtime-resource-store ,runtime) ,store)
+         ,@body))))
+
+(defun environment-of (runtime store pod)
+  "Return the created POD's resolved variables for its only container."
+  (let ((created (create-pod store pod)))
+    (gr8s::containerd-pod-environment runtime created (aref (pod-containers created) 0) nil)))
+
+(defun environment-value (name environment)
+  "Return one variable's value."
+  (cdr (assoc name environment :test #'equal)))
+
+(test service-pairs-match-the-kubernetes-names-and-formats
+  (let ((pairs (gr8s::service-environment-pairs
+                (com.inuoe.jzon:parse "{\"metadata\":{\"name\":\"foo-service\"},\"spec\":{\"clusterIP\":\"10.96.0.9\",\"ports\":[{\"name\":\"http-web\",\"port\":8765,\"protocol\":\"TCP\"},{\"port\":53,\"protocol\":\"UDP\"}]}}"))))
+    (is (equal "10.96.0.9" (environment-value "FOO_SERVICE_SERVICE_HOST" pairs)))
+    (is (equal "8765" (environment-value "FOO_SERVICE_SERVICE_PORT" pairs)))
+    (is (equal "8765" (environment-value "FOO_SERVICE_SERVICE_PORT_HTTP_WEB" pairs)))
+    (is (equal "tcp://10.96.0.9:8765" (environment-value "FOO_SERVICE_PORT" pairs)))
+    (is (equal "tcp://10.96.0.9:8765" (environment-value "FOO_SERVICE_PORT_8765_TCP" pairs)))
+    (is (equal "tcp" (environment-value "FOO_SERVICE_PORT_8765_TCP_PROTO" pairs)))
+    (is (equal "8765" (environment-value "FOO_SERVICE_PORT_8765_TCP_PORT" pairs)))
+    (is (equal "10.96.0.9" (environment-value "FOO_SERVICE_PORT_8765_TCP_ADDR" pairs)))
+    (is (equal "udp://10.96.0.9:53" (environment-value "FOO_SERVICE_PORT_53_UDP" pairs))))
+  ;; Headless Services have no address to advertise.
+  (is (null (gr8s::service-environment-pairs
+             (com.inuoe.jzon:parse "{\"metadata\":{\"name\":\"h\"},\"spec\":{\"clusterIP\":\"None\",\"ports\":[{\"port\":80}]}}")))))
+
+(test containers-get-services-from-their-namespace-and-the-api-service
+  (with-environment-runtime (runtime store)
+    (environment-test-service store "sonobuoy" "local" "10.96.1.1" "[{\"port\":80,\"protocol\":\"TCP\"}]")
+    (environment-test-service store "other" "foreign" "10.96.1.2" "[{\"port\":81,\"protocol\":\"TCP\"}]")
+    (environment-test-service store "default" "kubernetes" "10.96.0.1" "[{\"port\":443,\"protocol\":\"TCP\"}]")
+    (environment-test-service store "default" "unrelated" "10.96.1.3" "[{\"port\":82,\"protocol\":\"TCP\"}]")
+    (let ((environment (environment-of runtime store (environment-test-pod nil))))
+      (is (equal "10.96.1.1" (environment-value "LOCAL_SERVICE_HOST" environment)))
+      (is (equal "10.96.0.1" (environment-value "KUBERNETES_SERVICE_HOST" environment)))
+      (is (null (environment-value "FOREIGN_SERVICE_HOST" environment)))
+      (is (null (environment-value "UNRELATED_SERVICE_HOST" environment))))))
+
+(test disabling-service-links-keeps-only-the-api-service
+  (with-environment-runtime (runtime store)
+    (environment-test-service store "sonobuoy" "local" "10.96.1.1" "[{\"port\":80,\"protocol\":\"TCP\"}]")
+    (environment-test-service store "default" "kubernetes" "10.96.0.1" "[{\"port\":443,\"protocol\":\"TCP\"}]")
+    (let ((environment (environment-of runtime store (environment-test-pod nil "\"enableServiceLinks\":false"))))
+      (is (null (environment-value "LOCAL_SERVICE_HOST" environment)))
+      (is (equal "10.96.0.1" (environment-value "KUBERNETES_SERVICE_HOST" environment))))))
+
+(test env-from-prefixes-keys-and-explicit-env-wins
+  (with-environment-runtime (runtime store)
+    (gr8s::create-core-resource store "configmaps"
+      (gr8s::core-object "metadata" (gr8s::core-object "name" "vars")
+                         "data" (gr8s::core-object "shared" "from-config" "only" "c")) "sonobuoy")
+    (gr8s::create-core-resource store "secrets"
+      (gr8s::core-object "metadata" (gr8s::core-object "name" "sec")
+                         "data" (gr8s::core-object "token" "c2VjcmV0")) "sonobuoy")
+    (let ((environment
+            (environment-of runtime store
+              (environment-test-pod "\"envFrom\":[{\"configMapRef\":{\"name\":\"vars\"}},{\"prefix\":\"p_\",\"secretRef\":{\"name\":\"sec\"}}],\"env\":[{\"name\":\"shared\",\"value\":\"explicit\"}]"))))
+      (is (equal "explicit" (environment-value "shared" environment)))
+      (is (equal "c" (environment-value "only" environment)))
+      (is (equal "secret" (environment-value "p_token" environment)))
+      (is (= 1 (count "shared" environment :key #'car :test #'equal))))))
+
+(test env-from-optional-and-required-sources
+  (with-environment-runtime (runtime store)
+    (is (null (environment-value
+               "x" (environment-of runtime store
+                     (environment-test-pod "\"envFrom\":[{\"configMapRef\":{\"name\":\"absent\",\"optional\":true}}]"))))))
+  (with-environment-runtime (runtime store)
+    (let ((required (create-pod store (environment-test-pod "\"envFrom\":[{\"secretRef\":{\"name\":\"missing\"}}]"))))
+      (signals gr8s::runtime-error
+        (gr8s::containerd-pod-environment runtime required (aref (pod-containers required) 0) nil)))))
+
+(test env-from-references-reach-the-agent-including-init-containers
+  (let ((declared (gr8s::pod-resource-reference-declarations
+                   (parse-pod "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"e\"},\"spec\":{\"initContainers\":[{\"name\":\"i\",\"image\":\"b\",\"env\":[{\"name\":\"K\",\"valueFrom\":{\"secretKeyRef\":{\"name\":\"init-sec\",\"key\":\"k\"}}}]}],\"containers\":[{\"name\":\"c\",\"image\":\"b\",\"envFrom\":[{\"configMapRef\":{\"name\":\"cm\",\"optional\":true}},{\"secretRef\":{\"name\":\"sec\"}}]}]}}"))))
+    (is (member '("configmaps" "cm" t) declared :test #'equal))
+    (is (member '("secrets" "sec" nil) declared :test #'equal))
+    (is (member '("secrets" "init-sec" nil) declared :test #'equal))))
+
+(test invalid-env-from-is-refused
+  (dolist (fields '("\"envFrom\":[{}]"
+                    "\"envFrom\":[{\"configMapRef\":{\"name\":\"a\"},\"secretRef\":{\"name\":\"b\"}}]"
+                    "\"envFrom\":[{\"prefix\":\"a=b\",\"configMapRef\":{\"name\":\"a\"}}]"
+                    "\"envFrom\":[{\"configMapRef\":{\"name\":\"Not_Valid\"}}]"
+                    "\"envFrom\":[{\"configMapRef\":{\"name\":\"a\",\"optional\":\"yes\"}}]"))
+    (signals kubernetes-error (environment-test-pod fields))))
