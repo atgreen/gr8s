@@ -102,6 +102,12 @@
         for attempt = (gethash "restartCount" status -1)
         for entry = (or (gethash name (gethash "containers" state)) (core-object))
         when (and (stringp name) (integerp attempt) (<= 0 attempt)
+                  ;; A declared PodInitializing placeholder has consumed no
+                  ;; CRI attempt. Counting it would skip attempt zero when a
+                  ;; later init container is finally admitted.
+                  (or (let ((id (gethash "containerID" status)))
+                        (and (stringp id) (plusp (length id))))
+                      (<= 0 (known-container-attempt entry)))
                   (>= attempt (known-container-attempt entry)))
           do (setf (gethash "highestKnownAttempt" entry) attempt)
              (when (or (gethash "running" (gethash "state" status (core-object)))
@@ -115,7 +121,7 @@
   (let* ((state (load-container-lifecycle-state runtime uid))
          (before (copy-core-object state)))
     (incorporate-container-log-history runtime uid state)
-    (remember-container-lifecycle-statuses state (gethash "containerStatuses" (runtime-pod-status observed) #()))
+    (remember-container-lifecycle-statuses state (container-lifecycle-all-statuses observed))
     (unless (equalp before state) (save-container-lifecycle-state runtime uid state))
     state))
 
@@ -180,19 +186,20 @@
      "Running")
     (t "Pending")))
 
-(defun missing-container-restart-suppressed-p (pod entry)
+(defun missing-container-restart-suppressed-p (pod entry &optional name)
   "Preserve completed policy decisions and a failed probe's exact-attempt intent."
   (let* ((saved (and entry (gethash "lastStatus" entry)))
          (terminated (and saved (gethash "terminated" (gethash "state" saved (core-object)))))
+         (policy (container-effective-restart-policy pod (or name (and saved (gethash "name" saved)))))
          (probe (and entry (gethash "probeRestart" entry)))
          (probe-killed (and probe saved (equal (gethash "containerID" saved)
                                                (concatenate 'string "containerd://" (gethash "containerID" probe))))))
     (and entry
          (or (gethash "restartSuppressed" entry)
-             (and probe-killed (equal "Never" (pod-restart-policy pod)))
+             (and probe-killed (equal "Never" policy))
              (and terminated (= (gethash "restartCount" saved 0) (known-container-attempt entry))
-                  (or (equal "Never" (pod-restart-policy pod))
-                      (and (equal "OnFailure" (pod-restart-policy pod))
+                  (or (equal "Never" policy)
+                      (and (equal "OnFailure" policy)
                            (not probe-killed) (zerop (gethash "exitCode" terminated)))))))))
 
 (defun latest-container-infos (infos)
@@ -219,16 +226,21 @@
 
 (defun container-restart-eligible-p (pod info &optional state)
   "Apply policy to actual exits, including a completed probe-requested stop."
-  (and info (= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_exited+)
-       (or (equal "Always" (pod-restart-policy pod))
-           (and (equal "OnFailure" (pod-restart-policy pod))
+  (let ((policy (container-effective-restart-policy pod (and info (cri-container-info-name info)))))
+    (and info (= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_exited+)
+       (or (equal "Always" policy)
+           (and (equal "OnFailure" policy)
                 (or (not (zerop (cri-container-info-exit-code info)))
                     (let* ((entry (and state (gethash (cri-container-info-name info) (gethash "containers" state))))
                            (request (and entry (gethash "probeRestart" entry))))
-                      (and request (equal (cri-container-info-id info) (gethash "containerID" request)))))))))
+                      (and request (equal (cri-container-info-id info) (gethash "containerID" request))))))))))
 
 (defun native-container-progress-required-p (pod observed)
   "Avoid repeated CRI work for complete healthy or deliberately terminal observations."
+  (when (and (plusp (length (pod-init-containers pod)))
+             (not (pod-initialization-complete-p pod (runtime-pod-status observed))))
+    (return-from native-container-progress-required-p
+      (not (equal "Failed" (runtime-pod-phase observed)))))
   (when (equal "Unknown" (runtime-pod-phase observed))
     (return-from native-container-progress-required-p t))
   (let ((statuses (gethash "containerStatuses" (runtime-pod-status observed))))
@@ -370,6 +382,7 @@
       (runtime-delete runtime uid)
       (setf sandbox nil state (load-container-lifecycle-state runtime uid)))
     (incorporate-container-log-history runtime uid state)
+    (remember-init-container-declarations state pod)
     (setf (gethash "resourceVersion" state) (pod-resource-version pod)
           (gethash "specFingerprint" state) (pod-runtime-spec-fingerprint pod))
     (when (and sandbox (/= gr8s.cri.v1::+podsandboxstate-sandbox_ready+ (cri-pod-sandbox-info-state sandbox)))
@@ -382,7 +395,12 @@
         (setf sandbox nil)))
     (when (and (null sandbox) (lifecycle-all-containers-suppressed-p pod state))
       (return-from converge-containerd-containers (runtime-observe runtime uid)))
-    (unless sandbox (setf sandbox (containerd-start-sandbox runtime pod)))
+    (when (and (null sandbox) (retained-init-failure-terminal-p pod state))
+      (return-from converge-containerd-containers (runtime-observe runtime uid)))
+    (unless sandbox
+      (reset-init-containers-for-new-sandbox state pod)
+      (save-container-lifecycle-state runtime uid state)
+      (setf sandbox (containerd-start-sandbox runtime pod)))
     (let* ((config (containerd-sandbox-config runtime pod))
            (infos (mapcar (lambda (summary) (cri-container-status socket (cri-container-summary-id summary)))
                           (containerd-containers runtime sandbox)))
@@ -392,14 +410,14 @@
       (remember-container-lifecycle-statuses state
         (map 'vector (lambda (info) (container-lifecycle-status info state)) current))
       (save-container-lifecycle-state runtime uid state)
-      (loop for spec across (pod-containers pod)
+      (loop for spec across (next-pod-container-specs pod current state)
             for name = (container-spec-name spec)
             for info = (find name current :key #'cri-container-info-name :test #'equal)
             do (cond
                  ((null info)
                   (let ((entry (gethash name (gethash "containers" state))))
                     (cond
-                      ((missing-container-restart-suppressed-p pod entry)
+                      ((missing-container-restart-suppressed-p pod entry name)
                        (setf (gethash "restartSuppressed" entry) t)
                        (save-container-lifecycle-state runtime uid state))
                       ((and entry (< now (gethash "nextStart" entry 0)))
@@ -431,8 +449,8 @@
                           (push name created-names)))))))
       (containerd-prune-old-attempts runtime infos created-names)
       (let* ((observed (runtime-observe runtime uid))
-             (statuses (gethash "containerStatuses" (runtime-pod-status observed))))
-        (remember-container-lifecycle-statuses state statuses)
+             (statuses (container-lifecycle-all-statuses observed)))
+        (remember-container-lifecycle-statuses state (container-lifecycle-all-statuses observed))
         (save-container-lifecycle-state runtime uid state)
         (loop for status across statuses
               for entry = (gethash (gethash "name" status) waiting)
@@ -440,7 +458,8 @@
                 (setf (gethash "state" status) (core-object "waiting" (core-object "reason" "CrashLoopBackOff"))
                       (gethash "lastState" status) (core-object "terminated" (copy-core-object (gethash "lastTermination" entry)))
                       (gethash "ready" status) nil (gethash "started" status) nil))
-        (when restarting (setf (runtime-pod-phase observed) "Running"))
+        (when (and restarting (pod-initialization-complete-p pod (runtime-pod-status observed)))
+          (setf (runtime-pod-phase observed) "Running"))
         ;; An existing sandbox's creation revision may be older than a metadata
         ;; update. Reconciliation adopted the exact desired workload above.
         (setf (runtime-pod-resource-version observed) (pod-resource-version pod))

@@ -36,6 +36,8 @@
        (return-from pod-container-readiness (values "False" "PodCompleted" nil)))
       ((equal phase "Failed")
        (return-from pod-container-readiness (values "False" "PodFailed" nil))))
+    (unless (pod-initialization-complete-p pod status)
+      (return-from pod-container-readiness (values "False" "ContainersNotInitialized" nil)))
     (unless (and (vectorp containers) (not (stringp containers)) (plusp (length containers)))
       (return-from pod-container-readiness (values "False" "UnknownContainerStatuses" nil)))
     (loop for spec across (pod-containers pod)
@@ -89,12 +91,18 @@
             (condition "PodScheduled" (if scheduled "True" "False")
                        (unless scheduled "Unschedulable")
                        (unless scheduled "Waiting for an available matching node"))
-            ;; Init containers are rejected at admission until their execution
-            ;; is implemented. For admitted, assigned Pods the empty init set
-            ;; requires no runtime work, as in upstream's initialized condition.
-            (condition "Initialized" (if scheduled "True" "False")
-                       (cond ((not scheduled) "PodInitializing")
-                             ((equal phase "Succeeded") "PodCompleted")))
+            (let ((initialized (and scheduled (pod-initialization-complete-p pod status)))
+                  (incomplete (loop for spec across (pod-init-containers pod)
+                                    unless (init-container-succeeded-p
+                                            (find (container-spec-name spec) (gethash "initContainerStatuses" status)
+                                                  :test #'equal :key (lambda (item) (gethash "name" item))))
+                                      collect (container-spec-name spec))))
+              (condition "Initialized" (if initialized "True" "False")
+                         (cond ((not scheduled) "PodInitializing")
+                               (incomplete "ContainersNotInitialized")
+                               ((equal phase "Succeeded") "PodCompleted"))
+                         (when incomplete
+                           (format nil "containers with incomplete status: [~{~A~^ ~}]" incomplete))))
             (condition "ContainersReady" readiness reason message)
             (condition "Ready" readiness reason message))
           (setf conditions (coerce (nreverse conditions) 'vector)

@@ -129,6 +129,7 @@
             (statuses (container-lifecycle-statuses details (or history state))))
        (when (or sandbox (and checkpoint-owned-p (plusp (length statuses))))
          (apply-container-probe-observation runtime
+          (apply-init-container-observation
           (make-runtime-pod
           :uid uid
           :resource-version
@@ -142,7 +143,7 @@
           :phase (container-lifecycle-phase statuses (and sandbox (= gr8s.cri.v1::+podsandboxstate-sandbox_ready+
                                                                          (cri-pod-sandbox-info-state sandbox))))
           :container-details details
-          :status (core-object "containerStatuses" statuses))))))))
+          :status (core-object "containerStatuses" statuses)) state)))))))
 
 (defmethod runtime-delete ((runtime containerd-runtime) uid)
   (cancel-runtime-pod-deletion (containerd-runtime-deletions runtime) uid)

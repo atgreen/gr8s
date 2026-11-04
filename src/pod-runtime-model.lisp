@@ -10,7 +10,9 @@
 
 (defun pod-runtime-container-object (pod container)
   "Return CONTAINER's authoritative JSON specification within POD."
-  (find (container-spec-name container) (gethash "containers" (gethash "spec" (pod-to-object pod)))
+  (find (container-spec-name container)
+        (let ((spec (gethash "spec" (pod-to-object pod))))
+          (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec)))
         :key (lambda (object) (gethash "name" object)) :test #'equal))
 
 (defun safe-volume-relative-path-p (path)
@@ -139,7 +141,8 @@
           do (validate-pod-volume volume)
              (when (member (gethash "name" volume) names :test #'equal) (invalid-pod "volume names must be unique"))
              (push (gethash "name" volume) names))
-    (loop for container across (optional-vector spec "containers" "spec")
+    (loop for container across (concatenate 'vector (optional-vector spec "initContainers" "spec")
+                                           (optional-vector spec "containers" "spec"))
           do (require-object container "container")
              (loop for mount across (optional-vector container "volumeMounts" "container")
                    unless (member (gethash "name" mount) names :test #'equal)
@@ -168,6 +171,7 @@
 
 (defun pod-requests-privileged-container-p (pod)
   "Return whether any validated container needs a privileged sandbox."
-  (loop for container across (gethash "containers" (gethash "spec" (pod-to-object pod)))
+  (loop for container across (let ((spec (gethash "spec" (pod-to-object pod))))
+                               (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec)))
         thereis (let ((context (gethash "securityContext" container)))
                   (and context (eq t (gethash "privileged" context))))))

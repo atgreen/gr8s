@@ -40,11 +40,16 @@
   name
   namespace
   containers
+  (init-containers #())
   (restart-policy "Always")
   uid
   resource-version
   node-name
   object)
+
+(defun pod-all-containers (pod)
+  "Return init and application containers for shared credentials, mounts and named operations."
+  (concatenate 'vector (pod-init-containers pod) (pod-containers pod)))
 
 (defstruct node-record
   "Represent a registered worker node and its control-plane lease state."
@@ -258,7 +263,7 @@
      "metadata")
     (validate-owner-references metadata)
     (reject-unsupported-fields
-     spec '("containers" "restartPolicy" "dnsPolicy" "nodeName" "volumes"
+     spec '("containers" "initContainers" "restartPolicy" "dnsPolicy" "nodeName" "volumes"
             "securityContext" "serviceAccountName" "automountServiceAccountToken"
             "tolerations" "nodeSelector" "terminationGracePeriodSeconds") "spec")
     (let ((grace (gethash "terminationGracePeriodSeconds" spec 30)))
@@ -291,16 +296,20 @@
         (invalid-pod "restartPolicy must be Always, OnFailure, or Never"))
       (when node-name
         (require-dns-subdomain node-name "spec.nodeName"))
-      (let ((parsed-containers (map 'vector #'parse-container containers)))
-        (unless (= (length parsed-containers)
+      (let* ((parsed-containers (map 'vector #'parse-container containers))
+             (init-containers (map 'vector #'parse-init-container
+                                   (optional-vector spec "initContainers" "spec")))
+             (all-containers (concatenate 'vector init-containers parsed-containers)))
+        (unless (= (length all-containers)
                    (length (remove-duplicates
-                            (map 'list #'container-spec-name parsed-containers)
+                            (map 'list #'container-spec-name all-containers)
                             :test #'string=)))
           (invalid-pod "container names must be unique"))
         (make-pod
          :name name
          :namespace namespace
          :containers parsed-containers
+         :init-containers init-containers
          :restart-policy restart-policy
          :uid (gethash "uid" metadata)
          :resource-version (gethash "resourceVersion" metadata)
