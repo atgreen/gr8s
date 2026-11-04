@@ -1,13 +1,13 @@
 {
-  "recordedAtUTC": "2026-11-04T02:04:37.090775+00:00",
-  "sourceCommit": "984e0f1b68b3c216973d204c282bad55f7dc5a53",
-  "binarySha256": "5a461cedc7b235df7f8220a2f601fa5abe44619e226a089ee00fb0c772df40b5",
+  "recordedAtUTC": "2026-11-04T02:25:28.933087+00:00",
+  "sourceCommit": "d6ba829",
+  "binarySha256": "23bf3ba5ddb8126952d508b04b2b403c9fa284e17be0c71074983545f922f97b",
   "command": "python3 scripts/test-crd-api.py --executable build/gr8s.bin",
-  "stateDirectory": "/tmp/gr8s-crd-api-e9gakwfl",
+  "stateDirectory": "/tmp/gr8s-crd-api-7z7g3pfd",
   "nativeExitCode": 0,
   "workloadRuntime": "fake; no Pods or containers are created by this API test",
   "output": [
-    "CRD smoke state: /tmp/gr8s-crd-api-e9gakwfl",
+    "CRD smoke state: /tmp/gr8s-crd-api-7z7g3pfd",
     "actual create/update/delete watch events passed",
     "strict kubectl discovery/schema/status/versions and native restart passed",
     "durable finalizer cleanup, route withdrawal, clean recreation and native exit 0 passed"
@@ -19,22 +19,23 @@
     "correction": "Published accurate CRD schemas and fieldValidation query support backed by actual Strict/Warn unknown and duplicate-field handling; strict kubectl validation remained enabled"
   },
   "hostValidation": {
-    "fullCheckpoint": "984e0f1",
+    "fullCheckpoint": "d6ba829",
     "mergedMain": "ebae21c",
-    "checks": 2489,
-    "passed": 2484,
+    "checks": 2504,
+    "passed": 2499,
     "optionalSkipped": 5,
     "failed": 0,
-    "log": "/tmp/gr8s-crd-combined-full-suite.log",
+    "log": "/tmp/gr8s-crd-protobuf-full-suite.log",
     "schemaFocusedChecks": 43,
-    "sourceDocumentationFilesChecked": 11
+    "sourceDocumentationFilesChecked": 14,
+    "typedProtobufFocusedChecks": 15
   },
   "previousNativeCheckpoint": {
-    "sourceCommit": "849309c",
-    "binarySha256": "77f6759b37bc28908011d9d2a5b5506f9fb1c42021926e3734e343bf3e6e735d",
-    "stateDirectory": "/tmp/gr8s-crd-api-77qalx0t",
+    "sourceCommit": "984e0f1b68b3c216973d204c282bad55f7dc5a53",
+    "binarySha256": "5a461cedc7b235df7f8220a2f601fa5abe44619e226a089ee00fb0c772df40b5",
+    "stateDirectory": "/tmp/gr8s-crd-api-e9gakwfl",
     "output": [
-      "CRD smoke state: /tmp/gr8s-crd-api-77qalx0t",
+      "CRD smoke state: /tmp/gr8s-crd-api-e9gakwfl",
       "actual create/update/delete watch events passed",
       "strict kubectl discovery/schema/status/versions and native restart passed",
       "durable finalizer cleanup, route withdrawal, clean recreation and native exit 0 passed"
@@ -50,5 +51,15 @@
     "nativeExitCode": 0,
     "ownedShimsRemaining": [],
     "beforeEvidence": "docs/custom-resources-upstream-before-2026-11-04.json"
+  },
+  "upstreamRerun": {
+    "status": "live; no result claimed",
+    "sourceCommit": "d6ba829",
+    "binarySha256": "23bf3ba5ddb8126952d508b04b2b403c9fa284e17be0c71074983545f922f97b",
+    "vmSSHPort": 22293,
+    "root": "/var/tmp/gr8s-podtemplates.78cz3j_o",
+    "focus": "CustomResourceDefinition resources",
+    "expectedSpecs": 5,
+    "log": "/root/gr8s-crd-focused-d6ba829.log"
   }
 }
