@@ -143,6 +143,8 @@
             (return-from decode-core-resource-protobuf (decode-crd-protobuf raw)))
           (when (member kind '("Job" "CronJob") :test #'string=)
             (return-from decode-core-resource-protobuf (decode-batch-protobuf raw kind)))
+          (when (member kind '("MutatingWebhookConfiguration" "ValidatingWebhookConfiguration") :test #'equal)
+            (return-from decode-core-resource-protobuf (decode-admission-protobuf raw kind)))
           (when (member kind '("Deployment" "ReplicaSet" "Scale") :test #'equal)
             (return-from decode-core-resource-protobuf (decode-workload-protobuf raw kind)))
 

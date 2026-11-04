@@ -183,13 +183,24 @@
               (invalid-pod "only TCP container ports are supported"))
             number))))
 
+(defun default-container-termination-message (object)
+  "Apply the Kubernetes termination message defaults, refusing any other requested behavior."
+  (loop for (field default) in '(("terminationMessagePath" "/dev/termination-log")
+                                 ("terminationMessagePolicy" "File"))
+        do (let ((value (gethash field object)))
+             (cond ((member value '(nil null "") :test #'equal) (setf (gethash field object) default))
+                   ((not (equal value default))
+                    (invalid-pod "container.~A other than ~S is not implemented" field default))))))
+
 (defun parse-container (object)
   "Validate a container JSON OBJECT and return a CONTAINER-SPEC."
   (reject-unsupported-fields
    object '("name" "image" "command" "args" "env" "envFrom" "ports" "resources"
             "imagePullPolicy" "volumeMounts" "securityContext" "workingDir"
-            "startupProbe" "readinessProbe" "livenessProbe")
+            "startupProbe" "readinessProbe" "livenessProbe"
+            "terminationMessagePath" "terminationMessagePolicy")
    "container")
+  (default-container-termination-message object)
   (normalize-container-resources object)
   (validate-runtime-container object)
   (make-container-spec

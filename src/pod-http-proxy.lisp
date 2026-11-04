@@ -110,6 +110,7 @@
     (core-resource-error 405 "MethodNotAllowed" "Unsupported Pod proxy method"))
   (when (hunchentoot:header-in* :upgrade)
     (core-resource-error 501 "NotImplemented" "Pod proxy connection upgrades are not implemented"))
+  (admit-pod-proxy store namespace id)
   (let* ((target (pod-proxy-target store namespace id))
          (raw (hunchentoot:request-uri*))
          (question (position #\? raw))
