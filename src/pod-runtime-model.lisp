@@ -95,30 +95,43 @@
             do (let ((key (subseq field (length prefix) (- (length field) 2))))
                  (when (core-qualified-key-p key) (return (cons kind key)))))))
 
+(defun validate-resource-field-reference (reference)
+  "Validate a resourceFieldRef's implemented resource and its divisor."
+  (drop-null-fields (require-object reference "resourceFieldRef"))
+  (reject-unsupported-fields reference '("containerName" "resource" "divisor") "resourceFieldRef")
+  (unless (member (gethash "resource" reference)
+                  '("limits.cpu" "limits.memory" "requests.cpu" "requests.memory") :test #'equal)
+    (invalid-pod "resourceFieldRef.resource ~S is not supported" (gethash "resource" reference)))
+  (when (gethash "divisor" reference)
+    (when (minusp (container-quantity-coefficient (parse-container-quantity (gethash "divisor" reference))))
+      (invalid-pod "resourceFieldRef.divisor must not be negative"))))
+
 (defun validate-pod-field-reference (variable)
   "Validate downward fields and namespace-local Secret/ConfigMap key environment sources."
   (when (nth-value 1 (gethash "value" variable))
     (invalid-pod "env.value and env.valueFrom are mutually exclusive"))
   (let* ((from (require-object (gethash "valueFrom" variable) "env.valueFrom"))
          (sources (loop for key being the hash-keys of from collect key)))
-    (reject-unsupported-fields from '("fieldRef" "secretKeyRef" "configMapKeyRef") "env.valueFrom")
+    (reject-unsupported-fields from '("fieldRef" "resourceFieldRef" "secretKeyRef" "configMapKeyRef") "env.valueFrom")
     (unless (= 1 (length sources)) (invalid-pod "env.valueFrom requires exactly one source"))
     (let* ((kind (first sources)) (ref (require-object (gethash kind from) "environment source")))
-      (if (equal kind "fieldRef")
-          (progn
-            (reject-unsupported-fields ref '("fieldPath" "apiVersion") "fieldRef")
-            (unless (and (equal "v1" (gethash "apiVersion" ref "v1"))
-                         (or (member (gethash "fieldPath" ref)
-                                     '("metadata.name" "metadata.namespace" "metadata.uid" "spec.nodeName" "status.podIP") :test #'equal)
-                             (pod-metadata-subscript-reference (gethash "fieldPath" ref))))
-              (invalid-pod "unsupported downward API field reference")))
-          (progn
-            (reject-unsupported-fields ref '("name" "key" "optional") "environment key reference")
-            (require-dns-subdomain (gethash "name" ref) "environment source name")
-            (unless (core-data-key-p (gethash "key" ref)) (invalid-pod "invalid environment source key"))
-            (multiple-value-bind (optional present) (gethash "optional" ref)
-              (when (and present (not (member optional '(t nil))))
-                (invalid-pod "environment key reference optional must be boolean"))))))))
+      (cond
+        ((equal kind "fieldRef")
+         (reject-unsupported-fields ref '("fieldPath" "apiVersion") "fieldRef")
+         (unless (and (equal "v1" (gethash "apiVersion" ref "v1"))
+                      (or (member (gethash "fieldPath" ref)
+                                  '("metadata.name" "metadata.namespace" "metadata.uid" "spec.nodeName" "status.podIP") :test #'equal)
+                          (pod-metadata-subscript-reference (gethash "fieldPath" ref))))
+           (invalid-pod "unsupported downward API field reference")))
+        ;; Unlike in a volume, an unnamed container here means the variable's own.
+        ((equal kind "resourceFieldRef") (validate-resource-field-reference ref))
+        (t
+         (reject-unsupported-fields ref '("name" "key" "optional") "environment key reference")
+         (require-dns-subdomain (gethash "name" ref) "environment source name")
+         (unless (core-data-key-p (gethash "key" ref)) (invalid-pod "invalid environment source key"))
+         (multiple-value-bind (optional present) (gethash "optional" ref)
+           (when (and present (not (member optional '(t nil))))
+             (invalid-pod "environment key reference optional must be boolean"))))))))
 
 (defun validate-environment-sources (container)
   "Validate envFrom entries: an optional prefix and exactly one local object reference."
@@ -224,16 +237,8 @@
                                 (pod-metadata-subscript-reference (gethash "fieldPath" field))))
                  (invalid-pod "unsupported downwardAPI volume field reference")))
              (when resource
-               (drop-null-fields (require-object resource "resourceFieldRef"))
-               (reject-unsupported-fields resource '("containerName" "resource" "divisor") "resourceFieldRef")
-               (require-nonempty-string (gethash "containerName" resource) "resourceFieldRef.containerName")
-               (unless (member (gethash "resource" resource)
-                               '("limits.cpu" "limits.memory" "requests.cpu" "requests.memory") :test #'equal)
-                 (invalid-pod "resourceFieldRef.resource ~S is not supported" (gethash "resource" resource)))
-               (when (gethash "divisor" resource)
-                 (when (minusp (container-quantity-coefficient
-                                (parse-container-quantity (gethash "divisor" resource))))
-                   (invalid-pod "resourceFieldRef.divisor must not be negative")))))))
+               (validate-resource-field-reference resource)
+               (require-nonempty-string (gethash "containerName" resource) "resourceFieldRef.containerName")))))
 
 (defun validate-projected-source (projected)
   "Validate a projected volume, refusing sources that have no real implementation here."
