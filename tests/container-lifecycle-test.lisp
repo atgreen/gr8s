@@ -264,6 +264,7 @@
           (is (gr8s::native-container-progress-required-p pod observed)))))))
 
 (defun lifecycle-side-status (observed)
+  "Read the side container status from a real lifecycle observation fixture."
   (find "side" (gethash "containerStatuses" (gr8s::runtime-pod-status observed))
         :test #'equal :key (lambda (status) (gethash "name" status))))
 
