@@ -290,6 +290,7 @@
      :resource-version (pod-resource-version pod) :spec-fingerprint (pod-runtime-spec-fingerprint pod)
      :privileged (pod-requests-privileged-container-p pod)
      :hostname (pod-runtime-hostname pod)
+     :security (containerd-pod-sandbox-security pod)
      :dns-servers servers :dns-searches searches :dns-options options)))
 
 (defun containerd-start-sandbox (runtime pod)
@@ -305,6 +306,7 @@
             :resource-version (pod-resource-version pod) :spec-fingerprint (pod-runtime-spec-fingerprint pod)
             :privileged (pod-requests-privileged-container-p pod)
             :hostname (pod-runtime-hostname pod)
+            :security (containerd-pod-sandbox-security pod)
             :dns-servers servers :dns-searches searches :dns-options options)))))
 
 (defun containerd-prune-old-attempts (runtime infos &optional created-names)
@@ -375,7 +377,8 @@
     (when (and sandbox
                (not (equal (pod-runtime-spec-fingerprint pod)
                            (cdr (assoc +gr8s-spec-fingerprint-label+ (cri-pod-sandbox-info-labels sandbox) :test #'equal)))))
-      (runtime-delete runtime uid)
+      ;; A changed specification recreates containers, not the Pod: emptyDirs persist.
+      (containerd-replace-uid runtime uid)
       (setf sandbox nil state (load-container-lifecycle-state runtime uid)))
     (incorporate-container-log-history runtime uid state)
     (remember-init-container-declarations state pod)
