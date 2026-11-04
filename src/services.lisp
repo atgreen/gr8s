@@ -42,6 +42,9 @@
       (core-resource-error 400 "BadRequest" "Expected v1 Service"))
     (reject-unsupported-fields object '("apiVersion" "kind" "metadata" "spec" "status") "Service")
     (validate-core-metadata metadata namespace name)
+    ;; Kubernetes 1.36 enables relaxed Service names, still bounded to one
+    ;; 63-character DNS label rather than a general resource DNS subdomain.
+    (require-dns-label (gethash "name" metadata) "Service.metadata.name")
     (setf (gethash "apiVersion" object) "v1" (gethash "kind" object) "Service"
           (gethash "namespace" metadata) namespace)
     (reject-unsupported-fields spec '("type" "ports" "selector" "clusterIP" "clusterIPs" "ipFamilies"

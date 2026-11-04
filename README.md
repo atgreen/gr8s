@@ -424,6 +424,8 @@ pointer values and empty command arguments. Pod creation supports
 `metadata.generateName` with bounded generated names and collision retries;
 an explicit `metadata.name` takes precedence. Pod names accept DNS subdomains up
 to 253 characters, while runtime hostnames are limited to 63 characters.
+The [native name validation record](docs/generated-pod-names-validation-2026-11-04.json)
+captures real container hostname/name output, restart identities and cleanup.
 Runtime admission still validates
 the supported Pod feature set and rejects unsupported fields with HTTP 422.
 

@@ -124,3 +124,18 @@
                      :content-type "application/vnd.kubernetes.protobuf" :octets input)))
         (is (uiop:string-prefix-p "wire-generated-" (gethash "name" (gethash "metadata" wire)))))
       (is (= 2 (length (list-pods store "alpha")))))))
+
+(test http-resource-names-distinguish-subdomains-from-service-and-namespace-labels
+  (with-core-api (store path)
+    (values store path)
+    (let* ((long (make-string 253 :initial-element #\a))
+           (collection "/api/v1/namespaces/alpha/configmaps")
+           (created (check-core-status 201 collection :method :post
+                      :object (core-fixture "ConfigMap" long "data" (gr8s::core-object "key" "value")))))
+      (is (equal long (gethash "name" (gethash "metadata" created))))
+      (check-core-status 200 (concatenate 'string collection "/" long)))
+    (dolist (name (list (make-string 64 :initial-element #\a) "has.dots"))
+      (check-core-status 422 "/api/v1/namespaces/alpha/services" :method :post :object (service-test-object name))
+      (check-core-status 422 "/api/v1/namespaces" :method :post
+                         :object (gr8s::core-object "metadata" (gr8s::core-object "name" name))))
+    (check-core-status 201 "/api/v1/namespaces/alpha/services" :method :post :object (service-test-object "123-service"))))
