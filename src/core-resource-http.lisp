@@ -30,8 +30,7 @@
     (not (null value))))
 
 (defun core-resource-request-object (expected-kind)
-  (when (or (equal expected-kind "CustomResourceDefinition")
-            (and *crd-view-definition* (not (equal expected-kind "DeleteOptions")))) (return-from core-resource-request-object (crd-read-json)))
+  (when (and *crd-view-definition* (not (equal expected-kind "DeleteOptions"))) (return-from core-resource-request-object (crd-read-json)))
   (let ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;)))))
     (cond
       ((string= content-type "application/vnd.kubernetes.protobuf")
@@ -39,8 +38,10 @@
                                       (if (equal expected-kind "Scale") "autoscaling/v1"
                                           (when (member expected-kind '("Event" "DeleteOptions") :test #'equal) *core-resource-view-version*))))
       ((member content-type '("" "application/json") :test #'string=)
-       (require-object (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)
-                                           :max-string-length (* 2 1024 1024)) "request"))
+       (require-object (if (equal expected-kind "CustomResourceDefinition")
+                           (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))
+                           (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)
+                                                :max-string-length (* 2 1024 1024))) "request"))
       (t (core-resource-error 415 "UnsupportedMediaType" "Supported resource request formats are JSON and Kubernetes protobuf")))))
 
 (defun core-selector-terms (selector)

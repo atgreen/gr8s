@@ -19,6 +19,7 @@
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
                (:static-file "schema/crd-v1.json")
+               (:static-file "schema/crd-wire-v1.json")
                (:static-file "schema/workloads-v1.json")
 
                (:static-file "schema/storage-v1.json")
@@ -55,6 +56,7 @@
                              (:file "crd-schema")
                              (:file "crd-structural")
                              (:file "crd-resources")
+                             (:file "crd-protobuf")
                              (:file "crd-deletion")
                              (:file "node-session")
                              (:file "runtime")
@@ -130,6 +132,7 @@
                              (:file "http-test")
                              (:file "core-resource-http-test")
                              (:file "crd-api-test")
+                             (:file "crd-protobuf-test")
                              (:file "podtemplates-test")
                              (:file "durable-resource-watches-test")
                              (:file "bootstrap-resource-test")

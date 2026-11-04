@@ -41,11 +41,14 @@
     ]
   },
   "upstreamFocusedRun": {
-    "status": "running; no result claimed",
+    "status": "completed: 1 actual spec passed, 4 failed HTTP415 typed CRD input",
     "vmSSHPort": 22293,
     "root": "/var/tmp/gr8s-podtemplates.6tsq5l17",
     "focus": "CustomResourceDefinition resources",
     "expectedSpecs": 5,
-    "log": "/root/gr8s-crd-focused-984e0f1.log"
+    "log": "/root/gr8s-crd-focused-984e0f1.log",
+    "nativeExitCode": 0,
+    "ownedShimsRemaining": [],
+    "beforeEvidence": "docs/custom-resources-upstream-before-2026-11-04.json"
   }
 }

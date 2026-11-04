@@ -1,6 +1,7 @@
 # Custom resources
 
-The `apiextensions.k8s.io/v1` CustomResourceDefinition API installs actual
+The `apiextensions.k8s.io/v1` CustomResourceDefinition API accepts JSON and
+checksum-pinned typed Kubernetes protobuf requests, and installs actual
 schema-backed JSON resource routes. A definition becomes Established only after
 its group, names, scope, versions and structural schemas pass admission. Its
 served versions appear in discovery; their custom object and list schemas and
@@ -42,7 +43,8 @@ after its previous instances have been removed.
 
 This workstream remains under development. CEL, conversion webhooks, scale
 subresources, additional printer columns, custom field selectors, server-side
-apply and protobuf requests for CRDs/custom objects are not implemented and are
+apply, protobuf requests for unstructured custom objects, and protobuf OpenAPI
+v2 wire negotiation are not implemented and are
 not advertised as functioning features. Unsupported executable schema/conversion
 features are rejected. Further structural edge cases and integration are still being
 tested before integration review. The native kubectl smoke passes strict creation,

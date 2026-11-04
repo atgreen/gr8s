@@ -80,7 +80,7 @@
     (cond ((eq method :get) (json-response old))
           ((member method '(:put :patch))
            (let* ((type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
-                  (input (if (eq method :put) (crd-read-json)
+                  (input (if (eq method :put) (core-resource-request-object "CustomResourceDefinition")
                              (let ((patch (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))))
                                (cond ((equal type "application/merge-patch+json") (merge-json-object old patch))
                                      ((equal type "application/json-patch+json") (apply-core-json-patch old patch))
