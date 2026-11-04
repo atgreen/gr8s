@@ -247,3 +247,26 @@
       (gr8s::delete-core-resource store "jobs" "alpha" "work")
       (gr8s::reconcile-jobs reconciler)
       (is-false (gr8s::job-pod-tracked-p (get-pod store "alpha" (pod-name pod)))))))
+
+(test status-writes-apply-metadata-but-never-the-spec
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable runtime reconciler directory))
+    (let* ((job (job-with-spec store "parallelism" 2))
+           (input (gr8s::copy-core-object job))
+           (metadata (gethash "metadata" input)))
+      (setf (gethash "annotations" metadata) (gr8s::core-object "patched" "true")
+            (gethash "parallelism" (gethash "spec" input)) 9
+            (gethash "status" input) (gr8s::core-object "startTime" "2026-01-01T00:00:00Z"))
+      (gr8s::workload-update-status-request store "jobs" "alpha" "work" input nil)
+      (let ((current (job-now store)))
+        (is (equal "true" (gethash "patched" (gethash "annotations" (gethash "metadata" current)))))
+        (is (equal "2026-01-01T00:00:00Z" (gethash "startTime" (gethash "status" current))))
+        (is (= 2 (gethash "parallelism" (gethash "spec" current))))))))
+
+(test job-collections-can-be-deleted-by-selector
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable runtime reconciler directory))
+    (job-with-spec store)
+    (is (gr8s::batch-resource-p "jobs"))
+    (is (= 1 (length (gr8s::list-core-resources store "jobs" "alpha"))))))
+

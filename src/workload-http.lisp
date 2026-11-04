@@ -82,6 +82,11 @@
         (when (and (gethash "name" metadata) (not (equal name (gethash "name" metadata))))
           (core-resource-error 400 "BadRequest" "metadata.name does not match request name"))
         (setf (gethash "status" copy) (copy-core-object status))
+        ;; Kubernetes status writes may also change these, but never the spec.
+        (dolist (field '("labels" "annotations"))
+          (multiple-value-bind (value present) (gethash field metadata)
+            (when (and present (not (eq value 'null)))
+              (setf (gethash field (workload-metadata copy)) (copy-core-object value)))))
         (prepare-core-resource-metadata copy existing revision)
         (setf (gethash (core-resource-key resource namespace name) resources) copy)
         (unless dry-run (commit-core-resources store resources revision))
