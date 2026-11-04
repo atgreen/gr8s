@@ -247,7 +247,9 @@
            (bt:wait-on-semaphore release))))))
   (call-with-probe-raw-server
    (lambda (port)
-     (is-false (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port))))
+     (multiple-value-bind (success message kind)
+         (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port))
+       (is-false success) (is (eq :error kind)) (is (search "Incomplete" message))))
    (lambda (stream) (probe-request-lines stream) (write-probe-http-response stream 200 '(("Content-Length" . "5")) "no"))))
 
 (test probe-http-follows-redirect-before-reading-the-intermediate-body
@@ -304,7 +306,8 @@
 (test exec-probe-constructor-timeouts-close-the-real-unix-peer
   (with-temporary-store (store directory)
     (declare (ignore store))
-    (let ((closed (bt:make-semaphore :name "Exec constructor peer closed"))
+    (let ((gr8s::*cri-runtime-request-timeout* 0)
+          (closed (bt:make-semaphore :name "Exec constructor peer closed"))
           (path (merge-pathnames "stalled-cri.sock" directory)))
       (call-with-probe-raw-server
        (lambda (socket-path)
@@ -420,3 +423,110 @@
                (write-probe-http-response stream 302 '(("Location" . "/ready") ("Content-Length" . "1")) "")
                (bt:wait-on-semaphore release))
              (write-probe-http-response stream 200 '(("Content-Length" . "0")) "")))))))
+
+(test unresolved-probe-ports-and-exec-infrastructure-are-errors
+  (let ((container (gr8s::core-object "name" "app")) (runtime (gr8s::make-containerd-runtime)))
+    (dolist (handler '("httpGet" "tcpSocket"))
+      (multiple-value-bind (success message kind)
+          (gr8s::execute-container-probe runtime container "id" "127.0.0.1"
+            (checked-probe (format nil "{\"~A\":{\"port\":\"missing\"}}" handler)))
+        (is-false success) (is (eq :error kind)) (is (search "not declared" message))))
+    (with-temporary-store (store directory)
+      (declare (ignore store))
+      (multiple-value-bind (success message kind)
+          (gr8s::execute-container-probe
+           (gr8s::make-containerd-runtime :socket-path (namestring (merge-pathnames "absent-cri.sock" directory)))
+           container "id" "" (checked-probe "{\"exec\":{\"command\":[\"true\"]}}"))
+        (is-false success) (is (eq :error kind)) (is (plusp (length message)))))))
+
+(test actual-http-body-errors-differ-from-negative-service-results
+  (dolist (scenario '(:truncated :stalled))
+    (let ((release (bt:make-semaphore)))
+      (call-with-probe-raw-server
+       (lambda (port)
+         (unwind-protect
+              (let ((start (get-internal-real-time)))
+                (multiple-value-bind (success message kind result)
+                    (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port))
+                  (is-false success) (is (eq :error kind)) (is (eq :failure result))
+                  (is (plusp (length message)))
+                  (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 1.7))))
+           (bt:signal-semaphore release)))
+       (lambda (stream)
+         (probe-request-lines stream)
+         (write-probe-http-response stream 200 '(("Content-Length" . "5")) (if (eq scenario :truncated) "no" ""))
+         (when (eq scenario :stalled) (bt:wait-on-semaphore release))))))
+  (call-with-probe-http-server
+   (lambda (port)
+     (multiple-value-bind (success message kind)
+         (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port))
+       (is-false success) (is-false kind) (is (search "503" message))))
+   (lambda (lines) (declare (ignore lines)) (values 503 nil "unhealthy")))
+  (call-with-probe-raw-server
+   (lambda (port)
+     (multiple-value-bind (success message kind)
+         (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port))
+       (is-false success) (is-false kind) (is (plusp (length message)))))
+   (lambda (stream) (probe-request-lines stream) (loop while (read-byte stream nil nil)))))
+
+(test real-tcp-refusal-is-a-failure-rather-than-a-prober-error
+  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :element-type '(unsigned-byte 8)))
+         (port (usocket:get-local-port listener)))
+    (usocket:socket-close listener)
+    (multiple-value-bind (success message kind)
+        (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1"
+          (checked-probe (format nil "{\"tcpSocket\":{\"port\":~D}}" port)))
+      (is-false success) (is-false kind) (is (plusp (length message))))))
+
+(test exec-probes-distinguish-real-cri-status-from-command-results
+  (let* ((server (ag-grpc:make-grpc-server 0 :host "127.0.0.1")) (thread nil)
+         (original (symbol-function 'gr8s::make-unix-grpc-channel))
+         (status ag-grpc:+grpc-status-unavailable+) (exit-code 0) (commands nil) (delay 0) (timeouts nil))
+    (ag-grpc:server-register-handler
+     server "/runtime.v1.RuntimeService/ExecSync"
+     (lambda (request context)
+       (push (list (gr8s.cri.v1::timeout request)
+                   (cdr (assoc "grpc-timeout" (ag-grpc::context-request-headers context) :test #'equal))) timeouts)
+       (push (gr8s.cri.v1::cmd request) commands)
+       (sleep delay)
+       (if (= status ag-grpc:+grpc-status-ok+)
+           (make-instance 'gr8s.cri.v1::exec-sync-response :exit-code exit-code)
+           (error 'ag-grpc::grpc-status-error :code status :message "actual CRI execution status")))
+     :request-type 'gr8s.cri.v1::exec-sync-request :response-type 'gr8s.cri.v1::exec-sync-response)
+    (unwind-protect
+         (progn
+           (setf thread (bt:make-thread (lambda () (ag-grpc:server-start server))))
+           (is-true (wait-until (lambda () (eq :running (ag-grpc::server-state server)))))
+           ;; Change only the socket address family; run the actual generated
+           ;; CRI method and decode its real gRPC status/ExecSync response.
+           (setf (symbol-function 'gr8s::make-unix-grpc-channel)
+                 (lambda (path &key timeout)
+                   (declare (ignore path))
+                   (ag-grpc:make-channel "127.0.0.1" (usocket:get-local-port (ag-grpc::server-socket server)) :timeout timeout)))
+           (let ((probe (checked-probe "{\"exec\":{\"command\":[\"true\"]}}"))
+                 (runtime (gr8s::make-containerd-runtime)))
+             (multiple-value-bind (success message kind)
+                 (gr8s::execute-container-probe runtime (gr8s::core-object) "id" "" probe)
+               (is-false success) (is (eq :error kind)) (is (search "UNAVAILABLE" message)))
+             (setf status ag-grpc:+grpc-status-deadline-exceeded+)
+             (multiple-value-bind (success message kind)
+                 (gr8s::execute-container-probe runtime (gr8s::core-object) "id" "" probe)
+               (is-false success) (is-false kind) (is (search "actual CRI execution status" message)))
+             (setf status ag-grpc:+grpc-status-ok+ exit-code 7)
+             (multiple-value-bind (success message kind)
+                 (gr8s::execute-container-probe runtime (gr8s::core-object) "id" "" probe)
+               (is-false success) (is-false kind) (is (search "7" message)))
+             (setf exit-code 0)
+             (multiple-value-bind (success message kind)
+                 (gr8s::execute-container-probe runtime (gr8s::core-object) "id" "" probe)
+               (is-true success "Actual CRI execution failed: ~A" message) (is-false kind))
+             (setf delay 1.1)
+             (multiple-value-bind (success message kind)
+                 (gr8s::execute-container-probe runtime (gr8s::core-object) "id" "" probe)
+               (is-true success "CRI setup/cleanup time consumed the command's budget: ~A" message) (is-false kind)))
+           (is (= 5 (length commands)))
+           (is (every (lambda (entry) (= 1 (first entry))) timeouts))
+           (is (every (lambda (entry) (equal "121S" (second entry))) timeouts)))
+      (setf (symbol-function 'gr8s::make-unix-grpc-channel) original)
+      (ag-grpc:server-stop server)
+      (when thread (bt:join-thread thread)))))

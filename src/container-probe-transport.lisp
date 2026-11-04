@@ -85,10 +85,18 @@
       ;; and must still abort the whole request.
       (ignore-errors (read-container-probe-http-body body code headers 2048)))))
 
+(defun container-probe-error-values (condition &optional (result :unknown))
+  "Return an errored check separately from an observed unhealthy service."
+  (values nil (princ-to-string condition) :error result))
+
 (defun run-http-container-probe (action host port timeout)
   "Perform a bounded HTTP(S) GET, reading only the terminal response's framed body."
-  (let* ((uri (probe-http-uri action host port)) (original-host (puri:uri-host uri)))
-    (multiple-value-bind (agent headers) (container-probe-http-headers action)
+  (let* ((uri (handler-case (probe-http-uri action host port)
+                (error (condition) (return-from run-http-container-probe (container-probe-error-values condition)))))
+         (original-host (puri:uri-host uri)))
+    (multiple-value-bind (agent headers)
+        (handler-case (container-probe-http-headers action)
+          (error (condition) (return-from run-http-container-probe (container-probe-error-values condition))))
       (loop for redirects from 0
             do (multiple-value-bind (body code response-headers)
                    (drakma:http-request uri :method :get :proxy nil :redirect nil :want-stream t :verify nil
@@ -106,7 +114,11 @@
                            (drain-container-probe-redirect-body body code response-headers)
                            (setf uri next))
                           (t
-                           (let ((output (read-container-probe-http-body body code response-headers)))
+                           (let ((output (handler-case (read-container-probe-http-body body code response-headers)
+                                           (sb-sys:deadline-timeout (condition)
+                                             (return-from run-http-container-probe (container-probe-error-values condition :failure)))
+                                           (error (condition)
+                                             (return-from run-http-container-probe (container-probe-error-values condition :failure))))))
                              (unless (<= 200 code 399) (return (values nil (format nil "HTTP probe failed with statuscode: ~D" code))))
                              (if (or next (<= 300 code 399))
                                  (return (values t (format nil "Probe terminated redirects, Response body: ~A" output) :warning))
@@ -154,26 +166,36 @@
                                     (case status (0 "UNKNOWN") (2 "NOT_SERVING") (3 "SERVICE_UNKNOWN") (t "unrecognized")) status))))))))))
 
 (defun execute-container-probe (runtime container container-id pod-ip probe)
-  "Execute the declared handler with one overall deadline and an exact target ID."
-  (let ((timeout (gethash "timeoutSeconds" probe 1)))
+  "Execute one bounded attempt, separating prober errors from service failures."
+  (let* ((timeout (gethash "timeoutSeconds" probe 1))
+         (exec (gethash "exec" probe))
+         (client-timeout (if exec (+ *cri-runtime-request-timeout* timeout) timeout)))
     (handler-case
-        (sb-sys:with-deadline (:seconds timeout)
+        (sb-sys:with-deadline (:seconds client-timeout)
           (cond
             ((gethash "exec" probe)
-             (let ((result (cri-exec-sync (containerd-runtime-socket-path runtime) container-id
-                                         (expand-static-probe-command container (gethash "command" (gethash "exec" probe))) :timeout timeout)))
-               (let ((output (container-probe-exec-output result)))
-                 (values (zerop (runtime-exec-result-exit-code result))
-                         (if (plusp (length output)) output (format nil "Exec probe exited ~D" (runtime-exec-result-exit-code result)))))))
-            ((gethash "httpGet" probe)
-             (let* ((action (gethash "httpGet" probe)) (host (gethash "host" action "")))
-               (run-http-container-probe action (if (equal "" host) pod-ip host) (resolve-container-probe-port container (gethash "port" action)) timeout)))
-            ((gethash "tcpSocket" probe)
-             (let* ((action (gethash "tcpSocket" probe)) (host (gethash "host" action ""))
-                    (socket (usocket:socket-connect (if (equal "" host) pod-ip host) (resolve-container-probe-port container (gethash "port" action))
-                                                    :element-type '(unsigned-byte 8) :timeout timeout)))
-               (unwind-protect (values t "TCP connection succeeded") (usocket:socket-close socket))))
+             (handler-case
+                 (let ((result (cri-exec-sync (containerd-runtime-socket-path runtime) container-id
+                                             (expand-static-probe-command container (gethash "command" (gethash "exec" probe))) :timeout timeout)))
+                   (let ((output (container-probe-exec-output result)))
+                     (values (zerop (runtime-exec-result-exit-code result))
+                             (if (plusp (length output)) output (format nil "Exec probe exited ~D" (runtime-exec-result-exit-code result))))))
+               (cri-command-timeout (condition) (values nil (princ-to-string condition)))
+               (error (condition) (container-probe-error-values condition))))
+            ((or (gethash "httpGet" probe) (gethash "tcpSocket" probe))
+             (let* ((http (gethash "httpGet" probe)) (action (or http (gethash "tcpSocket" probe)))
+                    (host (gethash "host" action ""))
+                    (port (handler-case (resolve-container-probe-port container (gethash "port" action))
+                            (error (condition) (return-from execute-container-probe (container-probe-error-values condition))))))
+               (if http
+                   (run-http-container-probe action (if (equal "" host) pod-ip host) port timeout)
+                   (let ((socket (usocket:socket-connect (if (equal "" host) pod-ip host) port
+                                                         :element-type '(unsigned-byte 8) :timeout timeout)))
+                     (unwind-protect (values t "TCP connection succeeded")
+                       ;; A successful TCP dial is healthy even if Close fails.
+                       (ignore-errors (usocket:socket-close socket)))))))
             ((gethash "grpc" probe) (run-grpc-container-probe pod-ip (gethash "grpc" probe) timeout))
-            (t (values nil "Missing probe handler"))))
-      (sb-sys:deadline-timeout () (values nil "Probe exceeded timeoutSeconds"))
+            (t (values nil "Missing probe handler" :error :unknown))))
+      (sb-sys:deadline-timeout (condition)
+        (if exec (container-probe-error-values condition) (values nil "Probe exceeded timeoutSeconds")))
       (error (condition) (values nil (princ-to-string condition))))))

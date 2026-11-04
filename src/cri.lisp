@@ -82,21 +82,41 @@
            (gr8s.cri.v1::url response))
       (ag-grpc:channel-close channel))))
 
+(defparameter *cri-runtime-request-timeout* 120
+  "Pinned kubelet CRI request overhead/cleanup budget, separate from command duration.")
+
+(define-condition cri-command-timeout (runtime-error) ()
+  (:documentation "A server-reported CRI ExecSync deadline, distinct from local transport expiry."))
+
+(defun cri-server-command-timeout-p (condition)
+  "Require real server grpc-status metadata and no local timeout cause."
+  (and (= ag-grpc:+grpc-status-deadline-exceeded+ (ag-grpc::grpc-status-error-code condition))
+       (null (ag-grpc::grpc-status-error-cause condition))
+       (some (lambda (headers)
+               (equal "4" (cdr (assoc "grpc-status" headers :test #'string-equal))))
+             (list (ag-grpc::grpc-status-error-headers condition) (ag-grpc::grpc-status-error-trailers condition)))))
+
 (defun cri-exec-sync
     (socket-path container-id command &key (timeout 30))
-  "Run COMMAND synchronously in CONTAINER-ID and return captured output."
-  (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
+  "Keep the command timeout on the wire and allow kubelet's separate CRI cleanup budget."
+  (let* ((client-timeout (when (plusp timeout) (+ *cri-runtime-request-timeout* timeout)))
+         (channel (make-unix-grpc-channel socket-path :timeout client-timeout)))
     (unwind-protect
-         (multiple-value-bind (response status)
-             (gr8s.cri.v1::runtime-service-exec-sync
-              (gr8s.cri.v1::make-runtime-service-stub channel)
-              (make-cri-exec-sync-request container-id command timeout)
-              :timeout timeout)
-           (ensure-cri-status "ExecSync" status)
-           (make-runtime-exec-result
-            :stdout (gr8s.cri.v1::stdout response)
-            :stderr (gr8s.cri.v1::stderr response)
-            :exit-code (gr8s.cri.v1::exit-code response)))
+         (handler-case
+             (multiple-value-bind (response status)
+                 (gr8s.cri.v1::runtime-service-exec-sync
+                  (gr8s.cri.v1::make-runtime-service-stub channel)
+                  (make-cri-exec-sync-request container-id command timeout)
+                  :timeout client-timeout)
+               (ensure-cri-status "ExecSync" status)
+               (make-runtime-exec-result
+                :stdout (gr8s.cri.v1::stdout response)
+                :stderr (gr8s.cri.v1::stderr response)
+                :exit-code (gr8s.cri.v1::exit-code response)))
+           (ag-grpc::grpc-status-error (condition)
+             (if (cri-server-command-timeout-p condition)
+                 (error 'cri-command-timeout :message (princ-to-string condition))
+                 (error condition))))
       (ag-grpc:channel-close channel))))
 
 (defun cri-runtime-version (socket-path &key (timeout 10))
