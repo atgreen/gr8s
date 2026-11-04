@@ -182,6 +182,7 @@
          (cri-delete-pod-sandbox
           (containerd-runtime-socket-path runtime)
           (cri-pod-sandbox-info-id sandbox))))
+     (cleanup-pod-subpaths runtime uid)
      (unless preserve-lifecycle (forget-container-lifecycle-state runtime uid))
      nil)))
 
@@ -221,7 +222,7 @@
              :command (expand-container-command (container-spec-command spec) environment)
              :args (expand-container-command (container-spec-args spec) environment)
              :env environment
-             :mounts (containerd-container-mounts runtime pod spec sandbox-id)
+             :mounts (containerd-container-mounts runtime pod spec sandbox-id environment)
              :security-context (containerd-pod-security-context pod spec)
              :resources (cri-linux-container-resources (pod-runtime-container-object pod spec))
              :working-directory (gethash "workingDir" (pod-runtime-container-object pod spec))
