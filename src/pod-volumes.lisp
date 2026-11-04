@@ -337,6 +337,11 @@
                   (containerd-key-environment-value runtime pod "secrets" (gethash "secretKeyRef" from)))
                  ((gethash "configMapKeyRef" from)
                   (containerd-key-environment-value runtime pod "configmaps" (gethash "configMapKeyRef" from)))
+                 ((gethash "resourceFieldRef" from)
+                  (let ((reference (copy-core-object (gethash "resourceFieldRef" from))))
+                    (when (member (gethash "containerName" reference) '(nil "") :test #'equal)
+                      (setf (gethash "containerName" reference) (gethash "name" object)))
+                    (values (downward-resource-value pod reference) t)))
                  (t (let* ((field (gethash "fieldPath" (gethash "fieldRef" from)))
                            (reference (pod-metadata-subscript-reference field)))
                       (values

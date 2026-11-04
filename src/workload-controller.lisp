@@ -479,6 +479,7 @@
     (bt:with-lock-held ((pod-store-workload-lock store))
       (process-workload-deletions reconciler)
       (reconcile-jobs reconciler)
+      (reconcile-disruption-budgets reconciler)
       (reconcile-cronjobs reconciler)
       (dolist (resource '("deployments" "replicasets"))
         (dolist (object (list-core-resources store resource))

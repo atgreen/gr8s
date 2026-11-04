@@ -31,6 +31,8 @@
   ;; control-plane userspace proxy).
   service-lb
   service-lb-controller
+  ;; Listening host ports by (ip . port); see pod-host-ports.lisp.
+  (host-port-forwarders (make-hash-table :test #'equal))
   ;; Gateway API L7 proxy listeners, reconciled from stored Gateway/HTTPRoute
   ;; objects. NIL until the first reconcile creates it.
   gateway-controller)
@@ -261,7 +263,13 @@
          (setf (node-runtime-worker node-runtime)
                (start-reconciliation-worker
                 (node-runtime-reconciler node-runtime)
-                :before-reconcile (lambda () (reconcile-cached-node-network node-runtime))
+                :before-reconcile (lambda ()
+                                    (reconcile-cached-node-network node-runtime)
+                                    (handler-case
+                                        (converge-host-port-forwarders (node-runtime-host-port-forwarders node-runtime)
+                                                                       (node-runtime-store node-runtime))
+                                      (error (condition)
+                                        (format *error-output* "gr8s: host port convergence failed: ~A~%" condition))))
                 :observer (lambda (pod status) (cache-node-observation node-runtime pod status))))
          (bt:with-lock-held ((node-runtime-lock node-runtime))
            (setf (node-runtime-state node-runtime) :running)
@@ -270,6 +278,7 @@
     (when (node-runtime-worker node-runtime)
       (stop-reconciliation-worker (node-runtime-worker node-runtime))
       (setf (node-runtime-worker node-runtime) nil))
+    (stop-host-port-forwarders (node-runtime-host-port-forwarders node-runtime))
     (stop-runtime-deletions (node-runtime-runtime node-runtime))))
 
 (defun call-with-agent-cni-server

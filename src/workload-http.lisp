@@ -30,19 +30,21 @@
                                                             "kind" kind "verbs" #("get" "patch" "update")))) 'vector))))))
 
 (defun workload-subresource-route (path)
-  "Resolve valid namespaced apps scale and status endpoints and Job status endpoints."
+  "Resolve valid namespaced apps scale and status endpoints, and Job and budget status endpoints."
   (let ((parts (uiop:split-string path :separator '(#\/))))
     (when (and (= 9 (length parts)) (dns-label-p (sixth parts)) (dns-subdomain-p (eighth parts))
                (or (and (equal (subseq parts 0 5) '("" "apis" "apps" "v1" "namespaces"))
                         (workload-resource-p (seventh parts))
                         (member (ninth parts) '("scale" "status") :test #'equal))
                    (and (equal (subseq parts 0 5) '("" "apis" "batch" "v1" "namespaces"))
-                        (batch-resource-p (seventh parts)) (equal (ninth parts) "status"))))
+                        (batch-resource-p (seventh parts)) (equal (ninth parts) "status"))
+                   (and (equal (subseq parts 0 5) '("" "apis" "policy" "v1" "namespaces"))
+                        (budget-resource-p (seventh parts)) (equal (ninth parts) "status"))))
       (list (seventh parts) (sixth parts) (eighth parts) (ninth parts)))))
 
 (defun workload-schema-name (resource suffix)
   "Name RESOURCE's pinned structural definition, with SUFFIX such as Status, in its API group."
-  (format nil "io.k8s.api.~A.v1.~A~A" (if (batch-resource-p resource) "batch" "apps")
+  (format nil "io.k8s.api.~A.v1.~A~A" (cond ((batch-resource-p resource) "batch") ((budget-resource-p resource) "policy") (t "apps"))
           (core-resource-kind resource) suffix))
 
 (defun workload-scale-object (object)
@@ -71,6 +73,7 @@
                  (equal (core-resource-api-version resource) (gethash "apiVersion" input (core-resource-api-version resource))))
       (core-resource-error 400 "BadRequest" "Incorrect workload status kind or API version"))
     (validate-template-shape status (template-schema (workload-schema-name resource "Status")) "status")
+    (when (budget-resource-p resource) (validate-disruption-status status))
     (with-store-lock (store)
       (let* ((existing (get-core-resource-unlocked store resource namespace name)) (emeta (workload-metadata existing))
              (copy (copy-core-object existing)) (resources (copy-core-resource-index store))

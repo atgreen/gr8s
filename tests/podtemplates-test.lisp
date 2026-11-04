@@ -190,3 +190,15 @@
       (setf (gethash "args" (template-main-container object)) (vector (make-string (* 2 1024 1024) :initial-element #\x)))
       (is (= 413 (core-resource-status (lambda () (gr8s::create-core-resource store "podtemplates" object "alpha")))))
       (is (null (gr8s::list-core-resources (open-store path) "podtemplates"))))))
+
+(test strategic-merge-puts-entries-new-to-a-list-first
+  (let* ((schema (gr8s::template-schema "io.k8s.api.core.v1.PodSpec"))
+         (old (com.inuoe.jzon:parse "{\"containers\":[{\"name\":\"a\",\"image\":\"1\"},{\"name\":\"b\",\"image\":\"1\"}]}"))
+         (names (lambda (patch)
+                  (map 'list (lambda (container) (gethash "name" container))
+                       (gethash "containers" (gr8s::template-strategic-merge (gr8s::copy-core-object old) (com.inuoe.jzon:parse patch) schema))))))
+    ;; As upstream's merge does: a new entry leads, and existing ones keep their relative order.
+    (is (equal '("new" "a" "b") (funcall names "{\"containers\":[{\"name\":\"new\",\"image\":\"2\"}]}")))
+    (is (equal '("a" "b") (funcall names "{\"containers\":[{\"name\":\"b\",\"image\":\"2\"}]}")))
+    (is (equal '("a" "b") (funcall names "{\"containers\":[{\"name\":\"a\",\"image\":\"2\"}]}")))
+    (is (equal '("b") (funcall names "{\"containers\":[{\"name\":\"a\",\"$patch\":\"delete\"}]}")))))

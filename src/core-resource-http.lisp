@@ -256,6 +256,7 @@
         (if (string= content-type "application/json-patch+json")
             (apply-core-json-patch old patch)
             (if (and (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource)
+                         (budget-resource-p resource)
                          (policy-resource-p resource)
                          (member resource '("podtemplates" "deployments" "replicasets") :test #'equal))
                      (equal content-type "application/strategic-merge-patch+json"))
@@ -264,6 +265,7 @@
                                          ((storage-resource-p resource) (storage-resource-schema-name resource))
                                          ((policy-resource-p resource) (policy-resource-schema-name resource))
                                          ((endpointslice-resource-p resource) "io.k8s.api.discovery.v1.EndpointSlice")
+                                         ((budget-resource-p resource) "io.k8s.api.policy.v1.PodDisruptionBudget")
                                          ((equal resource "podtemplates") "io.k8s.api.core.v1.PodTemplate")
                                          (t (concatenate 'string "io.k8s.api.apps.v1." (core-resource-kind resource))))))
                 (merge-json-object old (require-object patch "patch")))))
@@ -295,7 +297,7 @@
                                                         (lambda (old) (declare (ignore old)) replacement) :dry-run dry-run))))
         ((and writable-scope name (eq method :patch)) (core-resource-patch-response store resource namespace name dry-run))
         ((and writable-scope (null name)
-              (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource) (batch-resource-p resource) (admission-config-resource-p resource) (policy-resource-p resource) (member resource '("podtemplates" "events" "deployments" "replicasets" "customresourcedefinitions") :test #'equal))
+              (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource) (batch-resource-p resource) (budget-resource-p resource) (admission-config-resource-p resource) (policy-resource-p resource) (member resource '("podtemplates" "events" "deployments" "replicasets" "customresourcedefinitions") :test #'equal))
               (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
                 (options (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions")))
@@ -366,6 +368,7 @@
              (if (or (uiop:string-prefix-p "io.k8s.api.certificates.v1." name)
                      (uiop:string-prefix-p "io.k8s.api.apps.v1." name)
                      (uiop:string-prefix-p "io.k8s.api.autoscaling.v1." name)
+                     (uiop:string-prefix-p "io.k8s.api.policy.v1." name)
                      (uiop:string-prefix-p "io.k8s.api.admissionregistration.v1." name)
                      (member name '("io.k8s.api.core.v1.PodTemplate" "io.k8s.api.core.v1.PodTemplateList"
                                   "io.k8s.api.core.v1.Event" "io.k8s.api.core.v1.EventList"

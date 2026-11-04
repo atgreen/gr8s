@@ -34,7 +34,7 @@
   (with-core-api (store path)
     (values path)
     (status-test-pod store "web")
-    (is (= 409 (nth-value 1 (evict-pod-request "web" "{\"deleteOptions\":{\"preconditions\":{\"uid\":\"other\"}}}"))))
+    (is (= 409 (nth-value 1 (evict-pod-request "web" "{\"metadata\":{\"name\":\"web\"},\"deleteOptions\":{\"preconditions\":{\"uid\":\"other\"}}}"))))
     (is (= 400 (nth-value 1 (evict-pod-request "web" "{\"metadata\":{\"name\":\"other\"}}"))))
     (is (null (gethash "deletionTimestamp" (gethash "metadata" (pod-to-object (get-pod store "default" "web"))))))))
 

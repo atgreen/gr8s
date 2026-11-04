@@ -38,7 +38,8 @@
      (remove-if
       (lambda (pod)
         (or (not (equal node-name (pod-node-name pod)))
-            (and excluded-uid (string= excluded-uid (pod-uid pod)))))
+            (and excluded-uid (string= excluded-uid (pod-uid pod)))
+            (not (admit-assigned-pod store pod))))
       (list-pods store))
      #'string< :key (lambda (pod) (format nil "~A/~A" (pod-namespace pod) (pod-name pod)))))))
 
@@ -102,6 +103,8 @@
             (progn (publish-node-snapshot runtime (pod-node-name pod))
                    (return-from runtime-delete-pod nil)))))
     (cond
+      ;; A refused Pod never reached its agent, which therefore has nothing to confirm.
+      ((with-store-lock (store) (pod-admission-rejected-p store pod)) t)
       ((or (not (pod-node-name pod))
            (zerop (gethash "deletionGracePeriodSeconds" (gethash "metadata" (pod-to-object pod)) 0))
            (and (equal (pod-resource-version pod) (pod-observed-resource-version store pod))
