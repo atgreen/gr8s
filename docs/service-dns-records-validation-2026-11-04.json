@@ -839,9 +839,9 @@
     "regression": "Actual shell plus UDP/TCP dig demonstrates unexpanded command falsely prints OK for NXDOMAIN; production expansion prints nothing for NXDOMAIN and OK for an actual authoritative A answer. Native Pod HTTP files prove command substitution and resolved environment expansion executed."
   },
   "remainingValidation": [
-    "Original33y_tdhg remains a failed cleanup run with immutable artifacts. Independent recovery83rec7yd removed all five owned shims; new ey7un2zg genuinely passed all three unchanged DNS cases and zero-shim cleanup on distinct integrated source de06095.",
-    "Remaining five unchanged DNS conformance cases are running once on the same frozen binary/cache; no result claimed yet.",
-    "dnsPolicy None and custom Pod resolver configuration continue separately in21.2; broad21 remains open for explicit DNS event follow-up21.2.1."
+    "All eight pinned unchanged DNS conformance cases passed across ey7un2zg(3) and u38pt475(5) on identical source de06095/nativeafa68c83, both with normal native exit0, no cleanup error and zero owned shims. Both actual JUnit archives and all copied declared artifact hashes were independently verified.",
+    "Original33y_tdhg remains a failed cleanup run with immutable artifacts. Independent recovery83rec7yd and subsequent clean reruns do not change that historical result.",
+    "dnsPolicy None and custom Pod resolver configuration continue separately in PR52; broad21 remains open for explicit Kubernetes DNS event follow-up21.2.1. These focused results do not establish certification."
   ],
   "upstreamRuns": [
     {
@@ -913,6 +913,53 @@
         }
       ],
       "actualJUnitPassedCases": 3,
+      "suiteHookEntriesExcluded": 7,
+      "cleanRun": true,
+      "nativeExitCode": 0,
+      "cleanupError": null,
+      "ownedShimsRemaining": [],
+      "allPresentDeclaredArtifactHashesVerified": true,
+      "privateKubeconfigNotCopied": true,
+      "includesFunctionalRecoveryCommit": "67fcba479a0d6bc50163cad52c0439bcb05205b9",
+      "original33y_tdhgRemainsFailed": true
+    },
+    {
+      "sourceCommit": "de06095a61553146a7fd94e73a175f103d32c032",
+      "sourceBranch": "feat/pod-dns-config",
+      "nativeSHA256": "afa68c8326f89147816d75e0d7a521a59ca984dc8e3604e9eda8ef2faebcc67f",
+      "harnessSHA256": "bb07ae3d86883d1d4d982d4cd8d177c3754d7ca32cdff0a56616b7f0914923a0",
+      "artifactDirectory": "build/conformance/2026-11-04-service-dns-five-u38pt475",
+      "reportSHA256": "097594a6e9b332d666bebda3c7212ab829bb8f79d7d1dfd27b749d55b1ea0f92",
+      "archiveSHA256": "dc2ed651e04e451ac573557fc71913c6a0fd1172ba8630d9b00d9be3f1ffdd9b",
+      "focus": "\\[sig-network\\] DNS (should provide /etc/hosts entries for the cluster|should provide DNS for pods for Hostname|should provide DNS for pods for Subdomain|should provide DNS for the cluster|should resolve DNS of partial qualified names for services \\[LinuxOnly\\]) \\[Conformance\\]$",
+      "actualSelectedCases": [
+        {
+          "name": "[It] [sig-network] DNS should provide /etc/hosts entries for the cluster [Conformance]",
+          "seconds": "45.520950812",
+          "passed": true
+        },
+        {
+          "name": "[It] [sig-network] DNS should provide DNS for pods for Hostname [Conformance]",
+          "seconds": "73.669492863",
+          "passed": true
+        },
+        {
+          "name": "[It] [sig-network] DNS should provide DNS for pods for Subdomain [Conformance]",
+          "seconds": "98.056149985",
+          "passed": true
+        },
+        {
+          "name": "[It] [sig-network] DNS should provide DNS for the cluster [Conformance]",
+          "seconds": "65.630295294",
+          "passed": true
+        },
+        {
+          "name": "[It] [sig-network] DNS should resolve DNS of partial qualified names for services [LinuxOnly] [Conformance]",
+          "seconds": "78.05411638",
+          "passed": true
+        }
+      ],
+      "actualJUnitPassedCases": 5,
       "suiteHookEntriesExcluded": 7,
       "cleanRun": true,
       "nativeExitCode": 0,
