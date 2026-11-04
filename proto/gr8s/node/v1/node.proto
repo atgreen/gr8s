@@ -143,6 +143,8 @@ message DesiredStateSnapshot {
   repeated PodAssignment pods = 2;
   NodeNetworkConfig network = 3;
   repeated NodeRoute routes = 4;
+  // Public Service/EndpointSlice DNS data, separate from Pod-scoped secrets.
+  repeated bytes service_discovery_objects_json = 5;
 }
 
 message PodAssignment {

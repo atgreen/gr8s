@@ -141,6 +141,10 @@
           (when (member kind '("Deployment" "ReplicaSet" "Scale") :test #'equal)
             (return-from decode-core-resource-protobuf (decode-workload-protobuf raw kind)))
 
+          (when (equal kind "EndpointSlice")
+            (let ((object (template-protobuf-message "k8s.io.api.discovery.v1.EndpointSlice" raw)))
+              (setf (gethash "apiVersion" object) version (gethash "kind" object) kind)
+              (return-from decode-core-resource-protobuf object)))
           (when (member kind '("PersistentVolume" "PersistentVolumeClaim" "StorageClass") :test #'equal)
             (let ((object (template-protobuf-message
                            (concatenate 'string (if (equal kind "StorageClass") "k8s.io.api.storage.v1." "k8s.io.api.core.v1.") kind) raw)))

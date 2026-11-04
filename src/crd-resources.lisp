@@ -148,7 +148,7 @@
     (reject-unsupported-fields names '("plural" "singular" "kind" "listKind" "shortNames" "categories") "CRD names")
     (validate-crd-metadata metadata nil name)
     (unless (and (dns-subdomain-p group) (find #\. group)
-                 (not (member group '("certificates.k8s.io" "apiextensions.k8s.io" "rbac.authorization.k8s.io" "events.k8s.io" "storage.k8s.io") :test #'equal)))
+                 (not (member group '("discovery.k8s.io" "certificates.k8s.io" "apiextensions.k8s.io" "rbac.authorization.k8s.io" "events.k8s.io" "storage.k8s.io") :test #'equal)))
       (crd-schema-error "spec.group" "requires an unreserved DNS group with a domain suffix"))
     (unless (and (dns-label-p plural) (cl-ppcre:scan "^[a-z]" plural)) (crd-schema-error "spec.names.plural" "invalid resource plural"))
     (unless (equal (format nil "~A.~A" plural group) (gethash "name" metadata))

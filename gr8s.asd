@@ -24,6 +24,7 @@
 
                (:static-file "schema/storage-v1.json")
                (:static-file "schema/certificates-v1.json")
+               (:static-file "schema/endpointslices-v1.json")
                (:module "src"
                 :serial t
                 :components ((:file "package")
@@ -53,6 +54,7 @@
                              (:file "workload-resources")
 
                              (:file "storage-api")
+                             (:file "endpointslice-api")
                              (:file "storage-controller")
                              (:file "events")
                              (:file "csr-resources")
@@ -80,6 +82,7 @@
                              (:file "container-lifecycle")
                              (:file "podman")
                              (:file "reconciler")
+                             (:file "service-dns")
                              (:file "control-plane-runtime")
                              (:file "pod-volumes")
                              (:file "storage-volumes")
@@ -96,6 +99,8 @@
                              (:file "server")
                              (:file "in-cluster-api")
                              (:file "services")
+                             (:file "endpointslice-controller")
+                             (:file "endpointslice-http")
                              (:file "garbage-collection")
                              (:file "crd-garbage-collection")
                              (:file "workload-controller")
@@ -155,6 +160,8 @@
                              (:file "node-log-delivery-test")
                              (:file "garbage-collection-test")
                              (:file "services-test")
+                             (:file "endpointslices-test")
+                             (:file "service-dns-test")
                              (:file "telemetry-test")
                              (:file "workloads-test"))))
   :perform (test-op (operation component)
