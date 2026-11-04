@@ -67,6 +67,25 @@ clients. See [ConfigMap and Secret APIs](docs/configmap-secret-api.md) for the
 supported surface. Pods can consume referenced environment keys and mounted
 files. Watch, server-side apply, and full Namespace lifecycle are not yet implemented.
 
+ResourceQuota, LimitRange, RuntimeClass and PriorityClass are served with real
+effects. Quota usage is computed from the live objects and checked under the store
+lock at admission, so a write that would exceed a hard limit gets a 403; the
+`Terminating`, `NotTerminating`, `BestEffort`, `NotBestEffort` and `PriorityClass`
+scopes apply. LimitRange defaults and bounds new Pods and bounds new claims.
+RuntimeClass admission resolves overhead and scheduling constraints, and the handler
+reaches CRI `RunPodSandbox`, so an unconfigured handler leaves the Pod pending with
+the runtime's error. PriorityClass resolves `spec.priority`.
+
+The scheduler charges Pod requests and overhead against the CPU, memory, storage
+and Pod count agents report, and against extended resources advertised through
+Node status. It evaluates node selectors and node affinity, and when nothing fits
+it preempts lower-priority Pods, marking them with a `DisruptionTarget` condition.
+Pod affinity and anti-affinity are refused. `spec.activeDeadlineSeconds` is counted
+from Pod creation rather than from the first node's acceptance. A declared
+`ephemeral-storage` limit counts for quota, LimitRange and scheduling, and the node
+evicts a Pod whose writable layers and disk-backed emptyDirs exceed it, checking
+every ten seconds. Container logs are not included in that measurement.
+
 Pod logs and exec run through correlated agent operations, including interactive
 streams and nonzero exit status. Complete agent-crash recovery
 remain outside the verified boundary. The administrative HTTP API refuses
@@ -503,13 +522,10 @@ disruptions. The Pod `eviction` subresource spends a budget atomically and answe
 429 with the `DisruptionBudget` cause when nothing remains, honors
 `unhealthyPodEvictionPolicy`, and marks the Pod with a `DisruptionTarget` condition.
 
-Agents report `cpu`, `memory` and `pods` capacity in their session hello, and Nodes
-serve them as `status.capacity` and `status.allocatable`, which are equal because
-gr8s reserves nothing for system daemons. The scheduler keeps declared requests and
-TCP host ports within what a node has, leaving a Pod that does not fit Pending with
-the reason in its `PodScheduled` condition. A Pod that named its own node bypasses
-the scheduler, so it fails with `OutOfcpu`, `OutOfmemory`, `OutOfpods` or `NodePorts`
-as a kubelet would fail it. The agent makes a `hostPort` real with a userspace TCP
+The scheduler keeps TCP host ports, as well as declared requests, within what a node
+has, leaving a Pod that does not fit Pending with the reason in its `PodScheduled`
+condition. A Pod that named its own node bypasses the scheduler, so it fails with
+`OutOfcpu`, `OutOfmemory`, `OutOfpods` or `NodePorts` as a kubelet would fail it. The agent makes a `hostPort` real with a userspace TCP
 relay, so a Pod sees the node, not the original client, as the connection's source;
 UDP host ports are refused.
 

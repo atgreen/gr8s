@@ -157,27 +157,8 @@
 (defun register-capacity-node (store name id cidr cpu memory &optional (pods "110"))
   "Register a ready node whose agent reported CPU, MEMORY and PODS capacity."
   (gr8s:register-node store (make-test-node name id cidr))
-  (gr8s::update-node-capacity store name (list (cons "cpu" cpu) (cons "memory" memory) (cons "pods" pods)))
+  (gr8s::update-node-capacity store name (gr8s::core-object "cpu" cpu "memory" memory "pods" pods))
   (gr8s:mark-node-ready store name 100))
-
-(test node-api-reports-the-capacity-its-agent-reported
-  (with-temporary-store (store path)
-    (gr8s:register-node store (make-test-node "worker-a" "node-a" "10.64.0.0/20"))
-    (is-false (gethash "capacity" (gethash "status" (gr8s::node-api-object (gr8s:get-node store "worker-a")))))
-    (gr8s::update-node-capacity store "worker-a" (list (cons "cpu" "4") (cons "memory" "8192Ki") (cons "pods" "110")))
-    (let* ((reopened (open-store path))
-           (status (gethash "status" (gr8s::node-api-object (gr8s:get-node reopened "worker-a")))))
-      (is (equal "4" (gethash "cpu" (gethash "capacity" status))))
-      (is (equal "8192Ki" (gethash "memory" (gethash "allocatable" status))))
-      (is (equal "110" (gethash "pods" (gethash "allocatable" status)))))
-    (signals gr8s::kubernetes-error
-      (gr8s::update-node-capacity store "worker-a" (list (cons "cpu" "many"))))))
-
-(test local-node-capacity-matches-what-the-downward-api-reports
-  (let ((capacity (gr8s::local-node-capacity)))
-    (is (equal (write-to-string (gr8s::node-allocatable-cpu)) (cdr (assoc "cpu" capacity :test #'equal))))
-    (is (= (* 1024 (floor (gr8s::node-allocatable-memory) 1024))
-           (gr8s::container-quantity-integer (gr8s::parse-container-quantity (cdr (assoc "memory" capacity :test #'equal))))))))
 
 (test requests-keep-pods-within-a-nodes-capacity
   (with-temporary-store (store path)
@@ -205,8 +186,6 @@
     (register-capacity-node store "worker-a" "node-a" "10.64.0.0/20" "2" "1Gi")
     (let ((large (create-pod store (capacity-test-pod "large" :cpu "100m" :init-cpu "3")))
           (small (create-pod store (capacity-test-pod "small" :cpu "1" :init-cpu "500m"))))
-      (is (equal '(3000 0) (multiple-value-list (gr8s::pod-effective-requests large))))
-      (is (equal '(1000 0) (multiple-value-list (gr8s::pod-effective-requests small))))
       (is-false (gr8s:schedule-pod store large))
       (is (gr8s:schedule-pod store small)))))
 

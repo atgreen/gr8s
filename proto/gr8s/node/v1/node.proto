@@ -61,6 +61,7 @@ message NodeHello {
   map<string, string> labels = 5;
   repeated string capabilities = 6;
   string underlay_address = 7;
+  map<string, string> capacity = 8;
 }
 
 message Heartbeat {

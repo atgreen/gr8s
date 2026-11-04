@@ -239,35 +239,61 @@
     (publish-pod-spec-change-unlocked store old pod)
     pod))
 
-(defun schedule-pod (store pod)
-  "Return POD's selected node, assigning it to the least-loaded ready node."
+(defun update-node-capacity (store node-name capacity)
+  "Persist the quantities NODE-NAME's agent measured, leaving a missing report unchanged."
   (with-store-lock (store)
-    (let ((requested-node (pod-node-name pod)))
-      (when requested-node
-        (return-from schedule-pod (get-node-unlocked store requested-node)))
-      (let ((node
-              (first
-               (sort
-                (loop for candidate being the hash-values
-                        of (pod-store-nodes store)
-                      when (and (node-record-ready-p candidate)
-                                (pod-node-selector-matches-p pod candidate)
-                                (pod-node-storage-compatible-p store pod candidate))
-                        collect candidate)
-                (lambda (left right)
-                  (let ((left-count
-                          (assigned-nonterminal-pod-count
-                           store (node-record-name left)))
-                        (right-count
-                          (assigned-nonterminal-pod-count
-                           store (node-record-name right))))
-                    (or (< left-count right-count)
-                        (and (= left-count right-count)
-                             (string< (node-record-name left)
-                                      (node-record-name right))))))))))
-        (when node
-          (persist-pod-assignment store pod (node-record-name node)))
-        node))))
+    (let ((node (get-node-unlocked store node-name)))
+      (when (and node capacity (plusp (hash-table-count capacity))
+                 (not (equalp capacity (node-record-capacity node))))
+        (let ((updated (copy-node-record node)))
+          (setf (node-record-capacity updated) capacity)
+          (persist-node store updated)
+          (setf (node-record-capacity node) capacity))))))
+
+(defun update-node-extended-resources (store node-name resources)
+  "Replace the extended resources NODE-NAME advertises to the scheduler."
+  (with-store-lock (store)
+    (let* ((node (or (get-node-unlocked store node-name)
+                     (error 'kubernetes-error :status-code 404 :reason "NotFound"
+                                              :message (format nil "Node ~A was not found" node-name))))
+           (updated (copy-node-record node)))
+      (setf (node-record-extended-resources updated) resources)
+      (persist-node store updated)
+      (setf (node-record-extended-resources node) resources)
+      node)))
+
+(defun node-placement-better-p (store pod left right)
+  "Prefer a node POD's affinity favors, then the fewest Pods, then a stable name."
+  (let ((left-score (pod-node-preference-score pod left))
+        (right-score (pod-node-preference-score pod right))
+        (left-count (assigned-nonterminal-pod-count store (node-record-name left)))
+        (right-count (assigned-nonterminal-pod-count store (node-record-name right))))
+    (cond ((/= left-score right-score) (> left-score right-score))
+          ((/= left-count right-count) (< left-count right-count))
+          (t (string< (node-record-name left) (node-record-name right))))))
+
+(defun schedule-pod (store pod)
+  "Return POD's selected node, or preempt lower-priority Pods when no placeable node fits it."
+  (let ((node nil) (victims nil))
+    (with-store-lock (store)
+      (let ((requested-node (pod-node-name pod)))
+        (when requested-node
+          (return-from schedule-pod (get-node-unlocked store requested-node))))
+      (let* ((placeable (loop for candidate being the hash-values of (pod-store-nodes store)
+                              when (pod-node-placeable-p store pod candidate) collect candidate))
+             (fitting (remove-if-not (lambda (candidate) (pod-fits-node-unlocked store pod candidate)) placeable)))
+        (setf node (first (sort fitting (lambda (left right) (node-placement-better-p store pod left right)))))
+        (if node
+            (progn
+              (remhash (pod-uid pod) (pod-store-nominated-nodes store))
+              (persist-pod-assignment store pod (node-record-name node)))
+            (let ((plan (choose-preemption-unlocked store pod placeable)))
+              (when plan
+                (setf victims (cdr plan)
+                      (gethash (pod-uid pod) (pod-store-nominated-nodes store)) (node-record-name (car plan))))))))
+    ;; Deletion takes the store lock itself and is retried by reconciliation.
+    (dolist (victim victims) (preempt-pod store victim))
+    node))
 
 (defun update-pod-observed-phase (store pod phase)
   "Record the agent-observed PHASE for POD."

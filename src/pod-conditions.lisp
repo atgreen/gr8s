@@ -132,6 +132,8 @@ list as 'nothing is running': Sonobuoy's worker takes it to mean all containers 
             (persist-pod-status-state store pod :conditions conditions)
             (setf (gethash (pod-uid pod) (pod-store-pod-condition-histories store))
                   (copy-pod-status-value conditions)))
+          (let ((nominated (and (not scheduled) (gethash (pod-uid pod) (pod-store-nominated-nodes store)))))
+            (when nominated (setf (gethash "nominatedNodeName" status) nominated)))
           (add-pod-host-address store pod status)
           (apply-pod-client-status store pod status)
           (publish-pod-status-unlocked store pod status)))))

@@ -74,7 +74,9 @@
       (when (pod-terminal-status-p before) (save-pod-finalization-state store pod before nil))
       (setf done (runtime-delete-pod runtime pod))
       (let ((after (observe-finalizing-pod reconciler pod)))
-        (setf state (save-pod-finalization-state store pod (if (pod-terminal-status-p after) after before) done))))
+        ;; A concurrent last-finalizer removal may have retired this exact Pod.
+        (setf state (or (save-pod-finalization-state store pod (if (pod-terminal-status-p after) after before) done)
+                        state))))
     ;; Physical cleanup releases creation capacity even when a controller or
     ;; user deliberately retains the API object for arbitrarily long.
     (when done (finish-reconciler-urgent-deletion reconciler (pod-uid pod)))

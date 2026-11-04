@@ -66,6 +66,10 @@
    :pod-ip (let ((status (pod-observed-status (control-plane-runtime-store runtime) pod)))
              (if status (gethash "podIP" status "") ""))))
 
+(defmethod runtime-runs-containers-p ((runtime control-plane-runtime))
+  "The assigned node's agent enforces container lifetimes; the control plane only observes them."
+  nil)
+
 (defmethod runtime-observe ((runtime control-plane-runtime) uid)
   (let ((pod (control-plane-pod-by-uid runtime uid)))
     ;; An unscheduled Pod must remain absent from the runtime view so that the

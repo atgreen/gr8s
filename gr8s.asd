@@ -25,6 +25,7 @@
                (:static-file "schema/admissionregistration-v1.json")
 
                (:static-file "schema/storage-v1.json")
+               (:static-file "schema/policy-v1.json")
                (:static-file "schema/certificates-v1.json")
                (:static-file "schema/endpointslices-v1.json")
                (:module "src"
@@ -46,7 +47,6 @@
                              (:file "pod-status-store")
                              (:file "pod-finalizers")
                              (:file "pod-deletion")
-                             (:file "node-capacity")
                              (:file "scheduler")
                              (:file "certificate-profiles")
                              (:file "pki")
@@ -68,6 +68,11 @@
                              (:file "admission-resources")
 
                              (:file "storage-api")
+                             (:file "policy-resources")
+                             (:file "pod-admission-policy")
+                             (:file "resource-quota")
+                             (:file "pod-resource-fit")
+                             (:file "pod-node-admission")
                              (:file "endpointslice-api")
                              (:file "storage-controller")
                              (:file "events")
@@ -126,6 +131,7 @@
                              (:file "http")
                              (:file "core-resource-http")
                              (:file "storage-http")
+                             (:file "policy-http")
                              (:file "csr-http")
                              (:file "podtemplate-watch")
                              (:file "pod-watch")
@@ -221,6 +227,7 @@
                              (:file "pod-eviction-test")
                              (:file "storage-api-test")
                              (:file "storage-http-test")
+                             (:file "policy-api-test")
                              (:file "service-account-test")
                              (:file "api-client-certificate-test")
                              (:file "bootstrap-protobuf-test")

@@ -59,12 +59,15 @@
                                          (cons "ca.crt" (getf config :ca-pem)))
               do (setf (gethash key data) (ag-grpc:base64-encode (trivial-utf-8:string-to-utf-8-bytes value))))
         (let ((secret
-                (create-core-resource store "secrets"
-                 (core-object "metadata" (core-object "name" secret-name
-                                                      "annotations" (core-object "kubernetes.io/service-account.name" account-name
-                                                                                 "kubernetes.io/service-account.uid" uid))
-                              "type" "kubernetes.io/service-account-token" "immutable" t "data" data)
-                 namespace)))
+                ;; The credential is the Pod's identity, not a user's write. It
+                ;; counts as usage, but quota cannot refuse the Pod's own account.
+                (let ((*resource-quota-admission-exempt* t))
+                  (create-core-resource store "secrets"
+                   (core-object "metadata" (core-object "name" secret-name
+                                                        "annotations" (core-object "kubernetes.io/service-account.name" account-name
+                                                                                   "kubernetes.io/service-account.uid" uid))
+                                "type" "kubernetes.io/service-account-token" "immutable" t "data" data)
+                   namespace))))
           (handler-case
               (write-private-text-atomically
                (service-account-issuer-record-path store (service-account-token-digest token))
@@ -86,8 +89,9 @@
           (if present value t)))))
 
 (defun admit-in-cluster-pod (store pod)
-  "Inject service environment and authorized credential mounts when the API is enabled."
-  (let ((config (pod-store-in-cluster-config store)))
+  "Run Pod policy admission, then inject service environment and credential mounts when the API is enabled."
+  (let ((pod (admit-pod-policies store pod))
+        (config (pod-store-in-cluster-config store)))
     (unless config (return-from admit-in-cluster-pod pod))
     (let* ((object (copy-core-object (pod-to-object pod)))
            (spec (gethash "spec" object))
@@ -205,8 +209,9 @@
 (defun ensure-default-service-account (store namespace)
   "Create the namespace's default ServiceAccount without replacing an existing identity."
   (handler-case
-      (create-core-resource store "serviceaccounts"
-       (core-object "metadata" (core-object "name" "default")) namespace)
+      (let ((*resource-quota-admission-exempt* t))
+        (create-core-resource store "serviceaccounts"
+         (core-object "metadata" (core-object "name" "default")) namespace))
     (kubernetes-error (condition)
       (if (= 409 (kubernetes-error-status-code condition))
           (get-core-resource store "serviceaccounts" namespace "default")
@@ -221,7 +226,8 @@
                                               "labels" (core-object "kubernetes.io/metadata.name" name))) nil)
       (kubernetes-error (condition)
         (unless (= 409 (kubernetes-error-status-code condition)) (error condition))))
-    (ensure-default-service-account store name)))
+    (ensure-default-service-account store name))
+  (ensure-system-priority-classes store))
 
 (defun ensure-namespace-root-ca (store namespace)
   "Publish the actual native API trust anchor without rotating the ConfigMap identity."
@@ -233,11 +239,12 @@
       (cond
         ((null existing)
          (let ((owner (get-core-resource store "namespaces" nil namespace)))
-           (create-core-resource store "configmaps"
-            (core-object "metadata" (core-object "name" "kube-root-ca.crt"
-                                      "ownerReferences" (vector (core-object "apiVersion" "v1" "kind" "Namespace"
-                                                                "name" namespace "uid" (gethash "uid" (gethash "metadata" owner)))))
-                         "data" (core-object "ca.crt" ca)) namespace)))
+           (let ((*resource-quota-admission-exempt* t))
+             (create-core-resource store "configmaps"
+              (core-object "metadata" (core-object "name" "kube-root-ca.crt"
+                                        "ownerReferences" (vector (core-object "apiVersion" "v1" "kind" "Namespace"
+                                                                  "name" namespace "uid" (gethash "uid" (gethash "metadata" owner)))))
+                           "data" (core-object "ca.crt" ca)) namespace))))
         ((not (equal ca (gethash "ca.crt" (or (gethash "data" existing) (core-object)))))
          (update-core-resource store "configmaps" namespace "kube-root-ca.crt"
           (lambda (object)
