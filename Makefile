@@ -22,7 +22,7 @@ NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
 NODE_PROTOCOL_LISP := src/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 
-.PHONY: all help containerd-bundle generate-protocol test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb test-core-api check smoke smoke-two-node run kubeconfig native clean
+.PHONY: all help containerd-bundle generate-protocol test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api check smoke smoke-two-node run kubeconfig native clean
 
 all: native
 
@@ -43,6 +43,7 @@ help:
 	@echo "  test-whistler-cni Test the chained Whistler TC/eBPF CNI plugin"
 	@echo "  test-service-lb Load/attach/pin the ClusterIP socket LB on a real kernel (sudo)"
 	@echo "  smoke-service-lb End-to-end: redirect an unrouted ClusterIP connect to backends (sudo)"
+	@echo "  smoke-service-lb-agent End-to-end agent path: Service+EndpointSlice -> redirect (sudo)"
 	@echo "  check         Syntax-check scripts and run tests"
 	@echo "  smoke         Run kubectl -> gr8s -> containerd end to end"
 	@echo "  smoke-two-node Test real containerd Pods across two isolated agent nodes"
@@ -94,6 +95,11 @@ test-service-lb:
 # in-kernel to a backend, and repeated connects spread across backends.
 smoke-service-lb:
 	sudo $(SBCL) --noinform --non-interactive --load scripts/smoke-service-lb.lisp
+
+# Real-root end-to-end of the AGENT path: converge a Service + EndpointSlice
+# into the LB maps and redirect an unrouted ClusterIP connect to backends.
+smoke-service-lb-agent:
+	sudo $(SBCL) --noinform --non-interactive --load scripts/smoke-service-lb-agent.lisp
 
 test-endpoint-policy-kernel: build/gr8s-endpoint-test.json
 	python3 scripts/test-endpoint-policy.py $< --kernel
