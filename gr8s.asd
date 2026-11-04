@@ -18,6 +18,7 @@
                "sb-posix" "trivial-utf-8" "usocket" "whistler/loader")
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
+               (:static-file "schema/crd-v1.json")
                (:module "src"
                 :serial t
                 :components ((:file "package")

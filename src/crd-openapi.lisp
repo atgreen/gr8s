@@ -8,6 +8,14 @@
 
 (in-package #:gr8s)
 
+(defparameter *crd-definition-schema*
+  (gethash "schema" (com.inuoe.jzon:parse (asdf:system-relative-pathname :gr8s "schema/crd-v1.json"))))
+
+(defun crd-openapi-builtin-definition ()
+  "Describe the actual JSON CRD API using its supported request schema."
+  (core-object "spec" (core-object "group" "apiextensions.k8s.io" "scope" "Cluster"
+                   "names" (core-object "plural" "customresourcedefinitions" "kind" "CustomResourceDefinition" "listKind" "CustomResourceDefinitionList"))))
+
 (defun crd-openapi-definition-name (definition version &optional list)
   "Return a group-qualified schema identity for one actual custom kind."
   (let* ((spec (gethash "spec" definition)) (names (gethash "names" spec)))
@@ -41,14 +49,19 @@
     (labels ((operation (action response &optional body)
                (let ((value (core-object "operationId" (format nil "~A_~A_~A_~A" action group version-name (gethash "kind" names))
                                          "x-kubernetes-action" action
-                                         "x-kubernetes-group-version-kind" (vector (core-object "group" group "version" version-name "kind" (gethash "kind" names)))
+                                         "x-kubernetes-group-version-kind" (core-object "group" group "version" version-name "kind" (gethash "kind" names))
                                          "responses" (core-object "200" (if v3
                                                                              (core-object "description" "Success" "content" (core-object "application/json" (core-object "schema" (reference-schema response))))
                                                                              (core-object "description" "Success" "schema" (reference-schema response)))))))
                  (when body
+                   (setf (gethash "parameters" value)
+                         (vector (if v3
+                                     (core-object "name" "fieldValidation" "in" "query" "schema" (core-object "type" "string" "enum" #("Strict" "Warn" "Ignore")))
+                                     (core-object "name" "fieldValidation" "in" "query" "type" "string" "enum" #("Strict" "Warn" "Ignore")))))
                    (if v3
                        (setf (gethash "requestBody" value) (core-object "content" (core-object "application/json" (core-object "schema" (reference-schema schema-name)))))
-                       (setf (gethash "parameters" value) (vector (core-object "name" "body" "in" "body" "schema" (reference-schema schema-name))))))
+                       (setf (gethash "parameters" value) (concatenate 'vector (gethash "parameters" value)
+                                                               (vector (core-object "name" "body" "in" "body" "schema" (reference-schema schema-name)))))))
                  value))
              (parameters (name-p scope-p)
                (coerce (loop for name in (append (when scope-p '("namespace")) (when name-p '("name")))
@@ -56,11 +69,11 @@
                                          (core-object "name" name "in" "path" "required" t "type" "string"))) 'vector)))
       (setf (gethash collection paths)
             (core-object "parameters" (parameters nil namespaced) "get" (operation "list" list-name)
-                         "post" (operation "create" schema-name t) "delete" (operation "deletecollection" schema-name))
+                         "post" (operation "create" schema-name t) "delete" (operation "deletecollection" "io.k8s.apimachinery.pkg.apis.meta.v1.Status"))
             (gethash item paths)
             (core-object "parameters" (parameters t namespaced) "get" (operation "get" schema-name)
                          "put" (operation "update" schema-name t) "patch" (operation "patch" schema-name t)
-                         "delete" (operation "delete" schema-name)))
+                         "delete" (operation "delete" "io.k8s.apimachinery.pkg.apis.meta.v1.Status")))
       (when namespaced
         (setf (gethash (format nil "/apis/~A/~A/~A" group version-name (gethash "plural" names)) paths)
               (core-object "get" (operation "listAllNamespaces" list-name))))
@@ -76,11 +89,27 @@
          (document (if v3 (core-object "openapi" "3.0.0" "info" (core-object "title" "gr8s custom APIs" "version" "v1")
                                       "paths" (core-object) "components" (core-object "schemas" (openapi-definitions)))
                        (openapi-document))))
+    (let* ((definitions (if v3 (gethash "schemas" (gethash "components" document)) (gethash "definitions" document)))
+           (metadata (gethash "properties" (gethash "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta" definitions))))
+      (setf (gethash "finalizers" metadata) (core-object "type" "array" "items" (core-object "type" "string"))
+            (gethash "ownerReferences" metadata) (core-object "type" "array" "items" (core-object "type" "object" "properties"
+                 (core-object "apiVersion" (core-object "type" "string") "kind" (core-object "type" "string")
+                              "name" (core-object "type" "string") "uid" (core-object "type" "string")
+                              "controller" (core-object "type" "boolean") "blockOwnerDeletion" (core-object "type" "boolean"))))
+            (gethash "io.k8s.apimachinery.pkg.apis.meta.v1.Status" definitions)
+            (core-object "type" "object" "properties" (core-object "apiVersion" (core-object "type" "string") "kind" (core-object "type" "string")
+                          "status" (core-object "type" "string") "message" (core-object "type" "string") "reason" (core-object "type" "string")
+                          "code" (core-object "type" "integer")))))
+    (when (or (null group) (equal group "apiextensions.k8s.io"))
+      (crd-add-openapi-version document (crd-openapi-builtin-definition)
+                               (core-object "name" "v1" "schema" (core-object "openAPIV3Schema" *crd-definition-schema*)) v3))
     (dolist (definition (list-core-resources store "customresourcedefinitions"))
       (when (or (null group) (equal group (gethash "group" (gethash "spec" definition))))
         (loop for entry across (gethash "versions" (gethash "spec" definition))
               when (and (gethash "served" entry) (or (null version) (equal version (gethash "name" entry))))
                 do (crd-add-openapi-version document definition entry v3))))
+    (when (or (null group) (equal group "apiextensions.k8s.io"))
+      (remhash "delete" (gethash "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" (gethash "paths" document))))
     document))
 
 (defun crd-openapi-discovery-response (store)

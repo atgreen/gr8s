@@ -953,7 +953,8 @@
 (defun handle-http-request (store runtime reconciler request)
   (handler-case
       (let ((path (hunchentoot:script-name request))
-            (method (hunchentoot:request-method request)))
+            (method (hunchentoot:request-method request))
+            (*crd-field-validation* (crd-request-field-validation)))
         (cond
           ((string= path "/metrics")
            (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")

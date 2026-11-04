@@ -30,7 +30,8 @@
     (not (null value))))
 
 (defun core-resource-request-object (expected-kind)
-  (when (and *crd-view-definition* (not (equal expected-kind "DeleteOptions"))) (return-from core-resource-request-object (crd-read-json)))
+  (when (or (equal expected-kind "CustomResourceDefinition")
+            (and *crd-view-definition* (not (equal expected-kind "DeleteOptions")))) (return-from core-resource-request-object (crd-read-json)))
   (let ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;)))))
     (cond
       ((string= content-type "application/vnd.kubernetes.protobuf")
@@ -243,7 +244,9 @@
     (unless (member content-type '("application/merge-patch+json" "application/strategic-merge-patch+json"
                                    "application/json-patch+json") :test #'string=)
       (core-resource-error 415 "UnsupportedMediaType" "Supported patch types are JSON merge, strategic merge, and JSON patch"))
-    (setf patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t) :max-string-length (* 2 1024 1024)))
+    (setf patch (if (or (equal resource "customresourcedefinitions") (custom-resource-key-p resource))
+                    (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))
+                    (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t) :max-string-length (* 2 1024 1024))))
     (json-response
      (update-core-resource
       store resource namespace name

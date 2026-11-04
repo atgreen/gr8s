@@ -36,12 +36,12 @@
      (let ((server (start-server :address "127.0.0.1" :port 18094 :store ,store :runtime (make-fake-runtime))))
        (unwind-protect (progn ,@body) (stop-server server)))))
 
-(defun crd-api-request (expected path &key (method :get) object content-type parameters)
+(defun crd-api-request (expected path &key (method :get) object text content-type parameters)
   "Issue a real HTTP request and assert its actual Kubernetes response code."
   (multiple-value-bind (body status)
       (drakma:http-request (concatenate 'string "http://127.0.0.1:18094" path) :method method
                           :content-type (or content-type "application/json") :parameters parameters
-                          :content (when object (com.inuoe.jzon:stringify object)))
+                          :content (or text (when object (com.inuoe.jzon:stringify object))))
     (is (= expected status) "~A returned ~A: ~A" path status body)
     (com.inuoe.jzon:parse body)))
 
@@ -146,5 +146,25 @@
       (dolist (current (list store (open-store path)))
         (is (= 1 (length (gr8s::list-core-resources current resource "alpha"))))
         (is (null (gethash "deletionTimestamp" (gethash "metadata" (gr8s::get-core-resource current "customresourcedefinitions" nil "widgets.widgets.example.test")))))))))
+
+(test custom-strict-field-validation-is-executable-and-published
+  (with-crd-api (store path)
+    (values store path)
+    (crd-api-request 201 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post :object (crd-fixture))
+    (let* ((collection "/apis/widgets.example.test/v1/namespaces/alpha/widgets")
+           (input (crd-instance)))
+      (setf (gethash "unexpected" (gethash "spec" input)) t)
+      (crd-api-request 400 collection :method :post :object input :parameters '(("fieldValidation" . "Strict")))
+      (crd-api-request 201 collection :method :post :object input :parameters '(("fieldValidation" . "Warn")))
+      (crd-api-request 400 (concatenate 'string collection "/one") :method :patch :content-type "application/merge-patch+json"
+                       :object (gr8s::core-object "metadata" (gr8s::core-object "unknown" t)) :parameters '(("fieldValidation" . "Strict")))
+      (crd-api-request 400 collection :method :post :parameters '(("fieldValidation" . "Strict"))
+                       :text "{\"apiVersion\":\"widgets.example.test/v1\",\"kind\":\"Widget\",\"metadata\":{\"name\":\"duplicate\"},\"spec\":{\"count\":2,\"count\":3}}")
+      (let* ((document (crd-api-request 200 "/openapi/v3/apis/widgets.example.test/v1"))
+             (operation (gethash "post" (gethash "/apis/widgets.example.test/v1/namespaces/{namespace}/widgets" (gethash "paths" document)))))
+        (is (hash-table-p (gethash "x-kubernetes-group-version-kind" operation)))
+        (is (find "fieldValidation" (gethash "parameters" operation) :test #'equal :key (lambda (entry) (gethash "name" entry))))))
+    (let ((document (crd-api-request 200 "/openapi/v3/apis/apiextensions.k8s.io/v1")))
+      (is (gethash "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" (gethash "paths" document))))))
 
 (in-suite gr8s)

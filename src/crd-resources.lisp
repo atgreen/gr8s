@@ -9,6 +9,7 @@
 (in-package #:gr8s)
 
 (defvar *crd-request-version* nil)
+(defvar *crd-field-validation* nil)
 (defvar *crd-view-definition* nil)
 (defvar *crd-status-write* nil)
 (defparameter +crd-api-version+ "apiextensions.k8s.io/v1")
@@ -72,6 +73,20 @@
 
 (defun validate-crd-metadata (metadata namespace name)
   "Apply common metadata checks while supporting genuine durable finalizers."
+  (let ((unknown nil))
+    (maphash (lambda (key value)
+               (declare (ignore value))
+               (unless (member key '("name" "generateName" "namespace" "uid" "resourceVersion" "generation"
+                                      "creationTimestamp" "deletionTimestamp" "deletionGracePeriodSeconds" "labels" "annotations"
+                                      "ownerReferences" "finalizers" "managedFields" "selfLink" "clusterName") :test #'equal)
+                 (push (concatenate 'string "metadata." key) unknown)
+                 (remhash key metadata))) metadata)
+    (when unknown (crd-report-pruned-fields unknown)))
+  (dolist (field '("labels" "annotations" "finalizers" "ownerReferences"))
+    (when (eq 'null (gethash field metadata)) (remhash field metadata)))
+  (dolist (field '("labels" "annotations"))
+    (when (and (nth-value 1 (gethash field metadata)) (not (hash-table-p (gethash field metadata))))
+      (crd-schema-error "metadata" "~A requires an object" field)))
   (let ((copy (copy-core-object metadata)) (finalizers (gethash "finalizers" metadata)))
     (remhash "finalizers" copy)
     (validate-core-metadata copy namespace name)
@@ -208,7 +223,9 @@
           (dolist (field '("resourceVersion" "uid"))
             (when (nth-value 1 (gethash field metadata)) (setf (gethash field copy-meta) (gethash field metadata))))
           (if (and (nth-value 1 (gethash "status" object)) status-schema)
-              (let ((status (crd-prepare-value (gethash "status" object) status-schema)))
+              (let* ((*crd-track-pruning* t) (*crd-pruned-fields* nil)
+                     (status (crd-prepare-value (gethash "status" object) status-schema nil 0 "status")))
+                (when *crd-pruned-fields* (crd-report-pruned-fields *crd-pruned-fields*))
                 (crd-validate-value status status-schema "status")
                 (setf (gethash "status" copy) status))
               (remhash "status" copy))
@@ -217,7 +234,9 @@
           (when status-p
             (if (and existing (nth-value 1 (gethash "status" existing)))
                 (setf (gethash "status" object) (copy-core-object (gethash "status" existing))) (remhash "status" object)))
-          (setf object (crd-prepare-value object (crd-schema version) t))
+          (let ((*crd-track-pruning* t) (*crd-pruned-fields* nil))
+            (setf object (crd-prepare-value object (crd-schema version) t))
+            (when *crd-pruned-fields* (crd-report-pruned-fields *crd-pruned-fields*)))
           (crd-validate-value object (crd-schema version) "resource")))
     (setf metadata (gethash "metadata" object))
     (setf (gethash "apiVersion" object) (format nil "~A/~A" (gethash "group" spec) (gethash "name" (crd-storage-version definition))))

@@ -10,6 +10,20 @@
 
 (defvar *crd-route* nil)
 
+(defun crd-request-field-validation ()
+  "Validate the actual supported field-validation query option."
+  (let ((mode (hunchentoot:parameter "fieldValidation")))
+    (unless (member mode '(nil "" "Strict" "Warn" "Ignore") :test #'equal)
+      (core-resource-error 400 "BadRequest" "fieldValidation must be Strict, Warn or Ignore"))
+    (if (member mode '(nil "") :test #'equal) "Warn" mode)))
+
+(defun crd-report-pruned-fields (fields)
+  "Reject strict unknown fields or emit a real warning while retaining pruning."
+  (let ((message (format nil "unknown fields: ~{~A~^, ~}" (reverse fields))))
+    (cond ((equal *crd-field-validation* "Strict") (core-resource-error 400 "BadRequest" "~A" message))
+          ((equal *crd-field-validation* "Warn")
+           (setf (hunchentoot:header-out :warning) (format nil "299 - ~A" (com.inuoe.jzon:stringify (subseq message 0 (min 1000 (length message))))))))))
+
 (defun crd-api-group (group versions)
   "Describe actual served versions with a deterministic preferred version."
   (let ((values (sort (copy-list versions) #'string>)))
@@ -82,7 +96,9 @@
 (defun crd-discovery-resources (store group version)
   "Return collections and real status subresources for one served group/version."
   (if (equal group "apiextensions.k8s.io")
-      (stored-resource-discovery +crd-api-version+)
+      (let ((resources (stored-resource-discovery +crd-api-version+)))
+        (loop for entry across resources do (setf (gethash "shortNames" entry) #("crd" "crds")))
+        resources)
       (with-store-lock (store)
         (coerce (loop for key being the hash-keys of (pod-store-resources store) using (hash-value definition)
                       for spec = (gethash "spec" definition)
@@ -99,11 +115,60 @@
                                                                      "namespaced" (equal "Namespaced" (gethash "scope" spec)) "kind" (gethash "kind" names)
                                                                      "verbs" #("get" "patch" "update"))))))) 'vector))))
 
+(defun crd-json-duplicate-fields (text)
+  "Find repeated decoded keys without conflating equal keys in different objects."
+  (let ((position 0) (size (length text)) (duplicates nil))
+    (labels ((whitespace () (loop while (and (< position size) (find (char text position) '(#\Space #\Tab #\Return #\Newline))) do (incf position)))
+             (string-end ()
+               (incf position)
+               (loop while (< position size)
+                     for character = (char text position)
+                     do (incf position)
+                        (cond ((char= character #\\) (incf position)) ((char= character #\") (return)))))
+             (value (path)
+               (whitespace)
+               (case (char text position)
+                 (#\{ (incf position) (whitespace)
+                  (let ((keys (make-hash-table :test #'equal)))
+                    (unless (char= #\} (char text position))
+                      (loop
+                        (whitespace)
+                        (let ((start position))
+                          (string-end)
+                          (let* ((key (com.inuoe.jzon:parse (subseq text start position)))
+                                 (child-path (concatenate 'string path "." key)))
+                            (when (gethash key keys) (push child-path duplicates))
+                            (setf (gethash key keys) t)
+                            (whitespace) (incf position) (value child-path)))
+                        (whitespace)
+                        (unless (char= #\, (char text position)) (return)) (incf position)))
+                    (incf position)))
+                 (#\[ (incf position) (whitespace)
+                  (unless (char= #\] (char text position))
+                    (loop (value (concatenate 'string path "[]")) (whitespace)
+                          (unless (char= #\, (char text position)) (return)) (incf position)))
+                  (incf position))
+                 (#\" (string-end))
+                 (t (loop while (and (< position size) (not (find (char text position) '(#\Space #\Tab #\Return #\Newline #\, #\} #\])))) do (incf position))))))
+      (value "resource"))
+    duplicates))
+
+(defun crd-parse-json-content (text)
+  "Parse bounded JSON and enforce real Strict/Warn duplicate-field behavior."
+  (let ((object (com.inuoe.jzon:parse text :max-string-length (* 2 1024 1024))))
+    (when (member *crd-field-validation* '("Strict" "Warn") :test #'equal)
+      (let ((duplicates (crd-json-duplicate-fields text)))
+        (when duplicates
+          (let ((message (format nil "duplicate fields: ~{~A~^, ~}" (reverse duplicates))))
+            (if (equal *crd-field-validation* "Strict") (core-resource-error 400 "BadRequest" "~A" message)
+                (setf (hunchentoot:header-out :warning) (format nil "299 - ~A" (com.inuoe.jzon:stringify message))))))))
+    object))
+
 (defun crd-read-json ()
   "Reject protobuf for unstructured custom objects; read actual JSON requests."
   (let ((type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;)))))
     (unless (member type '("" "application/json") :test #'equal) (core-resource-error 415 "UnsupportedMediaType" "Custom resources require JSON"))
-    (require-object (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t) :max-string-length (* 2 1024 1024)) "request")))
+    (require-object (crd-parse-json-content (hunchentoot:raw-post-data :force-text t)) "request")))
 
 (defun dispatch-crd-status (store resource namespace name method)
   "Serve status writes without modifying spec or bypassing optimistic metadata checks."
@@ -113,7 +178,7 @@
            (let* ((view (crd-api-view existing))
                   (type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
                   (input (if (eq method :put) (crd-read-json)
-                             (let ((patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t))))
+                             (let ((patch (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))))
                                (cond ((equal type "application/merge-patch+json") (merge-json-object view patch))
                                      ((equal type "application/json-patch+json") (apply-core-json-patch view patch))
                                      (t (core-resource-error 415 "UnsupportedMediaType" "Custom status supports JSON/merge patches"))))))

@@ -8,6 +8,9 @@
 
 (in-package #:gr8s)
 
+(defvar *crd-track-pruning* nil)
+(defvar *crd-pruned-fields* nil)
+
 (defun crd-json-equal-p (left right)
   "Compare JSON values independently of object insertion order."
   (cond ((and (hash-table-p left) (hash-table-p right))
@@ -208,7 +211,7 @@
     (crd-schema-error path "matches forbidden not schema"))
   value)
 
-(defun crd-prepare-value (input schema &optional (root nil) (depth 0))
+(defun crd-prepare-value (input schema &optional (root nil) (depth 0) (path "resource"))
   "Copy INPUT, apply recursive defaults and prune fields outside structural schemas."
   (when (> depth 64) (crd-schema-error "resource" "resource nesting exceeds 64"))
   (let ((value (copy-core-object input)))
@@ -222,14 +225,15 @@
                     (let ((sub (or (and properties (gethash key properties)) (and (hash-table-p additional) additional))))
                       (cond ((and preserve (member key '("apiVersion" "kind" "metadata") :test #'equal)) nil)
                             ((and sub (eq child 'null) (not (gethash "nullable" sub)) (not (nth-value 1 (gethash "default" sub)))) (remhash key value))
-                            (sub (setf (gethash key value) (crd-prepare-value child sub nil (1+ depth))))
+                            (sub (setf (gethash key value) (crd-prepare-value child sub nil (1+ depth) (format nil "~A.~A" path key))))
                             ((or (eq t additional) (gethash "x-kubernetes-preserve-unknown-fields" schema)) nil)
-                            (t (remhash key value))))) value)
+                            (t (when *crd-track-pruning* (push (format nil "~A.~A" path key) *crd-pruned-fields*))
+                               (remhash key value))))) value)
          (when properties
            (maphash (lambda (key sub)
                       (when (and (not (nth-value 1 (gethash key value))) (nth-value 1 (gethash "default" sub)))
-                        (setf (gethash key value) (crd-prepare-value (gethash "default" sub) sub nil (1+ depth))))) properties))))
+                        (setf (gethash key value) (crd-prepare-value (gethash "default" sub) sub nil (1+ depth) (format nil "~A.~A" path key))))) properties))))
       ((crd-array-p value)
        (when (gethash "items" schema)
-         (setf value (map 'vector (lambda (child) (crd-prepare-value child (gethash "items" schema) nil (1+ depth))) value)))))
+         (setf value (map 'vector (lambda (child) (crd-prepare-value child (gethash "items" schema) nil (1+ depth) (concatenate 'string path "[]"))) value)))))
     value))
