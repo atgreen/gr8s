@@ -71,8 +71,9 @@
   "reportDirectory": "/var/tmp/gr8s-podtemplates.78cz3j_o",
   "vmSSHPort": 22293,
   "verifiedLocalArchiveSHA256": "0bd97870ba11a9633408784e6478fdb0b04b0b4472b877db274842095a6b00d8",
-  "localEvidenceDirectory": "/tmp/gr8s-crd-upstream-after",
+  "localEvidenceDirectory": "/home/green/orca/workspaces/gr8s/tang/build/conformance/2026-11-04-crd-upstream-78cz3j_o",
   "beforeEvidence": "docs/custom-resources-upstream-before-2026-11-04.json",
   "correction": "Actual pinned typed CRD protobuf decoding; unchanged upstream focus/assertions and strict validation.",
-  "scope": "Supplemental five-case focused evidence, not certification; seven suite hook entries excluded from actual case counts."
+  "scope": "Supplemental five-case focused evidence, not certification; seven suite hook entries excluded from actual case counts.",
+  "independentReview": "Verified all eight non-secret artifact SHA256 values and five actual passing CRD JUnit cases from the official archive; native exit 0 and no owned shims."
 }

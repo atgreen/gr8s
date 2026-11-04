@@ -41,13 +41,12 @@ after restart; failed durable writes do not
 publish route or resource deletion. Recreating a definition is possible only
 after its previous instances have been removed.
 
-This workstream remains under development. CEL, conversion webhooks, scale
+CEL, conversion webhooks, scale
 subresources, additional printer columns, custom field selectors, server-side
 apply, protobuf requests for unstructured custom objects, and protobuf OpenAPI
 v2 wire negotiation are not implemented and are
 not advertised as functioning features. Unsupported executable schema/conversion
-features are rejected. Further structural edge cases and integration are still being
-tested before integration review. The native kubectl smoke passes strict creation,
+features are rejected. The native kubectl smoke passes strict creation,
 real streamed watches, version identity, restart persistence and finalizer
 cleanup without disabling validation. Run it against a dumped executable with:
 
