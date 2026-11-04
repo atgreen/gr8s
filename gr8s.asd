@@ -121,6 +121,7 @@
                              (:file "container-lifecycle-test")
                              (:file "container-probe-test")
                              (:file "container-probe-manager-test")
+                             (:file "container-probe-events-test")
                              (:file "podman-test")
                              (:file "main-test")
                              (:file "http-test")
