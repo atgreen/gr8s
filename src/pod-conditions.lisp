@@ -111,7 +111,7 @@ list as 'nothing is running': Sonobuoy's worker takes it to mean all containers 
                        (push result conditions))))
             (condition "PodScheduled" (if scheduled "True" "False")
                        (unless scheduled "Unschedulable")
-                       (unless scheduled "Waiting for an available matching node"))
+                       (unless scheduled (pod-unschedulable-message store pod)))
             (let ((initialized (and scheduled (pod-initialization-complete-p pod status)))
                   (incomplete (loop for spec across (pod-init-containers pod)
                                     unless (init-container-succeeded-p

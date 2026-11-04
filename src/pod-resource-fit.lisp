@@ -140,6 +140,7 @@ resource; an extended resource it does not advertise has zero capacity."
   (and (node-record-ready-p node)
        (pod-node-selector-matches-p pod node)
        (pod-node-affinity-matches-p pod node)
+       (pod-host-ports-free-p store pod node)
        (pod-node-storage-compatible-p store pod node)))
 
 (defun pod-more-important-p (left right)

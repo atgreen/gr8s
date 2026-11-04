@@ -22,6 +22,7 @@
   "Name RESOURCE's pinned structural definition, with SUFFIX such as Status, in its API group."
   (format nil "io.k8s.api.~A.v1.~A~A"
           (cond ((batch-resource-p resource) "batch")
+                ((budget-resource-p resource) "policy")
                 ((equal resource "replicationcontrollers") "core")
                 (t "apps"))
           (core-resource-kind resource) suffix))

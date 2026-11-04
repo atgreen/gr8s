@@ -36,7 +36,7 @@
                                                              "kind" kind "verbs" #("get" "patch" "update"))))) 'vector))))))
 
 (defun workload-subresource-route (path)
-  "Resolve valid namespaced workload scale and status endpoints and Job status endpoints."
+  "Resolve valid namespaced workload scale and status endpoints and Job and budget status endpoints."
   (let ((parts (uiop:split-string path :separator '(#\/))))
     (cond
       ((and (= 8 (length parts)) (equal (subseq parts 0 4) '("" "api" "v1" "namespaces"))
@@ -50,7 +50,9 @@
                 (and (equal (subseq parts 0 5) '("" "apis" "apps" "v1" "namespaces"))
                      (equal (seventh parts) "daemonsets") (equal (ninth parts) "status"))
                 (and (equal (subseq parts 0 5) '("" "apis" "batch" "v1" "namespaces"))
-                     (batch-resource-p (seventh parts)) (equal (ninth parts) "status"))))
+                     (batch-resource-p (seventh parts)) (equal (ninth parts) "status"))
+                (and (equal (subseq parts 0 5) '("" "apis" "policy" "v1" "namespaces"))
+                     (budget-resource-p (seventh parts)) (equal (ninth parts) "status"))))
        (list (seventh parts) (sixth parts) (eighth parts) (ninth parts))))))
 
 (defun workload-scale-object (object)
@@ -79,6 +81,7 @@
                  (equal (core-resource-api-version resource) (gethash "apiVersion" input (core-resource-api-version resource))))
       (core-resource-error 400 "BadRequest" "Incorrect workload status kind or API version"))
     (validate-template-shape status (template-schema (workload-schema-name resource "Status")) "status")
+    (when (budget-resource-p resource) (validate-disruption-status status))
     (with-store-lock (store)
       (let* ((existing (get-core-resource-unlocked store resource namespace name)) (emeta (workload-metadata existing))
              (copy (copy-core-object existing)) (resources (copy-core-resource-index store))

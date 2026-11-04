@@ -227,3 +227,36 @@
       (gr8s::update-core-resource store "configmaps" "alpha" "cfg"
         (lambda (current) (setf (gethash "resourceVersion" (gethash "metadata" current)) "1") current)))))
 
+
+(test environment-reads-a-containers-resources-and-node-allocatable
+  (let* ((resource (lambda (name resource &rest more)
+                     (gr8s::core-object "name" name "valueFrom"
+                                        (gr8s::core-object "resourceFieldRef" (apply #'gr8s::core-object "resource" resource more)))))
+         (pod (parse-pod (gr8s::core-object
+                          "apiVersion" "v1" "kind" "Pod" "metadata" (gr8s::core-object "name" "env" "namespace" "default")
+                          "spec" (gr8s::core-object
+                                  "containers"
+                                  (vector
+                                   (gr8s::core-object
+                                    "name" "main" "image" "busybox"
+                                    "resources" (gr8s::core-object "limits" (gr8s::core-object "cpu" "1250m"))
+                                    "env" (vector (funcall resource "OWN" "limits.cpu")
+                                                  (funcall resource "MILLI" "limits.cpu" "divisor" "1m")
+                                                  (funcall resource "UNSET" "limits.memory")
+                                                  (funcall resource "OTHER" "requests.cpu" "containerName" "side")))
+                                   (gr8s::core-object
+                                    "name" "side" "image" "busybox"
+                                    "resources" (gr8s::core-object "requests" (gr8s::core-object "cpu" "2"))))))))
+         (environment (gr8s::containerd-pod-environment nil pod (aref (gr8s::pod-containers pod) 0) "sandbox")))
+    (flet ((value (name) (cdr (assoc name environment :test #'equal))))
+      (is (equal "2" (value "OWN")))
+      (is (equal "1250" (value "MILLI")))
+      (is (equal (write-to-string (gr8s::node-allocatable-memory)) (value "UNSET")))
+      (is (equal "2" (value "OTHER"))))
+    (signals gr8s::kubernetes-error
+      (parse-pod (gr8s::core-object
+                  "apiVersion" "v1" "kind" "Pod" "metadata" (gr8s::core-object "name" "env" "namespace" "default")
+                  "spec" (gr8s::core-object
+                          "containers"
+                          (vector (gr8s::core-object "name" "main" "image" "busybox"
+                                                     "env" (vector (funcall resource "BAD" "limits.ephemeral-storage"))))))))))

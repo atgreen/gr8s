@@ -13,21 +13,23 @@
         (hunchentoot:content-type*) "application/json")
   (com.inuoe.jzon:stringify (crd-api-view (event-api-view object))))
 
-(defun status-response (status reason message code)
-  (json-response
-   (json-object "apiVersion" "v1"
-                "kind" "Status"
-                "status" status
-                "reason" reason
-                "message" message
-                "code" code)
-   code))
+(defun status-response (status reason message code &optional details)
+  "Answer a Kubernetes Status, with DETAILS such as the causes clients inspect when given."
+  (let ((object (json-object "apiVersion" "v1"
+                             "kind" "Status"
+                             "status" status
+                             "reason" reason
+                             "message" message
+                             "code" code)))
+    (when details (setf (gethash "details" object) details))
+    (json-response object code)))
 
 (defun kubernetes-error-response (error)
   (status-response "Failure"
                    (kubernetes-error-reason error)
                    (kubernetes-error-message error)
-                   (kubernetes-error-status-code error)))
+                   (kubernetes-error-status-code error)
+                   (kubernetes-error-details error)))
 
 (defun copy-json-object (object)
   (com.inuoe.jzon:parse (com.inuoe.jzon:stringify object)))
@@ -99,8 +101,8 @@
   (let ((groups (vector (json-object "name" "rbac.authorization.k8s.io"
                                     "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
-                       (event-api-group) (workload-api-group) (batch-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group)
-                       (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object))))
+                       (event-api-group) (workload-api-group) (batch-api-group) (budget-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group)
+                       (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group))))
     (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
@@ -239,6 +241,7 @@
      (json-object "serverRelativeURL" "/openapi/v3/apis/storage.k8s.io/v1?hash=gr8s-storage-v1")
      "apis/events.k8s.io/v1"
      (json-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1")
+     "apis/policy/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/policy/v1?hash=gr8s-policy-v1")
      "apis/node.k8s.io/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/node.k8s.io/v1?hash=gr8s-node-v1")
      "apis/scheduling.k8s.io/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/scheduling.k8s.io/v1?hash=gr8s-scheduling-v1")
      "apis/apps/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/apps/v1?hash=gr8s-apps-v1")))))
@@ -331,6 +334,7 @@
                     ((equal version "discovery.k8s.io/v1") (add-endpointslice-openapi-paths (core-object)))
                     ((equal version "events.k8s.io/v1") (add-event-openapi-paths (core-object) t))
                     ((equal version "apps/v1") (add-workload-openapi-paths (core-object)))
+                    ((equal version "policy/v1") (add-budget-openapi-paths (core-object)))
                     ((equal version "storage.k8s.io/v1") (add-storage-openapi-paths (core-object) version))
                     ((member version '("node.k8s.io/v1" "scheduling.k8s.io/v1") :test #'equal)
                      (add-policy-openapi-paths (core-object) version))
@@ -1090,7 +1094,7 @@ than wait for the next, which truncates any body that spans records in flight."
         (cond
           ((string= path "/metrics")
            (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
-           (runtime-network-metrics runtime))
+           (concatenate 'string (runtime-network-metrics runtime) (gateway-metrics-text)))
           ((string= path "/version") (version-response))
           ((string= path "/api") (api-versions-response))
           ((string= path "/apis") (api-groups-response store))
@@ -1118,9 +1122,14 @@ than wait for the next, which truncates any body that spans records in flight."
           ((string= path "/apis/events.k8s.io") (json-response (event-api-group)))
           ((string= path "/apis/events.k8s.io/v1") (event-discovery-response))
           ((string= path "/apis/rbac.authorization.k8s.io/v1") (rbac-resources-response))
+          ((string= path "/apis/gateway.networking.k8s.io") (json-response (gateway-api-group)))
+          ((string= path "/apis/gateway.networking.k8s.io/v1") (gateway-discovery-response))
           ((string= path "/apis/apps") (json-response (workload-api-group)))
           ((string= path "/apis/batch") (json-response (batch-api-group)))
           ((string= path "/apis/batch/v1") (batch-resources-response))
+          ((string= path "/apis/policy") (json-response (budget-api-group)))
+          ((string= path "/apis/policy/v1") (budget-resources-response))
+          ((string= path "/openapi/v3/apis/policy/v1") (openapi-v3-response "policy/v1"))
           ((string= path "/apis/apps/v1") (workload-resources-response))
           ((string= path "/openapi/v2") (json-response (crd-openapi-document store nil nil nil)))
           ((string= path "/openapi/v3") (crd-openapi-discovery-response store))
