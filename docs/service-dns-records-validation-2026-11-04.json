@@ -839,7 +839,52 @@
     "regression": "Actual shell plus UDP/TCP dig demonstrates unexpanded command falsely prints OK for NXDOMAIN; production expansion prints nothing for NXDOMAIN and OK for an actual authoritative A answer. Native Pod HTTP files prove command substitution and resolved environment expansion executed."
   },
   "remainingValidation": [
-    "Unchanged upstream DNS Services and ExternalName cases are running on sourcefe6e763; genuine command escaping and actual Pod HTTP proxy are included.",
-    "dnsPolicy None and custom Pod resolver configuration remain child podster-uqb.21.2; broad21 stays open."
+    "Both selected unchanged DNS assertions passed, but33y_tdhg failed cleanup with five owned shims. It is not a clean conformance result. Preserve artifacts/dirty guest until lifecycle diagnosis and owned-state capture complete.",
+    "Root/conformance_results own21.1.3 lifecycle/ack recovery; repeat unchanged cases with clean zero-shim cleanup after correction.",
+    "dnsPolicy None and custom Pod resolver configuration continue separately in21.2; broad21 stays open."
+  ],
+  "upstreamRuns": [
+    {
+      "sourceCommit": "fe6e763",
+      "nativeSHA256": "2b2cba63f454cd5ebee7461cea0565d1c337b32257141b74f85133a3e0f76b37",
+      "includesIndependentPodProxyCommit": "03552bf",
+      "localArtifacts": "build/conformance/2026-11-04-service-dns-records-upstream-33y_tdhg",
+      "guestReportDirectory": "/var/tmp/gr8s-podtemplates.33y_tdhg",
+      "reportSHA256": "76c1f457697a8023b78b74bcc231708be3bf7c14cf11536ab9e47dc322c4bd4a",
+      "verifiedArtifacts": {
+        "gr8s.log": "b00812d2c8e5af3b83d3175f16207017464deaa729d045037ae6fb778b8a1969",
+        "sonobuoy.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sonobuoy.stderr.log": "719a27b58f9c0a6d6f47523a25e2776dff0b71438762cb8b18b7c4c775336727",
+        "sonobuoy-results.tar.gz": "4a5c668213ef7146d16b7c59bb7767276b80201898c6199e6ec0657496621c8d",
+        "kube-sonobuoy.log": "9690bdf916b0a2d47dfcfe6990d35dc67538242e9bb94c678fc1acc92af8b38e",
+        "e2e.log": "c2a15adccaafb3b099a4114f092cd8f5c897d9799c94b427e77c37872b1a64e9",
+        "sonobuoy-worker.log": "ddf9a6d23c2d2a8679da55795d7262d551f64683feefa7129dea612b641ee34e",
+        "sonobuoy-results.txt": "a5fccba5a8a756421ad390e73bcd57bdffbcd4f996582044e9736ac9dfae67e1"
+      },
+      "actualSelectedJUnitCases": [
+        {
+          "name": "[It] [sig-network] DNS should provide DNS for ExternalName services [Conformance]",
+          "passed": true,
+          "seconds": "195.817257138"
+        },
+        {
+          "name": "[It] [sig-network] DNS should provide DNS for services [Conformance]",
+          "passed": true,
+          "seconds": "106.273052263"
+        }
+      ],
+      "suitePassed": true,
+      "cleanRun": false,
+      "nativeExitCode": 0,
+      "cleanupError": "Owned runtime deletion did not finish",
+      "ownedShimsRemaining": [
+        "containerd-shim /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/runtime/bin/containerd-shim-runc-v2 -namespace k8s.io -id 32300be5f5976462ba4616d75cab73e1b1a8961ebef53062fd95393eb1388fb5 -address /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/run/containerd.sock",
+        "containerd-shim /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/runtime/bin/containerd-shim-runc-v2 -namespace k8s.io -id 660f2c1ae9ef431478093f3c62d6578e61cca918a772b2a9faf22bbc24991811 -address /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/run/containerd.sock",
+        "containerd-shim /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/runtime/bin/containerd-shim-runc-v2 -namespace k8s.io -id cfb42fd2786698a3d3b38f7321f3a628d9970aab16079e95b92c89b0554b6e30 -address /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/run/containerd.sock",
+        "containerd-shim /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/runtime/bin/containerd-shim-runc-v2 -namespace k8s.io -id 15271de0d37a0c9a9faad213ba6e830c066d47334cbb6a8c92d1af20656bf157 -address /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/run/containerd.sock",
+        "containerd-shim /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/runtime/bin/containerd-shim-runc-v2 -namespace k8s.io -id cdf5492cd3bcebc608b7f5e53397bb11f9b9eee367c4152de8698b5c835d8602 -address /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/run/containerd.sock"
+      ],
+      "cleanupFailureIssue": "podster-uqb.21.1.3"
+    }
   ]
 }
