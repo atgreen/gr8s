@@ -100,7 +100,7 @@
                                     "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                        (event-api-group) (workload-api-group) (batch-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group)
-                       (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object))))
+                       (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group))))
     (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
@@ -1076,7 +1076,7 @@ than wait for the next, which truncates any body that spans records in flight."
         (cond
           ((string= path "/metrics")
            (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
-           (runtime-network-metrics runtime))
+           (concatenate 'string (runtime-network-metrics runtime) (gateway-metrics-text)))
           ((string= path "/version") (version-response))
           ((string= path "/api") (api-versions-response))
           ((string= path "/apis") (api-groups-response store))
@@ -1104,6 +1104,8 @@ than wait for the next, which truncates any body that spans records in flight."
           ((string= path "/apis/events.k8s.io") (json-response (event-api-group)))
           ((string= path "/apis/events.k8s.io/v1") (event-discovery-response))
           ((string= path "/apis/rbac.authorization.k8s.io/v1") (rbac-resources-response))
+          ((string= path "/apis/gateway.networking.k8s.io") (json-response (gateway-api-group)))
+          ((string= path "/apis/gateway.networking.k8s.io/v1") (gateway-discovery-response))
           ((string= path "/apis/apps") (json-response (workload-api-group)))
           ((string= path "/apis/batch") (json-response (batch-api-group)))
           ((string= path "/apis/batch/v1") (batch-resources-response))
