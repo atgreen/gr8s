@@ -1,0 +1,137 @@
+{
+  "date": "2026-11-04",
+  "scope": "Native Deployment and ReplicaSet controllers with actual containerd Pods, rollout bounds, durable recovery and physical deletion",
+  "isFullConformanceRun": false,
+  "isCertificationResult": false,
+  "runs": [
+    {
+      "sourceCommit": "c76f41d",
+      "nativeSHA256": "0ed0c1e1ff5ca2f5769f870e9f83e9f5c2166119d2fd0535b9c51deb7c51d8d3",
+      "guestRunDirectory": "/var/tmp/gr8s-workloads.ckc3flew",
+      "localArtifacts": "build/conformance/2026-11-04-workloads-ckc3flew",
+      "passed": false,
+      "scenarios": {
+        "replicaSetScaleReplacementDeletion": {
+          "passed": true,
+          "initialIdentities": {
+            "BAF048AB-277F-4452-8E9F-0CA4C644E1EB": "containerd://d80bc121e46ffae2d89ca9474bcf22914063569ab5f19a623d3828aa8061b6e3",
+            "C137357F-D164-4F98-A601-9AC1D0345A46": "containerd://5e76976c55c5c473c1f0a6685c3f852f143ea4195bb707c19ce2692e0f9b4e5c"
+          },
+          "initialHostPids": [
+            88040,
+            88253
+          ],
+          "actualOldProcessesGone": true
+        }
+      },
+      "error": "AssertionError((404, {'apiVersion': 'v1', 'kind': 'Status', 'status': 'Failure', 'reason': 'NotFound', 'message': 'Pod workloads-36a68e64/rolling-c161941978-ggctx was not found', 'code': 404}))",
+      "cleanup": {
+        "nativeExitCodes": [
+          0
+        ],
+        "ownedShimsRemaining": [],
+        "cleanupError": null
+      },
+      "artifactSHA256": {
+        "gr8s.log": "9baf8c44a0e769b9e4e790897c42b2db194ce6dd4221d5e5c4763f6285075686",
+        "BAF048AB-277F-4452-8E9F-0CA4C644E1EB-main.log": "b710fd21eeffdd1eda24e0676aa456453fe9e197ca3e2f2df1a9d51501da8e93",
+        "C137357F-D164-4F98-A601-9AC1D0345A46-main.log": "2dee90d914a62000970bb25c9b8deebd403019d6be34cc939184267296380757",
+        "5F875082-7852-4846-968B-5B491BF9F1A0-main.log": "e97ba50f9b891b70bdbbcbc1dc417e709c38189dd76fa23b3eecb3972fc9d3ca",
+        "03972147-3037-4564-87F9-493F4C46DA5A-main.log": "2e33a6d578a10770bb9515264d682d217a4583024c25e7cb07a67f58c0343671",
+        "1E927FEE-BD91-41B1-87A8-94FEFD291B19-main.log": "1acc43b10836430cd61cf5a3a77eb6e267e52bc61cf8f0b2a5e8de523cc80c38",
+        "06D9A0FC-AC7D-42B7-8028-1784B43D1838-main.log": "a799359441603b600ca6c4f359a8a8870a248b184a1c9ca3de5021c2c5b08520",
+        "0F77A469-9FDD-479B-86A9-50079BE542B5-main.log": "012bc756cc52db5f59ee85ddfb3430b629707f9f4634f8b98b3899360810807b",
+        "report.json": "5e43440f26b5d92c0828adb139d295618b325996bf0b2c82fa554deb1779e8ae"
+      }
+    },
+    {
+      "sourceCommit": "f858ff0",
+      "nativeSHA256": "255b7360303f669a3699dad446f9ea3bea23b94d651eec993232e7225ece0203",
+      "guestRunDirectory": "/var/tmp/gr8s-workloads.qupwxhp9",
+      "localArtifacts": "build/conformance/2026-11-04-workloads-qupwxhp9",
+      "passed": true,
+      "scenarios": {
+        "replicaSetScaleReplacementDeletion": {
+          "passed": true,
+          "initialIdentities": {
+            "F17AE922-47A5-4CD0-8C6B-036C0117CD42": "containerd://eb244136781a51d0bdde4987527cf4e9f2fae579ef325fb4b3301206d660a8c3",
+            "363AA6A3-357F-4BC9-85BD-9533EC889AF6": "containerd://f80d46260319764feadf4987ac27a194c3b7a130f1344a13344d08866b8f9018"
+          },
+          "initialHostPids": [
+            91275,
+            91640
+          ],
+          "actualOldProcessesGone": true
+        },
+        "rollingUpdate": {
+          "passed": true,
+          "before": {
+            "C4CF6410-480E-4A54-AB82-2B3213F8D5CC": "containerd://0c4ce2bb69c9ecbe5c0cb3e53eeaf989d63f740878a900abf9e879e4b8107b2a",
+            "6D4FBE1F-F4BB-4B23-86AB-576C5E17FDE1": "containerd://2996f2155ed6993aa30713241177c72bb6a111038bcf0fe229aba4ccf7040eec"
+          },
+          "after": {
+            "B0540E1B-4D27-406A-B779-6391207D53C1": "containerd://d5bcd196206913aa78b5bd0ff09f2f4c658438cf1a57c5003735891720af5c8f",
+            "757B6DAD-1506-42B5-B7DA-04AE314B1CF7": "containerd://501147e3d0f2bd2dd1d44cb1f217d59072f9df93441174c1fe89b7f71bc6dd10"
+          },
+          "maximumActivePods": 3,
+          "minimumReadyPods": 2
+        },
+        "restartPersistence": {
+          "passed": true,
+          "unchangedIdentities": {
+            "B0540E1B-4D27-406A-B779-6391207D53C1": "containerd://d5bcd196206913aa78b5bd0ff09f2f4c658438cf1a57c5003735891720af5c8f",
+            "757B6DAD-1506-42B5-B7DA-04AE314B1CF7": "containerd://501147e3d0f2bd2dd1d44cb1f217d59072f9df93441174c1fe89b7f71bc6dd10"
+          }
+        },
+        "recreateUpdate": {
+          "passed": true,
+          "oldProcessesGoneBeforeNewRunning": true
+        }
+      },
+      "error": null,
+      "cleanup": {
+        "nativeExitCodes": [
+          0,
+          0
+        ],
+        "ownedShimsRemaining": [],
+        "cleanupError": null
+      },
+      "artifactSHA256": {
+        "gr8s.log": "edb458739eadc468e7c465446ba717bfeb482804e6cc3c726a838f2058108f09",
+        "F17AE922-47A5-4CD0-8C6B-036C0117CD42-main.log": "74eade1ba1fd4da41af64230025ad4ed1e6f27aec3519a8dbc38e1dfed857a44",
+        "363AA6A3-357F-4BC9-85BD-9533EC889AF6-main.log": "8fbd14be4baf2d6ffa8bb5d8555d23c4da9d0b9dc4116c27f68bb1d702f06114",
+        "D23DCAA4-D8CF-4C06-BD78-3AA5E804AF51-main.log": "d037b18be58e7f20be758b769ef938582ab65cd147456790b9c1fa7f034d0308",
+        "E5D4ED76-D66B-487D-9777-29CE3DE7EFC0-main.log": "9c64a2a93b0df0c0d40548bd04d13bde44e34072bf1144db24d4268552a9693d",
+        "C4CF6410-480E-4A54-AB82-2B3213F8D5CC-main.log": "2609d4354a20c89b9ca936e4cbf6e857764901b5aefd9e2b556564fd63885131",
+        "6D4FBE1F-F4BB-4B23-86AB-576C5E17FDE1-main.log": "6677a208cf11c76acf06873eea6b3783f86411534cd3aef31f9b2a1b360b499d",
+        "B0540E1B-4D27-406A-B779-6391207D53C1-main.log": "6f4846ec109d791ffe3c935928fab19161340fd743a9d947834debd6f393efc7",
+        "757B6DAD-1506-42B5-B7DA-04AE314B1CF7-main.log": "e6253d185fffe3a264b8ff5fcccd078bbc8032f15d0812757c4bef978d71c353",
+        "6D256D8B-1B5A-4075-BF41-5C9237EB36F8-main.log": "0901904be67f385e2a62e59bcdb65a8dda9b62a76fd5cdb919aba174a73b7a49",
+        "17D7D320-6D76-4B68-870E-4059A309B4E0-main.log": "b660c08893400688fe615d6654498cda73d3c1fb633d0cb441060c076eb23590",
+        "report.json": "42729a014a628cd5d3cb1d25fe585264e8866772dc0f915e9ab5a079ae75923f"
+      }
+    }
+  ],
+  "localValidation": {
+    "fullSuite": {
+      "sourceCommit": "f858ff0",
+      "passed": 2045,
+      "skipped": 5,
+      "failed": 0
+    },
+    "focusedWorkloads": {
+      "sourceCommit": "b3a9427",
+      "passed": 141,
+      "skipped": 0,
+      "failed": 0
+    }
+  },
+  "limitations": [
+    "The initial native failure is preserved as negative evidence; a Pod-list concurrent-deletion race was fixed before rerunning the unchanged harness.",
+    "The passing native controller build is f858ff0. Follow-up b3a9427 changes only empty resourceVersion handling for unconditional Scale updates and adds its HTTP regression.",
+    "These four native scenarios do not replace the unchanged upstream conformance suite or establish certification.",
+    "Pod templates preserve the broad schema, but actual execution remains subject to supported Pod admission; unsupported fields produce ReplicaFailure.",
+    "Global Pod watches and arbitrary owner-reference blocking finalizers remain unsupported outside this change."
+  ]
+}
