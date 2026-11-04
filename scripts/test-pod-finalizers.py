@@ -215,6 +215,17 @@ def main():
         save("successful-api-retained-runtime-removed.json", retained)
         preserve_native_history("successful", success, 0)
         report["scenarios"]["successRetainsActualExitAfterPhysicalCleanup"] = {"passed": True, "uid": success["metadata"]["uid"], "exitCode": 0}
+        # A user finalizer may hold this API object forever. Its completed
+        # physical cleanup must not fence an unrelated Pod's actual creation.
+        unrelated = create("unrelated", ["sh", "-c", "echo FINALIZER_UNRELATED_SUCCESS; exit 0"])
+        wait(lambda: terminal(unrelated, 0), 120, "unrelated Pod executes while first API finalizer remains")
+        assert current(success)["metadata"].get("finalizers") == [finalizer]
+        delete(unrelated)
+        wait(lambda: terminal(unrelated, 0), 120, "unrelated finalizer retains actual exit")
+        wait(lambda: not shims(), 120, "both retained API Pods have no physical shims")
+        preserve_native_history("unrelated", unrelated, 0)
+        release(unrelated)
+        report["scenarios"]["retainedFinalizerDoesNotBlockUnrelatedExecution"] = {"passed": True, "uid": unrelated["metadata"]["uid"], "exitCode": 0}
         stop()
         start()
         reopened = wait(lambda: terminal(success, 0), 120, "terminal finalizer retention across native restart")
