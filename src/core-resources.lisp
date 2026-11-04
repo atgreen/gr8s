@@ -305,6 +305,7 @@
 
 (defun get-core-resource (store resource namespace name)
   (with-store-lock (store)
+    (check-crd-resource-context-unlocked store resource)
     (expire-core-events-unlocked store)
     (copy-core-object (get-core-resource-unlocked store resource namespace name))))
 

@@ -262,4 +262,22 @@
                  (is (= 410 (gethash "code" (gethash "object" event))))))
           (close stream))))))
 
+(test custom-lists-and-continue-tokens-cannot-replay-a-previous-definition
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
+    (let* ((resource "custom:widgets.example.test/widgets")
+           (gr8s::*stored-resource-types* (append gr8s::*stored-resource-types* (gr8s::crd-resource-types store))))
+      (gr8s::create-core-resource store resource (crd-instance "a") "alpha")
+      (gr8s::create-core-resource store resource (crd-instance "b") "alpha")
+      (let* ((page (gr8s::template-list-page store "alpha" "" "" :resource resource :limit 1))
+             (metadata (gethash "metadata" page))
+             (token (gethash "continue" metadata))
+             (revision (gethash "resourceVersion" metadata)))
+        (gr8s::delete-core-resource store "customresourcedefinitions" nil "widgets.widgets.example.test")
+        (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
+        (is (= 410 (core-resource-status (lambda () (gr8s::template-list-page store "alpha" "" "" :resource resource :continuation token)))))
+        (is (= 410 (core-resource-status (lambda () (gr8s::template-list-page store "alpha" "" "" :resource resource :resource-version revision :match "Exact")))))
+        (is (zerop (length (gethash "items" (gr8s::template-list-page store "alpha" "" "" :resource resource)))))))))
+
 (in-suite gr8s)

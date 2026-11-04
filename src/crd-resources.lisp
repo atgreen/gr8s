@@ -34,6 +34,31 @@
         when (and (equal "customresourcedefinitions" (first key)) (equal resource (crd-custom-key definition)))
           return definition))
 
+(defun crd-definition-uid-unlocked (store resource)
+  "Identify the actual durable definition behind a custom collection."
+  (let ((definition (crd-definition-unlocked store resource)))
+    (and definition (gethash "uid" (gethash "metadata" definition)))))
+
+(defun check-crd-resource-context-unlocked (store resource &optional revision)
+  "Reject stale request identities and history from a previous CRD incarnation."
+  (when (custom-resource-key-p resource)
+    (let* ((definition (crd-definition-unlocked store resource))
+           (uid (and definition (gethash "uid" (gethash "metadata" definition)))))
+      (unless (and definition
+                   (or (not *crd-view-definition*)
+                       (and (equal uid (gethash "uid" (gethash "metadata" *crd-view-definition*)))
+                            (crd-version definition *crd-request-version* :served t))))
+        (core-resource-error 410 "Expired" "Custom definition identity or served version has changed"))
+      (when revision
+        (let ((birth (loop for entry in (pod-store-template-history store)
+                           for object = (gethash "new" entry)
+                           when (and (equal "customresourcedefinitions" (gethash "resource" entry))
+                                     (eq 'null (gethash "old" entry)) (hash-table-p object)
+                                     (equal uid (gethash "uid" (gethash "metadata" object))))
+                             return (gethash "revision" entry))))
+          (when (and birth (< revision birth))
+            (core-resource-error 410 "Expired" "Resource version belongs to an older custom definition")))))))
+
 (defun crd-storage-version (definition)
   "Return the unique storage version established by admission."
   (find-if (lambda (version) (eq t (gethash "storage" version))) (gethash "versions" (gethash "spec" definition))))
