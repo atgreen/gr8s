@@ -122,6 +122,12 @@ smoke:
 	$(MAKE) native
 	sudo env PATH="$(PATH)" GR8S_DISABLE_SERVICE_LB="$(GR8S_DISABLE_SERVICE_LB)" scripts/smoke.sh
 
+# Run the smoke script assuming we are already root (invoked as `sudo make
+# smoke-root SMOKE_PATH=...`), for environments where sudo is scoped to make.
+# Build the native image first as your normal user: `make native`.
+smoke-root:
+	env PATH="$(SMOKE_PATH)" GR8S_DISABLE_SERVICE_LB="$(GR8S_DISABLE_SERVICE_LB)" scripts/smoke.sh
+
 smoke-two-node:
 	@if [ "$$(id -u)" -eq 0 ]; then \
 	  echo "Run make smoke-two-node as your normal user." >&2; \

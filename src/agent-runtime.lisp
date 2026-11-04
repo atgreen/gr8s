@@ -575,6 +575,45 @@ the node from starting."
              (node-runtime-received-revision node-runtime)))
     (error 'pod-reconciliation-superseded)))
 
+(defun pod-ip-identity-map (store)
+  "Map each known Pod IP -> (cons namespace label-alist), for policy selection."
+  (let ((map (make-hash-table :test #'equal)))
+    (dolist (pod (list-pods store) map)
+      (let* ((status (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)))
+             (ip (and status (gethash "podIP" status)))
+             (metadata (gethash "metadata" (pod-object pod) (make-hash-table :test #'equal)))
+             (labels (gethash "labels" metadata)))
+        (when (and (stringp ip) (plusp (length ip)))
+          (let ((alist '()))
+            (when (hash-table-p labels)
+              (maphash (lambda (k v) (push (cons k v) alist)) labels))
+            (setf (gethash ip map) (cons (pod-namespace pod) alist))))))))
+
+(defun converge-node-network-policies (node-runtime)
+  "Write each local Pod's resolved egress NetworkPolicy into its pinned maps
+(data-only; the egress guard enforces it, no recompile/re-attach). Always runs,
+so clearing the last policy resets a Pod's mode to open. Fail-soft: never aborts
+snapshot application."
+  (let ((manager (node-runtime-manager node-runtime))
+        (ipam (node-runtime-ipam node-runtime))
+        (store (node-runtime-store node-runtime)))
+    (when (and manager ipam store)
+      (let ((root (managed-containerd-bpf-directory manager))
+            (specs (network-policy-specs-from-objects
+                    (list-core-resources store "networkpolicies")))
+            (ip-map (pod-ip-identity-map store))
+            (endpoints (bt:with-lock-held ((node-ipam-lock ipam))
+                         (loop for key being the hash-keys of (node-ipam-allocations ipam)
+                                 using (hash-value address)
+                               collect (list (car key) (cdr key) address)))))
+        (converge-pod-egress-policies
+         specs endpoints
+         :pod-finder (lambda (address)
+                       (let ((id (gethash address ip-map)))
+                         (if id (values (car id) (cdr id)) (values nil nil))))
+         :directory-fn (lambda (sandbox)
+                         (nth-value 2 (cni-pin-paths root sandbox))))))))
+
 (defun reconcile-node-snapshot (node-runtime snapshot)
   (unless (eq :running (node-runtime-state node-runtime))
     (error 'runtime-error :message "node runtime is not running"))
@@ -599,6 +638,13 @@ the node from starting."
             (converge-service-lb-controller (node-runtime-service-lb-controller node-runtime))
           (error (condition)
             (format *error-output* "gr8s: Service LB convergence failed: ~A~%" condition))))
+      ;; Attach per-Pod NetworkPolicy classifiers from the just-installed policy
+      ;; objects. Fail-soft, like the Service LB above.
+      (when (node-runtime-manager node-runtime)
+        (handler-case
+            (converge-node-network-policies node-runtime)
+          (error (condition)
+            (format *error-output* "gr8s: NetworkPolicy convergence failed: ~A~%" condition))))
       (loop for assignment in
               (stable-sort (copy-list assignments)
                            (lambda (left right)

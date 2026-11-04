@@ -209,6 +209,45 @@ nsenter --net="$pod_namespace" ip address del 192.0.2.123/32 dev eth0
 wait_for_counter gr8s_endpoint_allowed_packets_total
 wait_for_counter gr8s_endpoint_rejected_spoofs_total
 
+# --- NetworkPolicy compiled-firewall enforcement on the real Pod ---
+# The Pod could reach its gateway above (no policy). Apply an egress policy that
+# allows only an unrelated CIDR: once the agent converges and attaches the
+# compiled classifier at the Pod's host veth, the gateway must become
+# unreachable (default-deny egress), proving the compiled NetworkPolicy enforces
+# on a real Pod. (Detach-on-removal is covered by unit tests.)
+cat >"$work_directory/netpol.json" <<'JSON'
+{"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy",
+ "metadata":{"name":"smoke-egress","namespace":"default"},
+ "spec":{"podSelector":{},"policyTypes":["Egress"],
+         "egress":[{"to":[{"ipBlock":{"cidr":"10.123.0.0/16"}}]}]}}
+JSON
+np_path=/apis/networking.k8s.io/v1/namespaces/default/networkpolicies
+# POST directly with an explicit JSON content-type: the resource is served by the
+# generic router (not yet advertised in discovery, and kubectl --raw does not set
+# a content-type the server accepts). The API is plain HTTP on localhost.
+np_server=$(kubectl --kubeconfig "$work_directory/kubeconfig" config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+np_code=$(curl -s -o "$work_directory/netpol-create.out" -w '%{http_code}' \
+  -X POST -H 'Content-Type: application/json' \
+  --data @"$work_directory/netpol.json" "$np_server$np_path")
+if [ "$np_code" != "201" ] && [ "$np_code" != "200" ]; then
+  echo "NetworkPolicy create failed: HTTP $np_code" >&2
+  cat "$work_directory/netpol-create.out" >&2
+  exit 1
+fi
+enforced=0
+for attempt in $(seq 1 25); do
+  if ! kubectl --kubeconfig "$work_directory/kubeconfig" \
+       exec gr8s-smoke -c main -- ping -c 1 -W 1 169.254.1.1 >/dev/null 2>&1; then
+    enforced=1; break
+  fi
+  sleep 1
+done
+if [ "$enforced" -ne 1 ]; then
+  echo "NetworkPolicy did not enforce: gateway still reachable after egress-deny policy" >&2
+  exit 1
+fi
+echo "NetworkPolicy compiled firewall enforced on real Pod: gateway blocked by egress policy"
+
 kubectl --kubeconfig "$work_directory/kubeconfig" delete pod gr8s-smoke
 if kubectl --kubeconfig "$work_directory/kubeconfig" get pod gr8s-smoke >/dev/null 2>&1; then
   echo "deleted Pod is still present" >&2
