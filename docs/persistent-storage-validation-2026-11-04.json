@@ -1,0 +1,33 @@
+{
+  "recordedAtUTC": "2026-11-04T00:58:00Z",
+  "native": {
+    "sourceCommit": "4f9c4f0",
+    "binarySha256": "750aed2bf7f852e3791a55b9a97bfaf2d68e3b070ec6aa78d49e6810f29c3d5a",
+    "vmSSHPort": 22291,
+    "stateDirectory": "/tmp/gr8s-storage-native-mfmh70zs",
+    "runner": "python3 /root/gr8s-storage-test/test-storage-native.py --executable /root/gr8s-storage-test/gr8s.bin",
+    "log": "/root/gr8s-storage-native-smoke.log",
+    "output": [
+      "storage smoke state: /tmp/gr8s-storage-native-mfmh70zs",
+      "real local-PV/PVC and direct hostPath mounts passed",
+      "native restart retained the running consumer and backing data",
+      "readonly, claim protection, Retain UID ownership, explicit reclamation and clean native exit passed",
+      "remaining smoke-owned shims: []"
+    ],
+    "exitCode": 0,
+    "remainingOwnedShims": [],
+    "note": "Native binary predates final default-class, empty-topology and unsupported-prebinding regressions; those are covered by the final host suite."
+  },
+  "host": {
+    "command": "flock /tmp/gr8s-host-http-tests.lock make test",
+    "checks": 1998,
+    "passed": 1993,
+    "optionalSkipped": 5,
+    "failed": 0,
+    "log": "/tmp/gr8s-storage-final-full-suite.log"
+  },
+  "unsupportedFollowups": {
+    "CSIAndDynamicProvisioning": "podster-uqb.14.1",
+    "AdvancedModesExpansionReclaim": "podster-uqb.14.2"
+  }
+}

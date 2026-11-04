@@ -45,5 +45,5 @@ The 2026-11-04 VM run passed real local PV/PVC and direct hostPath writes,
 read-only enforcement, restart preservation without restarting the consumer,
 claim protection, Retain UID ownership, explicit reclamation and clean native
 exit with zero owned shims. Its isolated state directory was
-`/tmp/gr8s-storage-native-mfmh70zs`. The host suite passed 1,986 checks with five
-optional integration skips (1,991 total).
+`/tmp/gr8s-storage-native-mfmh70zs`. The host suite passed 1,993 checks with five
+optional integration skips (1,998 total).

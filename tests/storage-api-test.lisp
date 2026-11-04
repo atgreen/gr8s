@@ -182,4 +182,43 @@
       (signals gr8s::runtime-error (gr8s::materialize-host-storage-source (gr8s::core-object "path" (namestring file) "type" "Directory")))
       (signals gr8s::runtime-error (gr8s::materialize-host-storage-source (gr8s::core-object "path" (namestring (merge-pathnames "absent/" path)) "type" "Directory"))))))
 
+(test retroactive-default-class-respects-explicit-opt-out
+  (with-temporary-store (store path)
+    (let ((claim (storage-test-claim "implicit")))
+      (remhash "storageClassName" (gethash "spec" claim))
+      (gr8s::create-core-resource store "persistentvolumeclaims" claim "default"))
+    (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "opt-out") "default")
+    (gr8s::create-core-resource store "storageclasses"
+      (gr8s::core-object "metadata" (gr8s::core-object "name" "default-class" "annotations"
+                           (gr8s::core-object "storageclass.kubernetes.io/is-default-class" "true"))
+                        "provisioner" "kubernetes.io/no-provisioner") nil)
+    (gr8s::create-core-resource store "persistentvolumes"
+      (storage-test-volume "provided" (merge-pathnames "provided/" path) :class "default-class") nil)
+    (gr8s::reconcile-storage-bindings store)
+    (let ((claim (gr8s::get-core-resource store "persistentvolumeclaims" "default" "implicit")))
+      (is (equal "default-class" (gethash "storageClassName" (gethash "spec" claim))))
+      (is (equal "Bound" (gethash "phase" (gethash "status" claim)))))
+    (is (equal "" (gethash "storageClassName" (gethash "spec" (gr8s::get-core-resource store "persistentvolumeclaims" "default" "opt-out")))))
+    (is (equal "Pending" (storage-phase store "persistentvolumeclaims" "default" "opt-out")))))
+
+(test unsupported-prebound-source-cannot-fabricate-native-binding
+  (with-temporary-store (store path)
+    (let* ((claim (storage-test-claim "claim"))
+           (volume (storage-test-volume "unsupported" (merge-pathnames "unused/" path))))
+      (setf (gethash "volumeName" (gethash "spec" claim)) "unsupported")
+      (setf claim (gr8s::create-core-resource store "persistentvolumeclaims" claim "default"))
+      (remhash "hostPath" (gethash "spec" volume))
+      (setf (gethash "csi" (gethash "spec" volume)) (gr8s::core-object "driver" "example.test" "volumeHandle" "admin-volume")
+            (gethash "claimRef" (gethash "spec" volume))
+            (gr8s::core-object "name" "claim" "namespace" "default" "uid" (gethash "uid" (gethash "metadata" claim))))
+      (gr8s::create-core-resource store "persistentvolumes" volume nil)
+      (gr8s::reconcile-storage-bindings store)
+      (is (equal "Pending" (storage-phase store "persistentvolumeclaims" "default" "claim")))
+      (is (equal "Pending" (storage-phase store "persistentvolumes" nil "unsupported"))))))
+
+(test empty-storage-topology-term-matches-no-nodes
+  (let ((node (make-test-node "worker-a" "a" "10.64.0.0/20")))
+    (is-false (gr8s::storage-class-topology-matches-p
+                (gr8s::core-object "allowedTopologies" (vector (gr8s::core-object))) node))))
+
 (in-suite gr8s)
