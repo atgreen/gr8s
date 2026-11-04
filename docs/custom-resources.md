@@ -54,3 +54,10 @@ cleanup without disabling validation. Run it against a dumped executable with:
 ```sh
 python3 scripts/test-crd-api.py --executable build/gr8s.bin
 ```
+
+The unchanged upstream Kubernetes v1.36 five-case CRD resource focus passes
+all five actual specs on the combined native checkpoint. The seven suite hook
+entries are excluded from that count. The first failing run and corrected run
+retain official archive hashes and clean native exit/zero-shim evidence in
+[the focused result](custom-resources-upstream-2026-11-04.json). This is
+supplemental evidence, not a certification result.
