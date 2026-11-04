@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--agnhost-image", default="registry.k8s.io/e2e-test-images/agnhost:2.63.0")
     parser.add_argument("--api-port", type=int, default=18292)
     parser.add_argument("--node-port", type=int, default=17492)
+    parser.add_argument("--startup-timeout", type=int, default=90)
     args = parser.parse_args()
     root = Path(tempfile.mkdtemp(prefix="gr8s-probes-native.", dir="/var/tmp"))
     state = args.state_directory or root / "state"
@@ -72,9 +73,11 @@ def main():
 
     def start():
         """Start the same owned durable cluster and require real API readiness."""
+        nonlocal native
         process = subprocess.Popen([str(args.gr8s), "serve", "--runtime", "containerd", "--state-directory", str(state),
                                     "--port", str(args.api_port), "--node-port", str(args.node_port),
                                     "--kubeconfig", str(root / "kubeconfig")], stdout=log, stderr=subprocess.STDOUT)
+        native = process
 
         def ready():
             """Detect a terminated server while waiting for its readiness endpoint."""
@@ -82,7 +85,7 @@ def main():
                 raise RuntimeError(f"native exited {process.returncode}")
             with opener.open(base + "/readyz", timeout=2) as response:
                 return response.status == 200
-        wait(ready, 90, "native readiness")
+        wait(ready, args.startup_timeout, "native readiness")
         return process
 
     def stop():
@@ -216,8 +219,53 @@ def main():
         stop_time = datetime.datetime.fromisoformat(termination["finishedAt"].replace("Z", "+00:00")).timestamp()
         failure_time = datetime.datetime.fromisoformat(failures[0]["firstTimestamp"].replace("Z", "+00:00")).timestamp()
         assert stop_time - failure_time < 10, (termination, failures)
-        report["scenarios"]["livenessPolicyGraceAndEvents"] = {"passed": True, "actualExitCode": 0, "healthyIDUnchanged": True,
+        report["scenarios"]["livenessZeroExitAndEvents"] = {"passed": True, "actualExitCode": 0, "healthyIDUnchanged": True,
                                                                  "actualStopSecondsAfterFirstFailure": stop_time - failure_time}
+        ignored = create([{"name": "ignore", "image": args.busybox_image, "imagePullPolicy": "IfNotPresent",
+                           "command": ["sh", "-c", "rm -f /work/unhealthy; trap ':' TERM; while :; do sleep 1; done"],
+                           "volumeMounts": [{"name": "work", "mountPath": "/work"}],
+                           "livenessProbe": {"exec": {"command": ["sh", "-c", "test ! -f /work/unhealthy"]},
+                                             "periodSeconds": 1, "failureThreshold": 1, "terminationGracePeriodSeconds": 3}}],
+                         [{"name": "work", "emptyDir": {}}])
+        ignored_before = wait(lambda: running(ignored, ["ignore"]), 600, "TERM-ignoring workload")
+        ignored_volume = Path("/var/log/gr8s/pods") / ignored["metadata"]["uid"] / "volumes/work"
+        (ignored_volume / "unhealthy").touch()
+
+        def ignored_restarted():
+            """Observe a physically stopped TERM-ignoring process and its replacement."""
+            obj = current(ignored)
+            value = statuses(obj).get("ignore", {})
+            return obj if value.get("restartCount") == 1 and "running" in value.get("state", {}) else None
+        ignored_after = wait(ignored_restarted, 120, "actual probe grace enforcement")
+        save("probe-grace-enforced.json", ignored_after)
+        ignored_events = wait(lambda: [event for event in events(ignored) if event.get("message", "").startswith("Liveness probe failed")],
+                              30, "TERM-ignoring probe failure Event")
+        killed = statuses(ignored_after)["ignore"]["lastState"]["terminated"]
+        elapsed_grace = datetime.datetime.fromisoformat(killed["finishedAt"].replace("Z", "+00:00")).timestamp() - datetime.datetime.fromisoformat(
+            ignored_events[0]["firstTimestamp"].replace("Z", "+00:00")).timestamp()
+        assert 2 <= elapsed_grace < 10 and killed["exitCode"] != 0, (killed, ignored_events)
+        report["scenarios"]["probeGraceOverridesPodGrace"] = {"passed": True, "probeGrace": 3, "podGrace": 30,
+                                                            "actualStopSeconds": elapsed_grace, "exitCode": killed["exitCode"]}
+        tcp_shell = ("child=''; trap 'test -z \"$child\" || kill $child; exit 0' TERM; while :; do "
+                     "if [ -f /work/listen ]; then if [ -z \"$child\" ]; then httpd -f -p 9090 -h /work & child=$!; fi; "
+                     "elif [ -n \"$child\" ]; then kill $child; wait $child; child=''; fi; sleep 1; done")
+        tcp = create([{"name": "listener", "image": args.busybox_image, "imagePullPolicy": "IfNotPresent",
+                       "command": ["sh", "-c", tcp_shell], "ports": [{"name": "tcp", "containerPort": 9090}],
+                       "volumeMounts": [{"name": "work", "mountPath": "/work"}],
+                       "readinessProbe": {"tcpSocket": {"port": "tcp"}, "periodSeconds": 1, "failureThreshold": 1}}],
+                     [{"name": "work", "emptyDir": {}}])
+        tcp_before = wait(lambda: running(tcp, ["listener"]), 600, "actual TCP probe workload")
+        tcp_id = statuses(tcp_before)["listener"]["containerID"]
+        tcp_volume = Path("/var/log/gr8s/pods") / tcp["metadata"]["uid"] / "volumes/work"
+        assert not statuses(tcp_before)["listener"]["ready"], tcp_before
+        (tcp_volume / "listen").touch()
+        wait(lambda: ready(tcp, "listener"), 30, "TCP listener readiness")
+        (tcp_volume / "listen").unlink()
+        wait(lambda: not statuses(current(tcp))["listener"]["ready"], 30, "physical TCP listener withdrawal")
+        tcp_after = current(tcp)
+        save("tcp-listener-withdrawn.json", tcp_after)
+        assert statuses(tcp_after)["listener"]["containerID"] == tcp_id and statuses(tcp_after)["listener"]["restartCount"] == 0, tcp_after
+        report["scenarios"]["tcpActualListenerTransitions"] = {"passed": True, "containerIDUnchanged": True}
         grpc = create([{"name": "health", "image": args.agnhost_image, "imagePullPolicy": "IfNotPresent",
                         "args": ["grpc-health-checking", "--port=5000", "--http-port=8080", "--service=application"],
                         "startupProbe": {"grpc": {"port": 5000, "service": "application"}, "periodSeconds": 1, "failureThreshold": 30},
@@ -234,7 +282,7 @@ def main():
         assert statuses(grpc_failed)["health"]["containerID"] == grpc_id and statuses(grpc_failed)["health"]["restartCount"] == 0, grpc_failed
         assert request(f"http://{grpc_ip}:8080/make-serving", absolute=True)[0] == 200
         wait(lambda: ready(grpc, "health"), 30, "gRPC readiness recovery")
-        report["scenarios"]["grpcAndTcpActualService"] = {"passed": True, "uid": grpc["metadata"]["uid"], "containerIDUnchanged": True}
+        report["scenarios"]["grpcActualService"] = {"passed": True, "uid": grpc["metadata"]["uid"], "containerIDUnchanged": True}
         before_restart = {pod["metadata"]["uid"]: statuses(current(pod)) for pod in (probe, grpc)}
         stop()
         native = start()
