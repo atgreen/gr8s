@@ -89,6 +89,16 @@ decides whether a dataplane failure is fatal to the node."
             (ignore-errors (sb-posix:close (whistler/loader:map-info-fd (cdr entry)))))
           (error condition))))))
 
+(defun try-start-service-lb-dataplane (cgroup-path pin-directory &key (log *error-output*))
+  "Attempt to bring up the socket LB.  On any failure (no CAP_BPF, no bpffs, an
+unattachable cgroup, a kernel too old for cgroup/connect4), log and return NIL so
+the caller can fall back to the userspace Service proxy."
+  (handler-case (start-service-lb-dataplane cgroup-path pin-directory)
+    (error (condition)
+      (format log "~&gr8s: eBPF Service load balancer unavailable, using the userspace proxy: ~A~%"
+              condition)
+      nil)))
+
 (defun service-lb-write-service
     (dataplane address port base-slot backends
      &key (update #'whistler/loader:map-update))

@@ -471,6 +471,8 @@
          (server nil)
          (api-server nil)
          (service-controller nil)
+         (service-lb nil)
+         (service-lb-controller nil)
          (service-network-created nil)
          (worker nil)
          (node-server nil)
@@ -501,6 +503,14 @@
                       (setf service-network-created (ensure-in-cluster-network pki))
                       (setf api-server (start-in-cluster-api store runtime reconciler pki)
                             service-controller (make-native-service-controller store))
+                      ;; Prefer the in-kernel socket load balancer; fall back to
+                      ;; the userspace proxy if the dataplane cannot attach.
+                      (setf service-lb
+                            (try-start-service-lb-dataplane
+                             (getf options :service-lb-cgroup "/sys/fs/cgroup")
+                             (service-lb-pin-directory (merge-pathnames "agent/" state-directory))))
+                      (when service-lb
+                        (setf service-lb-controller (make-service-lb-controller store service-lb)))
                       (setf (pod-store-in-cluster-config store)
                             (list :host "10.96.0.1" :port 443
                                   :ca-pem (uiop:read-file-string (cluster-pki-ca-certificate-path pki))))
@@ -522,7 +532,17 @@
                                       (publish-service-discovery-snapshots runtime)
                                       (when service-controller
                                         (ensure-in-cluster-network pki)
-                                        (reconcile-native-services service-controller)))))
+                                        (if service-lb-controller
+                                            ;; eBPF path: converge the maps. A
+                                            ;; transient map error must not kill
+                                            ;; reconciliation.
+                                            (handler-case
+                                                (converge-service-lb-controller service-lb-controller)
+                                              (error (condition)
+                                                (format *error-output*
+                                                        "gr8s: Service LB convergence failed: ~A~%"
+                                                        condition)))
+                                            (reconcile-native-services service-controller))))))
                     (when (getf options :kubeconfig)
                       (write-kubeconfig
                        (getf options :kubeconfig)
@@ -533,6 +553,7 @@
                (when worker (stop-reconciliation-worker worker))
                (when runtime (stop-runtime-deletions runtime))
                (when server (stop-server server))
+               (when service-lb (ignore-errors (stop-service-lb-dataplane service-lb)))
                (when service-controller (stop-native-service-controller service-controller))
                (when api-server (stop-server api-server))
                (when (or api-server service-network-created) (remove-in-cluster-network pki))
