@@ -246,6 +246,35 @@
       (runtime-ensure runtime pod)
       observed))
 
+(defun directory-disk-bytes (path)
+  "Return the file bytes under directory PATH, never following symbolic links; sparse holes count."
+  (let ((total 0) (directory (handler-case (sb-posix:opendir path) (sb-posix:syscall-error () nil))))
+    (when directory
+      (unwind-protect
+           (loop for entry = (sb-posix:readdir directory)
+                 until (sb-alien:null-alien entry)
+                 do (let ((name (sb-posix:dirent-name entry)))
+                      (unless (member name '("." "..") :test #'equal)
+                        (let* ((child (concatenate 'string (string-right-trim "/" path) "/" name))
+                               (stat (handler-case (sb-posix:lstat child) (sb-posix:syscall-error () nil))))
+                          (when stat
+                            (if (= sb-posix:s-ifdir (logand (sb-posix:stat-mode stat) sb-posix:s-ifmt))
+                                (incf total (directory-disk-bytes child))
+                                (incf total (sb-posix:stat-size stat))))))))
+        (sb-posix:closedir directory)))
+    total))
+
+(defmethod runtime-ephemeral-usage ((runtime containerd-runtime) pod)
+  "Measure writable layers through CRI and disk-backed emptyDirs from their agent-owned directories."
+  (let ((sandbox (containerd-owned-sandbox runtime (pod-uid pod))))
+    (when sandbox
+      (values
+       (cri-container-writable-bytes (containerd-runtime-socket-path runtime) (cri-pod-sandbox-info-id sandbox))
+       (loop for volume across (gethash "volumes" (gethash "spec" (pod-to-object pod)) #())
+             for source = (gethash "emptyDir" volume)
+             when (and source (not (equal "Memory" (gethash "medium" source))))
+               sum (directory-disk-bytes (namestring (pod-volume-directory runtime pod (gethash "name" volume)))))))))
+
 (defmethod runtime-logs
     ((runtime containerd-runtime) uid container-name &key tail)
   (declare (ignore tail))

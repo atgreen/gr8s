@@ -82,8 +82,9 @@ Node status. It evaluates node selectors and node affinity, and when nothing fit
 it preempts lower-priority Pods, marking them with a `DisruptionTarget` condition.
 Pod affinity and anti-affinity are refused. `spec.activeDeadlineSeconds` is counted
 from Pod creation rather than from the first node's acceptance. A declared
-`ephemeral-storage` limit counts for quota, LimitRange and scheduling, but the node
-does not yet evict a Pod that exceeds it.
+`ephemeral-storage` limit counts for quota, LimitRange and scheduling, and the node
+evicts a Pod whose writable layers and disk-backed emptyDirs exceed it, checking
+every ten seconds. Container logs are not included in that measurement.
 
 Pod logs and exec run through correlated agent operations, including interactive
 streams and nonzero exit status. Complete agent-crash recovery

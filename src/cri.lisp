@@ -384,6 +384,28 @@
            (ensure-cri-status "StartContainer" status))
       (ag-grpc:channel-close channel))))
 
+(defun cri-container-writable-bytes (socket-path sandbox-id &key (timeout 30))
+  "Return (container-name . writable-layer-bytes) entries for SANDBOX-ID's containers."
+  (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
+    (unwind-protect
+         (multiple-value-bind (response status)
+             (gr8s.cri.v1::runtime-service-list-container-stats
+              (gr8s.cri.v1::make-runtime-service-stub channel)
+              (make-instance 'gr8s.cri.v1::list-container-stats-request
+                             :filter (make-instance 'gr8s.cri.v1::container-stats-filter
+                                                    :pod-sandbox-id sandbox-id))
+              :timeout timeout)
+           (ensure-cri-status "ListContainerStats" status)
+           (loop for stats in (gr8s.cri.v1::stats response)
+                 for attributes = (gr8s.cri.v1::attributes stats)
+                 for metadata = (and attributes (gr8s.cri.v1::metadata attributes))
+                 for layer = (gr8s.cri.v1::writable-layer stats)
+                 for used = (and layer (gr8s.cri.v1::used-bytes layer))
+                 when metadata
+                   collect (cons (gr8s.cri.v1::name metadata)
+                                 (if used (gr8s.cri.v1::value used) 0))))
+      (ag-grpc:channel-close channel))))
+
 (defun cri-container-status (socket-path container-id &key (timeout 30))
   "Return the current CRI status for CONTAINER-ID."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))

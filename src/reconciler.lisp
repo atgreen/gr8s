@@ -6,7 +6,9 @@
   (lock (bt:make-lock "gr8s reconciler"))
   active-convergence
   (urgent-deletions (make-hash-table :test #'equal))
-  (convergence-lock (bt:make-lock "gr8s running convergence ownership")))
+  (convergence-lock (bt:make-lock "gr8s running convergence ownership"))
+  ;; Pod UID to the universal time its local storage was last measured.
+  (storage-measurements (make-hash-table :test #'equal)))
 
 (define-condition pod-reconciliation-superseded (serious-condition) ()
   (:documentation "Unwind obsolete creation without translating cancellation into a Pod failure."))
@@ -123,10 +125,64 @@
   (pod-status "Failed" :reason "DeadlineExceeded"
                        :message "Pod was active on the node longer than the specified deadline"))
 
+(defparameter +ephemeral-storage-check-seconds+ 10
+  "How often a node measures Pods that declare ephemeral-storage limits, like the kubelet's eviction loop.")
+
+(defun pod-ephemeral-limit-p (pod)
+  "Return whether any container of POD declares an ephemeral-storage limit."
+  (let ((spec (gethash "spec" (pod-to-object pod))))
+    (some (lambda (container) (gethash "ephemeral-storage" (container-resource-map container "limits")))
+          (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec)))))
+
+(defun pod-ephemeral-violation (pod layers volume-bytes)
+  "Return why measured LAYERS and VOLUME-BYTES exceed POD's ephemeral-storage limits, or NIL."
+  (let ((spec (gethash "spec" (pod-to-object pod))))
+    (or (loop for container across (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec))
+              for name = (gethash "name" container)
+              for limit = (gethash "ephemeral-storage" (container-resource-map container "limits"))
+              when (and limit (> (or (cdr (assoc name layers :test #'equal)) 0) (policy-value limit)))
+                return (format nil "Container ~A exceeded its local ephemeral storage limit ~S." name limit))
+        (let ((limit (gethash "ephemeral-storage" (nth-value 1 (pod-spec-resource-totals spec)))))
+          (when (and limit (> (+ volume-bytes (reduce #'+ layers :key #'cdr)) limit))
+            (format nil "Pod ephemeral local storage usage exceeds the total limit of containers ~A."
+                    (policy-value-string limit :binary)))))))
+
+(defun pod-storage-eviction-message (reconciler pod)
+  "Measure POD when due and return the eviction message for an exceeded limit, or NIL."
+  (when (pod-ephemeral-limit-p pod)
+    (let ((table (reconciler-storage-measurements reconciler))
+          (now (funcall *pod-deletion-clock*)))
+      (when (>= (- now (gethash (pod-uid pod) table 0)) +ephemeral-storage-check-seconds+)
+        (setf (gethash (pod-uid pod) table) now)
+        ;; A failed measurement says nothing about the Pod; the next one decides.
+        (handler-case
+            (multiple-value-bind (layers volume-bytes) (runtime-ephemeral-usage (reconciler-runtime reconciler) pod)
+              (when volume-bytes (pod-ephemeral-violation pod layers volume-bytes)))
+          (runtime-error (condition)
+            (format *error-output* "gr8s Pod ~A/~A storage measurement failed: ~A~%"
+                    (pod-namespace pod) (pod-name pod) (runtime-error-message condition))
+            nil))))))
+
+(defun evict-pod-for-storage (reconciler pod message)
+  "Stop POD and durably record the eviction, so reconciliation never starts it again."
+  (remhash (pod-uid pod) (reconciler-storage-measurements reconciler))
+  (runtime-delete (reconciler-runtime reconciler) (pod-uid pod))
+  (let ((status (pod-status "Failed" :reason "Evicted" :message message)))
+    (save-pod-observation (reconciler-store reconciler) pod status)
+    status))
+
+(defun pod-recorded-eviction (reconciler pod)
+  "Return POD's durable eviction status, if a previous pass evicted it."
+  (let ((status (pod-observed-status (reconciler-store reconciler) pod)))
+    (when (and status (equal "Failed" (gethash "phase" status)) (equal "Evicted" (gethash "reason" status)))
+      (copy-core-object status))))
+
 (defun converge-running-pod (reconciler pod)
-  (when (and (runtime-runs-containers-p (reconciler-runtime reconciler))
-             (pod-active-deadline-exceeded-p pod))
-    (return-from converge-running-pod (fail-pod-past-deadline (reconciler-runtime reconciler) pod)))
+  (when (runtime-runs-containers-p (reconciler-runtime reconciler))
+    (when (pod-active-deadline-exceeded-p pod)
+      (return-from converge-running-pod (fail-pod-past-deadline (reconciler-runtime reconciler) pod)))
+    (let ((evicted (pod-recorded-eviction reconciler pod)))
+      (when evicted (return-from converge-running-pod evicted))))
   (let* ((runtime (reconciler-runtime reconciler))
          (observed (runtime-observe runtime (pod-uid pod))))
     (when (and observed (runtime-pod-spec-fingerprint observed)
@@ -139,6 +195,10 @@
                           (pod-resource-version pod))))
         (setf observed (runtime-ensure runtime pod))
         (setf observed (runtime-reconcile-containers runtime pod observed)))
+    (when (runtime-runs-containers-p runtime)
+      (let ((message (pod-storage-eviction-message reconciler pod)))
+        (when message
+          (return-from converge-running-pod (evict-pod-for-storage reconciler pod message)))))
     (let ((status (observed-status observed)))
       (when (equal (pod-resource-version pod) (runtime-pod-resource-version observed))
         (setf (gethash "observedGeneration" status)

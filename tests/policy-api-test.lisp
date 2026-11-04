@@ -432,3 +432,42 @@
       (is (equal "PreemptionByScheduler" (gethash "reason" condition))))
     (let ((status (gr8s::add-pod-status-conditions store (get-pod store "team" "attacker") (gr8s::pod-status "Pending"))))
       (is (equal "only" (gethash "nominatedNodeName" status))))))
+
+(defstruct (policy-storage-runtime (:include gr8s::fake-runtime)
+                                   (:constructor make-policy-storage-runtime ()))
+  "A fake runtime reporting a settable local storage measurement."
+  (layers nil) (volume-bytes 0))
+
+(defmethod gr8s::runtime-ephemeral-usage ((runtime policy-storage-runtime) pod)
+  "Report RUNTIME's configured measurement for any POD."
+  (declare (ignore pod))
+  (values (policy-storage-runtime-layers runtime) (policy-storage-runtime-volume-bytes runtime)))
+
+(test node-evicts-pods-exceeding-ephemeral-storage-limits
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((runtime (make-policy-storage-runtime))
+           (reconciler (make-reconciler store runtime))
+           (pod (create-pod store (policy-test-pod "writer" :requests '("ephemeral-storage" "1Ki")
+                                                            :limits '("ephemeral-storage" "1Mi"))))
+           (clock 1000)
+           (gr8s::*pod-deletion-clock* (lambda () clock)))
+      (setf (policy-storage-runtime-layers runtime) (list (cons "main" 1024)))
+      (is (equal "Running" (gethash "phase" (gr8s::reconcile-pod reconciler "team" "writer"))))
+      (setf (policy-storage-runtime-layers runtime) (list (cons "main" (* 2 1024 1024))))
+      ;; Measured on a schedule, not on every pass.
+      (is (equal "Running" (gethash "phase" (gr8s::reconcile-pod reconciler "team" "writer"))))
+      (incf clock 11)
+      (let ((status (gr8s::reconcile-pod reconciler "team" "writer")))
+        (is (equal "Failed" (gethash "phase" status)))
+        (is (equal "Evicted" (gethash "reason" status))))
+      (is (null (gr8s::runtime-observe runtime (pod-uid pod))))
+      (let ((count (fake-runtime-ensure-count runtime)))
+        (is (equal "Evicted" (gethash "reason" (gr8s::reconcile-pod reconciler "team" "writer"))))
+        (is (= count (fake-runtime-ensure-count runtime)))))))
+
+(test ephemeral-violations-cover-containers-and-pod-totals
+  (let ((pod (policy-test-pod "two" :limits '("ephemeral-storage" "1Ki"))))
+    (is (null (gr8s::pod-ephemeral-violation pod (list (cons "main" 1024)) 0)))
+    (is (search "Container main" (gr8s::pod-ephemeral-violation pod (list (cons "main" 1025)) 0)))
+    (is (search "total limit" (gr8s::pod-ephemeral-violation pod (list (cons "main" 1000)) 100)))))

@@ -59,6 +59,10 @@
   (:documentation "Return whether RUNTIME itself stops containers, rather than delegating to a node.")
   (:method (runtime) (declare (ignore runtime)) t))
 
+(defgeneric runtime-ephemeral-usage (runtime pod)
+  (:documentation "Return POD's writable-layer bytes as (container . bytes) entries and its emptyDir bytes, or NIL when unmeasurable.")
+  (:method (runtime pod) (declare (ignore runtime pod)) nil))
+
 (defgeneric runtime-events (runtime uid)
   (:documentation "Return actual runtime event occurrences for the assigned Pod transport."))
 (defmethod runtime-events ((runtime t) uid) (declare (ignore runtime uid)) nil)
