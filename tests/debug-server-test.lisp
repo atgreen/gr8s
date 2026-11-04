@@ -122,11 +122,14 @@
         (is (search (pod-uid pod) text))
         (is (search "\"observed\"" text)))
       (is (search "no Pod" (gr8s::debug-eval "(debug-pod \"default\" \"missing\")")))
-      (is (search "ADDED default/hello" (gr8s::debug-eval "(debug-journal)"))))))
+      (is (search "ADDED default/hello" (gr8s::debug-eval "(debug-journal)")))
+      ;; Output stays machine-readable: no trailing printed value.
+      (is (com.inuoe.jzon:parse (gr8s::debug-eval "(debug-pod \"default\" \"hello\")"))))))
 
 (test thread-backtraces-come-back-even-from-a-blocked-thread
   (let* ((gate (sb-thread:make-semaphore))
          (thread (sb-thread:make-thread (lambda () (sb-thread:wait-on-semaphore gate)) :name "gr8s-blocked-for-test")))
+    (sleep 0.5) ; Let the new thread reach its wait before interrupting it.
     (unwind-protect
          (let ((text (gr8s::debug-eval "(debug-backtraces \"gr8s-blocked-for-test\")")))
            (is (search "gr8s-blocked-for-test" text))

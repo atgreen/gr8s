@@ -105,7 +105,8 @@ Errors come back as text with a backtrace, so a client never lands in a debugger
   (dolist (thread (sb-thread:list-all-threads))
     (let ((name (or (sb-thread:thread-name thread) "")))
       (when (and (not (eq thread sb-thread:*current-thread*)) (search name-filter name))
-        (format t "=== ~A~%~A~%" name (debug-thread-backtrace thread seconds))))))
+        (format t "=== ~A~%~A~%" name (debug-thread-backtrace thread seconds)))))
+  (values))
 
 (defun debug-pod (namespace name)
   "Print a Pod's stored object with its observed, published and finalization state."
@@ -123,7 +124,8 @@ Errors come back as text with a backtrace, so a client never lands in a debugger
                                "observedResourceVersion" (gethash uid (pod-store-pod-observed-resource-versions store) 'null)
                                "published" (gethash uid (pod-store-pod-published-statuses store) 'null)
                                "finalization" (gethash uid (pod-store-pod-finalization-states store) 'null))
-                              :pretty t)))))))
+                              :pretty t))))))
+  (values))
 
 (defun debug-journal (&optional (count 20))
   "Print the newest COUNT Pod watch events, newest first, with the journal's bounds."
@@ -137,4 +139,5 @@ Errors come back as text with a backtrace, so a client never lands in a debugger
                  (format t "~D ~A ~A/~A phase=~A~%" revision
                          (cond ((null old) "ADDED") ((null new) "DELETED") (t "MODIFIED"))
                          (gethash "namespace" metadata) (gethash "name" metadata)
-                         (gethash "phase" (gethash "status" view (core-object)))))))))
+                         (gethash "phase" (gethash "status" view (core-object))))))))
+  (values))

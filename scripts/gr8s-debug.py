@@ -27,6 +27,7 @@ def send(connection, text):
 def receive(connection):
     """Read one length-prefixed protocol message."""
     def exactly(count):
+        """Read COUNT bytes, or fail once the peer closes the connection."""
         data = b""
         while len(data) < count:
             chunk = connection.recv(count - len(data))
