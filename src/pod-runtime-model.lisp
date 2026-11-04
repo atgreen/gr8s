@@ -120,8 +120,27 @@
               (when (and present (not (member optional '(t nil))))
                 (invalid-pod "environment key reference optional must be boolean"))))))))
 
+(defun validate-environment-sources (container)
+  "Validate envFrom entries: an optional prefix and exactly one local object reference."
+  (loop for source across (optional-vector container "envFrom" "container")
+        do (drop-null-fields (require-object source "envFrom"))
+           (reject-unsupported-fields source '("prefix" "configMapRef" "secretRef") "envFrom")
+           (let ((prefix (gethash "prefix" source ""))
+                 (reference (or (gethash "configMapRef" source) (gethash "secretRef" source))))
+             (unless (stringp prefix) (invalid-pod "envFrom.prefix must be a string"))
+             (when (find #\= prefix) (invalid-pod "envFrom.prefix must not contain ="))
+             (unless (and reference (not (and (gethash "configMapRef" source) (gethash "secretRef" source))))
+               (invalid-pod "envFrom requires exactly one of configMapRef and secretRef"))
+             (drop-null-fields (require-object reference "envFrom reference"))
+             (reject-unsupported-fields reference '("name" "optional") "envFrom reference")
+             (require-dns-subdomain (gethash "name" reference) "envFrom reference name")
+             (multiple-value-bind (optional present) (gethash "optional" reference)
+               (when (and present (not (member optional '(t nil))))
+                 (invalid-pod "envFrom reference optional must be boolean"))))))
+
 (defun validate-runtime-container (container)
   "Validate mount declarations, executable probes, image policy and security settings."
+  (validate-environment-sources container)
   (dolist (kind '("startupProbe" "readinessProbe" "livenessProbe"))
     (when (gethash kind container) (validate-container-probe (gethash kind container) kind)))
   (when (gethash "imagePullPolicy" container)
