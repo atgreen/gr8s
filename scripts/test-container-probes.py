@@ -11,12 +11,35 @@ import datetime
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import time
 import urllib.error
 import urllib.request
 import uuid
+
+
+def timestamp(value):
+    """Compare real API and containerd timestamps on the same UTC timeline."""
+    return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+
+
+def container_stop_evidence(log_path, termination):
+    """Match the failed exact attempt's real CRI stop request to its physical exit."""
+    container_id = termination["containerID"].removeprefix("containerd://")
+    needle = f'StopContainer for \\"{container_id}\\" with timeout '
+    started, finished = timestamp(termination["startedAt"]), timestamp(termination["finishedAt"])
+    with log_path.open("rb") as stream:
+        stream.seek(max(0, log_path.stat().st_size - 4 * 1024 * 1024))
+        for line in stream.read().decode(errors="replace").splitlines():
+            if needle not in line:
+                continue
+            requested = timestamp(re.search(r'time="([^"]+)"', line).group(1))
+            if started <= requested <= finished:
+                return {"containerID": container_id, "requestedGrace": int(re.search(r'with timeout (\d+) \(s\)', line).group(1)),
+                        "actualStopSeconds": finished - requested, "containerdLogLine": line}
+    raise AssertionError(f"No actual stop request for terminated container {container_id}")
 
 
 def main():
@@ -214,13 +237,16 @@ def main():
         assert statuses(after)["main"]["containerID"] == healthy_id and after["status"]["podIP"] == stable["status"]["podIP"], after
         termination = statuses(after)["side"]["lastState"]["terminated"]
         assert termination["exitCode"] == 0, termination
-        failures = wait(lambda: [event for event in events(probe) if event.get("message", "").startswith("Liveness probe failed")], 30, "real liveness Warning Event")
+        failures = wait(lambda: [event for event in events(probe)
+                                if event.get("message", "").startswith("Liveness probe failed: Exec probe exited 1")
+                                and timestamp(termination["startedAt"]) <= timestamp(event["firstTimestamp"]) <= timestamp(termination["finishedAt"])],
+                        30, "actual command-exit liveness Warning Event for stopped attempt")
         save("probe-events.json", events(probe))
-        stop_time = datetime.datetime.fromisoformat(termination["finishedAt"].replace("Z", "+00:00")).timestamp()
-        failure_time = datetime.datetime.fromisoformat(failures[0]["firstTimestamp"].replace("Z", "+00:00")).timestamp()
-        assert stop_time - failure_time < 10, (termination, failures)
+        failure_time = min(timestamp(event["firstTimestamp"]) for event in failures)
+        elapsed = timestamp(termination["finishedAt"]) - failure_time
+        assert elapsed >= 0, (termination, failures)
         report["scenarios"]["livenessZeroExitAndEvents"] = {"passed": True, "actualExitCode": 0, "healthyIDUnchanged": True,
-                                                                 "actualStopSecondsAfterFirstFailure": stop_time - failure_time}
+                                                                 "actualStopSecondsAfterFirstFailure": elapsed}
         ignored = create([{"name": "ignore", "image": args.busybox_image, "imagePullPolicy": "IfNotPresent",
                            "command": ["sh", "-c", "rm -f /work/unhealthy; trap ':' TERM; while :; do sleep 1; done"],
                            "volumeMounts": [{"name": "work", "mountPath": "/work"}],
@@ -238,14 +264,17 @@ def main():
             return obj if value.get("restartCount") == 1 and "running" in value.get("state", {}) else None
         ignored_after = wait(ignored_restarted, 120, "actual probe grace enforcement")
         save("probe-grace-enforced.json", ignored_after)
-        ignored_events = wait(lambda: [event for event in events(ignored) if event.get("message", "").startswith("Liveness probe failed")],
-                              30, "TERM-ignoring probe failure Event")
         killed = statuses(ignored_after)["ignore"]["lastState"]["terminated"]
-        elapsed_grace = datetime.datetime.fromisoformat(killed["finishedAt"].replace("Z", "+00:00")).timestamp() - datetime.datetime.fromisoformat(
-            ignored_events[0]["firstTimestamp"].replace("Z", "+00:00")).timestamp()
-        assert 2 <= elapsed_grace < 10 and killed["exitCode"] != 0, (killed, ignored_events)
+        ignored_events = wait(lambda: [event for event in events(ignored)
+                                      if event.get("message", "").startswith("Liveness probe failed: Exec probe exited 1")
+                                      and timestamp(killed["startedAt"]) <= timestamp(event["firstTimestamp"]) <= timestamp(killed["finishedAt"])],
+                              30, "TERM-ignoring command-exit probe failure Event for stopped attempt")
+        save("probe-grace-events.json", ignored_events)
+        stop_evidence = container_stop_evidence(state / "agent/containerd/containerd.log", killed)
+        save("probe-grace-stop.json", stop_evidence)
+        assert stop_evidence["requestedGrace"] == 3 and 2 <= stop_evidence["actualStopSeconds"] < 10 and killed["exitCode"] != 0, (killed, stop_evidence)
         report["scenarios"]["probeGraceOverridesPodGrace"] = {"passed": True, "probeGrace": 3, "podGrace": 30,
-                                                            "actualStopSeconds": elapsed_grace, "exitCode": killed["exitCode"]}
+                                                            **stop_evidence, "exitCode": killed["exitCode"]}
         tcp_shell = ("child=''; trap 'test -z \"$child\" || kill $child; exit 0' TERM; while :; do "
                      "if [ -f /work/listen ]; then if [ -z \"$child\" ]; then httpd -f -p 9090 -h /work & child=$!; fi; "
                      "elif [ -n \"$child\" ]; then kill $child; wait $child; child=''; fi; sleep 1; done")
