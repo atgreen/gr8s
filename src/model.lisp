@@ -190,7 +190,7 @@
             "imagePullPolicy" "volumeMounts" "securityContext" "workingDir"
             "startupProbe" "readinessProbe" "livenessProbe")
    "container")
-  (require-empty-object-if-present object "resources" "container.resources")
+  (normalize-container-resources object)
   (validate-runtime-container object)
   (make-container-spec
    :name (require-dns-label

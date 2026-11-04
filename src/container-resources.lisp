@@ -26,8 +26,8 @@
     (if (zerop coefficient) (setf (container-quantity-scale quantity) 0)
         (loop while (zerop (mod coefficient 10))
               do (setf coefficient (/ coefficient 10)) (incf (container-quantity-scale quantity))))
-  (setf (container-quantity-coefficient quantity) coefficient)
-  quantity)
+    (setf (container-quantity-coefficient quantity) coefficient)
+    quantity))
 
 (defun container-quantity-round (quantity scale)
   "Round magnitude away from zero to SCALE, as Kubernetes Quantity.RoundUp does."
@@ -49,7 +49,7 @@
     (cond ((< sign-a sign-b) -1) ((> sign-a sign-b) 1) ((zerop a) 0)
           (t
            (let* ((magnitude-a (+ (length (write-to-string (abs a))) (container-quantity-scale left)))
-                  (magnitude-b (+ (length (write-to-string (abs b))) (container-quantity-scale right)))
+                  (magnitude-b (+ (length (write-to-string (abs b))) (container-quantity-scale right))))
              (* sign-a
                 (cond ((< magnitude-a magnitude-b) -1) ((> magnitude-a magnitude-b) 1)
                       (t (let* ((scale (min (container-quantity-scale left) (container-quantity-scale right)))
@@ -155,3 +155,30 @@
                                         (parse-container-quantity (gethash name limits)))))
                      (invalid-pod "Resource request ~A exceeds its limit" name))) requests)))
     resources))
+
+(defun container-resource-quantity (container kind name)
+  "Return CONTAINER's parsed KIND (limits or requests) quantity for resource NAME, if declared."
+  (let* ((resources (gethash "resources" container))
+         (values (and resources (gethash kind resources)))
+         (value (and values (gethash name values))))
+    (when value (parse-container-quantity value))))
+
+(defun container-milli-cpu (quantity)
+  "Return QUANTITY in whole millicores, rounding up as Kubernetes does."
+  (container-quantity-integer quantity :scale -3))
+
+(defun cri-linux-container-resources (container)
+  "Derive actual CFS and memory cgroup settings with the kubelet's formulas, or NIL if unconstrained."
+  (let* ((cpu-limit (container-resource-quantity container "limits" "cpu"))
+         (cpu-request (container-resource-quantity container "requests" "cpu"))
+         (memory-limit (container-resource-quantity container "limits" "memory"))
+         (period 100000))
+    (when (or cpu-limit cpu-request memory-limit)
+      (make-instance
+       'gr8s.cri.v1::linux-container-resources
+       :cpu-period (if cpu-limit period 0)
+       :cpu-quota (if cpu-limit (max 1000 (floor (* (container-milli-cpu cpu-limit) period) 1000)) 0)
+       ;; 1024 shares is one CPU, and the kernel's minimum is 2.
+       :cpu-shares (max 2 (floor (* (if cpu-request (container-milli-cpu cpu-request) 0) 1024) 1000))
+       :memory-limit-in-bytes (if memory-limit (container-quantity-integer memory-limit) 0)))))
+

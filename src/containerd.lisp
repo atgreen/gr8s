@@ -223,6 +223,7 @@
              :env environment
              :mounts (containerd-container-mounts runtime pod spec sandbox-id)
              :security-context (containerd-pod-security-context pod spec)
+             :resources (cri-linux-container-resources (pod-runtime-container-object pod spec))
              :working-directory (gethash "workingDir" (pod-runtime-container-object pod spec))
              :uid (pod-uid pod)
              :attempt attempt
