@@ -44,7 +44,9 @@
   uid
   resource-version
   node-name
-  object)
+  object
+  ;; Newer client-visible revision from status alone, never acknowledged by agents.
+  status-revision)
 
 (defstruct node-record
   "Represent a registered worker node and its control-plane lease state."
