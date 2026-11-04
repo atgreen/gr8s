@@ -144,9 +144,14 @@
           :container-details details
           :status (core-object "containerStatuses" statuses))))))))
 
-(defmethod runtime-delete ((runtime containerd-runtime) uid)
+(defun containerd-replace-uid (runtime uid)
+  "Remove UID's sandbox for recreation under the same Pod, keeping its volumes."
   (cancel-runtime-pod-deletion (containerd-runtime-deletions runtime) uid)
   (containerd-delete-uid runtime uid (funcall *pod-deletion-clock*)))
+
+(defmethod runtime-delete ((runtime containerd-runtime) uid)
+  (containerd-replace-uid runtime uid)
+  (cleanup-pod-volumes runtime uid))
 
 (defun containerd-delete-uid (runtime uid deadline &key preserve-lifecycle)
   "Stop UID's containers concurrently against DEADLINE before removing its sandbox."
@@ -185,7 +190,8 @@
   (stop-container-probes runtime (pod-uid pod))
   (when (pod-finalizers-present-p pod)
     (capture-containerd-finalized-pod runtime pod deadline))
-  (containerd-delete-uid runtime (pod-uid pod) deadline :preserve-lifecycle (pod-finalizers-present-p pod)))
+  (containerd-delete-uid runtime (pod-uid pod) deadline :preserve-lifecycle (pod-finalizers-present-p pod))
+  (cleanup-pod-volumes runtime (pod-uid pod)))
 
 (defmethod runtime-delete-pod ((runtime containerd-runtime) pod)
   "Poll the native Pod shutdown job without holding reconciliation until exit."

@@ -20,13 +20,57 @@
        (every (lambda (part) (and (plusp (length part)) (not (member part '("." "..") :test #'equal))))
               (uiop:split-string path :separator '(#\/)))))
 
+(defun drop-null-fields (object)
+  "Remove explicit JSON nulls, which Kubernetes treats the same as omitted fields."
+  (dolist (key (loop for key being the hash-keys of object using (hash-value value)
+                     when (eq value 'null) collect key))
+    (remhash key object))
+  object)
+
+(defun validate-seccomp-profile (profile)
+  "Accept profiles CRI can apply; Localhost is refused because no profile root is configured."
+  (drop-null-fields (require-object profile "securityContext.seccompProfile"))
+  (reject-unsupported-fields profile '("type" "localhostProfile") "seccompProfile")
+  (unless (member (gethash "type" profile) '("RuntimeDefault" "Unconfined") :test #'equal)
+    (invalid-pod "seccompProfile.type ~S is not supported" (gethash "type" profile)))
+  (when (gethash "localhostProfile" profile)
+    (invalid-pod "seccompProfile.localhostProfile requires type Localhost")))
+
+(defun validate-selinux-options (options)
+  "Validate the SELinux label components forwarded to the container runtime."
+  (drop-null-fields (require-object options "securityContext.seLinuxOptions"))
+  (reject-unsupported-fields options '("user" "role" "type" "level") "seLinuxOptions")
+  (maphash (lambda (key value)
+             (unless (stringp value) (invalid-pod "seLinuxOptions.~A must be a string" key)))
+           options))
+
+(defun validate-container-capabilities (capabilities)
+  "Validate capability names without an invented allowlist; the runtime rejects unknown ones."
+  (drop-null-fields (require-object capabilities "securityContext.capabilities"))
+  (reject-unsupported-fields capabilities '("add" "drop") "capabilities")
+  (dolist (field '("add" "drop"))
+    (loop for name across (optional-vector capabilities field "capabilities")
+          do (unless (and (stringp name) (plusp (length name))
+                          (every (lambda (character)
+                                   (or (alphanumericp character) (char= character #\_))) name))
+               (invalid-pod "capabilities.~A contains an invalid name" field)))))
+
 (defun validate-linux-security-context (context &key pod)
-  "Validate the Linux identity and privilege settings implemented by the CRI adapter."
+  "Validate the Linux identity, confinement and privilege settings implemented by the CRI adapter."
   (when context
+    (drop-null-fields (require-object context "securityContext"))
     (reject-unsupported-fields context
-                               (if pod '("runAsUser" "runAsGroup" "runAsNonRoot" "fsGroup")
+                               (if pod '("runAsUser" "runAsGroup" "runAsNonRoot" "fsGroup"
+                                         "supplementalGroups" "seLinuxOptions" "seccompProfile")
                                    '("runAsUser" "runAsGroup" "runAsNonRoot" "privileged"
-                                     "readOnlyRootFilesystem" "allowPrivilegeEscalation")) "securityContext")
+                                     "readOnlyRootFilesystem" "allowPrivilegeEscalation"
+                                     "seLinuxOptions" "seccompProfile" "capabilities")) "securityContext")
+    (when (gethash "seccompProfile" context) (validate-seccomp-profile (gethash "seccompProfile" context)))
+    (when (gethash "seLinuxOptions" context) (validate-selinux-options (gethash "seLinuxOptions" context)))
+    (when (gethash "capabilities" context) (validate-container-capabilities (gethash "capabilities" context)))
+    (loop for group across (optional-vector context "supplementalGroups" "securityContext")
+          do (unless (typep group '(integer 0 4294967294))
+               (invalid-pod "securityContext.supplementalGroups must contain Linux GIDs")))
     (dolist (field '("runAsUser" "runAsGroup" "fsGroup"))
       (when (gethash field context)
         (unless (typep (gethash field context) '(integer 0 4294967294))
@@ -106,8 +150,20 @@
              (when (and present (not (member value '(t nil))))
                (invalid-pod "volumeMount.readOnly must be boolean")))))
 
+(defun validate-empty-dir-source (source)
+  "Accept disk-backed and tmpfs emptyDirs; only tmpfs can actually enforce a size limit."
+  (drop-null-fields source)
+  (reject-unsupported-fields source '("medium" "sizeLimit") "emptyDir")
+  (let ((medium (gethash "medium" source "")) (limit (gethash "sizeLimit" source)))
+    (unless (member medium '("" "Memory") :test #'equal)
+      (invalid-pod "emptyDir.medium ~S is not supported" medium))
+    (unless (member limit '(nil 0 "0") :test #'equal)
+      (unless (equal medium "Memory")
+        (invalid-pod "emptyDir.sizeLimit is only enforced with medium Memory"))
+      (storage-quantity limit "emptyDir.sizeLimit"))))
+
 (defun validate-pod-volume (volume)
-  "Validate a durable ConfigMap, Secret or disk-backed emptyDir volume."
+  "Validate a durable ConfigMap, Secret, disk-backed or tmpfs emptyDir volume."
   (reject-unsupported-fields volume '("name" "configMap" "secret" "emptyDir" "hostPath" "persistentVolumeClaim") "volume")
   (require-dns-label (gethash "name" volume) "volume.name")
   (let ((sources (remove-if-not (lambda (key) (nth-value 1 (gethash key volume)))
@@ -125,7 +181,7 @@
           (when (and present (not (member value '(t nil)))) (invalid-pod "persistentVolumeClaim.readOnly must be boolean")))
         (return-from validate-pod-volume volume))
       (if (equal kind "emptyDir")
-          (reject-unsupported-fields source nil "emptyDir")
+          (validate-empty-dir-source source)
           (let ((name-field (if (equal kind "configMap") "name" "secretName")))
             (reject-unsupported-fields source (list name-field "items" "defaultMode" "optional") "volume source")
             (require-dns-subdomain (gethash name-field source) "volume source name")

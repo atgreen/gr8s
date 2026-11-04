@@ -6,6 +6,7 @@
 ;;;; materialize ConfigMap, Secret and emptyDir mounts in agent-owned directories.
 ;;;; Private resource data stays scoped to the Pod namespace; paths are validated
 ;;;; before touching the filesystem and fsGroup controls mounted data access.
+;;;; Memory emptyDirs are real tmpfs mounts that live until the Pod terminates.
 
 (in-package #:gr8s)
 
@@ -121,6 +122,54 @@
            (sb-posix:rename (namestring temporary) (namestring target)))
       (when (probe-file temporary) (delete-file temporary)))))
 
+(defparameter *pod-tmpfs-mount* (lambda (target options) (%linux-mount "gr8s-pod-volume" target "tmpfs" #x6 options))
+  "Mount a MS_NOSUID|MS_NODEV tmpfs, returning the libc status.")
+(defparameter *pod-tmpfs-unmount* (lambda (target) (%linux-umount target 0))
+  "Unmount one Pod volume, returning the libc status.")
+(defparameter *pod-mount-table-path* #P"/proc/self/mountinfo"
+  "The kernel's authoritative view of mounts in the agent's namespace.")
+
+(defun decode-mountinfo-path (encoded)
+  "Decode the octal escapes Linux applies to mountinfo pathnames."
+  (cl-ppcre:regex-replace-all
+   "\\\\([0-7]{3})" encoded
+   (lambda (match code) (declare (ignore match)) (string (code-char (parse-integer code :radix 8))))
+   :simple-calls t))
+
+(defun pod-volume-mount-targets (directory)
+  "Return mount points at or beneath existing DIRECTORY, deepest first."
+  (let ((root (namestring (truename directory))))
+    (sort (loop for line in (uiop:read-file-lines *pod-mount-table-path*)
+                for fields = (uiop:split-string line :separator '(#\Space))
+                for target = (and (>= (length fields) 5) (decode-mountinfo-path (nth 4 fields)))
+                when (and target (uiop:string-prefix-p root (concatenate 'string target "/")))
+                  collect target)
+          #'> :key #'length)))
+
+(defun pod-volume-system-error (operation target)
+  "Signal a runtime error naming the failed mount OPERATION and the current errno."
+  (error 'runtime-error :message (format nil "Could not ~A Pod volume ~A: ~A" operation target
+                                         (sb-int:strerror (sb-alien:get-errno)))))
+
+(defun ensure-pod-memory-volume (directory source)
+  "Mount a tmpfs at DIRECTORY once, so restarted containers keep the volume's contents."
+  (unless (pod-volume-mount-targets directory)
+    (let* ((target (namestring (truename directory)))
+           (limit (gethash "sizeLimit" source))
+           (options (if (member limit '(nil 0 "0") :test #'equal) ""
+                        (format nil "size=~D" (ceiling (storage-quantity limit "emptyDir.sizeLimit"))))))
+      (unless (zerop (funcall *pod-tmpfs-mount* target options))
+        (pod-volume-system-error "mount" target)))))
+
+(defun cleanup-pod-volumes (runtime uid)
+  "Unmount and delete a terminated Pod's volumes; a failed unmount leaves data for retry."
+  (let ((directory (merge-pathnames "volumes/" (containerd-pod-log-directory runtime uid))))
+    (when (probe-file directory)
+      (dolist (target (pod-volume-mount-targets directory))
+        (unless (zerop (funcall *pod-tmpfs-unmount* target))
+          (pod-volume-system-error "unmount" target)))
+      (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
+
 (defun materialize-pod-volume (runtime pod volume)
   "Create a volume's directories and projected files with enforced fsGroup access."
   (when (gethash "hostPath" volume)
@@ -133,6 +182,10 @@
     ;; The final directory is bind-mounted into the container. Its parent stays
     ;; private on the host even when Kubernetes requests world-readable files.
     (sb-posix:chmod (namestring (containerd-pod-log-directory runtime (pod-uid pod))) #o700)
+    (let ((source (gethash "emptyDir" volume)))
+      (when (and source (equal "Memory" (gethash "medium" source)))
+        (ensure-pod-memory-volume directory source)))
+    ;; Applied after mounting because the tmpfs root replaces the directory's mode.
     (set-pod-volume-permissions directory (if group #o2770 #o777) group)
     (multiple-value-bind (resource name optional) (pod-volume-resource-reference volume)
       (when resource
@@ -222,8 +275,39 @@
                                                      (containerd-runtime-socket-path runtime) sandbox-id))))) t))))
             (when include (list (cons (gethash "name" variable) value)))))))
 
+(defun cri-seccomp-profile (context)
+  "Map a validated seccompProfile to CRI, leaving an unset profile to mean Unconfined."
+  (let ((profile (and context (gethash "seccompProfile" context))))
+    (when profile
+      (make-instance 'gr8s.cri.v1::security-profile
+                     :profile-type (if (equal "RuntimeDefault" (gethash "type" profile))
+                                       gr8s.cri.v1::|+PROFILETYPE-RuntimeDefault+|
+                                       gr8s.cri.v1::|+PROFILETYPE-Unconfined+|)))))
+
+(defun cri-selinux-options (context)
+  "Map validated seLinuxOptions to the CRI label; enforcement belongs to the runtime."
+  (let ((options (and context (gethash "seLinuxOptions" context))))
+    (when options
+      (make-instance 'gr8s.cri.v1::se-linux-option
+                     :user (gethash "user" options "") :role (gethash "role" options "")
+                     :type (gethash "type" options "") :level (gethash "level" options "")))))
+
+(defun pod-supplemental-groups (pod)
+  "Return POD's declared supplemental groups joined with its fsGroup."
+  (let* ((context (gethash "securityContext" (gethash "spec" (pod-to-object pod))))
+         (declared (and context (coerce (gethash "supplementalGroups" context #()) 'list))))
+    (remove-duplicates (append declared (when (pod-fs-group pod) (list (pod-fs-group pod))))
+                       :from-end t)))
+
+(defun containerd-pod-sandbox-security (pod)
+  "Return Pod-level confinement initargs; containers derive their SELinux context from these."
+  (let ((context (gethash "securityContext" (gethash "spec" (pod-to-object pod)))))
+    (list :seccomp (cri-seccomp-profile context)
+          :selinux-options (cri-selinux-options context)
+          :supplemental-groups (pod-supplemental-groups pod))))
+
 (defun containerd-pod-security-context (pod container)
-  "Map effective Pod/container Linux identities and privileges to the CRI API."
+  "Map effective Pod/container Linux identities, confinement and privileges to the CRI API."
   (let* ((pod-context (gethash "securityContext" (gethash "spec" (pod-to-object pod))))
          (container-context (gethash "securityContext" (pod-runtime-container-object pod container)))
          (effective (core-object)))
@@ -237,7 +321,14 @@
        'gr8s.cri.v1::linux-container-security-context
        :run-as-user (when user (make-instance 'gr8s.cri.v1::int64value :value user))
        :run-as-group (when group (make-instance 'gr8s.cri.v1::int64value :value group))
-       :supplemental-groups (when (pod-fs-group pod) (list (pod-fs-group pod)))
+       :supplemental-groups (pod-supplemental-groups pod)
+       :seccomp (cri-seccomp-profile effective)
+       :selinux-options (cri-selinux-options effective)
+       :capabilities (let ((capabilities (gethash "capabilities" effective)))
+                       (when capabilities
+                         (make-instance 'gr8s.cri.v1::capability
+                                        :add-capabilities (coerce (gethash "add" capabilities #()) 'list)
+                                        :drop-capabilities (coerce (gethash "drop" capabilities #()) 'list))))
        :privileged (eq t (gethash "privileged" effective))
        :readonly-rootfs (eq t (gethash "readOnlyRootFilesystem" effective))
        :no-new-privs (and (nth-value 1 (gethash "allowPrivilegeEscalation" effective))
