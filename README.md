@@ -1,13 +1,63 @@
 # gr8s
 
-gr8s is a small Kubernetes-compatible Pod control plane written in Common
-Lisp. One dumped native image provides the control-plane, node-agent, and CNI
-roles. It serves the Kubernetes HTTP API on loopback and uses the same basic
-runtime boundary as k3s: containerd reached through the Kubernetes CRI, rather
-than shelling out to a container CLI. Workload execution is currently verified on the
-local node through the same private gRPC control channel used by standalone
-agents. The control plane schedules Pods and publishes desired state; the agent
-owns the node runtime and reports observed status.
+**A whole Kubernetes node — control plane, agent, CRI runtime, CNI, and a
+Lisp-compiled eBPF dataplane — in one self-contained native image.**
+
+gr8s is a small, Kubernetes-compatible Pod control plane written in Common Lisp.
+A single SBCL-dumped executable plays every role: it serves the Kubernetes HTTP
+API, schedules Pods, acts as the node agent, speaks CRI to an embedded
+containerd, implements the CNI plugin, and compiles its own eBPF dataplane — with
+no Envoy, no kube-proxy, no iptables, and no C toolchain anywhere in the build.
+It uses the same runtime boundary as k3s (containerd through the Kubernetes CRI,
+rather than shelling out to a container CLI), but almost everything above and
+around that boundary is Lisp. The control plane schedules Pods and publishes
+desired state; the agent owns the node runtime and reports observed status.
+
+## What makes gr8s unusual
+
+- **One static image, every role.** `gr8s serve` is the control plane *and* a
+  node; the same binary is the standalone agent and the CNI plugin. It embeds
+  statically linked containerd 2.4.2, `containerd-shim-runc-v2`, runc 1.5.2, and
+  the `bridge`/`host-local`/`loopback` CNI plugins 1.9.1 — no system containerd,
+  no host glibc, no separate CNI helper binary. At startup it mounts a private
+  `tmpfs` and BPF filesystem, materializes the payload, and runs its own
+  containerd.
+- **The dataplane is compiled from Common Lisp.** Whistler compiles eBPF
+  *directly from Lisp* — no LLVM, no clang, no `.c`, no hand-written ELF. The CNI
+  anti-spoof egress guard, the NetworkPolicy firewall, the ClusterIP service load
+  balancer, and the Gateway's inbound steering are all Lisp→eBPF, loaded through
+  a Lisp BPF loader and a Lisp rtnetlink stack.
+- **Gateway API with no proxy sidecar.** HTTPRoutes are *JIT-compiled*: SBCL
+  turns the routing table into a native dispatch function with route constants
+  inlined and Gateway-API precedence baked into the branch order, recompiled on
+  change in microseconds. The agent itself terminates HTTP/HTTPS and L4, and an
+  eBPF `sk_lookup` program steers the gateway port straight to the agent's
+  socket. The agent *is* the gateway. See [Gateway API](#gateway-api-no-envoy).
+- **NetworkPolicy as a compiled firewall.** Policies become data in per-Pod eBPF
+  maps enforced at the Pod's host veth — default-deny egress proven on a real Pod
+  in the smoke test, with no per-change recompile. See
+  [NetworkPolicy](#networkpolicy-compiled-ebpf-firewall).
+- **Lisp all the way down.** API server (Hunchentoot), JSON (jzon), CRI client
+  (ag-gRPC over a Unix socket), TLS + ACME (pure-tls), the scheduler, the
+  controllers, IPAM, rtnetlink, DNS, and the eBPF compiler — one language, one
+  image, no external runtime to install.
+- **Honest about scope.** Capabilities below are backed by committed evidence
+  records, and conformance numbers are reported as-is. gr8s has not passed
+  Kubernetes conformance, and it says so plainly.
+
+## Contents
+
+- [How it fits together](#how-it-fits-together)
+- [Kubernetes surface](#kubernetes-surface)
+- [Gateway API (no Envoy)](#gateway-api-no-envoy)
+- [NetworkPolicy (compiled eBPF firewall)](#networkpolicy-compiled-ebpf-firewall)
+- [Runtime architecture](#runtime-architecture)
+- [Requirements](#requirements)
+- [Build and run](#build-and-run-the-self-contained-server)
+- [Test](#test)
+- [Native executable](#native-executable)
+
+## How it fits together
 
 The runtime client is Common Lisp too. gr8s uses ag-gRPC over a Unix-domain
 socket and generated bindings for the pinned Kubernetes CRI v1 schema. The
@@ -100,6 +150,65 @@ backend is reached directly at a ready endpoint. `matchConditions` run a bounded
 CEL subset (`src/admission-cel.lisp`): `authorizer`, `matches`, uint, bytes and
 other unsupported CEL fail at registration instead of being misjudged. Objects
 written by in-process controllers do not pass through webhooks yet.
+
+## Gateway API (no Envoy)
+
+gr8s implements the Kubernetes Gateway API as a capability of the in-image
+agent — no Envoy, no sidecars, no kube-proxy, no iptables. `GatewayClass`,
+`Gateway`, `HTTPRoute`, `TCPRoute`, `TLSRoute` and `GRPCRoute` are served as
+durable, discoverable `gateway.networking.k8s.io/v1` objects and projected to
+the node that runs them. Two unfair advantages set it apart.
+
+**The routing table is compiled, not interpreted.** When HTTPRoutes change, SBCL
+JIT-compiles the match table into a native Lisp dispatch function — hostnames
+(exact and `*.suffix`), path `Exact`/`PathPrefix`, method and exact-header
+matches, and weighted backends — with the route constants inlined and
+Gateway-API match precedence baked into the `cond` branch order. A route change
+recompiles in microseconds; there is no per-request walk of a rules table.
+
+**The agent is the gateway.** An eBPF `sk_lookup` program (compiled from Lisp,
+keyed by destination port through a `SOCKHASH`) steers an inbound connection for
+a gateway port straight onto the agent's own listening socket — a port the agent
+never bound — with `bpf_sk_assign`, so there is no kube-proxy hop and no
+iptables. The in-agent L7 proxy then terminates the request and dispatches
+through the compiled router to a ready backend Pod endpoint.
+
+Supported today:
+
+- **HTTP routing** with full match precedence, weighted traffic splitting, and
+  HTTP filters: request/response header modifiers, URL rewrite
+  (`ReplaceFullPath`/`ReplacePrefixMatch`) and request redirect.
+- **HTTPS termination** on a listener, using the cert/key from a referenced
+  `kubernetes.io/tls` Secret through the in-image pure-tls stack.
+- **L4 routing** for TCPRoute (TCP splice) and TLSRoute/GRPCRoute (SNI
+  passthrough: the TLS ClientHello SNI is peeked without terminating and used to
+  pick the backend).
+- **Per-route observability and protection**:
+  `gr8s_gateway_requests_total{gateway,route,code}` on `/metrics`, and a
+  per-route token-bucket rate limiter (`gr8s.io/rate-limit-rps` → HTTP 429).
+
+`make smoke` creates a Gateway, an HTTPRoute, and a backend Service + Pod, then
+proves a host/path request routes end-to-end through the in-agent proxy to the
+real Pod. ACME auto-issuance, HTTP RequestMirror, backendRef-level filters, and
+an eBPF rate-limit fast path are tracked follow-ups.
+
+## NetworkPolicy (compiled eBPF firewall)
+
+`networking.k8s.io/v1` NetworkPolicy is enforced as a compiled eBPF firewall on
+real Pods. Rather than recompiling a program per policy change, gr8s folds
+enforcement into the per-Pod egress classifier at the host veth and drives it
+from BPF maps: the resolved policy — allowed destination CIDRs in an LPM trie and
+permitted `(group, protocol, port)` tuples in a hash — is written as *data* into
+pinned maps, so a policy change is a map update, not a recompile or a re-attach.
+Egress to a destination no rule permits is dropped (default-deny), and the drops
+are counted and exported through the same endpoint telemetry as the anti-spoof
+guard.
+
+The smoke test applies a default-deny-egress policy to a running Pod and
+requires its previously reachable gateway to become unreachable, proving
+enforcement on a live Pod; detach-on-removal is covered by unit tests.
+Ingress-direction enforcement, connection tracking for reply traffic, namespace
+selectors and `ipBlock.except` are tracked for completeness.
 
 ## Runtime architecture
 
