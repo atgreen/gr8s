@@ -218,17 +218,36 @@
                (incf offset (netlink-align size))))
     attributes))
 
-(defun network-link-attributes (name)
-  (let* ((index (native-interface-index (validate-network-interface-name name)))
-         (messages (call-rtnetlink
-                    18 0 (netlink-interface-message
-                          :index (if (zerop index)
-                                     (fail-rtnetlink "link lookup" 19) index))))
-         (message (find 16 messages
-                        :key (lambda (item) (netlink-read-integer item 4 2)))))
+(defun network-link-attributes-by-index (index)
+  "Read kernel link attributes for an interface index in this namespace."
+  (unless (plusp index) (fail-rtnetlink "link lookup" 19))
+  (let* ((messages (call-rtnetlink 18 0 (netlink-interface-message :index index)))
+         (message (find 16 messages :key (lambda (item) (netlink-read-integer item 4 2)))))
     (unless (and message (>= (length message) 32))
-      (invalid-cni "kernel returned no link information for ~A" name))
+      (invalid-cni "kernel returned no link information for index ~A" index))
     (netlink-attributes message 32)))
+
+(defun network-link-attributes (name)
+  "Read kernel link attributes for a validated interface name."
+  (network-link-attributes-by-index
+   (native-interface-index (validate-network-interface-name name))))
+
+(defun read-ipv4-host-routes ()
+  "Read non-default IPv4 routes from all Linux routing tables via rtnetlink."
+  (loop for message in (call-rtnetlink 26 #x300
+                                      (netlink-octets #(2 0 0 0 0 0 0 0) (netlink-integer 0 4)))
+        when (and (>= (length message) 28) (= 24 (netlink-read-integer message 4 2))
+                  (= 2 (aref message 16)) (plusp (aref message 17)))
+          collect (let* ((attributes (netlink-attributes message 28))
+                         (destination (gethash 1 attributes #(0 0 0 0)))
+                         (index (gethash 4 attributes)) (table (gethash 15 attributes)))
+                    (list :cidr (format nil "~A/~D"
+                                        (format-ipv4-integer
+                                         (loop for byte across destination
+                                               for shift from 24 downto 0 by 8 sum (ash byte shift)))
+                                        (aref message 17))
+                          :index (if index (netlink-read-integer index 0 4) 0)
+                          :table (if table (netlink-read-integer table 0 4) (aref message 20))))))
 
 (defun network-link-owned-p (name owner)
   (let ((alias (gethash 20 (network-link-attributes name))))

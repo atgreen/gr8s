@@ -122,7 +122,7 @@ bindings live in `src/cri-v1-generated.lisp`.
 
 Managed Pods receive directly routed veth pairs and `/32` addresses from
 persistent agent IPAM. The control plane assigns each node a distinct Pod CIDR
-within `10.88.0.0/16` and includes the network configuration in desired-state
+within `10.80.0.0/12` and includes the network configuration in desired-state
 snapshots. The agent persists that assignment and restores IPAM before restarting
 reconciliation. Containerd invokes only the `gr8s` CNI plugin, which sends typed
 requests to the agent's private Unix socket. CNI ADD retains its durable lease
@@ -560,6 +560,31 @@ The runner preserves the official Sonobuoy archive, native and worker logs, and
 individual executed specs in its printed report directory. A timeout preserves
 partial worker logs. A passing result requires every selected spec to execute
 and pass; running this command alone does not establish certification.
+
+### Debugging a running cluster
+
+`gr8s serve --debug-slynk-port PORT` starts an opt-in [Slynk](https://github.com/joaotavora/sly)
+server for inspecting a live process. It is off by default and is for disposable
+environments only: **it allows arbitrary code execution as the gr8s user, normally
+root.** It binds to `127.0.0.1` and requires a secret, newly generated at each start
+in `<state>/debug/slynk.secret`, because `hostNetwork` Pods share loopback. The
+secret is the bare first protocol message, and a connecting Emacs Sly client needs a
+matching `~/.sly-secret`.
+
+Forms can also be evaluated from a shell, in the `gr8s` package:
+
+```sh
+scripts/gr8s-debug.py --port PORT --state-directory DIR '(debug-threads)'
+scripts/gr8s-debug.py --port PORT --state-directory DIR '(debug-backtraces "reconciler")'
+scripts/gr8s-debug.py --port PORT --state-directory DIR '(debug-pod "default" "web")'
+scripts/gr8s-debug.py --port PORT --state-directory DIR '(debug-journal 20)'
+```
+
+`*debug-store*` and `*debug-reconciler*` hold the live objects. For a focused
+diagnostic run, the conformance runner accepts `--debug-slynk-port PORT` and
+`--hold-on-failure SECONDS`, which keeps a failed cluster running until the time
+passes or `<run>/release` exists. Both are refused with `--certified-conformance`,
+because a process changed this way is not conformance evidence.
 
 For the four supplemental upstream Event API cases, use
 `--focus '\[sig-instrumentation\].*Events.*\[Conformance\]' --expected-specs 4`.

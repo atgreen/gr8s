@@ -151,6 +151,9 @@
 
 (defun configure-node-runtime-network (node-runtime network &key (persist t))
   (validate-node-network-object network)
+  (when (node-runtime-manager node-runtime)
+    (validate-pod-pool-host-routes (gethash "clusterPodCIDR" network)
+                                  (node-runtime-state-directory node-runtime)))
   (bt:with-lock-held ((node-runtime-network-lock node-runtime))
     (let ((existing (node-runtime-network node-runtime)))
       (when (and existing

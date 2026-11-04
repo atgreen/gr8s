@@ -76,6 +76,7 @@ pure-tls, ghcr.io/ocicl/pure-tls@sha256:a8c1555d28eab93f4fb5d39d826844af2473eb80
 puri, ghcr.io/ocicl/puri@sha256:b803fb9444eaf2c7053812e19d342d4ce6a05fd1880fa3a2a2f824769a6d58d2, puri-20260406-4bbab89/puri.asd
 rfc2388, ghcr.io/ocicl/rfc2388@sha256:4190f6eb36b3b2f53def6eff56b44e76edf4086ada2feb6d88bb671a40fc9f70, rfc2388-20240503-591bcf7/rfc2388.asd
 salza2, ghcr.io/ocicl/salza2@sha256:0f9d930524b469e1442372a6e12b26742d9e6a1144e6a455006943190d1ea71e, salza2-2.1/salza2.asd
+slynk, ghcr.io/ocicl/slynk@sha256:f2b1cab9d0d90ff8404c3886f12314c27b298bd2cd2f5ed365226d053e64a667, sly-20261028-7035062/slynk/slynk.asd
 split-sequence, ghcr.io/ocicl/split-sequence@sha256:3a37662eedd99c42995587b9d443c4631f25c4c523091bcca31a27b880585b8e, split-sequence-2.0.1/split-sequence.asd
 trivial-backtrace, ghcr.io/ocicl/trivial-backtrace@sha256:89a3138695bb767c50001402fad60dacfc1e867e4e3d3579cc6f636d3e29a51c, trivial-backtrace-20240503-7f90b4a/trivial-backtrace.asd
 trivial-backtrace-test, ghcr.io/ocicl/trivial-backtrace@sha256:89a3138695bb767c50001402fad60dacfc1e867e4e3d3579cc6f636d3e29a51c, trivial-backtrace-20240503-7f90b4a/trivial-backtrace-test.asd
