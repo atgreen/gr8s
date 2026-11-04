@@ -1,0 +1,74 @@
+{
+  "focus": "Certificates API",
+  "mode": "focused",
+  "isCertificationResult": false,
+  "nativeSHA256": "9cf33089e7d691a45ae9b20703a25a41f1ee31d1ffd0fc8669df491c8577d970",
+  "stateDirectory": "/var/tmp/gr8s-podtemplates.vd3wzxyp/state",
+  "reusedState": false,
+  "nativeAgentReady": true,
+  "version": {
+    "major": "1",
+    "minor": "36",
+    "gitVersion": "v1.36.0-gr8s.0",
+    "gitCommit": "unknown",
+    "gitTreeState": "clean",
+    "buildDate": "1970-01-01T00:00:00Z",
+    "goVersion": "common-lisp",
+    "compiler": "sbcl",
+    "platform": "linux/amd64"
+  },
+  "sonobuoyVersion": "v0.57.5",
+  "sonobuoyRunExitCode": 0,
+  "passed": false,
+  "suiteStarts": 1,
+  "selectedSpecs": [
+    [
+      "2",
+      "7579"
+    ]
+  ],
+  "upstreamCases": [
+    {
+      "name": "[It] [sig-auth] Certificates API [Privileged:ClusterAdmin] should support CSR API operations [Conformance]",
+      "seconds": "0.884733117",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-auth] Certificates API [Privileged:ClusterAdmin] should support building a client with a CSR",
+      "seconds": "11.229569127",
+      "passed": false
+    }
+  ],
+  "suiteHookEntries": 7,
+  "error": "Upstream conformance cases did not all pass; inspect the official archive and logs",
+  "nativeExitCode": 0,
+  "ownedShimsRemaining": [],
+  "artifactSHA256": {
+    "gr8s.log": "fa386555919a21dd3c59613140257690c961f556069fdc21c57e513b506541ba",
+    "sonobuoy.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sonobuoy.stderr.log": "361fdd10f65b087237b59f61aaf1c554471f5bf969f697b8b195227cbb40060b",
+    "sonobuoy-results.tar.gz": "1503bc8e0a653d3c353fa9f62442adb79c29a941ea7fc1e40903af58ed124f65",
+    "kube-sonobuoy.log": "21712beaaae1afa5abfcfd8852dff8337c4c94b76f9e555e64718f1b26f466ad",
+    "e2e.log": "e385cf634479360be6f6a9ed1150fcd6cd3d2f01ffda08a25174250499902f25",
+    "sonobuoy-worker.log": "0958908feae1eaead60b123e9a222e489f5f1045181974b5a4f1501ddee68422",
+    "sonobuoy-results.txt": "b44e009a5dbfd4d7ea5d1b49e50ab74504ea78239026457f5383c9c06ddbe163"
+  },
+  "sourceCommit": "774287e",
+  "failureDiagnosis": {
+    "case": "should support building a client with a CSR",
+    "location": "test/e2e/auth/certificates.go:183",
+    "code": 401,
+    "reason": "Public TLS API authenticates only ServiceAccount bearer tokens; client certificate HTTP authentication is tracked podster-uqb.22.2. Actual single-leaf issuance and lifetime checks succeeded before this request."
+  },
+  "copiedArtifactHashesVerified": true,
+  "independentJUnitCases": [
+    {
+      "name": "[It] [sig-auth] Certificates API [Privileged:ClusterAdmin] should support CSR API operations [Conformance]",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-auth] Certificates API [Privileged:ClusterAdmin] should support building a client with a CSR",
+      "passed": false
+    }
+  ]
+}
