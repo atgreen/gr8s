@@ -73,6 +73,7 @@
                              (:file "core-resource-http")
                              (:file "podtemplate-watch")
                              (:file "crd-http")
+                             (:file "crd-status")
                              (:file "crd-openapi")
                              (:file "server")
                              (:file "in-cluster-api")

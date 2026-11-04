@@ -73,6 +73,10 @@
              (namespace (and (equal "namespaces" (first tail)) (third tail) (second tail)))
              (rest (if namespace (cddr tail) tail)))
         (cond
+          ((and (equal "apiextensions.k8s.io" group) (equal version "v1") (= 7 (length parts))
+                (equal (fifth parts) "customresourcedefinitions") (equal (seventh parts) "status")
+                (dns-subdomain-p (sixth parts)))
+           (list :definition-status (sixth parts)))
           ((and (equal "apiextensions.k8s.io" group) (member (length parts) '(3 4)) (member version '(nil "v1") :test #'equal))
            (list :discovery group version openapi))
           (t
@@ -98,7 +102,8 @@
   (if (equal group "apiextensions.k8s.io")
       (let ((resources (stored-resource-discovery +crd-api-version+)))
         (loop for entry across resources do (setf (gethash "shortNames" entry) #("crd" "crds")))
-        resources)
+        (concatenate 'vector resources
+          (vector (core-object "name" "customresourcedefinitions/status" "namespaced" nil "kind" "CustomResourceDefinition" "verbs" #("get" "patch" "update")))))
       (with-store-lock (store)
         (coerce (loop for key being the hash-keys of (pod-store-resources store) using (hash-value definition)
                       for spec = (gethash "spec" definition)
@@ -192,6 +197,7 @@
   "Handle one real served route using a store-scoped descriptor and version context."
   (let ((route (crd-special-route store path)))
     (ecase (first route)
+      (:definition-status (dispatch-crd-definition-status store (second route) method))
       (:discovery
        (unless (eq method :get) (core-resource-error 405 "MethodNotAllowed" "Discovery requires GET"))
        (destructuring-bind (tag group version openapi) route

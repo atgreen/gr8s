@@ -25,7 +25,9 @@ Served versions share object UIDs and one storage identity. Conversion strategy
 None changes the API version without transforming fields; each version's schema
 controls its defaults, pruning and validation. Removing a stored version requires
 actual migration first. A declared status subresource isolates status writes from
-desired fields and preserves generation. Ordinary writes preserve status.
+desired fields and preserves generation. Ordinary writes preserve status. CRD
+status writes preserve actual establishment/cleanup conditions and permit retiring
+a stored version only after every persisted instance has really left it.
 
 Deleting a definition deletes its actual custom instances. User finalizers block
 instance deletion and keep the definition's cleanup finalizer and routes alive.
@@ -37,7 +39,7 @@ This workstream remains under development. CEL, conversion webhooks, scale
 subresources, additional printer columns, custom field selectors, server-side
 apply and protobuf requests for CRDs/custom objects are not implemented and are
 not advertised as functioning features. Unsupported executable schema/conversion
-features are rejected. Further CRD status interoperability and structural edge cases are still being
+features are rejected. Further structural edge cases and integration are still being
 tested before integration review. The native kubectl smoke passes strict creation,
 real streamed watches, version identity, restart persistence and finalizer
 cleanup without disabling validation. Run it against a dumped executable with:
