@@ -84,3 +84,38 @@
             (pure-tls/acme::wrap-pem "CERTIFICATE REQUEST"
              (pure-tls/acme::encode-sequence (pure-tls::asn1-node-raw-bytes (first parts)) algorithm
                                              (pure-tls::asn1-node-raw-bytes (third parts)))))))))))
+
+(defun rewrite-and-resign-rsa-csr (request directory transform)
+  "Produce genuinely signed adversarial PKCS#10 structures using the original fixture key."
+  (let* ((root (pure-tls::parse-der (cdar (gr8s::csr-pem-blocks request))))
+         (parts (pure-tls::asn1-children root))
+         (info (pure-tls::asn1-children (first parts)))
+         (key (pure-tls:load-private-key (merge-pathnames "rsa-key.pem" directory)))
+         (spki (pure-tls::parse-subject-public-key-info (third info)))
+         (public (pure-tls::parse-rsa-public-key (getf spki :public-key)))
+         (rewritten (funcall transform info))
+         (signature (pure-tls/acme::sign-csr key public rewritten)))
+    (is-true (pure-tls::verify-rsa-pkcs1v15-signature public rewritten signature :sha256))
+    (trivial-utf-8:string-to-utf-8-bytes
+     (pure-tls/acme::wrap-pem "CERTIFICATE REQUEST"
+       (pure-tls/acme::encode-sequence rewritten (pure-tls::asn1-node-raw-bytes (second parts))
+                                      (pure-tls/acme::encode-bit-string signature))))))
+
+(test valid-signature-does-not-admit-an-unknown-public-key-identifier-or-malformed-name
+  (with-temporary-store (store directory)
+    (declare (ignore store))
+    (let ((request (csr-crypto-fixture directory "rsa")))
+      (dolist (kind '(:unknown-key :invalid-name))
+        (let ((rewritten (rewrite-and-resign-rsa-csr request directory
+                           (lambda (info)
+                             (pure-tls/acme::encode-sequence
+                              (pure-tls::asn1-node-raw-bytes (first info))
+                              (if (eq kind :invalid-name) (pure-tls/acme::encode-integer 123)
+                                  (pure-tls::asn1-node-raw-bytes (second info)))
+                              (if (eq kind :unknown-key)
+                                  (pure-tls/acme::encode-sequence
+                                   (pure-tls/acme::encode-sequence (pure-tls/acme::encode-oid '(1 2 840 113549 1 1 99)) (pure-tls/acme::encode-null))
+                                   (pure-tls::asn1-node-raw-bytes (second (pure-tls::asn1-children (third info)))))
+                                  (pure-tls::asn1-node-raw-bytes (third info)))
+                              (pure-tls::asn1-node-raw-bytes (fourth info)))))))
+          (signals kubernetes-error (gr8s::parse-and-verify-certificate-request rewritten)))))))

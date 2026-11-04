@@ -221,3 +221,23 @@
       (is (= revision (gr8s::pod-store-resource-revision store)))
       (is (gr8s::core-json-equal-p created (gr8s::get-core-resource store "certificatesigningrequests" nil "example-csr")))
       (is (gr8s::core-json-equal-p created (gr8s::get-core-resource (open-store directory) "certificatesigningrequests" nil "example-csr"))))))
+
+(test client-signer-subject-restriction-recognizes-bmp-encoded-masters-group
+  (with-csr-api (store directory)
+    (values store)
+    (let* ((request (csr-crypto-fixture directory "rsa"))
+           (rewritten
+             (rewrite-and-resign-rsa-csr request directory
+               (lambda (info)
+                 (let* ((text "system:masters")
+                        (bmp (make-array (+ 2 (* 2 (length text))) :element-type '(unsigned-byte 8) :initial-element 0)))
+                   (loop for character across text for index from 1 by 2 do (setf (aref bmp index) (char-code character)))
+                   (pure-tls/acme::encode-sequence
+                    (pure-tls::asn1-node-raw-bytes (first info))
+                    (pure-tls/acme::encode-sequence (pure-tls/acme::encode-der #x31
+                     (pure-tls/acme::encode-sequence (pure-tls/acme::encode-oid '(2 5 4 10)) (pure-tls/acme::encode-der #x1e bmp))))
+                    (pure-tls::asn1-node-raw-bytes (third info)) (pure-tls::asn1-node-raw-bytes (fourth info))))))))
+      (is (equal "system:masters" (cdr (assoc :organization-name
+                  (pure-tls::x509-name-rdns (gr8s::parsed-certificate-request-subject (gr8s::parse-and-verify-certificate-request rewritten)))))))
+      (csr-api-request 403 "/apis/certificates.k8s.io/v1/certificatesigningrequests" :method :post
+        :object (csr-fixture rewritten :signer "kubernetes.io/kube-apiserver-client" :usages #("client auth"))))))
