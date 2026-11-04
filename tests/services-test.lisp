@@ -103,3 +103,35 @@
       (when proxy (gr8s::stop-tcp-service-proxy proxy))
       (ignore-errors (usocket:socket-close backend))
       (when (and backend-thread (bt:thread-alive-p backend-thread)) (ignore-errors (bt:destroy-thread backend-thread))))))
+
+(test service-proxy-retired-request-cleanup-cannot-shutdown-a-reused-descriptor
+  #+sbcl
+  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :element-type '(unsigned-byte 8)))
+         (port (usocket:get-local-port listener))
+         (old-upstream (usocket:socket-connect "127.0.0.1" port :element-type '(unsigned-byte 8)))
+         (old-client (usocket:socket-accept listener :element-type '(unsigned-byte 8)))
+         (old-fd (sb-bsd-sockets:socket-file-descriptor (usocket::socket old-upstream)))
+         (proxy (gr8s::make-tcp-service-proxy)) (fresh nil) (peer nil))
+    (unwind-protect
+         (progn
+           (setf (gethash old-client (gr8s::tcp-service-proxy-connections proxy)) (list old-client old-upstream))
+           (gr8s::service-proxy-close-connection proxy old-client)
+           (setf fresh (usocket:socket-connect "127.0.0.1" port :element-type '(unsigned-byte 8))
+                 peer (usocket:socket-accept listener :element-type '(unsigned-byte 8)))
+           (is (= old-fd (sb-bsd-sockets:socket-file-descriptor (usocket::socket fresh))))
+           ;; SBCL's usocket stream close leaves the old socket wrapper's fd slot
+           ;; intact. An unguarded shutdown on it half-closes FRESH, not OLD.
+           (gr8s::service-proxy-shutdown-upstream-output proxy old-client old-upstream)
+           (write-byte 77 (usocket:socket-stream fresh))
+           (finish-output (usocket:socket-stream fresh))
+           (sb-sys:with-deadline (:seconds 2)
+             (is (= 77 (read-byte (usocket:socket-stream peer) nil -1))))
+           (setf (gethash fresh (gr8s::tcp-service-proxy-connections proxy)) (list fresh fresh))
+           (gr8s::service-proxy-shutdown-upstream-output proxy fresh fresh)
+           (sb-sys:with-deadline (:seconds 2)
+             (is (eq :eof (read-byte (usocket:socket-stream peer) nil :eof)))))
+      (when fresh (ignore-errors (usocket:socket-close fresh)))
+      (when peer (ignore-errors (usocket:socket-close peer)))
+      (ignore-errors (usocket:socket-close old-client))
+      (ignore-errors (usocket:socket-close old-upstream))
+      (ignore-errors (usocket:socket-close listener)))))

@@ -255,11 +255,12 @@
       (lambda (old)
         (if (string= content-type "application/json-patch+json")
             (apply-core-json-patch old patch)
-            (if (and (or (storage-resource-p resource)
+            (if (and (or (storage-resource-p resource) (endpointslice-resource-p resource)
                          (member resource '("podtemplates" "deployments" "replicasets") :test #'equal))
                      (equal content-type "application/strategic-merge-patch+json"))
                 (template-strategic-merge old (require-object patch "patch")
                   (template-schema (cond ((storage-resource-p resource) (storage-resource-schema-name resource))
+                                         ((endpointslice-resource-p resource) "io.k8s.api.discovery.v1.EndpointSlice")
                                          ((equal resource "podtemplates") "io.k8s.api.core.v1.PodTemplate")
                                          (t (concatenate 'string "io.k8s.api.apps.v1." (core-resource-kind resource))))))
                 (merge-json-object old (require-object patch "patch")))))
@@ -290,7 +291,7 @@
                                                (lambda (old) (declare (ignore old)) replacement) :dry-run dry-run))))
         ((and writable-scope name (eq method :patch)) (core-resource-patch-response store resource namespace name dry-run))
         ((and writable-scope (null name)
-              (or (storage-resource-p resource) (member resource '("podtemplates" "events" "deployments" "replicasets" "customresourcedefinitions") :test #'equal))
+              (or (storage-resource-p resource) (endpointslice-resource-p resource) (member resource '("podtemplates" "events" "deployments" "replicasets" "customresourcedefinitions") :test #'equal))
               (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
                 (options (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions")))
@@ -303,7 +304,7 @@
                                                      (or (hunchentoot:parameter "fieldSelector") "") (or dry-run preview)))
                  ((workload-resource-p resource)
                   (delete-workload-collection store resource namespace options (or dry-run preview)))
-                 ((storage-resource-p resource)
+                 ((or (storage-resource-p resource) (endpointslice-resource-p resource))
                   (delete-storage-collection store resource namespace (or (hunchentoot:parameter "labelSelector") "")
                                              (or (hunchentoot:parameter "fieldSelector") "") :dry-run (or dry-run preview)))
                  (t (delete-template-collection store namespace (or (hunchentoot:parameter "labelSelector") "")
@@ -361,7 +362,8 @@
                                   "io.k8s.api.events.v1.Event" "io.k8s.api.events.v1.EventList"
                                   "io.k8s.api.core.v1.PersistentVolume" "io.k8s.api.core.v1.PersistentVolumeList"
                                   "io.k8s.api.core.v1.PersistentVolumeClaim" "io.k8s.api.core.v1.PersistentVolumeClaimList"
-                                  "io.k8s.api.storage.v1.StorageClass" "io.k8s.api.storage.v1.StorageClassList") :test #'equal))
+                                  "io.k8s.api.storage.v1.StorageClass" "io.k8s.api.storage.v1.StorageClassList"
+                                  "io.k8s.api.discovery.v1.EndpointSlice" "io.k8s.api.discovery.v1.EndpointSliceList") :test #'equal))
                  name (concatenate 'string "io.gr8s.template." name)))
            (rewrite (schema)
              (cond ((hash-table-p schema)

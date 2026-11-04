@@ -138,7 +138,7 @@
                                                    ((equal resource "persistentvolumes") #("pv"))
                                                    ((equal resource "persistentvolumeclaims") #("pvc"))
                                                    ((equal resource "storageclasses") #("sc")) (t #()))
-                                "verbs" (if (or (storage-resource-p resource)
+                                "verbs" (if (or (storage-resource-p resource) (endpointslice-resource-p resource)
                                                 (member resource '("podtemplates" "events" "deployments" "replicasets" "customresourcedefinitions") :test #'equal))
                                             #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
                                             #("create" "delete" "get" "list" "patch" "update" "watch"))))
