@@ -155,3 +155,250 @@
              (is-false (gr8s::execute-container-probe (gr8s::make-containerd-runtime) container "current-attempt" "" probe))
              (is (equal '(("current-attempt" ("test" "literal") 1) ("current-attempt" ("test" "literal") 1)) calls))))
       (setf (symbol-function 'gr8s::cri-exec-sync) original))))
+
+(defun call-with-probe-raw-server (function responder &key socket-path)
+  "Own actual TCP/Unix peers and concurrent responders, including stalled handshakes and bodies."
+  (let* ((host (or socket-path "127.0.0.1"))
+         (listener (usocket:socket-listen host 0 :element-type '(unsigned-byte 8)))
+         (target (or socket-path (usocket:get-local-port listener)))
+         (lock (bt:make-lock "probe raw peers"))
+         (sockets nil) (workers nil) (stopping nil)
+         (acceptor
+           (bt:make-thread
+            (lambda ()
+              (handler-case
+                  (loop
+                    (let ((socket (usocket:socket-accept listener)))
+                      (when stopping (usocket:socket-close socket) (return))
+                      (bt:with-lock-held (lock) (push socket sockets))
+                      (let ((worker
+                              (bt:make-thread
+                               (lambda ()
+                                 (unwind-protect
+                                      (handler-case (funcall responder (usocket:socket-stream socket)) (error () nil))
+                                   (ignore-errors (usocket:socket-close socket))))
+                               :name "probe raw response")))
+                        (bt:with-lock-held (lock) (push worker workers)))))
+                (error () nil)))
+            :name "probe raw acceptor")))
+    (unwind-protect (funcall function target)
+      (setf stopping t)
+      (ignore-errors (usocket:socket-close (usocket:socket-connect host (if socket-path 0 target) :element-type '(unsigned-byte 8) :timeout 1)))
+      (ignore-errors (usocket:socket-close listener))
+      (unless (wait-until (lambda () (not (bt:thread-alive-p acceptor))) :timeout 1)
+        (ignore-errors (bt:destroy-thread acceptor)))
+      (ignore-errors (bt:join-thread acceptor))
+      (dolist (socket sockets) (ignore-errors (usocket:socket-close socket)))
+      (dolist (worker workers)
+        (when (bt:thread-alive-p worker) (ignore-errors (bt:destroy-thread worker)))
+        (ignore-errors (bt:join-thread worker))))))
+
+(defun probe-request-lines (stream)
+  "Read a complete real HTTP request header without consuming its target's state."
+  (let ((text (flexi-streams:make-flexi-stream stream :external-format :latin-1)))
+    (loop for line = (read-line text nil nil)
+          while (and line (plusp (length (string-trim '(#\Return) line)))) collect line)))
+
+(defun write-probe-http-response (stream status headers body)
+  "Write controlled HTTP framing so tests can keep a complete or partial body open."
+  (let ((text (flexi-streams:make-flexi-stream stream :external-format :latin-1)))
+    (format text "HTTP/1.1 ~D Test~C~C" status #\Return #\Newline)
+    (dolist (entry headers) (format text "~A: ~A~C~C" (car entry) (cdr entry) #\Return #\Newline))
+    (format text "~C~C~A" #\Return #\Newline body)
+    (force-output text)))
+
+(defun probe-for-http-port (port &optional (path "/"))
+  "Construct a validated one-second actual HTTP probe for a loopback fixture."
+  (gr8s::validate-container-probe
+   (gr8s::core-object "timeoutSeconds" 1 "httpGet" (gr8s::core-object "port" port "path" path)) "readinessProbe"))
+
+(test probe-http-spec-defaults-empty-header-values-and-restricts-names
+  (let* ((probe (checked-probe "{\"httpGet\":{\"port\":80,\"httpHeaders\":[{\"name\":\"Accept\"}]}}"))
+         (http (gethash "httpGet" probe)))
+    (is (equal "/" (gethash "path" http)))
+    (is (equal "" (gethash "value" (aref (gethash "httpHeaders" http) 0)))))
+  (signals gr8s:kubernetes-error (checked-probe "{\"httpGet\":{\"port\":\"a--b\"}}"))
+  (signals gr8s:kubernetes-error (checked-probe "{\"httpGet\":{\"port\":80,\"httpHeaders\":[{\"name\":\"X_Test\",\"value\":\"x\"}]}}")))
+
+(test probe-http-terminal-body-obeys-framing-and-the-10kib-limit
+  (dolist (scenario '((200 (("Content-Length" . "0")) "")
+                      (204 nil "")
+                      (304 nil "")
+                      (200 (("Content-Length" . "3")) "abc")
+                      (200 (("Transfer-Encoding" . "chunked")) :chunked)
+                      (200 (("Content-Length" . "20000")) :limit)))
+    (destructuring-bind (code headers body) scenario
+      (let ((release (bt:make-semaphore :name "probe completed before peer closes")))
+        (call-with-probe-raw-server
+         (lambda (port)
+           (unwind-protect
+                (multiple-value-bind (ok message)
+                    (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port))
+                  (is-true ok "Framed HTTP status ~D should not read past its body: ~A" code message))
+             (bt:signal-semaphore release)))
+         (lambda (stream)
+           (probe-request-lines stream)
+           (write-probe-http-response
+            stream code headers
+            (cond ((eq body :limit) (make-string 10240 :initial-element #\x))
+                  ((eq body :chunked)
+                   (format nil "3~C~Cabc~C~C0~C~C~C~C" #\Return #\Newline #\Return #\Newline #\Return #\Newline #\Return #\Newline))
+                  (t body)))
+           (bt:wait-on-semaphore release))))))
+  (call-with-probe-raw-server
+   (lambda (port)
+     (is-false (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port))))
+   (lambda (stream) (probe-request-lines stream) (write-probe-http-response stream 200 '(("Content-Length" . "5")) "no"))))
+
+(test probe-http-follows-redirect-before-reading-the-intermediate-body
+  (let ((release (bt:make-semaphore :name "release ignored redirect body")) (requests nil) (lock (bt:make-lock "redirect requests")))
+    (call-with-probe-raw-server
+     (lambda (port)
+       (unwind-protect
+            (progn
+              (is-true (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port "/start")))
+              (is (= 2 (length requests))))
+         (bt:signal-semaphore release)))
+     (lambda (stream)
+       (let ((request (first (probe-request-lines stream))))
+         (bt:with-lock-held (lock) (push request requests))
+         (if (search "/start" request)
+             (progn
+               (write-probe-http-response stream 302 '(("Location" . "/ready") ("Content-Length" . "20000")) "")
+               (bt:wait-on-semaphore release))
+             (write-probe-http-response stream 200 '(("Content-Length" . "0")) "")))))))
+
+(test probe-http-parses-absolute-path-authority-and-preserves-repeated-accept
+  (let ((requests nil))
+    (call-with-probe-http-server
+     (lambda (port)
+       (let ((probe (probe-for-http-port port "http://ignored.invalid/ready?check=yes")))
+         (setf (gethash "httpHeaders" (gethash "httpGet" probe))
+               (vector (gr8s::core-object "name" "Accept" "value" "application/a")
+                       (gr8s::core-object "name" "Accept" "value" "application/b")
+                       (gr8s::core-object "name" "Host" "value" "")
+                       (gr8s::core-object "name" "Host" "value" "ignored.invalid")))
+         (is-true (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" probe))
+         (is (search "GET /ready?check=yes HTTP/" (first requests)))
+         (is (= 2 (count-if (lambda (line) (search "Accept:" line :test #'char-equal)) requests)))
+         (is (= 1 (count-if (lambda (line) (search "Host:" line :test #'char-equal)) requests)))
+         (is (find-if (lambda (line) (search (format nil "Host: 127.0.0.1:~D" port) line :test #'char-equal)) requests))))
+     (lambda (lines) (setf requests lines) (values 200 nil "")))))
+
+(test grpc-probe-constructor-timeouts-close-the-real-peer
+  (let ((closed (bt:make-semaphore :name "gRPC constructor peer closed")))
+    (call-with-probe-raw-server
+     (lambda (port)
+       (dotimes (attempt 3)
+         (declare (ignore attempt))
+         (is-false (gr8s::execute-container-probe
+                    (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1"
+                    (checked-probe (format nil "{\"grpc\":{\"port\":~D},\"timeoutSeconds\":1}" port))))
+         (is (bt:wait-on-semaphore closed :timeout .5))))
+     (lambda (stream)
+       ;; Consume the actual client preface/SETTINGS, but never answer them.
+       (loop while (read-byte stream nil nil))
+       (bt:signal-semaphore closed)))))
+
+#+sbcl
+(test exec-probe-constructor-timeouts-close-the-real-unix-peer
+  (with-temporary-store (store directory)
+    (declare (ignore store))
+    (let ((closed (bt:make-semaphore :name "Exec constructor peer closed"))
+          (path (merge-pathnames "stalled-cri.sock" directory)))
+      (call-with-probe-raw-server
+       (lambda (socket-path)
+         (let ((runtime (gr8s::make-containerd-runtime :socket-path (namestring socket-path))))
+           (dotimes (attempt 2)
+             (declare (ignore attempt))
+             (is-false (gr8s::execute-container-probe runtime (gr8s::core-object) "exact-attempt" ""
+                                                    (checked-probe "{\"exec\":{\"command\":[\"true\"]},\"timeoutSeconds\":1}")))
+             (is (bt:wait-on-semaphore closed :timeout .5)))))
+       (lambda (stream) (loop while (read-byte stream nil nil)) (bt:signal-semaphore closed))
+       :socket-path path))))
+
+(define-condition probe-test-cancelled (serious-condition) ())
+
+(test cancelling-grpc-probe-during-constructor-closes-the-peer
+  (let ((entered (bt:make-semaphore :name "probe constructor entered"))
+        (closed (bt:make-semaphore :name "cancelled probe peer closed"))
+        (cancelled nil) (worker nil))
+    (call-with-probe-raw-server
+     (lambda (port)
+       (unwind-protect
+            (progn
+              (setf worker (bt:make-thread
+                            (lambda ()
+                              (handler-case
+                                  (gr8s::execute-container-probe
+                                   (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1"
+                                   (checked-probe (format nil "{\"grpc\":{\"port\":~D},\"timeoutSeconds\":30}" port)))
+                                (probe-test-cancelled () (setf cancelled t))))
+                            :name "cancelled probe constructor"))
+              (is (bt:wait-on-semaphore entered :timeout 2))
+              (bt:interrupt-thread worker (lambda () (error 'probe-test-cancelled)))
+              (bt:join-thread worker)
+              (is-true cancelled)
+              (is (bt:wait-on-semaphore closed :timeout .5)))
+         (when (and worker (bt:thread-alive-p worker)) (ignore-errors (bt:destroy-thread worker)))
+         (when worker (ignore-errors (bt:join-thread worker)))))
+     (lambda (stream)
+       (bt:signal-semaphore entered)
+       (loop while (read-byte stream nil nil))
+       (bt:signal-semaphore closed)))))
+
+(test http-probe-redirect-warnings-preserve-real-body-and-warning-result
+  (let ((requests 0))
+    (call-with-probe-http-server
+     (lambda (port)
+       (multiple-value-bind (success output result)
+           (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" (probe-for-http-port port))
+         (is-true success) (is (eq :warning result))
+         (is (search "actual redirect body" output))
+         (is (= 1 requests))))
+     (lambda (lines) (declare (ignore lines))
+       (incf requests)
+       (values 302 '(("Location" . "http://unrelated.invalid/unreachable")) "actual redirect body")))))
+
+(test exec-probe-output-keeps-captured-bytes-with-a-bound
+  (let* ((original (symbol-function 'gr8s::cri-exec-sync))
+         (result (gr8s::make-runtime-exec-result
+                  :stdout (trivial-utf-8:string-to-utf-8-bytes "actual stdout ")
+                  :stderr (trivial-utf-8:string-to-utf-8-bytes "actual stderr") :exit-code 7))
+         (probe (checked-probe "{\"exec\":{\"command\":[\"check\"]}}")))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s::cri-exec-sync) (lambda (&rest args) (declare (ignore args)) result))
+           (multiple-value-bind (success output)
+               (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "" probe)
+             (is-false success) (is (equal "actual stdout actual stderr" output)))
+           (setf result (gr8s::make-runtime-exec-result
+                         :stdout (make-array 20000 :element-type '(unsigned-byte 8) :initial-element 120)
+                         :stderr (trivial-utf-8:string-to-utf-8-bytes "not included") :exit-code 7))
+           (multiple-value-bind (success output)
+               (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "" probe)
+             (is-false success) (is (= 10240 (length output))))
+           (setf result (gr8s::make-runtime-exec-result :stdout (make-array 1 :element-type '(unsigned-byte 8) :initial-element 255)))
+           (multiple-value-bind (success output)
+               (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "" probe)
+             (is-true success) (is (equal (string (code-char #xfffd)) output))))
+      (setf (symbol-function 'gr8s::cri-exec-sync) original))))
+
+(test https-probes-ignore-an-untrusted-certificate-and-respect-empty-body-framing
+  (with-temporary-store (store directory)
+    (declare (ignore store))
+    (let ((pki (gr8s:ensure-cluster-pki (merge-pathnames "probe-pki/" directory))))
+      (multiple-value-bind (certificate key) (gr8s::ensure-node-server-credentials pki)
+        (call-with-probe-raw-server
+         (lambda (port)
+           (multiple-value-bind (success output)
+               (gr8s::execute-container-probe
+                (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1"
+                (checked-probe (format nil "{\"httpGet\":{\"port\":~D,\"scheme\":\"HTTPS\"},\"timeoutSeconds\":1}" port)))
+             (is-true success "Self-signed HTTPS with empty body failed: ~A" output)))
+         (lambda (stream)
+           (let ((tls (pure-tls:make-tls-server-stream stream :certificate (namestring certificate) :key (namestring key)
+                                                            :verify pure-tls:+verify-none+)))
+             (unwind-protect
+                  (progn (probe-request-lines tls) (write-probe-http-response tls 200 '(("Content-Length" . "0")) ""))
+               (ignore-errors (close tls :abort t))))))))))
