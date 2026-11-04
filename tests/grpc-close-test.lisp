@@ -84,3 +84,35 @@
   (with-http2-close-connection (connection socket peer listener)
     (ag-http2:connection-close connection)
     (check-fresh-connection-after-repeated-close connection listener socket)))
+
+(define-condition http2-close-cancelled (serious-condition) ())
+
+(test interrupted-ownership-handoff-still-releases-the-socket-once
+  (with-http2-close-connection (connection socket peer listener)
+    (let ((entered (bt:make-semaphore :name "HTTP/2 upstream handoff"))
+          (release (bt:make-semaphore :name "HTTP/2 upstream paused"))
+          (cancelled nil) (thread nil))
+      (unwind-protect
+           (progn
+             (setf thread
+                   (bt:make-thread
+                    (lambda ()
+                      ;; Pause exactly after the ownership claim and before
+                      ;; entering the upstream finalizer's unwind protection.
+                      (let ((gr8s::*upstream-http2-connection-close*
+                              (lambda (&rest args)
+                                (declare (ignore args))
+                                (bt:signal-semaphore entered)
+                                (bt:wait-on-semaphore release))))
+                        (handler-case (ag-http2:connection-close connection)
+                          (http2-close-cancelled () (setf cancelled t)))))
+                    :name "HTTP/2 interrupted close"))
+             (is (bt:wait-on-semaphore entered :timeout 2))
+             (bt:interrupt-thread thread (lambda () (error 'http2-close-cancelled)))
+             (bt:join-thread thread)
+             (is-true cancelled)
+             (is (eq :closed (ag-http2:connection-state connection)))
+             (is (not (open-stream-p (usocket:socket-stream socket))))
+             (check-fresh-connection-after-repeated-close connection listener socket))
+        (bt:signal-semaphore release)
+        (when thread (bt:join-thread thread))))))
