@@ -123,11 +123,16 @@
     "reportSHA256": "41bb5ae6469b53c96337c5776f4c453be15dc05791b8719005ea042524d75540"
   },
   "host": {
+    "sourceCommit": "eed65aea849b58215f0562261e3b1d9efd4cce20",
     "focusedRecoveryChecks": 122,
-    "previousIntegratedChecks": 2056,
-    "previousIntegratedPassed": 2051,
+    "command": "flock /tmp/gr8s-host-http-tests.lock make test",
+    "checks": 2346,
+    "passed": 2341,
     "optionalSkipped": 5,
-    "finalGate": "Pending integration of independently reproduced HTTP2 close fix; current storage+fixture combined gate still exposes cancellation handshake failure recorded in podster-uqb.18."
+    "failed": 0,
+    "log": "/tmp/gr8s-restarts-final-integrated-host-gate.log",
+    "logSHA256": "7563267e39e99a7ce0d705edeee3cd8ea4f41399fe4ed4a4627ae1fa100e249b",
+    "integration": "Includes merged workload/storage/atomic fixture and proven HTTP2 cleanup fixes. Earlier failing handshake gates are retained under independent transport issue podster-uqb.18; its remaining stress symptom is not claimed solved."
   },
   "limitations": [
     "Dead-sandbox replacement, missing CRI history, retained logs and explicit Unknown handling are covered by deterministic host CRI regressions; the five native scenarios exercise the listed restart policies and process restart.",
