@@ -160,7 +160,7 @@
 
 (defun node-api-object (node)
   "Serialize a registered worker with readiness taken from its live lease."
-  (let ((address (node-record-underlay-address node)))
+  (let ((address (node-reported-address node)))
     (core-object
      "apiVersion" "v1" "kind" "Node"
      "metadata" (core-object "name" (node-record-name node) "uid" (node-record-id node)

@@ -27,7 +27,8 @@
                                          (finalization (gethash (pod-uid pod) (pod-store-pod-finalization-states store)))
                                          (conditions (gethash (pod-uid pod) (pod-store-pod-condition-histories store)))
                                          (status (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)))
-                                         (resource-version (gethash (pod-uid pod) (pod-store-pod-observed-resource-versions store))))
+                                         (resource-version (gethash (pod-uid pod) (pod-store-pod-observed-resource-versions store)))
+                                         (client (gethash (pod-uid pod) (pod-store-pod-client-statuses store))))
   "Atomically checkpoint POD's history and actual observation before updating memory."
   (let* ((target (pod-status-state-path store (pod-uid pod)))
          (temporary (make-pathname :name (format nil "~A-~36R" (pathname-name target) (random (expt 36 10)))
@@ -39,6 +40,7 @@
           (gethash "name" record) (pod-name pod)
           (gethash "conditions" record) (or conditions #()))
     (when finalization (setf (gethash "finalization" record) finalization))
+    (when client (setf (gethash "clientStatus" record) client))
     (when status
       (setf (gethash "status" record) status
             (gethash "observedResourceVersion" record) resource-version))
@@ -66,6 +68,8 @@
             (unless (and (vectorp conditions) (not (stringp conditions)))
               (error "Invalid Pod condition checkpoint in ~A" path))
             (setf (gethash uid (pod-store-pod-condition-histories store)) conditions)
+            (when (gethash "clientStatus" record)
+              (setf (gethash uid (pod-store-pod-client-statuses store)) (gethash "clientStatus" record)))
             (when finalization
               (unless (and (hash-table-p finalization) (member (gethash "runtimeDeleted" finalization) '(t nil))
                            (or (null (gethash "status" finalization)) (pod-terminal-status-p (gethash "status" finalization))))

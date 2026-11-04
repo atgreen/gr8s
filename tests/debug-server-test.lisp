@@ -91,8 +91,11 @@
     ;; Rejections leave the server accepting; only the right secret evaluates.
     (dotimes (attempt 3)
       (is (notany (lambda (frame) (search ":ok" frame)) (slynk-exchange port :secret "wrong"))))
-    (let ((frames (slynk-exchange port :secret secret)))
-      (is (some (lambda (frame) (and (search ":ok" frame) (search "3" frame))) frames)))))
+    (let* ((hook sb-ext:*invoke-debugger-hook*)
+           (frames (slynk-exchange port :secret secret)))
+      (is (some (lambda (frame) (and (search ":ok" frame) (search "3" frame))) frames))
+      ;; A connected client must leave process-wide error handling alone.
+      (is (eq hook sb-ext:*invoke-debugger-hook*)))))
 
 (test the-server-binds-to-loopback-only
   (with-debug-server (port secret directory)

@@ -120,6 +120,9 @@
           (gethash "apiVersion" object) "v1" (gethash "kind" object) "PodTemplate")
     object))
 
+(defvar *pod-status-write* nil
+  "True while decoding a status write, the only request whose client status counts.")
+
 (defun decode-pod-protobuf (bytes)
   "Decode typed Pod input using the pinned core schema and server-owned status."
   (let* ((object (template-protobuf-message "k8s.io.api.core.v1.Pod" bytes))
@@ -128,6 +131,9 @@
           (gethash "apiVersion" object) "v1" (gethash "kind" object) "Pod")
     ;; The Pod creation strategy owns status; client status never drives runtime.
     (remhash "status" object)
+    (when *pod-status-write*
+      (let ((status (core-protobuf-value (core-protobuf-fields bytes) 3)))
+        (setf (gethash "status" object) (if status (decode-pod-status-protobuf status) (core-object)))))
     object))
 
 (defun decode-service-protobuf (bytes)
