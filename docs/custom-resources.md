@@ -37,5 +37,11 @@ This workstream remains under development. CEL, conversion webhooks, scale
 subresources, additional printer columns, custom field selectors, server-side
 apply and protobuf requests for CRDs/custom objects are not implemented and are
 not advertised as functioning features. Unsupported executable schema/conversion
-features are rejected. Further OpenAPI and CRD status interoperability and native
-kubectl validation are still being tested before integration review.
+features are rejected. Further CRD status interoperability and structural edge cases are still being
+tested before integration review. The native kubectl smoke passes strict creation,
+real streamed watches, version identity, restart persistence and finalizer
+cleanup without disabling validation. Run it against a dumped executable with:
+
+```sh
+python3 scripts/test-crd-api.py --executable build/gr8s.bin
+```
