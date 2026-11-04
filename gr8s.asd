@@ -14,7 +14,7 @@
   :version "0.1.0"
   :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cl-cancel"
                "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
-               "pure-tls/acme"
+               "pure-tls/acme" "drakma"
                "sb-posix" "trivial-utf-8" "usocket" "whistler/loader")
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
@@ -34,6 +34,7 @@
                              (:file "dns")
                              (:file "model")
                              (:file "pod-runtime-model")
+                             (:file "container-probe-spec")
                              (:file "store")
                              (:file "pod-status-store")
                              (:file "pod-deletion")
@@ -67,6 +68,7 @@
                              (:file "cri")
                              (:file "containerd")
                              (:file "container-lifecycle")
+                             (:file "container-probe-transport")
                              (:file "podman")
                              (:file "reconciler")
                              (:file "control-plane-runtime")
@@ -115,6 +117,7 @@
                              (:file "managed-containerd-test")
                              (:file "containerd-test")
                              (:file "container-lifecycle-test")
+                             (:file "container-probe-test")
                              (:file "podman-test")
                              (:file "main-test")
                              (:file "http-test")
