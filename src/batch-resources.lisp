@@ -113,6 +113,7 @@
           (when (gethash "selector" spec) (core-resource-error 422 "Invalid" "Automatic Job selectors are server-generated"))
           (setf (gethash "selector" spec) (core-object "matchLabels" (core-object "batch.kubernetes.io/controller-uid" uid))))))
     (setf (gethash "labels" embedded) labels)
+    (validate-core-metadata (core-object "name" "job-template" "labels" labels) nil nil)
     (when (and existing (gethash "deletionTimestamp" (gethash "metadata" existing)))
       (loop for name across (gethash "finalizers" metadata #())
             unless (find name (gethash "finalizers" (gethash "metadata" existing) #()) :test #'equal)
