@@ -88,6 +88,18 @@
         (unwind-protect (is (= #o2770 (logand #o7777 (sb-posix:stat-mode (sb-posix:fstat descriptor)))))
           (sb-posix:close descriptor))))))
 
+(test subpath-uses-literal-linux-filenames-with-wildcard-characters
+  (with-temporary-store (store directory)
+    (values store)
+    (let ((root (merge-pathnames "volume/" directory)))
+      (ensure-directories-exist root)
+      (let ((file (concatenate 'string (namestring root) "literal*[value]")))
+        (sb-posix:close (sb-posix:open file (logior sb-posix:o-wronly sb-posix:o-creat sb-posix:o-excl) #o600))
+        (let ((descriptor (gr8s::pin-volume-subpath root "literal*[value]" :create-directory t)))
+          (unwind-protect (is (= (sb-posix:stat-ino (sb-posix:stat file))
+                                (sb-posix:stat-ino (sb-posix:fstat descriptor))))
+            (sb-posix:close descriptor)))))))
+
 (defun subpath-test-object (mount)
   "Build a real admitted Pod with a shared emptyDir and the supplied mount declaration."
   (let* ((object (com.inuoe.jzon:parse *valid-pod-json*)) (spec (gethash "spec" object)))

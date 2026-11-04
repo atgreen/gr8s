@@ -23,6 +23,10 @@
 (sb-alien:define-alien-routine ("mkdirat" %subpath-mkdirat) sb-alien:int
   (directory sb-alien:int) (name sb-alien:c-string) (mode sb-alien:unsigned-int))
 
+#+linux
+(sb-alien:define-alien-routine ("realpath" %subpath-realpath) sb-alien:c-string
+  (name sb-alien:c-string) (buffer (* sb-alien:char)))
+
 (defun valid-container-subpath-p (path)
   "Accept a relative Linux mount subpath without NUL or any parent traversal."
   (and (stringp path) (not (find #\Null path))
@@ -83,13 +87,20 @@
             (when missing (error 'runtime-error :message "Volume subPathExpr has an empty or missing environment value"))
             (expand-container-command-argument expression environment))))))
 
+(defun canonical-linux-subpath (path &key allow-missing)
+  "Resolve literal Linux names without treating stars or brackets as Lisp pathname wildcards."
+  (sb-alien:with-alien ((buffer (array sb-alien:char 4096)))
+    (or (%subpath-realpath (namestring path) (sb-alien:addr (sb-alien:deref buffer 0)))
+        (unless (and allow-missing (= (sb-alien:get-errno) sb-posix:enoent))
+          (subpath-system-error "resolve")))))
+
 (defun canonical-subpath-relative (root relative)
   "Resolve existing internal links once, then return a name to reopen beneath the pinned root."
   (let* ((base (namestring root))
          (path (concatenate 'string base relative))
-         (existing (probe-file path)))
-    (if (null existing) relative
-        (let ((canonical (namestring (truename existing))))
+         (canonical (canonical-linux-subpath path :allow-missing t)))
+    (if (null canonical) relative
+        (progn
           (unless (or (equal (string-right-trim "/" base) canonical)
                       (uiop:string-prefix-p base canonical))
             (error 'runtime-error :message "Volume subpath link escapes its volume"))
@@ -99,7 +110,7 @@
   "Return a caller-owned descriptor to the exact inode below BASE, safely making missing directories."
   (unless (valid-container-subpath-p relative)
     (error 'runtime-error :message "Volume subpath must be relative without parent traversal"))
-  (let* ((root (uiop:ensure-directory-pathname (truename base)))
+  (let* ((root (concatenate 'string (string-right-trim "/" (canonical-linux-subpath base)) "/"))
          (descriptor (sb-posix:open (namestring root) (logior #x200000 #x80000 #x10000 #x20000)))
          (result nil))
     (unwind-protect
