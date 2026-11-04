@@ -229,8 +229,13 @@ def main():
                 deadline = time.monotonic() + 120
                 while time.monotonic() < deadline:
                     # Cache removal occurs after CRI deletion returns. Waiting
-                    # for both avoids stopping containerd midway through removal.
-                    if not owned_shims() and not list((state / "agent/runtime/desired").glob("*.json")):
+                    # for runtime and API deletion avoids stopping midway through
+                    # removal or accepting an unacknowledged control-plane tombstone.
+                    code, body = request("/api/v1/pods")
+                    remaining = json.loads(body).get("items") if code == 200 else None
+                    report["apiPodsRemainingAfterCleanup"] = [pod["metadata"]["uid"] for pod in remaining] if remaining is not None else None
+                    if (remaining == [] and not owned_shims()
+                            and not list((state / "agent/runtime/desired").glob("*.json"))):
                         break
                     time.sleep(.2)
                 else:

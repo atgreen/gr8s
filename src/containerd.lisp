@@ -144,9 +144,14 @@
           :container-details details
           :status (core-object "containerStatuses" statuses))))))))
 
-(defmethod runtime-delete ((runtime containerd-runtime) uid)
+(defun containerd-replace-uid (runtime uid)
+  "Remove UID's sandbox for recreation under the same Pod, keeping its volumes."
   (cancel-runtime-pod-deletion (containerd-runtime-deletions runtime) uid)
   (containerd-delete-uid runtime uid (funcall *pod-deletion-clock*)))
+
+(defmethod runtime-delete ((runtime containerd-runtime) uid)
+  (containerd-replace-uid runtime uid)
+  (cleanup-pod-volumes runtime uid))
 
 (defun containerd-delete-uid (runtime uid deadline &key preserve-lifecycle)
   "Stop UID's containers concurrently against DEADLINE before removing its sandbox."
@@ -184,7 +189,8 @@
   (stop-container-probes runtime (pod-uid pod))
   (when (pod-finalizers-present-p pod)
     (capture-containerd-finalized-pod runtime pod deadline))
-  (containerd-delete-uid runtime (pod-uid pod) deadline :preserve-lifecycle (pod-finalizers-present-p pod)))
+  (containerd-delete-uid runtime (pod-uid pod) deadline :preserve-lifecycle (pod-finalizers-present-p pod))
+  (cleanup-pod-volumes runtime (pod-uid pod)))
 
 (defmethod runtime-delete-pod ((runtime containerd-runtime) pod)
   "Poll the native Pod shutdown job without holding reconciliation until exit."
@@ -205,15 +211,16 @@
       (when (or (equal policy "Always")
                 (and (equal policy "IfNotPresent") (not (cri-image-present-p socket (container-spec-image spec)))))
         (cri-pull-image socket (container-spec-image spec))))
-    (let ((container-id
+    (let* ((environment (containerd-pod-environment runtime pod spec sandbox-id))
+           (container-id
             (cri-create-container
              socket sandbox-id sandbox-config
              :name (container-spec-name spec)
              :image (container-spec-image spec)
-             :command (coerce (container-spec-command spec) 'list)
-             :args (coerce (container-spec-args spec) 'list)
-             :env (containerd-pod-environment runtime pod spec sandbox-id)
-             :mounts (containerd-pod-mounts runtime pod spec)
+             :command (expand-container-command (container-spec-command spec) environment)
+             :args (expand-container-command (container-spec-args spec) environment)
+             :env environment
+             :mounts (containerd-container-mounts runtime pod spec sandbox-id)
              :security-context (containerd-pod-security-context pod spec)
              :working-directory (gethash "workingDir" (pod-runtime-container-object pod spec))
              :uid (pod-uid pod)

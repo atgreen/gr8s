@@ -30,8 +30,12 @@
                               (list (core-object "type" (cond ((and before after) "MODIFIED") (after "ADDED") (t "DELETED")) "object" object))))))
          (pod-store-resource-revision store))))))
 
-(defun podtemplate-watch-response (store namespace &optional (resource "podtemplates"))
-  "Serve a real Kubernetes JSON watch stream for a durable resource collection."
+(defun podtemplate-watch-response (store namespace &optional (resource "podtemplates")
+                                   &key page-reader event-reader
+                                     (bookmark-kind (and (null page-reader) (core-resource-kind resource)))
+                                     (bookmark-api-version (and (null page-reader) (core-resource-api-version resource))))
+  "Serve a real Kubernetes JSON watch stream for a resource collection.
+PAGE-READER and EVENT-READER replace the durable journal for separately stored resources."
   (let* ((rv-text (or (hunchentoot:parameter "resourceVersion") ""))
          (initial (or (equal rv-text "0") (true-parameter-p (hunchentoot:parameter "sendInitialEvents"))))
          (labels (or (hunchentoot:parameter "labelSelector") ""))
@@ -46,7 +50,10 @@
     (unless (member match '(nil "" "NotOlderThan") :test #'equal) (core-resource-error 400 "BadRequest" "Unsupported watch resourceVersionMatch"))
     (when (and (true-parameter-p (hunchentoot:parameter "sendInitialEvents")) (not (equal match "NotOlderThan")))
       (core-resource-error 400 "BadRequest" "sendInitialEvents requires NotOlderThan"))
-    (multiple-value-bind (page code) (template-list-page store namespace labels fields :resource-version rv-text :match match :resource resource)
+    (multiple-value-bind (page code)
+        (if page-reader
+            (funcall page-reader labels fields rv-text match)
+            (template-list-page store namespace labels fields :resource-version rv-text :match match :resource resource))
       (declare (ignore code))
       (setf revision (parse-integer (gethash "resourceVersion" (gethash "metadata" page))))
       (when initial
@@ -63,7 +70,7 @@
                (bookmark (&optional initial-end)
                  (let ((metadata (core-object "resourceVersion" (write-to-string revision))))
                    (when initial-end (setf (gethash "annotations" metadata) (core-object "k8s.io/initial-events-end" "true")))
-                   (emit (core-object "type" "BOOKMARK" "object" (core-object "apiVersion" (core-resource-api-version resource) "kind" (core-resource-kind resource) "metadata" metadata))))))
+                   (emit (core-object "type" "BOOKMARK" "object" (core-object "apiVersion" bookmark-api-version "kind" bookmark-kind "metadata" metadata))))))
         (handler-case
             (progn
               (dolist (event first-events) (emit event))
@@ -74,7 +81,10 @@
                     do (when (and *crd-view-definition*
                                   (not (crd-watch-definition-current-p store *crd-view-definition* *crd-request-version*)))
                          (core-resource-error 410 "Expired" "Custom definition identity or served version has changed"))
-                       (multiple-value-bind (events watermark) (template-watch-events store namespace labels fields revision :resource resource)
+                       (multiple-value-bind (events watermark)
+                           (if event-reader
+                               (funcall event-reader labels fields revision)
+                               (template-watch-events store namespace labels fields revision :resource resource))
                          (dolist (event events) (emit event))
                          (setf revision watermark))
                        (when (and (true-parameter-p (hunchentoot:parameter "allowWatchBookmarks"))

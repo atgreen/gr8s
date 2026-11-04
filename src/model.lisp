@@ -44,7 +44,9 @@
   uid
   resource-version
   node-name
-  object)
+  object
+  ;; Newer client-visible revision from status alone, never acknowledged by agents.
+  status-revision)
 
 (defstruct node-record
   "Represent a registered worker node and its control-plane lease state."
@@ -264,18 +266,19 @@
     (reject-unsupported-fields
      spec '("containers" "restartPolicy" "dnsPolicy" "nodeName" "volumes"
             "securityContext" "serviceAccountName" "automountServiceAccountToken"
-            "tolerations" "nodeSelector" "terminationGracePeriodSeconds") "spec")
+            "tolerations" "nodeSelector" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig") "spec")
+    (dolist (field '("hostname" "subdomain"))
+      (when (eq (gethash field spec) 'null) (remhash field spec))
+      (let ((value (gethash field spec "")))
+        (unless (and (stringp value) (or (zerop (length value)) (dns-label-p value)))
+          (invalid-pod "spec.~A must be a DNS label or empty" field))))
     (let ((grace (gethash "terminationGracePeriodSeconds" spec 30)))
       (when (eq grace 'null) (setf grace 30))
       (unless (and (integerp grace) (<= 0 grace #x7fffffffffffffff))
         (invalid-pod "spec.terminationGracePeriodSeconds must be a nonnegative int64"))
       (setf (gethash "terminationGracePeriodSeconds" spec) grace))
     (validate-runtime-pod-spec spec)
-    (multiple-value-bind (dns-policy present-p) (gethash "dnsPolicy" spec)
-      (when (and present-p
-                 (not (and (stringp dns-policy)
-                           (string= dns-policy "ClusterFirst"))))
-        (invalid-pod "only dnsPolicy ClusterFirst is supported")))
+    (validate-pod-dns-spec spec)
     (let* ((prefix (pod-generate-name-prefix metadata))
            (specified (gethash "name" metadata))
            (name (if (and allow-generate-name (plusp (length prefix))
