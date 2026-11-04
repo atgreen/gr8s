@@ -839,9 +839,9 @@
     "regression": "Actual shell plus UDP/TCP dig demonstrates unexpanded command falsely prints OK for NXDOMAIN; production expansion prints nothing for NXDOMAIN and OK for an actual authoritative A answer. Native Pod HTTP files prove command substitution and resolved environment expansion executed."
   },
   "remainingValidation": [
-    "Both selected unchanged DNS assertions passed, but33y_tdhg failed cleanup with five owned shims. It is not a clean conformance result. Preserve artifacts/dirty guest until lifecycle diagnosis and owned-state capture complete.",
-    "Root/conformance_results own21.1.3 lifecycle/ack recovery; repeat unchanged cases with clean zero-shim cleanup after correction.",
-    "dnsPolicy None and custom Pod resolver configuration continue separately in21.2; broad21 stays open."
+    "Original33y_tdhg remains a failed cleanup run with immutable artifacts. Independent recovery83rec7yd removed all five owned shims; new ey7un2zg genuinely passed all three unchanged DNS cases and zero-shim cleanup on distinct integrated source de06095.",
+    "Remaining five unchanged DNS conformance cases are running once on the same frozen binary/cache; no result claimed yet.",
+    "dnsPolicy None and custom Pod resolver configuration continue separately in21.2; broad21 remains open for explicit DNS event follow-up21.2.1."
   ],
   "upstreamRuns": [
     {
@@ -885,6 +885,43 @@
         "containerd-shim /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/runtime/bin/containerd-shim-runc-v2 -namespace k8s.io -id cdf5492cd3bcebc608b7f5e53397bb11f9b9eee367c4152de8698b5c835d8602 -address /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/run/containerd.sock"
       ],
       "cleanupFailureIssue": "podster-uqb.21.1.3"
+    },
+    {
+      "sourceCommit": "de06095a61553146a7fd94e73a175f103d32c032",
+      "sourceBranch": "feat/pod-dns-config",
+      "nativeSHA256": "afa68c8326f89147816d75e0d7a521a59ca984dc8e3604e9eda8ef2faebcc67f",
+      "harnessSHA256": "bb07ae3d86883d1d4d982d4cd8d177c3754d7ca32cdff0a56616b7f0914923a0",
+      "artifactDirectory": "build/conformance/2026-11-04-service-dns-three-ey7un2zg",
+      "reportSHA256": "def0af4e5135b5de42534d052702fd25872d52775d19b0f4359eee37102cdf1c",
+      "archiveSHA256": "940facb5473059516ec17d4ad83b13ed19f0ade2ad60163865e5cbb40170d303",
+      "focus": "\\[sig-network\\] DNS (should provide DNS for services|should provide DNS for ExternalName services|should support configurable pod DNS nameservers) \\[Conformance\\]$",
+      "actualSelectedCases": [
+        {
+          "name": "[It] [sig-network] DNS should provide DNS for ExternalName services [Conformance]",
+          "seconds": "176.419504419",
+          "passed": true
+        },
+        {
+          "name": "[It] [sig-network] DNS should provide DNS for services [Conformance]",
+          "seconds": "83.363231478",
+          "passed": true
+        },
+        {
+          "name": "[It] [sig-network] DNS should support configurable pod DNS nameservers [Conformance]",
+          "seconds": "30.499036219",
+          "passed": true
+        }
+      ],
+      "actualJUnitPassedCases": 3,
+      "suiteHookEntriesExcluded": 7,
+      "cleanRun": true,
+      "nativeExitCode": 0,
+      "cleanupError": null,
+      "ownedShimsRemaining": [],
+      "allPresentDeclaredArtifactHashesVerified": true,
+      "privateKubeconfigNotCopied": true,
+      "includesFunctionalRecoveryCommit": "67fcba479a0d6bc50163cad52c0439bcb05205b9",
+      "original33y_tdhgRemainsFailed": true
     }
   ]
 }
