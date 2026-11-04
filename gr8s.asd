@@ -18,6 +18,7 @@
                "sb-posix" "trivial-utf-8" "usocket" "whistler/loader")
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
+               (:static-file "schema/storage-v1.json")
                (:module "src"
                 :serial t
                 :components ((:file "package")
@@ -42,6 +43,8 @@
                              (:file "service-account")
                              (:file "core-resource-protobuf")
                              (:file "podtemplates")
+                             (:file "storage-api")
+                             (:file "storage-controller")
                              (:file "events")
                              (:file "node-session")
                              (:file "runtime")
@@ -63,10 +66,12 @@
                              (:file "reconciler")
                              (:file "control-plane-runtime")
                              (:file "pod-volumes")
+                             (:file "storage-volumes")
                              (:file "telemetry")
                              (:file "agent-runtime")
                              (:file "http")
                              (:file "core-resource-http")
+                             (:file "storage-http")
                              (:file "podtemplate-watch")
                              (:file "server")
                              (:file "in-cluster-api")
@@ -109,6 +114,8 @@
                              (:file "durable-resource-watches-test")
                              (:file "bootstrap-resource-test")
                              (:file "pod-volumes-test")
+                             (:file "storage-api-test")
+                             (:file "storage-http-test")
                              (:file "service-account-test")
                              (:file "bootstrap-protobuf-test")
                              (:file "events-test")
