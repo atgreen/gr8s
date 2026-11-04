@@ -531,6 +531,13 @@ group and fsGroup settings to containerd. Downward environment fields include
 Pod identity, node name and Pod IP, plus namespace-local Secret and ConfigMap key
 references. Pod metadata revisions preserve running containers; canonical spec
 fingerprints in sandbox labels identify the actual workload across agent restarts.
+Native container retries follow Always, OnFailure and Never independently,
+preserving the sandbox and healthy sibling containers. Attempt history, actual
+last termination state and exponential retry deadlines persist across server
+restarts, with separate logs for each attempt. Missing CRI history and failed
+sandboxes recover from retained observations; mutable image/spec updates still
+replace the sandbox. The [native restart validation record](docs/container-restarts-validation-2026-11-04.json)
+captures four real policy scenarios and durable backoff across a server restart.
 Projected data is applied during Pod setup;
 live refresh is not yet implemented. Managed native startup projects namespace-bound
 ServiceAccount token/CA files automatically unless the Pod or account opts out.
