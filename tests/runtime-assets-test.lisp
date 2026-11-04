@@ -24,8 +24,7 @@
          (bridge #(127 69 76 70 10))
          (host-local #(127 69 76 70 11))
          (loopback #(127 69 76 70 12))
-         (firewall #(127 69 76 70 13))
-         (whistler-program #(127 69 76 70 14)))
+         (firewall #(127 69 76 70 13)))
     (unwind-protect
          (progn
            (write-test-octets (merge-pathnames "bin/containerd" source)
@@ -38,18 +37,14 @@
                               host-local)
            (write-test-octets (merge-pathnames "bin/loopback" source) loopback)
            (write-test-octets (merge-pathnames "bin/firewall" source) firewall)
-           (write-test-octets
-            (merge-pathnames "bin/gr8s-whistler.bpf.o" source)
-            whistler-program)
            (let ((assets (gr8s::load-runtime-assets source)))
              (is (equal '("containerd" "containerd-shim-runc-v2" "runc"
-                          "bridge" "host-local" "loopback" "firewall"
-                          "gr8s-whistler.bpf.o")
+                          "bridge" "host-local" "loopback" "firewall")
                         (mapcar #'gr8s::runtime-asset-name assets)))
              (gr8s::materialize-runtime-assets assets destination)
              (loop for asset in assets
                    for expected in (list containerd shim runc bridge host-local
-                                         loopback firewall whistler-program)
+                                         loopback firewall)
                    for path = (merge-pathnames
                                (gr8s::runtime-asset-name asset) destination)
                    do (is (equalp expected (gr8s::read-file-octets path)))
@@ -68,12 +63,11 @@
     (unwind-protect
          (progn
            (dolist (name '("containerd" "containerd-shim-runc-v2" "runc"
-                           "bridge" "host-local" "loopback" "firewall"
-                           "gr8s-whistler.bpf.o"))
+                           "bridge" "host-local" "loopback" "firewall"))
              (write-test-octets (merge-pathnames (format nil "bin/~A" name) root)
                                 #(1 2 3)))
            (gr8s::embed-runtime-assets root)
-           (is (= 8 (length gr8s::*embedded-runtime-assets*)))
+           (is (= 7 (length gr8s::*embedded-runtime-assets*)))
            (is (gr8s::embedded-runtime-assets-p)))
       (uiop:delete-directory-tree root :validate t
                                   :if-does-not-exist :ignore))))

@@ -69,7 +69,9 @@
        :name (gethash "name" object "gr8s")
        :type (gethash "type" object "gr8s")
        :direction direction
-       :program (absolute-cni-path object "program")
+       ;; The egress guard is JIT-compiled in-process; a "program" ELF path, if
+       ;; present in an older conflist, is accepted and ignored.
+       :program (gethash "program" object)
        :map-pin-root (absolute-cni-path object "mapPinRoot")
        :previous-result previous))))
 
@@ -195,11 +197,6 @@
       (invalid-cni "network interface ~A was not found" name))
     index))
 
-(defun quiet-load-bpf-object (object replacements)
-  (let ((*standard-output* (make-broadcast-stream)))
-    (whistler/loader:load-bpf-object
-     object :map-replacements replacements)))
-
 (defun call-with-cni-policy-interface
     (configuration context operation call-in-netns interface-index)
   ;; The routed agent sets this internal field from its host veth identity.
@@ -219,10 +216,10 @@
        (open-pinned #'whistler/loader:open-pinned-object)
        (validate-map #'cni-policy-map-info)
        (remove-path #'remove-cni-path)
-       (open-object #'whistler/loader:open-bpf-object)
-       (load-object #'quiet-load-bpf-object)
-       (object-map #'whistler/loader:bpf-object-map)
-       (object-program #'whistler/loader:bpf-object-prog)
+       (open-object #'compile-egress-policy-object)
+       (load-object #'load-egress-policy-object)
+       (object-map #'egress-policy-object-find-map)
+       (object-program #'egress-policy-object-find-program)
        (map-fd #'whistler/loader:map-info-fd)
        (program-fd #'whistler/loader:prog-info-fd)
        (initialize-identity #'initialize-cni-identity)
@@ -234,7 +231,7 @@
        (attach-tcx (lambda (fd index direction)
                      (whistler/loader:attach-tcx fd index :direction direction)))
        (close-fd #'sb-posix:close)
-       (close-object #'whistler/loader:close-bpf-object))
+       (close-object #'close-egress-policy-object))
   (let ((directory (namestring (uiop:pathname-directory-pathname map-path)))
         (opened nil) (object nil) (new-pins nil) (link-fd nil)
         ;; bpffs rejects pin basenames containing a dot (EPERM).
@@ -331,8 +328,6 @@
   nil)
 
 (defun check-cni-status (configuration)
-  (unless (probe-file (cni-configuration-program configuration))
-    (invalid-cni "Whistler program is unavailable"))
   (let ((root (probe-file (cni-configuration-map-pin-root configuration))))
     (unless (and root (uiop:directory-pathname-p root))
       (invalid-cni "Whistler map pin root is unavailable")))

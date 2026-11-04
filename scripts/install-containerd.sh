@@ -106,13 +106,8 @@ if ! { cni_plugin_p "$destination/bin/bridge" &&
   install -m 0755 "$go_bin/firewall" "$destination/bin/firewall"
 fi
 
-whistler_object="$temporary_directory/gr8s-whistler.bpf.o"
-XDG_CACHE_HOME="$temporary_directory/common-lisp-cache" \
-  sbcl --noinform --script "$script_directory/build-whistler-program.lisp" \
-  "$project_root/network/gr8s-egress-guard.lisp" "$whistler_object"
-
-install -m 0644 "$whistler_object" \
-  "$destination/bin/gr8s-whistler.bpf.o"
+# The egress guard is JIT-compiled in-process by the agent; no eBPF ELF object
+# is built or installed into the runtime payload.
 
 "$destination/bin/containerd" --version
 "$destination/bin/containerd-shim-runc-v2" --version

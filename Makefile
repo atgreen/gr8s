@@ -22,7 +22,7 @@ NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
 NODE_PROTOCOL_LISP := src/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 
-.PHONY: all help containerd-bundle generate-protocol test test-containerd test-podman test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-core-api check smoke smoke-two-node run kubeconfig native clean
+.PHONY: all help containerd-bundle generate-protocol test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api check smoke smoke-two-node run kubeconfig native clean
 
 all: native
 
@@ -40,8 +40,10 @@ help:
 	@echo "  test-vxlan-network Test two-node VXLAN and routed Pod connectivity"
 	@echo "  test-agent-network Test agent CNI IPC, IPAM recovery, and Pod DNS"
 	@echo "  test-node-topology Test live node snapshots, VXLAN, and route recovery"
-	@echo "  test-podman   Include the disposable rootless Podman integration test"
 	@echo "  test-whistler-cni Test the chained Whistler TC/eBPF CNI plugin"
+	@echo "  test-service-lb Load/attach/pin the ClusterIP socket LB on a real kernel (sudo)"
+	@echo "  smoke-service-lb End-to-end: redirect an unrouted ClusterIP connect to backends (sudo)"
+	@echo "  smoke-service-lb-agent End-to-end agent path: Service+EndpointSlice -> redirect (sudo)"
 	@echo "  check         Syntax-check scripts and run tests"
 	@echo "  smoke         Run kubectl -> gr8s -> containerd end to end"
 	@echo "  smoke-two-node Test real containerd Pods across two isolated agent nodes"
@@ -76,20 +78,34 @@ test-agent-network:
 test-node-topology:
 	unshare -Urn $(SBCL) --noinform --non-interactive --load scripts/test-node-topology.lisp
 
-build/gr8s-endpoint-test.bpf.o: network/gr8s-egress-guard.lisp scripts/build-whistler-program.lisp
-	$(SBCL) --noinform --script scripts/build-whistler-program.lisp $< $@
+# The egress guard is JIT-compiled in-process; the fixture is its raw bytecode +
+# map descriptors as JSON, not an ELF object.
+build/gr8s-endpoint-test.json: src/egress-guard-program.lisp src/egress-guard.lisp scripts/compile-endpoint-policy-fixture.lisp
+	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@
 
-test-endpoint-policy: build/gr8s-endpoint-test.bpf.o
+test-endpoint-policy: build/gr8s-endpoint-test.json
 	python3 scripts/test-endpoint-policy.py $<
 
-test-endpoint-policy-kernel: build/gr8s-endpoint-test.bpf.o
+# Real-root verification that the Service LB JIT-compiles, loads, attaches to a
+# cgroup, pins its maps, and round-trips entries through the kernel. No ELF.
+test-service-lb:
+	sudo $(SBCL) --noinform --non-interactive --load scripts/test-service-lb.lisp
+
+# Real-root end-to-end: a Pod connect(2) to an unrouted ClusterIP is redirected
+# in-kernel to a backend, and repeated connects spread across backends.
+smoke-service-lb:
+	sudo $(SBCL) --noinform --non-interactive --load scripts/smoke-service-lb.lisp
+
+# Real-root end-to-end of the AGENT path: converge a Service + EndpointSlice
+# into the LB maps and redirect an unrouted ClusterIP connect to backends.
+smoke-service-lb-agent:
+	sudo $(SBCL) --noinform --non-interactive --load scripts/smoke-service-lb-agent.lisp
+
+test-endpoint-policy-kernel: build/gr8s-endpoint-test.json
 	python3 scripts/test-endpoint-policy.py $< --kernel
 
 test-core-api:
 	scripts/test-core-api.sh
-
-test-podman:
-	GR8S_RUN_PODMAN_TESTS=1 $(SBCL) --noinform --non-interactive $(TEST_EVAL)
 
 test-whistler-cni: containerd-bundle test
 
@@ -104,7 +120,7 @@ smoke:
 	  exit 1; \
 	fi
 	$(MAKE) native
-	sudo env PATH="$(PATH)" scripts/smoke.sh
+	sudo env PATH="$(PATH)" GR8S_DISABLE_SERVICE_LB="$(GR8S_DISABLE_SERVICE_LB)" scripts/smoke.sh
 
 smoke-two-node:
 	@if [ "$$(id -u)" -eq 0 ]; then \

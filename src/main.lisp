@@ -94,9 +94,9 @@
                       (setf (getf options :node-name)
                             (ensure-valid-node-name value)))
                      ((string= option "--runtime")
-                      (unless (member value '("containerd" "podman" "fake")
+                      (unless (member value '("containerd" "fake")
                                       :test #'string=)
-                        (error "runtime must be containerd, podman, or fake"))
+                        (error "runtime must be containerd or fake"))
                       (setf (getf options :runtime) value))
                      ((string= option "--containerd-socket")
                       (setf (getf options :containerd-socket) value))
@@ -149,9 +149,9 @@
                ((string= option "--state-directory")
                 (setf (getf options :state-directory) value))
                ((string= option "--runtime")
-                (unless (member value '("containerd" "podman" "fake")
+                (unless (member value '("containerd" "fake")
                                 :test #'string=)
-                  (error "runtime must be containerd, podman, or fake"))
+                  (error "runtime must be containerd or fake"))
                 (setf (getf options :runtime) value))
                ((string= option "--containerd-mode")
                 (unless (member value '("managed" "external") :test #'string=)
@@ -302,8 +302,6 @@
            :dns-searches +dns-pod-searches+
            :dns-options +dns-pod-options+)
           nil)))
-    ((string= (getf options :runtime) "podman")
-     (values (make-podman-runtime) nil))
     (t
      (values (make-fake-runtime) nil))))
 
@@ -484,7 +482,6 @@
          (pki (ensure-cluster-pki (merge-pathnames "pki/" state-directory)))
          (server nil)
          (api-server nil)
-         (service-controller nil)
          (debug-port nil)
          (service-network-created nil)
          (worker nil)
@@ -518,8 +515,7 @@
                       (ensure-native-bootstrap-namespaces store)
                       (ensure-native-api-service store)
                       (setf service-network-created (ensure-in-cluster-network pki))
-                      (setf api-server (start-in-cluster-api store runtime reconciler pki)
-                            service-controller (make-native-service-controller store))
+                      (setf api-server (start-in-cluster-api store runtime reconciler pki))
                       (setf (pod-store-in-cluster-config store)
                             (list :host "10.96.0.1" :port 443
                                   :ca-pem (uiop:read-file-string (cluster-pki-ca-certificate-path pki))))
@@ -539,9 +535,11 @@
                                       (reconcile-workloads reconciler)
                                       (reconcile-endpointslices store)
                                       (publish-service-discovery-snapshots runtime)
-                                      (when service-controller
-                                        (ensure-in-cluster-network pki)
-                                        (reconcile-native-services service-controller)))))
+                                      ;; ClusterIP Services are load-balanced in-kernel by the
+                                      ;; agent's eBPF socket LB; the control plane only keeps the
+                                      ;; in-cluster API address present.
+                                      (when service-network-created
+                                        (ensure-in-cluster-network pki)))))
                     (when (getf options :kubeconfig)
                       (write-kubeconfig
                        (getf options :kubeconfig)
@@ -553,7 +551,6 @@
                (when worker (stop-reconciliation-worker worker))
                (when runtime (stop-runtime-deletions runtime))
                (when server (stop-server server))
-               (when service-controller (stop-native-service-controller service-controller))
                (when api-server (stop-server api-server))
                (when (or api-server service-network-created) (remove-in-cluster-network pki))
                (setf (pod-store-in-cluster-config store) nil))))
@@ -563,7 +560,7 @@
 
 (defun print-help ()
   (format t
-          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%"))
+          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%"))
 
 (defun main-with-environment (arguments environment cni-entry)
   (if (funcall environment "CNI_COMMAND")
