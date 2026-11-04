@@ -158,9 +158,9 @@
         (handler-case
             (multiple-value-bind (layers volume-bytes) (runtime-ephemeral-usage (reconciler-runtime reconciler) pod)
               (when volume-bytes (pod-ephemeral-violation pod layers volume-bytes)))
-          (runtime-error (condition)
+          (error (condition)
             (format *error-output* "gr8s Pod ~A/~A storage measurement failed: ~A~%"
-                    (pod-namespace pod) (pod-name pod) (runtime-error-message condition))
+                    (pod-namespace pod) (pod-name pod) condition)
             nil))))))
 
 (defun evict-pod-for-storage (reconciler pod message)
