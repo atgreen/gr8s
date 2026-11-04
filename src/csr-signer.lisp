@@ -82,7 +82,8 @@
          (flags (logior (if (find "digital signature" usages :test #'equal) #x80 0)
                         (if (find "key encipherment" usages :test #'equal) #x20 0)))
          (algorithm (pure-tls/acme::encode-sequence (pure-tls/acme::encode-oid pure-tls/acme::*oid-ecdsa-with-sha256*)))
-         (extensions (list (pure-tls/acme::encode-critical-extension +oid-basic-constraints+ (pure-tls/acme::encode-sequence))
+         (extensions (list (api-csr-profile-extension)
+                           (pure-tls/acme::encode-critical-extension +oid-basic-constraints+ (pure-tls/acme::encode-sequence))
                            (pure-tls/acme::encode-extension +oid-extended-key-usage+
                              (pure-tls/acme::encode-sequence (pure-tls/acme::encode-oid
                                (if (find "server auth" usages :test #'equal) '(1 3 6 1 5 5 7 3 1) +oid-client-auth+)))))))
