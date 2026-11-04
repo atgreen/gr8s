@@ -48,7 +48,6 @@
    #:make-node-record
    #:make-containerd-runtime
    #:make-agent-envelope
-   #:make-podman-runtime
    #:make-reconciler
    #:make-server-envelope
    #:mark-pod-deleting
@@ -70,7 +69,6 @@
    #:pod-node-name
    #:pod-namespace
    #:pod-restart-policy
-   #:podman-create-plan
    #:pod-resource-version
    #:pod-to-object
    #:pod-uid

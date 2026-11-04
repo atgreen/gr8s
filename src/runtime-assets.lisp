@@ -2,8 +2,7 @@
 
 (defparameter +runtime-asset-names+
   '("containerd" "containerd-shim-runc-v2" "runc"
-    "bridge" "host-local" "loopback" "firewall"
-    "gr8s-whistler.bpf.o"))
+    "bridge" "host-local" "loopback" "firewall"))
 
 (defstruct runtime-asset
   name

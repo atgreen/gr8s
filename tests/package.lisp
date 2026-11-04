@@ -15,7 +15,6 @@
                 #:get-pod
                 #:list-pods
                 #:make-fake-runtime
-                #:make-podman-runtime
                 #:make-reconciler
                 #:mark-pod-deleting
                 #:open-store
@@ -24,7 +23,6 @@
                 #:pod-name
                 #:pod-namespace
                 #:pod-restart-policy
-                #:podman-create-plan
                 #:parse-cli-options
                 #:pod-resource-version
                 #:pod-to-object

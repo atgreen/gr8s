@@ -251,29 +251,6 @@
       (is (= 0 (hash-table-count (gr8s::deletion-controller-jobs (gated-deletion-runtime-controller runtime)))))
       (is (null (gr8s::deletion-controller-retired (gated-deletion-runtime-controller runtime)))))))
 
-(test podman-process-runner-preserves-output-status-and-can-cancel-shutdown
-  (multiple-value-bind (stdout stderr code)
-      (gr8s::run-podman-program '("sh" "-c" "printf stdout; printf stderr >&2; exit 7"))
-    (is (equal "stdout" stdout))
-    (is (equal "stderr" stderr))
-    (is (= 7 code)))
-  (let ((cancel nil) (finished nil) (thread nil)
-        (lock (bt:make-lock "test process cancellation")))
-    (unwind-protect
-         (progn
-           (setf thread
-                 (bt:make-thread
-                  (lambda ()
-                    (let ((gr8s::*runtime-deletion-register-cancel*
-                            (lambda (function) (bt:with-lock-held (lock) (setf cancel function)))))
-                      (gr8s::run-podman-program '("sh" "-c" "sleep 30")))
-                    (bt:with-lock-held (lock) (setf finished t)))))
-           (is (await-grace-test (lambda () (bt:with-lock-held (lock) (not (null cancel))))))
-           (funcall cancel)
-           (is (await-grace-test (lambda () (bt:with-lock-held (lock) finished)))))
-      (when cancel (funcall cancel))
-      (when thread (bt:join-thread thread)))))
-
 (test replacement-assignment-preserves-the-terminating-uids-recovery-record
   (with-temporary-store (store path)
     (let* ((old (create-pod store (grace-pod)))
