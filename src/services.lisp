@@ -132,7 +132,7 @@
             for status = (pod-observed-status store pod)
             for address = (and status (gethash "podIP" status))
             for target = (service-port-target pod port)
-            when (and status (equal "Running" (pod-scheduling-phase store pod))
+            when (and status (pod-status-ready-p status) (equal "Running" (pod-scheduling-phase store pod))
                       (not (deletion-requested-p pod)) address (plusp (length address)) target
                       (loop for key being the hash-keys of selector using (hash-value value)
                             always (and labels (equal value (gethash key labels)))))

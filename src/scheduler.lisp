@@ -64,7 +64,7 @@
                 collect node)
           #'string< :key #'node-record-name)))
 
-(defun mark-node-ready (store name heartbeat)
+(defun mark-node-ready (store name heartbeat &key (lease-duration 15))
   "Mark NAME ready and record its HEARTBEAT lease timestamp."
   (with-store-lock (store)
     (let ((node (or (get-node-unlocked store name)
@@ -72,8 +72,14 @@
                            :status-code 404
                            :reason "NotFound"
                            :message (format nil "Node ~A was not found" name)))))
-      (setf (node-record-ready-p node) t
-            (node-record-last-heartbeat node) heartbeat)
+      (let ((updated (copy-node-record node)))
+        (setf (node-record-ready-p updated) t
+              (node-record-last-heartbeat updated) heartbeat
+              (node-record-lease-deadline updated) (+ heartbeat lease-duration))
+        (persist-node store updated)
+        (setf (node-record-ready-p node) t
+              (node-record-last-heartbeat node) heartbeat
+              (node-record-lease-deadline node) (node-record-lease-deadline updated)))
       node)))
 
 (defun mark-node-not-ready (store name)
@@ -84,18 +90,26 @@
                            :status-code 404
                            :reason "NotFound"
                            :message (format nil "Node ~A was not found" name)))))
-      (setf (node-record-ready-p node) nil)
+      (persist-node-unavailable store node)
       node)))
 
-(defun expire-node-heartbeats (store oldest-acceptable-heartbeat)
+(defun persist-node-unavailable (store node)
+  "Checkpoint unavailable state before changing NODE under STORE's lock."
+  (let ((updated (copy-node-record node)))
+    (setf (node-record-ready-p updated) nil)
+    (persist-node store updated)
+    (setf (node-record-ready-p node) nil)))
+
+(defun expire-node-heartbeats (store oldest-acceptable-heartbeat &key now)
   "Mark stale ready nodes unavailable and return the records that expired."
   (with-store-lock (store)
     (loop for node being the hash-values of (pod-store-nodes store)
           when (and (node-record-ready-p node)
-                    (or (null (node-record-last-heartbeat node))
-                        (< (node-record-last-heartbeat node)
-                           oldest-acceptable-heartbeat)))
-            collect (progn (setf (node-record-ready-p node) nil) node))))
+                    (if (and now (node-record-lease-deadline node))
+                        (< (node-record-lease-deadline node) now)
+                        (or (null (node-record-last-heartbeat node))
+                            (< (node-record-last-heartbeat node) oldest-acceptable-heartbeat))))
+            collect (progn (persist-node-unavailable store node) node))))
 
 (defun parse-ipv4-integer (address)
   "Parse dotted-decimal ADDRESS into an unsigned 32-bit integer."
@@ -243,17 +257,13 @@
 
 (defun update-pod-observed-phase (store pod phase)
   "Record the agent-observed PHASE for POD."
-  (with-store-lock (store)
-    (setf (gethash (pod-uid pod) (pod-store-pod-observed-phases store)) phase
-          (gethash (pod-uid pod) (pod-store-pod-observed-resource-versions store)) (pod-resource-version pod))))
+  (let ((status (make-hash-table :test #'equal)))
+    (setf (gethash "phase" status) phase)
+    (save-pod-observation store pod status)))
 
 (defun update-pod-observed-status (store pod status)
   "Record POD's complete observed STATUS and its derived phase."
-  (with-store-lock (store)
-    (setf (gethash (pod-uid pod) (pod-store-pod-observed-resource-versions store)) (pod-resource-version pod)
-          (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)) status
-          (gethash (pod-uid pod) (pod-store-pod-observed-phases store))
-          (gethash "phase" status "Unknown"))))
+  (save-pod-observation store pod status))
 
 (defun pod-observed-status (store pod)
   "Return the latest agent-observed status object for POD, if any."

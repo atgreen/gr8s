@@ -10,6 +10,7 @@ Keeps logs and a machine-readable report, including cleanup outcomes, on failure
 
 import argparse
 import hashlib
+import http.client
 import json
 from pathlib import Path
 import subprocess
@@ -38,6 +39,8 @@ def main():
     parser.add_argument("--node-port", type=int, default=17452)
     parser.add_argument("--state-directory", type=Path,
                         help="Reuse an owned, stopped test cluster and its cached images")
+    parser.add_argument("--check-readiness", action="store_true",
+                        help="Also verify real Pod conditions, restart timestamps and Service readiness")
     args = parser.parse_args()
     root = Path(tempfile.mkdtemp(prefix="gr8s-pod-termination.", dir="/var/tmp"))
     base = f"http://127.0.0.1:{args.api_port}"
@@ -45,6 +48,7 @@ def main():
     process = None
     log = (root / "gr8s.log").open("w")
     pods = []
+    services = []
     report = {"nativeSHA256": hashlib.sha256(args.gr8s.read_bytes()).hexdigest(),
               "directory": str(root), "stateDirectory": str(state), "scenarios": {},
               "nativeExitCodes": [], "passed": False}
@@ -111,14 +115,15 @@ def main():
         path = Path("/var/log/gr8s/pods") / pod["metadata"]["uid"] / (name + ".log")
         return path.read_text(errors="replace") if path.exists() else ""
 
-    def create(name, grace, command, count=1):
+    def create(name, grace, command, count=1, commands=None):
         """Launch real containers and wait until every shell has installed its signal trap."""
-        command += f" # gr8s-shutdown-test-{name}-{time.time_ns()}"
+        marker = f" # gr8s-shutdown-test-{name}-{time.time_ns()}"
+        commands = [(item + marker) for item in (commands or [command] * count)]
         containers = [{"name": "main" if index == 0 else f"side{index}",
                        "image": "docker.io/library/busybox:1.36.1", "imagePullPolicy": "IfNotPresent",
-                       "command": ["sh", "-c", command]} for index in range(count)]
+                       "command": ["sh", "-c", commands[index]]} for index in range(count)]
         code, pod = request("/api/v1/namespaces/default/pods", "POST",
-                            {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name, "generation": 100},
+                            {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name, "generation": 100, "labels": {"app": name}},
                              "spec": {"terminationGracePeriodSeconds": grace, "restartPolicy": "Never",
                                       "containers": containers}})
         assert code == 201, (code, pod)
@@ -132,6 +137,7 @@ def main():
             statuses = current.get("status", {}).get("containerStatuses", [])
             return current if (code == 200 and len(statuses) == count
                                and all(item.get("containerID") for item in statuses)
+                               and (not args.check_readiness or condition(current, "Ready").get("status") == "True")
                                and current.get("status", {}).get("observedGeneration") == 1) else None
 
         current = wait_for(observed, 30, f"Pod {name} container status")
@@ -139,7 +145,38 @@ def main():
         pod.update(current)
         pod["testHostPids"] = host_container_pids(pod)
         assert len(pod["testHostPids"]) >= count, pod["testHostPids"]
+        if args.check_readiness:
+            for kind in ("PodScheduled", "Initialized", "ContainersReady", "Ready"):
+                assert condition(pod, kind).get("status") == "True", (kind, pod)
+            previous = condition(pod, "Ready")["lastTransitionTime"]
+            assert condition(request(pod_path(name))[1], "Ready")["lastTransitionTime"] == previous
         return pod
+
+    def condition(pod, kind):
+        """Find a typed condition in the actual API Pod status."""
+        return next((item for item in pod.get("status", {}).get("conditions", []) if item["type"] == kind), {})
+
+    def terminal_pod(name, code):
+        """Run a real completed container and require a truthful nonready terminal status."""
+        status, pod = request("/api/v1/namespaces/default/pods", "POST",
+                              {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name},
+                               "spec": {"restartPolicy": "Never", "containers": [{"name": "main",
+                                        "image": "docker.io/library/busybox:1.36.1", "imagePullPolicy": "IfNotPresent",
+                                        "command": ["sh", "-c", f"exit {code}"]}]}})
+        assert status == 201, (status, pod)
+        pods.append(pod)
+        phase = "Succeeded" if code == 0 else "Failed"
+
+        def finished():
+            """Observe the real exit code as well as the Pod terminal phase."""
+            status, current = request(pod_path(name))
+            return current if status == 200 and current.get("status", {}).get("phase") == phase else None
+
+        current = wait_for(finished, 120, f"{name} actual terminal phase")
+        assert condition(current, "Ready")["status"] == "False", current
+        assert condition(current, "Ready")["reason"] == ("PodCompleted" if code == 0 else "PodFailed")
+        assert current["status"]["containerStatuses"][0]["state"]["terminated"]["exitCode"] == code
+        return current
 
     def delete(name, **options):
         """Start deletion and require the API to respond before containers finish."""
@@ -213,7 +250,10 @@ def main():
         report["scenarios"]["forceShortening"] = {"passed": True, "processExitSeconds": process_seconds,
                                                     "replacementUID": replacement["metadata"]["uid"]}
 
+        steady = create("steady", 0, ignore) if args.check_readiness else None
+        steady_time = condition(steady, "Ready").get("lastTransitionTime") if steady else None
         restart = create("restart", 15, ignore)
+        original_ready_time = condition(restart, "Ready").get("lastTransitionTime")
         started, body = delete("restart")
         original_deadline = body["metadata"]["deletionTimestamp"]
         wait_for(lambda: "TERM" in logs(restart), 8, "pre-restart SIGTERM")
@@ -224,6 +264,8 @@ def main():
         if code == 200:
             assert recovered["metadata"]["deletionTimestamp"] == original_deadline
             assert recovered["metadata"]["uid"] == restart["metadata"]["uid"]
+            if args.check_readiness and condition(recovered, "Ready").get("status") == "True":
+                assert condition(recovered, "Ready")["lastTransitionTime"] == original_ready_time, recovered
         else:
             assert code == 404, (code, recovered)
         wait_for(lambda: containers_gone(restart), 20, "restart process termination")
@@ -232,6 +274,54 @@ def main():
         wait_for(lambda: gone("restart"), 90, "restart sandbox cleanup and API completion")
         report["scenarios"]["restartRecovery"] = {"passed": True, "seconds": time.monotonic() - started,
                                                     "processExitSeconds": exit_seconds, "originalDeadline": original_deadline}
+        if args.check_readiness:
+            def steady_ready():
+                """Observe the unchanged steady container after the native process restarts."""
+                code, current = request(pod_path("steady"))
+                return current if code == 200 and condition(current, "Ready").get("status") == "True" else None
+
+            steady_after = wait_for(steady_ready, 30, "steady Pod readiness after restart")
+            assert condition(steady_after, "Ready")["lastTransitionTime"] == steady_time, steady_after
+            assert steady_after["status"]["containerStatuses"][0]["containerID"] == steady["status"]["containerStatuses"][0]["containerID"]
+            report["scenarios"]["steadyRestart"] = {"passed": True, "readyTransitionTime": steady_time,
+                                                    "containerIDUnchanged": True}
+            for name, code in (("completed", 0), ("failed", 7)):
+                terminal_pod(name, code)
+            report["scenarios"]["terminalConditions"] = {"passed": True, "actualExitCodes": [0, 7]}
+            route = create("readiness-route", 0, "", count=2, commands=[
+                "mkdir -p /tmp/www; echo service-ready >/tmp/www/index.html; httpd -f -p 8080 -h /tmp/www & echo READY; wait",
+                "echo READY; sleep 30; exit 7"])
+            service_name = "readiness-" + route["metadata"]["uid"][:8].lower()
+            code, service = request("/api/v1/namespaces/default/services", "POST",
+                                    {"apiVersion": "v1", "kind": "Service", "metadata": {"name": service_name},
+                                     "spec": {"selector": {"app": "readiness-route"},
+                                              "ports": [{"port": 8055, "targetPort": 8080}]}})
+            assert code == 201, (code, service)
+            services.append(service)
+            url = f"http://{service['spec']['clusterIP']}:8055/"
+
+            def service_works():
+                """Probe real traffic through the Service listener and selected native Pod."""
+                try:
+                    with urllib.request.urlopen(url, timeout=1) as response:
+                        return response.read() == b"service-ready\n"
+                except (OSError, http.client.HTTPException):
+                    return False
+
+            wait_for(service_works, 30, "traffic to a ready Pod")
+
+            def became_unready():
+                """Keep the HTTP server running while its failed sidecar makes the Pod unready."""
+                code, current = request(pod_path("readiness-route"))
+                return current if (code == 200 and current["status"]["phase"] == "Running"
+                                   and condition(current, "Ready").get("status") == "False") else None
+
+            unready = wait_for(became_unready, 90, "failed sidecar changes readiness")
+            wait_for(lambda: not service_works(), 20, "unready endpoint withdrawal")
+            with urllib.request.urlopen(f"http://{unready['status']['podIP']}:8080/", timeout=3) as response:
+                assert response.read() == b"service-ready\n", "HTTP server itself stopped"
+            report["scenarios"]["serviceReadiness"] = {"passed": True, "phaseAfterSidecarExit": "Running",
+                                                       "readyAfterSidecarExit": "False", "directPodStillServes": True}
         report["passed"] = True
     except Exception as error:
         report["error"] = repr(error)
@@ -243,6 +333,11 @@ def main():
                         request(pod_path(pod["metadata"]["name"]), "DELETE", {"gracePeriodSeconds": 0})
                     wait_for(lambda: all(containers_gone(pod) for pod in pods) and not owned_shims(),
                              90, "owned container and sandbox cleanup")
+                    for service in services:
+                        meta = service["metadata"]
+                        code, body = request("/api/v1/namespaces/default/services/" + meta["name"], "DELETE",
+                                             {"preconditions": {"uid": meta["uid"]}})
+                        assert code in (200, 404), (code, body)
             finally:
                 stop()
         except Exception as error:

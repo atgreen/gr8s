@@ -297,7 +297,8 @@
     (attach-node-topology server node-name snapshot)
     (bt:with-lock-held ((node-grpc-server-lock server))
       (let ((existing (gethash node-name (node-grpc-server-snapshots server))))
-        (if (same-node-snapshot-topology-p existing snapshot)
+        (if (and (same-node-snapshot-topology-p existing snapshot)
+                 (>= (slot-value existing 'gr8s.node.v1::revision) last-applied))
             existing
           (let ((revision (1+ (max last-applied
                                    (gethash node-name
@@ -333,7 +334,8 @@
   (case (slot-value envelope 'gr8s.node.v1::payload-case)
     (:heartbeat
      (mark-node-ready (node-grpc-server-store server)
-                      node-name (get-universal-time)))
+                      node-name (get-universal-time)
+                      :lease-duration (node-grpc-server-heartbeat-timeout-seconds server)))
     (:snapshot-ack
      (note-node-snapshot-ack
       server node-name
@@ -455,10 +457,10 @@
 
 (defun monitor-node-heartbeats (server)
   (loop until (node-grpc-server-stopping-p server)
-        do (expire-node-heartbeats
-            (node-grpc-server-store server)
-            (- (get-universal-time)
-               (node-grpc-server-heartbeat-timeout-seconds server)))
+        do (let ((now (get-universal-time)))
+             (expire-node-heartbeats
+              (node-grpc-server-store server)
+              (- now (node-grpc-server-heartbeat-timeout-seconds server)) :now now))
            (sleep 0.05)))
 
 (defun handle-node-enrollment (server request context)
