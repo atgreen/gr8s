@@ -199,7 +199,12 @@ def main():
     try:
         native = start()
         code, existing = request("/api/v1/pods")
-        assert code == 200 and not existing["items"], "probe smoke requires an already-clean owned test state"
+        assert code == 200, existing
+        assert all(pod["metadata"].get("deletionTimestamp") for pod in existing["items"]), "probe smoke requires an already-clean owned test state"
+        if existing["items"]:
+            save("prior-owned-deletions.json", existing)
+            wait(lambda: not request("/api/v1/pods")[1]["items"], args.startup_timeout,
+                 "finish already-requested deletions in the reused owned state")
         code, body = request("/api/v1/namespaces", "POST", {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}})
         assert code == 201, (code, body)
         shell = ("rm -f /work/failed /work/liveness-ran; httpd -f -p 8080 -h /work & child=$!; "
