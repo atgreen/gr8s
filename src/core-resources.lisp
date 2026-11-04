@@ -355,8 +355,11 @@
                 unless (gethash (core-resource-key resource namespace name) (pod-store-resources store))
                   do (setf (gethash "name" metadata) name) (return)
                 finally (core-resource-error 409 "AlreadyExists" "Could not allocate a unique generated name"))))
-      (when (gethash "resourceVersion" metadata)
-        (core-resource-error 400 "BadRequest" "metadata.resourceVersion must not be set on create"))
+      (multiple-value-bind (version present) (gethash "resourceVersion" metadata)
+        (when present
+          (unless (or (equal version "") (eq version 'null))
+            (core-resource-error 400 "BadRequest" "metadata.resourceVersion must not be set on create"))
+          (remhash "resourceVersion" metadata)))
       (let* ((object (normalize-core-resource resource input namespace nil store))
              (name (gethash "name" (gethash "metadata" object)))
              (key (core-resource-key resource namespace name))

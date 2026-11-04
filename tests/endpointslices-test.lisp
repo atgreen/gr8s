@@ -98,14 +98,15 @@
       (setf (gethash "addressType" created) "IPv6")
       (check-core-status 422 (concatenate 'string collection "/manual") :method :put :object created)
       (check-core-status 422 collection :method :post :object (endpointslice-test-object "bad" "127.0.0.1"))
-      (let* ((metadata (core-test-protobuf '((1 "typed"))))
+      (let* ((metadata (core-test-protobuf '((1 "typed") (6 ""))))
              (conditions (core-test-protobuf '((1 0))))
              (endpoint (core-test-protobuf (list (list 1 "192.0.2.10") (list 2 conditions))))
              (port (core-test-protobuf '((1 "") (2 "TCP") (3 8080))))
              (request (core-test-protobuf-envelope "EndpointSlice"
                          (list (list 1 metadata) (list 2 endpoint) (list 3 port) (list 4 "IPv4")) "discovery.k8s.io/v1"))
              (response (check-core-status 201 collection :method :post :content-type "application/vnd.kubernetes.protobuf" :octets request)))
-        (is (null (gethash "ready" (gethash "conditions" (aref (gethash "endpoints" response) 0))))))
+        (is (null (gethash "ready" (gethash "conditions" (aref (gethash "endpoints" response) 0)))))
+        (is (plusp (length (gethash "resourceVersion" (gethash "metadata" response))))))
       (check-core-status 200 collection :method :delete)
       (is (null (gr8s::list-core-resources store "endpointslices" "alpha"))))))
 
@@ -167,3 +168,15 @@
                        (lambda (object) (setf (gethash "port" (aref (gethash "ports" object) 0)) 9090
                                               (gethash "resourceVersion" (gethash "metadata" object)) "") object))))
       (is (= 3 (gethash "generation" (gethash "metadata" changed)))))))
+
+(test endpointslice-create-treats-empty-and-null-resource-versions-as-unset
+  (with-temporary-store (store directory)
+    (dolist (value (list "" 'gr8s::null))
+      (let* ((input (endpointslice-test-object (if (stringp value) "empty" "null")))
+             (metadata (gethash "metadata" input)))
+        (setf (gethash "resourceVersion" metadata) value)
+        (is (plusp (length (gethash "resourceVersion" (gethash "metadata"
+           (gr8s::create-core-resource store "endpointslices" input "alpha"))))))))
+    (let ((input (endpointslice-test-object "nonempty")))
+      (setf (gethash "resourceVersion" (gethash "metadata" input)) "1")
+      (signals kubernetes-error (gr8s::create-core-resource store "endpointslices" input "alpha")))))
