@@ -41,8 +41,8 @@
     (core-resource-error 422 "Invalid" "~A must be a nonnegative int32" context))
   value)
 
-(defun validate-workload-selector (selector)
-  "Validate a nonempty LabelSelector including set-based expressions."
+(defun validate-workload-selector (selector &key allow-empty)
+  "Validate LabelSelector expressions; apps selectors stay nonempty while Jobs permit empty manual selectors."
   (require-object selector "spec.selector")
   (reject-unsupported-fields selector '("matchLabels" "matchExpressions") "spec.selector")
   (let ((labels (gethash "matchLabels" selector)) (expressions (gethash "matchExpressions" selector #())))
@@ -50,7 +50,7 @@
       (validate-core-metadata (core-object "name" "selector" "labels" labels) nil nil))
     (unless (and (vectorp expressions) (not (stringp expressions)))
       (core-resource-error 422 "Invalid" "matchExpressions must be an array"))
-    (when (and (or (null labels) (zerop (hash-table-count labels))) (zerop (length expressions)))
+    (when (and (not allow-empty) (or (null labels) (zerop (hash-table-count labels))) (zerop (length expressions)))
       (core-resource-error 422 "Invalid" "spec.selector must not be empty"))
     (loop for expression across expressions
           do (require-object expression "selector expression")
