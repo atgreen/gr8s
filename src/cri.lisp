@@ -31,6 +31,12 @@
   state
   labels)
 
+(defun cri-protobuf-state (message)
+  "Translate a decoded CRI enum state into its proto3 numeric representation."
+  ;; The pinned generator initializes an omitted enum to NIL. Proto3 defines
+  ;; that encoding as numeric zero (sandbox Ready or container Created).
+  (or (gr8s.cri.v1::state message) 0))
+
 (defun ensure-cri-status (operation status)
   (unless (= status ag-grpc:+grpc-status-ok+)
     (error 'runtime-error
@@ -300,7 +306,7 @@
                  collect
                  (make-cri-pod-sandbox-info
                   :id (gr8s.cri.v1::id sandbox)
-                  :state (gr8s.cri.v1::state sandbox)
+                  :state (cri-protobuf-state sandbox)
                   :labels (gr8s.cri.v1::labels sandbox))))
       (ag-grpc:channel-close channel))))
 
@@ -323,7 +329,7 @@
                  collect
                  (make-cri-container-summary
                   :id (gr8s.cri.v1::id container)
-                  :state (gr8s.cri.v1::state container)
+                  :state (cri-protobuf-state container)
                   :labels (gr8s.cri.v1::labels container))))
       (ag-grpc:channel-close channel))))
 
@@ -364,12 +370,25 @@
               :image-ref (gr8s.cri.v1::image-ref container-status)
               :started-at (gr8s.cri.v1::started-at container-status)
               :finished-at (gr8s.cri.v1::finished-at container-status)
-              :state (gr8s.cri.v1::state container-status)
+              :state (cri-protobuf-state container-status)
               :exit-code (gr8s.cri.v1::exit-code container-status)
               :reason (gr8s.cri.v1::reason container-status)
               :message (gr8s.cri.v1::message container-status)
               :labels (gr8s.cri.v1::labels container-status)
               :log-path (gr8s.cri.v1::log-path container-status))))
+      (ag-grpc:channel-close channel))))
+
+(defun cri-stop-container (socket-path container-id &key (grace-period 0) (timeout (+ grace-period 30)))
+  "Stop a container while retaining its real exit status and attempt metadata."
+  (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
+    (unwind-protect
+         (multiple-value-bind (response status)
+             (gr8s.cri.v1::runtime-service-stop-container
+              (gr8s.cri.v1::make-runtime-service-stub channel)
+              (make-instance 'gr8s.cri.v1::stop-container-request :container-id container-id :timeout grace-period)
+              :timeout timeout)
+           (declare (ignore response))
+           (ensure-cri-deletion-status "StopContainer" status))
       (ag-grpc:channel-close channel))))
 
 (defun cri-delete-container (socket-path container-id &key (grace-period 0)

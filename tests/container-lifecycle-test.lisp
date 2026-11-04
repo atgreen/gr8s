@@ -10,9 +10,16 @@
 (def-suite container-lifecycle :in gr8s)
 (in-suite container-lifecycle)
 
+(test cri-wire-defaults-zero-enum-states-without-erasing-explicit-values
+  (dolist (type-and-tag '((gr8s.cri.v1::pod-sandbox 24) (gr8s.cri.v1::container 48)
+                        (gr8s.cri.v1::container-status 24)))
+    (destructuring-bind (type tag) type-and-tag
+      (is (eql 0 (gr8s::cri-protobuf-state (ag-proto:deserialize-from-bytes type #()))))
+      (is (eql 1 (gr8s::cri-protobuf-state (ag-proto:deserialize-from-bytes type (vector tag 1))))))))
+
 (defstruct lifecycle-cri-fixture
   "Hold deterministic CRI state and the calls made by native reconciliation."
-  pod sandbox infos calls)
+  pod sandbox infos calls (lock (bt:make-lock "lifecycle fixture")))
 
 (defun lifecycle-info (name attempt state now &optional (exit-code 0))
   "Build one concrete CRI attempt with stable identity and Unix timestamps."
@@ -82,9 +89,32 @@
                 (replace-function 'gr8s::cri-delete-container
                   (lambda (socket id &rest options)
                     (declare (ignore socket options))
-                    (push (list :delete id) (lifecycle-cri-fixture-calls ,fixture))
-                    (setf (lifecycle-cri-fixture-infos ,fixture)
-                          (remove id (lifecycle-cri-fixture-infos ,fixture) :key #'gr8s::cri-container-info-id :test #'equal))))
+                    (bt:with-lock-held ((lifecycle-cri-fixture-lock ,fixture))
+                      (push (list :delete id) (lifecycle-cri-fixture-calls ,fixture))
+                      (setf (lifecycle-cri-fixture-infos ,fixture)
+                            (remove id (lifecycle-cri-fixture-infos ,fixture) :key #'gr8s::cri-container-info-id :test #'equal)))))
+                (replace-function 'gr8s::cri-stop-container
+                  (lambda (socket id &rest options)
+                    (declare (ignore socket options))
+                    (let ((info (find id (lifecycle-cri-fixture-infos ,fixture) :key #'gr8s::cri-container-info-id :test #'equal)))
+                      (push (list :stop id) (lifecycle-cri-fixture-calls ,fixture))
+                      (setf (gr8s::cri-container-info-state info) gr8s.cri.v1::+containerstate-container_exited+
+                            (gr8s::cri-container-info-exit-code info) 137
+                            (gr8s::cri-container-info-finished-at info)
+                            (* (- (funcall gr8s::*container-lifecycle-clock*) 2208988800) 1000000000)))))
+                (replace-function 'gr8s::cri-delete-pod-sandbox
+                  (lambda (socket id &rest options)
+                    (declare (ignore socket options))
+                    (push (list :delete-sandbox id) (lifecycle-cri-fixture-calls ,fixture))
+                    (setf (lifecycle-cri-fixture-sandbox ,fixture) nil)))
+                (replace-function 'gr8s::containerd-start-sandbox
+                  (lambda (runtime desired)
+                    (declare (ignore runtime))
+                    (push (list :new-sandbox) (lifecycle-cri-fixture-calls ,fixture))
+                    (setf (lifecycle-cri-fixture-sandbox ,fixture)
+                          (gr8s::make-cri-pod-sandbox-info
+                           :id "new-sandbox" :labels (list (cons gr8s::+gr8s-spec-fingerprint-label+
+                                                                (gr8s::pod-runtime-spec-fingerprint desired)))))))
                 ,@body)
            (dolist (pair ,originals) (setf (symbol-function (car pair)) (cdr pair))))))))
 
@@ -331,3 +361,27 @@
         (signals gr8s::runtime-error (gr8s::runtime-logs runtime (pod-uid pod) "side"))
         (is (null (runtime-observe runtime (pod-uid pod))))
         (is (null (probe-file (gr8s::container-lifecycle-path runtime (pod-uid pod)))))))))
+(test never-policy-does-not-recreate-terminal-containers-in-a-dead-sandbox
+  (with-temporary-store (store directory)
+    (let* ((now 4000000000) (gr8s::*container-lifecycle-clock* (lambda () now))
+           (pod (lifecycle-pod store "Never")) (runtime (gr8s::make-containerd-runtime :log-root directory)))
+      (with-lifecycle-cri (fixture pod (list (lifecycle-info "main" 0 gr8s.cri.v1::+containerstate-container_exited+ now)
+                                           (lifecycle-info "side" 0 gr8s.cri.v1::+containerstate-container_exited+ now)))
+        (setf (gr8s::cri-pod-sandbox-info-state (lifecycle-cri-fixture-sandbox fixture)) gr8s.cri.v1::+podsandboxstate-sandbox_notready+)
+        (gr8s::runtime-ensure runtime pod)
+        (is (null (lifecycle-cri-fixture-calls fixture)))
+        (let ((saved (gr8s::load-container-lifecycle-state runtime (pod-uid pod))))
+          (is (gr8s::lifecycle-all-containers-suppressed-p pod saved)))
+        (is (equal "same-sandbox" (gr8s::cri-pod-sandbox-info-id (lifecycle-cri-fixture-sandbox fixture))))))))
+
+(test failed-sandbox-recreation-does-not-rerun-a-successful-onfailure-container
+  (with-temporary-store (store directory)
+    (let* ((now 4000000000) (gr8s::*container-lifecycle-clock* (lambda () now))
+           (pod (lifecycle-pod store)) (runtime (gr8s::make-containerd-runtime :log-root directory)))
+      (with-lifecycle-cri (fixture pod (list (lifecycle-info "main" 0 gr8s.cri.v1::+containerstate-container_exited+ now)
+                                           (lifecycle-info "side" 0 gr8s.cri.v1::+containerstate-container_exited+ now 7)))
+        (setf (gr8s::cri-pod-sandbox-info-state (lifecycle-cri-fixture-sandbox fixture)) gr8s.cri.v1::+podsandboxstate-sandbox_notready+)
+        (gr8s::runtime-ensure runtime pod)
+        (is (equal '((:create "side" 1 "new-sandbox"))
+                   (remove-if-not (lambda (call) (eq :create (first call))) (lifecycle-cri-fixture-calls fixture))))
+        (is (gethash "restartSuppressed" (gethash "main" (gethash "containers" (gr8s::load-container-lifecycle-state runtime (pod-uid pod))))))))))
