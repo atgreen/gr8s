@@ -23,6 +23,7 @@
                (:static-file "schema/workloads-v1.json")
 
                (:static-file "schema/storage-v1.json")
+               (:static-file "schema/policy-v1.json")
                (:static-file "schema/certificates-v1.json")
                (:static-file "schema/endpointslices-v1.json")
                (:module "src"
@@ -60,6 +61,9 @@
                              (:file "batch-resources")
 
                              (:file "storage-api")
+                             (:file "policy-resources")
+                             (:file "pod-admission-policy")
+                             (:file "resource-quota")
                              (:file "endpointslice-api")
                              (:file "storage-controller")
                              (:file "events")
@@ -115,6 +119,7 @@
                              (:file "http")
                              (:file "core-resource-http")
                              (:file "storage-http")
+                             (:file "policy-http")
                              (:file "csr-http")
                              (:file "podtemplate-watch")
                              (:file "pod-watch")
@@ -199,6 +204,7 @@
                              (:file "job-controller-test")
                              (:file "storage-api-test")
                              (:file "storage-http-test")
+                             (:file "policy-api-test")
                              (:file "service-account-test")
                              (:file "api-client-certificate-test")
                              (:file "bootstrap-protobuf-test")

@@ -314,10 +314,20 @@
              (loop for mount across (optional-vector container "volumeMounts" "container")
                    unless (member (gethash "name" mount) names :test #'equal)
                      do (invalid-pod "volumeMount references an unknown volume"))))
-  (let ((selector (gethash "nodeSelector" spec)))
-    (when selector
-      (reject-unsupported-fields selector '("kubernetes.io/os" "kubernetes.io/arch" "kubernetes.io/hostname") "nodeSelector")
-      (maphash (lambda (key value) (declare (ignore key)) (require-nonempty-string value "nodeSelector value")) selector)))
+  (when (gethash "nodeSelector" spec) (validate-pod-node-selector (gethash "nodeSelector" spec)))
+  (validate-pod-tolerations spec)
+  (validate-pod-policy-fields spec))
+
+(defun validate-pod-node-selector (selector)
+  "Accept any qualified label; a label no node carries simply leaves the Pod unscheduled."
+  (require-object selector "nodeSelector")
+  (maphash (lambda (key value)
+             (unless (core-qualified-key-p key) (invalid-pod "nodeSelector key ~S is invalid" key))
+             (unless (core-label-name-p value :empty t) (invalid-pod "nodeSelector value for ~S is invalid" key)))
+           selector))
+
+(defun validate-pod-tolerations (spec)
+  "Validate the toleration list of a Pod or RuntimeClass scheduling SPEC."
   (loop for toleration across (optional-vector spec "tolerations" "spec")
         do (reject-unsupported-fields toleration '("key" "operator" "value" "effect" "tolerationSeconds") "toleration")
            (unless (member (gethash "operator" toleration "Equal") '("Equal" "Exists") :test #'equal)
@@ -325,6 +335,32 @@
            (when (gethash "effect" toleration)
              (unless (member (gethash "effect" toleration) '("" "NoSchedule" "PreferNoSchedule" "NoExecute") :test #'equal)
                (invalid-pod "invalid toleration effect")))))
+
+(defun validate-pod-policy-fields (spec)
+  "Validate the runtime class, priority, overhead and active deadline fields admission resolves."
+  (dolist (field '("runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"))
+    (when (eq (gethash field spec) 'null) (remhash field spec)))
+  (when (gethash "runtimeClassName" spec)
+    (require-dns-subdomain (gethash "runtimeClassName" spec) "spec.runtimeClassName"))
+  (when (equal "" (gethash "priorityClassName" spec)) (remhash "priorityClassName" spec))
+  (when (gethash "priorityClassName" spec)
+    (require-dns-subdomain (gethash "priorityClassName" spec) "spec.priorityClassName"))
+  (when (nth-value 1 (gethash "priority" spec))
+    (unless (typep (gethash "priority" spec) '(signed-byte 32)) (invalid-pod "spec.priority must be an int32")))
+  (when (gethash "preemptionPolicy" spec)
+    (unless (member (gethash "preemptionPolicy" spec) '("PreemptLowerPriority" "Never") :test #'equal)
+      (invalid-pod "spec.preemptionPolicy must be PreemptLowerPriority or Never")))
+  (when (gethash "activeDeadlineSeconds" spec)
+    (unless (typep (gethash "activeDeadlineSeconds" spec) '(integer 1 9223372036854775807))
+      (invalid-pod "spec.activeDeadlineSeconds must be a positive int64")))
+  (let ((overhead (gethash "overhead" spec)))
+    (when overhead
+      (require-object overhead "spec.overhead")
+      (dolist (name (loop for name being the hash-keys of overhead collect name))
+        (unless (member name '("cpu" "memory") :test #'equal)
+          (invalid-pod "spec.overhead[~A] has no implemented accounting" name))
+        (setf (gethash name overhead)
+              (container-quantity-string (container-quantity-round (parse-container-quantity (gethash name overhead)) -3)))))))
 
 (defun pod-node-selector-matches-p (pod node)
   "Match POD's supported node labels against a registered worker NODE."
@@ -335,6 +371,13 @@
                             (cond ((equal key "kubernetes.io/os") "linux")
                                   ((equal key "kubernetes.io/arch") (native-node-architecture))
                                   ((equal key "kubernetes.io/hostname") (node-record-name node))))))))
+
+(defun pod-runtime-handler (pod)
+  "Return the admission-resolved CRI handler of POD's RuntimeClass, or NIL for the default runtime."
+  (let* ((object (pod-to-object pod))
+         (annotations (gethash "annotations" (gethash "metadata" object))))
+    (when (and annotations (gethash "runtimeClassName" (gethash "spec" object)))
+      (gethash "node.gr8s.io/runtime-handler" annotations))))
 
 (defun pod-requests-privileged-container-p (pod)
   "Return whether any validated container needs a privileged sandbox."

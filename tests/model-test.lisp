@@ -32,7 +32,7 @@
 (test unsupported-pod-spec-fields-are-rejected
   (signals kubernetes-error
     (parse-pod
-     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"nodeSelector\":{\"disk\":\"ssd\"},\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}")))
+     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"shareProcessNamespace\":true,\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}")))
 
 (test kubectl-generated-default-pod-fields-are-accepted
   (let ((pod
@@ -49,7 +49,7 @@
      "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"dnsPolicy\":\"None\",\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}"))
   (signals kubernetes-error
     (parse-pod
-     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\",\"resources\":{\"limits\":{\"nvidia.com/gpu\":\"1\"}}}]}}")))
+     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\",\"resources\":{\"limits\":{\"hugepages-2Mi\":\"1Gi\"}}}]}}")))
 
 (test malformed-pod-shapes-are-kubernetes-errors
   (dolist (input

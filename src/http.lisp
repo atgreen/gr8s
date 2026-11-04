@@ -99,7 +99,8 @@
   (let ((groups (vector (json-object "name" "rbac.authorization.k8s.io"
                                     "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
-                       (event-api-group) (workload-api-group) (batch-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group))))
+                       (event-api-group) (workload-api-group) (batch-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group)
+                       (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io"))))
     (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
@@ -121,7 +122,7 @@
       (json-object "name" "pods/proxy" "singularName" "" "namespaced" t "kind" "PodProxyOptions"
                    "verbs" #("get" "create" "update" "patch" "delete"))
       (json-object "name" "nodes" "singularName" "node" "namespaced" nil "kind" "Node" "verbs" #("get" "list")))
-     (stored-resource-discovery "v1") (storage-status-discovery)))))
+     (stored-resource-discovery "v1") (storage-status-discovery) (policy-status-discovery)))))
 
 (defvar *schema-reference-prefix* "#/definitions/")
 
@@ -230,6 +231,8 @@
      (json-object "serverRelativeURL" "/openapi/v3/apis/storage.k8s.io/v1?hash=gr8s-storage-v1")
      "apis/events.k8s.io/v1"
      (json-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1")
+     "apis/node.k8s.io/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/node.k8s.io/v1?hash=gr8s-node-v1")
+     "apis/scheduling.k8s.io/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/scheduling.k8s.io/v1?hash=gr8s-scheduling-v1")
      "apis/apps/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/apps/v1?hash=gr8s-apps-v1")))))
 
 (defun pod-group-version-kind ()
@@ -320,14 +323,24 @@
                     ((equal version "events.k8s.io/v1") (add-event-openapi-paths (core-object) t))
                     ((equal version "apps/v1") (add-workload-openapi-paths (core-object)))
                     ((equal version "storage.k8s.io/v1") (add-storage-openapi-paths (core-object) version))
-                    (t (add-storage-openapi-paths (add-core-resource-openapi-paths (openapi-v3-pod-paths)))))
+                    ((member version '("node.k8s.io/v1" "scheduling.k8s.io/v1") :test #'equal)
+                     (add-policy-openapi-paths (core-object) version))
+                    (t (add-policy-openapi-paths
+                        (add-storage-openapi-paths (add-core-resource-openapi-paths (openapi-v3-pod-paths))) "v1")))
       "components" (json-object "schemas" (openapi-definitions))))))
 
 (defun create-pod-response (store reconciler &optional (namespace "default"))
+  "Admit a new Pod; a dry run runs every admission and quota check but stores nothing."
   (let* ((input (request-pod-in-namespace (core-resource-request-object "Pod") namespace :allow-generate-name t))
-         (pod (create-pod store (admit-in-cluster-pod store input)))
-         (status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
-    (json-response (pod-response-object pod status) 201)))
+         (admitted (admit-in-cluster-pod store input)))
+    (if (core-resource-dry-run-p)
+        (progn
+          (with-store-lock (store)
+            (enforce-resource-quotas-unlocked store "pods" namespace (pod-to-object admitted)))
+          (json-response (pod-response-object admitted (pod-status "Pending")) 201))
+        (let* ((pod (create-pod store admitted))
+               (status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
+          (json-response (pod-response-object pod status) 201)))))
 
 (defun pod-list-observed-object (store reconciler snapshot)
   "Skip vanished snapshot identities and never attach a replacement Pod's status to an old UID."
@@ -382,7 +395,7 @@
     (let ((pod (if existing
                    (update-pod store replacement
                                (pod-resource-version existing))
-                   (create-pod store replacement))))
+                   (create-pod store (admit-in-cluster-pod store replacement)))))
       (json-response
        (pod-response-object
         pod (reconcile-pod reconciler namespace name))
@@ -1026,6 +1039,13 @@ its clients treat any other multi-byte frame as an error message."
           ((string= path "/apis/storage.k8s.io/v1") (storage-discovery-response))
           ((string= path "/openapi/v3/apis/storage.k8s.io/v1") (openapi-v3-response "storage.k8s.io/v1"))
           ((storage-status-route path) (dispatch-storage-status-request store path method))
+          ((string= path "/apis/node.k8s.io") (json-response (policy-api-group "node.k8s.io")))
+          ((string= path "/apis/node.k8s.io/v1") (policy-discovery-response "node.k8s.io"))
+          ((string= path "/openapi/v3/apis/node.k8s.io/v1") (openapi-v3-response "node.k8s.io/v1"))
+          ((string= path "/apis/scheduling.k8s.io") (json-response (policy-api-group "scheduling.k8s.io")))
+          ((string= path "/apis/scheduling.k8s.io/v1") (policy-discovery-response "scheduling.k8s.io"))
+          ((string= path "/openapi/v3/apis/scheduling.k8s.io/v1") (openapi-v3-response "scheduling.k8s.io/v1"))
+          ((policy-status-route path) (dispatch-policy-status-request store path method))
           ((string= path "/apis/events.k8s.io") (json-response (event-api-group)))
           ((string= path "/apis/events.k8s.io/v1") (event-discovery-response))
           ((string= path "/apis/rbac.authorization.k8s.io/v1") (rbac-resources-response))

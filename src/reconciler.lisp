@@ -109,7 +109,24 @@
             (gethash "podIPs" status) (vector (json-object "ip" (runtime-pod-pod-ip runtime-pod)))))
     status))
 
+(defun pod-active-deadline-exceeded-p (pod)
+  "Return whether POD has outlived spec.activeDeadlineSeconds, counted from its creation."
+  (let* ((object (pod-to-object pod))
+         (deadline (gethash "activeDeadlineSeconds" (gethash "spec" object)))
+         (created (gethash "creationTimestamp" (gethash "metadata" object))))
+    (and deadline created
+         (>= (funcall *pod-deletion-clock*) (+ (pod-deletion-time created) deadline)))))
+
+(defun fail-pod-past-deadline (runtime pod)
+  "Stop an expired Pod's containers and report the terminal status a kubelet reports."
+  (runtime-delete runtime (pod-uid pod))
+  (pod-status "Failed" :reason "DeadlineExceeded"
+                       :message "Pod was active on the node longer than the specified deadline"))
+
 (defun converge-running-pod (reconciler pod)
+  (when (and (runtime-runs-containers-p (reconciler-runtime reconciler))
+             (pod-active-deadline-exceeded-p pod))
+    (return-from converge-running-pod (fail-pod-past-deadline (reconciler-runtime reconciler) pod)))
   (let* ((runtime (reconciler-runtime reconciler))
          (observed (runtime-observe runtime (pod-uid pod))))
     (when (and observed (runtime-pod-spec-fingerprint observed)

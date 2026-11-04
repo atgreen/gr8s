@@ -307,6 +307,7 @@
             :privileged (pod-requests-privileged-container-p pod)
             :hostname (pod-runtime-hostname pod)
             :security (containerd-pod-sandbox-security pod)
+            :runtime-handler (pod-runtime-handler pod)
             :dns-servers servers :dns-searches searches :dns-options options)))))
 
 (defun containerd-prune-old-attempts (runtime infos &optional created-names)

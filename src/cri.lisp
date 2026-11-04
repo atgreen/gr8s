@@ -198,8 +198,8 @@
 (defun cri-run-pod-sandbox
     (socket-path &key name uid (namespace "default") (attempt 0)
                    log-directory host-network resource-version spec-fingerprint
-                   dns-servers dns-searches dns-options privileged hostname security (timeout 120))
-  "Create and start a CRI pod sandbox, returning its runtime ID."
+                   dns-servers dns-searches dns-options privileged hostname security runtime-handler (timeout 120))
+  "Create and start a CRI pod sandbox under RUNTIME-HANDLER, returning its runtime ID."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
          (let* ((stub (gr8s.cri.v1::make-runtime-service-stub channel))
@@ -215,7 +215,7 @@
                (gr8s.cri.v1::runtime-service-run-pod-sandbox
                 stub
                 (make-instance 'gr8s.cri.v1::run-pod-sandbox-request
-                               :config config)
+                               :config config :runtime-handler (or runtime-handler ""))
                 :timeout timeout)
              (ensure-cri-status "RunPodSandbox" status)
              (gr8s.cri.v1::pod-sandbox-id response)))

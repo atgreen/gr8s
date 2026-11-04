@@ -2,6 +2,9 @@
 
 (defvar *core-resource-view-version* nil)
 
+(defvar *resource-quota-admission-exempt* nil
+  "True while the server creates its own bootstrap objects, which are counted but never refused.")
+
 ;; Core and bootstrap resources share a durable transaction and revision sequence.
 ;; Objects are copied at the boundary so clients cannot mutate indexed state.
 (defun core-object (&rest pairs)
@@ -255,6 +258,8 @@
 (defun normalize-core-resource (resource input namespace &optional name store)
   (when (batch-resource-p resource)
     (return-from normalize-core-resource (normalize-batch-resource input namespace name)))
+  (when (policy-resource-p resource)
+    (return-from normalize-core-resource (normalize-policy-resource resource input namespace name store)))
   (when (csr-resource-p resource)
     (return-from normalize-core-resource (normalize-csr-resource input name store)))
   (when (endpointslice-resource-p resource)
@@ -403,6 +408,8 @@
         (when (batch-resource-p resource) (prepare-batch-write object nil))
         (when (csr-resource-p resource) (prepare-csr-write object nil))
         (when (endpointslice-resource-p resource) (prepare-endpointslice-write object nil))
+        (when (equal resource "persistentvolumeclaims") (enforce-claim-limit-ranges-unlocked store namespace object))
+        (enforce-resource-quotas-unlocked store resource namespace object)
         (setf (gethash key resources) object)
         (unless dry-run (commit-core-resources store resources revision))
         (copy-core-object object)))))
@@ -429,6 +436,9 @@
       (when (equal resource "events") (validate-event-update existing object))
       (when (storage-resource-p resource) (validate-storage-update store resource existing object))
       (when (endpointslice-resource-p resource) (validate-endpointslice-update existing object))
+      (when (policy-resource-p resource) (validate-policy-update resource existing object))
+      (when (member resource '("services" "persistentvolumeclaims") :test #'equal)
+        (enforce-resource-quotas-unlocked store resource namespace object existing))
       (when (and (gethash "uid" metadata) (not (equal (gethash "uid" metadata) (gethash "uid" existing-metadata))))
         (core-resource-error 409 "Conflict" "metadata.uid does not match the stored object"))
       (when (and (member resource '("rolebindings" "clusterrolebindings") :test #'equal)
@@ -474,6 +484,7 @@
         (return-from delete-core-resource (delete-csr-unlocked store existing dry-run)))
       (when (storage-resource-p resource)
         (return-from delete-core-resource (delete-storage-resource-unlocked store resource existing dry-run)))
+      (when (policy-resource-p resource) (validate-policy-delete resource existing))
       (let ((resources (copy-core-resource-index store)))
         (remhash (core-resource-key resource namespace name) resources)
         (unless dry-run (commit-core-resources store resources (1+ (pod-store-resource-revision store)))))

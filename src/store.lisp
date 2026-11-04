@@ -243,6 +243,7 @@
              :status-code 409
              :reason "AlreadyExists"
              :message (format nil "Pod ~A already exists" (pod-name pod))))
+    (enforce-resource-quotas-unlocked store "pods" (pod-namespace pod) (pod-to-object pod))
     (let ((metadata (gethash "metadata" (pod-to-object pod))))
       (remhash "deletionTimestamp" metadata)
       (remhash "deletionGracePeriodSeconds" metadata)
@@ -277,6 +278,7 @@
       (validate-pod-hostname-update existing replacement)
       (validate-pod-dns-update existing replacement)
       (validate-pod-finalizer-update existing replacement)
+      (validate-pod-policy-update existing replacement)
       (when (pod-node-name existing)
         (when (and (pod-node-name replacement)
                    (not (string= (pod-node-name existing)
