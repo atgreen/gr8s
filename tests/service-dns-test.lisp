@@ -99,7 +99,6 @@
 
 (test service-dns-node-projection-wire-install-and-recovery
   (with-temporary-store (control directory)
-    (declare (ignore directory))
     (gr8s::create-core-resource control "services" (service-test-object "web") "alpha")
     (let* ((snapshot (gr8s::node-desired-state-snapshot control "worker-a"))
            (wire (ag-proto:serialize-to-bytes snapshot))
@@ -125,7 +124,6 @@
 
 (test service-dns-updates-publish-without-pod-version-changes-and-deduplicate
   (with-temporary-store (store directory)
-    (declare (ignore directory))
     (gr8s:register-node store (gr8s:make-node-record :id "dns-node" :name "worker-a"
                                                   :pod-cidr "10.88.0.0/24"))
     (let* ((server (gr8s::%make-node-grpc-server :store store :cluster-pod-cidr "10.88.0.0/16"))
@@ -146,7 +144,6 @@
 
 (test service-dns-empty-headless-service-is-nxdomain
   (with-temporary-store (store directory)
-    (declare (ignore directory))
     (let ((service (service-test-object "web")))
       (setf (gethash "clusterIP" (gethash "spec" service)) "None")
       (gr8s::create-core-resource store "services" service "alpha"))
