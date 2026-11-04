@@ -39,6 +39,13 @@
 ;;; In-process policy object for the CNI installer.  create-map and the program
 ;;; loader are injected, so the create/reuse/load orchestration runs rootless.
 
+(test egress-guard-dns-redirect-constant-tracks-the-node-dns-address
+  ;; The guard's DNS redirect-to-lo clause hardcodes the node gateway/DNS
+  ;; address as a BPF constant (#xa9fe0101). If the Lisp address ever changes,
+  ;; this fails loudly so the program constant is updated in lockstep.
+  (is (string= "169.254.1.1" gr8s::+dns-pod-server-address+))
+  (is (= #xa9fe0101 (gr8s::parse-ipv4-integer gr8s::+dns-pod-server-address+))))
+
 (test egress-policy-object-reuses-pinned-maps-and-creates-the-rest
   (let ((object (gr8s::compile-egress-policy-object "/ignored/path.o"))
         (created nil) (loaded-with nil))
