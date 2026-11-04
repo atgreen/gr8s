@@ -3,7 +3,8 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Serve the Pod status subresource, Pod collection deletion and each Pod's host
-;;;; address. A client's message, reason and custom conditions stay until replaced.
+;;;; address. A client's terminal phase, message, reason and custom conditions stay
+;;;; until replaced.
 ;;;; Conditions gr8s derives itself appear only in the write's response, because
 ;;;; the next observation overwrites them, as a kubelet's next status sync does.
 
@@ -59,9 +60,10 @@
     status))
 
 (defun apply-pod-client-status (store pod status)
-  "Overlay POD's persisted client message, reason and custom conditions onto STATUS."
+  "Overlay POD's persisted client terminal phase, message, reason and custom conditions onto STATUS."
   (let ((client (gethash (pod-uid pod) (pod-store-pod-client-statuses store))))
     (when client
+      (when (gethash "phase" client) (setf (gethash "phase" status) (gethash "phase" client)))
       (dolist (field '("message" "reason"))
         (when (and (gethash field client) (not (gethash field status)))
           (setf (gethash field status) (gethash field client))))
@@ -92,6 +94,9 @@
     (dolist (field '("message" "reason"))
       (let ((value (gethash field status)))
         (when (and (stringp value) (plusp (length value))) (setf (gethash field client) value))))
+    ;; A terminal phase is a verdict controllers act on, as when a kubelet reports it.
+    (when (member (gethash "phase" status) '("Failed" "Succeeded") :test #'equal)
+      (setf (gethash "phase" client) (gethash "phase" status)))
     (let ((custom (remove-if (lambda (condition)
                                (member (gethash "type" condition) *pod-system-condition-types* :test #'equal))
                              (gethash "conditions" status #()))))
@@ -147,7 +152,7 @@
                            (reconcile-pod reconciler namespace name)))
              (answer (pod-response-object pod (copy-json-object observed)))
              (shown (gethash "status" answer)))
-        (dolist (field '("message" "reason"))
+        (dolist (field '("phase" "message" "reason"))
           (when (gethash field client) (setf (gethash field shown) (gethash field client))))
         ;; The written form of a derived condition is visible only here.
         (setf (gethash "conditions" shown)
@@ -162,7 +167,9 @@
   "Delete matching Pods in NAMESPACE, each with the request's shutdown options."
   (let ((matches (pod-watch-predicate namespace (or (hunchentoot:parameter "labelSelector") "")
                                       (or (hunchentoot:parameter "fieldSelector") "")))
-        (arguments (pod-delete-request-arguments)))
+        (arguments (multiple-value-bind (arguments foreground) (pod-delete-request-arguments)
+                     (when foreground (invalid-pod "Pod collection deletion does not support Foreground propagation"))
+                     arguments)))
     (dolist (pod (list-pods store namespace))
       (when (funcall matches (with-store-lock (store) (pod-published-view store pod)))
         (admit-pod-delete store namespace (pod-name pod) nil)

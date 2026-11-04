@@ -155,7 +155,7 @@
             (return-from decode-core-resource-protobuf (decode-admission-protobuf raw kind)))
           (when (equal kind "PodDisruptionBudget")
             (return-from decode-core-resource-protobuf (decode-budget-protobuf raw)))
-          (when (member kind '("Deployment" "ReplicaSet" "Scale") :test #'equal)
+          (when (member kind '("Deployment" "ReplicaSet" "DaemonSet" "ControllerRevision" "ReplicationController" "Scale") :test #'equal)
             (return-from decode-core-resource-protobuf (decode-workload-protobuf raw kind)))
 
           (when (equal kind "EndpointSlice")

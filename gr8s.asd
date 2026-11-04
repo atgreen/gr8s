@@ -159,6 +159,7 @@
                              (:file "garbage-collection")
                              (:file "crd-garbage-collection")
                              (:file "workload-controller")
+                             (:file "daemonset-controller")
                              (:file "job-policy")
                              (:file "job-controller")
                              (:file "disruption-controller")
@@ -264,7 +265,8 @@
                              (:file "pod-dns-config-test")
                              (:file "telemetry-test")
                              (:file "workloads-test")
-                             (:file "disruption-budget-test"))))
+                             (:file "disruption-budget-test")
+                             (:file "rc-daemonset-test"))))
   :perform (test-op (operation component)
              (declare (ignore operation component))
              (unless (uiop:symbol-call

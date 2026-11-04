@@ -420,6 +420,26 @@
         (setf (gethash name overhead)
               (container-quantity-string (container-quantity-round (parse-container-quantity (gethash name overhead)) -3)))))))
 
+(defun node-builtin-labels (node)
+  "Return the labels gr8s derives from what NODE actually is."
+  (core-object "kubernetes.io/os" "linux"
+               "kubernetes.io/arch" (native-node-architecture)
+               "kubernetes.io/hostname" (node-record-name node)))
+
+(defun node-labels (node)
+  "Return all of NODE's labels: the derived ones and those written through the API."
+  (let ((labels (node-builtin-labels node)))
+    (when (node-record-labels node)
+      (maphash (lambda (key value) (setf (gethash key labels) value)) (node-record-labels node)))
+    labels))
+
+(defun node-selector-matches-p (selector node)
+  "Match a Pod spec's nodeSelector against NODE's actual labels."
+  (or (member selector '(nil null))
+      (let ((labels (node-labels node)))
+        (loop for key being the hash-keys of selector using (hash-value expected)
+              always (equal expected (gethash key labels))))))
+
 (defun pod-node-selector-matches-p (pod node)
   "Match POD's node selector against the labels registered worker NODE exposes."
   (let ((selector (gethash "nodeSelector" (gethash "spec" (pod-to-object pod)))))

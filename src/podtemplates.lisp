@@ -96,6 +96,10 @@
       ((equal name "k8s.io.apimachinery.pkg.api.resource.Quantity") (gethash "string" object "0"))
       ((equal name "k8s.io.apimachinery.pkg.util.intstr.IntOrString")
        (if (= 1 (gethash "type" object 0)) (gethash "strVal" object "") (gethash "intVal" object 0)))
+      ((equal name "k8s.io.apimachinery.pkg.runtime.RawExtension")
+       ;; Keep the client's key order: a revision's data is compared byte for byte.
+       (let ((raw (gethash "raw" object)))
+         (if raw (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (ag-grpc:base64-decode raw))) (core-object))))
       ((equal name "k8s.io.apimachinery.pkg.apis.meta.v1.FieldsV1")
        (let ((raw (gethash "Raw" object)))
          (if raw (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (ag-grpc:base64-decode raw))) (core-object))))

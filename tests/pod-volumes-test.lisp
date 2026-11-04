@@ -92,7 +92,7 @@
     (setf (gethash "nodeSelector" spec) (gr8s::core-object "bad key!" "ssd"))
     (signals kubernetes-error (parse-pod object))))
 
-(test scheduler-honors-supported-node-label-selectors
+(test scheduler-honors-node-label-selectors
   (with-temporary-store (store directory)
     (values directory)
     (gr8s:register-node store (gr8s:make-node-record :id "node-a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
@@ -107,7 +107,15 @@
       (is (null (gr8s::schedule-pod store (create-pod store (parse-pod object)))))
       (setf (gethash "nodeSelector" spec) (gr8s::core-object "kubernetes.io/hostname" "worker-a")
             (gethash "name" (gethash "metadata" object)) "selected")
-      (is (equal "worker-a" (gr8s:node-record-name (gr8s::schedule-pod store (create-pod store (parse-pod object)))))))))
+      (is (equal "worker-a" (gr8s:node-record-name (gr8s::schedule-pod store (create-pod store (parse-pod object))))))
+      ;; A label written through the API counts exactly like a derived one.
+      (remhash "nodeName" spec)
+      (setf (gethash "nodeSelector" spec) (gr8s::core-object "disk" "ssd")
+            (gethash "name" (gethash "metadata" object)) "needs-disk")
+      (let ((pod (create-pod store (parse-pod object))))
+        (is (null (gr8s::schedule-pod store pod)))
+        (setf (gr8s::node-record-labels (gr8s:get-node store "worker-a")) (gr8s::core-object "disk" "ssd"))
+        (is (equal "worker-a" (gr8s:node-record-name (gr8s::schedule-pod store pod))))))))
 
 (test key-environment-references-project-only-needed-objects-and-omit-optional-values
   (with-temporary-store (store directory)

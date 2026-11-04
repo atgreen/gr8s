@@ -104,7 +104,9 @@
 (defun authenticated-discovery-request-p (path method)
   "Recognize read-only discovery URLs granted to all authenticated accounts."
   (and (member method '(:get :head))
-       (or (member path '("/version" "/api" "/apis" "/api/v1") :test #'equal)
+       (or (member path '("/version" "/api" "/apis" "/api/v1" "/openapi/v2" "/openapi/v3") :test #'equal)
+           ;; As upstream's system:discovery role grants: kubectl validates with these.
+           (uiop:string-prefix-p "/openapi/v3/" path)
            (let ((parts (remove "" (uiop:split-string path :separator '(#\/)) :test #'equal)))
              (and (member (length parts) '(2 3)) (equal "apis" (first parts)))))))
 

@@ -2,9 +2,10 @@
 ;;;; SPDX-License-Identifier: MIT
 ;;;;
 ;;;; Purpose:
-;;;; Admit apps/v1 Deployments and ReplicaSets with pinned wire/structural
-;;;; schemas, immutable selectors, server-owned generations and status, and
-;;;; Kubernetes rollout defaults. Controllers are implemented separately.
+;;;; Admit apps/v1 Deployments, ReplicaSets, DaemonSets and ControllerRevisions
+;;;; and core/v1 ReplicationControllers with pinned wire/structural schemas,
+;;;; immutable selectors, server-owned generations and status, and Kubernetes
+;;;; rollout defaults. Controllers are implemented separately.
 
 (in-package #:gr8s)
 
@@ -14,8 +15,101 @@
              (gethash section addition))))
 
 (defun workload-resource-p (resource)
-  "Recognize implemented apps workload collections."
-  (member resource '("deployments" "replicasets") :test #'equal))
+  "Recognize implemented controller collections with status and generation."
+  (member resource '("deployments" "replicasets" "daemonsets" "replicationcontrollers") :test #'equal))
+
+(defun workload-schema-name (resource suffix)
+  "Name RESOURCE's pinned structural definition, with SUFFIX such as Status, in its API group."
+  (format nil "io.k8s.api.~A.v1.~A~A"
+          (cond ((batch-resource-p resource) "batch")
+                ((budget-resource-p resource) "policy")
+                ((equal resource "replicationcontrollers") "core")
+                (t "apps"))
+          (core-resource-kind resource) suffix))
+
+(defun workload-owner-resource (owner)
+  "Return the stored collection of a controller OWNER object."
+  (first (find (gethash "kind" owner) *stored-resource-types* :key #'second :test #'equal)))
+
+(defun workload-spec-selector (owner)
+  "Return OWNER's selector as a LabelSelector; a ReplicationController's is a plain label map."
+  (let ((selector (gethash "selector" (gethash "spec" owner))))
+    (if (equal "ReplicationController" (gethash "kind" owner))
+        (core-object "matchLabels" selector)
+        selector)))
+
+(defun workload-drop-unknown-patched-fields (resource object)
+  "Drop unknown top-level fields from a patched object unless the client asked for strict validation.
+
+Kubernetes merges a patch into a map and then ignores what the typed object does
+not declare, warning the client. fieldValidation=Strict keeps them for admission
+to reject."
+  (when (and (or (workload-resource-p resource) (equal resource "controllerrevisions"))
+             (hash-table-p object) (not (equal "Strict" (hunchentoot:parameter "fieldValidation"))))
+    (let ((known (gethash "properties" (template-schema (workload-schema-name resource "")))))
+      (dolist (key (loop for key being the hash-keys of object collect key))
+        (unless (nth-value 1 (gethash key known))
+          (remhash key object)
+          (setf (hunchentoot:header-out :warning)
+                (format nil "299 - \"unknown field \\\"~A\\\"\"" key))))))
+  object)
+
+(defun normalize-replication-controller-defaults (object)
+  "Apply v1 defaulting: the selector and object labels follow the template's labels."
+  (let* ((spec (gethash "spec" object)) (template (gethash "template" spec))
+         (embedded (and (hash-table-p template) (gethash "metadata" template)))
+         (labels (and (hash-table-p embedded) (gethash "labels" embedded)))
+         (metadata (gethash "metadata" object)))
+    (when (and (hash-table-p labels) (plusp (hash-table-count labels)))
+      (when (or (member (gethash "selector" spec) '(nil null))
+                (and (hash-table-p (gethash "selector" spec)) (zerop (hash-table-count (gethash "selector" spec)))))
+        (setf (gethash "selector" spec) (copy-core-object labels)))
+      (when (or (member (gethash "labels" metadata) '(nil null))
+                (and (hash-table-p (gethash "labels" metadata)) (zerop (hash-table-count (gethash "labels" metadata)))))
+        (setf (gethash "labels" metadata) (copy-core-object labels))))
+    object))
+
+(defun normalize-daemonset-strategy (spec)
+  "Default and validate a DaemonSet updateStrategy, refusing surge, which gr8s does not perform."
+  (let* ((strategy (let ((value (gethash "updateStrategy" spec)))
+                     (if (member value '(nil null)) (core-object) value)))
+         (type (gethash "type" strategy "RollingUpdate")))
+    (when (member type '("" null) :test #'equal) (setf type "RollingUpdate"))
+    (unless (member type '("RollingUpdate" "OnDelete") :test #'equal)
+      (core-resource-error 422 "Invalid" "Unsupported DaemonSet update strategy"))
+    (setf (gethash "type" strategy) type (gethash "updateStrategy" spec) strategy)
+    (if (equal type "OnDelete")
+        (when (eq (gethash "rollingUpdate" strategy) 'null) (remhash "rollingUpdate" strategy))
+        (let ((rolling (let ((value (gethash "rollingUpdate" strategy)))
+                         (if (member value '(nil null)) (core-object) value))))
+          (when (member (gethash "maxUnavailable" rolling) '(nil null)) (setf (gethash "maxUnavailable" rolling) 1))
+          (when (member (gethash "maxSurge" rolling) '(nil null)) (setf (gethash "maxSurge" rolling) 0))
+          (unless (zerop (workload-rollout-count (gethash "maxSurge" rolling) 100))
+            (core-resource-error 422 "Invalid" "gr8s does not support DaemonSet maxSurge: spec.updateStrategy.rollingUpdate.maxSurge must be 0"))
+          (when (zerop (workload-rollout-count (gethash "maxUnavailable" rolling) 100))
+            (core-resource-error 422 "Invalid" "spec.updateStrategy.rollingUpdate.maxUnavailable must not be 0"))
+          (when (and (stringp (gethash "maxUnavailable" rolling))
+                     (> (workload-rollout-count (gethash "maxUnavailable" rolling) 100) 100))
+            (core-resource-error 422 "Invalid" "maxUnavailable must not exceed 100%"))
+          (setf (gethash "rollingUpdate" strategy) rolling)))
+    (setf (gethash "revisionHistoryLimit" spec)
+          (workload-int (gethash "revisionHistoryLimit" spec) "revisionHistoryLimit" 10))))
+
+(defun normalize-controller-revision (input namespace name)
+  "Validate a ControllerRevision. Its data stays exactly as written, so its key order survives."
+  (let* ((object (copy-core-object (require-object input "ControllerRevision")))
+         (metadata (require-object (gethash "metadata" object) "metadata")))
+    (unless (and (equal "apps/v1" (gethash "apiVersion" object "apps/v1"))
+                 (equal "ControllerRevision" (gethash "kind" object "ControllerRevision")))
+      (core-resource-error 400 "BadRequest" "Expected apps/v1 ControllerRevision"))
+    (validate-core-metadata metadata namespace name)
+    (setf (gethash "namespace" metadata) namespace
+          (gethash "kind" object) "ControllerRevision" (gethash "apiVersion" object) "apps/v1")
+    (validate-template-shape object (template-schema "io.k8s.api.apps.v1.ControllerRevision") "ControllerRevision")
+    (unless (typep (gethash "revision" object) '(integer 0 *))
+      (core-resource-error 422 "Invalid" "revision must not be negative"))
+    (require-object (gethash "data" object) "data")
+    object))
 
 (defun workload-equal-p (left right)
   "Compare JSON maps independent of key order while retaining case-sensitive scalar values."
@@ -106,17 +200,20 @@
 (defun normalize-workload-resource (resource input namespace name)
   "Validate workload desired state without treating submitted status as runtime evidence."
   (let* ((object (copy-core-object (require-object input "workload")))
-         (kind (core-resource-kind resource)) (metadata (require-object (gethash "metadata" object) "metadata"))
+         (kind (core-resource-kind resource)) (version (core-resource-api-version resource))
+         (metadata (require-object (gethash "metadata" object) "metadata"))
          (spec (require-object (gethash "spec" object) "spec"))
          (template (require-object (gethash "template" spec) "spec.template"))
-         (pod-spec (require-object (gethash "spec" template) "spec.template.spec")))
-    (unless (and (equal "apps/v1" (gethash "apiVersion" object "apps/v1")) (equal kind (gethash "kind" object kind)))
-      (core-resource-error 400 "BadRequest" "Expected apps/v1 ~A" kind))
+         (pod-spec (require-object (gethash "spec" template) "spec.template.spec"))
+         (replication (equal resource "replicationcontrollers")))
+    (unless (and (equal version (gethash "apiVersion" object version)) (equal kind (gethash "kind" object kind)))
+      (core-resource-error 400 "BadRequest" "Expected ~A ~A" version kind))
+    (when replication (normalize-replication-controller-defaults object))
     (validate-core-metadata metadata namespace name)
     (pod-generate-name-prefix metadata)
-    (setf (gethash "namespace" metadata) namespace (gethash "kind" object) kind (gethash "apiVersion" object) "apps/v1")
+    (setf (gethash "namespace" metadata) namespace (gethash "kind" object) kind (gethash "apiVersion" object) version)
     (remhash "status" object)
-    (validate-template-shape object (template-schema (concatenate 'string "io.k8s.api.apps.v1." kind)) kind)
+    (validate-template-shape object (template-schema (workload-schema-name resource "")) kind)
     (let ((embedded (gethash "metadata" template (core-object))))
       (when (eq embedded 'null) (setf embedded (core-object)))
       (let ((labels (gethash "labels" embedded (core-object))))
@@ -124,15 +221,17 @@
         (setf (gethash "labels" embedded) labels))
       (setf
             (gethash "metadata" template) embedded))
-    (validate-template-shape object (template-schema (concatenate 'string "io.k8s.api.apps.v1." kind)) kind)
-    (setf (gethash "replicas" spec) (workload-int (gethash "replicas" spec) "spec.replicas" 1)
-          (gethash "minReadySeconds" spec) (workload-int (gethash "minReadySeconds" spec) "spec.minReadySeconds"))
-    (validate-workload-selector (gethash "selector" spec))
+    (validate-template-shape object (template-schema (workload-schema-name resource "")) kind)
+    (unless (equal resource "daemonsets")
+      (setf (gethash "replicas" spec) (workload-int (gethash "replicas" spec) "spec.replicas" 1)))
+    (setf (gethash "minReadySeconds" spec) (workload-int (gethash "minReadySeconds" spec) "spec.minReadySeconds"))
+    (validate-workload-selector (if replication (workload-spec-selector object) (gethash "selector" spec)))
     (let* ((embedded (gethash "metadata" template (core-object))) (check (copy-core-object embedded)))
       (setf (gethash "name" check) "template")
       (validate-core-metadata check (let ((value (gethash "namespace" check)))
                                       (unless (member value '(nil null "") :test #'equal) value)) nil)
-      (unless (workload-selector-matches-p (gethash "selector" spec) (gethash "labels" embedded))
+      (unless (workload-selector-matches-p (if replication (workload-spec-selector object) (gethash "selector" spec))
+                                           (gethash "labels" embedded))
         (core-resource-error 422 "Invalid" "spec.selector does not match spec.template.metadata.labels")))
     (when (member (gethash "restartPolicy" pod-spec) '(nil null "") :test #'equal)
       (setf (gethash "restartPolicy" pod-spec) "Always"))
@@ -150,6 +249,13 @@
                (require-nonempty-string (gethash "image" container) "container image")
                (when (gethash cname seen) (core-resource-error 422 "Invalid" "Duplicate container name"))
                (setf (gethash cname seen) t)))
+    (when (equal resource "daemonsets") (normalize-daemonset-strategy spec))
+    (when (member resource '("daemonsets" "replicationcontrollers") :test #'equal)
+      ;; These pass straight to Pod creation: an unrunnable template is refused now.
+      (let ((pod (workload-template-pod-object object)))
+        ;; The owner has no identity yet, and this Pod is only ever parsed.
+        (remhash "ownerReferences" (gethash "metadata" pod))
+        (parse-pod pod :allow-generate-name t)))
     (when (equal resource "deployments")
       (let* ((strategy (let ((value (gethash "strategy" spec)))
                          (if (member value '(nil null)) (core-object) value)))
@@ -181,15 +287,24 @@
 
 (defun prepare-workload-write (resource object existing)
   "Keep controller status server-owned and selectors immutable on ordinary writes."
+  (when (and existing (equal resource "controllerrevisions"))
+    (unless (core-json-equal-p (gethash "data" existing) (gethash "data" object))
+      (core-resource-error 422 "Invalid" "ControllerRevision data is immutable")))
   (when (workload-resource-p resource)
-    (when (and existing (not (workload-equal-p (gethash "selector" (gethash "spec" existing))
+    ;; Only a ReplicationController's map selector may change after creation.
+    (when (and existing (not (equal resource "replicationcontrollers"))
+               (not (workload-equal-p (gethash "selector" (gethash "spec" existing))
                                    (gethash "selector" (gethash "spec" object)))))
       (core-resource-error 422 "Invalid" "spec.selector is immutable"))
     (remhash "deletionTimestamp" (gethash "metadata" object))
     (when (and existing (gethash "deletionTimestamp" (gethash "metadata" existing)))
       (setf (gethash "deletionTimestamp" (gethash "metadata" object))
             (gethash "deletionTimestamp" (gethash "metadata" existing))))
-    (setf (gethash "status" object) (if existing (copy-core-object (gethash "status" existing (core-object))) (core-object "replicas" 0))
+    (setf (gethash "status" object) (cond (existing (copy-core-object (gethash "status" existing (core-object))))
+                                         ((equal resource "daemonsets")
+                                          (core-object "currentNumberScheduled" 0 "numberMisscheduled" 0
+                                                       "desiredNumberScheduled" 0 "numberReady" 0))
+                                         (t (core-object "replicas" 0)))
           (gethash "generation" (gethash "metadata" object))
           (if existing (+ (gethash "generation" (gethash "metadata" existing) 1)
                           (if (workload-equal-p (gethash "spec" existing) (gethash "spec" object)) 0 1)) 1)))
@@ -197,8 +312,12 @@
 
 (defun decode-workload-protobuf (bytes kind)
   "Decode typed workload or Scale wire input with pinned Go omission semantics."
-  (let* ((version (if (equal kind "Scale") "autoscaling/v1" "apps/v1"))
-         (package (if (equal kind "Scale") "k8s.io.api.autoscaling.v1." "k8s.io.api.apps.v1."))
+  (let* ((version (cond ((equal kind "Scale") "autoscaling/v1")
+                        ((equal kind "ReplicationController") "v1")
+                        (t "apps/v1")))
+         (package (cond ((equal kind "Scale") "k8s.io.api.autoscaling.v1.")
+                        ((equal kind "ReplicationController") "k8s.io.api.core.v1.")
+                        (t "k8s.io.api.apps.v1.")))
          (object (template-protobuf-message (concatenate 'string package kind) bytes))
          (metadata (core-protobuf-value (core-protobuf-fields bytes) 1)))
     (setf (gethash "metadata" object) (if metadata (core-protobuf-metadata metadata) (core-object))

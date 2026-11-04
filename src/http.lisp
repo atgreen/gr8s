@@ -125,7 +125,12 @@
                    "group" "policy" "version" "v1" "verbs" #("create"))
       (json-object "name" "pods/proxy" "singularName" "" "namespaced" t "kind" "PodProxyOptions"
                    "verbs" #("get" "create" "update" "patch" "delete"))
-      (json-object "name" "nodes" "singularName" "node" "namespaced" nil "kind" "Node" "verbs" #("get" "list")))
+      (json-object "name" "nodes" "singularName" "node" "namespaced" nil "kind" "Node"
+                   "verbs" #("get" "list" "patch" "update") "shortNames" #("no"))
+      (json-object "name" "replicationcontrollers/status" "singularName" "" "namespaced" t
+                   "kind" "ReplicationController" "verbs" #("get" "patch" "update"))
+      (json-object "name" "replicationcontrollers/scale" "singularName" "" "namespaced" t
+                   "kind" "Scale" "group" "autoscaling" "version" "v1" "verbs" #("get" "patch" "update")))
      (stored-resource-discovery "v1") (storage-status-discovery) (policy-status-discovery)))))
 
 (defvar *schema-reference-prefix* "#/definitions/")
@@ -440,7 +445,7 @@
          (preconditions (gethash "preconditions" options))
          (preview (gethash "dryRun" options))
          (query-grace (hunchentoot:parameter "gracePeriodSeconds"))
-         (arguments nil))
+         (arguments nil) (foreground nil))
     (when preconditions
       (require-object preconditions "preconditions")
       (dolist (key '("uid" "resourceVersion"))
@@ -452,8 +457,9 @@
         (core-resource-error 400 "BadRequest" "DeleteOptions.dryRun must contain only All")))
     (let ((policy (or (gethash "propagationPolicy" options)
                       (hunchentoot:parameter "propagationPolicy"))))
-      (when (and policy (not (eq policy 'null)) (not (equal policy "Background")))
-        (invalid-pod "Pod deletion currently supports Background propagation only")))
+      (when (and policy (not (eq policy 'null)) (not (member policy '("Background" "Foreground") :test #'equal)))
+        (invalid-pod "Pod deletion supports Background and Foreground propagation only"))
+      (when (equal policy "Foreground") (setf foreground t)))
     (when (eq t (gethash "orphanDependents" options))
       (invalid-pod "Orphan propagation is not supported"))
     (multiple-value-bind (grace supplied) (gethash "gracePeriodSeconds" options)
@@ -463,11 +469,13 @@
                       (error () (core-resource-error 400 "BadRequest" "Invalid gracePeriodSeconds")))
               supplied t))
       (when supplied (setf arguments (list :grace-period grace))))
-    (append arguments
-            (list :uid (and preconditions (gethash "uid" preconditions))
-                  :resource-version (and preconditions (gethash "resourceVersion" preconditions))
-                  :dry-run (or (core-resource-dry-run-p)
-                               (and (vectorp preview) (not (stringp preview)) (plusp (length preview))))))))
+    (values
+     (append arguments
+             (list :uid (and preconditions (gethash "uid" preconditions))
+                   :resource-version (and preconditions (gethash "resourceVersion" preconditions))
+                   :dry-run (or (core-resource-dry-run-p)
+                                (and (vectorp preview) (not (stringp preview)) (plusp (length preview))))))
+     foreground)))
 
 (defun delete-pod-response (store reconciler name &optional (namespace "default"))
   "Start or shorten Pod shutdown and return promptly while its agent stops containers."
@@ -475,7 +483,13 @@
     (admit-pod-delete store namespace name
                       (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions"))))
   (multiple-value-bind (status pod)
-      (apply #'delete-reconciled-pod reconciler namespace name (pod-delete-request-arguments))
+      (multiple-value-bind (arguments foreground) (pod-delete-request-arguments)
+        ;; A Pod with blocking dependents stays until they are gone.
+        (let ((held (and foreground (not (getf arguments :dry-run))
+                         (hold-pod-for-foreground-deletion store namespace name (getf arguments :uid)))))
+          (if held
+              (values (reconcile-pod reconciler namespace name) held)
+              (apply #'delete-reconciled-pod reconciler namespace name arguments))))
     (if (equal "Deleted" (and status (gethash "reason" status)))
         (status-response "Success" "Deleted" (format nil "Pod ~A deleted" name) 200)
         (json-response (pod-response-object pod (or status (pod-status "Running" :reason "Terminating")))))))
@@ -1129,6 +1143,9 @@ than wait for the next, which truncates any body that spans records in flight."
           ((and (eq method :get) (uiop:string-prefix-p "/api/v1/nodes/" path)
                 (dns-subdomain-p (subseq path (length "/api/v1/nodes/"))))
            (nodes-api-response store (subseq path (length "/api/v1/nodes/"))))
+          ((and (member method '(:put :patch)) (uiop:string-prefix-p "/api/v1/nodes/" path)
+                (dns-subdomain-p (subseq path (length "/api/v1/nodes/"))))
+           (write-node-response store (subseq path (length "/api/v1/nodes/")) method))
           ((crd-special-route store path) (dispatch-crd-request store path method))
           ((workload-subresource-route path) (dispatch-workload-subresource store path method))
           ((core-resource-route path)
