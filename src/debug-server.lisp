@@ -56,6 +56,9 @@ anyone able to connect could otherwise stop the server by sending a wrong secret
   "Start an authenticated, loopback-only Slynk server on PORT, returning the bound port."
   (install-debug-secret state-directory)
   (guard-slynk-connections)
+  ;; Otherwise the first client makes Slynk's hook global, and an error in any
+  ;; gr8s thread would wait on a remote debugger instead of its normal handling.
+  (setf slynk:*global-debugger* nil)
   (setf *debug-store* store *debug-reconciler* reconciler)
   (let ((bound (slynk:create-server :port port :interface "127.0.0.1" :style :spawn :dont-close t)))
     (format *error-output* "gr8s WARNING: debug Slynk server on 127.0.0.1:~D allows root code execution; ~
