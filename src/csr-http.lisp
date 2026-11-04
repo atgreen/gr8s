@@ -87,7 +87,10 @@
            (old (get-core-resource store "certificatesigningrequests" nil name)))
       (when (eq method :get) (return-from dispatch-csr-subresource (json-response old)))
       (unless (member method '(:put :patch)) (core-resource-error 405 "MethodNotAllowed" "Unsupported CSR subresource method"))
-      (let ((requested (csr-subresource-input old method)) (dry-run (core-resource-dry-run-p)))
+      (let* ((dry-run (core-resource-dry-run-p))
+             (requested (admit-subresource-write store "certificatesigningrequests"
+                                                 (string-downcase *csr-write-path*) nil name
+                                                 (csr-subresource-input old method) old :dry-run dry-run)))
         (csr-authorize-subresource store old requested *csr-write-path*)
         (json-response
          (update-core-resource store "certificatesigningrequests" nil name

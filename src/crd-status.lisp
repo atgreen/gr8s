@@ -85,7 +85,10 @@
                                (cond ((equal type "application/merge-patch+json") (merge-json-object old patch))
                                      ((equal type "application/json-patch+json") (apply-core-json-patch old patch))
                                      (t (core-resource-error 415 "UnsupportedMediaType" "CRD status supports JSON/merge patches")))))))
-             (json-response (write-crd-status store name input (core-resource-dry-run-p)))))
+             (json-response (write-crd-status store name
+                                              (admit-subresource-write store "customresourcedefinitions" "status" nil name input old
+                                                                       :dry-run (core-resource-dry-run-p))
+                                              (core-resource-dry-run-p)))))
           (t (core-resource-error 405 "MethodNotAllowed" "Unsupported CRD status method")))))
 
 (defun delete-crd-definition-collection (store labels fields dry-run)
