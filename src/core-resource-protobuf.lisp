@@ -136,6 +136,12 @@
           (when (string= kind "DeleteOptions") (return-from decode-core-resource-protobuf (core-protobuf-delete-options raw)))
           (when (member kind '("Deployment" "ReplicaSet" "Scale") :test #'equal)
             (return-from decode-core-resource-protobuf (decode-workload-protobuf raw kind)))
+
+          (when (member kind '("PersistentVolume" "PersistentVolumeClaim" "StorageClass") :test #'equal)
+            (let ((object (template-protobuf-message
+                           (concatenate 'string (if (equal kind "StorageClass") "k8s.io.api.storage.v1." "k8s.io.api.core.v1.") kind) raw)))
+              (setf (gethash "apiVersion" object) version (gethash "kind" object) kind)
+              (return-from decode-core-resource-protobuf object)))
           (when (equal kind "Event")
             (return-from decode-core-resource-protobuf
               (let* ((package (if (equal version "events.k8s.io/v1") "k8s.io.api.events.v1.Event" "k8s.io.api.core.v1.Event"))

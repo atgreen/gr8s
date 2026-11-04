@@ -95,6 +95,13 @@ node hello, heartbeat, complete desired-state snapshots, observed Pod status,
 and durable revision acknowledgements. The agent persists assigned Pods,
 reconciles them through its node runtime, adopts matching runtime objects after
 a restart, and treats omission from an authoritative snapshot as deletion.
+Persistent agents apply snapshots in order on a session-owned worker, allowing
+the receive loop to serve log and exec requests while another Pod's runtime
+operation is still converging. Acknowledgements follow durable application;
+disconnect cancels and joins snapshot work before the session is replaced.
+The [node log validation record](docs/node-log-delivery-validation-2026-11-04.json)
+preserves the starvation reproducer, cancellation checks and the passing
+upstream Secret-volume mappings case.
 
 gr8s does not reimplement an OCI runtime. Its embedded containerd owns images,
 sandboxes, containers, and the OCI runtime lifecycle. gr8s owns desired state,
@@ -467,6 +474,12 @@ the existing owner collector. Foreground and orphan workload deletion checkpoint
 their intent: foreground waits for owned children, while orphaning releases
 controller references before removing the parent. Custom finalizers remain
 unsupported.
+
+PersistentVolume, PersistentVolumeClaim and StorageClass APIs now support durable
+CRUD, typed protobuf, status subresources and resumable JSON watches. Static
+filesystem hostPath/local volumes bind to matching claims and mount real backing
+storage into native Pods. See [persistent storage](docs/persistent-storage.md)
+for supported behavior, protection, Retain reclamation and remaining extensions.
 
 Stored-resource list continuations are signed and bound to their resource type,
 namespace and selectors. A shared durable change journal preserves a consistent

@@ -19,6 +19,8 @@
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
                (:static-file "schema/workloads-v1.json")
+
+               (:static-file "schema/storage-v1.json")
                (:module "src"
                 :serial t
                 :components ((:file "package")
@@ -44,6 +46,9 @@
                              (:file "core-resource-protobuf")
                              (:file "podtemplates")
                              (:file "workload-resources")
+
+                             (:file "storage-api")
+                             (:file "storage-controller")
                              (:file "events")
                              (:file "node-session")
                              (:file "runtime")
@@ -64,10 +69,12 @@
                              (:file "reconciler")
                              (:file "control-plane-runtime")
                              (:file "pod-volumes")
+                             (:file "storage-volumes")
                              (:file "telemetry")
                              (:file "agent-runtime")
                              (:file "http")
                              (:file "core-resource-http")
+                             (:file "storage-http")
                              (:file "podtemplate-watch")
                              (:file "server")
                              (:file "in-cluster-api")
@@ -112,12 +119,15 @@
                              (:file "durable-resource-watches-test")
                              (:file "bootstrap-resource-test")
                              (:file "pod-volumes-test")
+                             (:file "storage-api-test")
+                             (:file "storage-http-test")
                              (:file "service-account-test")
                              (:file "bootstrap-protobuf-test")
                              (:file "events-test")
                              (:file "pod-deletion-test")
                              (:file "generated-pod-names-test")
                              (:file "pod-conditions-test")
+                             (:file "node-log-delivery-test")
                              (:file "garbage-collection-test")
                              (:file "services-test")
                              (:file "telemetry-test")

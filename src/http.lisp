@@ -97,7 +97,7 @@
                 (vector (json-object "name" "rbac.authorization.k8s.io"
                                      "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                                      "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
-                        (event-api-group) (workload-api-group)))))
+                        (event-api-group) (workload-api-group) (storage-api-group)))))
 
 (defun api-resources-response ()
   (json-response
@@ -112,7 +112,7 @@
       (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
       (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("create"))
       (json-object "name" "nodes" "singularName" "node" "namespaced" nil "kind" "Node" "verbs" #("get" "list")))
-     (stored-resource-discovery "v1")))))
+     (stored-resource-discovery "v1") (storage-status-discovery)))))
 
 (defvar *schema-reference-prefix* "#/definitions/")
 
@@ -214,6 +214,8 @@
     (json-object
      "api/v1"
      (json-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")
+     "apis/storage.k8s.io/v1"
+     (json-object "serverRelativeURL" "/openapi/v3/apis/storage.k8s.io/v1?hash=gr8s-storage-v1")
      "apis/events.k8s.io/v1"
      (json-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1")
      "apis/apps/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/apps/v1?hash=gr8s-apps-v1")))))
@@ -303,7 +305,8 @@
       "info" (json-object "title" "gr8s" "version" "v1")
       "paths" (cond ((equal version "events.k8s.io/v1") (add-event-openapi-paths (core-object) t))
                     ((equal version "apps/v1") (add-workload-openapi-paths (core-object)))
-                    (t (add-core-resource-openapi-paths (openapi-v3-pod-paths))))
+                    ((equal version "storage.k8s.io/v1") (add-storage-openapi-paths (core-object) version))
+                    (t (add-storage-openapi-paths (add-core-resource-openapi-paths (openapi-v3-pod-paths)))))
       "components" (json-object "schemas" (openapi-definitions))))))
 
 (defun create-pod-response (store reconciler &optional (namespace "default"))
@@ -974,6 +977,10 @@
           ((string= path "/version") (version-response))
           ((string= path "/api") (api-versions-response))
           ((string= path "/apis") (api-groups-response))
+          ((string= path "/apis/storage.k8s.io") (json-response (storage-api-group)))
+          ((string= path "/apis/storage.k8s.io/v1") (storage-discovery-response))
+          ((string= path "/openapi/v3/apis/storage.k8s.io/v1") (openapi-v3-response "storage.k8s.io/v1"))
+          ((storage-status-route path) (dispatch-storage-status-request store path method))
           ((string= path "/apis/events.k8s.io") (json-response (event-api-group)))
           ((string= path "/apis/events.k8s.io/v1") (event-discovery-response))
           ((string= path "/apis/rbac.authorization.k8s.io/v1") (rbac-resources-response))
