@@ -58,7 +58,7 @@
            (last-bookmark (get-internal-real-time)))
       (labels ((emit (event)
                  (write-sequence (trivial-utf-8:string-to-utf-8-bytes
-                                  (concatenate 'string (com.inuoe.jzon:stringify (event-api-view event)) (string #\Newline))) out)
+                                  (concatenate 'string (com.inuoe.jzon:stringify (crd-api-view (event-api-view event))) (string #\Newline))) out)
                  (finish-output out))
                (bookmark (&optional initial-end)
                  (let ((metadata (core-object "resourceVersion" (write-to-string revision))))
@@ -71,7 +71,10 @@
               ;; Flush headers even for an initially empty watch.
               (finish-output out)
               (loop while (< (get-internal-real-time) deadline)
-                    do (multiple-value-bind (events watermark) (template-watch-events store namespace labels fields revision :resource resource)
+                    do (when (and *crd-view-definition*
+                                  (not (crd-watch-definition-current-p store *crd-view-definition* *crd-request-version*)))
+                         (core-resource-error 410 "Expired" "Custom definition identity or served version has changed"))
+                       (multiple-value-bind (events watermark) (template-watch-events store namespace labels fields revision :resource resource)
                          (dolist (event events) (emit event))
                          (setf revision watermark))
                        (when (and (true-parameter-p (hunchentoot:parameter "allowWatchBookmarks"))

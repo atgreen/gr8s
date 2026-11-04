@@ -1,7 +1,10 @@
 (in-package #:gr8s)
 
+(defvar *crd-route* nil)
+
 (defun core-resource-route (path)
   "Resolve a durable resource URL to its collection, namespace and name."
+  (when *crd-route* (return-from core-resource-route *crd-route*))
   (let* ((parts (uiop:split-string path :separator '(#\/)))
          (version (cond ((equal (subseq parts 0 (min 3 (length parts))) '("" "api" "v1")) "v1")
                         ((and (>= (length parts) 4) (equal (second parts) "apis"))
@@ -27,6 +30,7 @@
     (not (null value))))
 
 (defun core-resource-request-object (expected-kind)
+  (when (and *crd-view-definition* (not (equal expected-kind "DeleteOptions"))) (return-from core-resource-request-object (crd-read-json)))
   (let ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;)))))
     (cond
       ((string= content-type "application/vnd.kubernetes.protobuf")
@@ -34,8 +38,10 @@
                                       (if (equal expected-kind "Scale") "autoscaling/v1"
                                           (when (member expected-kind '("Event" "DeleteOptions") :test #'equal) *core-resource-view-version*))))
       ((member content-type '("" "application/json") :test #'string=)
-       (require-object (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)
-                                           :max-string-length (* 2 1024 1024)) "request"))
+       (require-object (if (equal expected-kind "CustomResourceDefinition")
+                           (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))
+                           (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)
+                                                :max-string-length (* 2 1024 1024))) "request"))
       (t (core-resource-error 415 "UnsupportedMediaType" "Supported resource request formats are JSON and Kubernetes protobuf")))))
 
 (defun core-selector-terms (selector)
@@ -240,7 +246,9 @@
     (unless (member content-type '("application/merge-patch+json" "application/strategic-merge-patch+json"
                                    "application/json-patch+json") :test #'string=)
       (core-resource-error 415 "UnsupportedMediaType" "Supported patch types are JSON merge, strategic merge, and JSON patch"))
-    (setf patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t) :max-string-length (* 2 1024 1024)))
+    (setf patch (if (or (equal resource "customresourcedefinitions") (custom-resource-key-p resource))
+                    (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))
+                    (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t) :max-string-length (* 2 1024 1024))))
     (json-response
      (update-core-resource
       store resource namespace name
@@ -282,7 +290,7 @@
                                                (lambda (old) (declare (ignore old)) replacement) :dry-run dry-run))))
         ((and writable-scope name (eq method :patch)) (core-resource-patch-response store resource namespace name dry-run))
         ((and writable-scope (null name)
-              (or (storage-resource-p resource) (member resource '("podtemplates" "events" "deployments" "replicasets") :test #'equal))
+              (or (storage-resource-p resource) (member resource '("podtemplates" "events" "deployments" "replicasets" "customresourcedefinitions") :test #'equal))
               (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
                 (options (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions")))
@@ -290,7 +298,10 @@
            (when (and preview (not (equalp preview #("All")))) (core-resource-error 400 "BadRequest" "Invalid dryRun"))
            (when (gethash "preconditions" (or options (core-object)))
              (core-resource-error 400 "BadRequest" "DeleteCollection does not support preconditions"))
-           (cond ((workload-resource-p resource)
+           (cond ((equal resource "customresourcedefinitions")
+                  (delete-crd-definition-collection store (or (hunchentoot:parameter "labelSelector") "")
+                                                     (or (hunchentoot:parameter "fieldSelector") "") (or dry-run preview)))
+                 ((workload-resource-p resource)
                   (delete-workload-collection store resource namespace options (or dry-run preview)))
                  ((storage-resource-p resource)
                   (delete-storage-collection store resource namespace (or (hunchentoot:parameter "labelSelector") "")
