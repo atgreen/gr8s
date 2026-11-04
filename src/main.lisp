@@ -517,6 +517,7 @@
                                       (collect-orphaned-api-objects reconciler)
                                       (reconcile-workloads reconciler)
                                       (reconcile-endpointslices store)
+                                      (publish-service-discovery-snapshots runtime)
                                       (when service-controller
                                         (ensure-in-cluster-network pki)
                                         (reconcile-native-services service-controller)))))

@@ -1,0 +1,438 @@
+{
+  "date": "2026-11-04",
+  "isCertificationResult": false,
+  "scope": "Actual normal/headless Service A/AAAA address discovery over public durable node snapshots; no SRV/PTR/ExternalName claim",
+  "upstreamFocusedRuns": [
+    {
+      "sourceCommit": "55c418e",
+      "binarySHA256": "dbd30d5728b87f91823e79952810d4d5115a02eed1ce99023cfcbfd15900b6bb",
+      "guestReportDirectory": "/var/tmp/gr8s-podtemplates.6arql7ke",
+      "localArtifacts": "build/conformance/2026-11-04-service-dns-upstream-6arql7ke",
+      "reportSHA256": "13e6c215ab21acb70d68477cd73a85b61d1fd2acd74795e09c55dae791fe23b9",
+      "verifiedArtifacts": {
+        "gr8s.log": "a4d63c995d713e153c66868112fc8a8be296fb3a192fab3a8d716d82e6604916",
+        "sonobuoy.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sonobuoy.stderr.log": "da596a969a16929a7e31ad9883fdc740a5fa6af472f8ea230426b4ad7de7b17d",
+        "sonobuoy-results.tar.gz": "53719fde9794dc9f0604c7de52f4230395997beb9816101400c2304f36e144fb",
+        "kube-sonobuoy.log": "ab6ddd26281cdeccd779c16014dab98fe42af85df51744324e90d391140f6b20",
+        "e2e.log": "c9ad9d65d078c2d9301d3be829088e8fe4a7eec99600d77b8758528add6fbb63",
+        "sonobuoy-worker.log": "175da663032a28d71f4441bc9961da739735a23fad8fca5f97bb9ecb73fcd16d",
+        "sonobuoy-results.txt": "523ce3ebb27d99aaf26a06452667212464378f71ef5d86b559bccf68de1ff493"
+      },
+      "focus": "\\[sig-network\\] Services should serve a basic endpoint from pods \\[Conformance\\]$",
+      "actualSelectedJUnitCases": [
+        {
+          "name": "[It] [sig-network] Services should serve a basic endpoint from pods [Conformance]",
+          "passed": true,
+          "seconds": "64.07579605"
+        }
+      ],
+      "passed": true,
+      "nativeExitCode": 0,
+      "ownedShimsRemaining": [],
+      "cleanupError": null
+    },
+    {
+      "sourceCommit": "cbe5e29",
+      "nativeSHA256": "52b63866c669c496b500b3521e056fe6a0cae441331fac80efb9bfee7e77d844",
+      "guestReportDirectory": "/var/tmp/gr8s-podtemplates.ql9s7ao5",
+      "localArtifacts": "build/conformance/2026-11-04-service-dns-upstream-ql9s7ao5",
+      "reportSHA256": "013db75692896ee1dd9f675284af415f00dcb11d46dd1d6d46f27a64d7699a7d",
+      "verifiedArtifacts": {
+        "gr8s.log": "95addf8b02488ca1c24b08dc91b0942265df5010e93b4bd90be9720c7590b4c7",
+        "kubeconfig": "6cacedfa8b519928003c14d32486a684235b8210e2681f81950a9cac47a62abb",
+        "sonobuoy.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sonobuoy.stderr.log": "ee8ff83bab7b777ef07fd18c1d063923203615b9533a1f0b9bfe94c310c7c713",
+        "sonobuoy-results.tar.gz": "ab5ed942fe0115066e09b6d5c132b9b3db2a7a398570489dff38cc63619701b0",
+        "kube-sonobuoy.log": "754624fa99f50a90be24b65872ecccdc3c54046549392cc761330e181fc8172b",
+        "e2e.log": "702d587b0675351b74e86f50d48b27c05ee5dcbf5986bdcbfedcddb215759bb6",
+        "sonobuoy-worker.log": "e5f870a11dff2af233909a7b8bb3e54d565edf6199be0d8458bf174ab4588b8f",
+        "sonobuoy-results.txt": "5804d586bd949e5053fbae5d1c9b48c5ccba27b07acac88f2225316eb00f8703"
+      },
+      "focus": "\\[sig-network\\] (Services should serve a basic endpoint from pods|EndpointSlice should support creating EndpointSlice API operations|EndpointSlice should create and delete EndpointSlices for a Service with a selector that matches no pods) \\[Conformance\\]$",
+      "actualSelectedJUnitCases": [
+        {
+          "name": "[It] [sig-network] EndpointSlice should create and delete EndpointSlices for a Service with a selector that matches no pods [Conformance]",
+          "passed": true,
+          "seconds": "4.315194236"
+        },
+        {
+          "name": "[It] [sig-network] EndpointSlice should support creating EndpointSlice API operations [Conformance]",
+          "passed": true,
+          "seconds": "0.37556279"
+        },
+        {
+          "name": "[It] [sig-network] Services should serve a basic endpoint from pods [Conformance]",
+          "passed": true,
+          "seconds": "70.939849468"
+        }
+      ],
+      "passed": true,
+      "nativeExitCode": 0,
+      "ownedShimsRemaining": [],
+      "cleanupError": null
+    }
+  ],
+  "localValidation": {
+    "sourceCommit": "55c418e",
+    "fullHostSuite": {
+      "passed": 2622,
+      "skipped": 5,
+      "failed": 0
+    },
+    "latestFocusedSource": "e024c22",
+    "serviceDNS": {
+      "passed": 38,
+      "skipped": 0,
+      "failed": 0
+    }
+  },
+  "limitations": [
+    "Historical55c418e basic-Service andb23cc05 native sources are preserved separately. Finalcbe5e29 CRD/EndpointSlice/DNS implementation passes the unchanged original three-case selection; later mainca9d745 and328d662 only update validation documentation/docstrings.",
+    "Normal Service A/AAAA and ready headless/explicit endpoint-hostname address records are implemented.",
+    "SRV, PTR, DNS schema TXT, generated endpoint hostnames and ExternalName are follow-up podster-uqb.21.1.",
+    "Existing Pod namespace-specific DNS search paths from per-container lifecycle support are preserved."
+  ],
+  "nativeRuns": [
+    {
+      "sourceCommit": "b23cc05",
+      "harnessSHA256": "cb49bf4d9751634c09ae09776a648cc7cdebb8a1e92eba6b8af87f8e54554c81",
+      "localArtifacts": "build/conformance/2026-11-04-service-dns-native-1_9pfuyr",
+      "reportSHA256": "366a6928737453b263388901a9e02ef462fde244b4ec258fd65ae3f41ff7a2fd",
+      "result": {
+        "directory": "/var/tmp/gr8s-endpointslices.1_9pfuyr",
+        "stateDirectory": "/var/tmp/gr8s-conformance.pe4t1u6w/state",
+        "namespace": "slices-4cdc2512",
+        "nativeSHA256": "f02b51ffc3cd4d34ccfeadbdc18cec77f9e0dd26217ac617d8da353a5f4eb8a3",
+        "scenarios": {
+          "selectorServiceActualEndpoints": {
+            "passed": true,
+            "identities": {
+              "E1F91546-3731-478B-B445-D13860D95C7C": "containerd://dcaa458fc64252af3598ed07cab1634758fb326ca97aef2714ded8a9e142a404",
+              "0F28884A-C237-41A2-82B0-954E618C364F": "containerd://9ae86136709f9850a1ff7a3f39ffc6a898db779300d86a997cf45927298266a4"
+            },
+            "sliceUIDs": [
+              "FDE63D88-612F-437F-B715-A94356E66866"
+            ],
+            "actualHTTPResponses": [
+              "slices-4cdc2512-one",
+              "slices-4cdc2512-two"
+            ]
+          },
+          "actualServiceDNS": {
+            "passed": true,
+            "udpAndTCPClusterIP": "10.96.0.11",
+            "headlessActualPodIPs": [
+              "10.88.0.1",
+              "10.88.0.2"
+            ],
+            "emptyHeadlessNXDOMAIN": true,
+            "restartRecovered": true,
+            "terminatingAddressWithdrawn": true
+          },
+          "manualSliceForwardingAndReadiness": {
+            "passed": true,
+            "sliceUID": "76846FB8-2076-45EA-A94F-64F977ED45DE",
+            "actualHTTPResponse": "slices-4cdc2512-one"
+          },
+          "restartPersistence": {
+            "passed": true,
+            "unchangedIdentities": {
+              "E1F91546-3731-478B-B445-D13860D95C7C": "containerd://dcaa458fc64252af3598ed07cab1634758fb326ca97aef2714ded8a9e142a404",
+              "0F28884A-C237-41A2-82B0-954E618C364F": "containerd://9ae86136709f9850a1ff7a3f39ffc6a898db779300d86a997cf45927298266a4"
+            }
+          },
+          "terminatingEndpoint": {
+            "passed": true,
+            "servedDirectHTTPWhileWithdrawn": true,
+            "survivingHTTPResponse": "slices-4cdc2512-two"
+          }
+        },
+        "nativeExitCodes": [
+          0,
+          0
+        ],
+        "passed": true,
+        "observationErrors": [
+          "<urlopen error [Errno 111] Connection refused>",
+          "<urlopen error [Errno 111] Connection refused>",
+          "<urlopen error [Errno 111] Connection refused>",
+          "<urlopen error [Errno 111] Connection refused>",
+          "<urlopen error [Errno 111] Connection refused>",
+          "<urlopen error [Errno 111] Connection refused>",
+          "<urlopen error [Errno 111] Connection refused>",
+          "<urlopen error [Errno 111] Connection refused>",
+          "<urlopen error [Errno 111] Connection refused>",
+          "<urlopen error [Errno 111] Connection refused>",
+          "<urlopen error [Errno 111] Connection refused>",
+          "<urlopen error [Errno 111] Connection refused>",
+          "<urlopen error [Errno 111] Connection refused>",
+          "<urlopen error [Errno 111] Connection refused>"
+        ],
+        "stage": "terminating-service-withdrawal",
+        "ownedShimsRemaining": [],
+        "pods": [
+          {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+              "name": "one",
+              "labels": {
+                "app": "web"
+              },
+              "namespace": "slices-4cdc2512",
+              "uid": "E1F91546-3731-478B-B445-D13860D95C7C",
+              "resourceVersion": "2",
+              "generation": 1,
+              "creationTimestamp": "2026-11-04T03:05:49Z"
+            },
+            "spec": {
+              "restartPolicy": "Always",
+              "terminationGracePeriodSeconds": 30,
+              "containers": [
+                {
+                  "name": "main",
+                  "image": "docker.io/library/busybox:1.36.1",
+                  "imagePullPolicy": "IfNotPresent",
+                  "command": [
+                    "sh",
+                    "-c",
+                    "mkdir -p /www; echo slices-4cdc2512-one > /www/index.html; trap '' TERM; while :; do httpd -f -p 8080 -h /www; done"
+                  ],
+                  "ports": [
+                    {
+                      "name": "http",
+                      "containerPort": 8080
+                    }
+                  ],
+                  "env": [
+                    {
+                      "name": "KUBERNETES_SERVICE_HOST",
+                      "value": "10.96.0.1"
+                    },
+                    {
+                      "name": "KUBERNETES_SERVICE_PORT",
+                      "value": "443"
+                    },
+                    {
+                      "name": "KUBERNETES_SERVICE_PORT_HTTPS",
+                      "value": "443"
+                    }
+                  ],
+                  "volumeMounts": [
+                    {
+                      "name": "gr8s-api-access",
+                      "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+                      "readOnly": true
+                    }
+                  ]
+                }
+              ],
+              "serviceAccountName": "default",
+              "volumes": [
+                {
+                  "name": "gr8s-api-access",
+                  "secret": {
+                    "secretName": "default-token-86a8d3d9",
+                    "defaultMode": 420
+                  }
+                }
+              ],
+              "nodeName": "gr8s-local"
+            },
+            "status": {
+              "containerStatuses": [
+                {
+                  "name": "main",
+                  "containerID": "containerd://dcaa458fc64252af3598ed07cab1634758fb326ca97aef2714ded8a9e142a404",
+                  "image": "docker.io/library/busybox:1.36.1",
+                  "imageID": "docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662",
+                  "restartCount": 0,
+                  "ready": true,
+                  "started": true,
+                  "state": {
+                    "running": {
+                      "startedAt": "2026-11-04T03:06:25Z"
+                    }
+                  }
+                }
+              ],
+              "phase": "Running",
+              "podIP": "10.88.0.1",
+              "podIPs": [
+                {
+                  "ip": "10.88.0.1"
+                }
+              ],
+              "observedGeneration": 1,
+              "conditions": [
+                {
+                  "type": "PodScheduled",
+                  "status": "True",
+                  "lastTransitionTime": "2026-11-04T03:05:49Z",
+                  "observedGeneration": 1
+                },
+                {
+                  "type": "Initialized",
+                  "status": "True",
+                  "lastTransitionTime": "2026-11-04T03:05:49Z",
+                  "observedGeneration": 1
+                },
+                {
+                  "type": "ContainersReady",
+                  "status": "True",
+                  "lastTransitionTime": "2026-11-04T03:06:25Z",
+                  "observedGeneration": 1
+                },
+                {
+                  "type": "Ready",
+                  "status": "True",
+                  "lastTransitionTime": "2026-11-04T03:06:25Z",
+                  "observedGeneration": 1
+                }
+              ]
+            }
+          },
+          {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+              "name": "two",
+              "labels": {
+                "app": "web"
+              },
+              "namespace": "slices-4cdc2512",
+              "uid": "0F28884A-C237-41A2-82B0-954E618C364F",
+              "resourceVersion": "2",
+              "generation": 1,
+              "creationTimestamp": "2026-11-04T03:05:49Z"
+            },
+            "spec": {
+              "restartPolicy": "Always",
+              "terminationGracePeriodSeconds": 30,
+              "containers": [
+                {
+                  "name": "main",
+                  "image": "docker.io/library/busybox:1.36.1",
+                  "imagePullPolicy": "IfNotPresent",
+                  "command": [
+                    "sh",
+                    "-c",
+                    "mkdir -p /www; echo slices-4cdc2512-two > /www/index.html; trap '' TERM; while :; do httpd -f -p 8080 -h /www; done"
+                  ],
+                  "ports": [
+                    {
+                      "name": "http",
+                      "containerPort": 8080
+                    }
+                  ],
+                  "env": [
+                    {
+                      "name": "KUBERNETES_SERVICE_HOST",
+                      "value": "10.96.0.1"
+                    },
+                    {
+                      "name": "KUBERNETES_SERVICE_PORT",
+                      "value": "443"
+                    },
+                    {
+                      "name": "KUBERNETES_SERVICE_PORT_HTTPS",
+                      "value": "443"
+                    }
+                  ],
+                  "volumeMounts": [
+                    {
+                      "name": "gr8s-api-access",
+                      "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+                      "readOnly": true
+                    }
+                  ]
+                }
+              ],
+              "serviceAccountName": "default",
+              "volumes": [
+                {
+                  "name": "gr8s-api-access",
+                  "secret": {
+                    "secretName": "default-token-86a8d3d9",
+                    "defaultMode": 420
+                  }
+                }
+              ],
+              "nodeName": "gr8s-local"
+            },
+            "status": {
+              "containerStatuses": [
+                {
+                  "name": "main",
+                  "containerID": "containerd://9ae86136709f9850a1ff7a3f39ffc6a898db779300d86a997cf45927298266a4",
+                  "image": "docker.io/library/busybox:1.36.1",
+                  "imageID": "docker.io/library/busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662",
+                  "restartCount": 0,
+                  "ready": true,
+                  "started": true,
+                  "state": {
+                    "running": {
+                      "startedAt": "2026-11-04T03:06:42Z"
+                    }
+                  }
+                }
+              ],
+              "phase": "Running",
+              "podIP": "10.88.0.2",
+              "podIPs": [
+                {
+                  "ip": "10.88.0.2"
+                }
+              ],
+              "observedGeneration": 1,
+              "conditions": [
+                {
+                  "type": "PodScheduled",
+                  "status": "True",
+                  "lastTransitionTime": "2026-11-04T03:05:49Z",
+                  "observedGeneration": 1
+                },
+                {
+                  "type": "Initialized",
+                  "status": "True",
+                  "lastTransitionTime": "2026-11-04T03:05:49Z",
+                  "observedGeneration": 1
+                },
+                {
+                  "type": "ContainersReady",
+                  "status": "True",
+                  "lastTransitionTime": "2026-11-04T03:06:42Z",
+                  "observedGeneration": 1
+                },
+                {
+                  "type": "Ready",
+                  "status": "True",
+                  "lastTransitionTime": "2026-11-04T03:06:42Z",
+                  "observedGeneration": 1
+                }
+              ]
+            }
+          }
+        ],
+        "artifactSHA256": {
+          "gr8s.log": "e6c5cfb585d7f58b7d4b20736811f38c79c9dd9fe9978299bb38f1d5cd8f6391",
+          "E1F91546-3731-478B-B445-D13860D95C7C-main.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "0F28884A-C237-41A2-82B0-954E618C364F-main.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      }
+    }
+  ],
+  "finalCombinedHostSuite": {
+    "sourceCommit": "cbe5e29",
+    "includesCRDMain": "79dd73341e1b2054d156417bcef6f76d0b550703",
+    "passed": 2798,
+    "skipped": 5,
+    "failed": 0
+  },
+  "mainIntegration": {
+    "mainCommit": "ca9d745e4ad9110442d67b18d82a211aad9066b8",
+    "mergeCommit": "ab3b52b",
+    "differenceFromTestedImplementation": "Only EndpointSlice validation documentation beyond the already tested CRD/EndpointSlice union."
+  }
+}

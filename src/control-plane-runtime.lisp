@@ -30,6 +30,7 @@
 (defun node-desired-state-snapshot (store node-name &key excluded-uid)
   (make-instance
    'gr8s.node.v1::desired-state-snapshot
+   :service-discovery-objects-json (service-discovery-projection store)
    :pods
    (mapcar
     (lambda (pod) (pod-assignment pod store))
@@ -49,6 +50,11 @@
     (control-plane-runtime-store runtime) node-name
     :excluded-uid excluded-uid)
    :deduplicate t))
+
+(defun publish-service-discovery-snapshots (runtime)
+  "Deliver public DNS changes even when every running Pod revision is unchanged."
+  (dolist (node (list-nodes (control-plane-runtime-store runtime)))
+    (publish-node-snapshot runtime (node-record-name node))))
 
 (defun control-plane-observation (runtime pod)
   (make-runtime-pod
