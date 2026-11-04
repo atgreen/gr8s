@@ -44,6 +44,8 @@
     (when (and specified (not (equal specified "")) (not (equal namespace specified)))
       (core-resource-error 400 "BadRequest" "metadata.namespace does not match request namespace"))
     (setf (gethash "namespace" metadata) namespace)
+    ;; Ordinary Pod writes cannot supply runtime status, including GET-to-PUT metadata edits.
+    (remhash "status" object)
     (parse-pod object :allow-generate-name allow-generate-name)))
 
 (defun request-object (&optional (namespace "default"))

@@ -129,11 +129,14 @@
       status)))
 
 (defun converge-deleting-pod (reconciler pod)
+  (when (or (pod-finalizers-present-p pod) (pod-finalization-state (reconciler-store reconciler) pod))
+    (return-from converge-deleting-pod (converge-finalized-pod-deletion reconciler pod)))
   (if (runtime-delete-pod (reconciler-runtime reconciler) pod)
       (progn
+        (runtime-forget-pod-finalization (reconciler-runtime reconciler) (pod-uid pod))
         (finish-reconciler-urgent-deletion reconciler (pod-uid pod))
         (remove-pod (reconciler-store reconciler)
-                    (pod-namespace pod) (pod-name pod))
+                    (pod-namespace pod) (pod-name pod) :uid (pod-uid pod))
         (pod-status "Succeeded" :reason "Deleted"))
       (let* ((runtime (reconciler-runtime reconciler))
              (observed (handler-case (runtime-observe runtime (pod-uid pod))
@@ -164,9 +167,12 @@
           (format *error-output* "gr8s Pod ~A/~A runtime error: ~A~%" namespace name (runtime-error-message error))
           (add-pod-status-conditions
            (reconciler-store reconciler) pod
-           (pod-status "Pending"
-                       :reason "RuntimeError"
-                       :message (runtime-error-message error))))))))
+           (or (when (deletion-requested-p pod)
+                 (let ((state (pod-finalization-state (reconciler-store reconciler) pod)))
+                   (when state (gethash "status" state))))
+               (pod-status "Pending"
+                           :reason "RuntimeError"
+                           :message (runtime-error-message error)))))))))
 
 (defun delete-reconciled-pod (reconciler namespace name &key uid resource-version
                                                       (grace-period nil grace-supplied-p)
