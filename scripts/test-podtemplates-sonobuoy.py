@@ -59,6 +59,7 @@ def main():
     parser.add_argument("--gr8s", required=True, type=Path)
     parser.add_argument("--sonobuoy", required=True, type=Path)
     parser.add_argument("--state-parent", type=Path, default=Path("/var/tmp"))
+    parser.add_argument("--state-directory", type=Path, help="Reuse an explicitly owned, stopped state and its image cache")
     parser.add_argument("--api-port", type=int, default=18190)
     parser.add_argument("--node-port", type=int, default=17447)
     parser.add_argument("--timeout", type=int, default=1200)
@@ -74,11 +75,12 @@ def main():
     if os.geteuid() != 0:
         parser.error("Run this privileged integration test inside a disposable Linux guest")
     root = Path(tempfile.mkdtemp(prefix="gr8s-conformance." if args.certified_conformance else "gr8s-podtemplates.", dir=args.state_parent))
-    state = root / "state"
+    state = args.state_directory or root / "state"
     base = f"http://127.0.0.1:{args.api_port}"
     report = {"focus": None if args.certified_conformance else args.focus,
               "mode": "certified-conformance" if args.certified_conformance else "focused",
-              "isCertificationResult": False, "nativeSHA256": hashlib.sha256(args.gr8s.read_bytes()).hexdigest()}
+              "isCertificationResult": False, "nativeSHA256": hashlib.sha256(args.gr8s.read_bytes()).hexdigest(),
+              "stateDirectory": str(state), "reusedState": args.state_directory is not None}
     native_log = (root / "gr8s.log").open("w")
     process = subprocess.Popen([str(args.gr8s), "serve", "--runtime", "containerd", "--state-directory", str(state),
                                 "--port", str(args.api_port), "--node-port", str(args.node_port), "--kubeconfig", str(root / "kubeconfig")],
@@ -118,6 +120,14 @@ def main():
         report["nativeAgentReady"] = True
         report["version"] = json.loads(request("/version")[1])
         report["sonobuoyVersion"] = subprocess.check_output([str(args.sonobuoy), "version", "--short"], text=True).strip()
+        if args.state_directory:
+            cleanup_command = [str(args.sonobuoy), "delete", "--kubeconfig", str(root / "kubeconfig"), "--wait=1"]
+            report["stateReuseCleanupCommand"] = cleanup_command
+            cleanup = subprocess.run(cleanup_command, capture_output=True, text=True, timeout=90)
+            report["stateReuseCleanupExitCode"] = cleanup.returncode
+            (root / "state-reuse-cleanup.log").write_text(cleanup.stdout + cleanup.stderr)
+            if cleanup.returncode:
+                raise RuntimeError("Prior owned Sonobuoy resources did not clean up before state reuse")
         command = [str(args.sonobuoy), "run", "--kubeconfig", str(root / "kubeconfig"), "--dns-pod-labels=", "--plugin=e2e",
                    *(["--mode=certified-conformance"] if args.certified_conformance else ["--e2e-focus=" + args.focus, "--e2e-skip="])]
         report["command"] = command
