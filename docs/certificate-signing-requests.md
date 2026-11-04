@@ -78,11 +78,12 @@ that outer extension identifier's large integer arc. The standard
 certificatePolicies container permits the UUID policy identifier and has been
 verified with actual Go X.509/TLS and OpenSSL, without relaxing verification.
 
-The Kubernetes API TLS listener currently authenticates ServiceAccount tokens;
-user client-certificate HTTP authentication is tracked in `podster-uqb.22.2`.
-Real certificate issuance does not imply that this separate authentication
-feature is implemented. Server-side apply remains outside this surface;
-custom signer automation is an optional controller extension.
+The Kubernetes API TLS listener authenticates live ServiceAccount tokens and
+[verified client certificates](api-client-certificates.md). Certificate common
+names and organization groups use live User/Group RBAC; CSR actor fields derive
+from the authenticated identity and signer-specific admission still applies.
+Server-side apply remains outside this surface; custom signer automation is an
+optional controller extension.
 
 Run the focused native proof with strict validation enabled:
 

@@ -148,19 +148,15 @@
           (make-api-service-account-identity :namespace namespace :name name :uid (gethash "uid" record)))))))
 
 (defun rbac-subject-matches-account-p (subject binding-namespace identity)
-  "Match RBAC subject identities, including the standard ServiceAccount groups."
-  (let ((name (api-service-account-identity-name identity))
-        (namespace (api-service-account-identity-namespace identity)))
+  "Match live ServiceAccount or verified certificate identities using standard User and Group subjects."
+  (let ((username (api-identity-username identity)))
     (cond
       ((equal "ServiceAccount" (gethash "kind" subject))
-       (and (equal name (gethash "name" subject))
-            (equal namespace (gethash "namespace" subject binding-namespace))))
-      ((equal "User" (gethash "kind" subject))
-       (equal (gethash "name" subject) (format nil "system:serviceaccount:~A:~A" namespace name)))
+       (equal username (format nil "system:serviceaccount:~A:~A"
+                               (gethash "namespace" subject binding-namespace) (gethash "name" subject))))
+      ((equal "User" (gethash "kind" subject)) (equal (gethash "name" subject) username))
       ((equal "Group" (gethash "kind" subject))
-       (member (gethash "name" subject)
-               (list "system:authenticated" "system:serviceaccounts" (format nil "system:serviceaccounts:~A" namespace))
-               :test #'equal)))))
+       (find (gethash "name" subject) (api-identity-groups identity) :test #'equal)))))
 
 (defun rbac-rule-allows-p (rule verb group resource name url)
   "Evaluate one RBAC policy rule for a resource or nonresource request."
