@@ -121,7 +121,7 @@ bindings live in `src/cri-v1-generated.lisp`.
 
 Managed Pods receive directly routed veth pairs and `/32` addresses from
 persistent agent IPAM. The control plane assigns each node a distinct Pod CIDR
-within `10.88.0.0/16` and includes the network configuration in desired-state
+within `10.80.0.0/12` and includes the network configuration in desired-state
 snapshots. The agent persists that assignment and restores IPAM before restarting
 reconciliation. Containerd invokes only the `gr8s` CNI plugin, which sends typed
 requests to the agent's private Unix socket. CNI ADD retains its durable lease
