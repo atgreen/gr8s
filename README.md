@@ -396,14 +396,17 @@ The Kubernetes API compatibility target is **1.36** (`/version` reports
 it is not a claim that gr8s passes Kubernetes conformance. The gr8s project release
 version is maintained separately in `gr8s.asd`.
 
-The [third complete native conformance run](docs/conformance-full-third-2026-11-04.json)
-ran all **446** selected v1.36 conformance specs: **48 passed, 398 failed**.
-Compared with the [second run](docs/conformance-full-second-2026-11-03.json),
-six previously failing cases passed and one previously passing case failed
-during container log retrieval. The official JUnit archive and artifact hashes
-were verified, and runtime cleanup completed. This build includes typed
-ServiceAccount/RBAC and Event APIs, but predates the subsequent graceful
-deletion, RBAC defaulting, readiness/reconnect and generated Pod-name fixes.
+The [fourth complete native conformance run](docs/conformance-full-fourth-2026-11-04.json)
+ran all **446** selected v1.36 conformance specs: **64 passed, 382 failed**.
+Compared with the [third run](docs/conformance-full-third-2026-11-04.json),
+16 previously failing cases passed and none regressed. The official JUnit archive,
+complete case inventory and artifact hashes were verified. The native process
+exited cleanly, but the original cleanup report records two leftover test-owned
+shims. A [separate recovery](docs/conformance-fourth-cleanup-2026-11-04.json)
+completed their cleanup and all pending Pod deletions with a clean exit, preserving
+the original report. This binary includes graceful
+deletion, readiness/reconnect and generated Pod-name fixes, but predates newer
+storage/workload APIs, per-container restarts and connection cleanup fixes.
 gr8s has not passed Kubernetes conformance. The earlier
 [bootstrap record](docs/conformance-bootstrap-2026-11-03.json) remains available.
 
