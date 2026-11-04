@@ -65,8 +65,29 @@
             (or (not previous-time) (>= source-time previous-time)) (<= source-time now)) source)
       (t (current-timestamp now)))))
 
+(defun add-declared-container-statuses (pod status)
+  "List every declared container of an assigned, unfinished Pod, as a kubelet does.
+A container the agent has not reported yet is waiting. Clients cannot read an empty
+list as 'nothing is running': Sonobuoy's worker takes it to mean all containers exited."
+  (when (and (pod-node-name pod)
+             (member (gethash "phase" status) '("Pending" "Running") :test #'equal))
+    ;; Reports stay untouched, so readiness still sees any malformed or duplicate entry.
+    (let ((reported (gethash "containerStatuses" status #())))
+      (setf (gethash "containerStatuses" status)
+            (concatenate
+             'vector reported
+             (loop for container across (pod-containers pod)
+                   for name = (container-spec-name container)
+                   unless (find name reported :test #'equal
+                                :key (lambda (item) (and (hash-table-p item) (gethash "name" item))))
+                     collect (core-object "name" name "image" (container-spec-image container)
+                                          "imageID" "" "restartCount" 0 "ready" nil "started" nil
+                                          "state" (core-object "waiting" (core-object "reason" "ContainerCreating"))))))))
+  status)
+
 (defun add-pod-status-conditions (store pod status)
   "Attach truthful conditions and checkpoint their history without acknowledging a revision."
+  (add-declared-container-statuses pod status)
   (let* ((scheduled (not (null (pod-node-name pod))))
          (incoming (gethash "conditions" status))
          (generation (gethash "observedGeneration" status))
