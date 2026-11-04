@@ -96,6 +96,15 @@
             unless (core-qualified-key-p finalizer) do (crd-schema-error "metadata.finalizers" "invalid qualified finalizer")))
     metadata))
 
+(defun crd-prepare-embedded-metadata (input)
+  "Prune and validate embedded metadata without requiring an optional name."
+  (let* ((metadata (copy-core-object (require-object input "embedded metadata")))
+         (present (nth-value 1 (gethash "name" metadata))))
+    (unless present (setf (gethash "name" metadata) "embedded"))
+    (validate-crd-metadata metadata (let ((value (gethash "namespace" metadata))) (unless (member value '(nil "" null) :test #'equal) value)) nil)
+    (unless present (remhash "name" metadata))
+    metadata))
+
 (defun normalize-crd-resource (input namespace name store)
   "Admit only executable structural CRDs and preserve their allocated API identity."
   (when namespace (crd-schema-error "metadata.namespace" "CRDs are cluster scoped"))
@@ -152,6 +161,7 @@
                (require-object (gethash "schema" version) "schema")
                (reject-unsupported-fields (gethash "schema" version) '("openAPIV3Schema") "version schema")
                (validate-crd-schema (crd-schema version))
+               (validate-crd-structural-node (crd-schema version) "openAPIV3Schema" t)
                (unless (equal "object" (gethash "type" (crd-schema version))) (crd-schema-error "openAPIV3Schema" "root must have object type"))
                (when (gethash "subresources" version)
                  (let ((subresources (require-object (gethash "subresources" version) "subresources")))

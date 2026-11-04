@@ -45,6 +45,7 @@
                              (:file "podtemplates")
                              (:file "events")
                              (:file "crd-schema")
+                             (:file "crd-structural")
                              (:file "crd-resources")
                              (:file "crd-deletion")
                              (:file "node-session")

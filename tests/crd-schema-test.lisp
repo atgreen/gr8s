@@ -70,4 +70,52 @@
     (gr8s::crd-validate-value #(nil nil) (gr8s::core-object "type" "array" "uniqueItems" t
                                      "items" (gr8s::core-object "type" "boolean")) "set")))
 
+(test crd-structural-constraints-reject-inert-or-ambiguous-declarations
+  (dolist (schema
+           (list
+            (gr8s::core-object "type" "object" "additionalProperties" t)
+            (gr8s::core-object "type" "object" "anyOf" (vector (gr8s::core-object "type" "object")))
+            (gr8s::core-object "type" "object" "allOf" (vector (gr8s::core-object "properties" (gr8s::core-object "undeclared" (gr8s::core-object "minLength" 1)))))
+            (gr8s::core-object "type" "object" "properties" (gr8s::core-object "metadata" (gr8s::core-object "type" "object" "properties" (gr8s::core-object "labels" (gr8s::core-object "type" "object")))))
+            (gr8s::core-object "type" "object" "properties" (gr8s::core-object "items" (gr8s::core-object "type" "array" "x-kubernetes-list-type" "set" "items" (gr8s::core-object "type" "object"))))
+            (gr8s::core-object "type" "object" "properties" (gr8s::core-object "spec" (gr8s::core-object "type" "object" "default" (gr8s::core-object "unknown" t))))))
+    (signals kubernetes-error (gr8s::validate-crd-structural-node schema "schema" t))))
+
+(test embedded-resources-require-real-identities-and-prune-metadata
+  (let* ((schema (gr8s::core-object "type" "object" "x-kubernetes-embedded-resource" t "x-kubernetes-preserve-unknown-fields" t))
+         (input (gr8s::core-object "apiVersion" "v1" "kind" "Pod" "metadata" (gr8s::core-object "name" "nested" "unknown" t)
+                                  "spec" (gr8s::core-object "preserved" t)))
+         (output (gr8s::crd-prepare-value input schema)))
+    (gr8s::validate-crd-schema schema)
+    (gr8s::validate-crd-structural-node schema "embedded")
+    (is (null (gethash "unknown" (gethash "metadata" output))))
+    (is-true (gethash "preserved" (gethash "spec" output)))
+    (gr8s::crd-validate-value output schema "embedded")
+    (remhash "kind" output)
+    (signals kubernetes-error (gr8s::crd-validate-value output schema "embedded"))))
+
+(test structural-int-or-string-and-declared-logical-validation-are-supported
+  (let ((schema (gr8s::core-object "x-kubernetes-int-or-string" t "anyOf"
+                   (vector (gr8s::core-object "type" "integer") (gr8s::core-object "type" "string")))))
+    (gr8s::validate-crd-schema schema)
+    (gr8s::validate-crd-structural-node schema "union")
+    (is (= 3 (gr8s::crd-validate-value 3 schema "union")))
+    (is (equal "3" (gr8s::crd-validate-value "3" schema "union"))))
+  (let ((schema (gr8s::core-object "type" "object" "properties" (gr8s::core-object "count" (gr8s::core-object "type" "integer"))
+                 "allOf" (vector (gr8s::core-object "properties" (gr8s::core-object "count" (gr8s::core-object "minimum" 2)))))))
+    (gr8s::validate-crd-schema schema)
+    (gr8s::validate-crd-structural-node schema "logical" t)
+    (signals kubernetes-error (gr8s::crd-validate-value (gr8s::core-object "count" 1) schema "logical"))))
+
+(test supported-regexps-retain-re2-anchor-and-ascii-class-semantics
+  (let ((schema (gr8s::core-object "type" "string" "pattern" "^[a-z]+$")))
+    (gr8s::validate-crd-schema schema)
+    (signals kubernetes-error (gr8s::crd-validate-value (format nil "valid~%") schema "anchor")))
+  (dolist (pattern '("(?=lookahead)" "\\p{L}" "a{1001}"))
+    (signals kubernetes-error (gr8s::validate-crd-schema (gr8s::core-object "type" "string" "pattern" pattern))))
+  (let ((schema (gr8s::core-object "type" "string" "pattern" "^\\w+$")))
+    (gr8s::validate-crd-schema schema)
+    (is (equal "ascii_123" (gr8s::crd-validate-value "ascii_123" schema "ascii")))
+    (signals kubernetes-error (gr8s::crd-validate-value "é" schema "ascii"))))
+
 (in-suite gr8s)
