@@ -151,3 +151,181 @@
                          (service-dns-test-message store "web.alpha.svc.cluster.local")))))
     (is (= 3 (logand 15 (0conf:dns-message-flags
                          (service-dns-test-message store "web.alpha.svc.cluster.local" 0conf:+type-aaaa+)))))))
+
+(def-suite service-dns-records :in gr8s)
+(in-suite service-dns-records)
+
+(defun dns-srv-tuples (message)
+  "Inspect the decoded endpoint targets and ports instead of only counting records."
+  (sort (mapcar (lambda (record) (list (0conf:srv-port record)
+                                      (gr8s::canonical-dns-name (0conf:srv-target record))))
+                (0conf:dns-message-answers message))
+        #'string< :key (lambda (entry) (format nil "~A/~A" (second entry) (first entry)))))
+
+(test service-dns-srv-normal-port-is-service-port
+  (with-temporary-store (store directory)
+    (let* ((object (service-test-object "web" 7777))
+           (port (aref (gethash "ports" (gethash "spec" object)) 0)))
+      (setf (gethash "name" port) "http")
+      (gr8s::create-core-resource store "services" object "alpha")
+      (is (equal '((8080 "web.alpha.svc.cluster.local"))
+                 (dns-srv-tuples (service-dns-test-message store "_HTTP._TCP.web.alpha.svc.cluster.local" 0conf:+type-srv+))))
+      (is (= 3 (logand 15 (0conf:dns-message-flags
+                           (service-dns-test-message store "_other._tcp.web.alpha.svc.cluster.local" 0conf:+type-srv+)))))
+      (is (= 3 (logand 15 (0conf:dns-message-flags
+                           (service-dns-test-message store "_http._udp.web.alpha.svc.cluster.local" 0conf:+type-srv+)))))
+      (is (= 3 (logand 15 (0conf:dns-message-flags
+                           (service-dns-test-message store "_http._tcp.web.other.svc.cluster.local" 0conf:+type-srv+))))))))
+
+(test service-dns-srv-headless-uses-ready-actual-endpoint-targets
+  (with-temporary-store (store directory)
+    (let* ((object (service-test-object "web" "http"))
+           (port (aref (gethash "ports" (gethash "spec" object)) 0))
+           (slice (endpointslice-test-object "one" "192.0.2.11" 7777)))
+      (setf (gethash "clusterIP" (gethash "spec" object)) "None" (gethash "name" port) "http")
+      (gr8s::create-core-resource store "services" object "alpha")
+      (is (= 3 (logand 15 (0conf:dns-message-flags
+                           (service-dns-test-message store "_http._tcp.web.alpha.svc.cluster.local" 0conf:+type-srv+)))))
+      (setf (gethash "name" (aref (gethash "ports" slice) 0)) "http"
+            (gethash "endpoints" slice)
+            (vector (gr8s::core-object "hostname" "first" "addresses" #("192.0.2.11"))
+                    (gr8s::core-object "addresses" #("192.0.2.12"))
+                    (gr8s::core-object "hostname" "notready" "addresses" #("192.0.2.13")
+                                      "conditions" (gr8s::core-object "ready" nil))))
+      (gr8s::create-core-resource store "endpointslices" slice "alpha")
+      (let ((other (endpointslice-test-object "two" "192.0.2.14" 8888)))
+        (setf (gethash "name" (aref (gethash "ports" other) 0)) "http")
+        (gr8s::create-core-resource store "endpointslices" other "alpha"))
+      (is (equal '((7777 "192-0-2-12.web.alpha.svc.cluster.local")
+                   (8888 "192-0-2-14.web.alpha.svc.cluster.local")
+                   (7777 "first.web.alpha.svc.cluster.local"))
+                 (dns-srv-tuples (service-dns-test-message store "_http._tcp.web.alpha.svc.cluster.local" 0conf:+type-srv+))))
+      (is (equalp #(192 0 2 12)
+                  (0conf:a-address (first (0conf:dns-message-answers
+                                          (service-dns-test-message store "192-0-2-12.web.alpha.svc.cluster.local"))))))
+      (is (= 3 (logand 15 (0conf:dns-message-flags
+                           (service-dns-test-message store "notready.web.alpha.svc.cluster.local")))))
+      (gr8s::delete-core-resource store "services" "alpha" "web")
+      (is (= 3 (logand 15 (0conf:dns-message-flags
+                           (service-dns-test-message store "_http._tcp.web.alpha.svc.cluster.local" 0conf:+type-srv+))))))))
+
+(test service-dns-reverse-records-use-real-service-and-ready-headless-targets
+  (with-temporary-store (store directory)
+    (gr8s::create-core-resource store "services" (service-test-object "normal") "alpha")
+    (let ((message (service-dns-test-message store "10.0.96.10.in-addr.arpa" 0conf:+type-ptr+)))
+      (is (equal "normal.alpha.svc.cluster.local"
+                 (gr8s::canonical-dns-name (0conf:ptr-target (first (0conf:dns-message-answers message)))))))
+    (let ((object (service-test-object "web")))
+      (setf (gethash "clusterIP" (gethash "spec" object)) "None")
+      (gr8s::create-core-resource store "services" object "alpha"))
+    (let ((slice (endpointslice-test-object "reverse" "192.0.2.22")))
+      (setf (gethash "hostname" (aref (gethash "endpoints" slice) 0)) "target")
+      (gr8s::create-core-resource store "endpointslices" slice "alpha"))
+    (let ((message (service-dns-test-message store "22.2.0.192.in-addr.arpa" 0conf:+type-ptr+)))
+      (is (equal "target.web.alpha.svc.cluster.local"
+                 (gr8s::canonical-dns-name (0conf:ptr-target (first (0conf:dns-message-answers message)))))))
+    (let* ((v6 (endpointslice-test-object "reverse6" "2001:db8::1"))
+           (reverse "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa"))
+      (setf (gethash "addressType" v6) "IPv6")
+      (gr8s::create-core-resource store "endpointslices" v6 "alpha")
+      (is (equalp (0conf:parse-ipv6 "2001:db8::1") (gr8s::service-dns-reverse-address reverse)))
+      (is (equal "2001-db8--1.web.alpha.svc.cluster.local"
+                 (gr8s::canonical-dns-name (0conf:ptr-target (first (0conf:dns-message-answers
+                                                                  (service-dns-test-message store reverse 0conf:+type-ptr+))))))))
+    (is (null (gr8s::service-dns-reverse-address "256.0.0.10.in-addr.arpa")))
+    (is (null (gr8s::service-dns-reverse-address "garbage.ip6.arpa")))))
+
+(test service-dns-reverse-unready-headless-address-is-authoritative-nxdomain
+  (with-temporary-store (store directory)
+    (let ((service (service-test-object "web")) (slice (endpointslice-test-object "unready" "192.0.2.22")))
+      (setf (gethash "clusterIP" (gethash "spec" service)) "None"
+            (gethash "conditions" (aref (gethash "endpoints" slice) 0)) (gr8s::core-object "ready" nil))
+      (gr8s::create-core-resource store "services" service "alpha")
+      (gr8s::create-core-resource store "endpointslices" slice "alpha")
+      (let ((message (service-dns-test-message store "22.2.0.192.in-addr.arpa" 0conf:+type-ptr+)))
+        (is (= 3 (logand 15 (0conf:dns-message-flags message))))
+        (is (null (0conf:dns-message-answers message)))))))
+
+(defun external-name-test-object (name target)
+  "Build a DNS-only Service without an allocated address or artificial backend."
+  (gr8s::core-object "apiVersion" "v1" "kind" "Service"
+                    "metadata" (gr8s::core-object "name" name)
+                    "spec" (gr8s::core-object "type" "ExternalName" "externalName" target)))
+
+(defun dns-test-cname-target (message)
+  "Decode the actual CNAME RDATA written on the wire, rather than checking a local target slot."
+  (let ((answer (first (0conf:dns-message-answers message))))
+    (is (= 0conf:+type-cname+ (0conf:rr-type answer)))
+    (gr8s::canonical-dns-name (0conf:read-name (0conf:make-reader (0conf:rr-rdata answer))))))
+
+(test service-dns-externalname-mutates-real-cname-and-transitions-type
+  (with-temporary-store (store directory)
+    (let* ((created (gr8s::create-core-resource store "services" (external-name-test-object "alias" "foo.example.com") "alpha"))
+           (uid (gethash "uid" (gethash "metadata" created))))
+      (is (null (gethash "clusterIP" (gethash "spec" created))))
+      (is (null (gethash "clusterIPs" (gethash "spec" created))))
+      (is (equal "foo.example.com" (dns-test-cname-target
+                                    (service-dns-test-message store "alias.alpha.svc.cluster.local" 0conf:+type-cname+))))
+      (gr8s::update-core-resource store "services" "alpha" "alias"
+        (lambda (old) (setf (gethash "externalName" (gethash "spec" old)) "bar.example.com.") old))
+      (is (equal "bar.example.com" (dns-test-cname-target
+                                    (service-dns-test-message store "alias.alpha.svc.cluster.local"))))
+      (with-temporary-store (agent agent-directory)
+        (gr8s::install-assigned-resource-objects agent nil (gr8s::service-discovery-projection store))
+        (is (equal "bar.example.com" (dns-test-cname-target
+                                      (service-dns-test-message (open-store agent-directory) "alias.alpha.svc.cluster.local" 0conf:+type-cname+)))))
+      (let ((cluster (gr8s::update-core-resource store "services" "alpha" "alias"
+                       (lambda (old)
+                         (setf (gethash "type" (gethash "spec" old)) "ClusterIP"
+                               (gethash "ports" (gethash "spec" old)) (vector (gr8s::core-object "name" "http" "port" 80))) old))))
+        (is (equal "10.96.0.10" (gethash "clusterIP" (gethash "spec" cluster))))
+        (is (equal uid (gethash "uid" (gethash "metadata" cluster))))
+        (is (null (gethash "externalName" (gethash "spec" cluster))))
+        (is (equalp #(10 96 0 10) (0conf:a-address (first (0conf:dns-message-answers
+                                                        (service-dns-test-message store "alias.alpha.svc.cluster.local")))))))
+      (let ((external (gr8s::update-core-resource store "services" "alpha" "alias"
+                        (lambda (old) (setf (gethash "type" (gethash "spec" old)) "ExternalName"
+                                            (gethash "externalName" (gethash "spec" old)) "again.example.com") old))))
+        (is (null (gethash "clusterIP" (gethash "spec" external))))
+        (is (null (funcall (gr8s::native-service-backend-resolver store "alpha" "alias" uid 80))))
+        (is (equal "again.example.com" (dns-test-cname-target
+                                        (service-dns-test-message store "alias.alpha.svc.cluster.local" 0conf:+type-cname+))))))))
+
+(test service-dns-externalname-validation-and-typed-creation
+  (with-temporary-store (store directory)
+    (dolist (target '("" "bad name" "bad..example" "Upper.example" "https://example.org"))
+      (signals gr8s:kubernetes-error (gr8s::create-core-resource store "services" (external-name-test-object "invalid" target) "alpha")))
+    (signals gr8s:kubernetes-error (gr8s::create-core-resource store "services" (external-name-test-object "kubernetes" "example.org") "default"))
+    (let ((object (external-name-test-object "allocated" "example.org")))
+      (setf (gethash "clusterIP" (gethash "spec" object)) "10.96.0.20")
+      (signals gr8s:kubernetes-error (gr8s::create-core-resource store "services" object "alpha")))
+    (let* ((metadata (core-test-protobuf '((1 "typed-alias") (6 ""))))
+           (spec (core-test-protobuf '((3 "") (4 "ExternalName") (7 "") (8 "") (10 "typed.example.org") (11 "") (12 0) (13 0))))
+           (wire (core-test-protobuf-envelope "Service" (list (list 1 metadata) (list 2 spec) (list 3 #()))))
+           (created (gr8s::create-core-resource store "services" (gr8s::decode-core-resource-protobuf wire "Service") "alpha")))
+      (is (equal "typed.example.org" (gethash "externalName" (gethash "spec" created))))
+      (is (null (gethash "clusterIP" (gethash "spec" created)))))))
+
+(test service-dns-schema-version-record-is-actual-txt
+  (with-temporary-store (store directory)
+    (let ((answers (0conf:dns-message-answers (service-dns-test-message store "dns-version.cluster.local" 0conf:+type-txt+))))
+      (is (= 1 (length answers)))
+      (is (equal '("1.1.0") (0conf:txt-strings (first answers)))))))
+
+(test service-dns-externalname-transition-releases-generated-slices-without-adopting-manual
+  (with-temporary-store (store directory)
+    (let ((service (gr8s::create-core-resource store "services" (service-test-object "web" "http") "alpha")))
+      (create-endpointslice-test-pod store "backend" "alpha" "192.0.2.55")
+      (gr8s::reconcile-endpointslices store)
+      (is (= 1 (length (gr8s::list-core-resources store "endpointslices" "alpha"))))
+      (let ((manual (gr8s::create-core-resource store "endpointslices" (endpointslice-test-object "manual") "alpha")))
+        (gr8s::update-core-resource store "services" "alpha" "web"
+          (lambda (old) (setf (gethash "type" (gethash "spec" old)) "ExternalName"
+                              (gethash "externalName" (gethash "spec" old)) "outside.example.org") old))
+        (gr8s::reconcile-endpointslices store)
+        (let ((remaining (gr8s::list-core-resources store "endpointslices" "alpha")))
+          (is (= 1 (length remaining)))
+          (is (equal (gethash "uid" (gethash "metadata" manual))
+                     (gethash "uid" (gethash "metadata" (first remaining))))))
+        (is (null (funcall (gr8s::native-service-backend-resolver store "alpha" "web"
+                            (gethash "uid" (gethash "metadata" service)) 8080))))))))

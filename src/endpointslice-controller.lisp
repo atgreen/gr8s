@@ -63,7 +63,7 @@
   (let* ((spec (gethash "spec" service)) (selector (gethash "selector" spec))
          (namespace (gethash "namespace" (gethash "metadata" service)))
          (families (gethash "ipFamilies" spec #("IPv4"))) (groups (make-hash-table :test #'equal)))
-    (when (and (hash-table-p selector) (plusp (hash-table-count selector)))
+    (when (and (not (service-external-name-p service)) (hash-table-p selector) (plusp (hash-table-count selector)))
       (dolist (pod (sort (loop for pod being the hash-values of (pod-store-pods store)
                               when (equal namespace (pod-namespace pod)) collect pod) #'string< :key #'pod-uid))
         (let* ((labels (gethash "labels" (gethash "metadata" (pod-to-object pod))))
