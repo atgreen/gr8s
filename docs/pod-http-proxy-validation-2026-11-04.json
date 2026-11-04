@@ -1,0 +1,80 @@
+{
+  "scope": "Ordinary Pod HTTP proxy; native and host validation, not certification",
+  "sourceCommit": "199fba1ff66a41313a625fd71118ae493bf332b6",
+  "baseMain": "ffe26512f260ecfd982edb174479c365dd633f72",
+  "focusedChecks": {
+    "passed": 85,
+    "failed": 0,
+    "skipped": 0
+  },
+  "initialFullGate": {
+    "passed": 2843,
+    "skipped": 5,
+    "failed": 0,
+    "sourceCommit": "03552bf86b84d44e17e984fa0360b52634983525"
+  },
+  "expandedFullGate": {
+    "passed": 2882,
+    "skipped": 5,
+    "failed": 1,
+    "failure": "Existing local-agent deletion snapshot acknowledgement exceeded unchanged5second assertion window. No proxy handler was executing at this earlier suite stage.",
+    "log": "gr8s-pod-proxy-final-full.log"
+  },
+  "acknowledgementInvestigation": {
+    "issue": "podster-uqb.25",
+    "isolatedAttempts": 12,
+    "checksPerAttempt": 4,
+    "allPassed": true,
+    "productionFixClaimed": false,
+    "tracedFullGate": {
+      "passed": 2883,
+      "skipped": 5,
+      "failed": 0
+    },
+    "note": "The earlier failure remains preserved and open; passing traced/isolated checks do not prove the intermittent condition fixed."
+  },
+  "nativeCheckpoint": {
+    "implementationSource": "03552bf86b84d44e17e984fa0360b52634983525",
+    "combinedDNSSource": "fe6e763",
+    "nativeSHA256": "2b2cba63f454cd5ebee7461cea0565d1c337b32257141b74f85133a3e0f76b37",
+    "scenario": {
+      "passed": true,
+      "podUID": "C85178E1-B5B9-4B73-BC40-0388C0AA8ECD",
+      "actualObservedPodIP": "10.88.0.1",
+      "implicitFirstDeclaredPort": 8080,
+      "apiProxyHTTPResponse": "slices-c18c52fb-one"
+    },
+    "nativeExitCodes": [
+      0,
+      0
+    ],
+    "ownedShimsRemaining": [],
+    "reportSHA256": "4bc322ab8f0438bbfce43ccf803f06bdf0d77974726e906458d62d84a6bf8ffe",
+    "localArtifacts": "build/conformance/2026-11-04-service-dns-records-native-6z4_k17u"
+  },
+  "hostArtifacts": "build/validation/pod-http-proxy-2026-11-04",
+  "artifactSHA256": {
+    "gr8s-pod-proxy-focused.log": "430739afd61e8632dbed4048bf84508e7586e8abbf81f6bcd8cbc9ac722f51f1",
+    "gr8s-pod-proxy-scoped-auth.log": "546fd2a92467143067e5b9bdb4f003ef5f14ca3b6cb671c35e4a0dca20980c70",
+    "gr8s-pod-proxy-final-focused.log": "2fb846127197b5242d269da4caf30417d37072c57ed4ecc072f46bb4d928e3d4",
+    "gr8s-pod-proxy-full.log": "34f3ad6b9ecad73162b548d1cc6a99724fed64802dbbd582ead493a93a67c7a0",
+    "gr8s-pod-proxy-final-full.log": "c0f2c95b20e13549e11948160385662edeb4600a22e737ab552278b0703f3c50",
+    "gr8s-pod-proxy-traced-full.log": "be9a992ea123f669c722e421ae04e1d4364afdb5bc74718e7f036fa6a44f0e9c",
+    "gr8s-node-ack-diagnostic.log": "b4648d09c6deac2229d4ea0938d750b457500c0791793cf49275a6dc3d198e74",
+    "gr8s-node-ack-diagnostic.lisp": "b97ebcfbafbe2a4332ee4e90916029e7bfe614ced7bbba2d6838dc61fd7d3505",
+    "gr8s-node-ack-full-diagnostic.lisp": "f694f3816f8ec1f089de47103490441a79f92a4b2fb0075924bfd760c7b55133"
+  },
+  "remainingGaps": {
+    "issue": "podster-uqb.21.1.2.1",
+    "items": [
+      "Connection upgrades currently return501",
+      "HTML link rewriting",
+      "Complete PodProxyOptions/OpenAPI route schemas"
+    ]
+  },
+  "primarySemantics": [
+    "https://github.com/kubernetes/kubernetes/blob/v1.36.0/pkg/registry/core/pod/strategy.go",
+    "https://github.com/kubernetes/kubernetes/blob/v1.36.0/pkg/registry/core/pod/rest/subresources.go",
+    "https://raw.githubusercontent.com/golang/go/go1.26.0/src/net/ip.go"
+  ]
+}
