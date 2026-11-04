@@ -128,12 +128,142 @@
         "6F563AE4-5F1D-4F78-B93D-C059E7DED2AE-main.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "report.json": "570101feeeaefc1958b96b1301d400d822ff520d7468d4565553518aefc43ce1"
       }
+    },
+    {
+      "sourceCommit": "47c3b03fc28d9767560b4f47ccfd5e4d70e21153",
+      "nativeSHA256": "f25433557a8b07ea73c7d9a50ba160857f68c8187ebacd725edc5f41ecdbad16",
+      "guestRunDirectory": "/var/tmp/gr8s-endpointslices.a_hl08e5",
+      "localArtifacts": "build/conformance/2026-11-04-endpointslices-a_hl08e5",
+      "passed": false,
+      "scenarios": {
+        "selectorServiceActualEndpoints": {
+          "passed": true,
+          "identities": {
+            "A342938C-B097-4615-96BA-14F30D7A418B": "containerd://da5f7d3db5b1430325e427ad5ff0b7d27395132138b1a8c0cf5f2729fa4b1e85",
+            "3F170FA1-443B-4430-AB9E-6F7C1B82946A": "containerd://ce7a0ae5c6a5e6fdaf25a895a9ed38c7d560ce05c6a7c44742b34efa796860e7"
+          },
+          "sliceUIDs": [
+            "07BF0896-D292-4111-B173-D1EEBEB90015"
+          ],
+          "actualHTTPResponses": [
+            "slices-abf0eb4d-one",
+            "slices-abf0eb4d-two"
+          ]
+        },
+        "manualSliceForwardingAndReadiness": {
+          "passed": true,
+          "sliceUID": "FF847DFB-DDF2-48EE-AF87-07E57E46EF49",
+          "actualHTTPResponse": "slices-abf0eb4d-one"
+        },
+        "restartPersistence": {
+          "passed": true,
+          "unchangedIdentities": {
+            "A342938C-B097-4615-96BA-14F30D7A418B": "containerd://da5f7d3db5b1430325e427ad5ff0b7d27395132138b1a8c0cf5f2729fa4b1e85",
+            "3F170FA1-443B-4430-AB9E-6F7C1B82946A": "containerd://ce7a0ae5c6a5e6fdaf25a895a9ed38c7d560ce05c6a7c44742b34efa796860e7"
+          }
+        }
+      },
+      "error": "RemoteDisconnected('Remote end closed connection without response')",
+      "failureStage": "terminating-service-withdrawal",
+      "cleanup": {
+        "nativeExitCodes": [
+          0,
+          0
+        ],
+        "ownedShimsRemaining": [],
+        "cleanupError": null
+      },
+      "artifactSHA256": {
+        "gr8s.log": "72e1d5f4691dfd3d9248599387925c624feb5054f5284632f66f4b5f16d36bef",
+        "A342938C-B097-4615-96BA-14F30D7A418B-main.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "3F170FA1-443B-4430-AB9E-6F7C1B82946A-main.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "report.json": "3fb175350c603f08c3e136c750d6d15f480f5ef7fe40f0d41e4ffd99be041a0c"
+      }
+    },
+    {
+      "sourceCommit": "e754fab2d988c03eac2f0f3799f437c3fa699589",
+      "nativeSHA256": "4586215be6b3e3710dad982c95d9315e038bdd799885ddfe729729711834f3b8",
+      "guestRunDirectory": "/var/tmp/gr8s-endpointslices.cyl6er8u",
+      "localArtifacts": "build/conformance/2026-11-04-endpointslices-cyl6er8u",
+      "passed": false,
+      "scenarios": {},
+      "error": "ConnectionResetError(104, 'Connection reset by peer')",
+      "failureStage": null,
+      "cleanup": {
+        "nativeExitCodes": [
+          0
+        ],
+        "ownedShimsRemaining": [],
+        "cleanupError": null
+      },
+      "artifactSHA256": {
+        "gr8s.log": "2f230ab4b5c1a1df66e638db8c5ee5f0f3b6773be26b85f78587a750eb1dc094",
+        "6626547F-08AA-4486-AAC3-C682C325AF28-main.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "3965AB7C-9EE8-4EB3-AE34-432B9FDF64AE-main.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "report.json": "1a666c105650b42939343d3cb08dc42bbe8a60d7928fa256917e09124a177ff0"
+      }
+    },
+    {
+      "sourceCommit": "8540e87ec3194a584469c59ebed25aa4af630863",
+      "nativeSHA256": "19eabeb7f82b729d90dbeeb62b9e3d5d26ff3add9a72beb90102b10f84b09348",
+      "guestRunDirectory": "/var/tmp/gr8s-endpointslices.1854ybv1",
+      "localArtifacts": "build/conformance/2026-11-04-endpointslices-1854ybv1",
+      "passed": true,
+      "scenarios": {
+        "selectorServiceActualEndpoints": {
+          "passed": true,
+          "identities": {
+            "5C42B786-F456-407D-A719-74E78ABF1053": "containerd://72990667568e2e48538ae23a912efb2f85092563cb9af3812d4a5f5768f77fb1",
+            "F1649E21-7E32-46F6-95AC-8F7FE054BFAB": "containerd://4ee3938f79c6cf90f2864acf6b8191f3270948bb812cb141a8db5963f6095334"
+          },
+          "sliceUIDs": [
+            "E84237A5-1F17-4F56-9124-6B31CAE66D6D"
+          ],
+          "actualHTTPResponses": [
+            "slices-d2e6851f-one",
+            "slices-d2e6851f-two"
+          ]
+        },
+        "manualSliceForwardingAndReadiness": {
+          "passed": true,
+          "sliceUID": "3453BB2E-BA1D-41BC-8B9C-C1ECD6BAD324",
+          "actualHTTPResponse": "slices-d2e6851f-one"
+        },
+        "restartPersistence": {
+          "passed": true,
+          "unchangedIdentities": {
+            "5C42B786-F456-407D-A719-74E78ABF1053": "containerd://72990667568e2e48538ae23a912efb2f85092563cb9af3812d4a5f5768f77fb1",
+            "F1649E21-7E32-46F6-95AC-8F7FE054BFAB": "containerd://4ee3938f79c6cf90f2864acf6b8191f3270948bb812cb141a8db5963f6095334"
+          }
+        },
+        "terminatingEndpoint": {
+          "passed": true,
+          "servedDirectHTTPWhileWithdrawn": true,
+          "survivingHTTPResponse": "slices-d2e6851f-two"
+        }
+      },
+      "error": null,
+      "failureStage": "terminating-service-withdrawal",
+      "cleanup": {
+        "nativeExitCodes": [
+          0,
+          0
+        ],
+        "ownedShimsRemaining": [],
+        "cleanupError": null
+      },
+      "artifactSHA256": {
+        "gr8s.log": "b850a7a5b14cdd6b40e04292dc25d3fed40d8d164952f4f553595eb710e91db7",
+        "5C42B786-F456-407D-A719-74E78ABF1053-main.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "F1649E21-7E32-46F6-95AC-8F7FE054BFAB-main.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "report.json": "eebdae248ca1cf06e872ddd7a5ffda7dfee455a83d7f67575915f65865e79470"
+      }
     }
   ],
   "localValidation": {
-    "sourceCommit": "e7d07e2635985f50c619d8cfa66efa726ad0f832",
+    "sourceCommit": "8540e87ec3194a584469c59ebed25aa4af630863",
     "fullSuite": {
-      "passed": 2458,
+      "passed": 2592,
       "skipped": 5,
       "failed": 0
     },
@@ -141,14 +271,32 @@
       "passed": 241,
       "skipped": 0,
       "failed": 0
+    },
+    "focusedServices": {
+      "passed": 18,
+      "skipped": 0,
+      "failed": 0
     }
   },
   "limitations": [
-    "The initial observer failed when an empty initial EndpointSlice had no port; the failed report is preserved.",
-    "The second native run passed three scenarios then failed a terminating HTTP observation. The final test server supervises its HTTP child through TERM and captures failure stage and traceback.",
-    "The passing native run uses e7d07e2 before integration of subsequently merged container restart changes. Combined source47c3b03 is being validated separately.",
-    "These four native scenarios are supplemental and do not establish Kubernetes certification.",
+    "All initial failed observations and failed combined runs remain preserved alongside successful native results.",
+    "The initial observer failed on an empty EndpointSlice with no port; its guard was corrected before subsequent runs.",
+    "Native271asfer passed before integration of container restarts. Combined-source failures were investigated rather than hidden;8540e87 fixes the independently reproduced Service proxy stale-descriptor race.",
+    "The final1854ybv1 native run uses8540e87 including latest main9798aaa and all four strict actual HTTP/restart/termination scenarios passed with clean[0,0] exits and zero owned shims.",
+    "These native scenarios are supplemental and do not establish Kubernetes certification; exact unchanged upstream cases are recorded separately when complete.",
     "Generated Service slices follow the single-stack IPv4 runtime. Manual IPv6 and deprecated FQDN slices are valid API objects; the TCP Service runtime consumes IPv4 slices.",
     "Legacy Endpoints resources and blocking owner-reference finalizers remain outside this change."
-  ]
+  ],
+  "serviceProxyCorrection": {
+    "commit": "8540e87ec3194a584469c59ebed25aa4af630863",
+    "issue": "podster-uqb.19.1",
+    "trigger": "A retired request thread called socket-shutdown on an old usocket wrapper after its fd had been recycled for another healthy connection.",
+    "negativeProof": "Deterministic actual socket test reused fd6; shutdown on the retired wrapper caused fresh peer EOF.",
+    "correction": "Serialize half-close against exact live connection ownership; close removes ownership under the same lock before releasing descriptors.",
+    "regression": "Fresh reused descriptor remains writable; active owned connection still propagates half-close.",
+    "rejectedHypotheses": [
+      "100 isolated short HTTP responses through proxy passed.",
+      "Peer-closed1024-byte stream copied all1024bytes; no EOF-buffer change made."
+    ]
+  }
 }
