@@ -153,6 +153,20 @@
           (gethash "apiVersion" object) version (gethash "kind" object) kind)
     object))
 
+(defun strategic-merge-order (server-only patched order key)
+  "Interleave list entries as Kubernetes does: a server entry stays ahead of a patched one only
+when both were on the server and it came first, so entries new to the list lead the rest."
+  (let ((result nil))
+    (flet ((position-of (item) (position (gethash key item) order :test #'equal)))
+      (loop while (or server-only patched)
+            do (let ((left (first server-only)) (right (first patched)))
+                 (if (and left (or (null right)
+                                   (and (position-of left) (position-of right)
+                                        (< (position-of left) (position-of right)))))
+                     (push (pop server-only) result)
+                     (push (pop patched) result)))))
+    (coerce (nreverse result) 'vector)))
+
 (defun template-strategic-merge (old patch schema)
   "Apply schema-declared merge keys instead of replacing named container and volume lists."
   (setf schema (resolve-template-schema schema))
@@ -196,17 +210,23 @@
             (items (coerce (or old #()) 'list)))
        (when (and (plusp (length patch)) (hash-table-p (aref patch 0)) (gethash "$patch" (aref patch 0)))
          (let ((directive (gethash "$patch" (aref patch 0))))
-           (when (member directive '("replace" "delete") :test #'equal)
+           ;; A delete naming an entry removes that entry, in the loop below; a bare one the whole list.
+           (when (or (equal directive "replace")
+                     (and (equal directive "delete") (not (and key (gethash key (aref patch 0))))))
              (return-from template-strategic-merge (if (equal directive "delete") #() (copy-core-object (subseq patch 1)))))))
-       (loop for item across patch
-             do (if key
-                    (let ((before (find (gethash key item) items :key (lambda (entry) (gethash key entry)) :test #'equal)))
-                      (cond ((equal "delete" (gethash "$patch" item)) (setf items (remove before items :test #'eq)))
-                            (before (setf (nth (position before items :test #'eq) items)
-                                          (template-strategic-merge before item (gethash "items" schema))))
-                            (t (setf items (append items (list (copy-core-object item)))))))
-                    (unless (find item items :test #'core-json-equal-p) (setf items (append items (list item))))))
-       (coerce items 'vector)))
+       (if key
+           (let ((order (mapcar (lambda (item) (gethash key item)) items)) (patched nil))
+             (loop for item across patch
+                   do (let ((before (find (gethash key item) items :key (lambda (entry) (gethash key entry)) :test #'equal)))
+                        (cond ((equal "delete" (gethash "$patch" item)) (setf items (remove before items :test #'eq)))
+                              (before (setf items (remove before items :test #'eq))
+                                      (push (template-strategic-merge before item (gethash "items" schema)) patched))
+                              (t (push (copy-core-object item) patched)))))
+             (strategic-merge-order items (nreverse patched) order key))
+           (progn
+             (loop for item across patch
+                   do (unless (find item items :test #'core-json-equal-p) (setf items (append items (list item)))))
+             (coerce items 'vector)))))
     (t (copy-core-object patch))))
 
 (defun delete-template-collection (store namespace labels fields &key dry-run (resource "podtemplates"))
