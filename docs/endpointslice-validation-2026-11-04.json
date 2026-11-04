@@ -268,13 +268,18 @@
       "failed": 0
     },
     "focusedEndpointSlices": {
-      "passed": 241,
+      "passed": 245,
       "skipped": 0,
       "failed": 0
     },
     "focusedServices": {
       "passed": 18,
       "skipped": 0,
+      "failed": 0
+    },
+    "finalFullHostSuite": {
+      "passed": 2602,
+      "skipped": 5,
       "failed": 0
     }
   },
@@ -298,5 +303,194 @@
       "100 isolated short HTTP responses through proxy passed.",
       "Peer-closed1024-byte stream copied all1024bytes; no EOF-buffer change made."
     ]
+  },
+  "upstreamFocusedRuns": [
+    {
+      "focus": "\\[sig-network\\] (Services should serve a basic endpoint from pods|EndpointSlice should support creating EndpointSlice API operations|EndpointSlice should create and delete EndpointSlices for a Service with a selector that matches no pods) \\[Conformance\\]$",
+      "isCertificationResult": false,
+      "nativeSHA256": "19eabeb7f82b729d90dbeeb62b9e3d5d26ff3add9a72beb90102b10f84b09348",
+      "passed": null,
+      "nativeExitCode": 1,
+      "ownedShimsRemaining": [
+        "containerd-shim /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/runtime/bin/containerd-shim-runc-v2 -namespace k8s.io -id c6d60f925c83c58cbce83cc47cbeddcc3ae8f29006e2825fd9850b4465bec9d6 -address /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/run/containerd.sock",
+        "containerd-shim /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/runtime/bin/containerd-shim-runc-v2 -namespace k8s.io -id 0469fb5bd85d2756d2c63e7f346816f067679961245b3d02fd24d26089a40761 -address /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/run/containerd.sock",
+        "containerd-shim /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/runtime/bin/containerd-shim-runc-v2 -namespace k8s.io -id f3988e32aa56ad4b67ebc3135e0079a6273616ccd7177bc695b8579959e656d2 -address /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/run/containerd.sock",
+        "containerd-shim /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/runtime/bin/containerd-shim-runc-v2 -namespace k8s.io -id 60b684bc14e07db1d22e5d2618c1b20de566d6c77b5c645c5038d348cdea956f -address /var/tmp/gr8s-podtemplates.undx9ppv/state/agent/containerd/run/containerd.sock"
+      ],
+      "selectedSpecs": null,
+      "upstreamCases": null,
+      "error": "Native gr8s exited during e2e run",
+      "cleanupError": null,
+      "sourceCommit": "8540e87",
+      "remoteReportDirectory": "/var/tmp/gr8s-podtemplates.4nuo24oe",
+      "artifactDirectory": "/home/green/orca/workspaces/gr8s/tang/build/conformance/2026-11-04-endpointslice-upstream-4nuo24oe",
+      "reportSHA256": "ab630f873d3d3a3475b1f13eedb3059ca3304d8c8a1973663aead26f93a4f19c",
+      "verifiedArtifacts": {
+        "gr8s.log": "faf903057fb78842da6b64f34ccf0baa78c5bae2237f6e0bbb73a27355d5a30e",
+        "sonobuoy.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sonobuoy.stderr.log": "74a1465af88659601ba822f0d7d5167cce53dd8d99ec1fb9116a45902ea2ac67"
+      }
+    },
+    {
+      "focus": "\\[sig-network\\] EndpointSlice (should support creating EndpointSlice API operations|should create and delete EndpointSlices for a Service with a selector that matches no pods) \\[Conformance\\]$",
+      "isCertificationResult": false,
+      "nativeSHA256": "04e46d0ad505ad702fc3760165a04f82fcc3048ab6c7de9816b4375d1cd0d7ae",
+      "passed": false,
+      "nativeExitCode": 0,
+      "ownedShimsRemaining": [],
+      "selectedSpecs": [
+        [
+          "2",
+          "7579"
+        ]
+      ],
+      "upstreamCases": [
+        {
+          "name": "[It] [sig-network] EndpointSlice should create and delete EndpointSlices for a Service with a selector that matches no pods [Conformance]",
+          "seconds": "4.338732293",
+          "passed": true
+        },
+        {
+          "name": "[It] [sig-network] EndpointSlice should support creating EndpointSlice API operations [Conformance]",
+          "seconds": "0.227842953",
+          "passed": false
+        }
+      ],
+      "error": "Upstream conformance cases did not all pass; inspect the official archive and logs",
+      "cleanupError": null,
+      "sourceCommit": "fdd9948",
+      "remoteReportDirectory": "/var/tmp/gr8s-podtemplates.1_sm5ok7",
+      "artifactDirectory": "/home/green/orca/workspaces/gr8s/tang/build/conformance/2026-11-04-endpointslice-upstream-1_sm5ok7",
+      "reportSHA256": "f62bad8aa09a745d955550a2a1ddf0de341ad5d54ce3de1bd8fb89dde4dbc668",
+      "verifiedArtifacts": {
+        "gr8s.log": "e4eec55c4da36e6bd213c1bbef2d32cd6ad3aa39ff2dd79f2426fce9bade6027",
+        "sonobuoy.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sonobuoy.stderr.log": "990528b36e9a601972528e2056d9cbdb78a372fdb4552d5713c26abd105c5061",
+        "sonobuoy-results.tar.gz": "2a32864421ee94575a401d67587325f05a614f7bba766fbf0cb568535f5da662",
+        "kube-sonobuoy.log": "4e3f1eb2aa70dd4936508b7413850c3316bc534112a2adc21d4272b8ae3e4959",
+        "e2e.log": "8e6b25056de924b936b952c5c4d178d6f9ce4579f2a8e704ff3e163ec6d53761",
+        "sonobuoy-worker.log": "d8ac2983c228f81dc05f8095d6de5123041664901075e84038d4b72212f069b7",
+        "sonobuoy-results.txt": "98573d69f972fa989162d0e521ffdc0ee0d2f53ab5b7e550474998298fa0128a"
+      },
+      "actualSelectedJUnitCases": [
+        {
+          "name": "[It] [sig-network] EndpointSlice should create and delete EndpointSlices for a Service with a selector that matches no pods [Conformance]",
+          "passed": true,
+          "time": "4.338732293"
+        },
+        {
+          "name": "[It] [sig-network] EndpointSlice should support creating EndpointSlice API operations [Conformance]",
+          "passed": false,
+          "time": "0.227842953"
+        }
+      ]
+    },
+    {
+      "focus": "\\[sig-network\\] EndpointSlice (should support creating EndpointSlice API operations|should create and delete EndpointSlices for a Service with a selector that matches no pods) \\[Conformance\\]$",
+      "isCertificationResult": false,
+      "nativeSHA256": "b54f43ce507c24367cd3968552950cc7c7469a92ced311948e684ec1844f43c3",
+      "passed": true,
+      "nativeExitCode": 0,
+      "ownedShimsRemaining": [],
+      "selectedSpecs": [
+        [
+          "2",
+          "7579"
+        ]
+      ],
+      "upstreamCases": [
+        {
+          "name": "[It] [sig-network] EndpointSlice should create and delete EndpointSlices for a Service with a selector that matches no pods [Conformance]",
+          "seconds": "4.189472498",
+          "passed": true
+        },
+        {
+          "name": "[It] [sig-network] EndpointSlice should support creating EndpointSlice API operations [Conformance]",
+          "seconds": "0.511275894",
+          "passed": true
+        }
+      ],
+      "error": null,
+      "cleanupError": null,
+      "sourceCommit": "6c719c1",
+      "remoteReportDirectory": "/var/tmp/gr8s-podtemplates._sehw0ix",
+      "artifactDirectory": "/home/green/orca/workspaces/gr8s/tang/build/conformance/2026-11-04-endpointslice-upstream-_sehw0ix",
+      "reportSHA256": "7c3df681d365cc37cc134bec36420d3a5df4353e57b6ff33e5c3fccec6fea55d",
+      "verifiedArtifacts": {
+        "gr8s.log": "2d3849bf051f0be386299babe70bf4c8face94ce02693df913ce708cbb64d57f",
+        "sonobuoy.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sonobuoy.stderr.log": "000412ef2453f3964c307df933afd2902ec032958d37ae2c3b3de90fc94f4aa7",
+        "sonobuoy-results.tar.gz": "91127fab18e2c579eec91a878000a16e87f02de7d67f9d5b4487a40512720153",
+        "kube-sonobuoy.log": "edd32999bcf755a48bd14679f6f51634f27557e041cd68a8c86e714524cedab4",
+        "e2e.log": "920f4bd0198530f95133df769061fde58eedbb15e5ec4ff10f66bbb049a5cf45",
+        "sonobuoy-worker.log": "6c59ff52f517037e4e82ae47e0b4d82d422fde2ad8d64092167b190d8f523e95",
+        "sonobuoy-results.txt": "165bae897db7713b1be6eed591745cdbee6722d944a274c5efbdc4ade998705b"
+      },
+      "actualSelectedJUnitCases": [
+        {
+          "name": "[It] [sig-network] EndpointSlice should create and delete EndpointSlices for a Service with a selector that matches no pods [Conformance]",
+          "passed": true,
+          "time": "4.189472498"
+        },
+        {
+          "name": "[It] [sig-network] EndpointSlice should support creating EndpointSlice API operations [Conformance]",
+          "passed": true,
+          "time": "0.511275894"
+        }
+      ]
+    }
+  ],
+  "dnsCrashCleanup": {
+    "report": "/home/green/orca/workspaces/gr8s/tang/build/conformance/2026-11-04-dns-crash-cleanup-1vhy5zhf/report.json",
+    "sha256": "4d5af8fc31eea90d181f058a003115ea96f337d14bf45de4f27b510b137e2e23",
+    "result": {
+      "mode": "owned-crash-cleanup-only",
+      "isValidationRun": false,
+      "directory": "/var/tmp/gr8s-dns-crash-cleanup.1vhy5zhf",
+      "stateDirectory": "/var/tmp/gr8s-podtemplates.undx9ppv/state",
+      "nativeSHA256": "3374e0ebfbd58502fc1bdffb303be8888a0c0fabbeb6fdd6ba9420594f14abfb",
+      "deletions": [
+        {
+          "namespace": "sonobuoy",
+          "name": "sonobuoy-e2e-job-843b158ab2984d4d",
+          "uid": "C4050C9B-8B37-4278-9327-447FA88FC95E",
+          "code": 200
+        },
+        {
+          "namespace": "services-3514",
+          "name": "execpodjz8bp",
+          "uid": "BF417445-88CE-41AA-80DB-B7F8516F406C",
+          "code": 200
+        },
+        {
+          "namespace": "services-3514",
+          "name": "pod1",
+          "uid": "796E9D6B-CFD0-4B96-B84F-8DBA18B230A8",
+          "code": 200
+        },
+        {
+          "namespace": "sonobuoy",
+          "name": "sonobuoy",
+          "uid": "F499E280-4C13-410D-80CC-B74FBD7844A5",
+          "code": 200
+        }
+      ],
+      "stoppedOwnedDaemonPIDs": [
+        109820
+      ],
+      "cleaned": true,
+      "nativeExitCode": 0,
+      "ownedShimsRemaining": [],
+      "artifactSHA256": {
+        "gr8s.log": "b32269bddc4d62173af660ffb3de766db2838b68322d135b5fb7cbe382482905"
+      }
+    }
+  },
+  "dnsTimeoutCorrection": {
+    "commit": "820d5c4",
+    "issue": "podster-uqb.19.2",
+    "regression": "Actual silent bound UDP upstream returns SERVFAIL twice; DNS thread survives and answers an authoritative query. Explicit SB-EXT:TIMEOUT and SB-SYS:DEADLINE-TIMEOUT handlers; no deadline increase.",
+    "checksPassed": 6,
+    "serviceDNSImplemented": false
   }
 }
