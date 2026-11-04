@@ -143,3 +143,14 @@
       (gr8s::publish-service-discovery-snapshots runtime)
       (is (= 3 (slot-value (gr8s::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision)))
       (is (null (slot-value (gr8s::current-node-snapshot server "worker-a") 'gr8s.node.v1::service-discovery-objects-json))))))
+
+(test service-dns-empty-headless-service-is-nxdomain
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let ((service (service-test-object "web")))
+      (setf (gethash "clusterIP" (gethash "spec" service)) "None")
+      (gr8s::create-core-resource store "services" service "alpha"))
+    (is (= 3 (logand 15 (0conf:dns-message-flags
+                         (service-dns-test-message store "web.alpha.svc.cluster.local")))))
+    (is (= 3 (logand 15 (0conf:dns-message-flags
+                         (service-dns-test-message store "web.alpha.svc.cluster.local" 0conf:+type-aaaa+)))))))

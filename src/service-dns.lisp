@@ -97,7 +97,9 @@
                                                    (vector (gethash "clusterIP" spec))) 'list))))
             (values (remove nil (mapcar (lambda (address) (service-dns-address-answer question address))
                                         (sort addresses #'string<)))
-                    (or (null hostname) (not (null addresses)))))
+                    (if (equal "None" (gethash "clusterIP" spec))
+                        (not (null addresses))
+                        (null hostname))))
         (kubernetes-error (condition)
           (if (= 404 (kubernetes-error-status-code condition)) (values nil nil) (error condition)))))))
 
