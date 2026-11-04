@@ -699,16 +699,20 @@
      (make-agent-envelope
       variant payload :sequence (incf (agent-node-session-sequence session))))))
 
+(defun validate-node-snapshot-identity (identity snapshot)
+  "Reject another node allocation before an arrival observer can persist any deletion intent."
+  (let ((network (slot-value snapshot 'gr8s.node.v1::network))
+        (assigned (gethash "assignedPodCIDR" identity)))
+    (when (and network assigned
+               (not (string= assigned (slot-value network 'gr8s.node.v1::node-pod-cidr))))
+      (error "Snapshot Pod CIDR does not match the durable node allocation"))))
+
 (defun apply-node-snapshot-and-respond
     (session identity identity-path snapshot apply-snapshot &key replay)
   (let ((revision (slot-value snapshot 'gr8s.node.v1::revision))
         (last-applied (gethash "lastAppliedRevision" identity 0))
         (statuses nil))
-    (let ((network (slot-value snapshot 'gr8s.node.v1::network))
-          (assigned (gethash "assignedPodCIDR" identity)))
-      (when (and network assigned
-                 (not (string= assigned (slot-value network 'gr8s.node.v1::node-pod-cidr))))
-        (error "Snapshot Pod CIDR does not match the durable node allocation")))
+    (validate-node-snapshot-identity identity snapshot)
     (when (or (> revision last-applied) (and replay (= revision last-applied)))
       ;; A restarted agent can have completed deletion after its last durable
       ;; snapshot ack but before the final status reached the server. Reapply
@@ -1051,6 +1055,7 @@
                        (ag-grpc:stream-read-message stream) :desired-state)))
                (if one-shot-p
                    (progn
+                     (validate-node-snapshot-identity identity snapshot)
                      (when snapshot-observer (funcall snapshot-observer snapshot))
                      (apply-node-snapshot-and-respond
                       session identity identity-path snapshot apply-snapshot :replay t)
@@ -1066,11 +1071,7 @@
                             #'finish-session
                             :receive-snapshot
                             (lambda (snapshot)
-                              (let ((network (slot-value snapshot 'gr8s.node.v1::network))
-                                    (assigned (gethash "assignedPodCIDR" identity)))
-                                (when (and network assigned
-                                           (not (string= assigned (slot-value network 'gr8s.node.v1::node-pod-cidr))))
-                                  (error "Snapshot Pod CIDR does not match the durable node allocation")))
+                              (validate-node-snapshot-identity identity snapshot)
                               (when snapshot-observer (funcall snapshot-observer snapshot)))))
                      (queue-agent-snapshot-work snapshot-worker snapshot :replay t)
                      (setf operation-session-p t)

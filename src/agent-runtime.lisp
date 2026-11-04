@@ -49,7 +49,12 @@
                                           :persist (not (null pending)))))
       (dolist (pod (list-pods store))
         (setf (gethash (pod-uid pod) (node-runtime-assigned-versions node-runtime))
-              (pod-resource-version pod)))
+              (pod-resource-version pod))
+        ;; Rebuild the finite cleanup admission fence before the background
+        ;; reconciler starts, including when the control plane is unavailable.
+        (when (deletion-requested-p pod)
+          (setf (gethash (pod-uid pod)
+                         (reconciler-urgent-deletions (node-runtime-reconciler node-runtime))) t)))
       node-runtime)))
 
 (defun node-runtime-network-path (node-runtime)
