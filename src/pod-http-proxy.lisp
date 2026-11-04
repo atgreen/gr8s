@@ -10,6 +10,25 @@
 
 (defparameter *pod-proxy-methods* '(:get :post :put :patch :delete :head :options))
 
+(defun pod-proxy-address-p (address)
+  "Match Go IP.IsGlobalUnicast for numeric addresses, including IPv4-mapped IPv6."
+  (and (stringp address)
+       (handler-case
+           (let ((bytes (if (find #\: address) (sb-bsd-sockets:make-inet6-address address)
+                            (sb-bsd-sockets:make-inet-address address))))
+             (when (and (= 16 (length bytes)) (every #'zerop (subseq bytes 0 10))
+                        (= 255 (aref bytes 10)) (= 255 (aref bytes 11)))
+               (setf bytes (subseq bytes 12)))
+             (and (not (every #'zerop bytes))
+                  (if (= 4 (length bytes))
+                      (and (not (every (lambda (byte) (= byte 255)) bytes))
+                           (/= 127 (aref bytes 0)) (not (<= 224 (aref bytes 0) 239))
+                           (not (and (= 169 (aref bytes 0)) (= 254 (aref bytes 1)))))
+                      (and (not (and (every #'zerop (subseq bytes 0 15)) (= 1 (aref bytes 15))))
+                           (/= 255 (aref bytes 0))
+                           (not (and (= #xfe (aref bytes 0)) (= #x80 (logand #xc0 (aref bytes 1)))))))))
+         (error () nil))))
+
 (defun pod-http-proxy-route (path)
   "Recognize proxy suffixes, preserving empty segments and trailing slashes."
   (multiple-value-bind (match registers)
@@ -32,8 +51,7 @@
       (let* ((pod (get-pod-unlocked store namespace name))
              (status (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)))
              (address (and status (gethash "podIP" status))))
-        (unless (and (stringp address)
-                     (endpointslice-address-p address (if (find #\: address) "IPv6" "IPv4")))
+        (unless (pod-proxy-address-p address)
           (core-resource-error 400 "BadRequest" "Pod proxy address is not allowed"))
         (when (or (null port) (equal port ""))
           (setf port (or (loop for container across (gethash "containers" (gethash "spec" (pod-to-object pod)))
