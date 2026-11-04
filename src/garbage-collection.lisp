@@ -10,6 +10,8 @@
 
 (defun referenced-owner-state (store namespace owner)
   "Return :LIVE, :ABSENT or :UNKNOWN for an exact, namespace-correct owner UID."
+  (let ((custom (crd-referenced-owner-state store namespace owner)))
+    (when custom (return-from referenced-owner-state custom)))
   (let* ((kind (gethash "kind" owner)) (version (gethash "apiVersion" owner))
          (type (find-if (lambda (type) (and (equal kind (second type)) (equal version (third type))))
                         *stored-resource-types*))
