@@ -275,7 +275,7 @@
 
 (defun policy-map-fixture (name)
   (whistler/loader::make-map-info
-   :name name :fd (+ 41 (position name '("rejected_spoofs" "endpoint_identity" "traffic_stats")
+   :name name :fd (+ 41 (position name (mapcar #'first gr8s::+cni-policy-map-specs+)
                                  :test #'string=))))
 
 (test cni-policy-install-reuses-counters-and-atomically-replaces-the-link
@@ -353,10 +353,12 @@
   (dolist (spec gr8s::+cni-policy-map-specs+)
     (let ((info (make-array 256 :element-type '(unsigned-byte 8) :initial-element 0)))
       (flet ((put (offset value) (replace info (gr8s::netlink-integer value 4) :start1 offset)))
-        (put 0 2) (put 8 4) (put 12 (second spec)) (put 16 (third spec)) (put 20 (fourth spec))
+        ;; A spec is (name type key-size value-size max-entries flags).
+        (put 0 (second spec)) (put 8 (third spec)) (put 12 (fourth spec))
+        (put 16 (fifth spec)) (put 20 (sixth spec))
         (is (= 42 (whistler/loader:map-info-fd
                    (gr8s::cni-policy-map-info 42 (first spec) :object-info (lambda (fd) (declare (ignore fd)) info)))))
-        (put 12 (+ 8 (second spec)))
+        (put 12 (+ 8 (fourth spec)))
         (signals gr8s::cni-error
           (gr8s::cni-policy-map-info 42 (first spec) :object-info (lambda (fd) (declare (ignore fd)) info))))))
   (let ((info (make-array 256 :element-type '(unsigned-byte 8) :initial-element 0)))
