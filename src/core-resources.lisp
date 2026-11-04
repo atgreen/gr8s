@@ -33,6 +33,7 @@
     ("deployments" "Deployment" "apps/v1" t)
     ("replicasets" "ReplicaSet" "apps/v1" t)
     ("daemonsets" "DaemonSet" "apps/v1" t)
+    ("statefulsets" "StatefulSet" "apps/v1" t)
     ("controllerrevisions" "ControllerRevision" "apps/v1" t)
     ("jobs" "Job" "batch/v1" t)
     ("poddisruptionbudgets" "PodDisruptionBudget" "policy/v1" t)
