@@ -76,5 +76,15 @@
     "https://github.com/kubernetes/kubernetes/blob/v1.36.0/pkg/registry/core/pod/strategy.go",
     "https://github.com/kubernetes/kubernetes/blob/v1.36.0/pkg/registry/core/pod/rest/subresources.go",
     "https://raw.githubusercontent.com/golang/go/go1.26.0/src/net/ip.go"
-  ]
+  ],
+  "integratedProbeValidation": {
+    "sourceCommit": "a169f1ed05ee1131338141857571d14de5b1b842",
+    "mergedMain": "616d7ebf022e6519435b1d2af864fba051dc5608",
+    "checks": 3180,
+    "passed": 3175,
+    "skipped": 5,
+    "failed": 0,
+    "log": "/tmp/gr8s-proxy-probes-integrated-full.log",
+    "traceInstrumentation": false
+  }
 }
