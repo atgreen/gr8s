@@ -239,6 +239,10 @@
            (worker nil))
       (unwind-protect
            (progn
+             ;; Real RSA key generation can exceed the handshake's five-second
+             ;; assertion window. Prepare it before starting that timed work;
+             ;; enrollment still builds/verifies the CSR and negotiates mTLS.
+             (gr8s:generate-node-key-and-csr "gr8s-local" (merge-pathnames "agent/node.key" path))
              (setf worker
                    (gr8s::start-local-node-agent
                     server pki "gr8s-local" (merge-pathnames "agent/" path)))
@@ -270,6 +274,10 @@
            (pod (create-pod store (parse-pod *valid-pod-json*))))
       (unwind-protect
            (progn
+             ;; Real RSA key generation can exceed the handshake's five-second
+             ;; assertion window. Prepare it before starting that timed work;
+             ;; enrollment still builds/verifies the CSR and negotiates mTLS.
+             (gr8s:generate-node-key-and-csr "gr8s-local" (merge-pathnames "agent/node.key" path))
              (setf worker
                    (gr8s::start-local-node-agent
                     server pki "gr8s-local" agent-directory
