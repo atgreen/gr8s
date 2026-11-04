@@ -30,6 +30,7 @@
 
 (test pod-dns-policies-merge-real-host-searches-and-pod-overrides
   (with-temporary-store (store directory)
+    (values store)
     (let* ((file (merge-pathnames "resolv.conf" directory))
            (gr8s::*pod-dns-host-resolv-conf* file)
            (runtime (gr8s::make-containerd-runtime :host-network nil :dns-servers '("169.254.1.1")
@@ -83,3 +84,52 @@
       (signals gr8s:kubernetes-error (gr8s::update-pod store (parse-pod object) (pod-resource-version pod)))
       (setf (gethash "dnsPolicy" (gethash "spec" object)) "ClusterFirst")
       (signals gr8s:kubernetes-error (gr8s::update-pod store (parse-pod object) (pod-resource-version pod))))))
+
+(test pod-dns-none-is-forwarded-to-the-actual-sandbox-create-call
+  (with-temporary-store (store directory)
+    (let* ((pod (create-pod store (parse-pod (dns-config-test-object))))
+           (runtime (gr8s::make-containerd-runtime :host-network nil :log-root directory :dns-servers '("169.254.1.1")))
+           (original (symbol-function 'gr8s::cri-run-pod-sandbox))
+           (seen nil))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s::cri-run-pod-sandbox)
+                   (lambda (socket &rest parameters)
+                     (declare (ignore socket)) (setf seen parameters) "created-sandbox"))
+             (is (equal "created-sandbox" (gr8s::cri-pod-sandbox-info-id (gr8s::containerd-start-sandbox runtime pod))))
+             (is (equal '("1.1.1.1") (getf seen :dns-servers)))
+             (is (equal '("resolv.conf.local") (getf seen :dns-searches)))
+             (is (equal '("ndots:2") (getf seen :dns-options)))
+             (is (equal (pod-uid pod) (getf seen :uid))))
+        (setf (symbol-function 'gr8s::cri-run-pod-sandbox) original)))))
+
+(test pod-dns-merged-limits-reflect-actual-truncation-and-warn
+  (with-temporary-store (store directory)
+    (let* ((file (merge-pathnames "resolv.conf" directory))
+           (gr8s::*pod-dns-host-resolv-conf* file)
+           (runtime (gr8s::make-containerd-runtime :host-network nil :dns-servers '("169.254.1.1")))
+           (object (dns-config-test-object "ClusterFirst"))
+           (servers nil) (warning nil))
+      (values store)
+      (with-open-file (out file :direction :output :if-exists :supersede) (format out "nameserver 9.9.9.9~%"))
+      (setf (gethash "nameservers" (gethash "dnsConfig" (gethash "spec" object))) #("1.1.1.1" "2.2.2.2" "3.3.3.3"))
+      (setf warning (with-output-to-string (*error-output*)
+                      (setf servers (gr8s::containerd-pod-dns-configuration runtime (parse-pod object)))))
+      (is (equal '("169.254.1.1" "1.1.1.1" "2.2.2.2") servers))
+      (is (search "DNSConfigForming" warning)))))
+
+(test pod-dns-default-roundtrip-does-not-restart-a-healthy-spec
+  (with-temporary-store (store directory)
+    (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
+           (before (gr8s::pod-runtime-spec-fingerprint pod))
+           (object (gr8s::copy-core-object (pod-to-object pod))))
+      (setf (gethash "dnsPolicy" (gethash "spec" object)) "ClusterFirst")
+      (let ((updated (gr8s::update-pod store (parse-pod object) (pod-resource-version pod))))
+        (is (equal before (gr8s::pod-runtime-spec-fingerprint updated))))))
+  (let* ((object (dns-config-test-object))
+         (first (parse-pod (gr8s::copy-core-object object))))
+    (remhash "options" (gethash "dnsConfig" (gethash "spec" object)))
+    (remhash "searches" (gethash "dnsConfig" (gethash "spec" object)))
+    (let ((pod (parse-pod object)))
+      (is (equalp #() (gethash "options" (gethash "dnsConfig" (gethash "spec" (pod-to-object pod))))))
+      (is (not (equal (gr8s::pod-runtime-spec-fingerprint first) (gr8s::pod-runtime-spec-fingerprint pod)))))))

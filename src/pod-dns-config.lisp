@@ -39,6 +39,7 @@
       (let ((servers (optional-vector config "nameservers" "spec.dnsConfig"))
             (searches (optional-vector config "searches" "spec.dnsConfig"))
             (options (optional-vector config "options" "spec.dnsConfig")))
+        (setf (gethash "nameservers" config) servers (gethash "searches" config) searches (gethash "options" config) options)
         (unless (and (<= (length servers) 3) (every #'valid-pod-dns-address-p servers))
           (invalid-pod "dnsConfig.nameservers requires at most three literal IP addresses"))
         (unless (and (<= (length searches) 32) (every #'valid-pod-dns-search-p searches)
@@ -130,4 +131,9 @@
     (unless (and (equal (gethash "dnsPolicy" before "ClusterFirst") (gethash "dnsPolicy" after "ClusterFirst"))
                  (equal (endpointslice-canonical-json (gethash "dnsConfig" before))
                         (endpointslice-canonical-json (gethash "dnsConfig" after))))
-      (error 'kubernetes-error :status-code 422 :reason "Invalid" :message "Pod DNS policy and configuration are immutable"))))
+      (error 'kubernetes-error :status-code 422 :reason "Invalid" :message "Pod DNS policy and configuration are immutable"))
+    ;; Preserve legacy default representation so equivalent typed/JSON metadata
+    ;; updates cannot alter the runtime fingerprint and restart a healthy Pod.
+    (if (nth-value 1 (gethash "dnsPolicy" before))
+        (setf (gethash "dnsPolicy" after) (gethash "dnsPolicy" before))
+        (remhash "dnsPolicy" after))))
