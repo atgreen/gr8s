@@ -24,6 +24,7 @@
                (:module "src"
                 :serial t
                 :components ((:file "package")
+                             (:file "grpc-close-compat")
                              (:file "cri-v1-generated")
                              (:file "cri-wire-compat")
                              (:file "node-v1-generated")
@@ -104,6 +105,7 @@
                              (:file "reconciler-test")
                              (:file "agent-runtime-test")
                              (:file "grpc-unix-test")
+                             (:file "grpc-close-test")
                              (:file "cri-test")
                              (:file "runtime-assets-test")
                              (:file "cni-test")
