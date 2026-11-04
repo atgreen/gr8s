@@ -292,6 +292,17 @@
                  (= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_exited+))
         (cri-delete-container (containerd-runtime-socket-path runtime) (cri-container-info-id info))))))
 
+(defun containerd-stop-unknown-attempts (runtime infos)
+  "Resolve only current Unknown attempts through a real stop/status before applying restart policy."
+  (let ((socket (containerd-runtime-socket-path runtime)))
+    (mapcar (lambda (info)
+              (if (= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_unknown+)
+                  (progn
+                    (cri-stop-container socket (cri-container-info-id info))
+                    (cri-container-status socket (cri-container-info-id info)))
+                  info))
+            infos)))
+
 (defun containerd-capture-dead-sandbox (runtime pod sandbox state)
   "Retain actual stopped attempts and their policy before replacing a failed sandbox."
   (let ((socket (containerd-runtime-socket-path runtime))
@@ -359,7 +370,7 @@
     (let* ((config (containerd-sandbox-config runtime pod))
            (infos (mapcar (lambda (summary) (cri-container-status socket (cri-container-summary-id summary)))
                           (containerd-containers runtime sandbox)))
-           (current (current-container-infos infos state))
+           (current (containerd-stop-unknown-attempts runtime (current-container-infos infos state)))
            (now (funcall *container-lifecycle-clock*))
            (waiting (make-hash-table :test #'equal)) (restarting nil) (created-names nil))
       (remember-container-lifecycle-statuses state
