@@ -25,6 +25,7 @@
   in-cluster-config
   (credential-lock (bt:make-lock "gr8s ServiceAccount credentials"))
   (workload-lock (bt:make-lock "gr8s workload controllers"))
+  (workload-deletions (make-hash-table :test #'equal))
   (pod-observed-phases (make-hash-table :test #'equal))
   (pod-observed-statuses (make-hash-table :test #'equal))
   (pod-observed-resource-versions (make-hash-table :test #'equal))

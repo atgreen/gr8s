@@ -70,6 +70,7 @@
                    (not (typep (gethash "resourceHistoryStart" state) `(integer 0 ,(gethash "revision" state)))))
           (error "Invalid resource history start at ~A" path))
         (setf (pod-store-resource-revision store) (gethash "revision" state)
+              (pod-store-workload-deletions store) (gethash "workloadDeletions" state (make-hash-table :test #'equal))
               (pod-store-event-expirations store) (gethash "eventExpirations" state (make-hash-table :test #'equal))
               (pod-store-template-history store) (coerce (gethash "templateHistory" state #()) 'list)
               (pod-store-template-history-floor store) (gethash "templateHistoryFloor" state (gethash "revision" state))
@@ -88,7 +89,7 @@
                  (setf (gethash key (pod-store-resources store)) object)))))
   store)
 
-(defun commit-core-resources (store resources revision)
+(defun commit-core-resources (store resources revision &key (workload-deletions (pod-store-workload-deletions store)))
   ;; Write the complete new state before publishing it in memory. A failed
   ;; atomic write leaves both the old disk state and the old index intact.
   (multiple-value-bind (history floor) (next-template-history store resources revision)
@@ -97,7 +98,7 @@
     (write-private-text-atomically
    (core-resource-state-path store)
    (com.inuoe.jzon:stringify
-    (core-object "version" 2 "revision" revision
+    (core-object "version" 2 "revision" revision "workloadDeletions" workload-deletions
                  "templateHistory" (coerce history 'vector) "templateHistoryFloor" floor
                  "templateTokenKey" (ag-grpc:base64-encode token-key)
                  "resourceHistoryStart" (pod-store-resource-history-start store)
@@ -105,6 +106,7 @@
                  "items" (coerce (loop for object being the hash-values of resources
                                        collect object) 'vector))))
   (setf (pod-store-resources store) resources
+        (pod-store-workload-deletions store) workload-deletions
         (pod-store-resource-revision store) revision
         (pod-store-template-history store) history
         (pod-store-template-history-floor store) floor

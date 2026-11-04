@@ -33,12 +33,13 @@
          (equal (gethash "kind" ref) (gethash "kind" owner))
          (equal (gethash "apiVersion" ref) (gethash "apiVersion" owner)))))
 
-(defun workload-current-unlocked (store resource object &key generation)
+(defun workload-current-unlocked (store resource object &key generation allow-deleting)
   "Check an owner against the store while its transaction lock is held."
   (let* ((metadata (workload-metadata object))
          (current (gethash (core-resource-key resource (gethash "namespace" metadata) (gethash "name" metadata))
                            (pod-store-resources store))))
     (when (and current (equal (gethash "uid" (workload-metadata current)) (gethash "uid" metadata))
+               (or allow-deleting (not (gethash "deletionTimestamp" (workload-metadata current))))
                (or (not generation) (eql (gethash "generation" (workload-metadata current))
                                           (gethash "generation" metadata))))
       current)))
@@ -98,7 +99,7 @@
 (defun change-controller-pod-owner (store owner pod adopt)
   "Adopt or release a Pod atomically with exact owner and dependent UID checks."
   (with-store-lock (store)
-    (when (workload-current-unlocked store "replicasets" owner :generation t)
+    (when (workload-current-unlocked store "replicasets" owner :generation t :allow-deleting (not adopt))
       (let ((current (gethash (pod-key (pod-namespace pod) (pod-name pod)) (pod-store-pods store))))
         (when (and current (equal (pod-uid current) (pod-uid pod))
                    (if adopt (null (workload-controller-reference (pod-to-object current)))
@@ -197,7 +198,8 @@
   "Find exact deployment children and adopt unowned matching ReplicaSets."
   (let ((result nil) (metadata (workload-metadata owner)) (selector (gethash "selector" (gethash "spec" owner))))
     (dolist (set (list-core-resources store "replicasets" (gethash "namespace" metadata)))
-      (cond ((workload-owned-p set owner) (push set result))
+      (cond ((gethash "deletionTimestamp" (workload-metadata set)) nil)
+            ((workload-owned-p set owner) (push set result))
             ((and claim (null (workload-controller-reference set))
                   (workload-selector-matches-p selector (gethash "labels" (workload-metadata set))))
              (with-store-lock (store)
@@ -401,10 +403,12 @@
   "Run authoritative workload controllers; node agents never invoke this pass."
   (let ((store (reconciler-store reconciler)))
     (bt:with-lock-held ((pod-store-workload-lock store))
+      (process-workload-deletions reconciler)
       (dolist (resource '("deployments" "replicasets"))
         (dolist (object (list-core-resources store resource))
           (handler-case
-              (if (equal resource "deployments") (reconcile-deployment reconciler object) (reconcile-replica-set reconciler object))
+              (unless (gethash "deletionTimestamp" (workload-metadata object))
+                (if (equal resource "deployments") (reconcile-deployment reconciler object) (reconcile-replica-set reconciler object)))
             (kubernetes-error (condition)
               (unless (member (kubernetes-error-status-code condition) '(404 409))
                 (format *error-output* "gr8s ~A controller: ~A~%" resource condition)))

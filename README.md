@@ -462,8 +462,10 @@ durations, and derive availability from actual Pod conditions. Controller state
 survives restart through the durable API objects and owner references.
 Templates retain the broad Kubernetes Pod schema; execution still uses the
 supported Pod subset. Rejected Pod admission produces a ReplicaFailure condition
-rather than reporting successful replicas. Deletion cascades through the existing
-background owner collector; blocking foreground deletion and finalizers remain
+rather than reporting successful replicas. Background deletion cascades through
+the existing owner collector. Foreground and orphan workload deletion checkpoint
+their intent: foreground waits for owned children, while orphaning releases
+controller references before removing the parent. Custom finalizers remain
 unsupported.
 
 Stored-resource list continuations are signed and bound to their resource type,
@@ -540,4 +542,5 @@ Deleting and recreating an account or its credential Secret revokes the old toke
 Supported nonblocking owner references are preserved on Pods and stored resources.
 The control plane collects dependents after all known owners disappear, comparing
 UIDs so a newly created object cannot inherit an old object's dependents by name.
-Blocking foreground deletion and finalizer controllers remain unsupported.
+Outside Deployment and ReplicaSet deletion, blocking foreground deletion and
+finalizer controllers remain unsupported.

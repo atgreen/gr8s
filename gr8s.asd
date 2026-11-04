@@ -74,6 +74,7 @@
                              (:file "services")
                              (:file "garbage-collection")
                              (:file "workload-controller")
+                             (:file "workload-deletion")
                              (:file "workload-http")
                              (:file "main"))))
   :in-order-to ((test-op (test-op "gr8s/tests"))))
