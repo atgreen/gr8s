@@ -193,6 +193,7 @@
     (let ((manager (gethash "managedBy" spec)))
       (when manager
         (unless (and (stringp manager) (<= 1 (length manager) 63) (= 1 (count #\/ manager))
+                     (plusp (position #\/ manager))
                      (dns-subdomain-p (subseq manager 0 (position #\/ manager)))
                      (core-label-name-p (subseq manager (1+ (position #\/ manager)))))
           (core-resource-error 422 "Invalid" "Job.spec.managedBy must be a domain-prefixed path of at most 63 characters"))))
