@@ -134,6 +134,10 @@
                        (member (core-protobuf-string envelope 4) '("" "application/vnd.kubernetes.protobuf") :test #'equal))
             (error "Invalid Kubernetes protobuf envelope"))
           (when (string= kind "DeleteOptions") (return-from decode-core-resource-protobuf (core-protobuf-delete-options raw)))
+          (when (equal kind "EndpointSlice")
+            (let ((object (template-protobuf-message "k8s.io.api.discovery.v1.EndpointSlice" raw)))
+              (setf (gethash "apiVersion" object) version (gethash "kind" object) kind)
+              (return-from decode-core-resource-protobuf object)))
           (when (member kind '("PersistentVolume" "PersistentVolumeClaim" "StorageClass") :test #'equal)
             (let ((object (template-protobuf-message
                            (concatenate 'string (if (equal kind "StorageClass") "k8s.io.api.storage.v1." "k8s.io.api.core.v1.") kind) raw)))

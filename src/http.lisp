@@ -97,7 +97,7 @@
                 (vector (json-object "name" "rbac.authorization.k8s.io"
                                      "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                                      "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
-                        (event-api-group) (storage-api-group)))))
+                        (event-api-group) (storage-api-group) (endpointslice-api-group)))))
 
 (defun api-resources-response ()
   (json-response
@@ -214,6 +214,8 @@
     (json-object
      "api/v1"
      (json-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")
+     "apis/discovery.k8s.io/v1"
+     (json-object "serverRelativeURL" "/openapi/v3/apis/discovery.k8s.io/v1?hash=gr8s-endpointslices-v1")
      "apis/storage.k8s.io/v1"
      (json-object "serverRelativeURL" "/openapi/v3/apis/storage.k8s.io/v1?hash=gr8s-storage-v1")
      "apis/events.k8s.io/v1"
@@ -302,7 +304,8 @@
      (json-object
       "openapi" "3.0.0"
       "info" (json-object "title" "gr8s" "version" "v1")
-      "paths" (cond ((equal version "events.k8s.io/v1") (add-event-openapi-paths (core-object) t))
+      "paths" (cond ((equal version "discovery.k8s.io/v1") (add-endpointslice-openapi-paths (core-object)))
+                    ((equal version "events.k8s.io/v1") (add-event-openapi-paths (core-object) t))
                     ((equal version "storage.k8s.io/v1") (add-storage-openapi-paths (core-object) version))
                     (t (add-storage-openapi-paths (add-core-resource-openapi-paths (openapi-v3-pod-paths)))))
       "components" (json-object "schemas" (openapi-definitions))))))
@@ -964,6 +967,9 @@
           ((string= path "/version") (version-response))
           ((string= path "/api") (api-versions-response))
           ((string= path "/apis") (api-groups-response))
+          ((string= path "/apis/discovery.k8s.io") (json-response (endpointslice-api-group)))
+          ((string= path "/apis/discovery.k8s.io/v1") (endpointslice-discovery-response))
+          ((string= path "/openapi/v3/apis/discovery.k8s.io/v1") (openapi-v3-response "discovery.k8s.io/v1"))
           ((string= path "/apis/storage.k8s.io") (json-response (storage-api-group)))
           ((string= path "/apis/storage.k8s.io/v1") (storage-discovery-response))
           ((string= path "/openapi/v3/apis/storage.k8s.io/v1") (openapi-v3-response "storage.k8s.io/v1"))
