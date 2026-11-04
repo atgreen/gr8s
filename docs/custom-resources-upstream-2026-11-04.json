@@ -1,0 +1,79 @@
+{
+  "focus": "CustomResourceDefinition resources",
+  "mode": "focused",
+  "isCertificationResult": false,
+  "nativeSHA256": "23bf3ba5ddb8126952d508b04b2b403c9fa284e17be0c71074983545f922f97b",
+  "stateDirectory": "/var/tmp/gr8s-podtemplates.78cz3j_o/state",
+  "reusedState": false,
+  "sonobuoyVersion": "v0.57.5",
+  "command": [
+    "/usr/local/bin/sonobuoy",
+    "run",
+    "--kubeconfig",
+    "/var/tmp/gr8s-podtemplates.78cz3j_o/kubeconfig",
+    "--dns-pod-labels=",
+    "--plugin=e2e",
+    "--e2e-focus=CustomResourceDefinition resources",
+    "--e2e-skip="
+  ],
+  "sonobuoyRunExitCode": 0,
+  "passed": true,
+  "suiteStarts": 1,
+  "selectedSpecs": [
+    [
+      "5",
+      "7579"
+    ]
+  ],
+  "upstreamCases": [
+    {
+      "name": "[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] Simple CustomResourceDefinition creating/deleting custom resource definition objects works [Conformance]",
+      "seconds": "0.346524952",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] Simple CustomResourceDefinition getting/updating/patching custom resource definition status sub-resource works [Conformance]",
+      "seconds": "0.262026041",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] Simple CustomResourceDefinition listing custom resource definition objects works [Conformance]",
+      "seconds": "1.34350148",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] custom resource defaulting for requests and from storage works [Conformance]",
+      "seconds": "0.324357731",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] should include custom resource definition resources in discovery documents [Conformance]",
+      "seconds": "0.19466574",
+      "passed": true
+    }
+  ],
+  "suiteHookEntries": 7,
+  "nativeExitCode": 0,
+  "ownedShimsRemaining": [],
+  "artifactSHA256": {
+    "gr8s.log": "c094f75b6c1c1b29d8061c45c3ddaa8248a679d69b0f25e2573b3563572de1e1",
+    "kubeconfig": "882e9f813c19e57e3a1c199e7b08a205a073534368029e498e275a56bb5564b1",
+    "sonobuoy.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sonobuoy.stderr.log": "575842fa282bac61a752da663bc963c991c00013cb4d0905feb58ebcd0b3bf27",
+    "sonobuoy-results.tar.gz": "0bd97870ba11a9633408784e6478fdb0b04b0b4472b877db274842095a6b00d8",
+    "kube-sonobuoy.log": "eec20ff19deefa465cbe3808a8feb21ef12d60ff1ae4248ea36fdc9efb68df07",
+    "e2e.log": "11b4c63e1c826f11e6622378a87f36122fe23160727d823578ce5718a9f2d0b1",
+    "sonobuoy-worker.log": "6e08ba32759d44be1e71a2a01ba4c3ec29c213c11c2547d215612e636ca9e4f7",
+    "sonobuoy-results.txt": "896cf43f7bf19e5a38e852c51b7ca20762fd09a2e782b2d1f1ebc1d463a8adb3"
+  },
+  "sourceCommit": "d6ba829",
+  "mergedMain": "ebae21c",
+  "reportDirectory": "/var/tmp/gr8s-podtemplates.78cz3j_o",
+  "vmSSHPort": 22293,
+  "verifiedLocalArchiveSHA256": "0bd97870ba11a9633408784e6478fdb0b04b0b4472b877db274842095a6b00d8",
+  "localEvidenceDirectory": "/home/green/orca/workspaces/gr8s/tang/build/conformance/2026-11-04-crd-upstream-78cz3j_o",
+  "beforeEvidence": "docs/custom-resources-upstream-before-2026-11-04.json",
+  "correction": "Actual pinned typed CRD protobuf decoding; unchanged upstream focus/assertions and strict validation.",
+  "scope": "Supplemental five-case focused evidence, not certification; seven suite hook entries excluded from actual case counts.",
+  "independentReview": "Verified all eight non-secret artifact SHA256 values and five actual passing CRD JUnit cases from the official archive; native exit 0 and no owned shims."
+}
