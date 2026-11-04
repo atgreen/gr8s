@@ -186,7 +186,7 @@
 (defun parse-container (object)
   "Validate a container JSON OBJECT and return a CONTAINER-SPEC."
   (reject-unsupported-fields
-   object '("name" "image" "command" "args" "env" "ports" "resources"
+   object '("name" "image" "command" "args" "env" "envFrom" "ports" "resources"
             "imagePullPolicy" "volumeMounts" "securityContext" "workingDir"
             "startupProbe" "readinessProbe" "livenessProbe")
    "container")
@@ -271,7 +271,7 @@
     (reject-unsupported-fields
      spec '("containers" "initContainers" "restartPolicy" "dnsPolicy" "nodeName" "volumes"
             "securityContext" "serviceAccountName" "automountServiceAccountToken"
-            "tolerations" "nodeSelector" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig") "spec")
+            "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig") "spec")
     (dolist (field '("hostname" "subdomain"))
       (when (eq (gethash field spec) 'null) (remhash field spec))
       (let ((value (gethash field spec "")))
