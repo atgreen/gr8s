@@ -1,6 +1,43 @@
 {
-  "recordedAtUTC": "2026-11-04T00:58:00Z",
+  "recordedAtUTC": "2026-11-04T01:26:18.559579+00:00",
   "native": {
+    "sourceCommit": "963163e4c70e8a719f215e9f54f83a0ae6eb38d2",
+    "binarySha256": "e243858c1da7d445423b6cf618ffbb772d68bd59ed6f22bcf1ea323909506822",
+    "vmSSHPort": 22291,
+    "stateDirectory": "/tmp/gr8s-storage-native-2oar6bmg",
+    "runner": "python3 /root/gr8s-storage-test/test-storage-native.py --executable /root/gr8s-storage-test/gr8s.bin",
+    "log": "/root/gr8s-storage-integrated-native.log",
+    "output": [
+      "storage smoke state: /tmp/gr8s-storage-native-mfmh70zs",
+      "real local-PV/PVC and direct hostPath mounts passed",
+      "native restart retained the running consumer and backing data",
+      "readonly, claim protection, Retain UID ownership, explicit reclamation and clean native exit passed",
+      "remaining smoke-owned shims: []"
+    ],
+    "exitCode": 0,
+    "remainingOwnedShims": [],
+    "note": "Current integrated implementation including read-only semantics, plugin-independent static binding, and merged node log delivery fix; native run completed with exit0 and no owned shims.",
+    "artifactDirectory": "build/conformance/2026-11-04-storage-2oar6bmg",
+    "artifactSha256": {
+      "gr8s-storage-integrated-native.log": "a102b6be291445a7746892ab4677ad7fa526d3efa90792b4a7123f82f8f88500",
+      "server.log": "0d75ebc163d80dc5b67ea57099dc252e13f57d1289785ee27efa9fba4e08f7c5"
+    }
+  },
+  "host": {
+    "command": "flock /tmp/gr8s-host-http-tests.lock make test",
+    "sourceCommit": "963163e4c70e8a719f215e9f54f83a0ae6eb38d2",
+    "checks": 2028,
+    "passed": 2023,
+    "optionalSkipped": 5,
+    "failed": 0,
+    "log": "/tmp/gr8s-storage-final-gate.log",
+    "logSha256": "c4d2d8d10356f13491f797749ec59c5a885a4a8948ff17f030ba174221c6efec"
+  },
+  "unsupportedFollowups": {
+    "CSIAndDynamicProvisioning": "podster-uqb.14.1",
+    "AdvancedModesExpansionReclaim": "podster-uqb.14.2"
+  },
+  "previousNative": {
     "sourceCommit": "4f9c4f0",
     "binarySha256": "750aed2bf7f852e3791a55b9a97bfaf2d68e3b070ec6aa78d49e6810f29c3d5a",
     "vmSSHPort": 22291,
@@ -18,7 +55,7 @@
     "remainingOwnedShims": [],
     "note": "Native binary predates final default-class, empty-topology and unsupported-prebinding regressions; those are covered by the final host suite."
   },
-  "host": {
+  "previousHost": {
     "command": "flock /tmp/gr8s-host-http-tests.lock make test",
     "checks": 1998,
     "passed": 1993,
@@ -26,8 +63,13 @@
     "failed": 0,
     "log": "/tmp/gr8s-storage-final-full-suite.log"
   },
-  "unsupportedFollowups": {
-    "CSIAndDynamicProvisioning": "podster-uqb.14.1",
-    "AdvancedModesExpansionReclaim": "podster-uqb.14.2"
+  "unresolvedIntegrationFlakiness": {
+    "issue": "podster-uqb.18",
+    "note": "Earlier integrated runs failed pre-handshake cancellation and local-agent snapshot acknowledgement deadlines. Focused repeated local-agent diagnostic separately reproduced fatal TLS decode_error during enrollment. The final suite passes, but this transport flakiness is not claimed fixed by storage changes.",
+    "logs": [
+      "/tmp/gr8s-storage-final-integrated-tests.log",
+      "/tmp/gr8s-storage-full-session-diagnostic.log",
+      "/tmp/gr8s-local-session-diagnostic.log"
+    ]
   }
 }
