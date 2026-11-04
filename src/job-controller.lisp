@@ -6,6 +6,7 @@
 ;;;; identities and retry state before releasing tracking finalizers; acknowledge
 ;;;; finalizer removal before increasing counters, so retries/reopen cannot count
 ;;;; a Pod twice or invent completion from missing runtime observations.
+;;;; Indexed completion and Pod failure policies are refused at admission.
 
 (in-package #:gr8s)
 
@@ -135,7 +136,8 @@
            (current (gethash (pod-key (pod-namespace pod) (pod-name pod)) (pod-store-pods store))))
       (when (and owner current (equal (pod-uid current) (pod-uid pod))
                  (workload-owned-p (pod-to-object current) owner) (job-pod-tracked-p current)
-                 (or (and deleting (gethash "deletionTimestamp" (workload-metadata owner)))
+                 (or (and deleting (or (gethash "deletionTimestamp" (workload-metadata owner))
+                                       (deletion-requested-p current)))
                      (let ((status (gethash "status" owner)))
                        (or (member (pod-uid current) (job-uncounted-uids status "succeeded") :test #'equal)
                            (member (pod-uid current) (job-uncounted-uids status "failed") :test #'equal)))))
@@ -150,3 +152,155 @@
       (dolist (pair observations)
         (remove-accounted-job-finalizer (reconciler-store reconciler) committed (car pair)))
       (account-job-observations reconciler committed observations))))
+
+(defun job-reconcile-observations (reconciler job claim)
+  "Observe Pods, counting one deleted before finishing as failed, as the Job controller does."
+  (loop for (pod . status) in (job-observations reconciler job :claim claim)
+        collect (cons pod
+                      (if (and (deletion-requested-p pod)
+                               (not (member (gethash "phase" status) '("Succeeded" "Failed") :test #'equal)))
+                          (let ((copy (copy-core-object status)))
+                            (setf (gethash "phase" copy) "Failed")
+                            copy)
+                          status))))
+
+(defun delete-job-pods (reconciler job pods)
+  "Delete POD identities and release tracking, since these will not be counted."
+  (let ((store (reconciler-store reconciler)))
+    (dolist (pod pods)
+      (handler-case
+          (progn
+            (delete-reconciled-pod reconciler (pod-namespace pod) (pod-name pod) :uid (pod-uid pod))
+            (let ((current (gethash (pod-key (pod-namespace pod) (pod-name pod)) (pod-store-pods store))))
+              (when current (remove-accounted-job-finalizer store job current :deleting t))))
+        (kubernetes-error (condition)
+          (unless (member (kubernetes-error-status-code condition) '(404 409)) (error condition)))))))
+
+(defun job-terminal-decision (spec status restarts start-time)
+  "Return the reason this Job must fail or complete now, as a type, reason and message."
+  (let ((deadline (gethash "activeDeadlineSeconds" spec))
+        (succeeded (gethash "succeeded" status 0))
+        (attempts (+ (gethash "failed" status 0) restarts)))
+    (cond
+      ((and deadline start-time (>= (funcall *job-clock*) (+ start-time deadline)))
+       (values "Failed" "DeadlineExceeded" "Job was active longer than specified deadline"))
+      ((> attempts (gethash "backoffLimit" spec 6))
+       (values "Failed" "BackoffLimitExceeded" "Job has reached the specified backoff limit"))
+      ((job-success-goal-met-p spec succeeded 0)
+       (values "Complete" "CompletionsReached" "Reached expected number of succeeded pods")))))
+
+(defun job-pods-wanted (spec status)
+  "Return how many Pods should be active now, given work already succeeded."
+  (let ((parallelism (gethash "parallelism" spec 1)) (succeeded (gethash "succeeded" status 0)))
+    (multiple-value-bind (completions specified) (gethash "completions" spec)
+      (cond (specified (max 0 (min parallelism (- completions succeeded))))
+            ((plusp succeeded) 0)
+            (t parallelism)))))
+
+(defun write-job-status (store job active ready terminating update)
+  "Publish observed counts; UPDATE then applies any condition or timestamp change."
+  (commit-job-controller-update store job
+    (lambda (status state)
+      (setf (gethash "active" status) active (gethash "ready" status) ready
+            (gethash "terminating" status) terminating)
+      (when update (funcall update status))
+      (values status state))))
+
+(defun reconcile-job (reconciler job)
+  "Drive one Job toward its goal from actual Pod observations and durable accounting."
+  (let* ((store (reconciler-store reconciler))
+         (metadata (workload-metadata job)) (namespace (gethash "namespace" metadata))
+         (finished (job-terminal-condition (gethash "status" job (core-object)))))
+    (let ((observations (job-reconcile-observations reconciler job (not finished))))
+      (flush-job-terminal-accounting reconciler job observations)
+      (let* ((job (handler-case (get-core-resource store "jobs" namespace (gethash "name" metadata))
+                    (kubernetes-error (condition)
+                      (when (= 404 (kubernetes-error-status-code condition))
+                        (return-from reconcile-job nil))
+                      (error condition))))
+             (spec (gethash "spec" job))
+             (status (gethash "status" job (core-object)))
+             (observations (job-observations reconciler job))
+             (active (remove-if-not (lambda (pair) (job-active-observation-p (car pair) (cdr pair))) observations))
+             (active-pods (mapcar #'car active))
+             (ready (count-if (lambda (pair) (pod-status-ready-p (cdr pair))) active))
+             (terminating (count-if (lambda (pair) (deletion-requested-p (car pair))) observations))
+             (start-text (gethash "startTime" status))
+             (start-time (and start-text (pod-deletion-time start-text))))
+        (cond
+          (finished
+           (delete-job-pods reconciler job active-pods)
+           (write-job-status store job 0 0 terminating nil))
+          ((eq t (gethash "suspend" spec))
+           (delete-job-pods reconciler job active-pods)
+           (write-job-status store job 0 0 terminating
+             (lambda (next)
+               (remhash "startTime" next)
+               (set-job-condition next "Suspended" "True" "JobSuspended" "Job suspended"))))
+          (t
+           (multiple-value-bind (type reason message)
+               (job-terminal-decision spec status (job-onfailure-restarts observations) start-time)
+             (if type
+                 (progn
+                   (delete-job-pods reconciler job active-pods)
+                   (write-job-status store job 0 0 terminating
+                     (lambda (next)
+                       (set-job-condition next (if (equal type "Complete") "SuccessCriteriaMet" "FailureTarget")
+                                          "True" reason message)
+                       (set-job-condition next type "True" reason message)
+                       (when (equal type "Complete")
+                         (setf (gethash "completionTime" next) (current-timestamp (funcall *job-clock*)))))))
+                 (let* ((wanted (job-pods-wanted spec status))
+                        (missing (- wanted (length active)))
+                        (state (gethash (gethash "uid" (workload-metadata job))
+                                        (pod-store-job-controller-states store) (core-object))))
+                   (cond
+                     ((minusp missing)
+                      (delete-job-pods reconciler job (subseq active-pods 0 (- missing))))
+                     ((and (plusp missing) (>= (funcall *job-clock*) (job-backoff-until state)))
+                      (loop repeat missing do (create-job-pod store job))))
+                   (write-job-status store job (+ (length active) (max 0 missing)) ready terminating
+                     (lambda (next)
+                       (unless (gethash "startTime" next)
+                         (setf (gethash "startTime" next) (current-timestamp (funcall *job-clock*))))
+                       (when (job-condition-true-p next "Suspended")
+                         (set-job-condition next "Suspended" "False" "JobResumed" "Job resumed")))))))))))))
+
+(defun release-orphaned-job-pods (store)
+  "Remove tracking from Pods whose Job UID no longer exists, so they can be collected."
+  (with-store-lock (store)
+    (let ((jobs (loop for key being the hash-keys of (pod-store-resources store) using (hash-value object)
+                      when (equal "jobs" (first key))
+                        collect (gethash "uid" (workload-metadata object)))))
+      (dolist (pod (loop for pod being the hash-values of (pod-store-pods store) collect pod))
+        (when (job-pod-tracked-p pod)
+          (let* ((object (copy-core-object (pod-to-object pod)))
+                 (owner (workload-controller-reference object)))
+            (unless (and owner (member (gethash "uid" owner) jobs :test #'equal))
+              (setf (gethash "finalizers" (workload-metadata object))
+                    (remove +job-tracking-finalizer+ (pod-finalizers pod) :test #'equal))
+              (update-pod-unlocked store (parse-pod object) (pod-resource-version pod)))))))))
+
+(defun release-deleting-job-pods (reconciler)
+  "Release tracking for Pods of a Job with a pending foreground or orphan deletion."
+  (let ((store (reconciler-store reconciler)))
+    (dolist (job (list-core-resources store "jobs"))
+      (when (gethash "deletionTimestamp" (workload-metadata job))
+        (dolist (pod (list-pods store (gethash "namespace" (workload-metadata job))))
+          (when (and (workload-owned-p (pod-to-object pod) job) (job-pod-tracked-p pod))
+            (remove-accounted-job-finalizer store job pod :deleting t)))))))
+
+(defun reconcile-jobs (reconciler)
+  "Run one pass over all Jobs, isolating each so one failure cannot stall the others."
+  (let ((store (reconciler-store reconciler)))
+    (release-orphaned-job-pods store)
+    (release-deleting-job-pods reconciler)
+    (dolist (job (list-core-resources store "jobs"))
+      (handler-case
+          (unless (gethash "deletionTimestamp" (workload-metadata job))
+            (reconcile-job reconciler job))
+        (kubernetes-error (condition)
+          (unless (member (kubernetes-error-status-code condition) '(404 409))
+            (format *error-output* "gr8s jobs controller: ~A~%" condition)))
+        (error (condition) (format *error-output* "gr8s jobs controller: ~A~%" condition))))))
+

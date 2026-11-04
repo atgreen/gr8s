@@ -28,6 +28,7 @@
     ("events" "Event" "v1" t)
     ("deployments" "Deployment" "apps/v1" t)
     ("replicasets" "ReplicaSet" "apps/v1" t)
+    ("jobs" "Job" "batch/v1" t)
     ("roles" "Role" "rbac.authorization.k8s.io/v1" t)
     ("rolebindings" "RoleBinding" "rbac.authorization.k8s.io/v1" t)
     ("clusterroles" "ClusterRole" "rbac.authorization.k8s.io/v1" nil)

@@ -478,6 +478,7 @@
   (let ((store (reconciler-store reconciler)))
     (bt:with-lock-held ((pod-store-workload-lock store))
       (process-workload-deletions reconciler)
+      (reconcile-jobs reconciler)
       (dolist (resource '("deployments" "replicasets"))
         (dolist (object (list-core-resources store resource))
           (handler-case

@@ -18,10 +18,12 @@
        (let* ((,runtime (make-fake-runtime)) (,reconciler (make-reconciler ,store ,runtime)))
          ,@body))))
 
-(defun create-controller-job (store &optional (name "work"))
+(defun create-controller-job (store &optional (name "work") (restart-policy "OnFailure"))
   "Create through production admission with a user finalizer on the Pod template."
-  (let* ((input (batch-test-job name)) (metadata (gethash "metadata" (gethash "template" (gethash "spec" input)))))
-    (setf (gethash "finalizers" metadata) #("example.com/user"))
+  (let* ((input (batch-test-job name)) (template (gethash "template" (gethash "spec" input)))
+         (metadata (gethash "metadata" template)))
+    (setf (gethash "finalizers" metadata) #("example.com/user")
+          (gethash "restartPolicy" (gethash "spec" template)) restart-policy)
     (gr8s::create-core-resource store "jobs" input "alpha")))
 
 (defun observe-job-pod-terminal (reconciler runtime pod phase exit-code finish-time)
@@ -93,7 +95,8 @@
 
 (test job-reopen-recovers-a-committed-uncounted-failure-before-finalizer-removal
   (with-job-controller-fixture (store runtime reconciler directory)
-    (let* ((job (create-controller-job store)) (pod (gr8s::create-job-pod store job)))
+    ;; Only Never leaves a Pod Failed; OnFailure restarts it in place.
+    (let* ((job (create-controller-job store "work" "Never")) (pod (gr8s::create-job-pod store job)))
       (observe-job-pod-terminal reconciler runtime pod "Failed" 17 4000000000)
       (gr8s::account-job-observations reconciler job (gr8s::job-observations reconciler job))
       (let ((status (current-job-status store)))
@@ -125,3 +128,122 @@
         (is (null (gr8s::job-owned-pods reconciler replacement :claim t)))
         (is-false (gr8s::remove-accounted-job-finalizer store old pod :deleting t))
         (is-true (gr8s::job-pod-tracked-p (current-job-pod store pod)))))))
+
+(defun job-with-spec (store &rest fields)
+  "Create a Never-restart Job whose spec additionally has the FIELDS plist."
+  (let* ((input (batch-test-job "work")) (spec (gethash "spec" input)))
+    (setf (gethash "restartPolicy" (gethash "spec" (gethash "template" spec))) "Never")
+    (loop for (key value) on fields by #'cddr do (setf (gethash key spec) value))
+    (gr8s::create-core-resource store "jobs" input "alpha")))
+
+(defun job-now (store)
+  "Read the current durable Job."
+  (gr8s::get-core-resource store "jobs" "alpha" "work"))
+
+(defun finish-job-pods (reconciler runtime store phase &optional (exit-code 0))
+  "Report every undeleted Pod of the namespace as having reached the terminal PHASE."
+  (dolist (pod (list-pods store "alpha"))
+    (unless (gr8s::deletion-requested-p pod)
+      (observe-job-pod-terminal reconciler runtime pod phase exit-code 3000000000))))
+
+(test reconcile-creates-parallel-pods-and-reports-active
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable runtime directory))
+    (job-with-spec store "parallelism" 2 "completions" 3)
+    (gr8s::reconcile-jobs reconciler)
+    (is (= 2 (length (list-pods store "alpha"))))
+    (let ((status (gethash "status" (job-now store))))
+      (is (= 2 (gethash "active" status)))
+      (is (stringp (gethash "startTime" status)))
+      (is-false (gr8s::job-terminal-condition status)))
+    ;; Another pass with both Pods running changes nothing.
+    (gr8s::reconcile-jobs reconciler)
+    (is (= 2 (length (list-pods store "alpha"))))))
+
+(test successful-pods-complete-the-job-and-release-tracking
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable directory))
+    (job-with-spec store)
+    (gr8s::reconcile-jobs reconciler)
+    (finish-job-pods reconciler runtime store "Succeeded")
+    (gr8s::reconcile-jobs reconciler)
+    (gr8s::reconcile-jobs reconciler)
+    (let ((status (gethash "status" (job-now store))))
+      (is (= 1 (gethash "succeeded" status)))
+      (is (= 0 (gethash "active" status)))
+      (is (gr8s::job-condition-true-p status "Complete"))
+      (is (gr8s::job-condition-true-p status "SuccessCriteriaMet"))
+      (is (stringp (gethash "completionTime" status))))
+    (dolist (pod (list-pods store "alpha"))
+      (is-false (gr8s::job-pod-tracked-p pod)))
+    ;; A finished Job never creates more Pods.
+    (let ((count (length (list-pods store "alpha"))))
+      (gr8s::reconcile-jobs reconciler)
+      (is (= count (length (list-pods store "alpha")))))))
+
+(test exceeding-the-backoff-limit-fails-the-job
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable directory))
+    (job-with-spec store "backoffLimit" 0)
+    (gr8s::reconcile-jobs reconciler)
+    (finish-job-pods reconciler runtime store "Failed" 3)
+    (gr8s::reconcile-jobs reconciler)
+    (gr8s::reconcile-jobs reconciler)
+    (let* ((status (gethash "status" (job-now store)))
+           (condition (gr8s::job-terminal-condition status)))
+      (is (equal "Failed" (gethash "type" condition)))
+      (is (equal "BackoffLimitExceeded" (gethash "reason" condition)))
+      (is (= 1 (gethash "failed" status))))))
+
+(test failures-retry-only-after-the-backoff-delay
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable directory))
+    ;; The Pods finish at 3000000000, so the ten-second delay is still running.
+    (let* ((now 3000000001) (gr8s::*job-clock* (lambda () now)))
+      (job-with-spec store "backoffLimit" 5)
+      (gr8s::reconcile-jobs reconciler)
+      (finish-job-pods reconciler runtime store "Failed" 3)
+      (gr8s::reconcile-jobs reconciler)
+      (is (= 1 (length (list-pods store "alpha"))))
+      (incf now 11)
+      (gr8s::reconcile-jobs reconciler)
+      (is (= 2 (length (list-pods store "alpha"))))
+      (is-false (gr8s::job-terminal-condition (gethash "status" (job-now store)))))))
+
+(test deadline-fails-the-job-and-removes-active-pods
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable runtime directory))
+    (let* ((now 3000000000) (gr8s::*job-clock* (lambda () now)))
+      (job-with-spec store "activeDeadlineSeconds" 30)
+      (gr8s::reconcile-jobs reconciler)
+      (is (= 1 (length (list-pods store "alpha"))))
+      (incf now 31)
+      (gr8s::reconcile-jobs reconciler)
+      (let ((condition (gr8s::job-terminal-condition (gethash "status" (job-now store)))))
+        (is (equal "DeadlineExceeded" (gethash "reason" condition))))
+      (dolist (pod (list-pods store "alpha"))
+        (is-false (gr8s::job-pod-tracked-p pod))))))
+
+(test suspension-removes-pods-and-resuming-recreates-them
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable runtime directory))
+    (job-with-spec store "suspend" t)
+    (gr8s::reconcile-jobs reconciler)
+    (is (null (list-pods store "alpha")))
+    (is (gr8s::job-condition-true-p (gethash "status" (job-now store)) "Suspended"))
+    (gr8s::update-core-resource store "jobs" "alpha" "work"
+                                (lambda (current) (setf (gethash "suspend" (gethash "spec" current)) nil) current))
+    (gr8s::reconcile-jobs reconciler)
+    (is (= 1 (length (list-pods store "alpha"))))
+    (is-false (gr8s::job-condition-true-p (gethash "status" (job-now store)) "Suspended"))))
+
+(test deleted-jobs-release-their-pods-for-collection
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable runtime directory))
+    (job-with-spec store)
+    (gr8s::reconcile-jobs reconciler)
+    (let ((pod (first (list-pods store "alpha"))))
+      (is-true (gr8s::job-pod-tracked-p pod))
+      (gr8s::delete-core-resource store "jobs" "alpha" "work")
+      (gr8s::reconcile-jobs reconciler)
+      (is-false (gr8s::job-pod-tracked-p (get-pod store "alpha" (pod-name pod)))))))

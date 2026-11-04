@@ -30,12 +30,20 @@
                                                             "kind" kind "verbs" #("get" "patch" "update")))) 'vector))))))
 
 (defun workload-subresource-route (path)
-  "Resolve only valid namespaced apps workload scale and status endpoints."
+  "Resolve valid namespaced apps scale and status endpoints and Job status endpoints."
   (let ((parts (uiop:split-string path :separator '(#\/))))
-    (when (and (= 9 (length parts)) (equal (subseq parts 0 5) '("" "apis" "apps" "v1" "namespaces"))
-               (dns-label-p (sixth parts)) (workload-resource-p (seventh parts))
-               (dns-subdomain-p (eighth parts)) (member (ninth parts) '("scale" "status") :test #'equal))
+    (when (and (= 9 (length parts)) (dns-label-p (sixth parts)) (dns-subdomain-p (eighth parts))
+               (or (and (equal (subseq parts 0 5) '("" "apis" "apps" "v1" "namespaces"))
+                        (workload-resource-p (seventh parts))
+                        (member (ninth parts) '("scale" "status") :test #'equal))
+                   (and (equal (subseq parts 0 5) '("" "apis" "batch" "v1" "namespaces"))
+                        (batch-resource-p (seventh parts)) (equal (ninth parts) "status"))))
       (list (seventh parts) (sixth parts) (eighth parts) (ninth parts)))))
+
+(defun workload-schema-name (resource suffix)
+  "Name RESOURCE's pinned structural definition, with SUFFIX such as Status, in its API group."
+  (format nil "io.k8s.api.~A.v1.~A~A" (if (batch-resource-p resource) "batch" "apps")
+          (core-resource-kind resource) suffix))
 
 (defun workload-scale-object (object)
   "Return desired replicas and observed replicas/selector using the real workload identity."
@@ -60,9 +68,9 @@
   (let* ((metadata (require-object (gethash "metadata" input) "metadata"))
          (status (require-object (gethash "status" input) "status")))
     (unless (and (equal (core-resource-kind resource) (gethash "kind" input (core-resource-kind resource)))
-                 (equal "apps/v1" (gethash "apiVersion" input "apps/v1")))
+                 (equal (core-resource-api-version resource) (gethash "apiVersion" input (core-resource-api-version resource))))
       (core-resource-error 400 "BadRequest" "Incorrect workload status kind or API version"))
-    (validate-template-shape status (template-schema (concatenate 'string "io.k8s.api.apps.v1." (core-resource-kind resource) "Status")) "status")
+    (validate-template-shape status (template-schema (workload-schema-name resource "Status")) "status")
     (with-store-lock (store)
       (let* ((existing (get-core-resource-unlocked store resource namespace name)) (emeta (workload-metadata existing))
              (copy (copy-core-object existing)) (resources (copy-core-resource-index store))
@@ -86,7 +94,7 @@
            (scale (equal subresource "scale")) (kind (if scale "Scale" (core-resource-kind resource)))
            (representation (if scale (workload-scale-object old) old))
            (schema (template-schema (if scale "io.k8s.api.autoscaling.v1.Scale"
-                                       (concatenate 'string "io.k8s.api.apps.v1." kind)))))
+                                       (workload-schema-name resource "")))))
       (cond ((eq method :get) (json-response representation))
             ((member method '(:put :patch))
              (let* ((input (workload-read-subresource-input representation kind schema method))
@@ -141,3 +149,17 @@
                                "put" (operation (concatenate 'string "replace" subresource) subschema)
                                "patch" (operation (concatenate 'string "patch" subresource) subschema))))))))
   paths)
+
+(defun batch-api-group ()
+  "Describe the implemented batch/v1 API group."
+  (core-object "apiVersion" "v1" "kind" "APIGroup" "name" "batch"
+               "versions" (vector (core-object "groupVersion" "batch/v1" "version" "v1"))
+               "preferredVersion" (core-object "groupVersion" "batch/v1" "version" "v1")))
+
+(defun batch-resources-response ()
+  "Advertise Jobs and their separately authorized status subresource."
+  (json-response
+   (core-object "apiVersion" "v1" "kind" "APIResourceList" "groupVersion" "batch/v1" "resources"
+                (concatenate 'vector (stored-resource-discovery "batch/v1")
+                             (vector (core-object "name" "jobs/status" "namespaced" t "kind" "Job"
+                                                  "verbs" #("get" "patch" "update")))))))
