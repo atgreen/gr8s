@@ -99,6 +99,7 @@
         (is (null (lifecycle-cri-fixture-infos fixture)))
         (let ((actual (runtime-observe runtime (pod-uid pod))))
           (is (equal "Failed" (gr8s::runtime-pod-phase actual)))
+          (is (equal "10.88.0.2" (gr8s::runtime-pod-pod-ip actual)))
           (let ((statuses (gethash "containerStatuses" (gr8s::runtime-pod-status actual))))
             (is (= 2 (length statuses)))
             (loop for status across statuses
