@@ -91,6 +91,41 @@
       (reconcile-pod reconciler "default" "hello")
       (is (= 2 (fake-runtime-ensure-count runtime))))))
 
+(test restart-policy-distinguishes-success-failure-and-running-containers
+  (dolist (scenario '(("Always" "Failed" 2) ("Always" "Succeeded" 2)
+                      ("Always" "Running" 1) ("OnFailure" "Failed" 2)
+                      ("OnFailure" "Succeeded" 1) ("Never" "Failed" 1)
+                      ("Never" "Succeeded" 1)))
+    (destructuring-bind (policy phase count) scenario
+      (with-temporary-store (store path)
+        (let* ((object (com.inuoe.jzon:parse *valid-pod-json*))
+               (runtime (make-fake-runtime))
+               (reconciler (make-reconciler store runtime)))
+          (setf (gethash "restartPolicy" (gethash "spec" object)) policy)
+          (let ((pod (create-pod store (parse-pod object))))
+            (reconcile-pod reconciler "default" "hello")
+            (setf (runtime-pod-phase (runtime-observe runtime (pod-uid pod))) phase)
+            (reconcile-pod reconciler "default" "hello")
+            (is (= count (fake-runtime-ensure-count runtime)) "~A after ~A" policy phase)))))))
+
+(defstruct (pending-create-runtime (:include gr8s::fake-runtime)
+                                   (:constructor make-pending-create-runtime ()))
+  "Model an asynchronous backend whose accepted first creation is still Pending.")
+
+(defmethod gr8s::runtime-ensure :around ((runtime pending-create-runtime) pod)
+  "Return Pending after recording the real fake-backend creation count."
+  (let ((observed (call-next-method)))
+    (setf (runtime-pod-phase observed) "Pending")
+    observed))
+
+(test pending-initial-creation-is-not-immediately-created-again
+  (with-temporary-store (store path)
+    (create-pod store (parse-pod *valid-pod-json*))
+    (let* ((runtime (make-pending-create-runtime))
+           (status (reconcile-pod (make-reconciler store runtime) "default" "hello")))
+      (is (equal "Pending" (gethash "phase" status)))
+      (is (= 1 (fake-runtime-ensure-count runtime))))))
+
 (test log-reads-are-serialized-with-reconciliation
   (let* ((runtime (make-fake-runtime))
          (reconciler (make-reconciler nil runtime))
