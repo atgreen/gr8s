@@ -285,7 +285,7 @@
 
 (defun cri-create-container
     (socket-path sandbox-id sandbox-config
-     &key name image command args env uid mounts security-context working-directory
+     &key name image command args env uid mounts security-context resources working-directory
           (attempt 0) log-path (timeout 120))
   "Create a container in SANDBOX-ID and return its runtime ID."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
@@ -309,8 +309,9 @@
                 :args args
                 :working-dir (or working-directory "")
                 :mounts mounts
-                :linux (when security-context
-                         (make-instance 'gr8s.cri.v1::linux-container-config :security-context security-context))
+                :linux (when (or security-context resources)
+                         (make-instance 'gr8s.cri.v1::linux-container-config
+                                        :security-context security-context :resources resources))
                 :envs (loop for (key . value) in env
                             collect (make-instance 'gr8s.cri.v1::key-value
                                                    :key key :value value))
