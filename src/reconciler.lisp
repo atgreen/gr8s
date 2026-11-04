@@ -49,10 +49,13 @@
       status)))
 
 (defun converge-deleting-pod (reconciler pod)
+  (when (or (pod-finalizers-present-p pod) (pod-finalization-state (reconciler-store reconciler) pod))
+    (return-from converge-deleting-pod (converge-finalized-pod-deletion reconciler pod)))
   (if (runtime-delete-pod (reconciler-runtime reconciler) pod)
       (progn
+        (runtime-forget-pod-finalization (reconciler-runtime reconciler) (pod-uid pod))
         (remove-pod (reconciler-store reconciler)
-                    (pod-namespace pod) (pod-name pod))
+                    (pod-namespace pod) (pod-name pod) :uid (pod-uid pod))
         (pod-status "Succeeded" :reason "Deleted"))
       (let* ((runtime (reconciler-runtime reconciler))
              (observed (handler-case (runtime-observe runtime (pod-uid pod))

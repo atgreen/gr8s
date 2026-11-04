@@ -382,13 +382,15 @@
   "Stop a container while retaining its real exit status and attempt metadata."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
-         (multiple-value-bind (response status)
+         (progn
+           (register-runtime-deletion-cancel (lambda () (ag-grpc:channel-close channel)))
+           (multiple-value-bind (response status)
              (gr8s.cri.v1::runtime-service-stop-container
               (gr8s.cri.v1::make-runtime-service-stub channel)
               (make-instance 'gr8s.cri.v1::stop-container-request :container-id container-id :timeout grace-period)
               :timeout timeout)
            (declare (ignore response))
-           (ensure-cri-deletion-status "StopContainer" status))
+           (ensure-cri-deletion-status "StopContainer" status)))
       (ag-grpc:channel-close channel))))
 
 (defun cri-delete-container (socket-path container-id &key (grace-period 0)

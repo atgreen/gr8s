@@ -253,9 +253,10 @@
     (reject-unsupported-fields
      metadata '("name" "generateName" "namespace" "labels" "annotations" "uid"
                 "resourceVersion" "creationTimestamp" "deletionTimestamp"
-                "deletionGracePeriodSeconds" "generation" "ownerReferences")
+                "deletionGracePeriodSeconds" "generation" "ownerReferences" "finalizers")
      "metadata")
     (validate-owner-references metadata)
+    (validate-pod-finalizers metadata)
     (reject-unsupported-fields
      spec '("containers" "restartPolicy" "dnsPolicy" "nodeName" "volumes"
             "securityContext" "serviceAccountName" "automountServiceAccountToken"

@@ -176,7 +176,9 @@
 
 (defmethod runtime-terminate-pod ((runtime containerd-runtime) pod deadline)
   "Carry out one cancellable native Pod shutdown job."
-  (containerd-delete-uid runtime (pod-uid pod) deadline))
+  (when (pod-finalizers-present-p pod)
+    (capture-containerd-finalized-pod runtime pod deadline))
+  (containerd-delete-uid runtime (pod-uid pod) deadline :preserve-lifecycle (pod-finalizers-present-p pod)))
 
 (defmethod runtime-delete-pod ((runtime containerd-runtime) pod)
   "Poll the native Pod shutdown job without holding reconciliation until exit."
