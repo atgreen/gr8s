@@ -320,3 +320,17 @@
             (is-false (gethash "gr8sRuntimeEvents" (gethash "status" finalization))))
           (is-false (gethash "gr8sRuntimeEvents" (gr8s::pod-observed-status store deleting)))
           (is-false (gethash "gr8sRuntimeEvents" status)))))))
+
+(test finalized-deletion-tolerates-a-pod-removed-concurrently
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let* ((reconciler (make-reconciler store (make-fake-runtime)))
+           (created (create-pod store (finalized-test-pod)))
+           (stale (mark-pod-deleting store "default" "hello" :grace-period 0))
+           (object (gr8s::copy-core-object (pod-to-object stale))))
+      (setf (gethash "finalizers" (gethash "metadata" object)) #())
+      (update-pod store (parse-pod object) (pod-resource-version stale))
+      (gr8s::remove-pod store "default" "hello" :uid (pod-uid created))
+      ;; A snapshot taken before the removal still carries the finalizer.
+      (is (equal "Terminating"
+                 (gethash "reason" (gr8s::converge-finalized-pod-deletion reconciler stale)))))))
