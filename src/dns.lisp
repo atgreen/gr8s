@@ -1,3 +1,10 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Serve authoritative Kubernetes DNS replies and bounded UDP/TCP forwarding;
+;;;; upstream timeout conditions are contained so a resolver outage cannot stop the node.
+
 (in-package #:gr8s)
 
 (defconstant +dns-response+ #x8000)
@@ -25,9 +32,11 @@
 (defconstant +linux-ip-freebind+ 15)
 
 (defun canonical-dns-name (name)
+  "Normalize a DNS name for case-insensitive comparisons."
   (string-downcase (string-right-trim "." name)))
 
 (defun dns-name-in-zone-p (name zone)
+  "Recognize a zone apex or one of its descendant names."
   (let ((name (canonical-dns-name name))
         (zone (canonical-dns-name zone)))
     (or (string= name zone)
@@ -36,12 +45,14 @@
              (string= zone name :start2 (- (length name) (length zone)))))))
 
 (defun authoritative-dns-flags (query-flags &optional (rcode 0))
+  "Build authoritative response flags while preserving requested recursion."
   (logior +dns-response+
           +dns-authoritative+
           (logand query-flags +dns-recursion-desired+)
           rcode))
 
 (defun dns-authoritative-response (query &key answers (rcode 0))
+  "Encode an authoritative response with the original question and identifier."
   (0conf:encode-message
    (0conf:make-dns-message
     :id (0conf:dns-message-id query)
@@ -51,6 +62,7 @@
     :answers answers)))
 
 (defun kubernetes-service-answer (question)
+  "Return the reserved API Service A record for an A question."
   (when (= (0conf:question-qtype question) 0conf:+type-a+)
     (list (make-instance '0conf:a-record
                          :name (0conf:question-name question)
@@ -58,6 +70,7 @@
                          :ttl 30))))
 
 (defun answer-dns-query (packet forward)
+  "Answer cluster-authoritative names and forward queries outside the cluster zone."
   (let* ((query (0conf:decode-message packet))
          (questions (0conf:dns-message-questions query))
          (question (first questions)))
@@ -88,11 +101,13 @@
   (stop-requested nil))
 
 (defun dns-socket-address (address)
+  "Parse or retain a four-octet IPv4 socket address."
   (etypecase address
     (string (0conf:parse-ipv4 address))
     ((vector (unsigned-byte 8) 4) address)))
 
 (defun enable-ip-freebind (socket)
+  "Allow binding the node DNS address before its interface exists."
   #+linux
   (sb-alien:with-alien ((enabled sb-alien:int 1))
     (unless (zerop (%linux-setsockopt
@@ -106,6 +121,7 @@
   socket)
 
 (defun make-bound-dns-socket (type protocol address port)
+  "Create and bind an owned DNS socket, closing it if initialization fails."
   (let ((socket (make-instance 'sb-bsd-sockets:inet-socket
                                :type type :protocol protocol)))
     (handler-case
@@ -120,6 +136,7 @@
         (error condition)))))
 
 (defun receive-dns-datagram (socket)
+  "Read one complete UDP DNS packet and its sender address."
   (let ((buffer (make-array #xffff :element-type '(unsigned-byte 8))))
     (multiple-value-bind (ignored size host port)
         (sb-bsd-sockets:socket-receive socket buffer (length buffer))
@@ -127,14 +144,17 @@
       (values (subseq buffer 0 size) host port))))
 
 (defun send-dns-datagram (socket packet host port)
+  "Send one DNS response packet to its requesting peer."
   (sb-bsd-sockets:socket-send socket packet (length packet)
                               :address (list host port)))
 
 (defun dns-response-code (packet)
+  "Extract a DNS packet response code."
   (logand #x000f
           (0conf:dns-message-flags (0conf:decode-message packet))))
 
 (defun dns-servfail-response (packet)
+  "Encode SERVFAIL for a valid query whose upstream failed."
   (let ((query (0conf:decode-message packet)))
     (0conf:encode-message
      (0conf:make-dns-message
@@ -146,6 +166,7 @@
       :questions (0conf:dns-message-questions query)))))
 
 (defun call-dns-handler (server packet protocol)
+  "Resolve one query and convert ordinary forwarding failures into SERVFAIL."
   (handler-case
       (answer-dns-query
        packet
@@ -162,6 +183,7 @@
         (error () nil)))))
 
 (defun dns-udp-loop (server)
+  "Receive and answer UDP queries until the DNS server stops."
   (loop until (dns-server-stop-requested server)
         do (when (sb-sys:wait-until-fd-usable
                   (sb-bsd-sockets:socket-file-descriptor
@@ -180,6 +202,7 @@
                  (format *error-output* "gr8s DNS UDP error: ~A~%" condition)))))))
 
 (defun read-dns-frame (stream)
+  "Read a complete length-prefixed DNS message from a TCP stream."
   (let ((high (read-byte stream nil nil)))
     (when high
       (let* ((low (read-byte stream))
@@ -190,6 +213,7 @@
         packet))))
 
 (defun write-dns-frame (stream packet)
+  "Write a length-prefixed DNS message to a TCP stream."
   (let ((length (length packet)))
     (when (> length #xffff)
       (error "DNS-over-TCP frame exceeds 65535 octets"))
@@ -199,6 +223,7 @@
     (finish-output stream)))
 
 (defun serve-dns-tcp-client (server socket)
+  "Serve framed DNS queries on one accepted TCP client and close its socket."
   (let ((stream
           (sb-bsd-sockets:socket-make-stream
            socket :input t :output t
@@ -212,6 +237,7 @@
       (ignore-errors (sb-bsd-sockets:socket-close socket)))))
 
 (defun dns-tcp-loop (server)
+  "Accept DNS TCP clients and dispatch their connection handlers."
   (loop until (dns-server-stop-requested server)
         do (when (sb-sys:wait-until-fd-usable
                   (sb-bsd-sockets:socket-file-descriptor
@@ -229,6 +255,7 @@
                  (format *error-output* "gr8s DNS TCP error: ~A~%" condition)))))))
 
 (defun parse-resolv-conf-upstreams (stream)
+  "Read usable IPv4 nameserver entries from a resolv.conf stream."
   (let ((upstreams nil))
     (loop for raw-line = (read-line stream nil nil)
           while raw-line
@@ -248,19 +275,26 @@
     (nreverse upstreams)))
 
 (defun host-dns-upstreams (&optional (path "/etc/resolv.conf"))
+  "Load the host resolver configuration for external DNS forwarding."
   (with-open-file (stream path :direction :input)
     (parse-resolv-conf-upstreams stream)))
 
 (defun try-dns-upstreams (upstreams operation)
+  "Try each upstream while containing network errors and both SBCL timeout conditions."
   (let ((last-error nil))
     (dolist (upstream upstreams)
       (handler-case
           (return-from try-dns-upstreams (funcall operation upstream))
+        (sb-ext:timeout (condition)
+          (setf last-error condition))
+        (sb-sys:deadline-timeout (condition)
+          (setf last-error condition))
         (error (condition)
           (setf last-error condition))))
     (error "all DNS upstreams failed~@[; last error: ~A~]" last-error)))
 
 (defun forward-dns-udp (packet upstreams timeout)
+  "Forward a DNS packet over UDP with a bounded receive timeout."
   (try-dns-upstreams
    upstreams
    (lambda (upstream)
@@ -280,6 +314,7 @@
          (sb-bsd-sockets:socket-close socket))))))
 
 (defun forward-dns-tcp (packet upstreams timeout)
+  "Forward a framed DNS packet over TCP with a bounded operation timeout."
   (try-dns-upstreams
    upstreams
    (lambda (upstream)
@@ -306,6 +341,7 @@
           (timeout 2.0)
           (udp-forwarder #'forward-dns-udp)
           (tcp-forwarder #'forward-dns-tcp))
+  "Bind owned UDP and TCP listeners and start the DNS worker threads."
   (let* ((udp-socket
            (make-bound-dns-socket :datagram :udp address port))
          (selected-port (nth-value 1
@@ -337,10 +373,12 @@
         (error condition)))))
 
 (defun join-dns-thread (thread)
+  "Join a DNS worker thread when one was started."
   (when thread
     (bt:join-thread thread)))
 
 (defun stop-dns-server (server)
+  "Stop and join DNS workers before releasing their listening sockets."
   (setf (dns-server-stop-requested server) t)
   (join-dns-thread (dns-server-udp-thread server))
   (join-dns-thread (dns-server-tcp-thread server))
@@ -357,6 +395,7 @@
                 (address +dns-pod-server-address+)
                 (port 53)
                 (upstreams (host-dns-upstreams)))
+  "Run a body with an owned DNS service and always stop it afterward."
   (let ((server (funcall starter :address address :port port
                          :upstreams upstreams)))
     (unwind-protect

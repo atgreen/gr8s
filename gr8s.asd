@@ -23,6 +23,7 @@
                (:static-file "schema/workloads-v1.json")
 
                (:static-file "schema/storage-v1.json")
+               (:static-file "schema/endpointslices-v1.json")
                (:module "src"
                 :serial t
                 :components ((:file "package")
@@ -51,6 +52,7 @@
                              (:file "workload-resources")
 
                              (:file "storage-api")
+                             (:file "endpointslice-api")
                              (:file "storage-controller")
                              (:file "events")
                              (:file "crd-schema")
@@ -91,6 +93,8 @@
                              (:file "server")
                              (:file "in-cluster-api")
                              (:file "services")
+                             (:file "endpointslice-controller")
+                             (:file "endpointslice-http")
                              (:file "garbage-collection")
                              (:file "crd-garbage-collection")
                              (:file "workload-controller")
@@ -148,6 +152,7 @@
                              (:file "node-log-delivery-test")
                              (:file "garbage-collection-test")
                              (:file "services-test")
+                             (:file "endpointslices-test")
                              (:file "telemetry-test")
                              (:file "workloads-test"))))
   :perform (test-op (operation component)
