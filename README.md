@@ -432,6 +432,10 @@ leases survive a control-plane restart, and reconnecting agents receive snapshot
 revisions beyond their saved acknowledgements. Probes, init containers and
 readiness gates remain unsupported.
 
+The [readiness validation record](docs/pod-readiness-validation-2026-11-03.json)
+captures seven passing native scenarios and the official graceful-generation
+case changing from failure to success, including verified archives and cleanup.
+
 PodTemplates support namespaced CRUD and cluster-wide lists, JSON and Kubernetes
 protobuf requests, selectors, dry-run, optimistic updates, strategic merge and
 JSON patches, delete-collection, and JSON watch streams. Templates use the pinned

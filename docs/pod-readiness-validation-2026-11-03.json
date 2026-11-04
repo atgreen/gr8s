@@ -177,5 +177,90 @@
     "The steady Pod retained its container identity and Ready transition time; new terminal Pods and Service workloads ran after restart.",
     "The Service test verified ClusterIP withdrawal while direct Pod IP HTTP remained operational after the sidecar exited.",
     "Init containers, probes, readiness gates and Pod/Node watches remain unimplemented."
-  ]
+  ],
+  "upstreamFocusedValidation": {
+    "baseline": {
+      "guestRunDirectory": "/var/tmp/gr8s-podtemplates.ayir9gsd",
+      "localArtifacts": "build/conformance/2026-11-03-pod-ready-baseline-ayir9gsd",
+      "nativeSHA256": "2d74e4cfab0f945a1179c59f323ba211878f18cd141d2674818b82e397378ef3",
+      "focus": "Pods Extended.*custom-set generation on new pods and graceful delete",
+      "command": [
+        "/root/sonobuoy",
+        "run",
+        "--kubeconfig",
+        "/var/tmp/gr8s-podtemplates.ayir9gsd/kubeconfig",
+        "--dns-pod-labels=",
+        "--plugin=e2e",
+        "--e2e-focus=Pods Extended.*custom-set generation on new pods and graceful delete",
+        "--e2e-skip="
+      ],
+      "selected": 1,
+      "executed": 1,
+      "passed": 0,
+      "failed": 1,
+      "suiteStarts": 1,
+      "suiteHookEntries": 7,
+      "upstreamCases": [
+        {
+          "name": "[It] [sig-node] Pods Extended (pod generation) Pod Generation custom-set generation on new pods and graceful delete [Conformance]",
+          "seconds": "306.592465711",
+          "passed": false
+        }
+      ],
+      "cleanup": {
+        "nativeExitCode": 0,
+        "ownedShimsRemaining": [],
+        "cleanupError": null
+      },
+      "artifactSHA256": {
+        "e2e.log": "d10b569bd00fc642f9ebdcd361b85c3e680756f786f86e007546dfef07f7a5c5",
+        "gr8s.log": "3d683a63d0c4dc387617cc319bda993d487d9d818ec06b9c58a0bcf25cb9c271",
+        "report.json": "6195aaa4e7639867f66ef9ff3dff996562eb1d02822ca3137285d6e47afce553",
+        "sonobuoy-results.tar.gz": "48a050629b9e378094f3abe3b225dd07ac0ce066b346180fca1a3a1dbd18818d",
+        "sonobuoy-results.txt": "f8881e37b919573c56718f3a8c9ba341c8220b5269dea0dd146304e79a2d36ec"
+      }
+    },
+    "after": {
+      "guestRunDirectory": "/var/tmp/gr8s-podtemplates.yargj_i5",
+      "localArtifacts": "build/conformance/2026-11-03-pod-ready-official-yargj_i5",
+      "nativeSHA256": "699ad5ed67a0c1fccba87d147705585d6214bc3d05b813cf81053128a058405e",
+      "focus": "Pods Extended.*custom-set generation on new pods and graceful delete",
+      "command": [
+        "/root/sonobuoy",
+        "run",
+        "--kubeconfig",
+        "/var/tmp/gr8s-podtemplates.yargj_i5/kubeconfig",
+        "--dns-pod-labels=",
+        "--plugin=e2e",
+        "--e2e-focus=Pods Extended.*custom-set generation on new pods and graceful delete",
+        "--e2e-skip="
+      ],
+      "selected": 1,
+      "executed": 1,
+      "passed": 1,
+      "failed": 0,
+      "suiteStarts": 1,
+      "suiteHookEntries": 7,
+      "upstreamCases": [
+        {
+          "name": "[It] [sig-node] Pods Extended (pod generation) Pod Generation custom-set generation on new pods and graceful delete [Conformance]",
+          "seconds": "214.44225719",
+          "passed": true
+        }
+      ],
+      "cleanup": {
+        "nativeExitCode": 0,
+        "ownedShimsRemaining": [],
+        "cleanupError": null
+      },
+      "artifactSHA256": {
+        "e2e.log": "9af52cbb7be4c1bf63e2a7c64b0bbbb25654c358ccab6e81960adf99e3241857",
+        "gr8s.log": "dfbc08ff78f1e7a8d234da7ecccda6da20b5b4fdcb7ed4f0d66271319fefead5",
+        "report.json": "90de85f7d6a72f764340e0db2a49ec2648663ae64f1154cc8257f616692b99c8",
+        "sonobuoy-results.tar.gz": "90a1a5d255c6d0a6ab348904531c9ffcb2cdd3191913f25839842da7298e6188",
+        "sonobuoy-results.txt": "3a62b7939464a20c27384f0c1e976d157e8de1bbf25e4570c28f87dc414a58e1"
+      }
+    },
+    "interpretation": "The exact same unmodified official graceful-generation spec failed before conditions and passed after the readiness, lease and reconnect changes. This single focused case does not establish full conformance."
+  }
 }
