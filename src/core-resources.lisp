@@ -333,6 +333,7 @@
     (expire-core-events-unlocked store)
     (let* ((input (copy-core-object input))
            (metadata (require-object (gethash "metadata" input) "metadata")))
+      (when (workload-resource-p resource) (assign-generated-workload-name-unlocked store resource input namespace))
       (when (and (not (gethash "name" metadata)) (gethash "generateName" metadata))
         (let ((prefix (gethash "generateName" metadata)))
           (unless (and (stringp prefix) (<= 1 (length prefix) 247)

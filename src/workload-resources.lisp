@@ -21,6 +21,19 @@
   "Compare JSON maps independent of key order while retaining case-sensitive scalar values."
   (string= (canonical-workload-json left) (canonical-workload-json right)))
 
+(defun assign-generated-workload-name-unlocked (store resource input namespace)
+  "Allocate a bounded Kubernetes generated name within the existing core transaction."
+  (let* ((metadata (require-object (gethash "metadata" input) "metadata"))
+         (prefix (pod-generate-name-prefix metadata)))
+    (multiple-value-bind (name present) (gethash "name" metadata)
+      (when (and present (not (or (stringp name) (eq name 'null))))
+        (core-resource-error 422 "Invalid" "metadata.name must be a string"))
+      (when (and (member name '(nil null "") :test #'equal) (plusp (length prefix)))
+        (loop repeat 8 for candidate = (funcall *pod-name-generator* prefix)
+              unless (gethash (core-resource-key resource namespace candidate) (pod-store-resources store))
+                do (setf (gethash "name" metadata) candidate) (return)
+              finally (core-resource-error 409 "AlreadyExists" "Could not allocate a unique workload name"))))))
+
 (defun workload-int (value context &optional (default 0))
   "Validate a nonnegative int32, treating JSON null as DEFAULT."
   (when (member value '(nil null)) (setf value default))
@@ -82,11 +95,11 @@
                                           (coerce (gethash "values" expression) 'list))))))))
 
 (defun workload-rollout-count (value replicas &key round-up)
-  "Resolve a nonnegative integer or 0..100 percent rollout limit."
+  "Resolve a nonnegative integer or percentage rollout limit."
   (cond ((typep value '(integer 0 2147483647)) value)
         ((and (stringp value) (> (length value) 1) (char= #\% (char value (1- (length value))))
               (every #'digit-char-p (subseq value 0 (1- (length value))))
-              (<= 0 (parse-integer value :end (1- (length value))) 100))
+              (<= 0 (parse-integer value :end (1- (length value))) 2147483647))
          (funcall (if round-up #'ceiling #'floor) (* replicas (parse-integer value :end (1- (length value)))) 100))
         (t (core-resource-error 422 "Invalid" "Rollout limit must be a nonnegative integer or percentage"))))
 
@@ -100,6 +113,7 @@
     (unless (and (equal "apps/v1" (gethash "apiVersion" object "apps/v1")) (equal kind (gethash "kind" object kind)))
       (core-resource-error 400 "BadRequest" "Expected apps/v1 ~A" kind))
     (validate-core-metadata metadata namespace name)
+    (pod-generate-name-prefix metadata)
     (setf (gethash "namespace" metadata) namespace (gethash "kind" object) kind (gethash "apiVersion" object) "apps/v1")
     (remhash "status" object)
     (validate-template-shape object (template-schema (concatenate 'string "io.k8s.api.apps.v1." kind)) kind)
@@ -151,6 +165,9 @@
             (dolist (key '("maxUnavailable" "maxSurge"))
               (when (member (gethash key rolling) '(nil null)) (setf (gethash key rolling) "25%"))
               (workload-rollout-count (gethash key rolling) 100))
+            (when (and (stringp (gethash "maxUnavailable" rolling))
+                       (> (workload-rollout-count (gethash "maxUnavailable" rolling) 100) 100))
+              (core-resource-error 422 "Invalid" "maxUnavailable must not exceed 100%"))
             (when (and (zerop (workload-rollout-count (gethash "maxUnavailable" rolling) 100))
                        (zerop (workload-rollout-count (gethash "maxSurge" rolling) 100)))
               (core-resource-error 422 "Invalid" "maxUnavailable and maxSurge cannot both be zero"))

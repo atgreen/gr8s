@@ -312,6 +312,17 @@
          (status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
     (json-response (pod-response-object pod status) 201)))
 
+(defun pod-list-observed-object (store reconciler snapshot)
+  "Skip vanished snapshot identities and never attach a replacement Pod's status to an old UID."
+  (handler-case
+      (let ((status (reconcile-pod reconciler (pod-namespace snapshot) (pod-name snapshot))))
+        (with-store-lock (store)
+          (let ((current (gethash (pod-key (pod-namespace snapshot) (pod-name snapshot)) (pod-store-pods store))))
+            (when (and current (equal (pod-uid snapshot) (pod-uid current)))
+              (pod-response-object current status)))))
+    (kubernetes-error (condition)
+      (unless (= 404 (kubernetes-error-status-code condition)) (error condition)))))
+
 (defun list-pods-response (store reconciler &optional (namespace "default"))
   (let ((labels (core-selector-predicate (hunchentoot:parameter "labelSelector")))
         (fields (core-selector-predicate (hunchentoot:parameter "fieldSelector") :fields t
@@ -323,9 +334,9 @@
                   "metadata" (json-object "resourceVersion" "0")
                   "items" (coerce
                            (loop for pod in (list-pods store namespace)
-                                 when (funcall labels (pod-to-object pod))
-                                   append (let ((object (pod-response-object pod (reconcile-pod reconciler (pod-namespace pod) (pod-name pod)))))
-                                            (when (funcall fields object) (list object)))) 'vector)))))
+                                 for object = (pod-list-observed-object store reconciler pod)
+                                 when (and object (funcall labels object) (funcall fields object))
+                                   collect object) 'vector)))))
 
 (defun get-pod-response (store reconciler name &optional (namespace "default"))
   (let ((pod (get-pod store namespace name)))

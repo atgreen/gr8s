@@ -199,6 +199,9 @@
   (let ((result nil) (metadata (workload-metadata owner)) (selector (gethash "selector" (gethash "spec" owner))))
     (dolist (set (list-core-resources store "replicasets" (gethash "namespace" metadata)))
       (cond ((gethash "deletionTimestamp" (workload-metadata set)) nil)
+            ((and claim (workload-owned-p set owner)
+                  (not (workload-selector-matches-p selector (gethash "labels" (workload-metadata set)))))
+             (detach-workload-dependent store "replicasets" owner set))
             ((workload-owned-p set owner) (push set result))
             ((and claim (null (workload-controller-reference set))
                   (workload-selector-matches-p selector (gethash "labels" (workload-metadata set))))
@@ -228,8 +231,10 @@
          (revision (1+ (reduce #'max sets :key #'deployment-revision :initial-value 0)))
          (dmeta (workload-metadata deployment)) (spec (gethash "spec" deployment)))
     (unless current
-      (let* ((hash (string-downcase (subseq (octets-to-hex (ironclad:digest-sequence :sha256
-                               (trivial-utf-8:string-to-utf-8-bytes (canonical-workload-json template)))) 0 10)))
+      (let* ((collision (gethash "collisionCount" (gethash "status" deployment) 0))
+             (fingerprint (if (zerop collision) template (core-object "template" template "collisionCount" collision)))
+             (hash (string-downcase (subseq (octets-to-hex (ironclad:digest-sequence :sha256
+                               (trivial-utf-8:string-to-utf-8-bytes (canonical-workload-json fingerprint)))) 0 10)))
              (name (format nil "~A-~A" (subseq (gethash "name" dmeta) 0 (min 242 (length (gethash "name" dmeta)))) hash))
              (selector (copy-core-object (gethash "selector" spec)))
              (labels (gethash "labels" (gethash "metadata" template)))
@@ -248,7 +253,14 @@
               (let* ((object (normalize-workload-resource "replicasets" input (gethash "namespace" dmeta) nil))
                      (key (core-resource-key "replicasets" (gethash "namespace" dmeta) name))
                      (resources (copy-core-resource-index store)) (version (1+ (pod-store-resource-revision store))))
-                (when (gethash key resources) (core-resource-error 409 "Conflict" "ReplicaSet template hash name collision"))
+                (when (gethash key resources)
+                  (let* ((live (workload-current-unlocked store "deployments" deployment :generation t))
+                         (copy (copy-core-object live)) (status (gethash "status" copy (core-object))))
+                    (setf (gethash "collisionCount" status) (1+ collision) (gethash "status" copy) status)
+                    (prepare-core-resource-metadata copy live version)
+                    (setf (gethash (core-resource-key "deployments" (gethash "namespace" dmeta) (gethash "name" dmeta)) resources) copy)
+                    (commit-core-resources store resources version))
+                  (core-resource-error 409 "Conflict" "ReplicaSet template hash name collision; next pass uses a new collision count"))
                 (prepare-core-resource-metadata object nil version)
                 (prepare-workload-write "replicasets" object nil)
                 (setf (gethash key resources) object)
@@ -259,11 +271,12 @@
         (setf current (update-owned-workload store "replicasets" current
                         (lambda (object) (setf (gethash "minReadySeconds" (gethash "spec" object))
                                                (gethash "minReadySeconds" spec)) object))))
-      (when (< (deployment-revision current) (1- revision))
+      (when (< (deployment-revision current) (max 1 (1- revision)))
         (setf current (update-owned-workload store "replicasets" current
                         (lambda (object)
-                          (setf (gethash "deployment.kubernetes.io/revision"
-                                         (gethash "annotations" (workload-metadata object) (core-object))) (write-to-string revision)) object))))
+                          (let ((annotations (gethash "annotations" (workload-metadata object) (core-object))))
+                            (setf (gethash "deployment.kubernetes.io/revision" annotations) (write-to-string revision)
+                                  (gethash "annotations" (workload-metadata object)) annotations)) object))))
       (unless (equal (write-to-string (deployment-revision current))
                      (gethash "deployment.kubernetes.io/revision" (gethash "annotations" dmeta (core-object))))
         (update-owned-workload store "deployments" deployment
@@ -294,6 +307,56 @@
                                          '("Succeeded" "Failed") :test #'equal)))
                 (replica-set-pods reconciler set))) sets))
 
+(defun deployment-scaling-event-p (sets desired)
+  "Detect a desired-size change using the last durable ReplicaSet scaling annotations."
+  (some (lambda (set)
+          (let ((before (ignore-errors
+                          (parse-integer (gethash "deployment.kubernetes.io/desired-replicas"
+                                                  (gethash "annotations" (workload-metadata set))) :junk-allowed nil))))
+            (and (plusp (gethash "replicas" (gethash "spec" set))) before (/= desired before))))
+        sets))
+
+(defun deployment-proportional-scale (store deployment current sets desired surge)
+  "Distribute a scaling event across active revisions using their pre-scale maximum annotation."
+  (let* ((active (remove-if-not (lambda (set) (plusp (gethash "replicas" (gethash "spec" set)))) sets))
+         (maximum (+ desired surge)))
+    (cond
+      ((<= (length active) 1)
+       (deployment-scale-set store (or (first active) current) desired desired maximum))
+      ((and (= desired (gethash "replicas" (gethash "spec" current)))
+            (>= (gethash "availableReplicas" (gethash "status" current) 0) desired))
+       (dolist (set sets)
+         (deployment-scale-set store set (if (equal (gethash "uid" (workload-metadata current))
+                                                    (gethash "uid" (workload-metadata set))) desired 0) desired maximum)))
+      (t
+       (let* ((total (reduce #'+ active :key (lambda (set) (gethash "replicas" (gethash "spec" set))) :initial-value 0))
+              (allowed (if (zerop desired) 0 maximum)) (delta (- allowed total)) (allocated 0)
+              (sizes (make-hash-table :test #'equal)))
+         (setf active
+               (stable-sort active
+                 (lambda (left right)
+                   (let ((l (gethash "replicas" (gethash "spec" left))) (r (gethash "replicas" (gethash "spec" right))))
+                     (if (/= l r) (> l r)
+                         (if (minusp delta) (< (deployment-revision left) (deployment-revision right))
+                             (> (deployment-revision left) (deployment-revision right))))))))
+         (dolist (set active)
+           (let* ((count (gethash "replicas" (gethash "spec" set)))
+                  (before (or (ignore-errors (parse-integer (gethash "deployment.kubernetes.io/max-replicas"
+                                                                     (gethash "annotations" (workload-metadata set))) :junk-allowed nil)) 0))
+                  (denominator (if (plusp before) before (gethash "replicas" (gethash "status" deployment) 0)))
+                  (fraction (cond ((zerop desired) (- count))
+                                  ((plusp denominator) (- (floor (+ (* count maximum) (/ denominator 2)) denominator) count))
+                                  (t 0)))
+                  (portion (cond ((= delta allocated) 0)
+                                 ((plusp delta) (min fraction (- delta allocated)))
+                                 (t (max fraction (- delta allocated))))))
+             (setf (gethash (gethash "uid" (workload-metadata set)) sizes) (+ count portion))
+             (incf allocated portion)))
+         (let* ((first (first active)) (uid (gethash "uid" (workload-metadata first))))
+           (incf (gethash uid sizes) (- delta allocated)))
+         (dolist (set active)
+           (deployment-scale-set store set (max 0 (gethash (gethash "uid" (workload-metadata set)) sizes)) desired maximum)))))))
+
 (defun reconcile-deployment (reconciler deployment)
   "Drive bounded rolling/recreate rollout and publish observed aggregate status."
   (let* ((store (reconciler-store reconciler)) (spec (gethash "spec" deployment))
@@ -308,30 +371,29 @@
              (rolling (gethash "rollingUpdate" strategy (core-object)))
              (surge (if recreate 0 (workload-rollout-count (gethash "maxSurge" rolling) desired :round-up t)))
              (unavailable (if recreate 0 (min desired (workload-rollout-count (gethash "maxUnavailable" rolling) desired)))))
+        (when (and (not recreate) (plusp desired) (zerop surge) (zerop unavailable))
+          (setf unavailable 1))
         (cond
-          (paused
-           (let ((total (reduce #'+ sets :key (lambda (set) (gethash "replicas" (gethash "spec" set))) :initial-value 0)))
-             (if (< total desired)
-                 (deployment-scale-set store current (+ (gethash "replicas" (gethash "spec" current)) (- desired total)) desired desired)
-                 (loop for set in sets while (> total desired)
-                       for count = (gethash "replicas" (gethash "spec" set))
-                       for decrease = (min count (- total desired))
-                       do (deployment-scale-set store set (- count decrease) desired desired) (decf total decrease)))))
+          ((or paused (and (not recreate) (deployment-scaling-event-p sets desired)))
+           (deployment-proportional-scale store deployment current sets desired surge))
           (recreate
            (dolist (set old) (deployment-scale-set store set 0 desired desired))
            (unless (deployment-old-pods-exist-p reconciler old) (deployment-scale-set store current desired desired desired)))
           (t
            (let* ((old-total (reduce #'+ old :key (lambda (set) (gethash "replicas" (gethash "spec" set))) :initial-value 0))
                   (target (min desired (max 0 (- (+ desired surge) old-total)))))
-             (deployment-scale-set store current target desired (+ desired surge))
+             (setf current (deployment-scale-set store current target desired (+ desired surge)))
              (let* ((available (reduce #'+ sets :key (lambda (set) (gethash "availableReplicas" (gethash "status" set) 0)) :initial-value 0))
-                    (budget (max 0 (- available (- desired unavailable)))))
+                    (budget (max 0 (- available (- desired unavailable))))
+                    (maximum-down (max 0 (- (+ old-total target) (- desired unavailable)
+                                               (max 0 (- target (gethash "availableReplicas" (gethash "status" current) 0)))))))
                (dolist (set old)
                  (let* ((count (gethash "replicas" (gethash "spec" set)))
                         (ready (min count (gethash "availableReplicas" (gethash "status" set) 0)))
-                        (remove (min count (+ (- count ready) budget)))
+                        (remove (min count maximum-down (+ (- count ready) budget)))
                         (ready-removed (max 0 (- remove (- count ready)))))
                    (when (plusp remove) (deployment-scale-set store set (- count remove) desired (+ desired surge)))
+                   (decf maximum-down remove)
                    (decf budget ready-removed)))))))
         (deployment-publish-status reconciler deployment current unavailable paused)
         (deployment-clean-history reconciler deployment current)))
@@ -364,6 +426,8 @@
          (status (core-object "observedGeneration" (gethash "generation" (workload-metadata deployment))
                               "replicas" replicas "updatedReplicas" updated "readyReplicas" ready "availableReplicas" available
                               "unavailableReplicas" (max 0 (- desired available)))))
+    (when (nth-value 1 (gethash "collisionCount" prior))
+      (setf (gethash "collisionCount" status) (gethash "collisionCount" prior)))
     (let ((time (ignore-errors (pod-deletion-time (gethash "lastUpdateTime" progressing)))))
       (when (and (not paused) (not complete) time
                  (> (funcall *workload-clock*) (+ time (gethash "progressDeadlineSeconds" spec))))
