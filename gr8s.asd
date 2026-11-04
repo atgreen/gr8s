@@ -15,7 +15,7 @@
   :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cl-cancel"
                "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
                "pure-tls/acme" "drakma"
-               "sb-posix" "trivial-utf-8" "usocket" "whistler/loader")
+               "sb-posix" "slynk" "trivial-utf-8" "usocket" "whistler/loader")
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
                (:static-file "schema/crd-v1.json")
@@ -105,6 +105,7 @@
                              (:file "agent-runtime")
                              (:file "pod-pool")
                              (:file "pod-http-proxy")
+                             (:file "debug-server")
                              (:file "http")
                              (:file "core-resource-http")
                              (:file "storage-http")
@@ -175,6 +176,7 @@
                              (:file "durable-resource-watches-test")
                              (:file "bootstrap-resource-test")
                              (:file "pod-volumes-test")
+                             (:file "debug-server-test")
                              (:file "pod-subpaths-test")
                              (:file "container-resources-test")
                              (:file "pod-watch-test")

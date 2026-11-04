@@ -67,7 +67,12 @@ def main():
                         help="Run the entire upstream certified selection instead of the five focused specs")
     parser.add_argument("--focus", default=FOCUS, help="Upstream regex for a supplemental focused run")
     parser.add_argument("--expected-specs", type=int, default=5, help="Require this many executed specs in a focused run")
+    parser.add_argument("--debug-slynk-port", type=int, help="Expose the opt-in debug server to a focused diagnostic run")
+    parser.add_argument("--hold-on-failure", type=int, default=0, metavar="SECONDS",
+                        help="Keep a failed cluster running for debugging, until SECONDS pass or <run>/release exists")
     args = parser.parse_args()
+    if args.certified_conformance and (args.debug_slynk_port or args.hold_on_failure):
+        parser.error("A certified run must use the unmodified binary, without the debug server or a hold")
     if args.expected_specs < 1:
         parser.error("--expected-specs must be positive")
     if args.certified_conformance and (args.focus != FOCUS or args.expected_specs != 5):
@@ -80,10 +85,13 @@ def main():
     report = {"focus": None if args.certified_conformance else args.focus,
               "mode": "certified-conformance" if args.certified_conformance else "focused",
               "isCertificationResult": False, "nativeSHA256": hashlib.sha256(args.gr8s.read_bytes()).hexdigest(),
-              "stateDirectory": str(state), "reusedState": args.state_directory is not None}
+              "stateDirectory": str(state), "reusedState": args.state_directory is not None,
+              "debugServer": args.debug_slynk_port is not None}
     native_log = (root / "gr8s.log").open("w")
+    debug_arguments = ["--debug-slynk-port", str(args.debug_slynk_port)] if args.debug_slynk_port else []
     process = subprocess.Popen([str(args.gr8s), "serve", "--runtime", "containerd", "--state-directory", str(state),
-                                "--port", str(args.api_port), "--node-port", str(args.node_port), "--kubeconfig", str(root / "kubeconfig")],
+                                "--port", str(args.api_port), "--node-port", str(args.node_port), "--kubeconfig", str(root / "kubeconfig"),
+                                *debug_arguments],
                                stdout=native_log, stderr=subprocess.STDOUT)
 
     def request(path, method="GET"):
@@ -213,6 +221,12 @@ def main():
             raise RuntimeError("Upstream conformance cases did not all pass; inspect the official archive and logs")
     except Exception as error:
         report["error"] = str(error)
+        if args.hold_on_failure:
+            print(json.dumps({"holding": str(root), "state": str(state), "error": str(error),
+                              "seconds": args.hold_on_failure}), flush=True)
+            deadline = time.monotonic() + args.hold_on_failure
+            while time.monotonic() < deadline and not (root / "release").exists():
+                time.sleep(1)
     finally:
         try:
             if process.poll() is None:
