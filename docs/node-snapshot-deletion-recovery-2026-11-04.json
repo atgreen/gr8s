@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "title": "Durable Pod withdrawal and bounded snapshot recovery",
+  "isCertificationResult": false,
+  "copyright": "2026 Anthony Green",
+  "originalUpstreamRun": {
+    "directory": "/var/tmp/gr8s-podtemplates.33y_tdhg",
+    "sourceCommit": "fe6e763",
+    "nativeSHA256": "2b2cba63f454cd5ebee7461cea0565d1c337b32257141b74f85133a3e0f76b37",
+    "officialCasesPassed": 2,
+    "officialCasesFailed": 0,
+    "cleanupFailed": true,
+    "ownedShimsRemaining": 5,
+    "reportSHA256": "76c1f457697a8023b78b74bcc231708be3bf7c14cf11536ab9e47dc322c4bd4a",
+    "interpretation": "DNS assertions passed; runtime cleanup failed. Recovery is separate evidence and adds no conformance pass."
+  },
+  "stoppedStateEvidence": {
+    "directory": "/var/tmp/gr8s-container-create-diagnostic.fekff7ni",
+    "archiveSHA256": "045248a8cf34c049e39268694645f7fcd255c9ca94e3c294fba377ab6173ce2c",
+    "verifiedFiles": 63,
+    "apiPods": 2,
+    "apiPodsDeleting": 2,
+    "privateDesiredPods": 5,
+    "privateDesiredPodsDeleting": 0,
+    "privateDNSUIDsAbsentFromControlPlane": [
+      "3D544096-9C4F-4852-B79D-8E3CACFB1B7F",
+      "30F11B57-35B7-4D2E-A74F-07C5FCAF832D",
+      "68EFD1C6-3BBD-47BB-A32C-D246706BF806"
+    ],
+    "lastAppliedRevision": 245,
+    "cause": "Full snapshots accumulated behind synchronous CRI work while stale assignments continued to create containers. The name-reserved error appeared at shutdown and is not alone evidence of the initial cleanup cause."
+  },
+  "implementation": {
+    "headCommit": "67fcba479a0d6bc50163cad52c0439bcb05205b9",
+    "mainBase": "615a257264818f64e9225e7b5908afc8ec6f6b5c",
+    "changes": [
+      "Bound pending complete snapshots to highest revision; preserve initial replay; never acknowledge skipped or interrupted applications.",
+      "Validate snapshot identity and all Pod assignments before urgent persistence. Persist exact-UID private withdrawal/deletion intent before cancellation or waiting for the reconciler lock.",
+      "Register cancellation only for running convergence; release ownership safely on normal completion, failure and asynchronous cancellation.",
+      "Drain finite physical urgent deletion before admitting retained creation; retry only the latest incomplete projection and restore the fence from durable state before offline background recovery."
+    ],
+    "finalizerIntegration": "Release finish-reconciler-urgent-deletion at actual runtime cleanup completion. Retaining an API Pod for user finalizers must not retain this creation fence."
+  },
+  "hostValidation": {
+    "focusedChecks": 81,
+    "focusedPassed": 81,
+    "focusedFailed": 0,
+    "fullChecks": 3270,
+    "fullPassed": 3265,
+    "fullSkipped": 5,
+    "fullFailed": 0,
+    "negativeControls": {
+      "unboundedOriginalQueue": {
+        "checks": 4,
+        "passed": 1,
+        "failed": 3
+      },
+      "cancellationWithoutPhysicalDrain": {
+        "checks": 10,
+        "passed": 7,
+        "failed": 3
+      }
+    },
+    "coverage": [
+      "Real gRPC durable acknowledgement and reconnect replay",
+      "Failed persistence does not publish a received revision or cancel as though durable",
+      "Unrelated retained slow creation yields to physical deletion and retries afterward",
+      "Withdrawn UID cannot be recreated by an obsolete application",
+      "Authoritative resourceVersion, timestamp and grace preserved",
+      "Name reuse cannot interrupt a new owner",
+      "Committed Created attempt recovered without duplicate sibling/container/sandbox",
+      "Offline reopen drains physical deletion before creation"
+    ]
+  },
+  "nativeRecovery": {
+    "directory": "/var/tmp/gr8s-dns-owned-recovery.83rec7yd",
+    "sourceCommit": "5d80949754501e1064f492f71c47357e47e8883f",
+    "sourceDescription": "Separate validation merge of recovery67fcba and DNS265b3ee, including main615a257",
+    "nativeSHA256": "3073432362e46da4caed23fbaad832a7ee64c85e228be3dcc207183f3513f479",
+    "cleanupDeadlineSeconds": 120,
+    "cleanupSeconds": 64.96,
+    "ownedShimsBefore": 5,
+    "ownedShimsAfter": 0,
+    "apiPodsAfter": 0,
+    "privateDesiredPodsAfter": 0,
+    "nativeExitCode": 0,
+    "forcedShutdown": false,
+    "independentProcessCheckOwnedNativeDaemonsAndShims": 0,
+    "originalReportUnchanged": true,
+    "reportSHA256": "d016c2752eee454e7447aedcaedd4e427a74b9e7cdf33907d7426c89ceaf965b",
+    "transientErrors": "Actual CRI deadline, already-removing and NotFound responses occurred during recovery; ordinary retries converged without extending the cleanup deadline."
+  },
+  "artifactSHA256": {
+    "build/validation/node-snapshot-deletion-recovery-2026-11-04/gr8s-create-recovery-focused.log": "722699d2d031cf5f339e2b4edd71bb26b81771d85ba4f4833fc3c3cae12ba955",
+    "build/validation/node-snapshot-deletion-recovery-2026-11-04/gr8s-create-recovery-full-final.log": "fddbc43fe7a7c991f2011e3492e4ff56ca8248ba133b9648c631199d3ea9b52e",
+    "build/validation/node-snapshot-deletion-recovery-2026-11-04/gr8s-create-recovery-queue-before.log": "8eda52d15172634151af65c18c8a8912d65104d77a45d5c198b6319f294bc684",
+    "build/validation/node-snapshot-deletion-recovery-2026-11-04/gr8s-create-recovery-drain-before.log": "b150011e87d1df53e1aa3b8087145368c4062ad89acc532947d1573b76e82de5",
+    "build/validation/node-snapshot-deletion-recovery-2026-11-04/gr8s-dns-cleanup-native-build.log": "50f6e3b483110fdb35fe8dc0a381ce1c89ed80c3dcaa260a4c20b8dd37478b1c",
+    "build/conformance/2026-11-04-service-dns-records-upstream-33y_tdhg/cleanup-83rec7yd/report.json": "d016c2752eee454e7447aedcaedd4e427a74b9e7cdf33907d7426c89ceaf965b",
+    "build/conformance/2026-11-04-service-dns-records-upstream-33y_tdhg/cleanup-83rec7yd/gr8s.log": "3b58f54a6d124feae317c3a76ab96deb3dbc62236ad66e587d96e7cb13293109",
+    "build/conformance/2026-11-04-service-dns-records-upstream-33y_tdhg/cleanup-83rec7yd/containerd.log": "d1b65abe4eb13f46fc5a6a8d99066e3919e8db2ab997c95d44c07ca09b338ca7",
+    "build/conformance/2026-11-04-service-dns-records-upstream-33y_tdhg/cleanup-83rec7yd/recovery.py": "0189605fca0fbcc0e17bc7fa41ab0e6435e0ab5b9faefe011ffe4343f6cd8238",
+    "build/conformance/2026-11-04-service-dns-records-upstream-33y_tdhg/stopped-state-fekff7ni/stopped-owned-state.tar.gz": "045248a8cf34c049e39268694645f7fcd255c9ca94e3c294fba377ab6173ce2c",
+    "build/conformance/2026-11-04-service-dns-records-upstream-33y_tdhg/stopped-state-fekff7ni/manifest.json": "eb368c6bb418628f26844d46cb575e9e407ac9cc6416b7f683d65ffeb248f111",
+    "build/conformance/2026-11-04-service-dns-records-upstream-33y_tdhg/stopped-state-fekff7ni/identity-summary.json": "8beb9b32180fd0853c3692c7dbfc9229bc171b965346146754239c13286f4e19"
+  }
+}
