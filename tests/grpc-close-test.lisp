@@ -10,6 +10,7 @@
 (in-suite grpc-close)
 
 (defmacro with-http2-close-connection ((connection socket peer listener) &body body)
+  "Own a real loopback connection and release its sockets after each close regression."
   `(let* ((,listener (usocket:socket-listen "127.0.0.1" 0 :element-type '(unsigned-byte 8)))
           (,socket (usocket:socket-connect "127.0.0.1" (usocket:get-local-port ,listener)
                                            :element-type '(unsigned-byte 8)))
