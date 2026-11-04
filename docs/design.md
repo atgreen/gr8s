@@ -63,8 +63,8 @@ image recognizes the `gr8s` CNI environment, invokes
 its Common Lisp CNI implementation, and loads the generated sched-cls program
 through Whistler's loader after the bridge stage has established the Pod
 interface. It attaches the program as a persistent TCX link. The
-current egress guard permits ARP and non-IPv4 traffic and rejects IPv4 source
-addresses outside `10.80.0.0/12`. Its `rejected_spoofs` array is pinned beneath
+current egress guard permits ARP and non-IPv4 traffic and rejects IPv4 frames
+that do not match the endpoint's agent-initialized address and MAC identity. Its `rejected_spoofs` array is pinned beneath
 the Pod sandbox container ID. Repeated ADD reuses the pinned map so its count
 survives link replacement; CHECK requires both the pinned link and map; DEL
 removes both, including late DEL calls with no remaining network namespace.
