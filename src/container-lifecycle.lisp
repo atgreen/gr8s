@@ -54,6 +54,136 @@
   (let ((path (container-lifecycle-path runtime uid)))
     (when (probe-file path) (delete-file path))))
 
+(defun known-container-attempt (entry)
+  "Return the highest consumed attempt known from a checkpoint, or -1 before initial creation."
+  (if entry
+      (max (gethash "highestKnownAttempt" entry -1)
+           (gethash "lastAttempt" entry -1)
+           (1- (gethash "nextAttempt" entry 0))
+           (gethash "restartCount" (gethash "lastStatus" entry (core-object)) -1))
+      -1))
+
+(defun retained-container-log-attempts (runtime uid)
+  "Recover consumed attempts from the actual log files, including rotated names."
+  (let ((attempts (make-hash-table :test #'equal)))
+    (dolist (path (directory (merge-pathnames "*.*" (containerd-pod-log-directory runtime uid))))
+      (let* ((parts (uiop:split-string (file-namestring path) :separator '(#\.)))
+             (name (first parts))
+             (attempt
+               (cond
+                 ((equal "log" (second parts)) 0)
+                 ((and (equal "log" (third parts)) (second parts)
+                       (plusp (length (second parts))) (every #'digit-char-p (second parts)))
+                  (parse-integer (second parts))))))
+        (when (and attempt (dns-label-p name))
+          (setf (gethash name attempts) (max attempt (gethash name attempts -1))))))
+    attempts))
+
+(defun incorporate-container-log-history (runtime uid state)
+  "Add real retained log evidence to an in-memory checkpoint; readers do not persist it."
+  (maphash
+   (lambda (name attempt)
+     (let ((entry (or (gethash name (gethash "containers" state)) (core-object))))
+       (setf (gethash "highestKnownAttempt" entry) (max attempt (known-container-attempt entry))
+             (gethash name (gethash "containers" state)) entry)))
+   (retained-container-log-attempts runtime uid))
+  state)
+
+(defun remember-container-lifecycle-statuses (state statuses)
+  "Retain actual observed attempts and states without overwriting them with synthesized waiting states."
+  (loop for status across statuses
+        for name = (gethash "name" status)
+        for attempt = (gethash "restartCount" status -1)
+        for entry = (or (gethash name (gethash "containers" state)) (core-object))
+        when (and (stringp name) (integerp attempt) (<= 0 attempt)
+                  (>= attempt (known-container-attempt entry)))
+          do (setf (gethash "highestKnownAttempt" entry) attempt)
+             (when (or (gethash "running" (gethash "state" status (core-object)))
+                       (gethash "terminated" (gethash "state" status (core-object))))
+               (setf (gethash "lastStatus" entry) (copy-core-object status)))
+             (setf (gethash name (gethash "containers" state)) entry))
+  state)
+
+(defun checkpoint-container-lifecycle-observation (runtime uid observed)
+  "Persist an actual reconciliation observation, leaving read-only runtime/log operations side-effect free."
+  (let* ((state (load-container-lifecycle-state runtime uid))
+         (before (copy-core-object state)))
+    (incorporate-container-log-history runtime uid state)
+    (remember-container-lifecycle-statuses state (gethash "containerStatuses" (runtime-pod-status observed) #()))
+    (unless (equalp before state) (save-container-lifecycle-state runtime uid state))
+    state))
+
+(defun current-container-infos (infos state)
+  "Exclude old predecessors when a newer consumed attempt has lost its CRI metadata."
+  (remove-if
+   (lambda (info)
+     (< (cri-container-info-attempt info)
+        (known-container-attempt (gethash (cri-container-info-name info) (gethash "containers" state)))))
+   (latest-container-infos infos)))
+
+(defun retained-container-status (name entry)
+  "Return an actual retained terminal status, or truthful waiting status when metadata is missing."
+  (let* ((saved (gethash "lastStatus" entry))
+         (saved-termination (and saved (gethash "terminated" (gethash "state" saved (core-object)))))
+         (termination (or saved-termination (gethash "lastTermination" entry)))
+         (attempt (known-container-attempt entry))
+         (saved-attempt (if saved (gethash "restartCount" saved -1)
+                            (gethash "lastAttempt" entry (1- (gethash "nextAttempt" entry 0)))))
+         (terminal-current (and termination (or saved-termination (null saved)) (= saved-attempt attempt)))
+         (status (if saved (copy-core-object saved)
+                     (core-object "name" name "image" "" "imageID" "" "ready" nil "started" nil)))
+         (waiting (and terminal-current (not (gethash "restartSuppressed" entry))
+                       (gethash "nextStart" entry)
+                       (equal (gethash "containerID" termination)
+                              (format nil "containerd://~A" (gethash "lastExitID" entry))))))
+    (cond
+      ((and terminal-current (not waiting))
+       (setf (gethash "state" status) (core-object "terminated" (copy-core-object termination))))
+      (t
+       (setf (gethash "state" status)
+             (core-object "waiting" (core-object "reason" (if waiting "CrashLoopBackOff" "ContainerStatusUnknown"))))
+       (when (gethash "lastTermination" entry)
+         (setf (gethash "lastState" status) (core-object "terminated" (copy-core-object (gethash "lastTermination" entry)))))))
+    (setf (gethash "restartCount" status) (max 0 attempt)
+          (gethash "ready" status) nil (gethash "started" status) nil)
+    status))
+
+(defun container-lifecycle-statuses (infos state)
+  "Combine current CRI observations with actual checkpoint/history for missing container names."
+  (let* ((current (current-container-infos infos state))
+         (statuses (mapcar (lambda (info) (container-lifecycle-status info state)) current)))
+    (maphash
+     (lambda (name entry)
+       (unless (find name current :test #'equal :key #'cri-container-info-name)
+         (when (or (gethash "lastStatus" entry) (gethash "lastTermination" entry)
+                   (<= 0 (known-container-attempt entry)))
+           (push (retained-container-status name entry) statuses))))
+     (gethash "containers" state))
+    (coerce (sort statuses #'string< :key (lambda (status) (gethash "name" status))) 'vector)))
+
+(defun container-lifecycle-phase (statuses sandbox-ready-p)
+  "Derive phase from actual retained exits even after the old sandbox becomes unavailable."
+  (cond
+    ((and (plusp (length statuses))
+          (every (lambda (status) (gethash "terminated" (gethash "state" status))) statuses))
+     (if (some (lambda (status) (not (zerop (gethash "exitCode" (gethash "terminated" (gethash "state" status)))))) statuses)
+         "Failed" "Succeeded"))
+    ((not sandbox-ready-p) "Unknown")
+    ((some (lambda (status) (gethash "running" (gethash "state" status))) statuses) "Running")
+    ((some (lambda (status) (equal "CrashLoopBackOff" (gethash "reason" (gethash "waiting" (gethash "state" status) (core-object))))) statuses)
+     "Running")
+    (t "Pending")))
+
+(defun missing-container-restart-suppressed-p (pod entry)
+  "Do not rerun an actually completed Never/OnFailure container merely because its CRI row was collected."
+  (let* ((saved (and entry (gethash "lastStatus" entry)))
+         (terminated (and saved (gethash "terminated" (gethash "state" saved (core-object))))))
+    (and entry
+         (or (gethash "restartSuppressed" entry)
+             (and terminated (= (gethash "restartCount" saved 0) (known-container-attempt entry))
+                  (or (equal "Never" (pod-restart-policy pod))
+                      (and (equal "OnFailure" (pod-restart-policy pod)) (zerop (gethash "exitCode" terminated)))))))))
+
 (defun latest-container-infos (infos)
   "Select one current CRI attempt per container name, independently of list order."
   (let ((latest (make-hash-table :test #'equal)))
@@ -106,12 +236,14 @@
     (unless (and old (equal (gethash "lastExitID" old) (cri-container-info-id info)))
       (let* ((finished (+ 2208988800 (/ (cri-container-info-finished-at info) 1000000000d0)))
              (duration (/ (- (cri-container-info-finished-at info) (cri-container-info-started-at info)) 1000000000))
-             (reset (or (null old) (>= duration 600)
+             (reset (or (null old) (null (gethash "lastFailureTime" old)) (>= duration 600)
                         (> (- now (gethash "lastFailureTime" old now)) 600)))
              ;; Like upstream doBackOff/Backoff.Next, the first retry creates
              ;; the backoff entry; subsequent short runs wait 10,20,...,300s.
              (delay (if reset 0 (gethash "backoff" old 10)))
-             (entry (core-object "lastExitID" (cri-container-info-id info)
+             (entry (core-object "highestKnownAttempt" (max (cri-container-info-attempt info) (known-container-attempt old))
+                                 "lastStatus" (containerd-container-status-object info)
+                                 "lastExitID" (cri-container-info-id info)
                                  "lastFailureTime" now
                                  "nextAttempt" (1+ (cri-container-info-attempt info))
                                  "backoff" (if reset 10 (min 300 (* 2 delay)))
@@ -174,22 +306,34 @@
     (let* ((config (containerd-sandbox-config runtime pod))
            (infos (mapcar (lambda (summary) (cri-container-status socket (cri-container-summary-id summary)))
                           (containerd-containers runtime sandbox)))
-           (current (latest-container-infos infos))
-           (state (load-container-lifecycle-state runtime uid))
+           (state (incorporate-container-log-history runtime uid (load-container-lifecycle-state runtime uid)))
+           (current (current-container-infos infos state))
            (now (funcall *container-lifecycle-clock*))
            (waiting (make-hash-table :test #'equal)) (restarting nil) (created-names nil))
+      (remember-container-lifecycle-statuses state
+        (map 'vector (lambda (info) (container-lifecycle-status info state)) current))
+      (save-container-lifecycle-state runtime uid state)
       (loop for spec across (pod-containers pod)
             for name = (container-spec-name spec)
             for info = (find name current :key #'cri-container-info-name :test #'equal)
             do (cond
                  ((null info)
                   (let ((entry (gethash name (gethash "containers" state))))
-                    (if (and entry (< now (gethash "nextStart" entry 0)))
-                        (setf (gethash name waiting) entry restarting t)
-                        (progn
-                          (containerd-create-container runtime pod (cri-pod-sandbox-info-id sandbox) config spec
-                                                       :attempt (if entry (gethash "nextAttempt" entry 0) 0))
-                          (push name created-names)))))
+                    (cond
+                      ((missing-container-restart-suppressed-p pod entry)
+                       (setf (gethash "restartSuppressed" entry) t)
+                       (save-container-lifecycle-state runtime uid state))
+                      ((and entry (< now (gethash "nextStart" entry 0)))
+                       (setf (gethash name waiting) entry restarting t))
+                      (t
+                       (let ((attempt (max (if entry (gethash "nextAttempt" entry 0) 0)
+                                           (1+ (known-container-attempt entry)))))
+                         (containerd-create-container runtime pod (cri-pod-sandbox-info-id sandbox) config spec :attempt attempt)
+                         (setf entry (or entry (core-object))
+                               (gethash "highestKnownAttempt" entry) attempt
+                               (gethash name (gethash "containers" state)) entry)
+                         (save-container-lifecycle-state runtime uid state)
+                         (push name created-names))))))
                  ((= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_created+)
                   ;; An interrupted or ambiguous StartContainer must reuse the
                   ;; already created attempt instead of allocating another.
@@ -203,10 +347,14 @@
                         (progn
                           (containerd-create-container runtime pod (cri-pod-sandbox-info-id sandbox) config spec
                                                        :attempt (gethash "nextAttempt" entry))
+                          (setf (gethash "highestKnownAttempt" entry) (gethash "nextAttempt" entry))
+                          (save-container-lifecycle-state runtime uid state)
                           (push name created-names)))))))
       (containerd-prune-old-attempts runtime infos created-names)
       (let* ((observed (runtime-observe runtime uid))
              (statuses (gethash "containerStatuses" (runtime-pod-status observed))))
+        (remember-container-lifecycle-statuses state statuses)
+        (save-container-lifecycle-state runtime uid state)
         (loop for status across statuses
               for entry = (gethash (gethash "name" status) waiting)
               when entry do

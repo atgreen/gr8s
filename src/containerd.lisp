@@ -121,28 +121,24 @@
             (details (loop for container in containers
                            collect (cri-container-status (containerd-runtime-socket-path runtime)
                                                          (cri-container-summary-id container))))
-            (current (latest-container-infos details))
-            (state (load-container-lifecycle-state runtime uid)))
-       (when sandbox
+            (state (load-container-lifecycle-state runtime uid))
+            (checkpoint-owned-p (plusp (hash-table-count (gethash "containers" state))))
+            (history (when (or sandbox checkpoint-owned-p) (incorporate-container-log-history runtime uid state)))
+            (statuses (container-lifecycle-statuses details (or history state))))
+       (when (or sandbox (and checkpoint-owned-p (plusp (length statuses))))
          (make-runtime-pod
           :uid uid
           :resource-version
-          (or (cdr (assoc +gr8s-resource-version-label+
+          (or (and sandbox (cdr (assoc +gr8s-resource-version-label+
                           (cri-pod-sandbox-info-labels sandbox)
-                          :test #'string=))
-              "")
-          :spec-fingerprint (cdr (assoc +gr8s-spec-fingerprint-label+ (cri-pod-sandbox-info-labels sandbox) :test #'string=))
-          :pod-ip (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime)
-                                      (cri-pod-sandbox-info-id sandbox))
-          :phase (if (/= gr8s.cri.v1::+podsandboxstate-sandbox_ready+ (cri-pod-sandbox-info-state sandbox))
-                     "Unknown"
-                     (containerd-phase runtime
-                                   (mapcar (lambda (info) (make-cri-container-summary
-                                                          :id (cri-container-info-id info)
-                                                          :state (cri-container-info-state info))) current)
-                                   current))
-          :status (core-object "containerStatuses"
-                               (map 'vector (lambda (info) (container-lifecycle-status info state)) current))))))))
+                          :test #'string=)))
+              (gethash "resourceVersion" state ""))
+          :spec-fingerprint (or (and sandbox (cdr (assoc +gr8s-spec-fingerprint-label+ (cri-pod-sandbox-info-labels sandbox) :test #'string=)))
+                                (gethash "specFingerprint" state))
+          :pod-ip (if sandbox (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime) (cri-pod-sandbox-info-id sandbox)) "")
+          :phase (container-lifecycle-phase statuses (and sandbox (= gr8s.cri.v1::+podsandboxstate-sandbox_ready+
+                                                                         (cri-pod-sandbox-info-state sandbox))))
+          :status (core-object "containerStatuses" statuses)))))))
 
 (defmethod runtime-delete ((runtime containerd-runtime) uid)
   (cancel-runtime-pod-deletion (containerd-runtime-deletions runtime) uid)
@@ -221,6 +217,7 @@
 
 (defmethod runtime-reconcile-containers ((runtime containerd-runtime) pod observed)
   "Retry only eligible native containers, even while a sibling keeps the Pod Running."
+  (checkpoint-container-lifecycle-observation runtime (pod-uid pod) observed)
   (if (native-container-progress-required-p pod observed)
       (runtime-ensure runtime pod)
       observed))
@@ -230,24 +227,31 @@
   (declare (ignore tail))
   (call-containerd-runtime
    (lambda ()
-     (let ((container (containerd-owned-container runtime uid container-name)))
-       (unless container
+     (let* ((container (containerd-owned-container runtime uid container-name))
+            (state (load-container-lifecycle-state runtime uid))
+            (owned-entry (gethash container-name (gethash "containers" state)))
+            (history (when owned-entry (incorporate-container-log-history runtime uid state)))
+            (entry (gethash container-name (gethash "containers" (or history state))))
+            (attempt (if container
+                         (cri-container-info-attempt (cri-container-status (containerd-runtime-socket-path runtime)
+                                                                           (cri-container-summary-id container)))
+                         (known-container-attempt entry))))
+       (unless (or container (and owned-entry (<= 0 attempt)))
          (error 'runtime-error :message (format nil "Container ~A is not owned by gr8s" container-name)))
-       (let* ((info (cri-container-status (containerd-runtime-socket-path runtime)
-                                          (cri-container-summary-id container)))
-              (path (merge-pathnames
-                     (container-attempt-log-path container-name (cri-container-info-attempt info))
+       (let* ((path (merge-pathnames
+                     (container-attempt-log-path container-name attempt)
                      (containerd-pod-log-directory runtime uid))))
          (if (probe-file path) (uiop:read-file-string path) ""))))))
 
 (defun containerd-owned-container (runtime uid container-name)
   (let ((sandbox (containerd-owned-sandbox runtime uid)))
     (and sandbox
-         (let ((info (find container-name
-                           (latest-container-infos
+         (let* ((state (incorporate-container-log-history runtime uid (load-container-lifecycle-state runtime uid)))
+                (info (find container-name
+                           (current-container-infos
                             (mapcar (lambda (item) (cri-container-status (containerd-runtime-socket-path runtime)
                                                                         (cri-container-summary-id item)))
-                                    (containerd-containers runtime sandbox)))
+                                    (containerd-containers runtime sandbox)) state)
                            :key #'cri-container-info-name :test #'equal)))
            (when info (make-cri-container-summary :id (cri-container-info-id info)
                                                   :state (cri-container-info-state info)
