@@ -96,3 +96,29 @@
         (gr8s::stop-dns-server server)))
     (is (= 3 (logand 15 (0conf:dns-message-flags
                          (service-dns-test-message (open-store directory) "web.alpha.svc.cluster.local")))))))
+
+(test service-dns-node-projection-wire-install-and-recovery
+  (with-temporary-store (control directory)
+    (declare (ignore directory))
+    (gr8s::create-core-resource control "services" (service-test-object "web") "alpha")
+    (let* ((snapshot (gr8s::node-desired-state-snapshot control "worker-a"))
+           (wire (ag-proto:serialize-to-bytes snapshot))
+           (decoded (ag-proto:deserialize-from-bytes 'gr8s.node.v1::desired-state-snapshot wire))
+           (projection (slot-value decoded 'gr8s.node.v1::service-discovery-objects-json)))
+      (is (= 1 (length projection)))
+      (is (null (slot-value decoded 'gr8s.node.v1::pods)))
+      (with-temporary-store (agent agent-directory)
+        (gr8s::install-assigned-resource-objects agent nil projection)
+        (is (equalp #(10 96 0 10)
+                    (0conf:a-address (first (0conf:dns-message-answers
+                                            (service-dns-test-message agent "web.alpha.svc.cluster.local"))))))
+        (let ((reopened (open-store agent-directory)))
+          (is (equalp #(10 96 0 10)
+                      (0conf:a-address (first (0conf:dns-message-answers
+                                              (service-dns-test-message reopened "web.alpha.svc.cluster.local"))))))
+          (let ((revision (gr8s::pod-store-resource-revision reopened)))
+            (gr8s::install-assigned-resource-objects reopened nil projection)
+            (is (= revision (gr8s::pod-store-resource-revision reopened))))
+          (gr8s::install-assigned-resource-objects reopened nil nil)
+          (is (= 3 (logand 15 (0conf:dns-message-flags
+                               (service-dns-test-message reopened "web.alpha.svc.cluster.local"))))))))))
