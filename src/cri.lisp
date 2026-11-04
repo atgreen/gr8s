@@ -1,3 +1,10 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Perform native CRI requests with exact container identities, typed wire
+;;;; observations, command budgets and separately bounded transport cleanup.
+
 (in-package #:gr8s)
 
 (defstruct cri-version-info
@@ -38,6 +45,7 @@
   (or (gr8s.cri.v1::state message) 0))
 
 (defun ensure-cri-status (operation status)
+  "Reject unsuccessful CRI operations with their actual gRPC status."
   (unless (= status ag-grpc:+grpc-status-ok+)
     (error 'runtime-error
            :message
@@ -51,6 +59,7 @@
 
 (defun make-cri-exec-request
     (container-id command &key stdin stdout stderr tty)
+  "Build an exact-container streaming Exec request with the requested channels."
   (make-instance 'gr8s.cri.v1::exec-request
                  :container-id container-id
                  :cmd command
@@ -60,6 +69,7 @@
                  :tty tty))
 
 (defun make-cri-exec-sync-request (container-id command timeout)
+  "Keep the declared command timeout in the CRI request independently of RPC overhead."
   (make-instance 'gr8s.cri.v1::exec-sync-request
                  :container-id container-id
                  :cmd command
@@ -141,6 +151,7 @@
 (defun make-cri-pod-sandbox-config
     (name uid namespace attempt log-directory host-network
      &key resource-version spec-fingerprint dns-servers dns-searches dns-options privileged)
+  "Build the sandbox identity, ownership labels and declared native network/security configuration."
   (let ((metadata
           (make-instance 'gr8s.cri.v1::pod-sandbox-metadata
                          :name name
@@ -208,11 +219,13 @@
       (ag-grpc:channel-close channel))))
 
 (defun cri-pod-sandbox-ip-from-response (response)
+  "Read the real CRI network address, leaving absent assignments empty."
   (let* ((sandbox (gr8s.cri.v1::status response))
          (network (and sandbox (gr8s.cri.v1::network sandbox))))
     (if network (gr8s.cri.v1::ip network) "")))
 
 (defun cri-pod-sandbox-ip (socket-path sandbox-id &key (timeout 5))
+  "Fetch one native sandbox address within the requested observation budget."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
          (multiple-value-bind (response status)

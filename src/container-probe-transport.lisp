@@ -23,6 +23,12 @@
           (puri:uri-path uri) (cond ((equal parsed-path "") "/")
                                     ((char= #\/ (char parsed-path 0)) parsed-path)
                                     (t (concatenate 'string "/" parsed-path))))
+    ;; URI setters accept arbitrary authority strings. Parse the rendered
+    ;; request before dialing, so invalid/shifted authority is an execution
+    ;; error rather than a failed DNS/network health observation.
+    (let ((parsed (puri:parse-uri (puri:render-uri uri nil))))
+      (unless (string-equal host (or (puri:uri-host parsed) ""))
+        (error "Invalid HTTP probe request authority ~S" host)))
     uri))
 
 (defun container-probe-http-headers (action)

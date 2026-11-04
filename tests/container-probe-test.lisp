@@ -314,8 +314,10 @@
          (let ((runtime (gr8s::make-containerd-runtime :socket-path (namestring socket-path))))
            (dotimes (attempt 2)
              (declare (ignore attempt))
-             (is-false (gr8s::execute-container-probe runtime (gr8s::core-object) "exact-attempt" ""
-                                                    (checked-probe "{\"exec\":{\"command\":[\"true\"]},\"timeoutSeconds\":1}")))
+             (multiple-value-bind (success message kind)
+                 (gr8s::execute-container-probe runtime (gr8s::core-object) "exact-attempt" ""
+                   (checked-probe "{\"exec\":{\"command\":[\"true\"]},\"timeoutSeconds\":1}"))
+               (is-false success) (is (eq :error kind)) (is (plusp (length message))))
              (is (bt:wait-on-semaphore closed :timeout .5)))))
        (lambda (stream) (loop while (read-byte stream nil nil)) (bt:signal-semaphore closed))
        :socket-path path))))
@@ -526,7 +528,27 @@
                (is-true success "CRI setup/cleanup time consumed the command's budget: ~A" message) (is-false kind)))
            (is (= 5 (length commands)))
            (is (every (lambda (entry) (= 1 (first entry))) timeouts))
-           (is (every (lambda (entry) (equal "121S" (second entry))) timeouts)))
+           (is (every (lambda (entry) (equal "121S" (second entry))) timeouts))
+           (setf delay 0)
+           (is (= 0 (gr8s::runtime-exec-result-exit-code (gr8s::cri-exec-sync "test-address" "id" '("true") :timeout 0))))
+           (is (equal '(0 nil) (first timeouts)))
+           ;; A local RPC deadline carries no proof the command timed out.
+           ;; Reduce only the fixture's cleanup allowance, keeping its actual
+           ;; command timeout and the normal production default unchanged.
+           (setf delay 2)
+           (let ((gr8s::*cri-runtime-request-timeout* 0))
+             (multiple-value-bind (success message kind)
+                 (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" ""
+                   (checked-probe "{\"exec\":{\"command\":[\"true\"]}}"))
+               (is-false success) (is (eq :error kind)) (is (plusp (length message))))))
       (setf (symbol-function 'gr8s::make-unix-grpc-channel) original)
       (ag-grpc:server-stop server)
       (when thread (bt:join-thread thread)))))
+
+(test malformed-http-request-authority-is-a-prober-error
+  (dolist (host '("bad host" "[" "bad/host"))
+    (let ((probe (checked-probe "{\"httpGet\":{\"port\":80}}")))
+      (setf (gethash "host" (gethash "httpGet" probe)) host)
+      (multiple-value-bind (success message kind)
+          (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object) "id" "127.0.0.1" probe)
+        (is-false success) (is (eq :error kind)) (is (plusp (length message)))))))
