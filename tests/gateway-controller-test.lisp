@@ -55,9 +55,11 @@
                  (lambda (gw) (gr8s::gateway-controlled-p store gw)))))
       ;; Only the owned Gateway's HTTP port is planned.
       (is (= 1 (length plan)))
-      (is (equal 8080 (car (first plan))))
-      (is (= 1 (length (cdr (first plan)))))
-      (is (equal '("app.example.com") (gr8s::gw-route-hostnames (first (cdr (first plan)))))))))
+      (is (equal 8080 (getf (first plan) :port)))
+      (is (equal "HTTP" (getf (first plan) :protocol)))
+      (is (null (getf (first plan) :tls)))
+      (is (= 1 (length (getf (first plan) :routes))))
+      (is (equal '("app.example.com") (gr8s::gw-route-hostnames (first (getf (first plan) :routes))))))))
 
 (test gateway-controller-converges-start-swap-stop
   (with-temporary-store (store directory)
@@ -67,8 +69,8 @@
            (controller (gr8s::make-gateway-controller
                         store
                         :resolver (lambda (b) (declare (ignore b)) nil)
-                        :start-fn (lambda (port router resolver)
-                                    (declare (ignore router resolver))
+                        :start-fn (lambda (port router resolver tls)
+                                    (declare (ignore router resolver tls))
                                     (push (list :start port) actions)
                                     (list :handle port))
                         :stop-fn (lambda (handle) (push (list :stop handle) actions))
@@ -88,3 +90,40 @@
       (gr8s::converge-gateway-listeners controller)
       (is (equal '((:stop (:handle 8080))) actions))
       (is (zerop (hash-table-count (gr8s::gateway-controller-listeners controller)))))))
+
+(test gateway-controller-starts-https-listener-with-secret-cert
+  (with-temporary-store (store directory)
+    (flet ((create (resource namespace json)
+             (gr8s::create-core-resource store resource (com.inuoe.jzon:parse json) namespace)))
+      (create "gatewayclasses" nil
+              "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"GatewayClass\",\"metadata\":{\"name\":\"gr8s\"},\"spec\":{\"controllerName\":\"gr8s.io/gateway-controller\"}}")
+      ;; A kubernetes.io/tls Secret (dGxz... are arbitrary base64 payloads).
+      (create "secrets" "default"
+              "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"web-cert\",\"namespace\":\"default\"},\"type\":\"kubernetes.io/tls\",\"data\":{\"tls.crt\":\"dGxzLWNlcnQtcGVt\",\"tls.key\":\"dGxzLWtleS1wZW0=\"}}")
+      (create "gateways" "default"
+              "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"Gateway\",\"metadata\":{\"name\":\"tls-gw\",\"namespace\":\"default\"},\"spec\":{\"gatewayClassName\":\"gr8s\",\"listeners\":[{\"name\":\"https\",\"port\":8443,\"protocol\":\"HTTPS\",\"tls\":{\"certificateRefs\":[{\"kind\":\"Secret\",\"name\":\"web-cert\"}]}}]}}")
+      (create "httproutes" "default"
+              "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"HTTPRoute\",\"metadata\":{\"name\":\"secure\",\"namespace\":\"default\"},\"spec\":{\"parentRefs\":[{\"name\":\"tls-gw\"}],\"hostnames\":[\"secure.example.com\"],\"rules\":[{\"backendRefs\":[{\"name\":\"app-svc\",\"port\":443}]}]}}"))
+    (let ((plan (gr8s::gateway-listener-plan
+                 (gr8s::list-core-resources store "gateways")
+                 (gr8s::list-core-resources store "httproutes")
+                 (lambda (gw) (gr8s::gateway-controlled-p store gw)))))
+      (is (equal 8443 (getf (first plan) :port)))
+      (is (equal "HTTPS" (getf (first plan) :protocol)))
+      (is (equal '("default" . "web-cert") (getf (first plan) :tls))))
+    (let* ((started '())
+           (cert-dir (merge-pathnames "certs/" directory))
+           (controller (gr8s::make-gateway-controller
+                        store :cert-dir cert-dir
+                        :start-fn (lambda (port router resolver tls)
+                                    (declare (ignore router resolver))
+                                    (push (cons port tls) started) (list :handle port))
+                        :stop-fn (lambda (handle) (declare (ignore handle)))
+                        :swap-fn (lambda (handle router) (declare (ignore handle router))))))
+      (gr8s::converge-gateway-listeners controller)
+      (is (= 1 (length started)))
+      (is (equal 8443 (car (first started))))
+      (let ((tls (cdr (first started))))
+        (is (stringp (getf tls :certificate)))
+        (is (probe-file (getf tls :certificate)))        ; cert materialized on disk
+        (is (probe-file (getf tls :key)))))))

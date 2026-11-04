@@ -258,6 +258,26 @@
 ;;; ---------------------------------------------------------------------------
 ;;; Backend resolution + listener lifecycle.
 
+(defclass gateway-tls-acceptor (gateway-acceptor)
+  ((certificate :initarg :certificate :reader gateway-acceptor-certificate)
+   (private-key :initarg :private-key :reader gateway-acceptor-private-key))
+  (:documentation "A Gateway HTTPS listener that terminates TLS with pure-tls,
+   then dispatches the plaintext request exactly like the HTTP acceptor."))
+
+(defmethod hunchentoot:acceptor-ssl-p ((acceptor gateway-tls-acceptor))
+  "HTTPS: sets the scheme for X-Forwarded-Proto and redirect defaults."
+  t)
+
+(defmethod hunchentoot:initialize-connection-stream ((acceptor gateway-tls-acceptor) stream)
+  "Wrap the accepted connection in a server-side TLS stream before Hunchentoot
+   reads the request (the same mechanism as the in-cluster API acceptor)."
+  (sb-sys:with-deadline (:seconds 10)
+    (let ((pure-tls:*server-ticket-key* (ironclad:random-data 32)))
+      (pure-tls:make-tls-server-stream stream
+                                       :certificate (gateway-acceptor-certificate acceptor)
+                                       :key (gateway-acceptor-private-key acceptor)
+                                       :verify pure-tls:+verify-none+))))
+
 (defun make-service-backend-resolver (store)
   "A resolver mapping a GW-BACKEND (a Service reference) to an address. It
    prefers a randomly chosen ready Pod endpoint (direct dial, independent of the
@@ -278,13 +298,19 @@
                            (not (equal cluster-ip "None")))
                   (values cluster-ip (gw-backend-port backend))))))))))
 
-(defun start-gateway-listener (&key (address "127.0.0.1") port router resolver (name "gateway"))
+(defun start-gateway-listener (&key (address "127.0.0.1") port router resolver (name "gateway") tls)
   "Start a Gateway listener acceptor on PORT. ROUTER is a compiled dispatch fn
-   and RESOLVER maps a chosen GW-BACKEND to (values host port)."
+   and RESOLVER maps a chosen GW-BACKEND to (values host port). When TLS is a
+   plist (:certificate PATH :key PATH), the listener terminates HTTPS."
   (hunchentoot:start
-   (make-instance 'gateway-acceptor
-                  :address address :port port
-                  :router router :resolver resolver :gateway-name name)))
+   (if tls
+       (make-instance 'gateway-tls-acceptor
+                      :address address :port port
+                      :router router :resolver resolver :gateway-name name
+                      :certificate (getf tls :certificate) :private-key (getf tls :key))
+       (make-instance 'gateway-acceptor
+                      :address address :port port
+                      :router router :resolver resolver :gateway-name name))))
 
 (defun stop-gateway-listener (acceptor)
   (hunchentoot:stop acceptor))

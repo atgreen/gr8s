@@ -657,7 +657,10 @@ snapshot application."
           (progn
             (unless (node-runtime-gateway-controller node-runtime)
               (setf (node-runtime-gateway-controller node-runtime)
-                    (make-gateway-controller (node-runtime-store node-runtime))))
+                    (make-gateway-controller
+                     (node-runtime-store node-runtime)
+                     :cert-dir (merge-pathnames "gateway-certs/"
+                                                (node-runtime-state-directory node-runtime)))))
             (converge-gateway-listeners (node-runtime-gateway-controller node-runtime)))
         (error (condition)
           (format *error-output* "gr8s: Gateway convergence failed: ~A~%" condition)))
