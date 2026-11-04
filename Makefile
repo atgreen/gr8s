@@ -22,7 +22,7 @@ NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
 NODE_PROTOCOL_LISP := src/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 
-.PHONY: all help containerd-bundle generate-protocol test test-containerd test-podman test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-core-api check smoke smoke-two-node run kubeconfig native clean
+.PHONY: all help containerd-bundle generate-protocol test test-containerd test-podman test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb test-core-api check smoke smoke-two-node run kubeconfig native clean
 
 all: native
 
@@ -42,6 +42,7 @@ help:
 	@echo "  test-node-topology Test live node snapshots, VXLAN, and route recovery"
 	@echo "  test-podman   Include the disposable rootless Podman integration test"
 	@echo "  test-whistler-cni Test the chained Whistler TC/eBPF CNI plugin"
+	@echo "  test-service-lb Load/attach/pin the ClusterIP socket LB on a real kernel (sudo)"
 	@echo "  check         Syntax-check scripts and run tests"
 	@echo "  smoke         Run kubectl -> gr8s -> containerd end to end"
 	@echo "  smoke-two-node Test real containerd Pods across two isolated agent nodes"
@@ -81,6 +82,11 @@ build/gr8s-endpoint-test.bpf.o: network/gr8s-egress-guard.lisp scripts/build-whi
 
 test-endpoint-policy: build/gr8s-endpoint-test.bpf.o
 	python3 scripts/test-endpoint-policy.py $<
+
+# Real-root verification that the Service LB JIT-compiles, loads, attaches to a
+# cgroup, pins its maps, and round-trips entries through the kernel. No ELF.
+test-service-lb:
+	sudo $(SBCL) --noinform --non-interactive --load scripts/test-service-lb.lisp
 
 test-endpoint-policy-kernel: build/gr8s-endpoint-test.bpf.o
 	python3 scripts/test-endpoint-policy.py $< --kernel
