@@ -208,3 +208,40 @@
       (gr8s::delete-core-resource store "services" "alpha" "web")
       (is (= 3 (logand 15 (0conf:dns-message-flags
                            (service-dns-test-message store "_http._tcp.web.alpha.svc.cluster.local" 0conf:+type-srv+))))))))
+
+(test service-dns-reverse-records-use-real-service-and-ready-headless-targets
+  (with-temporary-store (store directory)
+    (gr8s::create-core-resource store "services" (service-test-object "normal") "alpha")
+    (let ((message (service-dns-test-message store "10.0.96.10.in-addr.arpa" 0conf:+type-ptr+)))
+      (is (equal "normal.alpha.svc.cluster.local"
+                 (gr8s::canonical-dns-name (0conf:ptr-target (first (0conf:dns-message-answers message)))))))
+    (let ((object (service-test-object "web")))
+      (setf (gethash "clusterIP" (gethash "spec" object)) "None")
+      (gr8s::create-core-resource store "services" object "alpha"))
+    (let ((slice (endpointslice-test-object "reverse" "192.0.2.22")))
+      (setf (gethash "hostname" (aref (gethash "endpoints" slice) 0)) "target")
+      (gr8s::create-core-resource store "endpointslices" slice "alpha"))
+    (let ((message (service-dns-test-message store "22.2.0.192.in-addr.arpa" 0conf:+type-ptr+)))
+      (is (equal "target.web.alpha.svc.cluster.local"
+                 (gr8s::canonical-dns-name (0conf:ptr-target (first (0conf:dns-message-answers message)))))))
+    (let* ((v6 (endpointslice-test-object "reverse6" "2001:db8::1"))
+           (reverse "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa"))
+      (setf (gethash "addressType" v6) "IPv6")
+      (gr8s::create-core-resource store "endpointslices" v6 "alpha")
+      (is (equalp (0conf:parse-ipv6 "2001:db8::1") (gr8s::service-dns-reverse-address reverse)))
+      (is (equal "2001-db8--1.web.alpha.svc.cluster.local"
+                 (gr8s::canonical-dns-name (0conf:ptr-target (first (0conf:dns-message-answers
+                                                                  (service-dns-test-message store reverse 0conf:+type-ptr+))))))))
+    (is (null (gr8s::service-dns-reverse-address "256.0.0.10.in-addr.arpa")))
+    (is (null (gr8s::service-dns-reverse-address "garbage.ip6.arpa")))))
+
+(test service-dns-reverse-unready-headless-address-is-authoritative-nxdomain
+  (with-temporary-store (store directory)
+    (let ((service (service-test-object "web")) (slice (endpointslice-test-object "unready" "192.0.2.22")))
+      (setf (gethash "clusterIP" (gethash "spec" service)) "None"
+            (gethash "conditions" (aref (gethash "endpoints" slice) 0)) (gr8s::core-object "ready" nil))
+      (gr8s::create-core-resource store "services" service "alpha")
+      (gr8s::create-core-resource store "endpointslices" slice "alpha")
+      (let ((message (service-dns-test-message store "22.2.0.192.in-addr.arpa" 0conf:+type-ptr+)))
+        (is (= 3 (logand 15 (0conf:dns-message-flags message))))
+        (is (null (0conf:dns-message-answers message)))))))

@@ -106,7 +106,10 @@
 
 (defun store-service-dns-resolver (store)
   "Capture the agent's durable store for both DNS worker threads."
-  (lambda (question) (resolve-store-service-question store question)))
+  (lambda (question)
+    (if (= (0conf:question-qtype question) 0conf:+type-ptr+)
+        (resolve-store-service-ptr store question)
+        (resolve-store-service-question store question))))
 
 (defun service-dns-endpoint-unready-p (endpoint)
   "Exclude explicitly unready endpoints while retaining unspecified or null readiness."

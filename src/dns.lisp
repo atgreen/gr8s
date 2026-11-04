@@ -80,11 +80,12 @@
                      +dns-kubernetes-service+))
        (dns-authoritative-response
         query :answers (kubernetes-service-answer question)))
-      ((and service-resolver (= 1 (length questions))
-            (dns-name-in-zone-p (0conf:question-name question) +dns-cluster-zone+))
-       (multiple-value-bind (answers exists) (funcall service-resolver question)
-         (dns-authoritative-response query :answers answers
-                                     :rcode (if exists 0 +dns-name-error+))))
+      ((and service-resolver (= 1 (length questions)))
+       (multiple-value-bind (answers exists reverse-authority) (funcall service-resolver question)
+         (if (or reverse-authority
+                 (dns-name-in-zone-p (0conf:question-name question) +dns-cluster-zone+))
+             (dns-authoritative-response query :answers answers :rcode (if exists 0 +dns-name-error+))
+             (funcall forward packet))))
       ((and question
             (dns-name-in-zone-p (0conf:question-name question)
                                 +dns-cluster-zone+))

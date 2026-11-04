@@ -204,7 +204,7 @@
              :command (expand-container-command (container-spec-command spec) environment)
              :args (expand-container-command (container-spec-args spec) environment)
              :env environment
-             :mounts (containerd-pod-mounts runtime pod spec)
+             :mounts (containerd-container-mounts runtime pod spec sandbox-id)
              :security-context (containerd-pod-security-context pod spec)
              :working-directory (gethash "workingDir" (pod-runtime-container-object pod spec))
              :uid (pod-uid pod)
