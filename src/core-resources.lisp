@@ -40,7 +40,13 @@
     ("rolebindings" "RoleBinding" "rbac.authorization.k8s.io/v1" t)
     ("clusterroles" "ClusterRole" "rbac.authorization.k8s.io/v1" nil)
     ("clusterrolebindings" "ClusterRoleBinding" "rbac.authorization.k8s.io/v1" nil)
-    ("networkpolicies" "NetworkPolicy" "networking.k8s.io/v1" t)))
+    ("networkpolicies" "NetworkPolicy" "networking.k8s.io/v1" t)
+    ("gatewayclasses" "GatewayClass" "gateway.networking.k8s.io/v1" nil)
+    ("gateways" "Gateway" "gateway.networking.k8s.io/v1" t)
+    ("httproutes" "HTTPRoute" "gateway.networking.k8s.io/v1" t)
+    ("tcproutes" "TCPRoute" "gateway.networking.k8s.io/v1" t)
+    ("tlsroutes" "TLSRoute" "gateway.networking.k8s.io/v1" t)
+    ("grpcroutes" "GRPCRoute" "gateway.networking.k8s.io/v1" t)))
 
 (defun stored-resource-type (resource)
   "Return the descriptor for a durable Kubernetes resource collection."

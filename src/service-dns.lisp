@@ -11,7 +11,8 @@
   "Copy only public DNS fields; exclude arbitrary annotations and unrelated resources."
   (let* ((kind (gethash "kind" object)) (source (gethash "metadata" object))
          (metadata (core-object)) (result (core-object)))
-    (unless (member kind '("Service" "EndpointSlice" "NetworkPolicy") :test #'equal)
+    (unless (member kind '("Service" "EndpointSlice" "NetworkPolicy"
+                           "GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
       (invalid-pod "unsupported public Service discovery kind"))
     (dolist (key '("name" "namespace" "uid" "resourceVersion"))
       (when (gethash key source) (setf (gethash key metadata) (gethash key source))))
@@ -22,6 +23,8 @@
     (setf (gethash "kind" result) kind
           (gethash "apiVersion" result) (cond ((equal kind "Service") "v1")
                                               ((equal kind "NetworkPolicy") "networking.k8s.io/v1")
+                                              ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
+                                               "gateway.networking.k8s.io/v1")
                                               (t "discovery.k8s.io/v1"))
           (gethash "metadata" result) metadata)
     (cond
@@ -35,6 +38,10 @@
        ;; The whole spec (podSelector, policyTypes, ingress/egress rules) is what
        ;; the agent needs to resolve and compile the per-Pod classifier.
        (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
+      ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
+       ;; The agent's Gateway controller reconciles these into L7 proxy listeners,
+       ;; so it needs the full spec (controllerName / listeners / parentRefs+rules).
+       (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
       (t
        (dolist (key '("addressType" "endpoints" "ports"))
          (setf (gethash key result) (copy-core-object (gethash key object))))))
@@ -47,7 +54,13 @@
              (endpointslice-canonical-json (service-discovery-public-object object))))
           (sort (append (list-core-resources store "services")
                         (list-core-resources store "endpointslices")
-                        (list-core-resources store "networkpolicies"))
+                        (list-core-resources store "networkpolicies")
+                        (list-core-resources store "gatewayclasses")
+                        (list-core-resources store "gateways")
+                        (list-core-resources store "httproutes")
+                        (list-core-resources store "tcproutes")
+                        (list-core-resources store "tlsroutes")
+                        (list-core-resources store "grpcroutes"))
                 #'string< :key (lambda (object)
                                  (let ((metadata (gethash "metadata" object)))
                                    (format nil "~A/~A/~A" (gethash "kind" object)
@@ -63,8 +76,16 @@
            (namespace (gethash "namespace" metadata)) (name (gethash "name" metadata))
            (resource (cond ((equal "Service" (gethash "kind" public)) "services")
                            ((equal "NetworkPolicy" (gethash "kind" public)) "networkpolicies")
+                           ((equal "GatewayClass" (gethash "kind" public)) "gatewayclasses")
+                           ((equal "Gateway" (gethash "kind" public)) "gateways")
+                           ((equal "HTTPRoute" (gethash "kind" public)) "httproutes")
+                           ((equal "TCPRoute" (gethash "kind" public)) "tcproutes")
+                           ((equal "TLSRoute" (gethash "kind" public)) "tlsroutes")
+                           ((equal "GRPCRoute" (gethash "kind" public)) "grpcroutes")
                            (t "endpointslices"))))
-      (unless (and (dns-label-p namespace) (stringp name) (plusp (length name)))
+      (unless (and (stringp name) (plusp (length name))
+                   ;; GatewayClass is cluster-scoped (no namespace); all others are namespaced.
+                   (if (equal resource "gatewayclasses") (null namespace) (dns-label-p namespace)))
         (invalid-pod "public Service discovery metadata is invalid"))
       (setf (gethash (core-resource-key resource namespace name) resources) public))))
 

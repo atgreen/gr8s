@@ -112,12 +112,21 @@ spec:
       args: ["echo gr8s-smoke; sleep 300"]
 YAML
 
+# Allow overriding the Pod pool CIDR so the smoke can run on a host that already
+# carries a conflicting route (e.g. a leaked route from an aborted prior run).
+pod_cidr_arg=""
+if [ -n "${GR8S_SMOKE_POD_CIDR:-}" ]; then
+  pod_cidr_arg="--cluster-pod-cidr $GR8S_SMOKE_POD_CIDR"
+fi
+
+# shellcheck disable=SC2086
 "$project_root/build/gr8s" serve \
   --state-directory "$work_directory/state" \
   --port "$port" \
   --runtime containerd \
   --containerd-log-root "$work_directory/logs/" \
   --kubeconfig "$work_directory/kubeconfig" \
+  $pod_cidr_arg \
   >"$work_directory/server.log" 2>&1 &
 server_pid=$!
 
@@ -208,6 +217,108 @@ fi
 nsenter --net="$pod_namespace" ip address del 192.0.2.123/32 dev eth0
 wait_for_counter gr8s_endpoint_allowed_packets_total
 wait_for_counter gr8s_endpoint_rejected_spoofs_total
+
+# --- Gateway API: host/path request routes end-to-end to a Pod (podster-43k.10) ---
+# A backend web Pod + Service, a Gateway listener and an HTTPRoute. The in-agent
+# L7 proxy must terminate an HTTP request on the gateway port and proxy it to the
+# backend Pod, proving the JIT-compiled-router data plane end to end. Runs before
+# the default-deny egress policy below, which would otherwise block the backend.
+cat >"$work_directory/gw-web.yaml" <<'YAML'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gw-web
+  labels:
+    app: gw-web
+spec:
+  containers:
+    - name: web
+      image: docker.io/library/busybox:1.37.0
+      command: ["sh", "-c"]
+      args: ["mkdir -p /www && printf 'gateway-backend-ok\\n' > /www/index.html && httpd -f -p 8080 -h /www"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gw-web
+  namespace: default
+spec:
+  publishNotReadyAddresses: true
+  selector:
+    app: gw-web
+  ports:
+    - port: 8080
+      targetPort: 8080
+YAML
+# --validate=false: kubectl's client-side OpenAPI (protobuf) validation is flaky
+# against gr8s's schema document; we control this manifest, so skip it.
+kubectl --kubeconfig "$work_directory/kubeconfig" apply --validate=false -f "$work_directory/gw-web.yaml"
+
+attempt=0
+until [ "$(kubectl --kubeconfig "$work_directory/kubeconfig" get pod gw-web \
+  -o jsonpath='{.status.phase}' 2>/dev/null)" = Running ]; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 600 ]; then echo "gw-web backend Pod did not reach Running" >&2; exit 1; fi
+  sleep 0.1
+done
+
+gw_server=$(kubectl --kubeconfig "$work_directory/kubeconfig" config view --minify -o jsonpath='{.clusters[0].cluster.server}')
+gw_post() {
+  gw_code=$(curl -s -o "$work_directory/gw-create.out" -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' --data @"$2" "$gw_server$1")
+  if [ "$gw_code" != "201" ] && [ "$gw_code" != "200" ]; then
+    echo "Gateway API create $1 failed: HTTP $gw_code" >&2; cat "$work_directory/gw-create.out" >&2; exit 1
+  fi
+}
+cat >"$work_directory/gatewayclass.json" <<'JSON'
+{"apiVersion":"gateway.networking.k8s.io/v1","kind":"GatewayClass","metadata":{"name":"gr8s"},"spec":{"controllerName":"gr8s.io/gateway-controller"}}
+JSON
+cat >"$work_directory/gateway.json" <<'JSON'
+{"apiVersion":"gateway.networking.k8s.io/v1","kind":"Gateway","metadata":{"name":"web-gw","namespace":"default"},"spec":{"gatewayClassName":"gr8s","listeners":[{"name":"http","port":18088,"protocol":"HTTP"}]}}
+JSON
+cat >"$work_directory/httproute.json" <<'JSON'
+{"apiVersion":"gateway.networking.k8s.io/v1","kind":"HTTPRoute","metadata":{"name":"web-route","namespace":"default"},"spec":{"parentRefs":[{"name":"web-gw"}],"hostnames":["gw.example.com"],"rules":[{"backendRefs":[{"name":"gw-web","port":8080}]}]}}
+JSON
+gw_post "/apis/gateway.networking.k8s.io/v1/gatewayclasses" "$work_directory/gatewayclass.json"
+gw_post "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways" "$work_directory/gateway.json"
+gw_post "/apis/gateway.networking.k8s.io/v1/namespaces/default/httproutes" "$work_directory/httproute.json"
+
+# The agent converges the Gateway into an L7 listener on 127.0.0.1:18088. Retry
+# until the route serves the backend body through the proxy.
+gw_routed=0
+for attempt in $(seq 1 60); do
+  if curl -fsS -H 'Host: gw.example.com' "http://127.0.0.1:18088/" 2>/dev/null | grep -qx gateway-backend-ok; then
+    gw_routed=1; break
+  fi
+  sleep 0.5
+done
+if [ "$gw_routed" -ne 1 ]; then
+  echo "Gateway did not route host/path to the backend Pod" >&2
+  curl -sS -H 'Host: gw.example.com' "http://127.0.0.1:18088/" >&2 || true
+  exit 1
+fi
+gw_unmatched=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: nope.example.com' "http://127.0.0.1:18088/")
+if [ "$gw_unmatched" != "404" ]; then
+  echo "Gateway did not 404 an unmatched host (got $gw_unmatched)" >&2; exit 1
+fi
+echo "Gateway API routed host/path to the backend Pod through the in-agent L7 proxy"
+
+# Tear the gateway scenario down and wait for the backend Pod's network state to
+# drain, restoring the single-Pod baseline for the sections that follow.
+kubectl --kubeconfig "$work_directory/kubeconfig" delete pod gw-web --ignore-not-found >/dev/null
+kubectl --kubeconfig "$work_directory/kubeconfig" delete service gw-web --ignore-not-found >/dev/null
+for gw_url in \
+  "/apis/gateway.networking.k8s.io/v1/namespaces/default/httproutes/web-route" \
+  "/apis/gateway.networking.k8s.io/v1/namespaces/default/gateways/web-gw" \
+  "/apis/gateway.networking.k8s.io/v1/gatewayclasses/gr8s"; do
+  curl -s -o /dev/null -X DELETE "$gw_server$gw_url" || true
+done
+attempt=0
+until [ "$(ls -1 "$work_directory/state/agent/containerd/run/io.containerd.grpc.v1.cri/netns/" 2>/dev/null | wc -l)" -le 1 ]; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 600 ]; then echo "gw-web network state did not drain" >&2; exit 1; fi
+  sleep 0.1
+done
 
 # --- NetworkPolicy compiled-firewall enforcement on the real Pod ---
 # The Pod could reach its gateway above (no policy). Apply an egress policy that

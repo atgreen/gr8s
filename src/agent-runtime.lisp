@@ -32,7 +32,10 @@
   service-lb
   service-lb-controller
   ;; Listening host ports by (ip . port); see pod-host-ports.lisp.
-  (host-port-forwarders (make-hash-table :test #'equal)))
+  (host-port-forwarders (make-hash-table :test #'equal))
+  ;; Gateway API L7 proxy listeners, reconciled from stored Gateway/HTTPRoute
+  ;; objects. NIL until the first reconcile creates it.
+  gateway-controller)
 
 (defun make-node-runtime (state-directory runtime manager
                           &key (network-reconciler
@@ -319,6 +322,9 @@ the node from starting."
             (make-service-lb-controller (node-runtime-store node-runtime) dataplane)))
     (unwind-protect
          (funcall function)
+      (when (node-runtime-gateway-controller node-runtime)
+        (ignore-errors (stop-gateway-controller (node-runtime-gateway-controller node-runtime)))
+        (setf (node-runtime-gateway-controller node-runtime) nil))
       (when (node-runtime-service-lb node-runtime)
         (ignore-errors (stop-service-lb-dataplane (node-runtime-service-lb node-runtime)))
         (setf (node-runtime-service-lb node-runtime) nil
@@ -654,6 +660,20 @@ snapshot application."
             (converge-node-network-policies node-runtime)
           (error (condition)
             (format *error-output* "gr8s: NetworkPolicy convergence failed: ~A~%" condition))))
+      ;; Reconcile Gateway API L7 proxy listeners from the stored Gateway and
+      ;; HTTPRoute objects. Created lazily; fail-soft like the convergences above.
+      (handler-case
+          (progn
+            (unless (node-runtime-gateway-controller node-runtime)
+              (setf (node-runtime-gateway-controller node-runtime)
+                    (make-gateway-controller
+                     (node-runtime-store node-runtime)
+                     :cert-dir (merge-pathnames "gateway-certs/"
+                                                (node-runtime-state-directory node-runtime)))))
+            (converge-gateway-listeners (node-runtime-gateway-controller node-runtime))
+            (converge-gateway-l4-listeners (node-runtime-gateway-controller node-runtime)))
+        (error (condition)
+          (format *error-output* "gr8s: Gateway convergence failed: ~A~%" condition)))
       (loop for assignment in
               (stable-sort (copy-list assignments)
                            (lambda (left right)
