@@ -195,14 +195,15 @@
       (when (or (equal policy "Always")
                 (and (equal policy "IfNotPresent") (not (cri-image-present-p socket (container-spec-image spec)))))
         (cri-pull-image socket (container-spec-image spec))))
-    (let ((container-id
+    (let* ((environment (containerd-pod-environment runtime pod spec sandbox-id))
+           (container-id
             (cri-create-container
              socket sandbox-id sandbox-config
              :name (container-spec-name spec)
              :image (container-spec-image spec)
-             :command (coerce (container-spec-command spec) 'list)
-             :args (coerce (container-spec-args spec) 'list)
-             :env (containerd-pod-environment runtime pod spec sandbox-id)
+             :command (expand-container-command (container-spec-command spec) environment)
+             :args (expand-container-command (container-spec-args spec) environment)
+             :env environment
              :mounts (containerd-pod-mounts runtime pod spec)
              :security-context (containerd-pod-security-context pod spec)
              :working-directory (gethash "workingDir" (pod-runtime-container-object pod spec))
