@@ -447,7 +447,7 @@
   (let* ((pod (get-pod store namespace name))
          (container (or (hunchentoot:parameter "container")
                         (container-spec-name (aref (pod-containers pod) 0)))))
-    (unless (find container (pod-containers pod)
+    (unless (find container (pod-all-containers pod)
                   :key #'container-spec-name :test #'string=)
       (error 'kubernetes-error
              :status-code 400
@@ -924,7 +924,7 @@
                (container-spec-name (aref (pod-containers pod) 0)))))
     (unless (exec-options-command options)
       (bad-exec-request "Pod exec requires at least one command argument"))
-    (unless (find container (pod-containers pod)
+    (unless (find container (pod-all-containers pod)
                   :key #'container-spec-name :test #'string=)
       (bad-exec-request
        (format nil "container ~A is not valid for pod ~A" container name)))

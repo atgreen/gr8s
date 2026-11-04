@@ -454,7 +454,7 @@ the supported Pod feature set and rejects unsupported fields with HTTP 422.
 
 Pods report PodScheduled, Initialized, ContainersReady and Ready conditions.
 Readiness requires actual running, ready observations for every declared
-container. Terminal Pods report false readiness, and unavailable node/runtime
+application container. Terminal Pods report false readiness, and unavailable node/runtime
 observations report unknown readiness. Condition transition history and actual
 observed revisions persist separately across restarts. Valid node readiness
 leases survive a control-plane restart, and reconnecting agents receive snapshot
@@ -462,8 +462,11 @@ revisions beyond their saved acknowledgements. Startup, readiness and liveness
 probes execute real exec, HTTP(S), TCP and standard gRPC Health checks. Startup
 success gates readiness/liveness; consecutive thresholds control readiness and
 exact-container restart, preserving healthy siblings. Probe-specific termination
-grace and actual failure Events survive node process restarts. Init containers
-and readiness gates remain unsupported.
+grace and actual failure Events survive node process restarts. Ordinary init
+containers execute in declaration order; applications wait for real zero exits.
+Failed initialization obeys the Pod restart policy, and native restart retains
+actual attempts and retry history. Restartable init sidecars and readiness gates
+remain unsupported.
 
 All ten unchanged upstream probe conformance cases pass in the
 [focused result](docs/container-probes-upstream-2026-11-04.json). The
