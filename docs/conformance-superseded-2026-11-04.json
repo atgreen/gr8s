@@ -1,0 +1,43 @@
+{
+  "date": "2026-11-04",
+  "scope": "Intentionally superseded full conformance run; partial diagnostics only",
+  "result": "interrupted",
+  "isCompleteConformanceRun": false,
+  "isCertificationResult": false,
+  "nativeSHA256": "699ad5ed67a0c1fccba87d147705585d6214bc3d05b813cf81053128a058405e",
+  "guestRunDirectory": "/var/tmp/gr8s-conformance.pe4t1u6w",
+  "localArtifacts": "build/conformance/2026-11-04-superseded-pe4t1u6w",
+  "reason": "At the user request to accelerate parallel implementation, the parent agent sent SIGINT to the confirmed Python runner PID 80278 after preserving the partial e2e log. The newer merged-source build eae631e1 was already running the full suite on VM 22292, so this older 699ad5ed build was superseded to free a VM for targeted tests. This was not an observation-timeout restart.",
+  "command": [
+    "/root/gr8s-test/sonobuoy",
+    "run",
+    "--kubeconfig",
+    "/var/tmp/gr8s-conformance.pe4t1u6w/kubeconfig",
+    "--dns-pod-labels=",
+    "--plugin=e2e",
+    "--mode=certified-conformance"
+  ],
+  "suiteStarts": 1,
+  "selectedSpecs": [
+    [
+      "446",
+      "7579"
+    ]
+  ],
+  "finalUpstreamCaseCounts": null,
+  "cleanup": {
+    "nativeExitCode": 0,
+    "ownedShimsRemaining": [],
+    "cleanupError": null
+  },
+  "artifactSHA256": {
+    "e2e.log": "53e0add505a92c64aaa3213e87a66775f4ccdd5adabcb2555b44884ebbee5373",
+    "e2e.partial.log": "8f992cd7526e428d41095f7db96e6bc3f27eec77e9b2f7a0e62c4bacf78b39fd",
+    "gr8s.log": "87d61220733a68d444b79862b45c5a41e54a529605f1071a3a2db5f435ad929d",
+    "kube-sonobuoy.log": "a667fcc1b50df46626e72661cfc8cff59d335e55c7d50592aaa4ec4aa032a3ce",
+    "report.json": "410ac863196a5bf8a6685466b5a7d4a768d520b2613fc8d184fa7d2c2d1c6352",
+    "sonobuoy-worker.log": "77ebeeb6b95e1bc2cd05a7eacea8e4aa4c299658ae623e0c12f28804446ad11d",
+    "sonobuoy.stderr.log": "b1b2d12e15e9031d6d4562fb5c3951d57ab830d9935d602474494b5124d82135",
+    "sonobuoy.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}
