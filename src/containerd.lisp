@@ -9,6 +9,7 @@
   dns-options
   resource-store
   probes
+  (lifecycle-lock (bt:make-lock "native lifecycle checkpoint writes"))
   (deletions (make-deletion-controller)))
 
 (defun make-containerd-runtime

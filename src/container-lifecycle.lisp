@@ -35,8 +35,8 @@
       (error 'runtime-error :message "Invalid native container lifecycle checkpoint"))
     state))
 
-(defun save-container-lifecycle-state (runtime uid state)
-  "Atomically persist retry state before allowing a new CRI attempt."
+(defun %save-container-lifecycle-state (runtime uid state)
+  "Atomically replace retry state while the caller holds the lifecycle write lock."
   (let* ((path (container-lifecycle-path runtime uid))
          (temporary (make-pathname :name (format nil "lifecycle-~36R" (random (expt 36 10)))
                                    :type "tmp" :defaults path)))
@@ -49,10 +49,16 @@
       (when (probe-file temporary) (delete-file temporary))))
   state)
 
+(defun save-container-lifecycle-state (runtime uid state)
+  "Serialize checkpoint replacement with deletion and shutdown Event preservation."
+  (bt:with-lock-held ((containerd-runtime-lifecycle-lock runtime))
+    (%save-container-lifecycle-state runtime uid state)))
+
 (defun forget-container-lifecycle-state (runtime uid)
   "Remove retry state after UID's runtime sandbox is actually gone."
-  (let ((path (container-lifecycle-path runtime uid)))
-    (when (probe-file path) (delete-file path))))
+  (bt:with-lock-held ((containerd-runtime-lifecycle-lock runtime))
+    (let ((path (container-lifecycle-path runtime uid)))
+      (when (probe-file path) (delete-file path)))))
 
 (defun known-container-attempt (entry)
   "Return the highest consumed attempt known from a checkpoint, or -1 before initial creation."
