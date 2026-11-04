@@ -134,6 +134,7 @@
                              (:file "job-controller")
                              (:file "workload-deletion")
                              (:file "workload-http")
+                             (:file "doctor")
                              (:file "main"))))
   :in-order-to ((test-op (test-op "gr8s/tests"))))
 
@@ -204,6 +205,7 @@
                              (:file "pod-conditions-test")
                              (:file "node-log-delivery-test")
                              (:file "garbage-collection-test")
+                             (:file "doctor-test")
                              (:file "service-lb-test")
                              (:file "egress-guard-test")
                              (:file "services-test")
