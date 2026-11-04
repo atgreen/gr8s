@@ -111,6 +111,7 @@
                              (:file "bootstrap-protobuf-test")
                              (:file "events-test")
                              (:file "pod-deletion-test")
+                             (:file "generated-pod-names-test")
                              (:file "pod-conditions-test")
                              (:file "garbage-collection-test")
                              (:file "services-test")

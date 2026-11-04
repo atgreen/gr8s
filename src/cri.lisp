@@ -123,7 +123,10 @@
     (make-instance
      'gr8s.cri.v1::pod-sandbox-config
      :metadata metadata
-     :hostname (if host-network "" name)
+     :hostname (if host-network ""
+                   (if (> (length name) 63)
+                       (string-right-trim "-." (subseq name 0 63))
+                       name))
      :log-directory log-directory
      :dns-config
      (when dns-servers

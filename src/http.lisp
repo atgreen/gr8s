@@ -37,14 +37,14 @@
     (setf (gethash "status" object) status)
     object))
 
-(defun request-pod-in-namespace (object namespace)
+(defun request-pod-in-namespace (object namespace &key allow-generate-name)
   "Validate the request namespace and default omitted Pod metadata.namespace."
   (let* ((metadata (require-object (gethash "metadata" object) "metadata"))
          (specified (gethash "namespace" metadata)))
     (when (and specified (not (equal specified "")) (not (equal namespace specified)))
       (core-resource-error 400 "BadRequest" "metadata.namespace does not match request namespace"))
     (setf (gethash "namespace" metadata) namespace)
-    (parse-pod object)))
+    (parse-pod object :allow-generate-name allow-generate-name)))
 
 (defun request-object (&optional (namespace "default"))
   (request-pod-in-namespace
@@ -306,7 +306,8 @@
       "components" (json-object "schemas" (openapi-definitions))))))
 
 (defun create-pod-response (store reconciler &optional (namespace "default"))
-  (let* ((pod (create-pod store (admit-in-cluster-pod store (request-object namespace))))
+  (let* ((input (request-pod-in-namespace (core-resource-request-object "Pod") namespace :allow-generate-name t))
+         (pod (create-pod store (admit-in-cluster-pod store input)))
          (status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
     (json-response (pod-response-object pod status) 201)))
 

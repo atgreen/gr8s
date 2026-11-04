@@ -1,0 +1,114 @@
+{
+  "date": "2026-11-04",
+  "scope": "Native generated and full-length Pod names, runtime hostnames and restart persistence, with readiness and termination regression scenarios",
+  "isFullConformanceRun": false,
+  "isCertificationResult": false,
+  "sourceCommit": "860ded582c330817f8730a94976a4709f5691822",
+  "nativeSHA256": "f5842ea6acec9d9f9d45e3823e3c9438bd8c666fb7819436db2a8e385dfa1697",
+  "guestRunDirectory": "/var/tmp/gr8s-pod-termination.k376kk2y",
+  "localArtifacts": "build/conformance/2026-11-04-generated-names-k376kk2y",
+  "scenarios": {
+    "sigtermHandler": {
+      "passed": true,
+      "processExitSeconds": 2.1459724959995583,
+      "apiRemovalSeconds": 17.147951488000217
+    },
+    "sharedDeadline": {
+      "passed": true,
+      "seconds": 5.129108721999728,
+      "containers": 2,
+      "grace": 5
+    },
+    "forceShortening": {
+      "passed": true,
+      "processExitSeconds": 0.11708307999924727,
+      "replacementUID": "FCBA0C8A-B404-4CBA-AFE8-E45C35874BC3"
+    },
+    "restartRecovery": {
+      "passed": true,
+      "seconds": 31.511831388000246,
+      "processExitSeconds": 14.977148506999583,
+      "originalDeadline": "2026-11-04T00:13:32Z"
+    },
+    "steadyRestart": {
+      "passed": true,
+      "readyTransitionTime": "2026-11-04T00:12:39Z",
+      "containerIDUnchanged": true
+    },
+    "terminalConditions": {
+      "passed": true,
+      "actualExitCodes": [
+        0,
+        7
+      ]
+    },
+    "serviceReadiness": {
+      "passed": true,
+      "phaseAfterSidecarExit": "Running",
+      "readyAfterSidecarExit": "False",
+      "directPodStillServes": true
+    },
+    "generatedNamesAndHostnames": {
+      "passed": true,
+      "identities": [
+        {
+          "name": "native-generated-rjrx4",
+          "uid": "C44B0A06-EE1B-4881-AC6C-D36E0AB3A711",
+          "hostname": "native-generated-rjrx4"
+        },
+        {
+          "name": "native-generated-hg7kg",
+          "uid": "1A788172-83D2-435C-8DD2-367E7F389431",
+          "hostname": "native-generated-hg7kg"
+        },
+        {
+          "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaapct22",
+          "uid": "EEBB1324-80D1-4137-A9C8-94A7E8499440",
+          "hostname": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaapct22"
+        },
+        {
+          "name": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb--bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "uid": "5ABA71CB-8507-4A1A-8312-D81E0FE13173",
+          "hostname": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ]
+    },
+    "generatedNamePersistence": {
+      "passed": true,
+      "restoredIdentities": 4
+    }
+  },
+  "cleanup": {
+    "nativeExitCodes": [
+      0,
+      0,
+      0
+    ],
+    "ownedShimsRemaining": [],
+    "cleanupError": null
+  },
+  "artifactSHA256": {
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaapct22-EEBB1324-80D1-4137-A9C8-94A7E8499440-main.log": "46fb5e4a7a857b0ece3da51b74f3113a81776f22869a496f16eb40aa08711266",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb--5ABA71CB-8507-4A1A-8312-D81E0FE13173-main.log": "a33a0fdb18d3ad3e20f37fb23071f232735decbca353dcc6fa7580872e61169e",
+    "completed-9160DF64-89C5-4481-B0ED-D8CA416E574C-main.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "failed-5AAB5F24-EA8E-4A9E-A929-6318FC491CE2-main.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "force-1A5EDE66-9640-4CB8-8C31-7A2A4B30AA83-main.log": "f767ce67d4d19d4f317ef9e297da534b4551fec3a8caa313c9bb29b22baf8524",
+    "force-FCBA0C8A-B404-4CBA-AFE8-E45C35874BC3-main.log": "3d02f53e954019bf48ab83fe33c94d547fcfe5af7110fab7554fae82c141747b",
+    "gr8s.log": "d974fe3103e5f5cd91c55fd9e34c4ece934ccdcd6a45cb4a1b3ce0dc4283f4a0",
+    "graceful-A674B765-20FD-4BC6-93B8-4DC9399AE755-main.log": "d4e82310560b8f5a6a2d960637d9fec30de1a7082049f9a27af5755ed477a9fa",
+    "native-generated-hg7kg-1A788172-83D2-435C-8DD2-367E7F389431-main.log": "b0d36255aa6ba469b4abbc31b49523102461da0d9736478cfb83098d693bd976",
+    "native-generated-rjrx4-C44B0A06-EE1B-4881-AC6C-D36E0AB3A711-main.log": "a51fd638de98c03bb69a4048039810577a647a82541805ec1bbb1a2b198b49b8",
+    "parallel-CEF7B139-7409-44E3-8A85-45A66CB6D0E0-main.log": "cbdb2470b643b8d3a490f4ade9aa6d3b34064b630abd552b9dcbf48154883eea",
+    "parallel-CEF7B139-7409-44E3-8A85-45A66CB6D0E0-side1.log": "514411a648517771acebea9be2cf4d0852993d905238ca1025c6c501217ad4fa",
+    "readiness-route-4504A06A-2152-4039-A4A9-88B763F46A44-main.log": "be981f115106cea320dbd5e91c74ad1e748cf2e4b4ed250f20dadfab17624b3d",
+    "readiness-route-4504A06A-2152-4039-A4A9-88B763F46A44-side1.log": "386dfa17671d176560ff94f0dbd45eb8d16b7826a3f9b0f12e74653d94a9b55b",
+    "report.json": "b215e9a264a36b3263348531e0b61d737bbac3224b2c9628b5aa0e343d1e7f4e",
+    "restart-27D4EFB4-A493-4957-BB84-B8B5025C3251-main.log": "d59a06128d1ebdbe66c0cf57669ff7b5ebbd1551281a04cefc3811799bd97d2f",
+    "steady-3D3110DE-668A-44B6-BF52-365CDA0F1674-main.log": "25f8e4f7a8ee0e9ed0b6bedec2830b9860faf9b4a72e57626117f64e990143c2"
+  },
+  "limitations": [
+    "These nine native scenarios do not replace the full upstream conformance selection.",
+    "A transient nil HTTP2 connection error during status reporting recovered; investigation remains open in podster-uqb.11. The run was not restarted.",
+    "After this native build, a separate admission check keeps Service names within their required DNS-label limit when sharing the corrected general DNS-subdomain validator. That check is validated by direct HTTP tests; the generated-name and hostname runtime code is unchanged."
+  ]
+}

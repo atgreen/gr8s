@@ -125,7 +125,7 @@
                  (setf (gethash "volumeMounts" container)
                        (concatenate 'vector (gethash "volumeMounts" container #())
                                     (vector (core-object "name" volume-name "mountPath" mount-path "readOnly" t))))))
-      (parse-pod object))))
+      (parse-pod object :allow-generate-name (null (pod-name pod))))))
 
 (defun authenticate-service-account-token (store token)
   "Authenticate only server-issued tokens against live account and credential UIDs."
