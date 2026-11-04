@@ -1,28 +1,28 @@
 {
-  "directory": "/var/tmp/gr8s-probes-native.7lkdus6o",
+  "directory": "/var/tmp/gr8s-probes-native.fdj60_yy",
   "stateDirectory": "/var/tmp/gr8s-conformance.a4fy165q/state",
-  "namespace": "probes-a389d4ca53",
+  "namespace": "probes-f384965c36",
   "nativeSHA256": "f4e09c4e047114c3c357f46936bc8c15da1fb4cfce03f964a2bf1b068da2f5fc",
   "scenarios": {
     "startupAndHttpReadiness": {
       "passed": true,
-      "uid": "D296E888-A29B-48AD-9066-316549DA0C0C",
+      "uid": "A691C531-BBCA-4F23-8535-ECE16C3B8ABC",
       "startupSuppressedLiveness": true
     },
     "livenessZeroExitAndEvents": {
       "passed": true,
       "actualExitCode": 0,
       "healthyIDUnchanged": true,
-      "actualStopSecondsAfterFirstFailure": 4.0
+      "actualStopSecondsAfterFirstFailure": 3.0
     },
     "probeGraceOverridesPodGrace": {
       "passed": true,
       "probeGrace": 3,
       "podGrace": 30,
-      "containerID": "7004621038480eafa7d686078d023933e641e6cefdcbb07ed251dd4ca1875b67",
+      "containerID": "7857d2596600d205a0777a13169da9c4caa65a1a642b32a4abcdb065023687b5",
       "requestedGrace": 3,
-      "actualStopSeconds": 2.648477077484131,
-      "containerdLogLine": "time=\"2026-11-04T03:22:45.351523489Z\" level=info msg=\"StopContainer for \\\"7004621038480eafa7d686078d023933e641e6cefdcbb07ed251dd4ca1875b67\\\" with timeout 3 (s)\"",
+      "actualStopSeconds": 2.9515180587768555,
+      "containerdLogLine": "time=\"2026-11-04T04:06:18.048482744Z\" level=info msg=\"StopContainer for \\\"7857d2596600d205a0777a13169da9c4caa65a1a642b32a4abcdb065023687b5\\\" with timeout 3 (s)\"",
       "exitCode": 137
     },
     "tcpActualListenerTransitions": {
@@ -31,7 +31,7 @@
     },
     "grpcActualService": {
       "passed": true,
-      "uid": "BC59E754-1D7D-4B83-BA6C-D37DC210A819",
+      "uid": "46BE2343-804C-40FE-8C3D-73CD32B343AF",
       "containerIDUnchanged": true
     },
     "nativeRestartKeepsActualAttempts": {
@@ -39,7 +39,9 @@
     },
     "deleteCancelsBlockedProbe": {
       "passed": true,
-      "seconds": 0.023449116000847425
+      "seconds": 12.249299906001397,
+      "containerID": "containerd://0914867cc023ed5828a742f36a2da46dc95c1087ee332acd491c5ff9f696cd37",
+      "actualRuntimeCleanupComplete": true
     }
   },
   "nativeExitCodes": [
@@ -65,25 +67,31 @@
   ],
   "ownedShimsRemaining": [],
   "sourceCommit": "b169681",
+  "harnessCommit": "890f535",
+  "harnessSHA256": "c2c28d5cb2afee53719d93ed5b273264c3180bfe4098c8002679c49b0b42f453",
   "mergedMain": "ffe26512f260ecfd982edb174479c365dd633f72",
-  "scope": "Seven strict native container probe scenarios; supplemental evidence, not certification",
-  "localArtifacts": "build/conformance/2026-11-04-probes-native-7lkdus6o",
+  "scope": "Seven strict actual native probe scenarios; exact UID physical container/sandbox cleanup precedes process shutdown. Supplemental evidence, not certification.",
+  "localArtifacts": "build/conformance/2026-11-04-probes-native-fdj60_yy",
   "artifactSHA256": {
-    "grpc-not-serving.json": "5d873b02a94969cad484e5babc1c7b7358aa56f5c5646b4c087a115702fcd49d",
-    "grpc-serving.json": "0ae3c8b0215231dfd74a7b33aaa5c63173cd455a890b57706fe85e45f6d2c0bf",
-    "http-ready.json": "fb0ce047010cf0f35deb0fc8be35edba8e8dd6199acccd4aaf786003c16b9090",
-    "liveness-restarted.json": "5f41efee73bca5ddf9779e0ed391fae5a690fcf630abad5fcede373f8e309228",
-    "probe-events.json": "798befda15d495d8a5a40121a164e517d3a4820aa9c637b698d79032b1facc6c",
-    "probe-grace-enforced.json": "69cf6c3005d1c159e1b543897ec95bf253f94253f0b45682458fdf774901997f",
-    "probe-grace-events.json": "936c22a35729541e0d087e542f36a25b0a1f24ed0e9435fa89c303c00883de96",
-    "probe-grace-stop.json": "8dc3f23dec06a6687aa7c38978fbcb23dc397f1c4c2bd0c125e7f279851d18d0",
-    "report.json": "b08f75667d2c52c268b9aeaa582e71684fb1d73e3d67dd8bb4660645a8ec785e",
-    "startup-pending.json": "0b8a0f60634ba06091e1dfb9c79ee02a617c146c9fec5b968e87b8b26ed6c07e",
-    "tcp-listener-withdrawn.json": "90706bb84c8cea1b55bac27510438ea9002f455f8840a79648e5aac4a05408bc",
-    "gr8s.log": "5165b1f43731a2f203f37183bf3f3d4f9b9145b58344c3988d368fbb7bdb298e",
-    "containerd.log": "f71cfa5801363f016efb96e3b1d5c85790ab9684d69697783cdc7c3aee646995"
+    "blocked-probe-running.json": "d15d4724e68f34bbcd8e9bf5b131da160fc490324a4efbfe271d63bfee12dafe",
+    "grpc-not-serving.json": "f820097bf80fa5d34bbd62d8fb378cf1f59e5201f76b25a55ceecbc2c0b5054f",
+    "grpc-serving.json": "760384addb6076f27a19f488ab883f5428ced62c364db82628ac30c8335c6384",
+    "http-ready.json": "015cfa6f6d8b6fbcd5e190ecc4deebd7195080136daf02a18299fc24957746d9",
+    "liveness-restarted.json": "e6029403dad6718cf8858a04ab5eafcbdcceb5c73d9ca2536c0ab4435de347b5",
+    "prior-owned-deletions.json": "2b94e0f21b09019fb7220c59ca7595e28ab48d4872fc207bcb731fea577568e2",
+    "probe-events.json": "a1b6f04651912b5f1f0b2f9a10cfafde72b71dd7264ddfb30f3b8441333117f8",
+    "probe-grace-enforced.json": "029bbb023de2d1e7687b9c0af7b64f846fef6db19f39fa0736d2b9d02aa89aff",
+    "probe-grace-events.json": "f3769a69a48da42098e61258da1571ff5908e9e9c23acd444be92aa6b062a54e",
+    "probe-grace-stop.json": "c6d30dad70499ac5f2a5c0b993347e91633f575a791f06e69c86278f16f159e7",
+    "report.json": "337f8cdffb2345bef2aadbc64111f9e583dbcdd7bdd39876600b6e0a3fc5a8a5",
+    "startup-pending.json": "afbccb749207666fd7d4e345d62c218125d5b7aff26f9e222e9cbea6a458f365",
+    "tcp-listener-withdrawn.json": "288980aa64410f1e6f5158bb90ee0e24740eb759d9b2a0da6da2f5784669e854",
+    "gr8s.log": "65c76b01dea0af9aa9ecf28d5a1ef6249c6ebed4eed9b4ac2b9b3df0e0db2542",
+    "containerd.log": "1ab1cc317a36d367f588d61d34944e39be9b7f5699165a609670aab725a0c808"
   },
   "beforeEvidence": "docs/container-probes-native-before-2026-11-04.json",
+  "firstNativeEvidence": "docs/container-probes-native-first-2026-11-04.json",
+  "upstreamEvidence": "docs/container-probes-upstream-2026-11-04.json",
   "hostValidation": {
     "checks": 3095,
     "passed": 3090,
@@ -91,5 +99,6 @@
     "failed": 0,
     "log": "/tmp/gr8s-probes-dns-final-full.log"
   },
-  "upstreamValidation": "Full ten-case Probing container conformance focus pending; do not treat native scenarios as upstream conformance results."
+  "cleanupValidation": "For each exact Pod UID, wait for native lifecycle checkpoint removal after actual CRI container and sandbox/network deletion. Blocked 60-second exec probe and its runtime resources retired in12.2493seconds; both native processes exited0, no owned shims remained.",
+  "reusePrecondition": "An earlier attempt qpzm6w5p failed before any test Pods because the previous run retained an already-deleting owned aggregator. New harness only waits for those existing deletion requests to converge; active/unrelated Pods still fail admission to the smoke."
 }
