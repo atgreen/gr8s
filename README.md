@@ -133,6 +133,12 @@ The agent serves DNS there and writes `<pod-namespace>.svc.cluster.local`,
 `svc.cluster.local`, and `cluster.local` searches into the Pod resolver. It
 answers Service A/AAAA address queries from durable local discovery data and
 forwards names outside `cluster.local` to the host's IPv4 resolvers, over UDP or TCP.
+Pod `dnsPolicy` selects actual cluster, host or explicitly configured resolver
+settings. `dnsConfig` merges validated nameservers, search paths and options;
+`None` uses only the supplied settings. DNS policy/configuration are immutable
+after Pod creation, and equivalent default metadata round trips preserve the
+runtime fingerprint. `scripts/test-pod-dns-config.py` verifies actual resolver
+files and custom UDP/TCP queries against a separate resolver in an owned guest.
 
 The Whistler classifier attaches to the host veth ingress for Pod egress. It uses an
 agent-initialized map to check the exact IPAM IPv4 address and interface MAC,

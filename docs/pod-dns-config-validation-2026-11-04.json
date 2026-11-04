@@ -1,0 +1,55 @@
+{
+  "date": "2026-11-04",
+  "isCertificationResult": false,
+  "scope": "Actual per-Pod CRI resolver settings for None, Default, ClusterFirst and ClusterFirstWithHostNet, ordered overrides and immutable updates",
+  "primarySources": [
+    {
+      "url": "https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.0/pkg/kubelet/network/dns/dns.go",
+      "sha256": "c10223dc5b5e1d6b96378f0060da6c120f1b6daf71b61437a04ff7f5c3001990"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.0/pkg/apis/core/validation/validation.go",
+      "sha256": "907df25a42225a8928cd914383af477b695e9791c22a2109c3ee31be97a7c754"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.0/test/utils/image/manifest.go",
+      "sha256": "801a5acff083db1c9d6c733a44ca0f031213a644ab0b01f7487b4b81ca1bfcf6",
+      "actualNativeImage": "registry.k8s.io/e2e-test-images/agnhost:2.63.0"
+    }
+  ],
+  "localValidation": {
+    "focusedSource": "d60a0bd",
+    "focusedPodDNSConfig": {
+      "passed": 31,
+      "skipped": 0,
+      "failed": 0
+    },
+    "firstFullHostSuite": {
+      "sourceCommit": "e3e06d8",
+      "passed": 2944,
+      "skipped": 5,
+      "failed": 2,
+      "failureTest": "OPERATION-INPUT-AND-CANCEL-FOLLOW-THE-CORRELATED-NODE-SESSION",
+      "failure": "Operation-request wait3s then Node operation timed out; no DNS config failure",
+      "log": "/tmp/gr8s-pod-dns-config-full.log",
+      "trackedByRootIssue": "podster-uqb.25"
+    },
+    "singleUnchangedTargetedRerun": {
+      "passed": 4,
+      "failed": 0,
+      "log": "/tmp/gr8s-pod-dns-config-node-op-targeted.log",
+      "timeoutsUnchanged": true
+    },
+    "nativeDNSFixtureSelfCheck": "Actual host-loopback UDP and TCP replies returned configured real-shaped backend IP; unknown name returnedNXDOMAIN; both listener threads stopped."
+  },
+  "nativeValidation": {
+    "status": "Not run; VM22290 remains stopped/dirty for owner-coordinated lifecycle and ACK diagnostics. No guest mutations or new native processes were started.",
+    "harness": "scripts/test-pod-dns-config.py",
+    "intendedProof": "Distinct custom resolver IP serves actual UDP/TCP queries from a real Pod; HTTP fetch by custom search name reaches actual observed backend Pod; actual resolv.conf, all container identities across restart and zero-shim cleanup."
+  },
+  "remaining": [
+    "Root node-session issue25 must be resolved before a final full-suite gate; no blanket reruns until coordination.",
+    "Actual native proof and exact unchanged configurable-nameservers conformance case remain pending safe guest release.",
+    "Truncation emits actual DNSConfigForming runtime warnings; forwarding those warnings as Kubernetes Events is a follow-up to the generic runtime-event bridge."
+  ]
+}
