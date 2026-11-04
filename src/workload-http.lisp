@@ -105,7 +105,7 @@
                      (let* ((count (workload-int (gethash "replicas" (require-object (gethash "spec" input) "spec")) "spec.replicas"))
                             (updated (update-core-resource store resource namespace name
                                        (lambda (current)
-                                         (when (gethash "resourceVersion" metadata)
+                                         (unless (member (gethash "resourceVersion" metadata) '(nil "") :test #'equal)
                                            (setf (gethash "resourceVersion" (workload-metadata current)) (gethash "resourceVersion" metadata)))
                                          (when (gethash "uid" metadata) (setf (gethash "uid" (workload-metadata current)) (gethash "uid" metadata)))
                                          (setf (gethash "replicas" (gethash "spec" current)) count) current) :dry-run dry-run)))

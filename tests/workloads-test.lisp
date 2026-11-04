@@ -476,3 +476,15 @@
       (setf (gethash "maxUnavailable" (gethash "rollingUpdate" (gethash "strategy" (gethash "spec" input)))) "101%")
       (signals kubernetes-error
         (gr8s::create-core-resource store "deployments" input "alpha")))))
+
+(test workload-scale-allows-an-explicitly-empty-resource-version
+  (with-core-api (store path)
+    (let* ((collection "/apis/apps/v1/namespaces/alpha/deployments")
+           (endpoint (concatenate 'string collection "/web/scale")))
+      (check-core-status 201 collection :method :post :object (workload-fixture "Deployment" "web" 1))
+      (let ((scale (check-core-status 200 endpoint)))
+        (setf (gethash "resourceVersion" (gethash "metadata" scale)) ""
+              (gethash "replicas" (gethash "spec" scale)) 2)
+        (is (= 2 (gethash "replicas" (gethash "spec" (check-core-status 200 endpoint :method :put :object scale)))))
+        (setf (gethash "resourceVersion" (gethash "metadata" scale)) "stale")
+        (check-core-status 409 endpoint :method :put :object scale)))))
