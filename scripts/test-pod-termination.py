@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: 2026 gr8s contributors
+# SPDX-FileCopyrightText: 2026 Anthony Green
 # SPDX-License-Identifier: MIT
 """Exercise real Pod shutdown in an isolated privileged guest with native gr8s.
 
