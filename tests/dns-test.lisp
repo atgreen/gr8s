@@ -1,3 +1,10 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Verify authoritative replies and actual UDP/TCP forwarding, including silent
+;;;; upstream timeout recovery and continued server liveness.
+
 (in-package #:gr8s/tests)
 
 (in-suite gr8s)
@@ -188,3 +195,33 @@
            (is (eq t udp-forwarded))
            (is (eq t tcp-forwarded)))
       (when server (gr8s::stop-dns-server server)))))
+
+(test dns-survives-an-actual-silent-udp-upstream-and-continues-serving
+  (let* ((silent (gr8s::make-bound-dns-socket :datagram :udp "127.0.0.1" 0))
+         (silent-port (nth-value 1 (sb-bsd-sockets:socket-name silent)))
+         (server nil))
+    (unwind-protect
+         (progn
+           (setf server (gr8s::start-dns-server :address "127.0.0.1" :port 0
+                          :upstreams (list (cons "127.0.0.1" silent-port)) :timeout .05))
+           ;; A bound, deliberately unread UDP socket supplies neither a reply
+           ;; nor an ICMP refusal: the actual recvfrom must hit its timeout.
+           (dotimes (index 2)
+             (declare (ignore index))
+             (sb-sys:with-deadline (:seconds 2)
+               (is (= 2 (gr8s::dns-response-code
+                         (test-udp-dns-query (gr8s::dns-server-port server) "silent.example"))))))
+           (is (bt:thread-alive-p (gr8s::dns-server-udp-thread server)))
+           (is (equalp #(10 96 0 1)
+                       (dns-first-a-address (test-udp-dns-query (gr8s::dns-server-port server) +kubernetes-service-name+)))))
+      (when server (gr8s::stop-dns-server server))
+      (sb-bsd-sockets:socket-close silent))))
+
+(test dns-upstream-retries-contain-deadline-timeouts
+  (let ((attempts 0))
+    (is (eq :answered
+            (gr8s::try-dns-upstreams '(first second)
+              (lambda (upstream)
+                (incf attempts)
+                (if (eq upstream 'first) (error 'sb-sys:deadline-timeout) :answered)))))
+    (is (= 2 attempts))))

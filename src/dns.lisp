@@ -1,3 +1,10 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Serve authoritative Kubernetes DNS replies and bounded UDP/TCP forwarding;
+;;;; upstream timeout conditions are contained so a resolver outage cannot stop the node.
+
 (in-package #:gr8s)
 
 (defconstant +dns-response+ #x8000)
@@ -256,6 +263,10 @@
     (dolist (upstream upstreams)
       (handler-case
           (return-from try-dns-upstreams (funcall operation upstream))
+        (sb-ext:timeout (condition)
+          (setf last-error condition))
+        (sb-sys:deadline-timeout (condition)
+          (setf last-error condition))
         (error (condition)
           (setf last-error condition))))
     (error "all DNS upstreams failed~@[; last error: ~A~]" last-error)))
