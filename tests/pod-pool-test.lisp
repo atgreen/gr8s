@@ -125,7 +125,7 @@
      (gr8s::validate-pod-pool-host-routes
       "10.80.0.0/12" path :route-reader
       (lambda () '((:cidr "0.0.0.0/0" :index 2 :table 254)
-                    (:cidr "192.0.2.0/24" :index 2 :table 254))))))))
+                    (:cidr "192.0.2.0/24" :index 2 :table 254)))))))
 
 (test only-exact-journal-owned-pod-routes-are-exempt-from-overlap-rejection
   (with-temporary-store (store path)
@@ -154,7 +154,7 @@
         (signals gr8s::cni-error (validate route))
         (setf (gethash 20 attributes) (gr8s::netlink-string owner)
               (gethash 1 attributes) #(2 0 0 0 0 99))
-        (signals gr8s::cni-error (validate route)))))))
+        (signals gr8s::cni-error (validate route))))))
 
 (test pending-and-applied-vxlan-identities-both-survive-host-route-validation
   (with-temporary-store (store path)
