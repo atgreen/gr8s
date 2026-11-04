@@ -56,6 +56,12 @@ The current API supports Pods in the `default` namespace:
 - durable desired state and optimistic resource-version checks
 - periodic, idempotent reconciliation with transient-failure retry
 
+Pods support finalizers that retain API objects after actual runtime cleanup,
+including zero-grace deletion. Native validation covers real exit codes 0 and
+137, restart recovery, UID reuse, unrelated execution during finalizer retention,
+and cancellation of a blocked Exec probe. See the
+[finalizer evidence](docs/pod-finalizers-native-2026-11-04.json).
+
 Namespaced ConfigMap and Secret APIs support durable CRUD, list/selectors,
 pagination, patch, optimistic concurrency, and dry-run through current kubectl
 clients. See [ConfigMap and Secret APIs](docs/configmap-secret-api.md) for the
