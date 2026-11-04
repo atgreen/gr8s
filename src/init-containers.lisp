@@ -82,9 +82,16 @@
       (setf (gethash "initContainerStatuses" status) inits
             (gethash "containerStatuses" status) apps)
       (setf (runtime-pod-phase observed)
-            (if complete
-                (container-lifecycle-phase apps (not (equal "Unknown" (runtime-pod-phase observed))))
-                (if (and failed (equal "Never" (gethash "restartPolicy" state))) "Failed" "Pending")))))
+            (cond
+              ((gethash "terminalShutdown" state)
+               ;; Finalizer retention must not leave a physically stopped
+               ;; Always Pod Pending merely because init was interrupted.
+               (if (and complete (every (lambda (item) (gethash "terminated" (gethash "state" item))) apps))
+                   (container-lifecycle-phase apps t)
+                   "Failed"))
+              (complete
+               (container-lifecycle-phase apps (not (equal "Unknown" (runtime-pod-phase observed)))))
+              (t (if (and failed (equal "Never" (gethash "restartPolicy" state))) "Failed" "Pending"))))))
   observed)
 
 (defun container-lifecycle-all-statuses (observed)

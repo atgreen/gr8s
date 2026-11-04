@@ -1,0 +1,92 @@
+{
+  "copyright": "2026 Anthony Green",
+  "isCertificationResult": false,
+  "scope": "Supplemental genuine ordinary init-container execution on frozen pre-finalizer-integration source",
+  "sourceCommit": "abbdc588c954a92f0f39d1660068f170437448d6",
+  "harnessCommit": "f5aeeee3802eb7438924710d2196f93814acb854",
+  "nativeSHA256": "2b30b0bf284f4040a05ab458b0a70dffb54eb32f2ddfbc322f385ee1cde1e38d",
+  "harnessSHA256": "716437df94ef751cbd19743e10dd0ede8221903ecc2699331d4433733776ae8d",
+  "guestRunDirectory": "/var/tmp/gr8s-init-native.ngzri8yq",
+  "rawReportSHA256": "82f5a1f932080b482cf4647b09bf66441dfb996f4ece1ba4c7c39675c5d22c54",
+  "sourceLabelErratum": {
+    "guestRunDirectory": "/var/tmp/gr8s-init-native.ngzri8yq",
+    "nativeSHA256": "2b30b0bf284f4040a05ab458b0a70dffb54eb32f2ddfbc322f385ee1cde1e38d",
+    "verifiedRuntimeSourceCommit": "abbdc588c954a92f0f39d1660068f170437448d6",
+    "harnessCommit": "f5aeeee3802eb7438924710d2196f93814acb854",
+    "harnessSHA256": "716437df94ef751cbd19743e10dd0ede8221903ecc2699331d4433733776ae8d",
+    "invocationSourceCommitTypo": "abbdc583657317e60456b23a8604d42efc48cf3d",
+    "erratum": "The source-commit string in the invocation is unresolvable because root mistyped its suffix. Actual built runtime source is verifiedRuntimeSourceCommit; native/hash and separate harness/hash were verified locally and remotely before launch. Preserve raw report unchanged and cite this correction. Harness-only f5aeeee modifies no runtime source.",
+    "hostExecSession": 36692,
+    "isCertificationResult": false
+  },
+  "scenarios": {
+    "orderedExecutionAndRestartAdoption": {
+      "passed": true,
+      "firstContainerID": "containerd://1d2a766a8c81086a8a6fb694a3b91407c72a4a274375b47c8343d1699554a835",
+      "actualSharedFile": "one\ntwo\n"
+    },
+    "neverFailurePreventsApplication": {
+      "passed": true,
+      "exitCode": 17
+    },
+    "alwaysRetriesOnlyFailedInit": {
+      "passed": true,
+      "actualExecutedAttempts": 4
+    }
+  },
+  "nativeExitCodes": [
+    0,
+    0
+  ],
+  "cleanupError": null,
+  "independentPostShutdown": {
+    "ownedProcesses": [],
+    "apiPodFiles": [],
+    "privateDesiredFiles": []
+  },
+  "hostValidation": {
+    "initChecks": 49,
+    "affectedChecks": 465,
+    "fullChecks": 3461,
+    "fullPassed": 3456,
+    "optionalSkips": 5,
+    "fullFailed": 0
+  },
+  "preservedEarlierFailure": {
+    "log": "build/validation/init-containers-2026-11-04/gr8s-init-focused.log",
+    "passed": 33,
+    "failed": 5,
+    "cause": "Unstarted PodInitializing placeholders incorrectly consumed attempt zero. Fixed before the native source commit."
+  },
+  "remainingWork": [
+    "Three pinned init cases require genuine CPU resource limits under independent implementation.",
+    "Restartable init sidecars are tracked separately and remain rejected.",
+    "Later main/finalizer integration and terminal-shutdown marker require their own final-source gate/native proof."
+  ],
+  "artifactSHA256": {
+    "build/conformance/2026-11-04-init-native-ngzri8yq/gr8s.log": "4fb0c6d9a4d4be4f5031c4c3ad31e99b32d5fe1db87095440f0c368f21a790e4",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/ordered-before-restart.json": "3c7a30930911ff238cccd61718e3d2d9a93b30dfca29827461614d533f35174f",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/ordered-complete.json": "dc6bd99437df1116959e2bb3730b869e46d45a8b69f4d6f6e2b00afaf57cabac",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/never-failed.json": "6102b33cd24ff2b85c359bb29a312ad8dcc58433d42038749759e753d480c159",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/always-retried.json": "78ffd4957bf6f5d75d13edd8aa33ee0c596490afc7de57545800197cbea9903d",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/B9527A0C-CBDC-4770-BE86-47CA94695969-before-cleanup.json": "d7a9a3c5f0a03e197628232a5dc8d8888ffac4a72668b84d064272ade477e359",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/B9527A0C-CBDC-4770-BE86-47CA94695969-init-0.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/B9527A0C-CBDC-4770-BE86-47CA94695969-init-1.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/B9527A0C-CBDC-4770-BE86-47CA94695969-app.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/C6237AFC-5E46-468E-B942-636C689C27BF-before-cleanup.json": "d6ba600ed3a0adcc424a664da63e6bf8b90975a4c46e3851802969046c267ac2",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/C6237AFC-5E46-468E-B942-636C689C27BF-init-0.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/C6237AFC-5E46-468E-B942-636C689C27BF-init-1.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/E74BF115-4C23-4579-B685-6E54C0076108-before-cleanup.json": "1ba84b544b5dbbdb6f1af3cc283b65e0ac01b8fddbd1fc8eac6e12862b843e9e",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/E74BF115-4C23-4579-B685-6E54C0076108-init-0.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/E74BF115-4C23-4579-B685-6E54C0076108-init-0.1.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/E74BF115-4C23-4579-B685-6E54C0076108-init-0.2.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/E74BF115-4C23-4579-B685-6E54C0076108-init-0.3.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/report.json": "82f5a1f932080b482cf4647b09bf66441dfb996f4ece1ba4c7c39675c5d22c54",
+    "build/conformance/2026-11-04-init-native-ngzri8yq/source-label-erratum.json": "ba7a82ad8f0794dfb8826e5776c2b04f8f97b013918b82df18128d25f46967ed",
+    "build/validation/init-containers-2026-11-04/gr8s-init-focused.log": "bb26856e912a4bb800978af59f5df777b51f89f4d47c7e644738a7a5ba49cf53",
+    "build/validation/init-containers-2026-11-04/gr8s-init-focused-2.log": "eba23be025d79ddf3c5258705db5492fb1951e4ce650a35cc73cfb74abc4ac2e",
+    "build/validation/init-containers-2026-11-04/gr8s-init-affected.log": "14c956aa1a6fc2d1a493f088a7d8e76b58482c7176299c79f98b87ca2339e3c7",
+    "build/validation/init-containers-2026-11-04/gr8s-init-full.log": "72e379f47780cece811afc8ea0f5c2279b95127c41e4d742a288c8fc76a36d2c",
+    "build/validation/init-containers-2026-11-04/gr8s-init-native-build.log": "816551625f6b0569f8acb2b494e5764ed236d7474af72ed7e3ea227269f9b18c"
+  }
+}

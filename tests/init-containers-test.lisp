@@ -122,6 +122,25 @@
     (is (equal "prepare" (container-spec-name (aref (gr8s::pod-init-containers pod) 0))))
     (is (equal '("/bin/true") (coerce (gr8s::container-spec-command (aref (gr8s::pod-init-containers pod) 0)) 'list)))))
 
+(test finalizer-shutdown-retains-real-interrupted-init-as-terminal-failed
+  (with-temporary-store (store directory)
+    (let* ((now 4000000000) (pod (init-test-pod store))
+           (runtime (gr8s::make-containerd-runtime :log-root directory))
+           (info (lifecycle-info "init-first" 0 gr8s.cri.v1::+containerstate-container_running+ now)))
+      (with-lifecycle-cri (fixture pod (list info))
+        (gr8s::runtime-ensure runtime pod)
+        (gr8s::capture-containerd-finalized-pod runtime pod now)
+        (let ((before (runtime-observe runtime (pod-uid pod))))
+          (is (equal "Failed" (gr8s::runtime-pod-phase before)))
+          (is (= 137 (gethash "exitCode" (gethash "terminated" (gethash "state" (init-test-status before "init-first"))))))
+          (is (not (gr8s::pod-initialization-complete-p pod (gr8s::runtime-pod-status before)))))
+        (gr8s::containerd-delete-uid runtime (pod-uid pod) now :preserve-lifecycle t)
+        (let ((after (runtime-observe (gr8s::make-containerd-runtime :log-root directory) (pod-uid pod))))
+          (is (equal "Failed" (gr8s::runtime-pod-phase after)))
+          (is (= 137 (gethash "exitCode" (gethash "terminated" (gethash "state" (init-test-status after "init-first"))))))
+          (is (null (lifecycle-cri-fixture-sandbox fixture)))
+          (is (not (find "app" (lifecycle-cri-fixture-calls fixture) :test #'equal :key #'second))))))))
+
 (test native-failed-init-always-retries-with-durable-backoff-before-any-app
   (with-temporary-store (store directory)
     (let* ((now 4000000000) (gr8s::*container-lifecycle-clock* (lambda () now))

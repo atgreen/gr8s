@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--gr8s", type=Path, required=True)
     parser.add_argument("--state-directory", type=Path)
     parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--with-finalizers", action="store_true", help="Also verify terminal init capture with merged Pod finalizers")
     parser.add_argument("--image", default="registry.k8s.io/e2e-test-images/busybox:1.37.0-1")
     parser.add_argument("--api-port", type=int, default=18290)
     parser.add_argument("--node-port", type=int, default=17490)
@@ -137,6 +138,21 @@ def main():
         return [line for line in subprocess.check_output(["ps", "-eo", "comm=,args="], text=True).splitlines()
                 if line.startswith("containerd-shim") and str(state) in line]
 
+    def capture_and_delete(pod):
+        """Preserve actual status and CRI logs before requesting exact-UID runtime deletion."""
+        code, observed = request(path(pod))
+        save(pod["metadata"]["uid"] + "-before-cleanup.json", {"code": code, "pod": observed})
+        for source in (Path("/var/log/gr8s/pods") / pod["metadata"]["uid"]).glob("*.log"):
+            (root / (pod["metadata"]["uid"] + "-" + source.name)).write_bytes(source.read_bytes())
+        code, body = request(path(pod), "DELETE", {"apiVersion": "v1", "kind": "DeleteOptions",
+                                                   "preconditions": {"uid": pod["metadata"]["uid"]}, "gracePeriodSeconds": 0})
+        assert code in (200, 404), (code, body)
+
+    def drained():
+        """Require API deletion and independent physical/runtime removal, with no phase inference."""
+        return (not request(f"/api/v1/namespaces/{namespace}/pods")[1]["items"] and not owned_shims()
+                and not list((state / "agent/runtime/desired").glob("*.json")))
+
     try:
         start()
         code, existing = request("/api/v1/pods")
@@ -192,6 +208,41 @@ def main():
         assert not (volume(retry) / "second-ran").exists() and not (volume(retry) / "app-ran").exists()
         save("always-retried.json", retried)
         report["scenarios"]["alwaysRetriesOnlyFailedInit"] = {"passed": True, "actualExecutedAttempts": int((volume(retry) / "count").read_text())}
+        if args.with_finalizers:
+            for pod in pods:
+                capture_and_delete(pod)
+            wait(drained, 120, "ordinary init scenario cleanup before isolated finalizer proof")
+            finalized = create(["while :; do sleep 1; done", "touch /work/second-ran"],
+                               "touch /work/app-ran; exec sleep 600", "Always")
+            before_finalized = wait(lambda: (obj if "running" in statuses(obj := current(finalized)).get("init-0", {}).get("state", {})
+                                             else None), 600, "actual finalizer init process")
+            cid = statuses(before_finalized)["init-0"]["containerID"]
+            before_finalized["metadata"]["finalizers"] = ["tests.gr8s.io/init-terminal-proof"]
+            code, obj = request(path(finalized), "PUT", before_finalized)
+            assert code == 200, (code, obj)
+            began = time.monotonic()
+            code, obj = request(path(finalized), "DELETE", {"gracePeriodSeconds": 0,
+                                                            "preconditions": {"uid": finalized["metadata"]["uid"]}})
+            assert code == 200, (code, obj)
+            retained = wait(lambda: (obj if (obj := current(finalized))["status"]["phase"] == "Failed"
+                                     and statuses(obj).get("init-0", {}).get("state", {}).get("terminated", {}).get("exitCode") == 137
+                                     else None), 120, "real terminal failed init after finalizer deletion")
+            wait(lambda: not owned_shims(), 120, "zero physical shims while API init Pod stays retained")
+            assert retained["metadata"]["finalizers"] and retained["metadata"]["deletionTimestamp"], retained
+            assert statuses(retained)["init-0"]["containerID"] == cid, retained
+            assert not (volume(finalized) / "app-ran").exists() and not (volume(finalized) / "second-ran").exists()
+            save("finalizer-interrupted-init.json", retained)
+            history = Path("/var/log/gr8s/pods") / finalized["metadata"]["uid"] / "lifecycle.json"
+            history_data = json.loads(history.read_text())
+            assert history_data["terminalShutdown"] and history_data["containers"]["init-0"]["lastStatus"]["state"]["terminated"]["exitCode"] == 137
+            save("finalizer-terminal-lifecycle.json", history_data)
+            report["scenarios"]["finalizerRetainsActualInterruptedInit"] = {"passed": True, "containerID": cid,
+                                                                          "exitCode": 137, "physicalCleanupSeconds": time.monotonic() - began}
+            released = current(finalized)
+            released["metadata"]["finalizers"] = []
+            code, obj = request(path(finalized), "PUT", released)
+            assert code == 200, (code, obj)
+            wait(drained, 120, "actual API/runtime removal after finalizer release")
         report["passed"] = True
     except Exception as error:
         report["error"] = str(error)
@@ -199,15 +250,8 @@ def main():
         try:
             if native is not None and native.poll() is None:
                 for pod in pods:
-                    code, observed = request(path(pod))
-                    save(pod["metadata"]["uid"] + "-before-cleanup.json", {"code": code, "pod": observed})
-                    for source in (Path("/var/log/gr8s/pods") / pod["metadata"]["uid"]).glob("*.log"):
-                        (root / (pod["metadata"]["uid"] + "-" + source.name)).write_bytes(source.read_bytes())
-                    code, body = request(path(pod), "DELETE", {"apiVersion": "v1", "kind": "DeleteOptions",
-                                                               "preconditions": {"uid": pod["metadata"]["uid"]}, "gracePeriodSeconds": 0})
-                    assert code in (200, 404), (code, body)
-                wait(lambda: not request(f"/api/v1/namespaces/{namespace}/pods")[1]["items"] and not owned_shims()
-                     and not list((state / "agent/runtime/desired").glob("*.json")), 120, "physical init/application cleanup")
+                    capture_and_delete(pod)
+                wait(drained, 120, "physical init/application cleanup")
         except Exception as error:
             report["cleanupError"] = str(error)
         try:
