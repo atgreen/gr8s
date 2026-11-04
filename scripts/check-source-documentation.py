@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: 2026 gr8s contributors
+# SPDX-FileCopyrightText: 2026 Anthony Green
 # SPDX-License-Identifier: MIT
 """Audit first-party source files for the gr8s documentation convention.
 
@@ -24,7 +24,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parent.parent
-SPDX_COPYRIGHT = "SPDX-FileCopyrightText: 2026 gr8s contributors"
+SPDX_COPYRIGHT = "SPDX-FileCopyrightText: 2026 Anthony Green"
 SPDX_LICENSE = "SPDX-License-Identifier: MIT"
 GENERATED = {
     Path("src/cri-v1-generated.lisp"),

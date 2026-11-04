@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-FileCopyrightText: 2026 gr8s contributors
+# SPDX-FileCopyrightText: 2026 Anthony Green
 # SPDX-License-Identifier: MIT
 #
 # Purpose:
