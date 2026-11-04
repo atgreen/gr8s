@@ -21,6 +21,7 @@
                (:static-file "schema/crd-v1.json")
                (:static-file "schema/crd-wire-v1.json")
                (:static-file "schema/workloads-v1.json")
+               (:static-file "schema/policy-v1.json")
                (:static-file "schema/admissionregistration-v1.json")
 
                (:static-file "schema/storage-v1.json")
@@ -60,6 +61,7 @@
                              (:file "podtemplates")
                              (:file "workload-resources")
                              (:file "batch-resources")
+                             (:file "policy-resources")
                              (:file "admission-cel")
                              (:file "admission-resources")
 
@@ -142,8 +144,10 @@
                              (:file "workload-controller")
                              (:file "job-policy")
                              (:file "job-controller")
+                             (:file "disruption-controller")
                              (:file "workload-deletion")
                              (:file "workload-http")
+                             (:file "policy-http")
                              (:file "doctor")
                              (:file "main"))))
   :in-order-to ((test-op (test-op "gr8s/tests"))))
@@ -230,7 +234,8 @@
                              (:file "pod-hostname-test")
                              (:file "pod-dns-config-test")
                              (:file "telemetry-test")
-                             (:file "workloads-test"))))
+                             (:file "workloads-test")
+                             (:file "policy-test"))))
   :perform (test-op (operation component)
              (declare (ignore operation component))
              (unless (uiop:symbol-call

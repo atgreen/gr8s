@@ -35,8 +35,10 @@
     (cond
       ((string= content-type "application/vnd.kubernetes.protobuf")
        (decode-core-resource-protobuf (hunchentoot:raw-post-data :force-binary t) expected-kind
-                                      (if (equal expected-kind "Scale") "autoscaling/v1"
-                                          (when (member expected-kind '("Event" "DeleteOptions") :test #'equal) *core-resource-view-version*))))
+                                      (cond ((equal expected-kind "Scale") "autoscaling/v1")
+                                                ((equal expected-kind "Eviction") "policy/v1")
+                                                (t
+                                          (when (member expected-kind '("Event" "DeleteOptions") :test #'equal) *core-resource-view-version*)))))
       ((member content-type '("" "application/json") :test #'string=)
        (require-object (if (member expected-kind '("CustomResourceDefinition" "CertificateSigningRequest") :test #'equal)
                            (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))
@@ -256,12 +258,14 @@
         (if (string= content-type "application/json-patch+json")
             (apply-core-json-patch old patch)
             (if (and (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource)
+                         (policy-resource-p resource)
                          (member resource '("podtemplates" "deployments" "replicasets") :test #'equal))
                      (equal content-type "application/strategic-merge-patch+json"))
                 (template-strategic-merge old (require-object patch "patch")
                   (template-schema (cond ((csr-resource-p resource) *csr-schema-name*)
                                          ((storage-resource-p resource) (storage-resource-schema-name resource))
                                          ((endpointslice-resource-p resource) "io.k8s.api.discovery.v1.EndpointSlice")
+                                         ((policy-resource-p resource) "io.k8s.api.policy.v1.PodDisruptionBudget")
                                          ((equal resource "podtemplates") "io.k8s.api.core.v1.PodTemplate")
                                          (t (concatenate 'string "io.k8s.api.apps.v1." (core-resource-kind resource))))))
                 (merge-json-object old (require-object patch "patch")))))
@@ -293,7 +297,7 @@
                                                         (lambda (old) (declare (ignore old)) replacement) :dry-run dry-run))))
         ((and writable-scope name (eq method :patch)) (core-resource-patch-response store resource namespace name dry-run))
         ((and writable-scope (null name)
-              (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource) (batch-resource-p resource) (admission-config-resource-p resource) (member resource '("podtemplates" "events" "deployments" "replicasets" "customresourcedefinitions") :test #'equal))
+              (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource) (batch-resource-p resource) (policy-resource-p resource) (admission-config-resource-p resource) (member resource '("podtemplates" "events" "deployments" "replicasets" "customresourcedefinitions") :test #'equal))
               (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
                 (options (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions")))
@@ -364,6 +368,7 @@
              (if (or (uiop:string-prefix-p "io.k8s.api.certificates.v1." name)
                      (uiop:string-prefix-p "io.k8s.api.apps.v1." name)
                      (uiop:string-prefix-p "io.k8s.api.autoscaling.v1." name)
+                     (uiop:string-prefix-p "io.k8s.api.policy.v1." name)
                      (uiop:string-prefix-p "io.k8s.api.admissionregistration.v1." name)
                      (member name '("io.k8s.api.core.v1.PodTemplate" "io.k8s.api.core.v1.PodTemplateList"
                                   "io.k8s.api.core.v1.Event" "io.k8s.api.core.v1.EventList"

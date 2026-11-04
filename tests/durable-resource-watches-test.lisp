@@ -45,6 +45,8 @@
           ((equal resource "events") (setf (gethash "involvedObject" object) (gr8s::core-object)))
           ((member resource '("deployments" "replicasets") :test #'equal)
            (setf (gethash "spec" object) (gethash "spec" (workload-fixture (gr8s::core-resource-kind resource) name))))
+          ((equal resource "poddisruptionbudgets")
+           (setf (gethash "spec" object) (gr8s::core-object "minAvailable" 1)))
           ((equal resource "podtemplates")
            (setf (gethash "template" object) (gethash "template" (podtemplate-fixture name))))
           ((equal resource "services")

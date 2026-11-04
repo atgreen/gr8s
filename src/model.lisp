@@ -19,7 +19,11 @@
     :reader kubernetes-error-reason)
    (message
     :initarg :message
-    :reader kubernetes-error-message))
+    :reader kubernetes-error-message)
+   (details
+    :initarg :details
+    :initform nil
+    :reader kubernetes-error-details))
   (:report (lambda (condition stream)
              (format stream "~A: ~A"
                      (kubernetes-error-reason condition)

@@ -13,21 +13,23 @@
         (hunchentoot:content-type*) "application/json")
   (com.inuoe.jzon:stringify (crd-api-view (event-api-view object))))
 
-(defun status-response (status reason message code)
-  (json-response
-   (json-object "apiVersion" "v1"
-                "kind" "Status"
-                "status" status
-                "reason" reason
-                "message" message
-                "code" code)
-   code))
+(defun status-response (status reason message code &optional details)
+  "Answer a Kubernetes Status, with DETAILS such as the causes clients inspect when given."
+  (let ((object (json-object "apiVersion" "v1"
+                             "kind" "Status"
+                             "status" status
+                             "reason" reason
+                             "message" message
+                             "code" code)))
+    (when details (setf (gethash "details" object) details))
+    (json-response object code)))
 
 (defun kubernetes-error-response (error)
   (status-response "Failure"
                    (kubernetes-error-reason error)
                    (kubernetes-error-message error)
-                   (kubernetes-error-status-code error)))
+                   (kubernetes-error-status-code error)
+                   (kubernetes-error-details error)))
 
 (defun copy-json-object (object)
   (com.inuoe.jzon:parse (com.inuoe.jzon:stringify object)))
@@ -99,7 +101,7 @@
   (let ((groups (vector (json-object "name" "rbac.authorization.k8s.io"
                                     "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
-                       (event-api-group) (workload-api-group) (batch-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group) (admission-api-group-object))))
+                       (event-api-group) (workload-api-group) (batch-api-group) (policy-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group) (admission-api-group-object))))
     (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
@@ -118,6 +120,8 @@
                    "verbs" #("get" "patch" "update"))
       (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
       (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("create"))
+      (json-object "name" "pods/eviction" "singularName" "" "namespaced" t "kind" "Eviction"
+                   "group" "policy" "version" "v1" "verbs" #("create"))
       (json-object "name" "pods/proxy" "singularName" "" "namespaced" t "kind" "PodProxyOptions"
                    "verbs" #("get" "create" "update" "patch" "delete"))
       (json-object "name" "nodes" "singularName" "node" "namespaced" nil "kind" "Node" "verbs" #("get" "list")))
@@ -231,6 +235,7 @@
      (json-object "serverRelativeURL" "/openapi/v3/apis/storage.k8s.io/v1?hash=gr8s-storage-v1")
      "apis/events.k8s.io/v1"
      (json-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1")
+     "apis/policy/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/policy/v1?hash=gr8s-policy-v1")
      "apis/apps/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/apps/v1?hash=gr8s-apps-v1")))))
 
 (defun pod-group-version-kind ()
@@ -321,6 +326,7 @@
                     ((equal version "discovery.k8s.io/v1") (add-endpointslice-openapi-paths (core-object)))
                     ((equal version "events.k8s.io/v1") (add-event-openapi-paths (core-object) t))
                     ((equal version "apps/v1") (add-workload-openapi-paths (core-object)))
+                    ((equal version "policy/v1") (add-policy-openapi-paths (core-object)))
                     ((equal version "storage.k8s.io/v1") (add-storage-openapi-paths (core-object) version))
                     (t (add-storage-openapi-paths (add-core-resource-openapi-paths (openapi-v3-pod-paths)))))
       "components" (json-object "schemas" (openapi-definitions))))))
@@ -1012,6 +1018,8 @@ its clients treat any other multi-byte frame as an error message."
        (replace-pod-response store reconciler (first parts) namespace))
       ((and (= 1 (length parts)) (eq method :delete))
        (delete-pod-response store reconciler (first parts) namespace))
+      ((and (= 2 (length parts)) (string= "eviction" (second parts)) (eq method :post))
+       (evict-pod-response store reconciler (first parts) namespace))
       ((and (= 2 (length parts)) (string= "log" (second parts)) (eq method :get))
        (pod-logs-response store reconciler (first parts) namespace))
       ((and (= 2 (length parts)) (string= "exec" (second parts)) (member method '(:get :post)))
@@ -1083,6 +1091,9 @@ than wait for the next, which truncates any body that spans records in flight."
           ((string= path "/apis/apps") (json-response (workload-api-group)))
           ((string= path "/apis/batch") (json-response (batch-api-group)))
           ((string= path "/apis/batch/v1") (batch-resources-response))
+          ((string= path "/apis/policy") (json-response (policy-api-group)))
+          ((string= path "/apis/policy/v1") (policy-resources-response))
+          ((string= path "/openapi/v3/apis/policy/v1") (openapi-v3-response "policy/v1"))
           ((string= path "/apis/apps/v1") (workload-resources-response))
           ((string= path "/openapi/v2") (json-response (crd-openapi-document store nil nil nil)))
           ((string= path "/openapi/v3") (crd-openapi-discovery-response store))
