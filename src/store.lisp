@@ -39,6 +39,8 @@
   (pod-watch-journal-length 0)
   (pod-published-statuses (make-hash-table :test #'equal))
   (pod-client-statuses (make-hash-table :test #'equal))
+  ;; Pod UID to the node reserved for it while its preemption victims terminate.
+  (nominated-nodes (make-hash-table :test #'equal))
   (lock (bt:make-lock "gr8s store")))
 
 (defmacro with-store-lock ((store) &body body)
@@ -76,6 +78,10 @@
       (setf (gethash "lastHeartbeat" object) (node-record-last-heartbeat node)))
     (when (node-record-lease-deadline node)
       (setf (gethash "leaseDeadline" object) (node-record-lease-deadline node)))
+    (when (node-record-capacity node)
+      (setf (gethash "capacity" object) (node-record-capacity node)))
+    (when (node-record-extended-resources node)
+      (setf (gethash "extendedResources" object) (node-record-extended-resources node)))
     object))
 
 (defun parse-node-record (input)
@@ -91,6 +97,8 @@
                       :underlay-address (gethash "underlayAddress" object "")
                       :last-heartbeat (when (integerp heartbeat) heartbeat)
                       :lease-deadline (when (integerp deadline) deadline)
+                      :capacity (gethash "capacity" object)
+                      :extended-resources (gethash "extendedResources" object)
                       :ready-p (and (eq t (gethash "ready" object))
                                     (integerp heartbeat) (integerp deadline)
                                     (<= (get-universal-time) deadline)))))
@@ -337,6 +345,7 @@
       (remhash (pod-uid pod) (pod-store-pod-observed-resource-versions store))
       (remhash (pod-uid pod) (pod-store-pod-condition-histories store))
       (remhash (pod-uid pod) (pod-store-pod-client-statuses store))
+      (remhash (pod-uid pod) (pod-store-nominated-nodes store))
       pod)))
 
 (defun delete-pod (store namespace name)

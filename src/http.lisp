@@ -1059,6 +1059,7 @@ its clients treat any other multi-byte frame as an error message."
           ((string= path "/openapi/v3/apis/apps/v1") (openapi-v3-response "apps/v1"))
           ((string= path "/openapi/v3/api/v1") (openapi-v3-response))
           ((string= path "/api/v1") (api-resources-response))
+          ((node-status-route path) (dispatch-node-status-request store path method))
           ((and (eq method :get) (string= path "/api/v1/nodes"))
            (nodes-api-response store))
           ((and (eq method :get) (uiop:string-prefix-p "/api/v1/nodes/" path)

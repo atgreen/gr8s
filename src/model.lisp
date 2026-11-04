@@ -61,7 +61,11 @@
   (underlay-address "")
   (ready-p nil)
   last-heartbeat
-  lease-deadline)
+  lease-deadline
+  ;; Quantity strings the node's agent measured about itself.
+  capacity
+  ;; Quantity strings clients advertised through the Node status subresource.
+  extended-resources)
 
 (defun invalid-pod (control &rest arguments)
   "Signal an HTTP 422 Kubernetes error formatted by CONTROL and ARGUMENTS."
@@ -272,7 +276,8 @@
      spec '("containers" "initContainers" "restartPolicy" "dnsPolicy" "nodeName" "volumes"
             "securityContext" "serviceAccountName" "automountServiceAccountToken"
             "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig"
-            "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds") "spec")
+            "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
+            "affinity") "spec")
     (dolist (field '("hostname" "subdomain"))
       (when (eq (gethash field spec) 'null) (remhash field spec))
       (let ((value (gethash field spec "")))

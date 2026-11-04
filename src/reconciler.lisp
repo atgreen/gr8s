@@ -204,8 +204,13 @@
 
 (defun reconcile-all (reconciler &key observer)
   (loop for pod in (stable-sort (copy-list (list-pods (reconciler-store reconciler)))
+                                ;; Finish deletions first, then place the most important Pods.
                                 (lambda (left right)
-                                  (and (deletion-requested-p left) (not (deletion-requested-p right)))))
+                                  (let ((left-deleting (deletion-requested-p left))
+                                        (right-deleting (deletion-requested-p right)))
+                                    (if (eq (not left-deleting) (not right-deleting))
+                                        (> (pod-spec-priority left) (pod-spec-priority right))
+                                        left-deleting))))
         append (handler-case
                    (let ((status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
                      (when observer (funcall observer pod status))

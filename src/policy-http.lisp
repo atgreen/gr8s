@@ -68,6 +68,56 @@
             old))
         :dry-run dry-run)))))
 
+(defun node-status-route (path)
+  "Return the node name of a /api/v1/nodes/NAME/status URL."
+  (let ((parts (uiop:split-string path :separator '(#\/))))
+    (when (and (= 6 (length parts)) (equal (subseq parts 0 4) '("" "api" "v1" "nodes"))
+               (equal "status" (sixth parts)) (dns-subdomain-p (fifth parts)))
+      (fifth parts))))
+
+(defun node-status-extended-resources (status)
+  "Select the valid extended resources a written Node STATUS advertises.
+As with a kubelet, measured CPU, memory, storage and conditions are never taken from clients."
+  (let ((source (or (gethash "allocatable" status) (gethash "capacity" status)))
+        (resources (core-object)))
+    (when source
+      (maphash (lambda (name value)
+                 (when (extended-resource-name-p name)
+                   (let ((quantity (policy-quantity value (format nil "status.allocatable[~A]" name))))
+                     (when (or (minusp (container-quantity-coefficient quantity))
+                               (minusp (container-quantity-scale quantity)))
+                       (core-resource-error 422 "Invalid" "Extended resource ~A must be a whole nonnegative number" name))
+                     (setf (gethash name resources) (container-quantity-string quantity)))))
+               source))
+    resources))
+
+(defun dispatch-node-status-request (store path method)
+  "Serve Node status, whose writes advertise the extended resources the scheduler charges."
+  (let* ((name (node-status-route path))
+         (current (node-api-object (get-node store name))))
+    (when (eq method :get)
+      (return-from dispatch-node-status-request (json-response current)))
+    (unless (member method '(:put :patch))
+      (core-resource-error 405 "MethodNotAllowed" "Unsupported Node status method"))
+    (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
+           (requested
+             (if (eq method :put)
+                 (core-resource-request-object "Node")
+                 (let ((patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t))))
+                   (cond ((equal content-type "application/json-patch+json")
+                          (apply-core-json-patch (copy-core-object current) patch))
+                         ((member content-type '("application/merge-patch+json" "application/strategic-merge-patch+json")
+                                  :test #'equal)
+                          (merge-json-object (copy-core-object current) (require-object patch "patch")))
+                         (t (core-resource-error 415 "UnsupportedMediaType" "Unsupported Node status patch type"))))))
+           (metadata (require-object (gethash "metadata" requested (core-object)) "metadata")))
+      (when (and (gethash "name" metadata) (not (equal name (gethash "name" metadata))))
+        (core-resource-error 400 "BadRequest" "Node status metadata does not match its URL"))
+      (let ((resources (node-status-extended-resources (require-object (gethash "status" requested (core-object)) "status"))))
+        (unless (core-resource-dry-run-p)
+          (update-node-extended-resources store name (and (plusp (hash-table-count resources)) resources))))
+      (json-response (node-api-object (get-node store name))))))
+
 (defun add-policy-openapi-paths (paths version)
   "Describe the policy collections served in API VERSION from the pinned schemas."
   (dolist (resource '("resourcequotas" "limitranges" "runtimeclasses" "priorityclasses"))

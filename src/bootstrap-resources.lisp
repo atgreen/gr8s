@@ -162,6 +162,14 @@
         ((member :arm64 *features*) "arm64")
         (t (string-downcase (machine-type)))))
 
+(defun node-resource-list (node)
+  "Return a fresh list of NODE's measured and advertised resources."
+  (let ((list (core-object)))
+    (dolist (source (list (node-record-capacity node) (node-record-extended-resources node)))
+      (when source
+        (maphash (lambda (name value) (setf (gethash name list) value)) source)))
+    list))
+
 (defun node-api-object (node)
   "Serialize a registered worker with readiness taken from its live lease."
   (let ((address (node-reported-address node)))
@@ -180,6 +188,8 @@
                                                   "message" "Readiness follows the gr8s node session lease"))
                "addresses" (if (and address (plusp (length address)))
                                (vector (core-object "type" "InternalIP" "address" address)) #())
+               "capacity" (node-resource-list node)
+               "allocatable" (node-resource-list node)
                "nodeInfo" (core-object "operatingSystem" "linux" "architecture" (native-node-architecture)
                                         "kubeletVersion" "v1.36.0-gr8s.0")))))
 

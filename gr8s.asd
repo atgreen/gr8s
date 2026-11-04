@@ -64,6 +64,7 @@
                              (:file "policy-resources")
                              (:file "pod-admission-policy")
                              (:file "resource-quota")
+                             (:file "pod-resource-fit")
                              (:file "endpointslice-api")
                              (:file "storage-controller")
                              (:file "events")

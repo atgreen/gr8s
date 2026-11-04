@@ -312,3 +312,123 @@
           (is (equal "Failed" (gethash "phase" status)))
           (is (equal "DeadlineExceeded" (gethash "reason" status))))
         (is (null (gr8s::runtime-observe runtime (pod-uid pod))))))))
+
+(defun policy-test-node (store name &key extended capacity)
+  "Register ready node NAME with EXTENDED advertised and CAPACITY measured quantity tables."
+  (gr8s:register-node store (gr8s:make-node-record :id (concatenate 'string "id-" name) :name name
+                                                   :pod-cidr (format nil "10.88.~D.0/24" (random 200))))
+  (gr8s:mark-node-ready store name (get-universal-time) :lease-duration 3600)
+  (when extended (gr8s::update-node-extended-resources store name extended))
+  (when capacity (gr8s::update-node-capacity store name capacity)))
+
+(defun policy-test-class (store name value)
+  "Create a PriorityClass NAME with VALUE."
+  (gr8s::create-core-resource store "priorityclasses"
+                              (gr8s::core-object "metadata" (gr8s::core-object "name" name) "value" value) nil))
+
+(defun policy-test-priority-pod (store name class dongles)
+  "Admit and store a Pod in CLASS using DONGLES of the extended test resource."
+  (create-pod store (gr8s::admit-pod-policies
+                     store (policy-test-pod name :limits (list "example.com/dongle" (write-to-string dongles))
+                                                 :spec-fields (list "priorityClassName" class)))))
+
+(defun policy-test-deleting-p (store name)
+  "Return whether the team Pod NAME has begun deletion."
+  (gr8s::deletion-requested-p (get-pod store "team" name)))
+
+(test scheduler-charges-requests-against-node-resources
+  (with-temporary-store (store path)
+    (values path)
+    (policy-test-node store "small" :capacity (gr8s::core-object "cpu" "1" "pods" "2"))
+    (let ((pod (create-pod store (policy-test-pod "dongle" :limits '("example.com/dongle" "1")))))
+      (is (null (gr8s::schedule-pod store pod))))
+    (gr8s::update-node-extended-resources store "small" (gr8s::core-object "example.com/dongle" "1"))
+    (is (equal "small" (gr8s:node-record-name
+                        (gr8s::schedule-pod store (get-pod store "team" "dongle")))))
+    (is (equal "1" (gethash "example.com/dongle"
+                            (gethash "allocatable" (gethash "status" (gr8s::node-api-object (gr8s::get-node store "small")))))))
+    (is (null (gr8s::schedule-pod store (create-pod store (policy-test-pod "second-dongle" :limits '("example.com/dongle" "1"))))))
+    (is (null (gr8s::schedule-pod store (create-pod store (policy-test-pod "too-big" :requests '("cpu" "2"))))))
+    (is-true (gr8s::schedule-pod store (create-pod store (policy-test-pod "fits" :requests '("cpu" "1")))))
+    ;; The node's two Pod slots are now taken.
+    (is (null (gr8s::schedule-pod store (create-pod store (policy-test-pod "third")))))))
+
+(test node-affinity-selects-and-refuses-nodes
+  (with-temporary-store (store path)
+    (values path)
+    (policy-test-node store "alpha")
+    (policy-test-node store "beta")
+    (flet ((term (key operator value)
+             (gr8s::core-object (if (uiop:string-prefix-p "metadata." key) "matchFields" "matchExpressions")
+                                (vector (gr8s::core-object "key" key "operator" operator "values" (vector value))))))
+      (let ((required (lambda (key operator value)
+                        (gr8s::core-object "nodeAffinity"
+                                           (gr8s::core-object "requiredDuringSchedulingIgnoredDuringExecution"
+                                                              (gr8s::core-object "nodeSelectorTerms" (vector (term key operator value))))))))
+        (is (equal "beta"
+                   (gr8s:node-record-name
+                    (gr8s::schedule-pod store (create-pod store (policy-test-pod "named" :spec-fields (list "affinity" (funcall required "metadata.name" "In" "beta"))))))))
+        (is (null (gr8s::schedule-pod store (create-pod store (policy-test-pod "absent" :spec-fields (list "affinity" (funcall required "metadata.name" "In" "gamma")))))))
+        (is (equal "alpha"
+                   (gr8s:node-record-name
+                    (gr8s::schedule-pod store (create-pod store (policy-test-pod "label" :spec-fields (list "affinity" (funcall required "kubernetes.io/hostname" "NotIn" "beta"))))))))
+        (signals kubernetes-error (policy-test-pod "bad-field" :spec-fields (list "affinity" (funcall required "metadata.labels" "In" "x"))))))
+    (signals kubernetes-error
+      (policy-test-pod "pod-affinity" :spec-fields (list "affinity" (gr8s::core-object "podAffinity" (gr8s::core-object)))))
+    (let ((preferred (gr8s::core-object "nodeAffinity"
+                                        (gr8s::core-object "preferredDuringSchedulingIgnoredDuringExecution"
+                                                           (vector (gr8s::core-object "weight" 10
+                                                                                      "preference" (gr8s::core-object "matchFields" (vector (gr8s::core-object "key" "metadata.name" "operator" "In" "values" #("alpha"))))))))))
+      (is (equal "alpha"
+                 (gr8s:node-record-name
+                  (gr8s::schedule-pod store (create-pod store (policy-test-pod "favored" :spec-fields (list "affinity" preferred))))))))))
+
+(test preemption-removes-only-enough-lower-priority-pods
+  (with-temporary-store (store path)
+    (values path)
+    (policy-test-node store "only" :extended (gr8s::core-object "example.com/dongle" "1000"))
+    (loop for (name value) in '(("p1" 1) ("p2" 2) ("p3" 3) ("p4" 4)) do (policy-test-class store name value))
+    (loop for (name class dongles) in '(("low" "p1" 200) ("mid" "p2" 300) ("high" "p3" 450))
+          do (is-true (gr8s::schedule-pod store (policy-test-priority-pod store name class dongles))))
+    (let ((preemptor (policy-test-priority-pod store "preemptor" "p4" 500)))
+      (is (null (gr8s::schedule-pod store preemptor)))
+      (is-true (policy-test-deleting-p store "low"))
+      (is-true (policy-test-deleting-p store "mid"))
+      (is-false (policy-test-deleting-p store "high"))
+      (is (equal "only" (gethash (gr8s::pod-uid preemptor) (gr8s::pod-store-nominated-nodes store))))
+      ;; Victims still hold their resources; nothing further is preempted meanwhile.
+      (is (null (gr8s::schedule-pod store preemptor)))
+      (is-false (policy-test-deleting-p store "high"))
+      (dolist (name '("low" "mid")) (gr8s::remove-pod store "team" name))
+      ;; A lesser Pod cannot use the space reserved for the nominated preemptor.
+      (is (null (gr8s::schedule-pod store (policy-test-priority-pod store "latecomer" "p1" 100))))
+      (is-true (gr8s::schedule-pod store preemptor)))))
+
+(test preemption-respects-policy-and-equal-priority
+  (with-temporary-store (store path)
+    (values path)
+    (policy-test-node store "only" :extended (gr8s::core-object "example.com/dongle" "1"))
+    (policy-test-class store "same" 5)
+    (gr8s::create-core-resource store "priorityclasses"
+                                (gr8s::core-object "metadata" (gr8s::core-object "name" "polite") "value" 9 "preemptionPolicy" "Never") nil)
+    (is-true (gr8s::schedule-pod store (policy-test-priority-pod store "resident" "same" 1)))
+    (is (null (gr8s::schedule-pod store (policy-test-priority-pod store "equal" "same" 1))))
+    (is-false (policy-test-deleting-p store "resident"))
+    (is (null (gr8s::schedule-pod store (policy-test-priority-pod store "never" "polite" 1))))
+    (is-false (policy-test-deleting-p store "resident"))))
+
+(test preempted-pod-reports-disruption-condition
+  (with-temporary-store (store path)
+    (values path)
+    (policy-test-node store "only" :extended (gr8s::core-object "example.com/dongle" "1"))
+    (policy-test-class store "low" 1)
+    (policy-test-class store "high" 2)
+    (is-true (gr8s::schedule-pod store (policy-test-priority-pod store "victim" "low" 1)))
+    (is (null (gr8s::schedule-pod store (policy-test-priority-pod store "attacker" "high" 1))))
+    (let* ((victim (get-pod store "team" "victim"))
+           (status (gr8s::add-pod-status-conditions store victim (gr8s::pod-status "Running")))
+           (condition (gr8s::find-pod-condition (gethash "conditions" status) "DisruptionTarget")))
+      (is (equal "True" (gethash "status" condition)))
+      (is (equal "PreemptionByScheduler" (gethash "reason" condition))))
+    (let ((status (gr8s::add-pod-status-conditions store (get-pod store "team" "attacker") (gr8s::pod-status "Pending"))))
+      (is (equal "only" (gethash "nominatedNodeName" status))))))

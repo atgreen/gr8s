@@ -19,7 +19,8 @@ SOURCES = {
     "scheduling-types.go": ("api/v0.36.0/scheduling/v1/types.go", "3895051203aa464fdeecb6b9d786ef917c7d56187d9c34f7adbed3daa45f7199"),
 }
 ROOTS = ["k8s.io.api.core.v1.ResourceQuota", "k8s.io.api.core.v1.LimitRange",
-         "k8s.io.api.node.v1.RuntimeClass", "k8s.io.api.scheduling.v1.PriorityClass"]
+         "k8s.io.api.node.v1.RuntimeClass", "k8s.io.api.scheduling.v1.PriorityClass",
+         "k8s.io.api.core.v1.Node"]
 TYPE_SOURCES = [("core-types.go", "k8s.io.api.core.v1."), ("node-types.go", "k8s.io.api.node.v1."),
                 ("scheduling-types.go", "k8s.io.api.scheduling.v1.")]
 
