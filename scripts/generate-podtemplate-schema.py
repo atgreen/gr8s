@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: 2026 gr8s contributors
+# SPDX-FileCopyrightText: 2026 Anthony Green
 # SPDX-License-Identifier: MIT
 """Generate PodTemplate wire and structural schemas from pinned Kubernetes sources."""
 
