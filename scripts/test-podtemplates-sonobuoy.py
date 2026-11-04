@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: 2026 gr8s contributors
+# SPDX-FileCopyrightText: 2026 Anthony Green
 # SPDX-License-Identifier: MIT
 """Run upstream conformance cases in a disposable native cluster.
 
