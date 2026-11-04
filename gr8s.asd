@@ -116,6 +116,7 @@
                              (:file "in-cluster-api")
                              (:file "services")
                              (:file "endpointslice-controller")
+                             (:file "service-lb-controller")
                              (:file "endpointslice-http")
                              (:file "garbage-collection")
                              (:file "crd-garbage-collection")

@@ -206,3 +206,116 @@
 (test service-lb-pin-directory-is-under-state
   (is (string= "/var/lib/gr8s/containerd/bpf/service-lb/"
                (gr8s::service-lb-pin-directory "/var/lib/gr8s"))))
+
+;;; Controller: converge Service/endpoint state into the maps.  Services are
+;;; plain core objects and the endpoint lookup and map ops are injected, so no
+;;; store and no kernel are needed.
+
+(defun fake-lb-service (cluster-ip &key (ports '(80)) external-name)
+  (let ((spec (gr8s::core-object
+               "clusterIP" cluster-ip
+               "type" (if external-name "ExternalName" "ClusterIP")
+               "selector" (gr8s::core-object "app" "web")
+               "ports" (coerce (mapcar (lambda (p) (gr8s::core-object "port" p)) ports) 'vector))))
+    (when external-name (setf (gethash "externalName" spec) external-name))
+    (gr8s::core-object
+     "metadata" (gr8s::core-object "name" "svc" "namespace" "default" "uid" cluster-ip)
+     "spec" spec)))
+
+(test service-lb-plan-excludes-ineligible-services
+  ;; Headless (None), the API Service, and ExternalName never reach the maps.
+  (let ((services (list (fake-lb-service "None")
+                        (fake-lb-service "10.96.0.1")
+                        (fake-lb-service "10.96.0.9" :external-name "db.example.com")
+                        (fake-lb-service "10.96.0.10"))))
+    (multiple-value-bind (service-entries backend-entries slots)
+        (gr8s::service-lb-plan services (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080))))
+      (is (= 1 (length service-entries)))
+      (is (= 1 (length backend-entries)))
+      (is (= 1 slots))
+      (is (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80) (car (first service-entries)))))))
+
+(test service-lb-plan-packs-backends-deterministically
+  (let ((services (list (fake-lb-service "10.96.0.10" :ports '(80))
+                        (fake-lb-service "10.96.0.5" :ports '(80 443)))))
+    (flet ((endpoints (service port)
+             (let ((ip (gethash "clusterIP" (gethash "spec" service)))
+                   (number (gethash "port" port)))
+               (cond ((and (equal ip "10.96.0.10") (= number 80))
+                      '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))
+                     ((and (equal ip "10.96.0.5") (= number 80)) '(("10.88.2.1" 9090)))
+                     (t '())))))               ; 10.96.0.5:443 has no ready backends
+      (multiple-value-bind (service-entries backend-entries slots)
+          (gr8s::service-lb-plan services #'endpoints)
+        ;; "10.96.0.10" sorts before "10.96.0.5"; slots pack 0,1 then 2.
+        (is (= 3 (length service-entries)))
+        (is (= 3 (length backend-entries)))
+        (is (= 3 slots))
+        (is (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80) (car (first service-entries))))
+        (is (equalp (gr8s::service-lb-service-value 2 0) (cdr (first service-entries))))
+        (is (equalp (gr8s::service-lb-backend-value "10.88.1.5" 8080) (cdr (first backend-entries))))
+        ;; A port with no ready backends still gets a zero-count entry (passthrough);
+        ;; its base is the slot counter after the two populated ports (0,1 then 2).
+        (is (equalp (gr8s::service-lb-service-value 0 3) (cdr (third service-entries))))))))
+
+(defun make-fake-lb-controller ()
+  (gr8s::make-service-lb-controller
+   nil
+   (gr8s::%make-service-lb-dataplane
+    :maps (list (fake-lb-map "gr8s_service_v4" 1) (fake-lb-map "gr8s_backend_v4" 2)))))
+
+(test service-lb-converge-writes-backends-before-services-then-is-idempotent
+  (let ((controller (make-fake-lb-controller))
+        (one-service (lambda () (list (fake-lb-service "10.96.0.10" :ports '(80)))))
+        (two-backends (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))))
+    (let ((writes nil) (deletes nil))
+      (gr8s::converge-service-lb-controller
+       controller :list-services one-service :endpoints-of two-backends
+       :update (lambda (m k v) (declare (ignore k v)) (push (whistler/loader:map-info-fd m) writes))
+       :delete (lambda (m k) (declare (ignore k)) (push (whistler/loader:map-info-fd m) deletes)))
+      ;; Two backend writes (map fd 2) then the one service write (map fd 1).
+      (is (equal '(2 2 1) (nreverse writes)))
+      (is (null deletes)))
+    ;; Re-converging an unchanged plan writes and deletes nothing.
+    (let ((touched nil))
+      (gr8s::converge-service-lb-controller
+       controller :list-services one-service :endpoints-of two-backends
+       :update (lambda (m k v) (declare (ignore m k v)) (push t touched))
+       :delete (lambda (m k) (declare (ignore m k)) (push t touched)))
+      (is (null touched)))))
+
+(test service-lb-converge-frees-slots-when-a-backend-leaves
+  (let ((controller (make-fake-lb-controller)))
+    ;; Start with two backends.
+    (gr8s::converge-service-lb-controller
+     controller
+     :list-services (lambda () (list (fake-lb-service "10.96.0.10" :ports '(80))))
+     :endpoints-of (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))
+     :update (constantly nil) :delete (constantly nil))
+    ;; Drop to one backend: slot 1 must be deleted from the backend map (fd 2).
+    (let ((deletes nil))
+      (gr8s::converge-service-lb-controller
+       controller
+       :list-services (lambda () (list (fake-lb-service "10.96.0.10" :ports '(80))))
+       :endpoints-of (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080)))
+       :update (constantly nil)
+       :delete (lambda (m k) (push (list (whistler/loader:map-info-fd m) k) deletes)))
+      (is (member (list 2 (gr8s::service-lb-backend-key 1)) deletes :test #'equalp)))))
+
+(test service-lb-converge-withdraws-a-removed-service
+  (let ((controller (make-fake-lb-controller)))
+    (gr8s::converge-service-lb-controller
+     controller
+     :list-services (lambda () (list (fake-lb-service "10.96.0.10" :ports '(80))))
+     :endpoints-of (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080)))
+     :update (constantly nil) :delete (constantly nil))
+    ;; Remove the Service entirely: its VIP key (fd 1) and freed slot 0 (fd 2) go.
+    (let ((deletes nil))
+      (gr8s::converge-service-lb-controller
+       controller
+       :list-services (lambda () nil)
+       :endpoints-of (lambda (s p) (declare (ignore s p)) nil)
+       :update (constantly nil)
+       :delete (lambda (m k) (push (list (whistler/loader:map-info-fd m) k) deletes)))
+      (is (member (list 1 (gr8s::service-lb-vip-key "10.96.0.10" 80)) deletes :test #'equalp))
+      (is (member (list 2 (gr8s::service-lb-backend-key 0)) deletes :test #'equalp)))))
