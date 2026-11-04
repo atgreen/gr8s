@@ -426,6 +426,7 @@
                                '("apiGroup" "kind" "name")))))
         (core-resource-error 422 "Invalid" "roleRef is immutable"))
       (when (and (equal resource "services")
+                 (not (or (service-external-name-p existing) (service-external-name-p object)))
                  (not (equal (gethash "clusterIP" (gethash "spec" existing))
                              (gethash "clusterIP" (gethash "spec" object)))))
         (core-resource-error 422 "Invalid" "Service clusterIP is immutable"))

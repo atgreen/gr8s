@@ -264,6 +264,7 @@
                :reason "Conflict"
                :message (format nil "expected resourceVersion ~A, found ~A"
                                 expected-resource-version actual)))
+      (validate-pod-hostname-update existing replacement)
       (validate-pod-finalizer-update existing replacement)
       (when (pod-node-name existing)
         (when (and (pod-node-name replacement)

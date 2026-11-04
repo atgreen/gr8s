@@ -261,7 +261,12 @@
     (reject-unsupported-fields
      spec '("containers" "restartPolicy" "dnsPolicy" "nodeName" "volumes"
             "securityContext" "serviceAccountName" "automountServiceAccountToken"
-            "tolerations" "nodeSelector" "terminationGracePeriodSeconds") "spec")
+            "tolerations" "nodeSelector" "terminationGracePeriodSeconds" "hostname" "subdomain") "spec")
+    (dolist (field '("hostname" "subdomain"))
+      (when (eq (gethash field spec) 'null) (remhash field spec))
+      (let ((value (gethash field spec "")))
+        (unless (and (stringp value) (or (zerop (length value)) (dns-label-p value)))
+          (invalid-pod "spec.~A must be a DNS label or empty" field))))
     (let ((grace (gethash "terminationGracePeriodSeconds" spec 30)))
       (when (eq grace 'null) (setf grace 30))
       (unless (and (integerp grace) (<= 0 grace #x7fffffffffffffff))
