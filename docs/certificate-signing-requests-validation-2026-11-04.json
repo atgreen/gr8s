@@ -67,10 +67,13 @@
     ]
   },
   "upstreamWholeFamily": {
-    "status": "running",
+    "status": "completed; one tagged Conformance pass and one client-certificate authentication failure",
     "expectedSpecs": 2,
     "focus": "Certificates API",
-    "stateDirectory": "/var/tmp/gr8s-podtemplates.vd3wzxyp"
+    "stateDirectory": "/var/tmp/gr8s-podtemplates.vd3wzxyp",
+    "evidence": "certificate-signing-requests-upstream-2026-11-04.json",
+    "nativeExitCode": 0,
+    "ownedShimsRemaining": []
   },
   "remainingTrackedGaps": [
     "podster-uqb.22.1: optional custom-signer controller extension; Pending without an external signer is normal Kubernetes behavior",
