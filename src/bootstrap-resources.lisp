@@ -131,8 +131,11 @@
                                 "namespaced" namespaced "kind" kind
                                 "shortNames" (cond ((equal resource "configmaps") #("cm"))
                                                    ((equal resource "services") #("svc"))
-                                                   ((equal resource "events") #("ev")) (t #()))
-                                "verbs" (if (member resource '("podtemplates" "events") :test #'equal)
+                                                   ((equal resource "events") #("ev"))
+                                                   ((equal resource "persistentvolumes") #("pv"))
+                                                   ((equal resource "persistentvolumeclaims") #("pvc"))
+                                                   ((equal resource "storageclasses") #("sc")) (t #()))
+                                "verbs" (if (or (storage-resource-p resource) (member resource '("podtemplates" "events") :test #'equal))
                                             #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
                                             #("create" "delete" "get" "list" "patch" "update" "watch"))))
    'vector))
