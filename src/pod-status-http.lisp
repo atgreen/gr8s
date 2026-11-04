@@ -120,7 +120,9 @@
   "Apply a status write and answer with what the client wrote over the observed status."
   (let* ((pod (get-pod store namespace name))
          (current (pod-response-object pod (reconcile-pod reconciler namespace name)))
-         (input (require-object (pod-status-write-input current method) "Pod"))
+         (input (admit-subresource-write store "pods" "status" namespace name
+                                         (require-object (pod-status-write-input current method) "Pod") current
+                                         :dry-run (core-resource-dry-run-p)))
          (metadata (require-object (gethash "metadata" input) "metadata"))
          (status (require-object (gethash "status" input (core-object)) "status"))
          (expected (gethash "resourceVersion" metadata))
@@ -163,6 +165,7 @@
         (arguments (pod-delete-request-arguments)))
     (dolist (pod (list-pods store namespace))
       (when (funcall matches (with-store-lock (store) (pod-published-view store pod)))
+        (admit-pod-delete store namespace (pod-name pod) nil)
         (handler-case (apply #'delete-reconciled-pod reconciler namespace (pod-name pod)
                              :uid (pod-uid pod) (loop for (key value) on arguments by #'cddr
                                                       unless (member key '(:uid :resource-version))

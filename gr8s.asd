@@ -21,6 +21,7 @@
                (:static-file "schema/crd-v1.json")
                (:static-file "schema/crd-wire-v1.json")
                (:static-file "schema/workloads-v1.json")
+               (:static-file "schema/admissionregistration-v1.json")
 
                (:static-file "schema/storage-v1.json")
                (:static-file "schema/policy-v1.json")
@@ -59,6 +60,8 @@
                              (:file "podtemplates")
                              (:file "workload-resources")
                              (:file "batch-resources")
+                             (:file "admission-cel")
+                             (:file "admission-resources")
 
                              (:file "storage-api")
                              (:file "policy-resources")
@@ -131,6 +134,8 @@
                              (:file "crd-http")
                              (:file "crd-status")
                              (:file "crd-openapi")
+                             (:file "admission-webhooks")
+                             (:file "admission-http")
                              (:file "server")
                              (:file "in-cluster-api")
                              (:file "services")
@@ -203,6 +208,7 @@
                              (:file "pod-status-http-test")
                              (:file "pod-logs-test")
                              (:file "batch-resources-test")
+                             (:file "admission-webhooks-test")
                              (:file "job-policy-test")
                              (:file "job-controller-test")
                              (:file "storage-api-test")

@@ -92,6 +92,15 @@ remain outside the verified boundary. The administrative HTTP API refuses
 non-loopback listener addresses; native Pods use the authenticated HTTPS API
 described below.
 
+`admissionregistration.k8s.io/v1` webhook configurations call their backends
+with AdmissionReview on API writes and Pod connections, over TLS verified against
+the `caBundle` and within `timeoutSeconds`, with rules, selectors, `failurePolicy`,
+ordered JSON patches and `reinvocationPolicy` applied as upstream does. A Service
+backend is reached directly at a ready endpoint. `matchConditions` run a bounded
+CEL subset (`src/admission-cel.lisp`): `authorizer`, `matches`, uint, bytes and
+other unsupported CEL fail at registration instead of being misjudged. Objects
+written by in-process controllers do not pass through webhooks yet.
+
 ## Runtime architecture
 
 The executable has three entry paths:

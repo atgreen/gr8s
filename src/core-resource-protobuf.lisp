@@ -149,6 +149,8 @@
               (setf (gethash "metadata" object) (if metadata (core-protobuf-metadata metadata) (core-object))
                     (gethash "apiVersion" object) "v1" (gethash "kind" object) "Node")
               (return-from decode-core-resource-protobuf object)))
+          (when (member kind '("MutatingWebhookConfiguration" "ValidatingWebhookConfiguration") :test #'equal)
+            (return-from decode-core-resource-protobuf (decode-admission-protobuf raw kind)))
           (when (string= kind "Job")
             (return-from decode-core-resource-protobuf (decode-batch-protobuf raw)))
           (when (member kind '("Deployment" "ReplicaSet" "Scale") :test #'equal)

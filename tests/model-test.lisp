@@ -20,6 +20,9 @@
     (is (equal '(8080) (container-spec-ports container)))
     (let ((expected (com.inuoe.jzon:parse *valid-pod-json*)))
       (setf (gethash "terminationGracePeriodSeconds" (gethash "spec" expected)) 30)
+      (let ((expected-container (aref (gethash "containers" (gethash "spec" expected)) 0)))
+        (setf (gethash "terminationMessagePath" expected-container) "/dev/termination-log"
+              (gethash "terminationMessagePolicy" expected-container) "File"))
       (is (equalp expected (pod-to-object pod))))))
 
 (test pods-accept-valid-namespaces

@@ -250,7 +250,7 @@
                     (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))
                     (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t) :max-string-length (* 2 1024 1024))))
     (json-response
-     (update-core-resource
+     (admitted-update-core-resource
       store resource namespace name
       (lambda (old)
         (if (string= content-type "application/json-patch+json")
@@ -287,15 +287,15 @@
          (json-response
           (complete-created-bootstrap-resource
            store resource
-           (create-core-resource store resource (core-resource-request-object (core-resource-kind resource)) namespace :dry-run dry-run)
+           (admitted-create-core-resource store resource (core-resource-request-object (core-resource-kind resource)) namespace :dry-run dry-run)
            dry-run) 201))
         ((and writable-scope name (eq method :put))
          (let ((replacement (core-resource-request-object (core-resource-kind resource))))
-           (json-response (update-core-resource store resource namespace name
-                                               (lambda (old) (declare (ignore old)) replacement) :dry-run dry-run))))
+           (json-response (admitted-update-core-resource store resource namespace name
+                                                        (lambda (old) (declare (ignore old)) replacement) :dry-run dry-run))))
         ((and writable-scope name (eq method :patch)) (core-resource-patch-response store resource namespace name dry-run))
         ((and writable-scope (null name)
-              (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource) (batch-resource-p resource) (policy-resource-p resource) (member resource '("podtemplates" "events" "deployments" "replicasets" "customresourcedefinitions") :test #'equal))
+              (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource) (batch-resource-p resource) (admission-config-resource-p resource) (policy-resource-p resource) (member resource '("podtemplates" "events" "deployments" "replicasets" "customresourcedefinitions") :test #'equal))
               (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
                 (options (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions")))
@@ -303,6 +303,7 @@
            (when (and preview (not (equalp preview #("All")))) (core-resource-error 400 "BadRequest" "Invalid dryRun"))
            (when (gethash "preconditions" (or options (core-object)))
              (core-resource-error 400 "BadRequest" "DeleteCollection does not support preconditions"))
+           (admit-core-delete-collection store resource namespace options (or dry-run preview))
            (cond ((equal resource "customresourcedefinitions")
                   (delete-crd-definition-collection store (or (hunchentoot:parameter "labelSelector") "")
                                                      (or (hunchentoot:parameter "fieldSelector") "") (or dry-run preview)))
@@ -327,6 +328,7 @@
                           (every (lambda (value) (equal value "All")) body-dry-run))
                (core-resource-error 400 "BadRequest" "DeleteOptions.dryRun must contain only All")))
            (when preconditions (require-object preconditions "preconditions"))
+           (admit-core-delete store resource namespace name options (or dry-run (and body-dry-run (plusp (length body-dry-run)))))
            (if (or (workload-resource-p resource) (batch-resource-p resource))
                (delete-workload-resource store resource namespace name :dry-run (or dry-run (and body-dry-run (plusp (length body-dry-run))))
                     :uid (and preconditions (gethash "uid" preconditions))
@@ -364,6 +366,7 @@
              (if (or (uiop:string-prefix-p "io.k8s.api.certificates.v1." name)
                      (uiop:string-prefix-p "io.k8s.api.apps.v1." name)
                      (uiop:string-prefix-p "io.k8s.api.autoscaling.v1." name)
+                     (uiop:string-prefix-p "io.k8s.api.admissionregistration.v1." name)
                      (member name '("io.k8s.api.core.v1.PodTemplate" "io.k8s.api.core.v1.PodTemplateList"
                                   "io.k8s.api.core.v1.Event" "io.k8s.api.core.v1.EventList"
                                   "io.k8s.api.events.v1.Event" "io.k8s.api.events.v1.EventList"
