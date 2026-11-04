@@ -176,10 +176,16 @@ def main():
         return obj if observed.get("ready") and observed.get("started") and "running" in observed.get("state", {}) else None
 
     def delete(pod, timeout=90):
-        """Force-delete only this smoke's exact UID and wait for actual API removal."""
+        """Delete the exact UID and await physical runtime cleanup before stopping its services."""
+        started = time.monotonic()
         code, body = request(path(pod), "DELETE", {"gracePeriodSeconds": 0, "preconditions": {"uid": pod["metadata"]["uid"]}})
         assert code in (200, 404), (code, body)
         wait(lambda: request(path(pod))[0] == 404, timeout, "exact Pod deletion")
+        checkpoint = Path("/var/log/gr8s/pods") / pod["metadata"]["uid"] / "lifecycle.json"
+        # The native runtime removes this exact UID's checkpoint only after
+        # CRI container and sandbox/network removal have actually completed.
+        wait(lambda: not checkpoint.exists(), max(.001, timeout - (time.monotonic() - started)),
+             "actual container/sandbox cleanup for deleted Pod UID")
 
     def owned_shims():
         """Find shims in this explicitly owned, initially empty test state."""
@@ -326,9 +332,14 @@ def main():
                                               "timeoutSeconds": 60, "periodSeconds": 1}}], [{"name": "work", "emptyDir": {}}])
         marker = Path("/var/log/gr8s/pods") / blocked["metadata"]["uid"] / "volumes/work/probe-running"
         wait(lambda: marker.exists(), 600, "actual blocked exec probe")
+        blocked_before = wait(lambda: running(blocked, ["blocked"]), 30, "observed blocked-probe container")
+        save("blocked-probe-running.json", blocked_before)
+        assert (marker.parent.parent.parent / "lifecycle.json").exists(), "native checkpoint must exist before deletion"
         deletion_start = time.monotonic()
         delete(blocked, timeout=30)
-        report["scenarios"]["deleteCancelsBlockedProbe"] = {"passed": True, "seconds": time.monotonic() - deletion_start}
+        report["scenarios"]["deleteCancelsBlockedProbe"] = {"passed": True, "seconds": time.monotonic() - deletion_start,
+                                                            "containerID": statuses(blocked_before)["blocked"]["containerID"],
+                                                            "actualRuntimeCleanupComplete": True}
         report["passed"] = True
     except (Exception, KeyboardInterrupt) as error:
         report["error"] = repr(error)
