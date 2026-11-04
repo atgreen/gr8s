@@ -412,17 +412,13 @@
              (update-node-underlay-address
               (node-grpc-server-store server) node-name
               (slot-value hello 'gr8s.node.v1::underlay-address)))
-           (capacity-reported
-             (update-node-capacity
-              (node-grpc-server-store server) node-name
-              (slot-value hello 'gr8s.node.v1::capacity)))
            (snapshot (prepare-node-connect-snapshot
                       server node-name
                       (slot-value hello 'gr8s.node.v1::last-applied-revision)))
            (session (make-node-agent-session stream))
            (heartbeat-interval
              (max 1 (floor (node-grpc-server-heartbeat-timeout-seconds server) 2))))
-      (declare (ignore authenticated capacity-reported))
+      (declare (ignore authenticated))
       (unwind-protect
            (progn
              ;; Register and drain queued work atomically; hold the send lock
@@ -1034,7 +1030,6 @@
                             :agent-version "gr8s"
                             :underlay-address
                             (or underlay-address (node-channel-underlay-address channel))
-                            :capacity (local-node-capacity)
                             :last-applied-revision
                             (gethash "lastAppliedRevision" identity 0)))
            (send-agent-session-envelope

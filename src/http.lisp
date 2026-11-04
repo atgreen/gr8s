@@ -101,7 +101,7 @@
   (let ((groups (vector (json-object "name" "rbac.authorization.k8s.io"
                                     "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
-                       (event-api-group) (workload-api-group) (batch-api-group) (policy-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group) (admission-api-group-object))))
+                       (event-api-group) (workload-api-group) (batch-api-group) (budget-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group) (admission-api-group-object))))
     (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
@@ -326,7 +326,7 @@
                     ((equal version "discovery.k8s.io/v1") (add-endpointslice-openapi-paths (core-object)))
                     ((equal version "events.k8s.io/v1") (add-event-openapi-paths (core-object) t))
                     ((equal version "apps/v1") (add-workload-openapi-paths (core-object)))
-                    ((equal version "policy/v1") (add-policy-openapi-paths (core-object)))
+                    ((equal version "policy/v1") (add-budget-openapi-paths (core-object)))
                     ((equal version "storage.k8s.io/v1") (add-storage-openapi-paths (core-object) version))
                     (t (add-storage-openapi-paths (add-core-resource-openapi-paths (openapi-v3-pod-paths)))))
       "components" (json-object "schemas" (openapi-definitions))))))
@@ -1091,8 +1091,8 @@ than wait for the next, which truncates any body that spans records in flight."
           ((string= path "/apis/apps") (json-response (workload-api-group)))
           ((string= path "/apis/batch") (json-response (batch-api-group)))
           ((string= path "/apis/batch/v1") (batch-resources-response))
-          ((string= path "/apis/policy") (json-response (policy-api-group)))
-          ((string= path "/apis/policy/v1") (policy-resources-response))
+          ((string= path "/apis/policy") (json-response (budget-api-group)))
+          ((string= path "/apis/policy/v1") (budget-resources-response))
           ((string= path "/openapi/v3/apis/policy/v1") (openapi-v3-response "policy/v1"))
           ((string= path "/apis/apps/v1") (workload-resources-response))
           ((string= path "/openapi/v2") (json-response (crd-openapi-document store nil nil nil)))

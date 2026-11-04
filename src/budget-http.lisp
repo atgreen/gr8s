@@ -7,13 +7,13 @@
 
 (in-package #:gr8s)
 
-(defun policy-api-group ()
+(defun budget-api-group ()
   "Describe the implemented policy/v1 API group."
   (core-object "apiVersion" "v1" "kind" "APIGroup" "name" "policy"
                "versions" (vector (core-object "groupVersion" "policy/v1" "version" "v1"))
                "preferredVersion" (core-object "groupVersion" "policy/v1" "version" "v1")))
 
-(defun policy-resources-response ()
+(defun budget-resources-response ()
   "Advertise PodDisruptionBudgets and their separately authorized status subresource."
   (let ((resources (stored-resource-discovery "policy/v1")))
     (loop for resource across resources do (setf (gethash "shortNames" resource) #("pdb")))
@@ -23,7 +23,7 @@
                                            (vector (core-object "name" "poddisruptionbudgets/status" "namespaced" t
                                                                 "kind" "PodDisruptionBudget" "verbs" #("get" "patch" "update"))))))))
 
-(defun add-policy-openapi-paths (paths)
+(defun add-budget-openapi-paths (paths)
   "Describe PodDisruptionBudget CRUD and status schemas for clients that discover them."
   (let* ((schema "io.k8s.api.policy.v1.PodDisruptionBudget")
          (collection "/apis/policy/v1/namespaces/{namespace}/poddisruptionbudgets")

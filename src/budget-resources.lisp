@@ -9,12 +9,12 @@
 
 (in-package #:gr8s)
 
-(let ((addition (com.inuoe.jzon:parse (asdf:system-relative-pathname :gr8s "schema/policy-v1.json"))))
+(let ((addition (com.inuoe.jzon:parse (asdf:system-relative-pathname :gr8s "schema/budget-v1.json"))))
   (dolist (section '("messages" "definitions"))
     (maphash (lambda (name value) (setf (gethash name (gethash section *podtemplate-schema*)) value))
              (gethash section addition))))
 
-(defun policy-resource-p (resource)
+(defun budget-resource-p (resource)
   "Recognize the implemented policy collection."
   (equal resource "poddisruptionbudgets"))
 
@@ -25,7 +25,7 @@
                    (<= (parse-integer value :end (1- (length value))) 100)))
     (core-resource-error 422 "Invalid" "spec.~A must be a nonnegative integer or a percentage of at most 100%" field)))
 
-(defun normalize-policy-resource (input namespace name)
+(defun normalize-budget-resource (input namespace name)
   "Validate a PodDisruptionBudget's desired state; ordinary writes never carry its status."
   (let* ((object (copy-core-object (require-object input "PodDisruptionBudget")))
          (metadata (require-object (gethash "metadata" object) "metadata"))
@@ -54,7 +54,7 @@
         (core-resource-error 422 "Invalid" "spec.unhealthyPodEvictionPolicy must be IfHealthyBudget or AlwaysAllow")))
     object))
 
-(defun prepare-policy-write (object existing)
+(defun prepare-budget-write (object existing)
   "Keep status server-owned and advance generation only when the spec really changed."
   (setf (gethash "status" object)
         (if existing (copy-core-object (gethash "status" existing (core-object)))
@@ -71,7 +71,7 @@
       (when (and (integerp value) (minusp value))
         (core-resource-error 422 "Invalid" "status.~A must not be negative" field)))))
 
-(defun decode-policy-protobuf (bytes)
+(defun decode-budget-protobuf (bytes)
   "Decode typed PodDisruptionBudget input with the pinned policy/v1 field numbers."
   (let* ((object (template-protobuf-message "k8s.io.api.policy.v1.PodDisruptionBudget" bytes))
          (metadata (core-protobuf-value (core-protobuf-fields bytes) 1)))

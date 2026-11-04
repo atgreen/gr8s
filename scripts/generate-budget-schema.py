@@ -21,7 +21,7 @@ SOURCES = {
 def main():
     """Verify source checksums and write only definitions absent from the core schema."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cache", type=Path, default=ROOT / "build/kubernetes-policy")
+    parser.add_argument("--cache", type=Path, default=ROOT / "build/kubernetes-budget")
     parser.add_argument("--core-cache", type=Path, default=ROOT / "build/kubernetes-schema")
     args = parser.parse_args()
     spec = importlib.util.spec_from_file_location("core_generator", ROOT / "scripts/generate-podtemplate-schema.py")
@@ -73,7 +73,7 @@ def main():
     result = {"kubernetesVersion": "v1.36.0", "sourceLicense": "Apache-2.0; Copyright The Kubernetes Authors",
               "sources": {n: {"url": core.BASE + p, "sha256": d} for n, (p, d) in SOURCES.items()},
               "messages": messages, "definitions": definitions}
-    output = ROOT / "schema/policy-v1.json"
+    output = ROOT / "schema/budget-v1.json"
     output.write_text(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
     print(f"Wrote {len(messages)} messages and {len(definitions)} definitions")
 

@@ -7,8 +7,8 @@
 ;;;; decision order over real HTTP, including typed protobuf requests.
 
 (in-package #:gr8s/tests)
-(def-suite policy :in gr8s)
-(in-suite policy)
+(def-suite disruption-budgets :in gr8s)
+(in-suite disruption-budgets)
 
 (defun budget-fixture (name &key min max (selector (gr8s::core-object "matchLabels" (gr8s::core-object "foo" "bar"))) policy)
   "Build a PodDisruptionBudget with the given limits."
