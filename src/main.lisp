@@ -332,6 +332,7 @@
                 host port node-name identity
                 (lambda (snapshot)
                   (reconcile-node-snapshot node-runtime snapshot))
+                :snapshot-observer (lambda (snapshot) (receive-node-snapshot-intent node-runtime snapshot))
                 :operation-handler
                 (lambda (variant payload emit)
                   (dispatch-node-operation node-runtime variant payload emit))
