@@ -66,19 +66,30 @@
         do (incf bytes width)
         finally (return text)))
 
+(defun record-container-probe-event (worker reason message now)
+  "Count one final outcome Event independently of threshold state."
+  (let ((entry (or (gethash reason (container-probe-worker-events worker))
+                   (core-object "id" (generate-uid) "count" 0 "firstTimestamp" (current-timestamp (floor now))))))
+    (setf (gethash "reason" entry) reason (gethash "message" entry) (bounded-probe-event-message message)
+          (gethash "lastTimestamp" entry) (current-timestamp (floor now))
+          (gethash "count" entry) (min 2147483647 (1+ (gethash "count" entry)))
+          (gethash reason (container-probe-worker-events worker)) entry)))
+
+(defun container-probe-worker-type (worker)
+  "Return kubelet's display name for one worker's probe kind."
+  (string-capitalize (subseq (container-probe-worker-kind worker) 0 (- (length (container-probe-worker-kind worker)) 5))))
+
+(defun record-container-probe-error (worker message now result)
+  "Publish the final prober error without changing consecutive results or thresholds."
+  (record-container-probe-event worker "Unhealthy"
+    (format nil "~A probe errored and resulted in ~A state: ~A" (container-probe-worker-type worker)
+            (if (eq result :failure) "Failure" "Unknown") message) now))
+
 (defun record-container-probe-result (worker success message &optional (now (container-lifecycle-now)) result-kind)
   "Apply consecutive success/failure thresholds without prematurely changing readiness."
   (when (or (not success) (eq result-kind :warning))
-    (let* ((reason (if success "ProbeWarning" "Unhealthy"))
-           (entry (or (gethash reason (container-probe-worker-events worker))
-                      (core-object "id" (generate-uid) "count" 0 "firstTimestamp" (current-timestamp (floor now)))))
-           (text (format nil "~A probe ~A: ~A" (string-capitalize (subseq (container-probe-worker-kind worker) 0 (- (length (container-probe-worker-kind worker)) 5)))
-                         (if success "warning" "failed") message)))
-      (setf text (bounded-probe-event-message text))
-      (setf (gethash "reason" entry) reason (gethash "message" entry) text
-            (gethash "lastTimestamp" entry) (current-timestamp (floor now))
-            (gethash "count" entry) (min 2147483647 (1+ (gethash "count" entry)))
-            (gethash reason (container-probe-worker-events worker)) entry)))
+    (record-container-probe-event worker (if success "ProbeWarning" "Unhealthy")
+      (format nil "~A probe ~A: ~A" (container-probe-worker-type worker) (if success "warning" "failed") message) now))
   (incf (container-probe-worker-runs worker))
   (setf (container-probe-worker-message worker) message)
   (if (eql success (container-probe-worker-last-result worker))
@@ -91,6 +102,15 @@
               (and (not success) (equal "livenessProbe" (container-probe-worker-kind worker))))
       (setf (container-probe-worker-on-hold-p worker) t
             (container-probe-worker-failed-p worker) (not success)))))
+
+(defun execute-container-probe-with-retries (manager runtime target worker)
+  "Retry only prober errors three times; real success/failure ends the current check."
+  (loop for attempt below 3
+        do (multiple-value-bind (success message kind result)
+               (funcall (container-probe-manager-executor manager) runtime (container-probe-target-container target)
+                        (container-probe-target-id target) (container-probe-target-pod-ip target) (container-probe-worker-spec worker))
+             (when (or (not (eq kind :error)) (= attempt 2))
+               (return (values success message kind result))))))
 
 (defun step-container-probe (manager runtime target worker)
   "Run a due probe without holding the manager or reconciliation lock during I/O."
@@ -105,12 +125,14 @@
               (container-probe-worker-next-due worker) (+ now (gethash "periodSeconds" (container-probe-worker-spec worker))))))
     (when run
       (unwind-protect
-           (multiple-value-bind (success message result-kind)
-               (funcall (container-probe-manager-executor manager) runtime (container-probe-target-container target)
-                        (container-probe-target-id target) (container-probe-target-pod-ip target) (container-probe-worker-spec worker))
+           (multiple-value-bind (success message result-kind error-result)
+               (execute-container-probe-with-retries manager runtime target worker)
              (bt:with-lock-held ((container-probe-manager-lock manager))
                (when (current-probe-target-p manager target)
-                 (record-container-probe-result worker (not (null success)) message (funcall (container-probe-manager-clock manager)) result-kind))))
+                 (let ((completed (funcall (container-probe-manager-clock manager))))
+                   (if (eq result-kind :error)
+                       (record-container-probe-error worker message completed error-result)
+                       (record-container-probe-result worker (not (null success)) message completed result-kind))))))
         (bt:with-lock-held ((container-probe-manager-lock manager))
           (setf (container-probe-worker-inflight-p worker) nil))))))
 
