@@ -11,7 +11,7 @@
 (def-suite csr-crypto :in gr8s)
 (in-suite csr-crypto)
 
-(defun csr-crypto-fixture (directory algorithm &key certificate)
+(defun csr-crypto-fixture (directory algorithm &key certificate (subject "/CN=fixture.example/O=fixture") (sans "DNS:fixture.example,IP:127.0.0.1"))
   "Generate an independent actual key/request or certificate in a disposable directory."
   (let* ((key (merge-pathnames (format nil "~A-key.pem" algorithm) directory))
          (output (merge-pathnames (format nil "~A-~A.pem" algorithm (if certificate "cert" "request")) directory))
@@ -19,8 +19,9 @@
                               ((equal algorithm "ec") '("ec" "-pkeyopt" "ec_paramgen_curve:P-256"))
                               (t '("ed25519")))))
     (uiop:run-program (append (list "openssl" "req" (if certificate "-x509" "-new") "-newkey") key-arguments
-                             (list "-nodes" "-subj" "/CN=fixture.example/O=fixture" "-addext" "subjectAltName=DNS:fixture.example,IP:127.0.0.1"
-                                   "-keyout" (namestring key) "-out" (namestring output)))
+                             (list "-nodes" "-subj" subject)
+                             (when sans (list "-addext" (concatenate 'string "subjectAltName=" sans)))
+                             (list "-keyout" (namestring key) "-out" (namestring output)))
                       :output :string :error-output :string)
     (pure-tls::read-file-bytes output)))
 

@@ -23,6 +23,7 @@
                (:static-file "schema/workloads-v1.json")
 
                (:static-file "schema/storage-v1.json")
+               (:static-file "schema/certificates-v1.json")
                (:module "src"
                 :serial t
                 :components ((:file "package")
@@ -42,6 +43,7 @@
                              (:file "scheduler")
                              (:file "pki")
                              (:file "node-tls")
+                             (:file "csr-crypto")
                              (:file "core-resources")
                              (:file "podtemplate-history")
                              (:file "bootstrap-resources")
@@ -53,6 +55,8 @@
                              (:file "storage-api")
                              (:file "storage-controller")
                              (:file "events")
+                             (:file "csr-resources")
+                             (:file "csr-signer")
                              (:file "crd-schema")
                              (:file "crd-structural")
                              (:file "crd-resources")
@@ -84,6 +88,7 @@
                              (:file "http")
                              (:file "core-resource-http")
                              (:file "storage-http")
+                             (:file "csr-http")
                              (:file "podtemplate-watch")
                              (:file "crd-http")
                              (:file "crd-status")
@@ -133,6 +138,8 @@
                              (:file "core-resource-http-test")
                              (:file "crd-api-test")
                              (:file "crd-protobuf-test")
+                             (:file "csr-crypto-test")
+                             (:file "csr-api-test")
                              (:file "podtemplates-test")
                              (:file "durable-resource-watches-test")
                              (:file "bootstrap-resource-test")
