@@ -1,4 +1,4 @@
-;;;; SPDX-FileCopyrightText: 2026 gr8s contributors
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
 ;;;; SPDX-License-Identifier: MIT
 ;;;;
 ;;;; Purpose:
@@ -187,3 +187,23 @@
            (is (null (gr8s::agent-snapshot-worker-pending worker))))
       (release-blocked-log-runtime barrier)
       (gr8s::stop-agent-snapshot-worker worker))))
+
+(test stopping-snapshot-work-during-its-failure-handler-is-contained
+  (let* ((barrier (make-blocked-log-runtime))
+         (worker
+           (gr8s::start-agent-snapshot-worker
+            (lambda (snapshot replay) (declare (ignore snapshot replay)) (error "Failed application"))
+            (lambda ()
+              (bt:with-lock-held ((blocked-log-runtime-lock barrier))
+                (setf (blocked-log-runtime-entered barrier) t)
+                (loop until (blocked-log-runtime-released barrier)
+                      do (bt:condition-wait (blocked-log-runtime-changed barrier)
+                                           (blocked-log-runtime-lock barrier))))))))
+    (unwind-protect
+         (progn
+           (gr8s::queue-agent-snapshot-work worker 1)
+           (is-true (wait-until (lambda () (blocked-log-runtime-entered barrier))))
+           (gr8s::stop-agent-snapshot-worker worker)
+           (is-false (bt:thread-alive-p (gr8s::agent-snapshot-worker-thread worker))))
+      (release-blocked-log-runtime barrier)
+      (ignore-errors (gr8s::stop-agent-snapshot-worker worker)))))

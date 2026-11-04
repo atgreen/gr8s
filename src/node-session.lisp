@@ -838,37 +838,64 @@
   pending
   failure
   stopping-p
+  started-p
+  finished-p
   (lock (bt:make-lock "gr8s snapshot work"))
   (changed (bt:make-condition-variable :name "gr8s snapshot work changed")))
 
 (defun run-agent-snapshot-work (worker)
   "Apply ordered work and close the session on failure without acknowledging pending revisions."
   (handler-case
-      (loop
-        (let ((work
-                (bt:with-lock-held ((agent-snapshot-worker-lock worker))
-                  (loop while (and (null (agent-snapshot-worker-pending worker))
-                                   (not (agent-snapshot-worker-stopping-p worker)))
-                        do (bt:condition-wait (agent-snapshot-worker-changed worker)
-                                             (agent-snapshot-worker-lock worker)))
-                  (when (agent-snapshot-worker-stopping-p worker)
-                    (return-from run-agent-snapshot-work nil))
-                  (pop (agent-snapshot-worker-pending worker)))))
-          (funcall (agent-snapshot-worker-function worker) (car work) (cdr work))))
-    (node-snapshot-stopped () nil)
-    (error (condition)
-      (bt:with-lock-held ((agent-snapshot-worker-lock worker))
-        (setf (agent-snapshot-worker-failure worker) condition
-              (agent-snapshot-worker-stopping-p worker) t
-              (agent-snapshot-worker-pending worker) nil))
-      (funcall (agent-snapshot-worker-finish-session worker)))))
+      (unwind-protect
+           (progn
+             ;; Readiness is signalled only after the outer stop handler is
+             ;; installed. It also covers the application error handler below.
+             (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+               (setf (agent-snapshot-worker-started-p worker) t)
+               (bt:condition-notify (agent-snapshot-worker-changed worker)))
+             (handler-case
+                 (loop
+                   (let ((work
+                           (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+                             (loop while (and (null (agent-snapshot-worker-pending worker))
+                                              (not (agent-snapshot-worker-stopping-p worker)))
+                                   do (bt:condition-wait (agent-snapshot-worker-changed worker)
+                                                        (agent-snapshot-worker-lock worker)))
+                             (when (agent-snapshot-worker-stopping-p worker)
+                               (return-from run-agent-snapshot-work nil))
+                             (pop (agent-snapshot-worker-pending worker)))))
+                     (funcall (agent-snapshot-worker-function worker) (car work) (cdr work))))
+               (error (condition)
+                 (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+                   (setf (agent-snapshot-worker-failure worker) condition
+                         (agent-snapshot-worker-stopping-p worker) t
+                         (agent-snapshot-worker-pending worker) nil))
+                 (funcall (agent-snapshot-worker-finish-session worker)))))
+        ;; A late interrupt must not signal after the outer handler is gone.
+        (setf (agent-snapshot-worker-finished-p worker) t))
+    (node-snapshot-stopped () nil)))
 
 (defun start-agent-snapshot-worker (function finish-session)
   "Start a session-owned ordered snapshot executor."
-  (let ((worker (%make-agent-snapshot-worker :function function :finish-session finish-session)))
-    (setf (agent-snapshot-worker-thread worker)
-          (bt:make-thread (lambda () (run-agent-snapshot-work worker)) :name "gr8s agent snapshot work"))
-    worker))
+  (let ((worker (%make-agent-snapshot-worker :function function :finish-session finish-session))
+        (ready nil))
+    (unwind-protect
+         (progn
+           (flet ((spawn ()
+                    (setf (agent-snapshot-worker-thread worker)
+                          (bt:make-thread (lambda () (run-agent-snapshot-work worker))
+                                          :name "gr8s agent snapshot work"))))
+             ;; The session monitor can cancel this owner at any instruction.
+             ;; Retain the created thread handle before delivering that signal.
+             #+sbcl (sb-sys:without-interrupts (spawn))
+             #-sbcl (spawn))
+           (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+             (loop until (agent-snapshot-worker-started-p worker)
+                   do (bt:condition-wait (agent-snapshot-worker-changed worker)
+                                        (agent-snapshot-worker-lock worker))))
+           (setf ready t)
+           worker)
+      (unless ready (stop-agent-snapshot-worker worker)))))
 
 (defun queue-agent-snapshot-work (worker snapshot &key replay)
   "Queue a snapshot without making the stream receiver wait for runtime convergence."
@@ -882,17 +909,23 @@
 (defun stop-agent-snapshot-worker (worker)
   "Cancel and join application before a disconnected session can be replaced."
   (when worker
-    (bt:with-lock-held ((agent-snapshot-worker-lock worker))
-      (setf (agent-snapshot-worker-stopping-p worker) t
-            (agent-snapshot-worker-pending worker) nil)
-      (bt:condition-notify (agent-snapshot-worker-changed worker)))
-    (let ((thread (agent-snapshot-worker-thread worker)))
+    (let ((started-p nil)
+          (thread (agent-snapshot-worker-thread worker)))
+      (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+        (setf (agent-snapshot-worker-stopping-p worker) t
+              (agent-snapshot-worker-pending worker) nil
+              started-p (agent-snapshot-worker-started-p worker))
+        (bt:condition-notify (agent-snapshot-worker-changed worker)))
       (when (and thread (not (eq thread (bt:current-thread))))
-        (when (bt:thread-alive-p thread)
+        (when (and started-p (bt:thread-alive-p thread))
           ;; Runtime wrappers catch ERROR and translate it to Pending. This
           ;; private serious condition must unwind the whole application so
           ;; shutdown cannot continue to another blocked Pod or persist an ack.
-          (ignore-errors (bt:interrupt-thread thread (lambda () (error 'node-snapshot-stopped)))))
+          (ignore-errors
+            (bt:interrupt-thread thread
+              (lambda ()
+                (unless (agent-snapshot-worker-finished-p worker)
+                  (error 'node-snapshot-stopped))))))
         (bt:join-thread thread))))
   nil)
 
