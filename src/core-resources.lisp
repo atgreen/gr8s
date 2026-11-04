@@ -26,6 +26,8 @@
     ("services" "Service" "v1" t)
     ("podtemplates" "PodTemplate" "v1" t)
     ("events" "Event" "v1" t)
+    ("deployments" "Deployment" "apps/v1" t)
+    ("replicasets" "ReplicaSet" "apps/v1" t)
     ("roles" "Role" "rbac.authorization.k8s.io/v1" t)
     ("rolebindings" "RoleBinding" "rbac.authorization.k8s.io/v1" t)
     ("clusterroles" "ClusterRole" "rbac.authorization.k8s.io/v1" nil)
@@ -68,6 +70,7 @@
                    (not (typep (gethash "resourceHistoryStart" state) `(integer 0 ,(gethash "revision" state)))))
           (error "Invalid resource history start at ~A" path))
         (setf (pod-store-resource-revision store) (gethash "revision" state)
+              (pod-store-workload-deletions store) (gethash "workloadDeletions" state (make-hash-table :test #'equal))
               (pod-store-event-expirations store) (gethash "eventExpirations" state (make-hash-table :test #'equal))
               (pod-store-template-history store) (coerce (gethash "templateHistory" state #()) 'list)
               (pod-store-template-history-floor store) (gethash "templateHistoryFloor" state (gethash "revision" state))
@@ -95,7 +98,7 @@
                  (setf (gethash key (pod-store-resources store)) object)))))
   store)
 
-(defun commit-core-resources (store resources revision)
+(defun commit-core-resources (store resources revision &key (workload-deletions (pod-store-workload-deletions store)))
   ;; Write the complete new state before publishing it in memory. A failed
   ;; atomic write leaves both the old disk state and the old index intact.
   (multiple-value-bind (history floor) (next-template-history store resources revision)
@@ -104,7 +107,7 @@
     (write-private-text-atomically
    (core-resource-state-path store)
    (com.inuoe.jzon:stringify
-    (core-object "version" 2 "revision" revision
+    (core-object "version" 2 "revision" revision "workloadDeletions" workload-deletions
                  "templateHistory" (coerce history 'vector) "templateHistoryFloor" floor
                  "templateTokenKey" (ag-grpc:base64-encode token-key)
                  "resourceHistoryStart" (pod-store-resource-history-start store)
@@ -115,6 +118,7 @@
                                        when (custom-resource-key-p (first key))
                                          collect (core-object "resource" (first key) "object" object)) 'vector))))
   (setf (pod-store-resources store) resources
+        (pod-store-workload-deletions store) workload-deletions
         (pod-store-resource-revision store) revision
         (pod-store-template-history store) history
         (pod-store-template-history-floor store) floor
@@ -170,7 +174,7 @@
       (or (and (= 1 (length parts)) (core-label-name-p (first parts)))
           (and (= 2 (length parts)) (dns-subdomain-p (first parts)) (core-label-name-p (second parts)))))))
 
-(defun validate-core-metadata (metadata namespace name)
+(defun validate-core-metadata (metadata namespace name &key allow-finalizers)
   (require-object metadata "metadata")
   (when (and namespace (not (dns-label-p namespace)))
     (core-resource-error 422 "Invalid" "metadata.namespace must be a DNS label"))
@@ -195,7 +199,13 @@
         (when (and (string= field "annotations") (> size (* 256 1024)))
           (core-resource-error 422 "Invalid" "metadata.annotations exceeds the 256 KiB limit")))))
   (validate-owner-references metadata)
-  (dolist (field '("finalizers"))
+  (when allow-finalizers
+    (when (nth-value 1 (gethash "finalizers" metadata))
+      (bootstrap-string-array (gethash "finalizers" metadata) "metadata.finalizers")
+      (loop for finalizer across (gethash "finalizers" metadata)
+            unless (core-qualified-key-p finalizer)
+              do (core-resource-error 422 "Invalid" "Invalid finalizer name"))))
+  (dolist (field (unless allow-finalizers '("finalizers")))
     (let ((value (gethash field metadata)))
       (when (and value (not (eq value 'null))
                  (or (not (vectorp value)) (plusp (length value))))
@@ -240,6 +250,8 @@
     (return-from normalize-core-resource (normalize-crd-resource input namespace name store)))
   (when (custom-resource-key-p resource)
     (return-from normalize-core-resource (normalize-custom-resource resource input namespace name store)))
+  (when (storage-resource-p resource)
+    (return-from normalize-core-resource (normalize-storage-resource resource input namespace name store)))
   (unless (member resource '("configmaps" "secrets") :test #'equal)
     (return-from normalize-core-resource
       (normalize-bootstrap-resource resource input namespace name store)))
@@ -346,6 +358,7 @@
     (expire-core-events-unlocked store)
     (let* ((input (copy-core-object input))
            (metadata (require-object (gethash "metadata" input) "metadata")))
+      (when (workload-resource-p resource) (assign-generated-workload-name-unlocked store resource input namespace))
       (when (and (not (gethash "name" metadata)) (gethash "generateName" metadata))
         (let ((prefix (gethash "generateName" metadata)))
           (unless (and (stringp prefix) (<= 1 (length prefix) 247)
@@ -366,6 +379,7 @@
         (when (gethash key resources)
           (core-resource-error 409 "AlreadyExists" "~A ~A/~A already exists" (core-resource-kind resource) namespace name))
         (prepare-core-resource-metadata object nil revision)
+        (prepare-workload-write resource object nil)
         (setf (gethash key resources) object)
         (unless dry-run (commit-core-resources store resources revision))
         (copy-core-object object)))))
@@ -389,6 +403,7 @@
       (unless (equal expected (gethash "resourceVersion" existing-metadata))
         (core-resource-error 409 "Conflict" "The resource was modified; apply your changes to the latest version"))
       (when (equal resource "events") (validate-event-update existing object))
+      (when (storage-resource-p resource) (validate-storage-update store resource existing object))
       (when (and (gethash "uid" metadata) (not (equal (gethash "uid" metadata) (gethash "uid" existing-metadata))))
         (core-resource-error 409 "Conflict" "metadata.uid does not match the stored object"))
       (when (and (member resource '("rolebindings" "clusterrolebindings") :test #'equal)
@@ -406,6 +421,7 @@
                  (or (not (core-resource-immutable-p object)) (not (core-resource-data-equal-p existing object))))
         (core-resource-error 422 "Invalid" "Immutable resource data cannot change"))
       (prepare-core-resource-metadata object existing revision)
+      (prepare-workload-write resource object existing)
       (let ((resources (copy-core-resource-index store)))
         (if (and (custom-resource-key-p resource)
                  (gethash "deletionTimestamp" metadata) (zerop (length (gethash "finalizers" metadata #()))))
@@ -424,6 +440,8 @@
         (core-resource-error 409 "Conflict" "Delete precondition does not match the stored object"))
       (when (or (equal resource "customresourcedefinitions") (custom-resource-key-p resource))
         (return-from delete-core-resource (delete-crd-object-unlocked store resource existing dry-run)))
+      (when (storage-resource-p resource)
+        (return-from delete-core-resource (delete-storage-resource-unlocked store resource existing dry-run)))
       (let ((resources (copy-core-resource-index store)))
         (remhash (core-resource-key resource namespace name) resources)
         (unless dry-run (commit-core-resources store resources (1+ (pod-store-resource-revision store)))))

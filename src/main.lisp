@@ -513,7 +513,9 @@
                                   :before-reconcile (lambda ()
                                       (reconcile-crd-deletions store)
                                       (collect-orphaned-custom-resources store)
+                                      (reconcile-storage-bindings store)
                                       (collect-orphaned-api-objects reconciler)
+                                      (reconcile-workloads reconciler)
                                       (when service-controller
                                         (ensure-in-cluster-network pki)
                                         (reconcile-native-services service-controller)))))

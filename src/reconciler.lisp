@@ -37,12 +37,11 @@
       ;; Metadata updates advance API resourceVersion but do not change the
       ;; running workload. The durable runtime fingerprint proves adoption.
       (setf (runtime-pod-resource-version observed) (pod-resource-version pod)))
-    (when (or (null observed)
-              (not (string= (runtime-pod-resource-version observed)
-                            (pod-resource-version pod)))
-              (and (string= "Always" (pod-restart-policy pod))
-                   (not (string= "Running" (runtime-pod-phase observed)))))
-      (setf observed (runtime-ensure runtime pod)))
+    (if (or (null observed)
+            (not (string= (runtime-pod-resource-version observed)
+                          (pod-resource-version pod))))
+        (setf observed (runtime-ensure runtime pod))
+        (setf observed (runtime-reconcile-containers runtime pod observed)))
     (let ((status (observed-status observed)))
       (when (equal (pod-resource-version pod) (runtime-pod-resource-version observed))
         (setf (gethash "observedGeneration" status)

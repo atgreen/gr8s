@@ -280,4 +280,20 @@
         (is (= 410 (core-resource-status (lambda () (gr8s::template-list-page store "alpha" "" "" :resource resource :resource-version revision :match "Exact")))))
         (is (zerop (length (gethash "items" (gr8s::template-list-page store "alpha" "" "" :resource resource)))))))))
 
+(test crd-status-accepts-upstream-compatible-message-only-conditions
+  (with-crd-api (store path)
+    (values store path)
+    (let* ((base "/apis/apiextensions.k8s.io/v1/customresourcedefinitions")
+           (definition (crd-api-request 201 base :method :post :object (crd-fixture)))
+           (status-url (concatenate 'string base "/widgets.widgets.example.test/status")))
+      (setf (gethash "conditions" (gethash "status" definition))
+            (concatenate 'vector (gethash "conditions" (gethash "status" definition))
+                         (vector (gr8s::core-object "message" "updated"))))
+      (let ((updated (crd-api-request 200 status-url :method :put :object definition)))
+        (is (find "updated" (gethash "conditions" (gethash "status" updated)) :test #'equal :key (lambda (condition) (gethash "message" condition)))))
+      (let ((patched (crd-api-request 200 status-url :method :patch :content-type "application/json-patch+json"
+                           :object (vector (gr8s::core-object "op" "add" "path" "/status/conditions"
+                                                            "value" (vector (gr8s::core-object "message" "patched")))))))
+        (is (find "patched" (gethash "conditions" (gethash "status" patched)) :test #'equal :key (lambda (condition) (gethash "message" condition))))))))
+
 (in-suite gr8s)

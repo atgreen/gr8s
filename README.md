@@ -63,7 +63,7 @@ supported surface. Pods can consume referenced environment keys and mounted
 files. Watch, server-side apply, and full Namespace lifecycle are not yet implemented.
 
 Pod logs and exec run through correlated agent operations, including interactive
-streams and nonzero exit status. Deployments and complete agent-crash recovery
+streams and nonzero exit status. Complete agent-crash recovery
 remain outside the verified boundary. The administrative HTTP API refuses
 non-loopback listener addresses; native Pods use the authenticated HTTPS API
 described below.
@@ -459,6 +459,28 @@ Server-side apply and finalizer processing remain unsupported.
 Templates have a 2 MiB serialized storage limit so admitted objects can be read
 back by the durable JSON loader.
 
+Deployments and ReplicaSets expose `apps/v1` JSON/protobuf CRUD, selectors,
+resumable watches, revision-consistent lists, strategic patches and separate
+`scale` and `status` subresources. ReplicaSet controllers create and scale real
+Pods, adopt matching orphans, release selector mismatches and preserve exact
+controller UIDs. Deployment controllers perform bounded rolling updates or
+recreate updates, retain revision history, honor pause and minimum readiness
+durations, and derive availability from actual Pod conditions. Controller state
+survives restart through the durable API objects and owner references.
+Templates retain the broad Kubernetes Pod schema; execution still uses the
+supported Pod subset. Rejected Pod admission produces a ReplicaFailure condition
+rather than reporting successful replicas. Background deletion cascades through
+the existing owner collector. Foreground and orphan workload deletion checkpoint
+their intent: foreground waits for owned children, while orphaning releases
+controller references before removing the parent. Custom finalizers remain
+unsupported.
+
+PersistentVolume, PersistentVolumeClaim and StorageClass APIs now support durable
+CRUD, typed protobuf, status subresources and resumable JSON watches. Static
+filesystem hostPath/local volumes bind to matching claims and mount real backing
+storage into native Pods. See [persistent storage](docs/persistent-storage.md)
+for supported behavior, protection, Retain reclamation and remaining extensions.
+
 Stored-resource list continuations are signed and bound to their resource type,
 namespace and selectors. A shared durable change journal preserves a consistent
 resourceVersion across
@@ -525,6 +547,13 @@ group and fsGroup settings to containerd. Downward environment fields include
 Pod identity, node name and Pod IP, plus namespace-local Secret and ConfigMap key
 references. Pod metadata revisions preserve running containers; canonical spec
 fingerprints in sandbox labels identify the actual workload across agent restarts.
+Native container retries follow Always, OnFailure and Never independently,
+preserving the sandbox and healthy sibling containers. Attempt history, actual
+last termination state and exponential retry deadlines persist across server
+restarts, with separate logs for each attempt. Missing CRI history and failed
+sandboxes recover from retained observations; mutable image/spec updates still
+replace the sandbox. The [native restart validation record](docs/container-restarts-validation-2026-11-04.json)
+captures four real policy scenarios and durable backoff across a server restart.
 Projected data is applied during Pod setup;
 live refresh is not yet implemented. Managed native startup projects namespace-bound
 ServiceAccount token/CA files automatically unless the Pod or account opts out.
@@ -533,4 +562,5 @@ Deleting and recreating an account or its credential Secret revokes the old toke
 Supported nonblocking owner references are preserved on Pods and stored resources.
 The control plane collects dependents after all known owners disappear, comparing
 UIDs so a newly created object cannot inherit an old object's dependents by name.
-Blocking foreground deletion and finalizer controllers remain unsupported.
+Outside Deployment and ReplicaSet deletion, blocking foreground deletion and
+finalizer controllers remain unsupported.

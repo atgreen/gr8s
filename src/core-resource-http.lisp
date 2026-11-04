@@ -36,7 +36,8 @@
     (cond
       ((string= content-type "application/vnd.kubernetes.protobuf")
        (decode-core-resource-protobuf (hunchentoot:raw-post-data :force-binary t) expected-kind
-                                      (when (member expected-kind '("Event" "DeleteOptions") :test #'equal) *core-resource-view-version*)))
+                                      (if (equal expected-kind "Scale") "autoscaling/v1"
+                                          (when (member expected-kind '("Event" "DeleteOptions") :test #'equal) *core-resource-view-version*))))
       ((member content-type '("" "application/json") :test #'string=)
        (require-object (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)
                                            :max-string-length (* 2 1024 1024)) "request"))
@@ -253,8 +254,13 @@
       (lambda (old)
         (if (string= content-type "application/json-patch+json")
             (apply-core-json-patch old patch)
-            (if (and (equal resource "podtemplates") (equal content-type "application/strategic-merge-patch+json"))
-                (template-strategic-merge old (require-object patch "patch") (template-schema "io.k8s.api.core.v1.PodTemplate"))
+            (if (and (or (storage-resource-p resource)
+                         (member resource '("podtemplates" "deployments" "replicasets") :test #'equal))
+                     (equal content-type "application/strategic-merge-patch+json"))
+                (template-strategic-merge old (require-object patch "patch")
+                  (template-schema (cond ((storage-resource-p resource) (storage-resource-schema-name resource))
+                                         ((equal resource "podtemplates") "io.k8s.api.core.v1.PodTemplate")
+                                         (t (concatenate 'string "io.k8s.api.apps.v1." (core-resource-kind resource))))))
                 (merge-json-object old (require-object patch "patch")))))
       :dry-run dry-run))))
 
@@ -282,18 +288,25 @@
            (json-response (update-core-resource store resource namespace name
                                                (lambda (old) (declare (ignore old)) replacement) :dry-run dry-run))))
         ((and writable-scope name (eq method :patch)) (core-resource-patch-response store resource namespace name dry-run))
-        ((and writable-scope (null name) (member resource '("podtemplates" "events" "customresourcedefinitions") :test #'equal) (eq method :delete))
+        ((and writable-scope (null name)
+              (or (storage-resource-p resource) (member resource '("podtemplates" "events" "deployments" "replicasets" "customresourcedefinitions") :test #'equal))
+              (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
                 (options (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions")))
                 (preview (gethash "dryRun" (or options (core-object)))))
            (when (and preview (not (equalp preview #("All")))) (core-resource-error 400 "BadRequest" "Invalid dryRun"))
            (when (gethash "preconditions" (or options (core-object)))
              (core-resource-error 400 "BadRequest" "DeleteCollection does not support preconditions"))
-           (if (equal resource "customresourcedefinitions")
-               (delete-crd-definition-collection store (or (hunchentoot:parameter "labelSelector") "")
-                                                 (or (hunchentoot:parameter "fieldSelector") "") (or dry-run preview))
-               (delete-template-collection store namespace (or (hunchentoot:parameter "labelSelector") "")
-                                           (or (hunchentoot:parameter "fieldSelector") "") :dry-run (or dry-run preview) :resource resource))
+           (cond ((equal resource "customresourcedefinitions")
+                  (delete-crd-definition-collection store (or (hunchentoot:parameter "labelSelector") "")
+                                                     (or (hunchentoot:parameter "fieldSelector") "") (or dry-run preview)))
+                 ((workload-resource-p resource)
+                  (delete-workload-collection store resource namespace options (or dry-run preview)))
+                 ((storage-resource-p resource)
+                  (delete-storage-collection store resource namespace (or (hunchentoot:parameter "labelSelector") "")
+                                             (or (hunchentoot:parameter "fieldSelector") "") :dry-run (or dry-run preview)))
+                 (t (delete-template-collection store namespace (or (hunchentoot:parameter "labelSelector") "")
+                                                (or (hunchentoot:parameter "fieldSelector") "") :dry-run (or dry-run preview) :resource resource)))
            (status-response "Success" "Deleted" "Resource collection deleted" 200)))
         ((and writable-scope name (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
@@ -306,9 +319,14 @@
                           (every (lambda (value) (equal value "All")) body-dry-run))
                (core-resource-error 400 "BadRequest" "DeleteOptions.dryRun must contain only All")))
            (when preconditions (require-object preconditions "preconditions"))
-           (delete-core-resource store resource namespace name :dry-run (or dry-run (and body-dry-run (plusp (length body-dry-run))))
+           (if (workload-resource-p resource)
+               (delete-workload-resource store resource namespace name :dry-run (or dry-run (and body-dry-run (plusp (length body-dry-run))))
+                    :uid (and preconditions (gethash "uid" preconditions))
+                    :resource-version (and preconditions (gethash "resourceVersion" preconditions))
+                    :policy (workload-deletion-policy options))
+               (delete-core-resource store resource namespace name :dry-run (or dry-run (and body-dry-run (plusp (length body-dry-run))))
                                  :uid (and preconditions (gethash "uid" preconditions))
-                                 :resource-version (and preconditions (gethash "resourceVersion" preconditions)))
+                                 :resource-version (and preconditions (gethash "resourceVersion" preconditions))))
            (status-response "Success" "Deleted" (format nil "~A ~A deleted" (core-resource-kind resource) name) 200)))
         (t (core-resource-error 405 "MethodNotAllowed" "Method is not supported for this resource endpoint"))))))
 
@@ -335,9 +353,14 @@
                          "x-kubernetes-group-version-kind"
                          (vector (json-object "group" "" "version" "v1" "kind" kind))))))
   (labels ((alias (name)
-             (if (member name '("io.k8s.api.core.v1.PodTemplate" "io.k8s.api.core.v1.PodTemplateList"
+             (if (or (uiop:string-prefix-p "io.k8s.api.apps.v1." name)
+                     (uiop:string-prefix-p "io.k8s.api.autoscaling.v1." name)
+                     (member name '("io.k8s.api.core.v1.PodTemplate" "io.k8s.api.core.v1.PodTemplateList"
                                   "io.k8s.api.core.v1.Event" "io.k8s.api.core.v1.EventList"
-                                  "io.k8s.api.events.v1.Event" "io.k8s.api.events.v1.EventList") :test #'equal)
+                                  "io.k8s.api.events.v1.Event" "io.k8s.api.events.v1.EventList"
+                                  "io.k8s.api.core.v1.PersistentVolume" "io.k8s.api.core.v1.PersistentVolumeList"
+                                  "io.k8s.api.core.v1.PersistentVolumeClaim" "io.k8s.api.core.v1.PersistentVolumeClaimList"
+                                  "io.k8s.api.storage.v1.StorageClass" "io.k8s.api.storage.v1.StorageClassList") :test #'equal))
                  name (concatenate 'string "io.gr8s.template." name)))
            (rewrite (schema)
              (cond ((hash-table-p schema)

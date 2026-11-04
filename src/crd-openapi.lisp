@@ -112,7 +112,9 @@
 
 (defun crd-openapi-discovery-response (store)
   "Expose current schema URLs for every actually served group/version."
-  (let ((paths (core-object "api/v1" (core-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")
+  (let ((paths (core-object "apis/apps/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/apps/v1?hash=gr8s-apps-v1")
+                            "apis/storage.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/storage.k8s.io/v1?hash=gr8s-storage-v1")
+                            "api/v1" (core-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")
                             "apis/events.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1"))))
     (dolist (group (crd-api-groups store))
       (loop for version across (gethash "versions" group)

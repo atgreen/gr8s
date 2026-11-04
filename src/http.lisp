@@ -94,7 +94,7 @@
   (let ((groups (vector (json-object "name" "rbac.authorization.k8s.io"
                                     "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
-                       (event-api-group))))
+                       (event-api-group) (workload-api-group) (storage-api-group))))
     (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
@@ -111,7 +111,7 @@
       (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
       (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("create"))
       (json-object "name" "nodes" "singularName" "node" "namespaced" nil "kind" "Node" "verbs" #("get" "list")))
-     (stored-resource-discovery "v1")))))
+     (stored-resource-discovery "v1") (storage-status-discovery)))))
 
 (defvar *schema-reference-prefix* "#/definitions/")
 
@@ -213,8 +213,11 @@
     (json-object
      "api/v1"
      (json-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")
+     "apis/storage.k8s.io/v1"
+     (json-object "serverRelativeURL" "/openapi/v3/apis/storage.k8s.io/v1?hash=gr8s-storage-v1")
      "apis/events.k8s.io/v1"
-     (json-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1")))))
+     (json-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1")
+     "apis/apps/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/apps/v1?hash=gr8s-apps-v1")))))
 
 (defun pod-group-version-kind ()
   (json-object "group" "" "version" "v1" "kind" "Pod"))
@@ -299,9 +302,10 @@
      (json-object
       "openapi" "3.0.0"
       "info" (json-object "title" "gr8s" "version" "v1")
-      "paths" (if (equal version "events.k8s.io/v1")
-                  (add-event-openapi-paths (core-object) t)
-                  (add-core-resource-openapi-paths (openapi-v3-pod-paths)))
+      "paths" (cond ((equal version "events.k8s.io/v1") (add-event-openapi-paths (core-object) t))
+                    ((equal version "apps/v1") (add-workload-openapi-paths (core-object)))
+                    ((equal version "storage.k8s.io/v1") (add-storage-openapi-paths (core-object) version))
+                    (t (add-storage-openapi-paths (add-core-resource-openapi-paths (openapi-v3-pod-paths)))))
       "components" (json-object "schemas" (openapi-definitions))))))
 
 (defun create-pod-response (store reconciler &optional (namespace "default"))
@@ -309,6 +313,17 @@
          (pod (create-pod store (admit-in-cluster-pod store input)))
          (status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
     (json-response (pod-response-object pod status) 201)))
+
+(defun pod-list-observed-object (store reconciler snapshot)
+  "Skip vanished snapshot identities and never attach a replacement Pod's status to an old UID."
+  (handler-case
+      (let ((status (reconcile-pod reconciler (pod-namespace snapshot) (pod-name snapshot))))
+        (with-store-lock (store)
+          (let ((current (gethash (pod-key (pod-namespace snapshot) (pod-name snapshot)) (pod-store-pods store))))
+            (when (and current (equal (pod-uid snapshot) (pod-uid current)))
+              (pod-response-object current status)))))
+    (kubernetes-error (condition)
+      (unless (= 404 (kubernetes-error-status-code condition)) (error condition)))))
 
 (defun list-pods-response (store reconciler &optional (namespace "default"))
   (let ((labels (core-selector-predicate (hunchentoot:parameter "labelSelector")))
@@ -321,9 +336,9 @@
                   "metadata" (json-object "resourceVersion" "0")
                   "items" (coerce
                            (loop for pod in (list-pods store namespace)
-                                 when (funcall labels (pod-to-object pod))
-                                   append (let ((object (pod-response-object pod (reconcile-pod reconciler (pod-namespace pod) (pod-name pod)))))
-                                            (when (funcall fields object) (list object)))) 'vector)))))
+                                 for object = (pod-list-observed-object store reconciler pod)
+                                 when (and object (funcall labels object) (funcall fields object))
+                                   collect object) 'vector)))))
 
 (defun get-pod-response (store reconciler name &optional (namespace "default"))
   (let ((pod (get-pod store namespace name)))
@@ -962,12 +977,19 @@
           ((string= path "/version") (version-response))
           ((string= path "/api") (api-versions-response))
           ((string= path "/apis") (api-groups-response store))
+          ((string= path "/apis/storage.k8s.io") (json-response (storage-api-group)))
+          ((string= path "/apis/storage.k8s.io/v1") (storage-discovery-response))
+          ((string= path "/openapi/v3/apis/storage.k8s.io/v1") (openapi-v3-response "storage.k8s.io/v1"))
+          ((storage-status-route path) (dispatch-storage-status-request store path method))
           ((string= path "/apis/events.k8s.io") (json-response (event-api-group)))
           ((string= path "/apis/events.k8s.io/v1") (event-discovery-response))
           ((string= path "/apis/rbac.authorization.k8s.io/v1") (rbac-resources-response))
+          ((string= path "/apis/apps") (json-response (workload-api-group)))
+          ((string= path "/apis/apps/v1") (workload-resources-response))
           ((string= path "/openapi/v2") (json-response (crd-openapi-document store nil nil nil)))
           ((string= path "/openapi/v3") (crd-openapi-discovery-response store))
           ((string= path "/openapi/v3/apis/events.k8s.io/v1") (openapi-v3-response "events.k8s.io/v1"))
+          ((string= path "/openapi/v3/apis/apps/v1") (openapi-v3-response "apps/v1"))
           ((string= path "/openapi/v3/api/v1") (openapi-v3-response))
           ((string= path "/api/v1") (api-resources-response))
           ((and (eq method :get) (string= path "/api/v1/nodes"))
@@ -976,6 +998,7 @@
                 (dns-subdomain-p (subseq path (length "/api/v1/nodes/"))))
            (nodes-api-response store (subseq path (length "/api/v1/nodes/"))))
           ((crd-special-route store path) (dispatch-crd-request store path method))
+          ((workload-subresource-route path) (dispatch-workload-subresource store path method))
           ((core-resource-route path)
            (dispatch-core-resource-request store path method))
           ((and (string= path "/api/v1/pods") (eq method :get))
