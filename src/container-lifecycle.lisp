@@ -1,0 +1,220 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Reconcile native containers independently, retaining sandbox identity and
+;;;; healthy siblings. Checkpoint retry deadlines and last termination state
+;;;; before starting another attempt, and recover from ambiguous CRI replies.
+
+(in-package #:gr8s)
+
+(defun container-lifecycle-now ()
+  "Return wall time with subsecond precision for durable CRI restart deadlines."
+  #+sbcl (multiple-value-bind (seconds microseconds) (sb-ext:get-time-of-day)
+           (+ 2208988800 seconds (/ microseconds 1000000d0)))
+  #-sbcl (get-universal-time))
+
+(defparameter *container-lifecycle-clock* #'container-lifecycle-now
+  "Wall clock for durable restart deadlines; bound by lifecycle regression tests.")
+
+(defun container-attempt-log-path (name attempt)
+  "Keep the first log path compatible and separate subsequent container attempts."
+  (if (zerop attempt) (format nil "~A.log" name) (format nil "~A.~D.log" name attempt)))
+
+(defun container-lifecycle-path (runtime uid)
+  "Return UID's private durable native lifecycle checkpoint."
+  (merge-pathnames "lifecycle.json" (containerd-pod-log-directory runtime uid)))
+
+(defun load-container-lifecycle-state (runtime uid)
+  "Load only a checkpoint belonging to UID; absent checkpoints start empty."
+  (let* ((path (container-lifecycle-path runtime uid))
+         (state (if (probe-file path) (com.inuoe.jzon:parse path)
+                    (core-object "version" 1 "uid" uid "containers" (core-object)))))
+    (unless (and (hash-table-p state) (eql 1 (gethash "version" state))
+                 (equal uid (gethash "uid" state)) (hash-table-p (gethash "containers" state)))
+      (error 'runtime-error :message "Invalid native container lifecycle checkpoint"))
+    state))
+
+(defun save-container-lifecycle-state (runtime uid state)
+  "Atomically persist retry state before allowing a new CRI attempt."
+  (let* ((path (container-lifecycle-path runtime uid))
+         (temporary (make-pathname :name (format nil "lifecycle-~36R" (random (expt 36 10)))
+                                   :type "tmp" :defaults path)))
+    (ensure-directories-exist path)
+    (unwind-protect
+         (progn
+           (with-open-file (out temporary :direction :output :if-exists :supersede :if-does-not-exist :create)
+             (com.inuoe.jzon:stringify state :stream out))
+           (uiop:rename-file-overwriting-target temporary path))
+      (when (probe-file temporary) (delete-file temporary))))
+  state)
+
+(defun forget-container-lifecycle-state (runtime uid)
+  "Remove retry state after UID's runtime sandbox is actually gone."
+  (let ((path (container-lifecycle-path runtime uid)))
+    (when (probe-file path) (delete-file path))))
+
+(defun latest-container-infos (infos)
+  "Select one current CRI attempt per container name, independently of list order."
+  (let ((latest (make-hash-table :test #'equal)))
+    (dolist (info infos)
+      (let* ((name (cri-container-info-name info)) (old (gethash name latest)))
+        (when (or (null old)
+                  (> (cri-container-info-attempt info) (cri-container-info-attempt old))
+                  (and (= (cri-container-info-attempt info) (cri-container-info-attempt old))
+                       (> (cri-container-info-started-at info) (cri-container-info-started-at old))))
+          (setf (gethash name latest) info))))
+    (sort (loop for info being the hash-values of latest collect info)
+          #'string< :key #'cri-container-info-name)))
+
+(defun container-lifecycle-status (info state)
+  "Attach durable last termination state to a real current CRI observation."
+  (let* ((status (containerd-container-status-object info))
+         (entry (gethash (cri-container-info-name info) (gethash "containers" state)))
+         (previous (and entry (gethash "lastTermination" entry))))
+    (when (and previous (not (equal (cri-container-info-id info) (gethash "lastExitID" entry))))
+      (setf (gethash "lastState" status) (core-object "terminated" (copy-core-object previous))))
+    status))
+
+(defun container-restart-eligible-p (pod info)
+  "Apply Pod restart policy to one actually exited container."
+  (and info (= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_exited+)
+       (or (equal "Always" (pod-restart-policy pod))
+           (and (equal "OnFailure" (pod-restart-policy pod))
+                (not (zerop (cri-container-info-exit-code info)))))))
+
+(defun native-container-progress-required-p (pod observed)
+  "Avoid repeated CRI work for complete healthy or deliberately terminal observations."
+  (when (equal "Unknown" (runtime-pod-phase observed))
+    (return-from native-container-progress-required-p t))
+  (let ((statuses (gethash "containerStatuses" (runtime-pod-status observed))))
+    (loop for spec across (pod-containers pod)
+          for status = (find (container-spec-name spec) statuses :test #'equal
+                             :key (lambda (item) (gethash "name" item)))
+          for state = (and status (gethash "state" status))
+          for terminated = (and state (gethash "terminated" state))
+          thereis (or (null state) (gethash "waiting" state)
+                      (and terminated
+                           (or (equal "Always" (pod-restart-policy pod))
+                               (and (equal "OnFailure" (pod-restart-policy pod))
+                                    (not (zerop (gethash "exitCode" terminated))))))))))
+
+(defun prepare-container-restart (state info now)
+  "Record an exit once and return its durable retry deadline and next attempt."
+  (let* ((entries (gethash "containers" state)) (name (cri-container-info-name info))
+         (old (gethash name entries)))
+    (unless (and old (equal (gethash "lastExitID" old) (cri-container-info-id info)))
+      (let* ((finished (+ 2208988800 (/ (cri-container-info-finished-at info) 1000000000d0)))
+             (duration (/ (- (cri-container-info-finished-at info) (cri-container-info-started-at info)) 1000000000))
+             (reset (or (null old) (>= duration 600)
+                        (> (- now (gethash "lastFailureTime" old now)) 600)))
+             ;; Like upstream doBackOff/Backoff.Next, the first retry creates
+             ;; the backoff entry; subsequent short runs wait 10,20,...,300s.
+             (delay (if reset 0 (gethash "backoff" old 10)))
+             (entry (core-object "lastExitID" (cri-container-info-id info)
+                                 "lastFailureTime" now
+                                 "nextAttempt" (1+ (cri-container-info-attempt info))
+                                 "backoff" (if reset 10 (min 300 (* 2 delay)))
+                                 "nextStart" (+ (if (plusp (cri-container-info-finished-at info)) finished now) delay)
+                                 "lastTermination" (gethash "terminated" (gethash "state" (containerd-container-status-object info))))))
+        (setf (gethash name entries) entry)))
+    (gethash name entries)))
+
+(defun containerd-sandbox-config (runtime pod)
+  "Build the sandbox configuration used for initial and subsequent container attempts."
+  (make-cri-pod-sandbox-config
+   (pod-name pod) (pod-uid pod) (pod-namespace pod) 0
+   (namestring (containerd-pod-log-directory runtime (pod-uid pod)))
+   (containerd-runtime-host-network runtime)
+   :resource-version (pod-resource-version pod) :spec-fingerprint (pod-runtime-spec-fingerprint pod)
+   :privileged (pod-requests-privileged-container-p pod)
+   :dns-servers (containerd-runtime-dns-servers runtime)
+   :dns-searches (when (containerd-runtime-dns-searches runtime)
+                   (cons (format nil "~A.svc.cluster.local" (pod-namespace pod))
+                         (cdr (containerd-runtime-dns-searches runtime))))
+   :dns-options (containerd-runtime-dns-options runtime)))
+
+(defun containerd-start-sandbox (runtime pod)
+  "Create the native sandbox once; partial container creation never withdraws it."
+  (let ((directory (containerd-pod-log-directory runtime (pod-uid pod))))
+    (ensure-directories-exist directory)
+    (make-cri-pod-sandbox-info
+     :id (cri-run-pod-sandbox
+          (containerd-runtime-socket-path runtime)
+          :name (pod-name pod) :uid (pod-uid pod) :namespace (pod-namespace pod)
+          :log-directory (namestring directory) :host-network (containerd-runtime-host-network runtime)
+          :resource-version (pod-resource-version pod) :spec-fingerprint (pod-runtime-spec-fingerprint pod)
+          :privileged (pod-requests-privileged-container-p pod)
+          :dns-servers (containerd-runtime-dns-servers runtime)
+          :dns-searches (when (containerd-runtime-dns-searches runtime)
+                          (cons (format nil "~A.svc.cluster.local" (pod-namespace pod))
+                                (cdr (containerd-runtime-dns-searches runtime))))
+          :dns-options (containerd-runtime-dns-options runtime)))))
+
+(defun containerd-prune-old-attempts (runtime infos &optional created-names)
+  "Keep the latest attempt and one predecessor per name, bounding dead CRI objects."
+  (let ((counts (make-hash-table :test #'equal)))
+    (dolist (info (stable-sort (copy-list infos) #'> :key #'cri-container-info-attempt))
+      (when (and (> (incf (gethash (cri-container-info-name info) counts 0))
+                    (if (member (cri-container-info-name info) created-names :test #'equal) 1 2))
+                 (= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_exited+))
+        (cri-delete-container (containerd-runtime-socket-path runtime) (cri-container-info-id info))))))
+
+(defun converge-containerd-containers (runtime pod)
+  "Converge each declared container while retaining its unchanged sandbox and siblings."
+  (let* ((uid (pod-uid pod)) (socket (containerd-runtime-socket-path runtime))
+         (sandbox (containerd-owned-sandbox runtime uid)))
+    (when (and sandbox
+               (or (/= gr8s.cri.v1::+podsandboxstate-sandbox_ready+ (cri-pod-sandbox-info-state sandbox))
+                   (not (equal (pod-runtime-spec-fingerprint pod)
+                               (cdr (assoc +gr8s-spec-fingerprint-label+ (cri-pod-sandbox-info-labels sandbox) :test #'equal))))))
+      (runtime-delete runtime uid)
+      (setf sandbox nil))
+    (unless sandbox (setf sandbox (containerd-start-sandbox runtime pod)))
+    (let* ((config (containerd-sandbox-config runtime pod))
+           (infos (mapcar (lambda (summary) (cri-container-status socket (cri-container-summary-id summary)))
+                          (containerd-containers runtime sandbox)))
+           (current (latest-container-infos infos))
+           (state (load-container-lifecycle-state runtime uid))
+           (now (funcall *container-lifecycle-clock*))
+           (waiting (make-hash-table :test #'equal)) (restarting nil) (created-names nil))
+      (loop for spec across (pod-containers pod)
+            for name = (container-spec-name spec)
+            for info = (find name current :key #'cri-container-info-name :test #'equal)
+            do (cond
+                 ((null info)
+                  (let ((entry (gethash name (gethash "containers" state))))
+                    (if (and entry (< now (gethash "nextStart" entry 0)))
+                        (setf (gethash name waiting) entry restarting t)
+                        (progn
+                          (containerd-create-container runtime pod (cri-pod-sandbox-info-id sandbox) config spec
+                                                       :attempt (if entry (gethash "nextAttempt" entry 0) 0))
+                          (push name created-names)))))
+                 ((= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_created+)
+                  ;; An interrupted or ambiguous StartContainer must reuse the
+                  ;; already created attempt instead of allocating another.
+                  (cri-start-container socket (cri-container-info-id info)))
+                 ((container-restart-eligible-p pod info)
+                  (let ((entry (prepare-container-restart state info now)))
+                    (save-container-lifecycle-state runtime uid state)
+                    (setf restarting t)
+                    (if (< now (gethash "nextStart" entry))
+                        (setf (gethash name waiting) entry)
+                        (progn
+                          (containerd-create-container runtime pod (cri-pod-sandbox-info-id sandbox) config spec
+                                                       :attempt (gethash "nextAttempt" entry))
+                          (push name created-names)))))))
+      (containerd-prune-old-attempts runtime infos created-names)
+      (let* ((observed (runtime-observe runtime uid))
+             (statuses (gethash "containerStatuses" (runtime-pod-status observed))))
+        (loop for status across statuses
+              for entry = (gethash (gethash "name" status) waiting)
+              when entry do
+                (setf (gethash "state" status) (core-object "waiting" (core-object "reason" "CrashLoopBackOff"))
+                      (gethash "lastState" status) (core-object "terminated" (copy-core-object (gethash "lastTermination" entry)))
+                      (gethash "ready" status) nil (gethash "started" status) nil))
+        (when restarting (setf (runtime-pod-phase observed) "Running"))
+        ;; An existing sandbox's creation revision may be older than a metadata
+        ;; update. Reconciliation adopted the exact desired workload above.
+        (setf (runtime-pod-resource-version observed) (pod-resource-version pod))
+        observed))))

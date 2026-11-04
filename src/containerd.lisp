@@ -36,10 +36,10 @@
         (cons +gr8s-uid-label+ uid)))
 
 (defun containerd-owned-sandbox (runtime uid)
-  (first
-   (cri-list-pod-sandboxes
-    (containerd-runtime-socket-path runtime)
-    :labels (containerd-ownership-labels uid))))
+  (let ((sandboxes (cri-list-pod-sandboxes (containerd-runtime-socket-path runtime)
+                                          :labels (containerd-ownership-labels uid))))
+    (or (find gr8s.cri.v1::+podsandboxstate-sandbox_ready+ sandboxes :key #'cri-pod-sandbox-info-state)
+        (first sandboxes))))
 
 (defun containerd-containers (runtime sandbox)
   (cri-list-containers
@@ -120,7 +120,9 @@
             (containers (when sandbox (containerd-containers runtime sandbox)))
             (details (loop for container in containers
                            collect (cri-container-status (containerd-runtime-socket-path runtime)
-                                                         (cri-container-summary-id container)))))
+                                                         (cri-container-summary-id container))))
+            (current (latest-container-infos details))
+            (state (load-container-lifecycle-state runtime uid)))
        (when sandbox
          (make-runtime-pod
           :uid uid
@@ -132,9 +134,15 @@
           :spec-fingerprint (cdr (assoc +gr8s-spec-fingerprint-label+ (cri-pod-sandbox-info-labels sandbox) :test #'string=))
           :pod-ip (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime)
                                       (cri-pod-sandbox-info-id sandbox))
-          :phase (containerd-phase runtime containers details)
+          :phase (if (/= gr8s.cri.v1::+podsandboxstate-sandbox_ready+ (cri-pod-sandbox-info-state sandbox))
+                     "Unknown"
+                     (containerd-phase runtime
+                                   (mapcar (lambda (info) (make-cri-container-summary
+                                                          :id (cri-container-info-id info)
+                                                          :state (cri-container-info-state info))) current)
+                                   current))
           :status (core-object "containerStatuses"
-                               (map 'vector #'containerd-container-status-object details))))))))
+                               (map 'vector (lambda (info) (container-lifecycle-status info state)) current))))))))
 
 (defmethod runtime-delete ((runtime containerd-runtime) uid)
   (cancel-runtime-pod-deletion (containerd-runtime-deletions runtime) uid)
@@ -167,6 +175,7 @@
          (cri-delete-pod-sandbox
           (containerd-runtime-socket-path runtime)
           (cri-pod-sandbox-info-id sandbox))))
+     (forget-container-lifecycle-state runtime uid)
      nil)))
 
 (defmethod runtime-terminate-pod ((runtime containerd-runtime) pod deadline)
@@ -181,7 +190,7 @@
   "Join native deletion jobs before the containerd service exits."
   (stop-runtime-deletion-controller (containerd-runtime-deletions runtime)))
 
-(defun containerd-create-container (runtime pod sandbox-id sandbox-config spec)
+(defun containerd-create-container (runtime pod sandbox-id sandbox-config spec &key (attempt 0))
   (let ((socket (containerd-runtime-socket-path runtime)))
     (let ((policy (gethash "imagePullPolicy" (pod-runtime-container-object pod spec)
                            (if (or (uiop:string-suffix-p (container-spec-image spec) ":latest")
@@ -202,97 +211,47 @@
              :security-context (containerd-pod-security-context pod spec)
              :working-directory (gethash "workingDir" (pod-runtime-container-object pod spec))
              :uid (pod-uid pod)
-             :log-path (format nil "~A.log" (container-spec-name spec)))))
+             :attempt attempt
+             :log-path (container-attempt-log-path (container-spec-name spec) attempt))))
       (cri-start-container socket container-id))))
 
 (defmethod runtime-ensure ((runtime containerd-runtime) pod)
-  (call-containerd-runtime
-   (lambda ()
-     (runtime-delete runtime (pod-uid pod))
-     (let* ((log-directory
-              (containerd-pod-log-directory runtime (pod-uid pod)))
-            (sandbox-config
-              (make-cri-pod-sandbox-config
-               (pod-name pod) (pod-uid pod) (pod-namespace pod) 0
-               (namestring log-directory)
-               (containerd-runtime-host-network runtime)
-               :resource-version (pod-resource-version pod)
-               :spec-fingerprint (pod-runtime-spec-fingerprint pod)
-               :privileged (pod-requests-privileged-container-p pod)
-               :dns-servers (containerd-runtime-dns-servers runtime)
-               :dns-searches (when (containerd-runtime-dns-searches runtime)
-                               (cons (format nil "~A.svc.cluster.local" (pod-namespace pod))
-                                     (cdr (containerd-runtime-dns-searches runtime))))
-               :dns-options (containerd-runtime-dns-options runtime)))
-            (sandbox-id nil))
-       (ensure-directories-exist log-directory)
-       (handler-case
-           (progn
-             (setf sandbox-id
-                   (cri-run-pod-sandbox
-                    (containerd-runtime-socket-path runtime)
-                    :name (pod-name pod)
-                    :uid (pod-uid pod)
-                    :namespace (pod-namespace pod)
-                    :log-directory (namestring log-directory)
-                    :host-network (containerd-runtime-host-network runtime)
-                    :resource-version (pod-resource-version pod)
-                    :spec-fingerprint (pod-runtime-spec-fingerprint pod)
-                    :privileged (pod-requests-privileged-container-p pod)
-                    :dns-servers (containerd-runtime-dns-servers runtime)
-                    :dns-searches (when (containerd-runtime-dns-searches runtime)
-                               (cons (format nil "~A.svc.cluster.local" (pod-namespace pod))
-                                     (cdr (containerd-runtime-dns-searches runtime))))
-                    :dns-options (containerd-runtime-dns-options runtime)))
-             (loop for spec across (pod-containers pod)
-                   do (containerd-create-container
-                       runtime pod sandbox-id sandbox-config spec))
-             (or (runtime-observe runtime (pod-uid pod))
-                 (make-runtime-pod
-                  :uid (pod-uid pod)
-                  :resource-version (pod-resource-version pod)
-                  :phase "Pending")))
-         (error (condition)
-           (when sandbox-id
-             (ignore-errors (runtime-delete runtime (pod-uid pod))))
-           (error condition)))))))
+  "Converge native containers without destroying an unchanged sandbox or healthy siblings."
+  (call-containerd-runtime (lambda () (converge-containerd-containers runtime pod))))
+
+(defmethod runtime-reconcile-containers ((runtime containerd-runtime) pod observed)
+  "Retry only eligible native containers, even while a sibling keeps the Pod Running."
+  (if (native-container-progress-required-p pod observed)
+      (runtime-ensure runtime pod)
+      observed))
 
 (defmethod runtime-logs
     ((runtime containerd-runtime) uid container-name &key tail)
   (declare (ignore tail))
   (call-containerd-runtime
    (lambda ()
-     (let* ((sandbox (containerd-owned-sandbox runtime uid))
-            (container
-              (and sandbox
-                   (find container-name
-                         (containerd-containers runtime sandbox)
-                         :key (lambda (item)
-                                (cdr (assoc +gr8s-container-label+
-                                            (cri-container-summary-labels item)
-                                            :test #'string=)))
-                         :test #'string=))))
+     (let ((container (containerd-owned-container runtime uid container-name)))
        (unless container
-         (error 'runtime-error
-                :message (format nil "Container ~A is not owned by gr8s"
-                                 container-name)))
-       (let ((path (merge-pathnames
-                    (format nil "~A.log" container-name)
-                    (containerd-pod-log-directory runtime uid))))
-         (if (probe-file path)
-             (uiop:read-file-string path)
-             ""))))))
+         (error 'runtime-error :message (format nil "Container ~A is not owned by gr8s" container-name)))
+       (let* ((info (cri-container-status (containerd-runtime-socket-path runtime)
+                                          (cri-container-summary-id container)))
+              (path (merge-pathnames
+                     (container-attempt-log-path container-name (cri-container-info-attempt info))
+                     (containerd-pod-log-directory runtime uid))))
+         (if (probe-file path) (uiop:read-file-string path) ""))))))
 
 (defun containerd-owned-container (runtime uid container-name)
   (let ((sandbox (containerd-owned-sandbox runtime uid)))
     (and sandbox
-         (find container-name
-               (containerd-containers runtime sandbox)
-               :key (lambda (item)
-                      (cdr (assoc +gr8s-container-label+
-                                  (cri-container-summary-labels item)
-                                  :test #'string=)))
-               :test #'string=))))
+         (let ((info (find container-name
+                           (latest-container-infos
+                            (mapcar (lambda (item) (cri-container-status (containerd-runtime-socket-path runtime)
+                                                                        (cri-container-summary-id item)))
+                                    (containerd-containers runtime sandbox)))
+                           :key #'cri-container-info-name :test #'equal)))
+           (when info (make-cri-container-summary :id (cri-container-info-id info)
+                                                  :state (cri-container-info-state info)
+                                                  :labels (cri-container-info-labels info)))))))
 
 (defmethod runtime-exec-url
     ((runtime containerd-runtime) uid container-name command

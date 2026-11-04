@@ -23,7 +23,8 @@
 
 (defstruct cri-pod-sandbox-info
   id
-  labels)
+  labels
+  (state gr8s.cri.v1::+podsandboxstate-sandbox_ready+))
 
 (defstruct cri-container-summary
   id
@@ -299,6 +300,7 @@
                  collect
                  (make-cri-pod-sandbox-info
                   :id (gr8s.cri.v1::id sandbox)
+                  :state (gr8s.cri.v1::state sandbox)
                   :labels (gr8s.cri.v1::labels sandbox))))
       (ag-grpc:channel-close channel))))
 
