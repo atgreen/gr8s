@@ -1,0 +1,28 @@
+{
+  "scope": "Initial native probe smoke; failed result preserved, not certification",
+  "sourceCommit": "e4f64283425a3f175b50072a54ab6a8fc0aa1399",
+  "nativeSHA256": "f5584f000f41db764cd6f1f90402c37514aab6ef9c973e7d8580bb86d1313f70",
+  "harnessSHA256": "d5e335ddd0442e1a37850e30f9fecc9b0b7bd4c303dfabf1bd897b3fc97d6626",
+  "guestReportDirectory": "/var/tmp/gr8s-probes-native.hgpuf6zw",
+  "localArtifacts": "build/conformance/2026-11-04-probes-native-hgpuf6zw",
+  "result": "failed",
+  "nativeExitCodes": [
+    0
+  ],
+  "ownedShimsRemaining": [],
+  "findings": [
+    "Actual exec probes can be interrupted during runtime setup because gr8s applied command timeoutSeconds to the whole CRI RPC. Kubernetes preserves the command budget but permits runtimeRequestTimeout + commandTimeout for the RPC. Production correction pending.",
+    "Initial liveness zero-exit restart and healthy sibling preservation occurred, but its first stopped attempt was triggered by an infrastructure timeout; this is not accepted as proof of intended command-failure behavior.",
+    "Event listing order is not attempt order; the original harness selected a later attempt Event and accepted a negative stop interval. The corrected harness requires an actual nonzero-command Event during the stopped attempt lifetime.",
+    "Containerd log proves the exact TERM-ignoring attempt received StopContainer timeout3 at03:10:13.368 and physically exited137 at03:10:16.471. API timestamp precision yields2.631889seconds after stop request. The initial harness incorrectly measured Event-to-exit latency, including queued reconciliation."
+  ],
+  "nextValidation": "Rerun the complete strict native harness after pinned CRI command/RPC timeout and prober-error retry fixes; all earlier failures remain preserved.",
+  "artifactSHA256": {
+    "report.json": "706cbdd0faeef2fe27391cf55e0fa26a534f829faf193facbc3e78f650bb8a2a",
+    "gr8s.log": "7e37156ac335d3b3ce57364a78530aaf739d430122ec4120a37a54bdfc07c37e",
+    "containerd.log": "7bc5c3a85098b438f4be084137f2fa586b37cb474d4e172b8b610854badf8351",
+    "probe-events.json": "8c35e66e7c7b13d22335375574fe1da08eeca53855af3576e72e4297cfe2acc1",
+    "probe-grace-enforced.json": "221f117e57e2d72e21d4a5f3352d5f0d342391ce1e991d5d2234caabd5fe7ce6",
+    "independent-stop-review.json": "feb2b58b0502d44954768d4e9bbb43ef681a184932b11001042fe1fc3d30f772"
+  }
+}
