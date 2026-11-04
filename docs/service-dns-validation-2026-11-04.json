@@ -31,6 +31,46 @@
       "nativeExitCode": 0,
       "ownedShimsRemaining": [],
       "cleanupError": null
+    },
+    {
+      "sourceCommit": "cbe5e29",
+      "nativeSHA256": "52b63866c669c496b500b3521e056fe6a0cae441331fac80efb9bfee7e77d844",
+      "guestReportDirectory": "/var/tmp/gr8s-podtemplates.ql9s7ao5",
+      "localArtifacts": "build/conformance/2026-11-04-service-dns-upstream-ql9s7ao5",
+      "reportSHA256": "013db75692896ee1dd9f675284af415f00dcb11d46dd1d6d46f27a64d7699a7d",
+      "verifiedArtifacts": {
+        "gr8s.log": "95addf8b02488ca1c24b08dc91b0942265df5010e93b4bd90be9720c7590b4c7",
+        "kubeconfig": "6cacedfa8b519928003c14d32486a684235b8210e2681f81950a9cac47a62abb",
+        "sonobuoy.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "sonobuoy.stderr.log": "ee8ff83bab7b777ef07fd18c1d063923203615b9533a1f0b9bfe94c310c7c713",
+        "sonobuoy-results.tar.gz": "ab5ed942fe0115066e09b6d5c132b9b3db2a7a398570489dff38cc63619701b0",
+        "kube-sonobuoy.log": "754624fa99f50a90be24b65872ecccdc3c54046549392cc761330e181fc8172b",
+        "e2e.log": "702d587b0675351b74e86f50d48b27c05ee5dcbf5986bdcbfedcddb215759bb6",
+        "sonobuoy-worker.log": "e5f870a11dff2af233909a7b8bb3e54d565edf6199be0d8458bf174ab4588b8f",
+        "sonobuoy-results.txt": "5804d586bd949e5053fbae5d1c9b48c5ccba27b07acac88f2225316eb00f8703"
+      },
+      "focus": "\\[sig-network\\] (Services should serve a basic endpoint from pods|EndpointSlice should support creating EndpointSlice API operations|EndpointSlice should create and delete EndpointSlices for a Service with a selector that matches no pods) \\[Conformance\\]$",
+      "actualSelectedJUnitCases": [
+        {
+          "name": "[It] [sig-network] EndpointSlice should create and delete EndpointSlices for a Service with a selector that matches no pods [Conformance]",
+          "passed": true,
+          "seconds": "4.315194236"
+        },
+        {
+          "name": "[It] [sig-network] EndpointSlice should support creating EndpointSlice API operations [Conformance]",
+          "passed": true,
+          "seconds": "0.37556279"
+        },
+        {
+          "name": "[It] [sig-network] Services should serve a basic endpoint from pods [Conformance]",
+          "passed": true,
+          "seconds": "70.939849468"
+        }
+      ],
+      "passed": true,
+      "nativeExitCode": 0,
+      "ownedShimsRemaining": [],
+      "cleanupError": null
     }
   ],
   "localValidation": {
@@ -48,7 +88,7 @@
     }
   },
   "limitations": [
-    "This passing source predates e024c22 empty-headless NXDOMAIN correction and later integration; final combined validation is recorded separately.",
+    "Historical55c418e basic-Service andb23cc05 native sources are preserved separately. Finalcbe5e29 CRD/EndpointSlice/DNS implementation passes the unchanged original three-case selection; later mainca9d745 and328d662 only update validation documentation/docstrings.",
     "Normal Service A/AAAA and ready headless/explicit endpoint-hostname address records are implemented.",
     "SRV, PTR, DNS schema TXT, generated endpoint hostnames and ExternalName are follow-up podster-uqb.21.1.",
     "Existing Pod namespace-specific DNS search paths from per-container lifecycle support are preserved."
