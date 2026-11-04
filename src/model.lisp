@@ -64,7 +64,7 @@
   lease-deadline
   (labels nil)
   (annotations nil)
-  (resource-version "1"))
+  (resource-version "1")
   ;; Quantity strings the node's agent measured about itself.
   capacity
   ;; Quantity strings clients advertised through the Node status subresource.
