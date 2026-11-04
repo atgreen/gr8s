@@ -503,6 +503,16 @@ their intent: foreground waits for owned children, while orphaning releases
 controller references before removing the parent. Custom finalizers remain
 unsupported.
 
+ReplicationControllers expose the same controller, `scale` and `status` through
+`core/v1`, with a mutable map selector and, as upstream, orphaning as the default
+deletion policy. DaemonSets run one Pod on every node their template selects,
+following node labels written through the Node API, and record `apps/v1`
+ControllerRevisions whose data is the JSON a typed client marshals for the
+template. RollingUpdate replaces Pods within `maxUnavailable`; `maxSurge` is
+refused because surge is not implemented. OnDelete leaves running Pods alone.
+Only `metadata.labels` and `metadata.annotations` of a Node can be written: taints
+and `spec.unschedulable` are refused because nothing would enforce them.
+
 PersistentVolume, PersistentVolumeClaim and StorageClass APIs now support durable
 CRUD, typed protobuf, status subresources and resumable JSON watches. Static
 filesystem hostPath/local volumes bind to matching claims and mount real backing
@@ -642,8 +652,10 @@ live refresh is not yet implemented. Managed native startup projects namespace-b
 ServiceAccount token/CA files automatically unless the Pod or account opts out.
 Deleting and recreating an account or its credential Secret revokes the old token.
 
-Supported nonblocking owner references are preserved on Pods and stored resources.
-The control plane collects dependents after all known owners disappear, comparing
-UIDs so a newly created object cannot inherit an old object's dependents by name.
-Outside Deployment and ReplicaSet deletion, blocking foreground deletion and
-finalizer controllers remain unsupported.
+Owner references are preserved on Pods and stored resources. The control plane
+collects dependents after all known owners disappear, comparing UIDs so a newly
+created object cannot inherit an old object's dependents by name. Foreground
+deletion of a workload or Pod waits for `blockOwnerDeletion` dependents and only
+detaches a dependent that another owner still holds. A Pod held this way starts
+terminating when the hold ends, so it shows no `deletionTimestamp` meanwhile.
+Foreground deletion of other kinds and finalizer controllers remain unsupported.
