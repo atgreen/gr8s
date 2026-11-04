@@ -74,7 +74,7 @@
   (let ((payload (ag-grpc:base64-encode
                   (trivial-utf-8:string-to-utf-8-bytes
                    (com.inuoe.jzon:stringify
-                    (core-object "resource" resource "namespace" (or namespace 'null) "labels" labels "fields" fields
+                    (core-object "resource" resource "definitionUID" (if (custom-resource-key-p resource) (crd-definition-uid-unlocked store resource) 'null) "namespace" (or namespace 'null) "labels" labels "fields" fields
                                  "revision" revision "lastKey" last-key "issuedAt" (funcall *podtemplate-clock*)))))))
     (concatenate 'string payload "." (template-token-signature store payload))))
 
@@ -93,7 +93,11 @@
                        (typep (gethash "revision" token) '(integer 0 *))
                        (typep (gethash "issuedAt" token) '(integer 0 *)) (stringp (gethash "lastKey" token)))
             (error "Invalid token scope"))
+          (when (and (custom-resource-key-p resource)
+                     (not (equal (gethash "definitionUID" token) (crd-definition-uid-unlocked store resource))))
+            (core-resource-error 410 "Expired" "Continue token belongs to an older custom definition"))
           token))
+    (kubernetes-error (condition) (error condition))
     (error () (core-resource-error 400 "BadRequest" "Invalid or mismatched resource continue token"))))
 
 (defun template-list-page (store namespace labels fields &key limit continuation resource-version match (resource "podtemplates"))
@@ -102,6 +106,7 @@
   (unless (member match '(nil "" "Exact" "NotOlderThan") :test #'equal) (core-resource-error 400 "BadRequest" "Invalid resourceVersionMatch"))
   (let ((label-test (core-selector-predicate labels)) (field-test (core-selector-predicate fields :fields t :field-paths (core-resource-field-paths resource))))
     (with-store-lock (store)
+      (check-crd-resource-context-unlocked store resource)
       (compact-template-history-unlocked store)
       (let* ((token (when (and continuation (plusp (length continuation)))
                       (decode-template-token store continuation namespace labels fields resource)))
@@ -113,6 +118,7 @@
                            (and requested (not (equal match "NotOlderThan")) requested)
                            (pod-store-resource-revision store)))
              (last-key (and token (gethash "lastKey" token))))
+        (check-crd-resource-context-unlocked store resource revision)
         (when (and token requested) (core-resource-error 400 "BadRequest" "resourceVersion cannot be combined with continue"))
         (when (and match (not (equal match "")) (null requested) (not (equal resource-version "0")))
           (core-resource-error 400 "BadRequest" "resourceVersionMatch requires resourceVersion"))
