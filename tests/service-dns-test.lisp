@@ -122,3 +122,24 @@
           (gr8s::install-assigned-resource-objects reopened nil nil)
           (is (= 3 (logand 15 (0conf:dns-message-flags
                                (service-dns-test-message reopened "web.alpha.svc.cluster.local"))))))))))
+
+(test service-dns-updates-publish-without-pod-version-changes-and-deduplicate
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (gr8s:register-node store (gr8s:make-node-record :id "dns-node" :name "worker-a"
+                                                  :pod-cidr "10.88.0.0/24"))
+    (let* ((server (gr8s::%make-node-grpc-server :store store :cluster-pod-cidr "10.88.0.0/16"))
+           (runtime (gr8s::make-control-plane-runtime store server)))
+      (gr8s::publish-service-discovery-snapshots runtime)
+      (is (= 1 (slot-value (gr8s::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision)))
+      (gr8s::publish-service-discovery-snapshots runtime)
+      (is (= 1 (slot-value (gr8s::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision)))
+      (gr8s::create-core-resource store "services" (service-test-object "web") "alpha")
+      (gr8s::publish-service-discovery-snapshots runtime)
+      (is (= 2 (slot-value (gr8s::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision)))
+      (gr8s::publish-service-discovery-snapshots runtime)
+      (is (= 2 (slot-value (gr8s::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision)))
+      (gr8s::delete-core-resource store "services" "alpha" "web")
+      (gr8s::publish-service-discovery-snapshots runtime)
+      (is (= 3 (slot-value (gr8s::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision)))
+      (is (null (slot-value (gr8s::current-node-snapshot server "worker-a") 'gr8s.node.v1::service-discovery-objects-json))))))
