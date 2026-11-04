@@ -221,4 +221,23 @@
     (is-false (gr8s::storage-class-topology-matches-p
                 (gr8s::core-object "allowedTopologies" (vector (gr8s::core-object))) node))))
 
+(test rox-binding-does-not-override-explicit-pod-mount-flags
+  (with-temporary-store (store path)
+    (gr8s::create-core-resource store "persistentvolumes"
+      (storage-test-volume "rox" (merge-pathnames "rox/" path) :modes #("ReadOnlyMany")) nil)
+    (gr8s::create-core-resource store "persistentvolumeclaims"
+      (storage-test-claim "claim" :modes #("ReadOnlyMany")) "default")
+    (gr8s::reconcile-storage-bindings store)
+    (let ((runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "pod-logs/" path))))
+      (setf (gr8s::containerd-runtime-resource-store runtime) store)
+      (dolist (flags '((nil nil nil) (t nil t) (nil t t)))
+        (destructuring-bind (source-readonly mount-readonly expected) flags
+          (let* ((object (pod-to-object (storage-test-pod "consumer" "claim")))
+                 (spec (gethash "spec" object)) (container (aref (gethash "containers" spec) 0)))
+            (setf (gethash "readOnly" (gethash "persistentVolumeClaim" (aref (gethash "volumes" spec) 0))) source-readonly
+                  (gethash "readOnly" (aref (gethash "volumeMounts" container) 0)) mount-readonly)
+            (let* ((pod (parse-pod object))
+                   (mount (first (gr8s::containerd-pod-mounts runtime pod (aref (pod-containers pod) 0)))))
+              (is (eql expected (gr8s.cri.v1::readonly mount))))))))))
+
 (in-suite gr8s)

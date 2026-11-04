@@ -17,7 +17,8 @@ Native consumers receive the actual backing path through CRI bind mounts.
 `local` sources require node affinity and an existing directory. `hostPath` type
 checks run on the real node; directories/files are created only for the explicit
 `DirectoryOrCreate`/`FileOrCreate` types. Direct Pod `hostPath` sources are also
-supported. PVC `readOnly` and ROX-only claims produce read-only mounts. A control
+supported. Pod PVC source `readOnly` and container `volumeMount.readOnly` produce read-only
+mounts. Access modes constrain binding without changing these mount flags. A control
 plane restart preserves healthy native consumers and existing backing data.
 
 PVC protection retains a deleting claim while nonterminal Pods reference it.

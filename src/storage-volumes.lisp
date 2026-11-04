@@ -89,6 +89,4 @@
       (error 'runtime-error :message "Persistent volume source, mode, mount options or node affinity is unavailable"))
     (let* ((spec (gethash "spec" volume)) (kind (storage-source-kind spec)))
       (values (materialize-host-storage-source (gethash kind spec) :local (equal kind "local"))
-              (or (eq t (gethash "readOnly" source))
-                  (and (= 1 (length (gethash "accessModes" (gethash "spec" claim))))
-                       (equal "ReadOnlyMany" (aref (gethash "accessModes" (gethash "spec" claim)) 0))))))))
+              (eq t (gethash "readOnly" source))))))
