@@ -38,6 +38,7 @@
   pod-watch-journal
   (pod-watch-journal-length 0)
   (pod-published-statuses (make-hash-table :test #'equal))
+  (pod-client-statuses (make-hash-table :test #'equal))
   (lock (bt:make-lock "gr8s store")))
 
 (defmacro with-store-lock ((store) &body body)
@@ -333,6 +334,7 @@
       (remhash (pod-uid pod) (pod-store-pod-observed-statuses store))
       (remhash (pod-uid pod) (pod-store-pod-observed-resource-versions store))
       (remhash (pod-uid pod) (pod-store-pod-condition-histories store))
+      (remhash (pod-uid pod) (pod-store-pod-client-statuses store))
       pod)))
 
 (defun delete-pod (store namespace name)

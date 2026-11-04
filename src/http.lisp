@@ -112,7 +112,10 @@
      'vector
      (vector
       (json-object "name" "pods" "singularName" "pod" "namespaced" t "kind" "Pod"
-                   "verbs" #("create" "delete" "get" "list" "patch" "update") "shortNames" #("po"))
+                   "verbs" #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
+                   "shortNames" #("po"))
+      (json-object "name" "pods/status" "singularName" "" "namespaced" t "kind" "Pod"
+                   "verbs" #("get" "patch" "update"))
       (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
       (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("create"))
       (json-object "name" "pods/proxy" "singularName" "" "namespaced" t "kind" "PodProxyOptions"
@@ -965,6 +968,12 @@
        (create-pod-response store reconciler namespace))
       ((and (null parts) (eq method :get))
        (list-pods-response store reconciler namespace))
+      ((and (null parts) (eq method :delete))
+       (delete-pod-collection-response store reconciler namespace))
+      ((and (= 2 (length parts)) (string= "status" (second parts)) (eq method :get))
+       (get-pod-response store reconciler (first parts) namespace))
+      ((and (= 2 (length parts)) (string= "status" (second parts)) (member method '(:put :patch)))
+       (write-pod-status-response store reconciler (first parts) namespace method))
       ((and (= 1 (length parts)) (eq method :get))
        (get-pod-response store reconciler (first parts) namespace))
       ((and (= 1 (length parts)) (eq method :patch))
