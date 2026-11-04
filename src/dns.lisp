@@ -343,41 +343,53 @@
              (ignore-errors (close stream)))
          (ignore-errors (sb-bsd-sockets:socket-close socket)))))))
 
+(defconstant +dns-ephemeral-bind-attempts+ 16)
+
+(defun bind-dns-socket-pair (address port)
+  "Return owned UDP/TCP listeners on one port; retry port 0 conflicts with complete cleanup."
+  (let ((limit (if (zerop port) +dns-ephemeral-bind-attempts+ 1)))
+    (loop for attempt from 1 to limit
+          do (let ((udp nil) (tcp nil) (transferred nil))
+               (unwind-protect
+                    (handler-case
+                        (let ((selected nil))
+                          (setf udp (make-bound-dns-socket :datagram :udp address port)
+                                selected (nth-value 1 (sb-bsd-sockets:socket-name udp))
+                                tcp (make-bound-dns-socket :stream :tcp address selected))
+                          (sb-bsd-sockets:socket-listen tcp 16)
+                          (setf transferred t)
+                          (return-from bind-dns-socket-pair (values udp tcp selected)))
+                      (sb-bsd-sockets:address-in-use-error (condition)
+                        (unless (and (zerop port) (< attempt limit)) (error condition))))
+                 (unless transferred
+                   (when tcp (ignore-errors (sb-bsd-sockets:socket-close tcp)))
+                   (when udp (ignore-errors (sb-bsd-sockets:socket-close udp)))))))))
+
 (defun start-dns-server
     (&key (address +dns-pod-server-address+) (port 53) upstreams
           (timeout 2.0) service-resolver
           (udp-forwarder #'forward-dns-udp)
           (tcp-forwarder #'forward-dns-tcp))
   "Bind owned UDP and TCP listeners and start the DNS worker threads."
-  (let* ((udp-socket
-           (make-bound-dns-socket :datagram :udp address port))
-         (selected-port (nth-value 1
-                                  (sb-bsd-sockets:socket-name udp-socket)))
-         (tcp-socket nil)
-         (server nil))
-    (handler-case
-        (progn
-          (setf tcp-socket
-                (make-bound-dns-socket
-                 :stream :tcp address selected-port))
-          (sb-bsd-sockets:socket-listen tcp-socket 16)
-          (setf server
-                (%make-dns-server
-                 :address address :port selected-port :upstreams upstreams
-                 :timeout timeout :service-resolver service-resolver :udp-forwarder udp-forwarder
-                 :tcp-forwarder tcp-forwarder :udp-socket udp-socket
-                 :tcp-socket tcp-socket))
-          (setf (dns-server-udp-thread server)
-                (bt:make-thread (lambda () (dns-udp-loop server))
-                                :name "gr8s DNS UDP")
-                (dns-server-tcp-thread server)
-                (bt:make-thread (lambda () (dns-tcp-loop server))
-                                :name "gr8s DNS TCP"))
-          server)
-      (error (condition)
-        (when tcp-socket (sb-bsd-sockets:socket-close tcp-socket))
-        (sb-bsd-sockets:socket-close udp-socket)
-        (error condition)))))
+  (multiple-value-bind (udp-socket tcp-socket selected-port) (bind-dns-socket-pair address port)
+    (let ((server nil))
+      (handler-case
+          (progn
+            (setf server
+                  (%make-dns-server
+                   :address address :port selected-port :upstreams upstreams
+                   :timeout timeout :service-resolver service-resolver :udp-forwarder udp-forwarder
+                   :tcp-forwarder tcp-forwarder :udp-socket udp-socket
+                   :tcp-socket tcp-socket))
+            (setf (dns-server-udp-thread server)
+                  (bt:make-thread (lambda () (dns-udp-loop server)) :name "gr8s DNS UDP")
+                  (dns-server-tcp-thread server)
+                  (bt:make-thread (lambda () (dns-tcp-loop server)) :name "gr8s DNS TCP"))
+            server)
+        (error (condition)
+          (sb-bsd-sockets:socket-close tcp-socket)
+          (sb-bsd-sockets:socket-close udp-socket)
+          (error condition))))))
 
 (defun join-dns-thread (thread)
   "Join a DNS worker thread when one was started."
