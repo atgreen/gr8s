@@ -1,0 +1,95 @@
+{
+  "directory": "/var/tmp/gr8s-probes-native.7lkdus6o",
+  "stateDirectory": "/var/tmp/gr8s-conformance.a4fy165q/state",
+  "namespace": "probes-a389d4ca53",
+  "nativeSHA256": "f4e09c4e047114c3c357f46936bc8c15da1fb4cfce03f964a2bf1b068da2f5fc",
+  "scenarios": {
+    "startupAndHttpReadiness": {
+      "passed": true,
+      "uid": "D296E888-A29B-48AD-9066-316549DA0C0C",
+      "startupSuppressedLiveness": true
+    },
+    "livenessZeroExitAndEvents": {
+      "passed": true,
+      "actualExitCode": 0,
+      "healthyIDUnchanged": true,
+      "actualStopSecondsAfterFirstFailure": 4.0
+    },
+    "probeGraceOverridesPodGrace": {
+      "passed": true,
+      "probeGrace": 3,
+      "podGrace": 30,
+      "containerID": "7004621038480eafa7d686078d023933e641e6cefdcbb07ed251dd4ca1875b67",
+      "requestedGrace": 3,
+      "actualStopSeconds": 2.648477077484131,
+      "containerdLogLine": "time=\"2026-11-04T03:22:45.351523489Z\" level=info msg=\"StopContainer for \\\"7004621038480eafa7d686078d023933e641e6cefdcbb07ed251dd4ca1875b67\\\" with timeout 3 (s)\"",
+      "exitCode": 137
+    },
+    "tcpActualListenerTransitions": {
+      "passed": true,
+      "containerIDUnchanged": true
+    },
+    "grpcActualService": {
+      "passed": true,
+      "uid": "BC59E754-1D7D-4B83-BA6C-D37DC210A819",
+      "containerIDUnchanged": true
+    },
+    "nativeRestartKeepsActualAttempts": {
+      "passed": true
+    },
+    "deleteCancelsBlockedProbe": {
+      "passed": true,
+      "seconds": 0.023449116000847425
+    }
+  },
+  "nativeExitCodes": [
+    0,
+    0
+  ],
+  "passed": true,
+  "observationErrors": [
+    "<urlopen error [Errno 111] Connection refused>",
+    "<urlopen error [Errno 111] Connection refused>",
+    "<urlopen error [Errno 111] Connection refused>",
+    "<urlopen error [Errno 111] Connection refused>",
+    "<urlopen error [Errno 111] Connection refused>",
+    "<urlopen error [Errno 111] Connection refused>",
+    "<urlopen error [Errno 111] Connection refused>",
+    "<urlopen error [Errno 111] Connection refused>",
+    "<urlopen error [Errno 111] Connection refused>",
+    "<urlopen error [Errno 111] Connection refused>",
+    "<urlopen error [Errno 111] Connection refused>",
+    "<urlopen error [Errno 111] Connection refused>",
+    "<urlopen error [Errno 111] Connection refused>",
+    "<urlopen error [Errno 111] Connection refused>"
+  ],
+  "ownedShimsRemaining": [],
+  "sourceCommit": "b169681",
+  "mergedMain": "ffe26512f260ecfd982edb174479c365dd633f72",
+  "scope": "Seven strict native container probe scenarios; supplemental evidence, not certification",
+  "localArtifacts": "build/conformance/2026-11-04-probes-native-7lkdus6o",
+  "artifactSHA256": {
+    "grpc-not-serving.json": "5d873b02a94969cad484e5babc1c7b7358aa56f5c5646b4c087a115702fcd49d",
+    "grpc-serving.json": "0ae3c8b0215231dfd74a7b33aaa5c63173cd455a890b57706fe85e45f6d2c0bf",
+    "http-ready.json": "fb0ce047010cf0f35deb0fc8be35edba8e8dd6199acccd4aaf786003c16b9090",
+    "liveness-restarted.json": "5f41efee73bca5ddf9779e0ed391fae5a690fcf630abad5fcede373f8e309228",
+    "probe-events.json": "798befda15d495d8a5a40121a164e517d3a4820aa9c637b698d79032b1facc6c",
+    "probe-grace-enforced.json": "69cf6c3005d1c159e1b543897ec95bf253f94253f0b45682458fdf774901997f",
+    "probe-grace-events.json": "936c22a35729541e0d087e542f36a25b0a1f24ed0e9435fa89c303c00883de96",
+    "probe-grace-stop.json": "8dc3f23dec06a6687aa7c38978fbcb23dc397f1c4c2bd0c125e7f279851d18d0",
+    "report.json": "b08f75667d2c52c268b9aeaa582e71684fb1d73e3d67dd8bb4660645a8ec785e",
+    "startup-pending.json": "0b8a0f60634ba06091e1dfb9c79ee02a617c146c9fec5b968e87b8b26ed6c07e",
+    "tcp-listener-withdrawn.json": "90706bb84c8cea1b55bac27510438ea9002f455f8840a79648e5aac4a05408bc",
+    "gr8s.log": "5165b1f43731a2f203f37183bf3f3d4f9b9145b58344c3988d368fbb7bdb298e",
+    "containerd.log": "f71cfa5801363f016efb96e3b1d5c85790ab9684d69697783cdc7c3aee646995"
+  },
+  "beforeEvidence": "docs/container-probes-native-before-2026-11-04.json",
+  "hostValidation": {
+    "checks": 3095,
+    "passed": 3090,
+    "skipped": 5,
+    "failed": 0,
+    "log": "/tmp/gr8s-probes-dns-final-full.log"
+  },
+  "upstreamValidation": "Full ten-case Probing container conformance focus pending; do not treat native scenarios as upstream conformance results."
+}
