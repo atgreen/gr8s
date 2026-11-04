@@ -69,6 +69,8 @@
                       (setf (getf options :listen) value))
                      ((string= option "--port")
                       (setf (getf options :port) (parse-port value)))
+                     ((string= option "--debug-slynk-port")
+                      (setf (getf options :debug-slynk-port) (parse-port value)))
                      ((string= option "--node-listen")
                       (setf (getf options :node-listen)
                             (format-ipv4-integer (parse-ipv4-integer value))))
@@ -471,6 +473,7 @@
          (server nil)
          (api-server nil)
          (service-controller nil)
+         (debug-port nil)
          (service-network-created nil)
          (worker nil)
          (node-server nil)
@@ -492,6 +495,9 @@
                       node-server pki (getf options :node-name)
                       (merge-pathnames "agent/" state-directory)
                       options)))
+             (when (getf options :debug-slynk-port)
+               (setf debug-port (start-debug-server (getf options :debug-slynk-port) state-directory
+                                                    :store store :reconciler reconciler)))
              (unwind-protect
                   (progn
                     (when (and local-agent (equal "containerd" (getf options :runtime))
@@ -530,6 +536,7 @@
                     (format t "gr8s listening on http://~A:~D~%" address port)
                     (finish-output)
                     (loop until *shutdown-requested* do (sleep 0.1)))
+               (when debug-port (stop-debug-server debug-port))
                (when worker (stop-reconciliation-worker worker))
                (when runtime (stop-runtime-deletions runtime))
                (when server (stop-server server))
@@ -543,7 +550,7 @@
 
 (defun print-help ()
   (format t
-          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--disable-agent] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%"))
+          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--disable-agent] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%"))
 
 (defun main-with-environment (arguments environment cni-entry)
   (if (funcall environment "CNI_COMMAND")
