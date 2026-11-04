@@ -8,6 +8,7 @@
   dns-searches
   dns-options
   resource-store
+  probes
   (deletions (make-deletion-controller)))
 
 (defun make-containerd-runtime
@@ -126,7 +127,8 @@
             (history (when (or sandbox checkpoint-owned-p) (incorporate-container-log-history runtime uid state)))
             (statuses (container-lifecycle-statuses details (or history state))))
        (when (or sandbox (and checkpoint-owned-p (plusp (length statuses))))
-         (make-runtime-pod
+         (apply-container-probe-observation runtime
+          (make-runtime-pod
           :uid uid
           :resource-version
           (or (and sandbox (cdr (assoc +gr8s-resource-version-label+
@@ -138,7 +140,8 @@
           :pod-ip (if sandbox (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime) (cri-pod-sandbox-info-id sandbox)) "")
           :phase (container-lifecycle-phase statuses (and sandbox (= gr8s.cri.v1::+podsandboxstate-sandbox_ready+
                                                                          (cri-pod-sandbox-info-state sandbox))))
-          :status (core-object "containerStatuses" statuses)))))))
+          :container-details details
+          :status (core-object "containerStatuses" statuses))))))))
 
 (defmethod runtime-delete ((runtime containerd-runtime) uid)
   (cancel-runtime-pod-deletion (containerd-runtime-deletions runtime) uid)
@@ -146,6 +149,7 @@
 
 (defun containerd-delete-uid (runtime uid deadline &key preserve-lifecycle)
   "Stop UID's containers concurrently against DEADLINE before removing its sandbox."
+  (stop-container-probes runtime uid)
   (call-containerd-runtime
    (lambda ()
      (let ((sandbox (containerd-owned-sandbox runtime uid)))
@@ -180,10 +184,12 @@
 
 (defmethod runtime-delete-pod ((runtime containerd-runtime) pod)
   "Poll the native Pod shutdown job without holding reconciliation until exit."
+  (stop-container-probes runtime (pod-uid pod))
   (poll-runtime-pod-deletion (containerd-runtime-deletions runtime) runtime pod))
 
 (defmethod stop-runtime-deletions ((runtime containerd-runtime))
   "Join native deletion jobs before the containerd service exits."
+  (stop-container-probes runtime)
   (stop-runtime-deletion-controller (containerd-runtime-deletions runtime)))
 
 (defun containerd-create-container (runtime pod sandbox-id sandbox-config spec &key (attempt 0))
@@ -213,12 +219,14 @@
 
 (defmethod runtime-ensure ((runtime containerd-runtime) pod)
   "Converge native containers without destroying an unchanged sandbox or healthy siblings."
-  (call-containerd-runtime (lambda () (converge-containerd-containers runtime pod))))
+  (call-containerd-runtime (lambda () (reconcile-container-probes runtime pod (converge-containerd-containers runtime pod)))))
 
 (defmethod runtime-reconcile-containers ((runtime containerd-runtime) pod observed)
   "Retry only eligible native containers, even while a sibling keeps the Pod Running."
   (checkpoint-container-lifecycle-observation runtime (pod-uid pod) observed)
-  (if (native-container-progress-required-p pod observed)
+  (setf observed (reconcile-container-probes runtime pod observed))
+  (if (or (native-container-progress-required-p pod observed)
+          (container-probe-restart-required-p runtime pod observed))
       (runtime-ensure runtime pod)
       observed))
 

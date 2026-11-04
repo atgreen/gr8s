@@ -18,6 +18,7 @@
   (phase "Running")
   (pod-ip "")
   status
+  container-details
   (logs (make-hash-table :test #'equal)))
 
 (defun canonical-workload-json (object)
@@ -51,6 +52,10 @@
     (octets-to-hex (ironclad:digest-sequence :sha256
                   (trivial-utf-8:string-to-utf-8-bytes
                    (canonical-workload-json spec))))))
+
+(defgeneric runtime-events (runtime uid)
+  (:documentation "Return actual runtime event occurrences for the assigned Pod transport."))
+(defmethod runtime-events ((runtime t) uid) (declare (ignore runtime uid)) nil)
 
 (defgeneric runtime-network-metrics (runtime))
 (defmethod runtime-network-metrics ((runtime t)) (declare (ignore runtime)) "")

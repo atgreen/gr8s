@@ -1,0 +1,364 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Run each container probe outside reconciliation, retaining exact attempt
+;;;; identity, startup suppression, consecutive-result thresholds and bounded
+;;;; periods. Reconciliation checkpoints real outcomes and requested stop
+;;;; deadlines before asynchronously stopping only the failed native attempt.
+
+(in-package #:gr8s)
+
+(define-condition container-probe-stopped (serious-condition) ()
+  (:documentation "Unwind an owned probe operation without converting cancellation to Failure."))
+
+(defstruct container-probe-manager
+  "Own probe targets and stop jobs for one native runtime."
+  (targets (make-hash-table :test #'equal))
+  (jobs (make-hash-table :test #'equal))
+  (lock (bt:make-lock "native container probes"))
+  (clock #'container-lifecycle-now)
+  (executor #'execute-container-probe)
+  stopping-p)
+
+(defstruct container-probe-target
+  "Bind all probes to one actual container ID and its authoritative declaration."
+  uid name id container pod-ip started-at workers stopping-p)
+
+(defstruct container-probe-worker
+  "Track one probe kind's consecutive results independently of its siblings."
+  kind spec result last-result (count 0) (runs 0) next-due message
+  failed-p on-hold-p inflight-p thread started-p finished-p
+  (events (make-hash-table :test #'equal)))
+
+(defstruct container-probe-stop-job
+  "Own the asynchronous CRI stop of one exact failed container."
+  uid id deadline thread started-p finished-p failure cancelled-p)
+
+(defun ensure-container-probe-manager (runtime)
+  "Lazily allocate the native runtime's private asynchronous probe state."
+  (or (containerd-runtime-probes runtime)
+      (setf (containerd-runtime-probes runtime) (make-container-probe-manager))))
+
+(defun probe-target-key (target)
+  "Return the UID/name identity whose current attempt owns TARGET."
+  (list (container-probe-target-uid target) (container-probe-target-name target)))
+
+(defun current-probe-target-p (manager target)
+  "Require exact target ownership before running or publishing a probe result."
+  (and (not (container-probe-manager-stopping-p manager))
+       (not (container-probe-target-stopping-p target))
+       (eq target (gethash (probe-target-key target) (container-probe-manager-targets manager)))))
+
+(defun probe-target-started-p (target)
+  "Suppress liveness/readiness until the current startup worker has succeeded."
+  (let ((startup (find "startupProbe" (container-probe-target-workers target) :test #'equal :key #'container-probe-worker-kind)))
+    (or (null startup) (container-probe-worker-result startup))))
+
+(defun bounded-probe-event-message (text)
+  "Keep Event text within1024 UTF8 bytes without quadratic truncation work."
+  (loop with bytes = 0 for character across text for end from 0
+        for width = (let ((code (char-code character))) (cond ((< code 128) 1) ((< code 2048) 2) ((< code 65536) 3) (t 4)))
+        when (> (+ bytes width) 1024) return (subseq text 0 end)
+        do (incf bytes width)
+        finally (return text)))
+
+(defun record-container-probe-result (worker success message &optional (now (container-lifecycle-now)) result-kind)
+  "Apply consecutive success/failure thresholds without prematurely changing readiness."
+  (when (or (not success) (eq result-kind :warning))
+    (let* ((reason (if success "ProbeWarning" "Unhealthy"))
+           (entry (or (gethash reason (container-probe-worker-events worker))
+                      (core-object "id" (generate-uid) "count" 0 "firstTimestamp" (current-timestamp (floor now)))))
+           (text (format nil "~A probe ~A: ~A" (string-capitalize (subseq (container-probe-worker-kind worker) 0 (- (length (container-probe-worker-kind worker)) 5)))
+                         (if success "warning" "failed") message)))
+      (setf text (bounded-probe-event-message text))
+      (setf (gethash "reason" entry) reason (gethash "message" entry) text
+            (gethash "lastTimestamp" entry) (current-timestamp (floor now))
+            (gethash "count" entry) (min 2147483647 (1+ (gethash "count" entry)))
+            (gethash reason (container-probe-worker-events worker)) entry)))
+  (incf (container-probe-worker-runs worker))
+  (setf (container-probe-worker-message worker) message)
+  (if (eql success (container-probe-worker-last-result worker))
+      (incf (container-probe-worker-count worker))
+      (setf (container-probe-worker-last-result worker) success (container-probe-worker-count worker) 1))
+  (when (>= (container-probe-worker-count worker)
+            (gethash (if success "successThreshold" "failureThreshold") (container-probe-worker-spec worker)))
+    (setf (container-probe-worker-result worker) success)
+    (when (or (equal "startupProbe" (container-probe-worker-kind worker))
+              (and (not success) (equal "livenessProbe" (container-probe-worker-kind worker))))
+      (setf (container-probe-worker-on-hold-p worker) t
+            (container-probe-worker-failed-p worker) (not success)))))
+
+(defun step-container-probe (manager runtime target worker)
+  "Run a due probe without holding the manager or reconciliation lock during I/O."
+  (let ((run nil) (now (funcall (container-probe-manager-clock manager))))
+    (bt:with-lock-held ((container-probe-manager-lock manager))
+      (when (and (current-probe-target-p manager target)
+                 (not (container-probe-worker-inflight-p worker))
+                 (not (container-probe-worker-on-hold-p worker))
+                 (or (equal "startupProbe" (container-probe-worker-kind worker)) (probe-target-started-p target))
+                 (>= now (container-probe-worker-next-due worker)))
+        (setf run t (container-probe-worker-inflight-p worker) t
+              (container-probe-worker-next-due worker) (+ now (gethash "periodSeconds" (container-probe-worker-spec worker))))))
+    (when run
+      (unwind-protect
+           (multiple-value-bind (success message result-kind)
+               (funcall (container-probe-manager-executor manager) runtime (container-probe-target-container target)
+                        (container-probe-target-id target) (container-probe-target-pod-ip target) (container-probe-worker-spec worker))
+             (bt:with-lock-held ((container-probe-manager-lock manager))
+               (when (current-probe-target-p manager target)
+                 (record-container-probe-result worker (not (null success)) message (funcall (container-probe-manager-clock manager)) result-kind))))
+        (bt:with-lock-held ((container-probe-manager-lock manager))
+          (setf (container-probe-worker-inflight-p worker) nil))))))
+
+(defun run-container-probe-worker (manager runtime target worker)
+  "Keep an exact-attempt probe alive until ownership or runtime shutdown ends."
+  (handler-case
+      (unwind-protect
+           (progn
+             (bt:with-lock-held ((container-probe-manager-lock manager))
+               (setf (container-probe-worker-started-p worker) t))
+             (loop while (bt:with-lock-held ((container-probe-manager-lock manager)) (current-probe-target-p manager target))
+                   do (handler-case (step-container-probe manager runtime target worker)
+                        (container-probe-stopped (condition) (error condition))
+                        (serious-condition (condition)
+                          (format *error-output* "gr8s probe worker ~A/~A ~A failed: ~A~%"
+                                  (container-probe-target-uid target) (container-probe-target-name target)
+                                  (container-probe-worker-kind worker) condition)))
+                      (sleep .05)))
+        (setf (container-probe-worker-finished-p worker) t))
+    (container-probe-stopped () nil)))
+
+(defun stop-container-probe-target (target)
+  "Join already-retired probe workers; cancellation bypasses recoverable probe failures."
+  (dolist (worker (container-probe-target-workers target))
+    (let ((thread (container-probe-worker-thread worker)))
+      (when (and thread (not (eq thread (bt:current-thread))))
+        (when (and (container-probe-worker-started-p worker) (bt:thread-alive-p thread))
+          (ignore-errors (bt:interrupt-thread thread
+                            (lambda () (unless (container-probe-worker-finished-p worker) (error 'container-probe-stopped))))))
+        (bt:join-thread thread))))
+  nil)
+
+(defun retire-container-probe-targets (manager predicate)
+  "Withdraw matching target ownership atomically before cancellation or replacement."
+  (let ((retired nil))
+    (bt:with-lock-held ((container-probe-manager-lock manager))
+      (maphash (lambda (key target)
+                 (when (funcall predicate target)
+                   (setf (container-probe-target-stopping-p target) t)
+                   (remhash key (container-probe-manager-targets manager))
+                   (push target retired)))
+               (container-probe-manager-targets manager)))
+    (dolist (target retired) (stop-container-probe-target target))))
+
+(defun make-native-probe-target (pod container status observed state)
+  "Restore only actual same-attempt results and reset counters for a replacement."
+  (let* ((name (gethash "name" container)) (id (subseq (gethash "containerID" status) (length "containerd://")))
+         (saved (gethash "probeState" (gethash name (gethash "containers" state) (core-object))))
+         (same (and saved (equal id (gethash "containerID" saved))))
+         (detail (find id (runtime-pod-container-details observed) :test #'equal :key #'cri-container-info-id))
+         (started (if (and detail (plusp (cri-container-info-started-at detail)))
+                      (+ 2208988800 (/ (cri-container-info-started-at detail) 1000000000d0))
+                      (pod-deletion-time (gethash "startedAt" (gethash "running" (gethash "state" status))))))
+         (target (make-container-probe-target :uid (pod-uid pod) :name name :id id :container container
+                                              :pod-ip (runtime-pod-pod-ip observed) :started-at started)))
+    (setf (container-probe-target-workers target)
+          (loop for kind in '("startupProbe" "livenessProbe" "readinessProbe") for spec = (gethash kind container)
+                when spec
+                  collect (make-container-probe-worker
+                           :kind kind :spec spec :next-due (+ started (gethash "initialDelaySeconds" spec))
+                           :result (cond ((equal kind "livenessProbe") t)
+                                         ((equal kind "startupProbe") (and same (gethash "startupSucceeded" saved)))
+                                         (t (and same (gethash "readinessSucceeded" saved))))
+                           :on-hold-p (and (equal kind "startupProbe") same (gethash "startupSucceeded" saved)))))
+    target))
+
+(defun sync-container-probe-targets (runtime pod observed &key (start-workers t))
+  "Attach declared probes to actual running IDs; retire all stale attempt workers."
+  (let* ((manager (ensure-container-probe-manager runtime))
+         (state (load-container-lifecycle-state runtime (pod-uid pod)))
+         (current nil) (created nil))
+    (loop for container across (gethash "containers" (gethash "spec" (pod-to-object pod)))
+          for name = (gethash "name" container)
+          for status = (find name (gethash "containerStatuses" (runtime-pod-status observed)) :test #'equal :key (lambda (value) (gethash "name" value)))
+          when (and status (gethash "running" (gethash "state" status))
+                    (some (lambda (kind) (gethash kind container)) '("startupProbe" "readinessProbe" "livenessProbe")))
+            do (push (cons name (subseq (gethash "containerID" status) (length "containerd://"))) current))
+    (retire-container-probe-targets manager
+      (lambda (target)
+        (and (equal (pod-uid pod) (container-probe-target-uid target))
+             (not (equal (container-probe-target-id target) (cdr (assoc (container-probe-target-name target) current :test #'equal)))))))
+    (dolist (entry current)
+      (let* ((key (list (pod-uid pod) (car entry)))
+             (existing (bt:with-lock-held ((container-probe-manager-lock manager)) (gethash key (container-probe-manager-targets manager)))))
+        (unless existing
+          (let* ((container (find (car entry) (gethash "containers" (gethash "spec" (pod-to-object pod))) :test #'equal :key (lambda (item) (gethash "name" item))))
+                 (status (find (car entry) (gethash "containerStatuses" (runtime-pod-status observed)) :test #'equal :key (lambda (item) (gethash "name" item))))
+                 (target (make-native-probe-target pod container status observed state)))
+            (bt:with-lock-held ((container-probe-manager-lock manager))
+              (unless (container-probe-manager-stopping-p manager)
+                (setf (gethash key (container-probe-manager-targets manager)) target) (push target created)))))))
+    (when start-workers
+      (dolist (target created)
+        (dolist (worker (container-probe-target-workers target))
+          (bt:with-lock-held ((container-probe-manager-lock manager))
+            (when (current-probe-target-p manager target)
+              (setf (container-probe-worker-thread worker)
+                    (bt:make-thread (lambda () (run-container-probe-worker manager runtime target worker))
+                                    :name (format nil "probe ~A/~A ~A" (container-probe-target-uid target) (container-probe-target-name target) (container-probe-worker-kind worker)))))))))
+    manager))
+
+(defun snapshot-container-probes (manager uid)
+  "Copy actual thresholded results and stop requests under their ownership lock."
+  (let ((snapshots nil))
+    (bt:with-lock-held ((container-probe-manager-lock manager))
+      (maphash
+       (lambda (key target)
+         (declare (ignore key))
+         (when (and (equal uid (container-probe-target-uid target)) (current-probe-target-p manager target))
+           (let* ((workers (container-probe-target-workers target))
+                  (readiness (find "readinessProbe" workers :test #'equal :key #'container-probe-worker-kind))
+                  (failure (find-if #'container-probe-worker-failed-p workers)))
+             (push (list target
+                         (core-object "containerID" (container-probe-target-id target)
+                                      "startupSucceeded" (not (null (probe-target-started-p target)))
+                                      "readinessConfigured" (not (null readiness))
+                                      "readinessSucceeded" (or (null readiness) (container-probe-worker-result readiness)))
+                         (when failure (list (container-probe-worker-kind failure) (container-probe-worker-spec failure)
+                                             (container-probe-worker-message failure)))) snapshots))))
+       (container-probe-manager-targets manager)))
+    snapshots))
+
+(defun checkpoint-container-probes (runtime pod manager)
+  "Persist real probe state and an absolute failed-attempt stop deadline before CRI stop."
+  (let* ((uid (pod-uid pod)) (state (load-container-lifecycle-state runtime uid))
+         (before (copy-core-object state)) (now (funcall (container-probe-manager-clock manager))))
+    (dolist (snapshot (snapshot-container-probes manager uid))
+      (destructuring-bind (target results failure) snapshot
+        (let* ((name (container-probe-target-name target)) (entry (or (gethash name (gethash "containers" state)) (core-object)))
+               (old (gethash "probeRestart" entry)))
+          (setf (gethash "probeState" entry) results)
+          (when (and old (not (equal (gethash "containerID" old) (container-probe-target-id target))))
+            (remhash "probeRestart" entry) (setf old nil))
+          (when (and failure (null old))
+            (destructuring-bind (kind spec message) failure
+              (setf (gethash "probeRestart" entry)
+                    (core-object "containerID" (container-probe-target-id target) "kind" kind "message" message
+                                 "deadline" (+ now (gethash "terminationGracePeriodSeconds" spec
+                                                            (gethash "terminationGracePeriodSeconds" (gethash "spec" (pod-to-object pod)) 30)))))))
+          (setf (gethash name (gethash "containers" state)) entry))))
+    (unless (equalp before state) (save-container-lifecycle-state runtime uid state))
+    state))
+
+(defun run-container-probe-stop (runtime manager job)
+  "Stop a failed exact attempt outside reconciliation, retaining its actual terminal status."
+  (handler-case
+      (unwind-protect
+           (progn
+             (bt:with-lock-held ((container-probe-manager-lock manager))
+               (when (container-probe-stop-job-cancelled-p job) (return-from run-container-probe-stop nil))
+               (setf (container-probe-stop-job-started-p job) t))
+             (cri-stop-container (containerd-runtime-socket-path runtime) (container-probe-stop-job-id job)
+                                 :grace-period (max 0 (ceiling (- (container-probe-stop-job-deadline job) (funcall (container-probe-manager-clock manager)))))))
+        (setf (container-probe-stop-job-finished-p job) t))
+    (container-probe-stopped () nil)
+    (serious-condition (condition) (setf (container-probe-stop-job-failure job) condition))))
+
+(defun ensure-container-probe-stops (runtime pod observed manager state)
+  "Resume durable failed-probe stops, including after an agent restart."
+  (maphash
+   (lambda (name entry)
+     (let* ((request (gethash "probeRestart" entry))
+            (id (and request (gethash "containerID" request)))
+            (status (find name (gethash "containerStatuses" (runtime-pod-status observed)) :test #'equal :key (lambda (item) (gethash "name" item)))))
+       (when (and id status (gethash "running" (gethash "state" status))
+                  (equal (gethash "containerID" status) (concatenate 'string "containerd://" id)))
+         (let ((job nil))
+           (bt:with-lock-held ((container-probe-manager-lock manager))
+             (let ((old (gethash id (container-probe-manager-jobs manager))))
+               (unless (or (container-probe-manager-stopping-p manager)
+                           (and old (not (container-probe-stop-job-finished-p old))))
+                 (setf job (make-container-probe-stop-job :uid (pod-uid pod) :id id :deadline (gethash "deadline" request))
+                       (gethash id (container-probe-manager-jobs manager)) job))))
+           (when job
+             (bt:with-lock-held ((container-probe-manager-lock manager))
+               (unless (or (container-probe-stop-job-cancelled-p job) (container-probe-manager-stopping-p manager))
+                 (setf (container-probe-stop-job-thread job)
+                       (bt:make-thread (lambda () (run-container-probe-stop runtime manager job)) :name "failed probe container stop")))))))))
+   (gethash "containers" state)))
+
+(defun apply-container-probe-observation (runtime observed)
+  "Overlay only same-attempt probe facts onto actual running container observations."
+  (when observed
+    (let* ((uid (runtime-pod-uid observed))
+           (manager (containerd-runtime-probes runtime))
+           (snapshots (when manager (snapshot-container-probes manager uid)))
+           (state (load-container-lifecycle-state runtime uid)))
+      (loop for status across (gethash "containerStatuses" (runtime-pod-status observed))
+            when (gethash "running" (gethash "state" status))
+              do (let* ((name (gethash "name" status))
+                        (snapshot (find name snapshots :test #'equal :key (lambda (value) (container-probe-target-name (first value)))))
+                        (results (if snapshot (second snapshot) (gethash "probeState" (gethash name (gethash "containers" state) (core-object))))))
+                   (when (and results (equal (gethash "containerID" status) (concatenate 'string "containerd://" (gethash "containerID" results))))
+                     (setf (gethash "started" status) (gethash "startupSucceeded" results)
+                           (gethash "ready" status) (and (gethash "startupSucceeded" results) (gethash "readinessSucceeded" results))))))))
+  observed)
+
+(defun reconcile-container-probes (runtime pod observed)
+  "Register actual attempts, persist completed checks and launch requested targeted stops."
+  (when observed
+    (let* ((manager (sync-container-probe-targets runtime pod observed))
+           (state (checkpoint-container-probes runtime pod manager)))
+      (ensure-container-probe-stops runtime pod observed manager state)))
+  (apply-container-probe-observation runtime observed))
+
+(defun container-probe-restart-required-p (runtime pod observed)
+  "Request reconciliation for actual exits killed by probes even when they exit zero."
+  (and (not (equal "Never" (pod-restart-policy pod)))
+       (let ((state (load-container-lifecycle-state runtime (pod-uid pod))))
+         (loop for status across (gethash "containerStatuses" (runtime-pod-status observed))
+               for request = (gethash "probeRestart" (gethash (gethash "name" status) (gethash "containers" state) (core-object)))
+               thereis (and request (gethash "terminated" (gethash "state" status))
+                            (equal (gethash "containerID" status) (concatenate 'string "containerd://" (gethash "containerID" request))))))))
+
+(defun stop-container-probes (runtime &optional uid)
+  "Withdraw and join probe workers/stops before deleting a Pod or stopping its runtime."
+  (let ((manager (containerd-runtime-probes runtime)))
+    (when manager
+      (unless uid (setf (container-probe-manager-stopping-p manager) t))
+      (retire-container-probe-targets manager (lambda (target) (or (null uid) (equal uid (container-probe-target-uid target)))))
+      (let ((jobs nil))
+        (bt:with-lock-held ((container-probe-manager-lock manager))
+          (maphash (lambda (id job)
+                     (when (or (null uid) (equal uid (container-probe-stop-job-uid job)))
+                       (setf (container-probe-stop-job-cancelled-p job) t)
+                       (remhash id (container-probe-manager-jobs manager)) (push job jobs)))
+                   (container-probe-manager-jobs manager)))
+        (dolist (job jobs)
+          (let ((thread (container-probe-stop-job-thread job)))
+            (when thread
+              (when (and (container-probe-stop-job-started-p job) (bt:thread-alive-p thread))
+                (ignore-errors (bt:interrupt-thread thread (lambda () (unless (container-probe-stop-job-finished-p job) (error 'container-probe-stopped))))))
+              (bt:join-thread thread)))))))
+  nil)
+
+(defmethod runtime-events ((runtime containerd-runtime) uid)
+  "Expose actual cumulative probe occurrences only to the node observation transport."
+  (let ((manager (containerd-runtime-probes runtime)) (events nil))
+    (when manager
+      (bt:with-lock-held ((container-probe-manager-lock manager))
+        (maphash
+         (lambda (key target)
+           (declare (ignore key))
+           (when (equal uid (container-probe-target-uid target))
+             (dolist (worker (container-probe-target-workers target))
+               (maphash (lambda (reason event)
+                          (declare (ignore reason))
+                          (let ((copy (copy-core-object event)))
+                            (setf (gethash "container" copy) (container-probe-target-name target)
+                                  (gethash "kind" copy) (container-probe-worker-kind worker))
+                            (push copy events)))
+                        (container-probe-worker-events worker)))))
+         (container-probe-manager-targets manager))))
+    (when events (coerce events 'vector))))

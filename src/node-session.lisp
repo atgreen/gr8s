@@ -366,7 +366,10 @@
                       (setf (gethash "podIP" object) (slot-value pod-status 'gr8s.node.v1::pod-ip)
                             (gethash "podIPs" object)
                             (vector (json-object "ip" (slot-value pod-status 'gr8s.node.v1::pod-ip)))))
-                    (update-pod-observed-status (node-grpc-server-store server) pod object)))))
+                    (let ((events (gethash "gr8sRuntimeEvents" object)))
+                      (remhash "gr8sRuntimeEvents" object)
+                      (update-pod-observed-status (node-grpc-server-store server) pod object)
+                      (record-node-runtime-events (node-grpc-server-store server) pod node-name events))))))
     (:operation-response
      (note-node-operation-response
       server (slot-value envelope 'gr8s.node.v1::operation-response)))

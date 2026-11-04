@@ -175,14 +175,19 @@
     (t "Pending")))
 
 (defun missing-container-restart-suppressed-p (pod entry)
-  "Do not rerun an actually completed Never/OnFailure container merely because its CRI row was collected."
+  "Preserve completed policy decisions and a failed probe's exact-attempt intent."
   (let* ((saved (and entry (gethash "lastStatus" entry)))
-         (terminated (and saved (gethash "terminated" (gethash "state" saved (core-object))))))
+         (terminated (and saved (gethash "terminated" (gethash "state" saved (core-object)))))
+         (probe (and entry (gethash "probeRestart" entry)))
+         (probe-killed (and probe saved (equal (gethash "containerID" saved)
+                                               (concatenate 'string "containerd://" (gethash "containerID" probe))))))
     (and entry
          (or (gethash "restartSuppressed" entry)
+             (and probe-killed (equal "Never" (pod-restart-policy pod)))
              (and terminated (= (gethash "restartCount" saved 0) (known-container-attempt entry))
                   (or (equal "Never" (pod-restart-policy pod))
-                      (and (equal "OnFailure" (pod-restart-policy pod)) (zerop (gethash "exitCode" terminated)))))))))
+                      (and (equal "OnFailure" (pod-restart-policy pod))
+                           (not probe-killed) (zerop (gethash "exitCode" terminated)))))))))
 
 (defun latest-container-infos (infos)
   "Select one current CRI attempt per container name, independently of list order."
@@ -206,12 +211,15 @@
       (setf (gethash "lastState" status) (core-object "terminated" (copy-core-object previous))))
     status))
 
-(defun container-restart-eligible-p (pod info)
-  "Apply Pod restart policy to one actually exited container."
+(defun container-restart-eligible-p (pod info &optional state)
+  "Apply policy to actual exits, including a completed probe-requested stop."
   (and info (= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_exited+)
        (or (equal "Always" (pod-restart-policy pod))
            (and (equal "OnFailure" (pod-restart-policy pod))
-                (not (zerop (cri-container-info-exit-code info)))))))
+                (or (not (zerop (cri-container-info-exit-code info)))
+                    (let* ((entry (and state (gethash (cri-container-info-name info) (gethash "containers" state))))
+                           (request (and entry (gethash "probeRestart" entry))))
+                      (and request (equal (cri-container-info-id info) (gethash "containerID" request)))))))))
 
 (defun native-container-progress-required-p (pod observed)
   "Avoid repeated CRI work for complete healthy or deliberately terminal observations."
@@ -249,6 +257,8 @@
                                  "backoff" (if reset 10 (min 300 (* 2 delay)))
                                  "nextStart" (+ (if (plusp (cri-container-info-finished-at info)) finished now) delay)
                                  "lastTermination" (gethash "terminated" (gethash "state" (containerd-container-status-object info))))))
+        (dolist (key '("probeState" "probeRestart"))
+          (when (and old (gethash key old)) (setf (gethash key entry) (copy-core-object (gethash key old)))))
         (setf (gethash name entries) entry)))
     (gethash name entries)))
 
@@ -321,7 +331,7 @@
     (dolist (info (current-container-infos infos state))
       (let* ((name (cri-container-info-name info))
              (old (gethash name (gethash "containers" state)))
-             (eligible (container-restart-eligible-p pod info))
+             (eligible (container-restart-eligible-p pod info state))
              (entry (if eligible (prepare-container-restart state info now) (or old (core-object))))
              (status (containerd-container-status-object info)))
         (setf (gethash "lastAttempt" entry) (cri-container-info-attempt info)
@@ -401,7 +411,7 @@
                   ;; An interrupted or ambiguous StartContainer must reuse the
                   ;; already created attempt instead of allocating another.
                   (cri-start-container socket (cri-container-info-id info)))
-                 ((container-restart-eligible-p pod info)
+                 ((container-restart-eligible-p pod info state)
                   (let ((entry (prepare-container-restart state info now)))
                     (save-container-lifecycle-state runtime uid state)
                     (setf restarting t)
