@@ -498,7 +498,7 @@
                       (mark-pod-deleting (node-runtime-store node-runtime)
                                          (pod-namespace existing) (pod-name existing)
                                          :uid (pod-uid existing) :grace-period 0))
-                  (setf urgent t))
+                  (pushnew (pod-uid existing) urgent :test #'equal))
               (kubernetes-error (condition)
                 ;; An independently completed deletion or replacement is not
                 ;; authority to cancel the new UID that now owns this name.
@@ -508,8 +508,8 @@
       ;; may repeat already durable deletion intent, but cannot undo it.
       (setf (node-runtime-received-revision node-runtime) revision))
     (when urgent
-      (cancel-running-pod-convergence (node-runtime-reconciler node-runtime)))
-    urgent))
+      (prioritize-reconciler-deletions (node-runtime-reconciler node-runtime) urgent))
+    (not (null urgent))))
 
 (defun ensure-node-snapshot-current (node-runtime snapshot)
   "Fence obsolete application before it can create another Pod or acknowledge a revision."
@@ -535,7 +535,11 @@
       (install-assigned-resource-objects
        (node-runtime-store node-runtime) assignments
        (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json))
-      (loop for assignment in assignments
+      (loop for assignment in
+              (stable-sort (copy-list assignments)
+                           (lambda (left right)
+                             (and (deletion-requested-p (assignment-pod left))
+                                  (not (deletion-requested-p (assignment-pod right))))))
             for pod = (progn
                         (ensure-node-snapshot-current node-runtime snapshot)
                         (put-assigned-pod (node-runtime-store node-runtime)

@@ -851,6 +851,19 @@
   (lock (bt:make-lock "gr8s snapshot work"))
   (changed (bt:make-condition-variable :name "gr8s snapshot work changed")))
 
+(defun retry-agent-snapshot-work (worker work)
+  "Retry an incomplete latest projection without growing a queue or acknowledging it."
+  (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+    (when (and (not (agent-snapshot-worker-stopping-p worker))
+               (null (agent-snapshot-worker-pending worker))
+               (= (slot-value (car work) 'gr8s.node.v1::revision)
+                  (agent-snapshot-worker-highest-revision worker)))
+      (setf (agent-snapshot-worker-pending worker) (list work))
+      ;; Async runtime deletion needs a later observation before admission can
+      ;; resume. Yield instead of spinning; new snapshots and stop wake us.
+      (bt:condition-wait (agent-snapshot-worker-changed worker)
+                         (agent-snapshot-worker-lock worker) :timeout .1))))
+
 (defun run-agent-snapshot-work (worker)
   "Apply ordered work and close the session on failure without acknowledging pending revisions."
   (handler-case
@@ -881,7 +894,7 @@
                                (setf (agent-snapshot-worker-replay-revision worker) nil))))
                        ;; Durable urgent intent superseded this application.
                        ;; Its revision was not applied and must not be acked.
-                       (pod-reconciliation-superseded () nil))))
+                       (pod-reconciliation-superseded () (retry-agent-snapshot-work worker work)))))
                (error (condition)
                  (bt:with-lock-held ((agent-snapshot-worker-lock worker))
                    (setf (agent-snapshot-worker-failure worker) condition

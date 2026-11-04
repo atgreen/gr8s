@@ -469,3 +469,59 @@
         (setf (symbol-function 'gr8s::mark-pod-deleting) mark)
         (release-blocked-log-runtime runtime)
         (when owner (bt:join-thread owner))))))
+
+(defstruct (deferred-cleanup-runtime (:include blocked-log-runtime)
+                                    (:constructor make-deferred-cleanup-runtime ()))
+  "Model a physical deletion job whose completion requires another reconciliation poll."
+  (delete-polls 0) (delete-released-p nil) (slow-entries 0))
+
+(defmethod gr8s:runtime-ensure ((runtime deferred-cleanup-runtime) pod)
+  "Record every entry to the retained slow creation operation."
+  (when (equal "slow" (pod-name pod)) (incf (deferred-cleanup-runtime-slow-entries runtime)))
+  (call-next-method))
+
+(defmethod gr8s::runtime-delete-pod ((runtime deferred-cleanup-runtime) pod)
+  "Leave a real runtime Pod until the independent physical deletion job finishes."
+  (incf (deferred-cleanup-runtime-delete-polls runtime))
+  (when (deferred-cleanup-runtime-delete-released-p runtime) (call-next-method)))
+
+(test asynchronous-physical-cleanup-finishes-before-retained-creation-retries
+  (with-temporary-store (control-store path)
+    (let* ((slow (create-pod control-store (node-log-test-pod "slow")))
+           (finished (create-pod control-store (node-log-test-pod "finished")))
+           (runtime (make-deferred-cleanup-runtime))
+           (node (gr8s::make-node-runtime (merge-pathnames "drain-agent/" path) runtime nil))
+           (first (desired-snapshot-for-test slow finished))
+           (latest (desired-snapshot-for-test slow))
+           (applied nil) (worker nil) (closed nil))
+      (setf (slot-value latest 'gr8s.node.v1::revision) 2
+            (gr8s::node-runtime-state node) :running)
+      (dolist (pod (list slow finished)) (gr8s::put-assigned-pod (gr8s::node-runtime-store node) pod))
+      (gr8s:runtime-ensure runtime finished)
+      (unwind-protect
+           (progn
+             (setf worker
+                   (gr8s::start-agent-snapshot-worker
+                    (lambda (snapshot replay)
+                      (declare (ignore replay))
+                      (gr8s::reconcile-node-snapshot node snapshot)
+                      (push (slot-value snapshot 'gr8s.node.v1::revision) applied))
+                    (lambda () (setf closed t))
+                    :receive-snapshot (lambda (snapshot) (gr8s::receive-node-snapshot-intent node snapshot))))
+             (gr8s::queue-agent-snapshot-work worker first)
+             (is-true (wait-until (lambda () (= 1 (deferred-cleanup-runtime-slow-entries runtime)))))
+             (gr8s::queue-agent-snapshot-work worker latest)
+             (is-true (wait-until (lambda () (> (deferred-cleanup-runtime-delete-polls runtime) 1))))
+             (is (= 1 (deferred-cleanup-runtime-slow-entries runtime)))
+             (is (null applied))
+             (is-true (gr8s:runtime-observe runtime (pod-uid finished)))
+             (setf (deferred-cleanup-runtime-delete-released-p runtime) t)
+             (is-true (wait-until (lambda () (= 2 (deferred-cleanup-runtime-slow-entries runtime)))))
+             (is (null (gr8s:runtime-observe runtime (pod-uid finished))))
+             (release-blocked-log-runtime runtime)
+             (is-true (wait-until (lambda () (equal '(2) applied))))
+             (is (= 2 (gr8s::fake-runtime-ensure-count runtime)))
+             (is-false closed))
+        (setf (deferred-cleanup-runtime-delete-released-p runtime) t)
+        (release-blocked-log-runtime runtime)
+        (gr8s::stop-agent-snapshot-worker worker)))))

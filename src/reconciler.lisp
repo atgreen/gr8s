@@ -5,6 +5,7 @@
   runtime
   (lock (bt:make-lock "gr8s reconciler"))
   active-convergence
+  (urgent-deletions (make-hash-table :test #'equal))
   (convergence-lock (bt:make-lock "gr8s running convergence ownership")))
 
 (define-condition pod-reconciliation-superseded (serious-condition) ()
@@ -32,14 +33,40 @@
              (error 'pod-reconciliation-superseded)))))))
   nil)
 
+(defun prioritize-reconciler-deletions (reconciler uids)
+  "Reserve creation capacity for durable urgent UIDs until their physical cleanup completes."
+  (bt:with-lock-held ((reconciler-convergence-lock reconciler))
+    (dolist (uid uids) (setf (gethash uid (reconciler-urgent-deletions reconciler)) t)))
+  (cancel-running-pod-convergence reconciler))
+
+(defun finish-reconciler-urgent-deletion (reconciler uid)
+  "Release UID's creation fence only after its actual runtime cleanup has completed."
+  (bt:with-lock-held ((reconciler-convergence-lock reconciler))
+    (remhash uid (reconciler-urgent-deletions reconciler))))
+
+(defun prune-reconciler-urgent-deletions (reconciler)
+  "Discard finished exact UIDs without treating a new Pod sharing its name as old ownership."
+  (let ((uids (mapcar #'pod-uid (list-pods (reconciler-store reconciler)))))
+    (bt:with-lock-held ((reconciler-convergence-lock reconciler))
+      (maphash (lambda (uid ignored)
+                 (declare (ignore ignored))
+                 (unless (member uid uids :test #'equal)
+                   (remhash uid (reconciler-urgent-deletions reconciler))))
+               (reconciler-urgent-deletions reconciler)))))
+
 (defun converge-cancellable-running-pod (reconciler pod)
   "Register cancellation only around running convergence and recheck durable deletion first."
   (let ((operation (make-running-pod-convergence :thread (bt:current-thread)
                                                 :uid (pod-uid pod))))
     (unwind-protect
          (progn
+           (prune-reconciler-urgent-deletions reconciler)
            (bt:with-lock-held ((reconciler-convergence-lock reconciler))
-             (setf (reconciler-active-convergence reconciler) operation))
+             (setf (reconciler-active-convergence reconciler) operation)
+             ;; New or retried creation must not grab the global lock while a
+             ;; finite urgent cleanup job still needs its completion observed.
+             (when (plusp (hash-table-count (reconciler-urgent-deletions reconciler)))
+               (error 'pod-reconciliation-superseded)))
            ;; Urgent snapshot projection uses the store lock, never this global
            ;; reconciler lock. Register before checking so its cancellation
            ;; cannot miss the gap between reading a Pod and entering CRI.
@@ -104,6 +131,7 @@
 (defun converge-deleting-pod (reconciler pod)
   (if (runtime-delete-pod (reconciler-runtime reconciler) pod)
       (progn
+        (finish-reconciler-urgent-deletion reconciler (pod-uid pod))
         (remove-pod (reconciler-store reconciler)
                     (pod-namespace pod) (pod-name pod))
         (pod-status "Succeeded" :reason "Deleted"))
@@ -152,7 +180,9 @@
                                           (converge-deleting-pod reconciler pod))) pod))))
 
 (defun reconcile-all (reconciler &key observer)
-  (loop for pod in (list-pods (reconciler-store reconciler))
+  (loop for pod in (stable-sort (copy-list (list-pods (reconciler-store reconciler)))
+                                (lambda (left right)
+                                  (and (deletion-requested-p left) (not (deletion-requested-p right)))))
         append (handler-case
                    (let ((status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
                      (when observer (funcall observer pod status))
