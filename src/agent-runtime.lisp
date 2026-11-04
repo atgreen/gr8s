@@ -52,7 +52,7 @@
               (pod-resource-version pod))
         ;; Rebuild the finite cleanup admission fence before the background
         ;; reconciler starts, including when the control plane is unavailable.
-        (when (deletion-requested-p pod)
+        (when (pod-runtime-cleanup-pending-p store pod)
           (setf (gethash (pod-uid pod)
                          (reconciler-urgent-deletions (node-runtime-reconciler node-runtime))) t)))
       node-runtime)))
@@ -390,27 +390,37 @@
         ;; Serialize with the background reconciler and persist deletion intent
         ;; before CRI calls. A transient removal failure must never turn into
         ;; runtime-ensure recreating an assignment the server has withdrawn.
+        (when (pod-finalizers-present-p pod)
+          (let ((store (node-runtime-store node-runtime)))
+            (with-store-lock (store)
+              (let ((current (gethash (pod-key (pod-namespace pod) (pod-name pod)) (pod-store-pods store))))
+                (when (and current (equal (pod-uid current) (pod-uid pod)))
+                  (let ((copy (copy-core-object (pod-to-object current))))
+                    (setf (gethash "finalizers" (gethash "metadata" copy)) #())
+                    (update-pod-unlocked store (parse-pod copy) (pod-resource-version current))))))))
         (delete-reconciled-pod (node-runtime-reconciler node-runtime)
-                               (pod-namespace pod) (pod-name pod) :grace-period 0)))))
+                               (pod-namespace pod) (pod-name pod) :uid (pod-uid pod) :grace-period 0)))))
 
-(defun pod-observed-status-message (pod status &optional events)
+(defun pod-observed-status-message (pod status &optional events runtime-deleted)
+  "Encode real observations, private Event transport and independent physical cleanup acknowledgement."
   (let ((wire-status (copy-core-object status)))
     (when events (setf (gethash "gr8sRuntimeEvents" wire-status) events))
-  (make-instance
-   'gr8s.node.v1::pod-observed-status
-   :namespace (pod-namespace pod)
-   :name (pod-name pod)
-   :uid (pod-uid pod)
-   :resource-version (pod-resource-version pod)
-   :phase (gethash "phase" status "Unknown")
-   :reason (gethash "reason" status "")
-   :message (gethash "message" status "")
-   :pod-ip (gethash "podIP" status "")
-   :status-json (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify wire-status)))))
+    (make-instance
+     'gr8s.node.v1::pod-observed-status
+     :namespace (pod-namespace pod) :name (pod-name pod) :uid (pod-uid pod)
+     :resource-version (pod-resource-version pod)
+     :phase (gethash "phase" status "Unknown") :reason (gethash "reason" status "")
+     :message (gethash "message" status "") :pod-ip (gethash "podIP" status "")
+     :status-json (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify wire-status))
+     :runtime-deleted runtime-deleted)))
 
 (defun cache-node-observation (node-runtime pod status)
+  "Persist actual status and transport Events without confusing runtime deletion with public phase."
   (save-pod-observation (node-runtime-store node-runtime) pod status)
-  (let ((message (pod-observed-status-message pod status (runtime-events (node-runtime-runtime node-runtime) (pod-uid pod)))))
+  (let* ((finalization (pod-finalization-state (node-runtime-store node-runtime) pod))
+         (message (pod-observed-status-message
+                   pod status (runtime-events (node-runtime-runtime node-runtime) (pod-uid pod))
+                   (and finalization (gethash "runtimeDeleted" finalization)))))
     (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
       (setf (gethash (pod-uid pod) (node-runtime-observed-statuses node-runtime)) message))
     message))
@@ -495,15 +505,16 @@
         (let ((assigned (find (pod-uid existing) pods :key #'pod-uid :test #'equal)))
           (when (or (null assigned) (deletion-requested-p assigned))
             (handler-case
-                (progn
-                  (if assigned
-                      ;; Preserve the server's RV, deletion timestamp and grace.
-                      ;; put-assigned-pod also prevents extending an earlier deadline.
-                      (put-assigned-pod (node-runtime-store node-runtime) assigned)
-                      (mark-pod-deleting (node-runtime-store node-runtime)
-                                         (pod-namespace existing) (pod-name existing)
-                                         :uid (pod-uid existing) :grace-period 0))
-                  (pushnew (pod-uid existing) urgent :test #'equal))
+                (let ((projected
+                        (if assigned
+                            ;; Preserve the server's RV, timestamp and grace.
+                            ;; Existing earlier deadlines cannot be extended.
+                            (put-assigned-pod (node-runtime-store node-runtime) assigned)
+                            (mark-pod-deleting (node-runtime-store node-runtime)
+                                               (pod-namespace existing) (pod-name existing)
+                                               :uid (pod-uid existing) :grace-period 0))))
+                  (when (pod-runtime-cleanup-pending-p (node-runtime-store node-runtime) projected)
+                    (pushnew (pod-uid projected) urgent :test #'equal)))
               (kubernetes-error (condition)
                 ;; An independently completed deletion or replacement is not
                 ;; authority to cancel the new UID that now owns this name.
