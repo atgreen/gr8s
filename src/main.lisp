@@ -48,6 +48,8 @@
                        :node-address nil
                        :node-name "gr8s-local"
                        :disable-agent nil
+                       :cluster-pod-cidr +default-cluster-pod-cidr+
+                       :node-pod-prefix +default-node-pod-prefix+
                        :runtime "containerd"
                        :containerd-mode "managed"
                        :containerd-executable (default-containerd-executable)
@@ -69,6 +71,15 @@
                       (setf (getf options :listen) value))
                      ((string= option "--port")
                       (setf (getf options :port) (parse-port value)))
+                     ((string= option "--cluster-pod-cidr")
+                      (validate-network-cidr value)
+                      (setf (getf options :cluster-pod-cidr) value
+                            (getf options :cluster-pod-cidr-supplied-p) t))
+                     ((string= option "--node-pod-prefix")
+                      (let ((prefix (parse-integer value :junk-allowed nil)))
+                        (unless (<= 1 prefix 30) (error "node Pod prefix must be 1..30"))
+                        (setf (getf options :node-pod-prefix) prefix
+                              (getf options :node-pod-prefix-supplied-p) t)))
                      ((string= option "--node-listen")
                       (setf (getf options :node-listen)
                             (format-ipv4-integer (parse-ipv4-integer value))))
@@ -466,6 +477,7 @@
          (state-directory
            (uiop:ensure-directory-pathname (getf options :state-directory)))
          (store (open-store state-directory))
+         (pool (ensure-controller-node-pool store state-directory options))
          (pki (ensure-cluster-pki (merge-pathnames "pki/" state-directory)))
          (server nil)
          (worker nil)
@@ -479,7 +491,8 @@
                  (start-node-grpc-server
                   store :host (getf options :node-listen "127.0.0.1")
                   :port (getf options :node-port)
-                  :pki pki :cluster-pod-cidr "10.88.0.0/16" :node-prefix 24))
+                  :pki pki :cluster-pod-cidr (gethash "clusterPodCIDR" pool)
+                  :node-prefix (gethash "nodePrefix" pool)))
            (let* ((runtime (make-control-plane-runtime store node-server))
                   (reconciler (make-reconciler store runtime)))
              (unless (getf options :disable-agent)
@@ -511,7 +524,7 @@
 
 (defun print-help ()
   (format t
-          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--disable-agent] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%"))
+          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|podman|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%"))
 
 (defun main-with-environment (arguments environment cni-entry)
   (if (funcall environment "CNI_COMMAND")

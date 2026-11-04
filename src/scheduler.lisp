@@ -9,6 +9,9 @@
 
 (in-package #:gr8s)
 
+(defparameter +default-cluster-pod-cidr+ "10.80.0.0/12")
+(defparameter +default-node-pod-prefix+ 20)
+
 (defun node-conflict (control &rest arguments)
   "Signal a Kubernetes Conflict error formatted by CONTROL and ARGUMENTS."
   (error 'kubernetes-error
@@ -127,6 +130,13 @@
         (error "Invalid IPv4 CIDR prefix ~S" cidr))
       (values (parse-ipv4-integer (first parts)) prefix))))
 
+(defun ipv4-prefixes-overlap-p (left right)
+  "Compare IPv4 prefixes, including /32 host routes, for any intersection."
+  (multiple-value-bind (a a-prefix) (parse-ipv4-cidr left)
+    (multiple-value-bind (b b-prefix) (parse-ipv4-cidr right)
+      (let ((shift (- (min a-prefix b-prefix) 32)))
+        (= (ash a shift) (ash b shift))))))
+
 (defun canonical-node-underlay-address (address)
   "Validate and canonicalize a non-loopback unicast IPv4 underlay ADDRESS."
   (unless (and (stringp address) (plusp (length address)))
@@ -181,8 +191,8 @@
                                       node-prefix)
               unless (loop for node being the hash-values
                              of (pod-store-nodes store)
-                           thereis (string= candidate
-                                            (node-record-pod-cidr node)))
+                           thereis (ipv4-prefixes-overlap-p candidate
+                                                          (node-record-pod-cidr node)))
                 return candidate
               finally (error "No free /~D PodCIDR remains in ~A"
                              node-prefix cluster-cidr))))))
