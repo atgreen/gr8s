@@ -332,8 +332,8 @@
   (with-temporary-store (store path)
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
            (input (workload-fixture "ReplicaSet" "web" 1)))
-      (setf (gethash "readinessProbe" (aref (gethash "containers" (gethash "spec" (gethash "template" (gethash "spec" input)))) 0))
-            (gr8s::core-object "exec" (gr8s::core-object "command" #("false"))))
+      (setf (gethash "resources" (aref (gethash "containers" (gethash "spec" (gethash "template" (gethash "spec" input)))) 0))
+            (gr8s::core-object "requests" (gr8s::core-object "cpu" "10m")))
       (gr8s::create-core-resource store "replicasets" input "alpha")
       (run-workload-passes reconciler)
       (is (null (list-pods store)))
@@ -342,7 +342,7 @@
         (is (= 0 (gethash "readyReplicas" status)))
         (is (equal "ReplicaFailure" (gethash "type" failure)))
         (is (equal "FailedCreate" (gethash "reason" failure)))
-        (is (search "readinessProbe" (gethash "message" failure)))))))
+        (is (search "resources" (gethash "message" failure)))))))
 
 (test generated-workload-names-are-bounded-and-collisions-do-not-replace-existing-owners
   (with-temporary-store (store path)

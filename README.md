@@ -446,8 +446,18 @@ container. Terminal Pods report false readiness, and unavailable node/runtime
 observations report unknown readiness. Condition transition history and actual
 observed revisions persist separately across restarts. Valid node readiness
 leases survive a control-plane restart, and reconnecting agents receive snapshot
-revisions beyond their saved acknowledgements. Probes, init containers and
-readiness gates remain unsupported.
+revisions beyond their saved acknowledgements. Startup, readiness and liveness
+probes execute real exec, HTTP(S), TCP and standard gRPC Health checks. Startup
+success gates readiness/liveness; consecutive thresholds control readiness and
+exact-container restart, preserving healthy siblings. Probe-specific termination
+grace and actual failure Events survive node process restarts. Init containers
+and readiness gates remain unsupported.
+
+All ten unchanged upstream probe conformance cases pass in the
+[focused result](docs/container-probes-upstream-2026-11-04.json). The
+[native validation record](docs/container-probes-native-2026-11-04.json)
+records seven real scenarios, including physical cleanup of a blocked exec probe.
+These focused results do not establish full Kubernetes certification.
 
 The [readiness validation record](docs/pod-readiness-validation-2026-11-03.json)
 captures seven passing native scenarios and the official graceful-generation
