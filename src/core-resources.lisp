@@ -32,7 +32,8 @@
     ("roles" "Role" "rbac.authorization.k8s.io/v1" t)
     ("rolebindings" "RoleBinding" "rbac.authorization.k8s.io/v1" t)
     ("clusterroles" "ClusterRole" "rbac.authorization.k8s.io/v1" nil)
-    ("clusterrolebindings" "ClusterRoleBinding" "rbac.authorization.k8s.io/v1" nil)))
+    ("clusterrolebindings" "ClusterRoleBinding" "rbac.authorization.k8s.io/v1" nil)
+    ("networkpolicies" "NetworkPolicy" "networking.k8s.io/v1" t)))
 
 (defun stored-resource-type (resource)
   "Return the descriptor for a durable Kubernetes resource collection."
