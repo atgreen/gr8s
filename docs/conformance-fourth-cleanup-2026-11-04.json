@@ -1,0 +1,77 @@
+{
+  "SPDX-FileCopyrightText": "2026 Anthony Green",
+  "SPDX-License-Identifier": "MIT",
+  "recordedAtUTC": "2026-11-04T02:02:36.775918+00:00",
+  "originalConformanceEvidence": "docs/conformance-full-fourth-2026-11-04.json",
+  "vmSSHPort": 22292,
+  "oldRunDirectory": "/var/tmp/gr8s-conformance.a4fy165q",
+  "cleanupEvidenceDirectory": "/var/tmp/gr8s-full4-cleanup.n2uveh2j",
+  "originalReportSHA256Before": "fa0cc453d57d2d4fbd8835ba75a672f4ca941326db34d518f9939cef2fa040b9",
+  "originalReportSHA256After": "fa0cc453d57d2d4fbd8835ba75a672f4ca941326db34d518f9939cef2fa040b9",
+  "originalReportUnchanged": true,
+  "originalCleanupError": "Owned runtime deletion did not finish",
+  "originalOwnedShimCount": 2,
+  "recoveryNativeSHA256": "9d52d42aff6e9c11e85331eceb953a54d66b73efa6420402fca222f9b1f899ef",
+  "recoveryPID": 49618,
+  "recoveryPorts": {
+    "http": 18180,
+    "node": 19190
+  },
+  "scope": {
+    "expectedOwnedShimIDs": [
+      "ca7b4e65297c78b20db83f60e9af48c753ac3f95c892f92060d673ee9d8e5aa9",
+      "d1d0ab9c6c2f6d5194f5a118a10ae7cff7699ef3d52ff962c186f97728dcccf7"
+    ],
+    "apiPodsAlreadyMarkedForDeletion": 10,
+    "desiredPodsAlreadyMarkedForDeletion": 11,
+    "newShimIDsObserved": false,
+    "newConformanceRunStarted": false
+  },
+  "outcome": {
+    "cleanupComplete": true,
+    "nativeExitCode": 0,
+    "ownedShims": 0,
+    "desiredPodFiles": 0,
+    "apiPodFiles": 0,
+    "apiPods": 0,
+    "elapsedSeconds": 67.10591387748718
+  },
+  "notes": [
+    "The modern native binary recovered only the completed run state. All retained API and desired Pods had deletion timestamps before recovery.",
+    "Transient gRPC DEADLINE_EXCEEDED entries occurred during recovery; deletion acknowledgements subsequently completed.",
+    "The original conformance report still records its original cleanupError and two remaining shims. Later cleanup does not alter the 64 passed / 382 failed test result.",
+    "Kubeconfig credentials were not copied into the evidence bundle."
+  ],
+  "artifacts": [
+    {
+      "path": "build/conformance/2026-11-04-full-a4fy165q/cleanup-n2uveh2j/cleanup-report.json",
+      "bytes": 6332,
+      "sha256": "9aab98097f32fda20ad1b919c65d9d285c04a31fabb24392600a7506ec408594",
+      "verifiedAgainstGuest": true
+    },
+    {
+      "path": "build/conformance/2026-11-04-full-a4fy165q/cleanup-n2uveh2j/gr8s-full4-cleanup-host.log",
+      "bytes": 1063,
+      "sha256": "64b3e1a514d9341efeb6acd58f5dd807086ef1d35b7f5900480a411bc2ef27d9",
+      "verifiedAgainstGuest": false
+    },
+    {
+      "path": "build/conformance/2026-11-04-full-a4fy165q/cleanup-n2uveh2j/gr8s-recover-old-full4.py",
+      "bytes": 5162,
+      "sha256": "5571df38f4dd2d1263e07fc70ff3c8ffae8320a5b1a267297c56bd65a8854b05",
+      "verifiedAgainstGuest": true
+    },
+    {
+      "path": "build/conformance/2026-11-04-full-a4fy165q/cleanup-n2uveh2j/original-report.json",
+      "bytes": 132407,
+      "sha256": "fa0cc453d57d2d4fbd8835ba75a672f4ca941326db34d518f9939cef2fa040b9",
+      "verifiedAgainstGuest": true
+    },
+    {
+      "path": "build/conformance/2026-11-04-full-a4fy165q/cleanup-n2uveh2j/recovery-native.log",
+      "bytes": 10577,
+      "sha256": "0fdff6ee7ead1f4786fff075b4e86fc0dae7e74fb8972e872c93403c82c4f8c1",
+      "verifiedAgainstGuest": true
+    }
+  ]
+}
