@@ -25,7 +25,12 @@
   (state-changed (bt:make-condition-variable :name "gr8s node runtime state"))
   (apply-lock (bt:make-lock "gr8s node snapshot application"))
   (received-revision -1)
-  (arrival-lock (bt:make-lock "gr8s node snapshot arrival")))
+  (arrival-lock (bt:make-lock "gr8s node snapshot arrival"))
+  ;; In-kernel ClusterIP socket load balancer, owned by the agent (which holds
+  ;; the bpffs and the Pod cgroups). NIL when unavailable (falls back to the
+  ;; control-plane userspace proxy).
+  service-lb
+  service-lb-controller)
 
 (defun make-node-runtime (state-directory runtime manager
                           &key (network-reconciler
@@ -277,14 +282,45 @@
            (funcall function)
         (stop-agent-cni-server server)))))
 
+(defun call-with-service-lb (node-runtime function)
+  "Bring up the in-kernel ClusterIP socket load balancer for the agent's
+lifetime, then run FUNCTION.  Must run inside the managed-containerd scope so
+the bpffs is mounted.  On any failure the dataplane stays NIL and the
+control-plane userspace proxy continues to serve Services, so this never blocks
+the node from starting."
+  (let* ((manager (node-runtime-manager node-runtime))
+         (pin-directory
+           (and manager
+                (namestring (merge-pathnames
+                             "service-lb/"
+                             (uiop:ensure-directory-pathname
+                              (managed-containerd-bpf-directory manager))))))
+         (dataplane
+           (and pin-directory
+                ;; The node cgroup2 root whose subtree holds the Pod processes.
+                (try-start-service-lb-dataplane "/sys/fs/cgroup" pin-directory))))
+    (when dataplane
+      (setf (node-runtime-service-lb node-runtime) dataplane
+            (node-runtime-service-lb-controller node-runtime)
+            (make-service-lb-controller (node-runtime-store node-runtime) dataplane)))
+    (unwind-protect
+         (funcall function)
+      (when (node-runtime-service-lb node-runtime)
+        (ignore-errors (stop-service-lb-dataplane (node-runtime-service-lb node-runtime)))
+        (setf (node-runtime-service-lb node-runtime) nil
+              (node-runtime-service-lb-controller node-runtime) nil)))))
+
 (defun call-with-node-runtime-services (node-runtime)
   (let ((body (lambda () (run-node-runtime-body node-runtime))))
     (if (containerd-runtime-p (node-runtime-runtime node-runtime))
         (if (node-runtime-manager node-runtime)
-            (call-with-agent-cni-server
+            (call-with-service-lb
              node-runtime
-             (lambda () (call-with-dns-server body :service-resolver
-                                        (store-service-dns-resolver (node-runtime-store node-runtime)))))
+             (lambda ()
+               (call-with-agent-cni-server
+                node-runtime
+                (lambda () (call-with-dns-server body :service-resolver
+                                           (store-service-dns-resolver (node-runtime-store node-runtime)))))))
             (call-with-dns-server body :service-resolver
                                         (store-service-dns-resolver (node-runtime-store node-runtime))))
         (funcall body))))
@@ -551,6 +587,13 @@
       (install-assigned-resource-objects
        (node-runtime-store node-runtime) assignments
        (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json))
+      ;; Converge the socket LB from the just-installed Service/EndpointSlice
+      ;; discovery data. A transient map error must not abort snapshot application.
+      (when (node-runtime-service-lb-controller node-runtime)
+        (handler-case
+            (converge-service-lb-controller (node-runtime-service-lb-controller node-runtime))
+          (error (condition)
+            (format *error-output* "gr8s: Service LB convergence failed: ~A~%" condition))))
       (loop for assignment in
               (stable-sort (copy-list assignments)
                            (lambda (left right)
