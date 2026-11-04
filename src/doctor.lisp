@@ -1,0 +1,167 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; `gr8s doctor`: inspect and validate the host environment, turning the
+;;;; cryptic failures we hit in practice (EHOSTUNREACH from a default-deny
+;;;; firewall, pod-pool route overlaps, missing kernel/cgroup/bpffs support)
+;;;; into actionable, up-front diagnostics.  Each check prints ok/warn/fail with
+;;;; a remediation hint; the command exits non-zero only when a check FAILs.
+;;;;
+;;;; Pure decision helpers are separated from data gathering so the logic is
+;;;; unit-tested without a host.
+
+(in-package #:gr8s)
+
+(defun doctor-report (status label &optional detail hint)
+  "Print one check line.  STATUS is :ok, :warn, or :fail.  Returns STATUS."
+  (format t "~&  [~A] ~A~@[: ~A~]~%"
+          (ecase status (:ok " ok ") (:warn "warn") (:fail "FAIL")) label detail)
+  (when (and hint (member status '(:warn :fail)))
+    (format t "         -> ~A~%" hint))
+  status)
+
+;;; ---------------------------------------------------------------------------
+;;; Pure decision helpers (unit-tested).
+
+(defun doctor-kernel-version (release)
+  "Return (values major minor) parsed from a uname release like \"7.2.11-x\"."
+  (let* ((base (subseq release 0 (position #\- release)))
+         (parts (uiop:split-string base :separator '(#\.))))
+    (values (ignore-errors (parse-integer (first parts) :junk-allowed t))
+            (ignore-errors (parse-integer (or (second parts) "0") :junk-allowed t)))))
+
+(defun doctor-kernel-ok-p (release &key (min-major 6) (min-minor 6))
+  "True when RELEASE is at least MIN-MAJOR.MIN-MINOR (TCX + cgroup/connect4)."
+  (multiple-value-bind (major minor) (doctor-kernel-version release)
+    (and major minor
+         (or (> major min-major) (and (= major min-major) (>= minor min-minor))))))
+
+(defun doctor-port-spec-covers-p (spec port)
+  "SPEC is a firewalld port like \"53/udp\" or \"1025-65535/tcp\"; does it cover PORT?"
+  (let* ((range (subseq spec 0 (position #\/ spec)))
+         (dash (position #\- range)))
+    (ignore-errors
+     (if dash
+         (<= (parse-integer range :end dash) port (parse-integer range :start (1+ dash)))
+         (= port (parse-integer range))))))
+
+(defun doctor-firewall-blocks-dns-p (active ports services)
+  "True when a firewall is ACTIVE yet nothing opens inbound DNS (the \"dns\"
+service or a port range covering 53), so the gateway DNS would be rejected."
+  (and active
+       (not (member "dns" services :test #'string=))
+       (notany (lambda (spec) (doctor-port-spec-covers-p spec 53)) ports)))
+
+;;; ---------------------------------------------------------------------------
+;;; Data gathering (degrades gracefully; a probe failure becomes a warn).
+
+(defun doctor-proc-string (path)
+  (string-trim '(#\Space #\Newline #\Tab) (uiop:read-file-string path)))
+
+(defun doctor-mounts ()
+  (handler-case (uiop:read-file-string "/proc/mounts") (error () "")))
+
+(defun doctor-firewall-state (&key (runner #'doctor-run))
+  "Return (values active-p ports services) by asking firewall-cmd, or (nil nil nil)
+when no active firewalld is present."
+  (multiple-value-bind (out code) (funcall runner (list "firewall-cmd" "--state"))
+    (declare (ignore out))
+    (if (and code (zerop code))
+        (values t
+                (uiop:split-string (string-trim '(#\Newline) (funcall runner '("firewall-cmd" "--list-ports"))))
+                (uiop:split-string (string-trim '(#\Newline) (funcall runner '("firewall-cmd" "--list-services")))))
+        (values nil nil nil))))
+
+(defun doctor-run (argv)
+  "Run ARGV, returning (values stdout exit-code), or (values \"\" nil) if the
+program is missing.  Used for optional host tools like firewall-cmd."
+  (handler-case
+      (multiple-value-bind (out err code)
+          (uiop:run-program argv :output '(:string :stripped t) :ignore-error-status t
+                                 :error-output nil)
+        (declare (ignore err))
+        (values out code))
+    (error () (values "" nil))))
+
+;;; ---------------------------------------------------------------------------
+;;; The command.
+
+(defun run-doctor (&key (cluster-pod-cidr +default-cluster-pod-cidr+)
+                        (state-directory "/var/lib/gr8s")
+                        (firewall #'doctor-firewall-state))
+  "Run every environment check and return the number of FAILs."
+  (let ((fails 0))
+    (flet ((note (status label &optional detail hint)
+             (when (eq (doctor-report status label detail hint) :fail) (incf fails))))
+      (format t "~&gr8s doctor — host environment checks~%~%")
+
+      ;; Kernel: TCX and cgroup/connect4 need a recent kernel.
+      (handler-case
+          (let ((release (doctor-proc-string "/proc/sys/kernel/osrelease")))
+            (if (doctor-kernel-ok-p release)
+                (note :ok "kernel" (format nil "~A (>= 6.6, TCX + cgroup/connect4)" release))
+                (note :fail "kernel" (format nil "~A" release)
+                      "gr8s eBPF needs Linux 6.6+ (TCX links, cgroup/connect4)")))
+        (error (c) (note :warn "kernel" (format nil "could not read: ~A" c))))
+
+      ;; cgroup v2 unified hierarchy (where the socket LB attaches).
+      (let ((mounts (doctor-mounts)))
+        (if (search "cgroup2 /sys/fs/cgroup" mounts)
+            (note :ok "cgroup2" "/sys/fs/cgroup")
+            (note :fail "cgroup2" "no cgroup2 at /sys/fs/cgroup"
+                  "mount the unified cgroup2 hierarchy; gr8s attaches the socket LB there"))
+        ;; bpffs for pinning policy/LB maps.
+        (if (search " bpf " mounts)
+            (note :ok "bpffs" "present")
+            (note :warn "bpffs" "no bpf filesystem mounted"
+                  "gr8s mounts a private bpffs under the agent state dir, but a host /sys/fs/bpf is recommended")))
+
+      ;; IPv4 forwarding (Pod egress).
+      (handler-case
+          (if (string= "1" (doctor-proc-string "/proc/sys/net/ipv4/ip_forward"))
+              (note :ok "ip_forward" "enabled")
+              (note :warn "ip_forward" "disabled"
+                    "gr8s enables net.ipv4.ip_forward at startup; set it to 1 to avoid surprises"))
+        (error (c) (note :warn "ip_forward" (format nil "could not read: ~A" c))))
+
+      ;; Pod-pool route overlap (the validate-pod-pool-host-routes trap).
+      (handler-case
+          (progn
+            (validate-pod-pool-host-routes cluster-pod-cidr
+                                           (uiop:ensure-directory-pathname state-directory))
+            (note :ok "pod-pool routes" (format nil "no host route overlaps ~A" cluster-pod-cidr)))
+        (cni-error (c)
+          (note :fail "pod-pool routes" (princ-to-string c)
+                "remove the conflicting interface/route (e.g. a stale gr8s0: sudo ip link del gr8s0)"))
+        (error (c) (note :warn "pod-pool routes" (format nil "could not check: ~A" c))))
+
+      ;; Host firewall vs the gateway DNS (169.254.1.1:53) — podster-sp5.
+      (handler-case
+          (multiple-value-bind (active ports services) (funcall firewall)
+            (cond
+              ((not active) (note :ok "firewall DNS" "no active firewalld"))
+              ((doctor-firewall-blocks-dns-p active ports services)
+               (note :warn "firewall DNS"
+                     "firewalld is active and does not allow inbound DNS (port 53)"
+                     "Pod DNS to 169.254.1.1:53 will be rejected; allow it (e.g. firewall-cmd --zone=trusted --add-interface=gr8s-gateway) or stop firewalld"))
+              (t (note :ok "firewall DNS" "inbound DNS is permitted"))))
+        (error (c) (note :warn "firewall DNS" (format nil "could not check: ~A" c))))
+
+      ;; The in-process eBPF programs compile (no ELF, no toolchain).
+      (handler-case
+          (multiple-value-bind (lb-maps lb-progs) (compile-service-lb)
+            (multiple-value-bind (eg-maps eg-progs) (compile-egress-guard)
+              (note :ok "eBPF compile"
+                    (format nil "service LB (~D maps, ~D prog) + egress guard (~D maps, ~D prog)"
+                            (length lb-maps) (length lb-progs) (length eg-maps) (length eg-progs)))))
+        (error (c) (note :fail "eBPF compile" (format nil "Whistler compilation failed: ~A" c)
+                         "this is a build/image problem, not a host one")))
+
+      ;; Actually loading BPF into the kernel needs privilege.
+      (unless (zerop (sb-posix:geteuid))
+        (note :warn "bpf load" "skipped (not root)"
+              "run 'sudo gr8s doctor' to verify the kernel accepts BPF map creation + program load"))
+
+      (format t "~%~A~%" (if (zerop fails) "all checks passed (warnings are advisory)"
+                             (format nil "~D check(s) FAILED" fails))))
+    fails))
