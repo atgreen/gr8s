@@ -133,3 +133,17 @@
   "Preserve the address-family identity of an existing EndpointSlice."
   (unless (equal (gethash "addressType" old) (gethash "addressType" object))
     (core-resource-error 422 "Invalid" "EndpointSlice addressType is immutable")))
+
+(defun prepare-endpointslice-write (object old)
+  "Own generation: endpoint/port/address-family or label changes advance it; annotations do not."
+  (let ((changed (and old
+                      (not (equal
+                            (endpointslice-canonical-json
+                             (core-object "addressType" (gethash "addressType" old) "ports" (gethash "ports" old)
+                                          "endpoints" (gethash "endpoints" old) "labels" (gethash "labels" (gethash "metadata" old))))
+                            (endpointslice-canonical-json
+                             (core-object "addressType" (gethash "addressType" object) "ports" (gethash "ports" object)
+                                          "endpoints" (gethash "endpoints" object) "labels" (gethash "labels" (gethash "metadata" object)))))))))
+    (setf (gethash "generation" (gethash "metadata" object))
+          (if old (+ (gethash "generation" (gethash "metadata" old) 1) (if changed 1 0)) 1)))
+  object)

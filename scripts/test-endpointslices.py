@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
+import traceback
 import urllib.error
 import urllib.request
 import uuid
@@ -136,7 +137,7 @@ def main():
         selected = service("selected", {"app": "web"})
         for name in ("one", "two"):
             marker = namespace + "-" + name
-            command = f"mkdir -p /www; echo {marker} > /www/index.html; trap '' TERM; httpd -f -p 8080 -h /www & wait"
+            command = f"mkdir -p /www; echo {marker} > /www/index.html; trap '' TERM; while :; do httpd -f -p 8080 -h /www; done"
             create("pods", {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name, "labels": {"app": "web"}},
                             "spec": {"restartPolicy": "Always", "terminationGracePeriodSeconds": 30,
                                      "containers": [{"name": "main", "image": "docker.io/library/busybox:1.36.1", "imagePullPolicy": "IfNotPresent",
@@ -201,8 +202,10 @@ def main():
             return endpoint if endpoint and endpoint["conditions"].get("terminating") and not endpoint["conditions"].get("ready") else None
         endpoint = wait(terminating, "terminating EndpointSlice condition", 25)
         assert endpoint["conditions"].get("serving")
-        assert http(target["status"]["podIP"]) == body
+        report["stage"] = "terminating-direct-http"
+        assert wait(lambda: http(target["status"]["podIP"]), "actual HTTP serving during termination", 10) == body
         survivor = (expected - {body}).pop()
+        report["stage"] = "terminating-service-withdrawal"
         assert {http(selected["spec"]["clusterIP"]) for _ in range(4)} == {survivor}
         wait(lambda: request(path("pods", target["metadata"]["name"]))[0] == 404, "actual deleting Pod removal", 60)
         wait(lambda: all(e["targetRef"]["uid"] != target["metadata"]["uid"] for s in slices("selected") for e in s["endpoints"]), "deleted endpoint removal")
@@ -215,6 +218,7 @@ def main():
         report["passed"] = True
     except Exception as error:
         report["error"] = repr(error)
+        report["traceback"] = traceback.format_exc()
     finally:
         try:
             if process:

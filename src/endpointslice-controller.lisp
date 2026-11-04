@@ -26,7 +26,7 @@
   "Require matching namespace, Service UID and authoritative manager before modifying a slice."
   (let ((metadata (gethash "metadata" slice)) (owner (gethash "metadata" service)))
     (and (equal (gethash "namespace" metadata) (gethash "namespace" owner))
-         (equal *endpointslice-manager* (gethash "endpointslice.kubernetes.io/managed-by" (gethash "labels" metadata)))
+         (equal *endpointslice-manager* (gethash "endpointslice.kubernetes.io/managed-by" (gethash "labels" metadata (core-object))))
          (find-if (lambda (ref) (and (equal "v1" (gethash "apiVersion" ref)) (equal "Service" (gethash "kind" ref))
                                     (equal (gethash "uid" owner) (gethash "uid" ref)) (eq t (gethash "controller" ref))))
                   (gethash "ownerReferences" metadata #())))))
@@ -120,6 +120,9 @@
                            (gethash "labels" slice-meta) labels (gethash "namespace" slice-meta) namespace
                            (gethash "ownerReferences" slice-meta)
                            (vector (core-object "apiVersion" "v1" "kind" "Service" "name" name "uid" (gethash "uid" metadata) "controller" t)))
+                     (if (equal "None" (gethash "clusterIP" (gethash "spec" service)))
+                         (setf (gethash "service.kubernetes.io/headless" labels) "")
+                         (remhash "service.kubernetes.io/headless" labels))
                      (unless old
                        (loop for candidate = (concatenate 'string (subseq name 0 (min 57 (length name))) "-"
                                                          (string-downcase (subseq (generate-uid) 0 5)))
@@ -130,6 +133,7 @@
                                                   "endpoints" (coerce chunk 'vector)) namespace (gethash "name" slice-meta)))
                             (resource-key (core-resource-key "endpointslices" namespace (gethash "name" slice-meta))))
                        (when (or (null old) (not (equal (endpointslice-canonical-json old) (endpointslice-canonical-json object))))
+                         (prepare-endpointslice-write object old)
                          (prepare-core-resource-metadata object old (incf revision))
                          (setf (gethash resource-key resources) object))
                        (setf (gethash (gethash "uid" (gethash "metadata" (or old object))) used) t)))))))
@@ -154,7 +158,7 @@
          (port-name (gethash "name" port "")) (result nil) (found nil))
     (dolist (slice (list-core-resources store "endpointslices" (gethash "namespace" metadata)))
       (when (and (equal "IPv4" (gethash "addressType" slice))
-                 (equal name (gethash "kubernetes.io/service-name" (gethash "labels" (gethash "metadata" slice)))))
+                 (equal name (gethash "kubernetes.io/service-name" (gethash "labels" (gethash "metadata" slice) (core-object)))))
         (setf found t)
         (let ((target (find-if (lambda (candidate)
                                  (and (equal port-name (gethash "name" candidate ""))

@@ -123,6 +123,7 @@
     (let ((slices (gr8s::list-core-resources store "endpointslices" "alpha")))
       (is (equal '(1 100) (sort (mapcar (lambda (o) (length (gethash "endpoints" o))) slices) #'<)))
       (dolist (slice slices)
+        (is (equal "" (gethash "service.kubernetes.io/headless" (gethash "labels" (gethash "metadata" slice)))))
         (loop for endpoint across (gethash "endpoints" slice)
               do (is (eq t (gethash "ready" (gethash "conditions" endpoint))))
                  (is (null (gethash "serving" (gethash "conditions" endpoint)))))))
@@ -139,3 +140,30 @@
       (setf (gethash "generateName" metadata) (make-string 100 :initial-element #\a))
       (let ((created (gr8s::create-core-resource store "endpointslices" input "alpha")))
         (is (= 63 (length (gethash "name" (gethash "metadata" created)))))))))
+
+(test endpointslices-ignore-unlabeled-manual-slices
+  (with-temporary-store (store directory)
+    (let ((manual (endpointslice-test-object "unlabeled")))
+      (remhash "labels" (gethash "metadata" manual))
+      (gr8s::create-core-resource store "endpointslices" manual "alpha"))
+    (let ((service (gr8s::create-core-resource store "services" (service-test-object "web") "alpha")))
+      (gr8s::reconcile-endpointslices store)
+      (is (= 2 (length (gr8s::list-core-resources store "endpointslices" "alpha"))))
+      (is (null (gr8s::service-pod-endpoints store service (aref (gethash "ports" (gethash "spec" service)) 0)))))
+    (is (gr8s::get-core-resource store "endpointslices" "alpha" "unlabeled"))))
+
+(test endpointslice-generations-distinguish-label-data-and-annotation-updates
+  (with-temporary-store (store directory)
+    (let* ((input (endpointslice-test-object "manual")) (metadata (gethash "metadata" input)))
+      (setf (gethash "generation" metadata) 999)
+      (is (= 1 (gethash "generation" (gethash "metadata" (gr8s::create-core-resource store "endpointslices" input "alpha"))))))
+    (let ((annotated (gr8s::update-core-resource store "endpointslices" "alpha" "manual"
+                       (lambda (object) (setf (gethash "annotations" (gethash "metadata" object)) (gr8s::core-object "example.com/note" "new")) object))))
+      (is (= 1 (gethash "generation" (gethash "metadata" annotated)))))
+    (let ((relabeled (gr8s::update-core-resource store "endpointslices" "alpha" "manual"
+                       (lambda (object) (setf (gethash "app" (gethash "labels" (gethash "metadata" object))) "changed") object))))
+      (is (= 2 (gethash "generation" (gethash "metadata" relabeled)))))
+    (let ((changed (gr8s::update-core-resource store "endpointslices" "alpha" "manual"
+                       (lambda (object) (setf (gethash "port" (aref (gethash "ports" object) 0)) 9090
+                                              (gethash "resourceVersion" (gethash "metadata" object)) "") object))))
+      (is (= 3 (gethash "generation" (gethash "metadata" changed)))))))
