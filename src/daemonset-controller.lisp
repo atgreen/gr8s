@@ -1,0 +1,303 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Reconcile DaemonSets: one Pod on each eligible node, ControllerRevision
+;;;; history, RollingUpdate and OnDelete strategies and observed status. A
+;;;; revision's data is the exact JSON a typed client derives from the DaemonSet,
+;;;; because kubectl and upstream clients compare it byte for byte.
+
+(in-package #:gr8s)
+
+(defparameter +controller-revision-hash-label+ "controller-revision-hash"
+  "Label tying a daemon Pod and a ControllerRevision to one template revision.")
+
+(defun go-json-empty-p (value)
+  "Return whether Go's omitempty drops VALUE, a stored JSON scalar or collection."
+  (or (member value '(nil null))
+      (equal value "")
+      (and (numberp value) (zerop value))
+      (and (vectorp value) (not (stringp value)) (zerop (length value)))))
+
+(defun go-json-message-field (message key)
+  "Find KEY's field definition in protobuf MESSAGE, looking through inlined messages."
+  (let ((descriptor (gethash message (gethash "messages" *podtemplate-schema*))))
+    (when descriptor
+      (loop for definition being the hash-values of descriptor
+            thereis (cond ((gethash "inline" definition)
+                           (go-json-message-field (gethash "type" definition) key))
+                          ((equal key (gethash "name" definition)) definition))))))
+
+(defun go-json-sorted (value)
+  "Copy a JSON VALUE with every object's keys inserted in sorted order."
+  (cond ((hash-table-p value)
+         (let ((result (core-object)))
+           (dolist (key (sort (loop for key being the hash-keys of value collect key) #'string<) result)
+             (setf (gethash key result) (go-json-sorted (gethash key value))))))
+        ((and (vectorp value) (not (stringp value))) (map 'vector #'go-json-sorted value))
+        (t value)))
+
+(defun go-json-view (value message)
+  "Rewrite VALUE, an object of protobuf MESSAGE, as a typed Go client would marshal it.
+Keys are sorted, unset and omitempty zero values vanish, and pointers to empty objects stay."
+  (unless (and (hash-table-p value) (gethash message (gethash "messages" *podtemplate-schema*)))
+    (return-from go-json-view (go-json-sorted value)))
+  (let ((result (core-object)) (keys (loop for key being the hash-keys of value collect key)))
+    ;; A Container's resources is a non-pointer struct, which omitempty keeps.
+    (when (and (equal message "k8s.io.api.core.v1.Container") (not (gethash "resources" value)))
+      (setf (gethash "resources" value) (core-object))
+      (pushnew "resources" keys :test #'equal))
+    (dolist (key (sort keys #'string<) result)
+      (let* ((field (gethash key value)) (definition (go-json-message-field message key))
+             (type (and definition (gethash "type" definition))))
+        (cond
+          ((null definition) (unless (eq field 'null) (setf (gethash key result) (go-json-sorted field))))
+          ((eq field 'null) nil)
+          ((gethash "mapKey" definition)
+           (when (plusp (hash-table-count field))
+             (let ((map (core-object)))
+               (dolist (name (sort (loop for name being the hash-keys of field collect name) #'string<))
+                 (setf (gethash name map) (go-json-view (gethash name field) type)))
+               (setf (gethash key result) map))))
+          ((gethash "repeated" definition)
+           (unless (go-json-empty-p field)
+             (setf (gethash key result) (map 'vector (lambda (item) (go-json-view item type)) field))))
+          ((and (gethash "omitEmpty" definition) (go-json-empty-p field)) nil)
+          (t (setf (gethash key result) (go-json-view field type))))))))
+
+(defun daemonset-revision-data (daemonset)
+  "Build the patch a ControllerRevision records: DaemonSet Go JSON with spec.template set to replace."
+  (let* ((template (go-json-view (copy-core-object (gethash "template" (gethash "spec" daemonset)))
+                                 "k8s.io.api.core.v1.PodTemplateSpec"))
+         (replace (core-object "$patch" "replace")))
+    (unless (gethash "metadata" template) (setf (gethash "metadata" replace) (core-object)))
+    (dolist (key (sort (loop for key being the hash-keys of template collect key) #'string<))
+      (setf (gethash key replace) (gethash key template)))
+    (core-object "spec" (core-object "template" replace))))
+
+(defun daemonset-revision-hash (data collision)
+  "Hash revision DATA and the collision count into a label value and name suffix."
+  (string-downcase
+   (subseq (octets-to-hex
+            (ironclad:digest-sequence
+             :sha256 (trivial-utf-8:string-to-utf-8-bytes
+                      (concatenate 'string (canonical-workload-json data) (write-to-string collision)))))
+           0 10)))
+
+(defun daemonset-revision-label (revision)
+  "Return REVISION's hash label, which a client-created revision may lack."
+  (let ((labels (gethash "labels" (workload-metadata revision))))
+    (or (and labels (gethash +controller-revision-hash-label+ labels))
+        (gethash "name" (workload-metadata revision)))))
+
+(defun add-revision-owner (store daemonset revision)
+  "Adopt an unowned REVISION whose labels match DAEMONSET."
+  (update-core-resource store "controllerrevisions" (gethash "namespace" (workload-metadata revision))
+                        (gethash "name" (workload-metadata revision))
+    (lambda (current)
+      (unless (equal (gethash "uid" (workload-metadata current)) (gethash "uid" (workload-metadata revision)))
+        (core-resource-error 409 "Conflict" "Revision identity has changed"))
+      (setf (gethash "ownerReferences" (workload-metadata current))
+            (concatenate 'vector (gethash "ownerReferences" (workload-metadata current) #())
+                         (vector (workload-owner-reference daemonset))))
+      current)))
+
+(defun daemonset-revisions (store daemonset)
+  "Claim DAEMONSET's ControllerRevisions, adopting matching orphans and releasing mismatches."
+  (let ((selector (workload-spec-selector daemonset)) (result nil))
+    (dolist (revision (list-core-resources store "controllerrevisions" (gethash "namespace" (workload-metadata daemonset))))
+      (let* ((metadata (workload-metadata revision))
+             (matches (workload-selector-matches-p selector (gethash "labels" metadata)))
+             (owned (workload-owned-p revision daemonset)))
+        (cond ((and owned matches) (push revision result))
+              (owned (detach-workload-dependent store "controllerrevisions" daemonset revision))
+              ((and matches (null (workload-controller-reference revision)))
+               (push (add-revision-owner store daemonset revision) result)))))
+    (sort result #'< :key (lambda (revision) (gethash "revision" revision)))))
+
+(defun bump-daemonset-collision-count (store daemonset count)
+  "Durably record a revision name collision so the next pass hashes differently."
+  (with-store-lock (store)
+    (let ((current (workload-current-unlocked store "daemonsets" daemonset)))
+      (when current
+        (let ((copy (copy-core-object current)) (resources (copy-core-resource-index store))
+              (revision (1+ (pod-store-resource-revision store))))
+          (setf (gethash "collisionCount" (gethash "status" copy)) count)
+          (prepare-core-resource-metadata copy current revision)
+          (setf (gethash (core-resource-key "daemonsets" (gethash "namespace" (workload-metadata copy))
+                                            (gethash "name" (workload-metadata copy))) resources) copy)
+          (commit-core-resources store resources revision))))))
+
+(defun create-daemonset-revision (store daemonset data number)
+  "Create the ControllerRevision for DAEMONSET's template, or count a name collision and retry later."
+  (let* ((metadata (workload-metadata daemonset)) (namespace (gethash "namespace" metadata))
+         (collision (gethash "collisionCount" (gethash "status" daemonset) 0))
+         (hash (daemonset-revision-hash data collision))
+         (name (format nil "~A-~A" (subseq (gethash "name" metadata) 0 (min 242 (length (gethash "name" metadata)))) hash))
+         (labels (copy-core-object (gethash "labels" (gethash "metadata" (gethash "template" (gethash "spec" daemonset)))))))
+    (setf (gethash +controller-revision-hash-label+ labels) hash)
+    (let ((object (core-object "apiVersion" "apps/v1" "kind" "ControllerRevision" "data" data "revision" number
+                               "metadata" (core-object "name" name "namespace" namespace "labels" labels
+                                                       "ownerReferences" (vector (workload-owner-reference daemonset))))))
+      (when (gethash "annotations" metadata)
+        (setf (gethash "annotations" (workload-metadata object)) (copy-core-object (gethash "annotations" metadata))))
+      (handler-case (create-core-resource store "controllerrevisions" object namespace)
+        (kubernetes-error (condition)
+          (unless (= 409 (kubernetes-error-status-code condition)) (error condition))
+          (let ((existing (get-core-resource store "controllerrevisions" namespace name)))
+            (if (and (workload-owned-p existing daemonset) (workload-equal-p (gethash "data" existing) data))
+                existing
+                (progn (bump-daemonset-collision-count store daemonset (1+ collision))
+                       (core-resource-error 409 "Conflict" "ControllerRevision name collision; the next pass uses a new count")))))))))
+
+(defun daemonset-construct-history (store daemonset)
+  "Return the current revision, the other revisions and every hash label meaning the current template.
+
+Kubernetes removes duplicates of the current revision when something next syncs
+the DaemonSet, which nothing does for a revision a client just created. This
+level-triggered loop syncs always, so it keeps duplicates and ages them out with
+the rest of the history instead of deleting one a client is about to use."
+  (let* ((revisions (daemonset-revisions store daemonset)) (data (daemonset-revision-data daemonset))
+         (matching (remove-if-not (lambda (revision) (workload-equal-p (gethash "data" revision) data)) revisions))
+         (different (remove-if (lambda (revision) (member revision matching :test #'eq)) revisions))
+         (number (1+ (reduce #'max different :key (lambda (revision) (gethash "revision" revision)) :initial-value 0)))
+         (current (or (car (last matching)) (create-daemonset-revision store daemonset data number))))
+    (when (< (gethash "revision" current) number)
+      (setf current (update-owned-workload store "controllerrevisions" current
+                      (lambda (object) (setf (gethash "revision" object) number) object))))
+    (values current
+            (remove-if (lambda (revision) (equal (gethash "uid" (workload-metadata revision))
+                                                 (gethash "uid" (workload-metadata current))))
+                       revisions)
+            (remove-duplicates (cons (daemonset-revision-label current) (mapcar #'daemonset-revision-label matching))
+                               :test #'equal))))
+
+(defun daemonset-node-eligible-p (daemonset node)
+  "Return whether DAEMONSET's template selects NODE. gr8s nodes carry no taints to tolerate."
+  (let ((pod-spec (gethash "spec" (gethash "template" (gethash "spec" daemonset)))))
+    (and (node-selector-matches-p (gethash "nodeSelector" pod-spec) node)
+         (member (gethash "nodeName" pod-spec) (list nil "" 'null (node-record-name node)) :test #'equal))))
+
+(defun daemonset-pod-terminal-p (status)
+  "Return whether a daemon Pod's observed STATUS has reached a terminal phase."
+  (member (gethash "phase" status) '("Failed" "Succeeded") :test #'equal))
+
+(defun daemonset-observations (reconciler daemonset &key claim)
+  "Return (pod . status) for DAEMONSET's Pods, oldest first, without those already gone from the node."
+  (stable-sort
+   (loop for pod in (replica-set-pods reconciler daemonset :claim claim)
+         for status = (workload-pod-status reconciler pod)
+         unless (and (deletion-requested-p pod) (daemonset-pod-terminal-p status))
+           collect (cons pod status))
+   #'string<
+   :key (lambda (pair) (gethash "creationTimestamp" (workload-metadata (pod-to-object (car pair))) ""))))
+
+(defun daemonset-pods-on-node (observations node-name)
+  "Select the observations assigned to NODE-NAME."
+  (remove node-name observations :test-not #'equal :key (lambda (pair) (pod-node-name (car pair)))))
+
+(defun delete-daemon-pod (reconciler pod)
+  "Start deleting one exact daemon Pod, tolerating one that is already gone."
+  (handler-case (delete-reconciled-pod reconciler (pod-namespace pod) (pod-name pod) :uid (pod-uid pod))
+    (kubernetes-error (condition)
+      (unless (member (kubernetes-error-status-code condition) '(404 409)) (error condition)))))
+
+(defun manage-daemon-pods (reconciler daemonset current observations eligible)
+  "Keep exactly one Pod on each eligible node, replacing terminal ones and removing every other Pod."
+  (let ((store (reconciler-store reconciler)) (eligible-names (mapcar #'node-record-name eligible)))
+    (dolist (pair observations)
+      (let ((name (pod-node-name (car pair))))
+        (when (and name (not (member name eligible-names :test #'equal)) (not (deletion-requested-p (car pair))))
+          (delete-daemon-pod reconciler (car pair)))))
+    (dolist (name eligible-names)
+      (let* ((pods (daemonset-pods-on-node observations name))
+             (running (remove-if (lambda (pair) (or (deletion-requested-p (car pair)) (daemonset-pod-terminal-p (cdr pair)))) pods)))
+        (dolist (pair pods)
+          (when (and (daemonset-pod-terminal-p (cdr pair)) (not (deletion-requested-p (car pair))))
+            (delete-daemon-pod reconciler (car pair))))
+        (dolist (pair (cdr running)) (delete-daemon-pod reconciler (car pair)))
+        (when (null pods)
+          (create-replica-set-pod store daemonset :node-name name
+                                  :labels (list (cons +controller-revision-hash-label+
+                                                      (daemonset-revision-label current)))))))))
+
+(defun daemon-pod-updated-p (pod hashes)
+  "Return whether POD runs one of the hash labels meaning the current template."
+  (let ((labels (gethash "labels" (workload-metadata (pod-to-object pod)))))
+    (and labels (member (gethash +controller-revision-hash-label+ labels) hashes :test #'equal))))
+
+(defun roll-daemon-pods (reconciler daemonset observations eligible hashes)
+  "Delete out-of-date Pods: unavailable ones at once, available ones within maxUnavailable."
+  (let* ((spec (gethash "spec" daemonset)) (minimum (gethash "minReadySeconds" spec))
+         (budget (max 1 (workload-rollout-count
+                         (gethash "maxUnavailable" (gethash "rollingUpdate" (gethash "updateStrategy" spec)))
+                         (length eligible) :round-up t)))
+         (candidates nil))
+    (dolist (node eligible)
+      (let* ((name (node-record-name node))
+             (running (remove-if (lambda (pair) (or (deletion-requested-p (car pair)) (daemonset-pod-terminal-p (cdr pair))))
+                                 (daemonset-pods-on-node observations name)))
+             (pair (first running)))
+        (cond ((null pair) (decf budget))
+              ((daemon-pod-updated-p (car pair) hashes)
+               (unless (workload-pod-available-p (cdr pair) minimum) (decf budget)))
+              ((workload-pod-available-p (cdr pair) minimum) (push (car pair) candidates))
+              (t (decf budget) (delete-daemon-pod reconciler (car pair))))))
+    (loop for pod in (nreverse candidates)
+          while (plusp budget)
+          do (delete-daemon-pod reconciler pod) (decf budget))))
+
+(defun clean-daemonset-history (store daemonset old observations)
+  "Delete the oldest revisions beyond revisionHistoryLimit, keeping any a live Pod still names."
+  (let ((excess (- (length old) (gethash "revisionHistoryLimit" (gethash "spec" daemonset))))
+        (live (remove-duplicates
+               (loop for (pod) in observations
+                     for labels = (gethash "labels" (workload-metadata (pod-to-object pod)))
+                     when labels collect (gethash +controller-revision-hash-label+ labels))
+               :test #'equal)))
+    (dolist (revision old)
+      (when (and (plusp excess) (not (member (daemonset-revision-label revision) live :test #'equal)))
+        (let ((metadata (workload-metadata revision)))
+          (delete-core-resource store "controllerrevisions" (gethash "namespace" metadata)
+                                (gethash "name" metadata) :uid (gethash "uid" metadata)))
+        (decf excess)))))
+
+(defun publish-daemonset-status (reconciler daemonset nodes eligible hashes)
+  "Report what the nodes and their oldest daemon Pods actually show, keeping client conditions."
+  (let* ((store (reconciler-store reconciler)) (minimum (gethash "minReadySeconds" (gethash "spec" daemonset)))
+         (observations (remove-if (lambda (pair) (deletion-requested-p (car pair)))
+                                  (daemonset-observations reconciler daemonset)))
+         (scheduled 0) (ready 0) (available 0) (updated 0) (misscheduled 0))
+    (dolist (node nodes)
+      (let* ((name (node-record-name node)) (pair (first (daemonset-pods-on-node observations name))))
+        (cond ((not (member node eligible :test #'eq)) (when pair (incf misscheduled)))
+              (pair
+               (incf scheduled)
+               (when (pod-status-ready-p (cdr pair)) (incf ready))
+               (when (workload-pod-available-p (cdr pair) minimum) (incf available))
+               (when (daemon-pod-updated-p (car pair) hashes) (incf updated))))))
+    (let* ((live (get-core-resource store "daemonsets" (gethash "namespace" (workload-metadata daemonset))
+                                    (gethash "name" (workload-metadata daemonset))))
+           (status (copy-core-object (gethash "status" live (core-object))))
+           (desired (length eligible)) (unavailable (- desired available)))
+      (setf (gethash "observedGeneration" status) (gethash "generation" (workload-metadata daemonset))
+            (gethash "desiredNumberScheduled" status) desired
+            (gethash "currentNumberScheduled" status) scheduled
+            (gethash "numberMisscheduled" status) misscheduled
+            (gethash "numberReady" status) ready
+            (gethash "numberAvailable" status) available
+            (gethash "numberUnavailable" status) unavailable
+            (gethash "updatedNumberScheduled" status) updated)
+      (update-workload-controller-status store "daemonsets" daemonset status))))
+
+(defun reconcile-daemonset (reconciler daemonset)
+  "Converge DAEMONSET: record its revision, place Pods on nodes, roll them and report status."
+  (let* ((store (reconciler-store reconciler)) (nodes (list-nodes store))
+         (eligible (remove-if-not (lambda (node) (daemonset-node-eligible-p daemonset node)) nodes))
+         (rolling (equal "RollingUpdate" (gethash "type" (gethash "updateStrategy" (gethash "spec" daemonset))))))
+    (multiple-value-bind (current old hashes) (daemonset-construct-history store daemonset)
+      (let ((observations (daemonset-observations reconciler daemonset :claim t)))
+        (manage-daemon-pods reconciler daemonset current observations eligible)
+        (when rolling (roll-daemon-pods reconciler daemonset observations eligible hashes))
+        (clean-daemonset-history store daemonset old observations))
+      (publish-daemonset-status reconciler daemonset nodes eligible hashes))))

@@ -32,7 +32,7 @@
 (test unsupported-pod-spec-fields-are-rejected
   (signals kubernetes-error
     (parse-pod
-     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"nodeSelector\":{\"disk\":\"ssd\"},\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}")))
+     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"affinity\":{},\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}")))
 
 (test kubectl-generated-default-pod-fields-are-accepted
   (let ((pod

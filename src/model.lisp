@@ -61,7 +61,10 @@
   (underlay-address "")
   (ready-p nil)
   last-heartbeat
-  lease-deadline)
+  lease-deadline
+  (labels nil)
+  (annotations nil)
+  (resource-version "1"))
 
 (defun invalid-pod (control &rest arguments)
   "Signal an HTTP 422 Kubernetes error formatted by CONTROL and ARGUMENTS."
@@ -207,7 +210,7 @@
    :ports (parse-ports object)))
 
 (defun validate-owner-references (metadata)
-  "Validate owner identities and the supported nonblocking ownership relationship."
+  "Validate owner identities. Foreground deletion honors blockOwnerDeletion on any dependent."
   (let ((owners (gethash "ownerReferences" metadata)) (controllers 0))
     (when (and owners (not (eq owners 'null)))
       (unless (and (vectorp owners) (not (stringp owners)))
@@ -219,12 +222,7 @@
                (dolist (key '("controller" "blockOwnerDeletion"))
                  (multiple-value-bind (value present) (gethash key owner)
                    (when (and present (not (member value '(t nil)))) (invalid-pod "ownerReference flag must be boolean"))))
-               (when (eq t (gethash "controller" owner)) (incf controllers))
-               (when (and (eq t (gethash "blockOwnerDeletion" owner))
-                          (not (and (eq t (gethash "controller" owner))
-                                    (equal "Job" (gethash "kind" owner))
-                                    (equal "batch/v1" (gethash "apiVersion" owner)))))
-                 (invalid-pod "blocking foreground owner deletion requires a supported Job controller")))
+               (when (eq t (gethash "controller" owner)) (incf controllers)))
       (when (> controllers 1) (invalid-pod "an object can have only one controller owner")))))
 
 (defun pod-generate-name-prefix (metadata)

@@ -315,9 +315,12 @@
                    unless (member (gethash "name" mount) names :test #'equal)
                      do (invalid-pod "volumeMount references an unknown volume"))))
   (let ((selector (gethash "nodeSelector" spec)))
-    (when selector
-      (reject-unsupported-fields selector '("kubernetes.io/os" "kubernetes.io/arch" "kubernetes.io/hostname") "nodeSelector")
-      (maphash (lambda (key value) (declare (ignore key)) (require-nonempty-string value "nodeSelector value")) selector)))
+    (when (and selector (not (eq selector 'null)))
+      (require-object selector "nodeSelector")
+      (maphash (lambda (key value)
+                 (unless (and (core-qualified-key-p key) (core-label-name-p value :empty t))
+                   (invalid-pod "nodeSelector requires valid label keys and values")))
+               selector)))
   (loop for toleration across (optional-vector spec "tolerations" "spec")
         do (reject-unsupported-fields toleration '("key" "operator" "value" "effect" "tolerationSeconds") "toleration")
            (unless (member (gethash "operator" toleration "Equal") '("Equal" "Exists") :test #'equal)
@@ -326,15 +329,29 @@
              (unless (member (gethash "effect" toleration) '("" "NoSchedule" "PreferNoSchedule" "NoExecute") :test #'equal)
                (invalid-pod "invalid toleration effect")))))
 
-(defun pod-node-selector-matches-p (pod node)
-  "Match POD's supported node labels against a registered worker NODE."
-  (let ((selector (gethash "nodeSelector" (gethash "spec" (pod-to-object pod)))))
-    (or (null selector)
+(defun node-builtin-labels (node)
+  "Return the labels gr8s derives from what NODE actually is."
+  (core-object "kubernetes.io/os" "linux"
+               "kubernetes.io/arch" (native-node-architecture)
+               "kubernetes.io/hostname" (node-record-name node)))
+
+(defun node-labels (node)
+  "Return all of NODE's labels: the derived ones and those written through the API."
+  (let ((labels (node-builtin-labels node)))
+    (when (node-record-labels node)
+      (maphash (lambda (key value) (setf (gethash key labels) value)) (node-record-labels node)))
+    labels))
+
+(defun node-selector-matches-p (selector node)
+  "Match a Pod spec's nodeSelector against NODE's actual labels."
+  (or (member selector '(nil null))
+      (let ((labels (node-labels node)))
         (loop for key being the hash-keys of selector using (hash-value expected)
-              always (equal expected
-                            (cond ((equal key "kubernetes.io/os") "linux")
-                                  ((equal key "kubernetes.io/arch") (native-node-architecture))
-                                  ((equal key "kubernetes.io/hostname") (node-record-name node))))))))
+              always (equal expected (gethash key labels))))))
+
+(defun pod-node-selector-matches-p (pod node)
+  "Match POD's node labels against a registered worker NODE."
+  (node-selector-matches-p (gethash "nodeSelector" (gethash "spec" (pod-to-object pod))) node))
 
 (defun pod-requests-privileged-container-p (pod)
   "Return whether any validated container needs a privileged sandbox."

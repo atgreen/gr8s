@@ -253,18 +253,19 @@
      (update-core-resource
       store resource namespace name
       (lambda (old)
-        (if (string= content-type "application/json-patch+json")
+        (workload-drop-unknown-patched-fields resource
+         (if (string= content-type "application/json-patch+json")
             (apply-core-json-patch old patch)
             (if (and (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource)
-                         (member resource '("podtemplates" "deployments" "replicasets") :test #'equal))
+                         (member resource '("podtemplates" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "controllerrevisions") :test #'equal))
                      (equal content-type "application/strategic-merge-patch+json"))
                 (template-strategic-merge old (require-object patch "patch")
                   (template-schema (cond ((csr-resource-p resource) *csr-schema-name*)
                                          ((storage-resource-p resource) (storage-resource-schema-name resource))
                                          ((endpointslice-resource-p resource) "io.k8s.api.discovery.v1.EndpointSlice")
                                          ((equal resource "podtemplates") "io.k8s.api.core.v1.PodTemplate")
-                                         (t (concatenate 'string "io.k8s.api.apps.v1." (core-resource-kind resource))))))
-                (merge-json-object old (require-object patch "patch")))))
+                                         (t (workload-schema-name resource "")))))
+                (merge-json-object old (require-object patch "patch"))))))
       :dry-run dry-run))))
 
 (defun dispatch-core-resource-request (store path method)
@@ -293,7 +294,7 @@
                                                (lambda (old) (declare (ignore old)) replacement) :dry-run dry-run))))
         ((and writable-scope name (eq method :patch)) (core-resource-patch-response store resource namespace name dry-run))
         ((and writable-scope (null name)
-              (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource) (batch-resource-p resource) (member resource '("podtemplates" "events" "deployments" "replicasets" "customresourcedefinitions") :test #'equal))
+              (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource) (batch-resource-p resource) (member resource '("podtemplates" "events" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "controllerrevisions" "customresourcedefinitions") :test #'equal))
               (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
                 (options (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions")))
@@ -329,7 +330,7 @@
                (delete-workload-resource store resource namespace name :dry-run (or dry-run (and body-dry-run (plusp (length body-dry-run))))
                     :uid (and preconditions (gethash "uid" preconditions))
                     :resource-version (and preconditions (gethash "resourceVersion" preconditions))
-                    :policy (workload-deletion-policy options))
+                    :policy (workload-deletion-policy options resource))
                (delete-core-resource store resource namespace name :dry-run (or dry-run (and body-dry-run (plusp (length body-dry-run))))
                                  :uid (and preconditions (gethash "uid" preconditions))
                                  :resource-version (and preconditions (gethash "resourceVersion" preconditions))))
@@ -363,6 +364,7 @@
                      (uiop:string-prefix-p "io.k8s.api.apps.v1." name)
                      (uiop:string-prefix-p "io.k8s.api.autoscaling.v1." name)
                      (member name '("io.k8s.api.core.v1.PodTemplate" "io.k8s.api.core.v1.PodTemplateList"
+                                  "io.k8s.api.core.v1.ReplicationController" "io.k8s.api.core.v1.ReplicationControllerList"
                                   "io.k8s.api.core.v1.Event" "io.k8s.api.core.v1.EventList"
                                   "io.k8s.api.events.v1.Event" "io.k8s.api.events.v1.EventList"
                                   "io.k8s.api.core.v1.PersistentVolume" "io.k8s.api.core.v1.PersistentVolumeList"
@@ -379,12 +381,27 @@
                                    (rewrite value))) schema))
                    ((and (vectorp schema) (not (stringp schema))) (map nil #'rewrite schema)))
              schema))
-    (maphash (lambda (name schema) (setf (gethash (alias name) definitions) (rewrite (copy-core-object schema))))
+    (maphash (lambda (name schema)
+               (let ((copy (rewrite (copy-core-object schema))))
+                 ;; The pinned schemas erase these identities; kubectl looks kinds up by them.
+                 (when (gethash "x-kubernetes-group-version-kind" copy)
+                   (setf (gethash "x-kubernetes-group-version-kind" copy) (openapi-definition-gvk name)))
+                 (setf (gethash (alias name) definitions) copy)))
              (gethash "definitions" *podtemplate-schema*)))
   definitions)
 
+(defun openapi-definition-gvk (name)
+  "Derive the group, version and kind that a pinned definition NAME describes."
+  (let* ((parts (uiop:split-string name :separator '(#\.)))
+         (kind (car (last parts))) (version (car (last parts 2))) (group (car (last parts 3))))
+    (vector (json-object "group" (cond ((equal group "core") "")
+                                       ((member group '("certificates" "discovery" "events" "storage") :test #'equal)
+                                        (concatenate 'string group ".k8s.io"))
+                                       (t group))
+                         "version" version "kind" kind))))
+
 (defun add-core-resource-openapi-paths (paths)
-  (dolist (resource '("configmaps" "secrets" "podtemplates"))
+  (dolist (resource '("configmaps" "secrets" "podtemplates" "replicationcontrollers"))
     (let* ((kind (core-resource-kind resource))
            (schema (concatenate 'string "io.k8s.api.core.v1." kind))
            (gvk (json-object "group" "" "version" "v1" "kind" kind))
@@ -422,8 +439,16 @@
                            "put" (operation "put" "replace" :body t)
                            "patch" (operation "patch" "patch" :body t)
                            "delete" (operation "delete" "delete")))
-        (when (equal resource "podtemplates")
-          (setf (gethash "delete" (gethash collection paths)) (operation "deletecollection" "deleteCollection"))))))
+        (when (member resource '("podtemplates" "replicationcontrollers") :test #'equal)
+          (setf (gethash "delete" (gethash collection paths)) (operation "deletecollection" "deleteCollection")))
+        (when (equal resource "replicationcontrollers")
+          (dolist (subresource '("status" "scale"))
+            (let ((schema (if (equal subresource "scale") "io.k8s.api.autoscaling.v1.Scale" schema)))
+              (setf (gethash (concatenate 'string item "/" subresource) paths)
+                    (json-object "parameters" (vector (parameter "namespace") (parameter "name"))
+                                 "get" (operation "get" (concatenate 'string "read" subresource))
+                                 "put" (operation "put" (concatenate 'string "replace" subresource) :body t)
+                                 "patch" (operation "patch" (concatenate 'string "patch" subresource) :body t))))))))) 
   (add-event-openapi-paths paths nil)
   (when (equal *schema-reference-prefix* "#/definitions/") (add-event-openapi-paths paths t))
   paths)

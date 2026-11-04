@@ -3,7 +3,7 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Expose apps/v1 discovery, structural OpenAPI paths and real scale/status
-;;;; subresources. Subresource transactions preserve ordinary desired state,
+;;;; subresources, including those of core/v1 ReplicationControllers. Subresource transactions preserve ordinary desired state,
 ;;;; optimistic revisions and the workload's server-owned generation.
 
 (in-package #:gr8s)
@@ -17,40 +17,48 @@
   "Advertise workload collections and their separately authorized subresources."
   (let ((resources (stored-resource-discovery "apps/v1")))
     (loop for resource across resources
-          do (setf (gethash "shortNames" resource) (if (equal "Deployment" (gethash "kind" resource)) #("deploy") #("rs"))))
+          do (setf (gethash "shortNames" resource)
+                   (cond ((equal "Deployment" (gethash "kind" resource)) #("deploy"))
+                         ((equal "ReplicaSet" (gethash "kind" resource)) #("rs"))
+                         ((equal "DaemonSet" (gethash "kind" resource)) #("ds"))
+                         (t #()))))
     (json-response
      (core-object "apiVersion" "v1" "kind" "APIResourceList" "groupVersion" "apps/v1" "resources"
                   (concatenate 'vector resources
-                    (coerce (loop for name in '("deployments" "replicasets")
-                                  for kind in '("Deployment" "ReplicaSet")
-                                  append (list (core-object "name" (concatenate 'string name "/scale") "namespaced" t
-                                                            "kind" "Scale" "group" "autoscaling" "version" "v1"
-                                                            "verbs" #("get" "patch" "update"))
-                                               (core-object "name" (concatenate 'string name "/status") "namespaced" t
-                                                            "kind" kind "verbs" #("get" "patch" "update")))) 'vector))))))
+                    (coerce (loop for name in '("deployments" "replicasets" "daemonsets")
+                                  for kind in '("Deployment" "ReplicaSet" "DaemonSet")
+                                  append (append
+                                          (unless (equal name "daemonsets")
+                                            (list (core-object "name" (concatenate 'string name "/scale") "namespaced" t
+                                                               "kind" "Scale" "group" "autoscaling" "version" "v1"
+                                                               "verbs" #("get" "patch" "update"))))
+                                          (list (core-object "name" (concatenate 'string name "/status") "namespaced" t
+                                                             "kind" kind "verbs" #("get" "patch" "update"))))) 'vector))))))
 
 (defun workload-subresource-route (path)
-  "Resolve valid namespaced apps scale and status endpoints and Job status endpoints."
+  "Resolve valid namespaced workload scale and status endpoints and Job status endpoints."
   (let ((parts (uiop:split-string path :separator '(#\/))))
-    (when (and (= 9 (length parts)) (dns-label-p (sixth parts)) (dns-subdomain-p (eighth parts))
-               (or (and (equal (subseq parts 0 5) '("" "apis" "apps" "v1" "namespaces"))
-                        (workload-resource-p (seventh parts))
-                        (member (ninth parts) '("scale" "status") :test #'equal))
-                   (and (equal (subseq parts 0 5) '("" "apis" "batch" "v1" "namespaces"))
-                        (batch-resource-p (seventh parts)) (equal (ninth parts) "status"))))
-      (list (seventh parts) (sixth parts) (eighth parts) (ninth parts)))))
-
-(defun workload-schema-name (resource suffix)
-  "Name RESOURCE's pinned structural definition, with SUFFIX such as Status, in its API group."
-  (format nil "io.k8s.api.~A.v1.~A~A" (if (batch-resource-p resource) "batch" "apps")
-          (core-resource-kind resource) suffix))
+    (cond
+      ((and (= 8 (length parts)) (equal (subseq parts 0 4) '("" "api" "v1" "namespaces"))
+            (dns-label-p (fifth parts)) (equal (sixth parts) "replicationcontrollers")
+            (dns-subdomain-p (seventh parts)) (member (eighth parts) '("scale" "status") :test #'equal))
+       (list (sixth parts) (fifth parts) (seventh parts) (eighth parts)))
+      ((and (= 9 (length parts)) (dns-label-p (sixth parts)) (dns-subdomain-p (eighth parts))
+            (or (and (equal (subseq parts 0 5) '("" "apis" "apps" "v1" "namespaces"))
+                     (member (seventh parts) '("deployments" "replicasets") :test #'equal)
+                     (member (ninth parts) '("scale" "status") :test #'equal))
+                (and (equal (subseq parts 0 5) '("" "apis" "apps" "v1" "namespaces"))
+                     (equal (seventh parts) "daemonsets") (equal (ninth parts) "status"))
+                (and (equal (subseq parts 0 5) '("" "apis" "batch" "v1" "namespaces"))
+                     (batch-resource-p (seventh parts)) (equal (ninth parts) "status"))))
+       (list (seventh parts) (sixth parts) (eighth parts) (ninth parts))))))
 
 (defun workload-scale-object (object)
   "Return desired replicas and observed replicas/selector using the real workload identity."
   (core-object "apiVersion" "autoscaling/v1" "kind" "Scale" "metadata" (copy-core-object (workload-metadata object))
                "spec" (core-object "replicas" (gethash "replicas" (gethash "spec" object)))
                "status" (core-object "replicas" (gethash "replicas" (gethash "status" object) 0)
-                                     "selector" (workload-selector-string (gethash "selector" (gethash "spec" object))))))
+                                     "selector" (workload-selector-string (workload-spec-selector object)))))
 
 (defun workload-read-subresource-input (old kind schema method)
   "Read JSON/protobuf PUT or schema-aware supported patch formats."
@@ -129,7 +137,7 @@
 
 (defun add-workload-openapi-paths (paths)
   "Describe workload CRUD, collection deletion, and status/scale request schemas."
-  (dolist (resource '("deployments" "replicasets"))
+  (dolist (resource '("deployments" "replicasets" "daemonsets" "controllerrevisions"))
     (let* ((kind (core-resource-kind resource)) (schema (concatenate 'string "io.k8s.api.apps.v1." kind))
            (collection (format nil "/apis/apps/v1/namespaces/{namespace}/~A" resource))
            (item (concatenate 'string collection "/{name}")))
@@ -148,7 +156,9 @@
         (setf (gethash collection paths) (core-object "parameters" (parameters) "get" (operation "list") "post" (operation "create" schema) "delete" (operation "deleteCollection"))
               (gethash item paths) (core-object "parameters" (parameters t) "get" (operation "read") "put" (operation "replace" schema)
                                                "patch" (operation "patch" schema) "delete" (operation "delete")))
-        (dolist (subresource '("status" "scale"))
+        (dolist (subresource (cond ((equal resource "controllerrevisions") nil)
+                                   ((equal resource "daemonsets") '("status"))
+                                   (t '("status" "scale"))))
           (let ((subschema (if (equal subresource "scale") "io.k8s.api.autoscaling.v1.Scale" schema)))
             (setf (gethash (concatenate 'string item "/" subresource) paths)
                   (core-object "parameters" (parameters t) "get" (operation (concatenate 'string "read" subresource))

@@ -2,7 +2,7 @@
 ;;;; SPDX-License-Identifier: MIT
 ;;;;
 ;;;; Purpose:
-;;;; Reconcile real ReplicaSet Pods and Deployment rollouts using durable owner
+;;;; Reconcile real ReplicaSet and ReplicationController Pods and Deployment rollouts using durable owner
 ;;;; UIDs, optimistic mutations, observed Pod readiness and shared background
 ;;;; garbage collection. Repeated passes and process restarts are idempotent.
 
@@ -19,7 +19,7 @@
   "Build the controller reference used for an actual dependent object."
   (core-object "apiVersion" (gethash "apiVersion" owner) "kind" (gethash "kind" owner)
                "name" (gethash "name" (workload-metadata owner)) "uid" (gethash "uid" (workload-metadata owner))
-               "controller" t))
+               "controller" t "blockOwnerDeletion" t))
 
 (defun workload-controller-reference (object)
   "Find the unique controller owner without treating unrelated owners as controllers."
@@ -97,7 +97,7 @@
     (and (pod-status-ready-p status) (or (zerop minimum) (and time (>= (funcall *workload-clock*) (+ time minimum)))))))
 
 (defun change-controller-pod-owner (store owner pod adopt
-                                    &key (resource "replicasets") tracking-finalizer
+                                    &key (resource (workload-owner-resource owner)) tracking-finalizer
                                       (reference (workload-owner-reference owner)))
   "Adopt or release a Pod atomically with exact owner and dependent UID checks."
   (with-store-lock (store)
@@ -123,7 +123,7 @@
 (defun replica-set-pods (reconciler owner &key claim)
   "Find exact-UID children, adopting matching orphans and releasing selector mismatches."
   (let* ((store (reconciler-store reconciler)) (metadata (workload-metadata owner))
-         (selector (gethash "selector" (gethash "spec" owner))) (result nil))
+         (selector (workload-spec-selector owner)) (result nil))
     (dolist (pod (list-pods store (gethash "namespace" metadata)))
       (let* ((object (pod-to-object pod)) (owned (workload-owned-p object owner))
              (matches (workload-selector-matches-p selector (gethash "labels" (workload-metadata object)))))
@@ -134,22 +134,32 @@
            (let ((adopted (change-controller-pod-owner store owner pod t))) (when adopted (push adopted result)))))))
     (nreverse result)))
 
-(defun create-replica-set-pod (store owner)
-  "Admit a real Pod and commit it only if its owner's UID and generation remain current."
+(defun workload-template-pod-object (owner)
+  "Build the Pod a controller OWNER's template describes, with a generated name and owner reference."
   (let* ((template (gethash "template" (gethash "spec" owner)))
          (source-meta (gethash "metadata" template (core-object))) (metadata (core-object))
          (namespace (gethash "namespace" (workload-metadata owner)))
-         (prefix (concatenate 'string (gethash "name" (workload-metadata owner)) "-")))
+         (prefix (concatenate 'string (or (gethash "name" (workload-metadata owner)) "pod") "-")))
     (dolist (key '("labels" "annotations" "finalizers"))
       (when (gethash key source-meta) (setf (gethash key metadata) (copy-core-object (gethash key source-meta)))))
     (setf (gethash "generateName" metadata) (subseq prefix 0 (min 58 (length prefix)))
           (gethash "namespace" metadata) namespace
           (gethash "ownerReferences" metadata) (vector (workload-owner-reference owner)))
-    (let ((pod (admit-in-cluster-pod store
-                 (parse-pod (core-object "apiVersion" "v1" "kind" "Pod" "metadata" metadata
-                                         "spec" (copy-core-object (gethash "spec" template))) :allow-generate-name t))))
+    (core-object "apiVersion" "v1" "kind" "Pod" "metadata" metadata
+                 "spec" (copy-core-object (gethash "spec" template)))))
+
+(defun create-replica-set-pod (store owner &key node-name labels)
+  "Admit a real Pod and commit it only if its owner's UID and generation remain current.
+NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the template's labels."
+  (let ((object (workload-template-pod-object owner)))
+    (when node-name (setf (gethash "nodeName" (gethash "spec" object)) node-name))
+    (when labels
+      (let ((metadata (workload-metadata object)))
+        (unless (gethash "labels" metadata) (setf (gethash "labels" metadata) (core-object)))
+        (loop for (key . value) in labels do (setf (gethash key (gethash "labels" metadata)) value))))
+    (let ((pod (admit-in-cluster-pod store (parse-pod object :allow-generate-name t))))
       (with-store-lock (store)
-        (when (workload-current-unlocked store "replicasets" owner :generation t)
+        (when (workload-current-unlocked store (workload-owner-resource owner) owner :generation t)
           (create-pod-unlocked store pod))))))
 
 (defun replica-set-observations (reconciler owner)
@@ -188,10 +198,12 @@
                                 "replicas" (length active) "fullyLabeledReplicas" fully-labeled
                                 "readyReplicas" ready "availableReplicas" available)))
       (when failure
-        (setf (gethash "conditions" status)
-              (vector (workload-condition (gethash "conditions" (gethash "status" owner) #())
-                                          "ReplicaFailure" "True" failure-reason failure))))
-      (update-workload-controller-status store "replicasets" owner status))))
+        (let ((condition (workload-condition (gethash "conditions" (gethash "status" owner) #())
+                                             "ReplicaFailure" "True" failure-reason failure)))
+          ;; Replica conditions have no lastUpdateTime in their API schema.
+          (remhash "lastUpdateTime" condition)
+          (setf (gethash "conditions" status) (vector condition))))
+      (update-workload-controller-status store (workload-owner-resource owner) owner status))))
 
 (defun deployment-template (object)
   "Compare desired Pod templates independently of the generated rollout label."
@@ -479,11 +491,13 @@
     (bt:with-lock-held ((pod-store-workload-lock store))
       (process-workload-deletions reconciler)
       (reconcile-jobs reconciler)
-      (dolist (resource '("deployments" "replicasets"))
+      (dolist (resource '("deployments" "replicasets" "replicationcontrollers" "daemonsets"))
         (dolist (object (list-core-resources store resource))
           (handler-case
               (unless (gethash "deletionTimestamp" (workload-metadata object))
-                (if (equal resource "deployments") (reconcile-deployment reconciler object) (reconcile-replica-set reconciler object)))
+                (cond ((equal resource "deployments") (reconcile-deployment reconciler object))
+                      ((equal resource "daemonsets") (reconcile-daemonset reconciler object))
+                      (t (reconcile-replica-set reconciler object))))
             (kubernetes-error (condition)
               (unless (member (kubernetes-error-status-code condition) '(404 409))
                 (format *error-output* "gr8s ~A controller: ~A~%" resource condition)))
