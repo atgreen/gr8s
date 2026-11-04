@@ -1,0 +1,142 @@
+{
+  "date": "2026-11-04",
+  "scope": "Independent native per-container restart policy, attempt recovery, sibling identity, log selection and durable retry backoff",
+  "isFullConformanceRun": false,
+  "isCertificationResult": false,
+  "native": {
+    "sourceCommit": "69368cb",
+    "binarySHA256": "e8147bf58a5b9a5aa09d6bc522b344950218cf0b729ec522d66706b8dfd23cd9",
+    "sshPort": 22293,
+    "artifactDirectory": "build/conformance/2026-11-04-restarts-ft170hzp",
+    "command": "python3 /root/test-container-restarts.py --gr8s /root/gr8s.bin --state-directory /var/tmp/gr8s-container-restarts.vauz5tj6/state",
+    "report": {
+      "directory": "/var/tmp/gr8s-container-restarts.ft170hzp",
+      "stateDirectory": "/var/tmp/gr8s-container-restarts.vauz5tj6/state",
+      "nativeSHA256": "e8147bf58a5b9a5aa09d6bc522b344950218cf0b729ec522d66706b8dfd23cd9",
+      "scenarios": {
+        "OnFailureExit7": {
+          "passed": true,
+          "uid": "192999EF-B58D-446A-A6B5-59A31C747022",
+          "mainIDUnchanged": true,
+          "podIPUnchanged": true,
+          "restartCount": 1,
+          "sideContainerID": "containerd://17bb4eabdf92b7a62acf3c7e37f3ffffeb5889f3d3ddad317fd052d3b4612f83"
+        },
+        "AlwaysExit0": {
+          "passed": true,
+          "uid": "2AB1F270-58E3-4856-9454-C0D019F9F7DF",
+          "mainIDUnchanged": true,
+          "podIPUnchanged": true,
+          "restartCount": 1,
+          "sideContainerID": "containerd://7b3fe9e34462641b09b1dba7e42fa302742874a2f128c2e3e4eec26a73f3735d"
+        },
+        "OnFailureExit0": {
+          "passed": true,
+          "uid": "8B41C263-42F0-4747-BD7A-C56F246D0477",
+          "mainIDUnchanged": true,
+          "podIPUnchanged": true,
+          "restartCount": 0,
+          "sideContainerID": "containerd://db833225e3ea3bbb15d8b5a7cb03527f8e5daa0c1a8fe5d97cf43d8b631e2414"
+        },
+        "NeverExit7": {
+          "passed": true,
+          "uid": "31F0AC3B-071A-4646-A5B2-DF0CAAAE7472",
+          "mainIDUnchanged": true,
+          "podIPUnchanged": true,
+          "restartCount": 0,
+          "sideContainerID": "containerd://158e50c902b24a7255cc10704bc25f41c140de00af6942c1f9dac7f5e9606e11"
+        },
+        "durableBackoffAndRestart": {
+          "passed": true,
+          "uid": "CEF5C493-22DA-411D-A080-981D9F2EBABB",
+          "retryDeadline": 4002744911.34608,
+          "nextAttempt": 4,
+          "actualNextStartedUnix": 1793756124.0,
+          "healthyContainerIDUnchanged": true
+        }
+      },
+      "nativeExitCodes": [
+        0,
+        0
+      ],
+      "passed": true,
+      "observationErrors": [
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>",
+        "<urlopen error [Errno 111] Connection refused>"
+      ],
+      "ownedShimsRemaining": []
+    },
+    "artifactSHA256": {
+      "192999EF-B58D-446A-A6B5-59A31C747022-main.log": "4cea6bf2dceb707debea7789dcf7b2b3e1953024ec4713b1dc65081ab13eaefc",
+      "192999EF-B58D-446A-A6B5-59A31C747022-side.1.log": "b221aa0d568af1010d105767986c871b3ec1647e436fcbe93f449913e90f13e7",
+      "192999EF-B58D-446A-A6B5-59A31C747022-side.log": "4efe83ad5310aedc8bee047d2f73739dcb3b92f1d482d3b028e4a95d1d53fe11",
+      "2AB1F270-58E3-4856-9454-C0D019F9F7DF-main.log": "cfe8a6dfa35ac63a40c45070ee0aeda77b8e0bcb760df6e48752fcb0dd1110c7",
+      "2AB1F270-58E3-4856-9454-C0D019F9F7DF-side.1.log": "fa6bbbdb7f8c50bd6cd6418dd06c12686e7930c9b7d55917d6d1610c6b9e3f90",
+      "2AB1F270-58E3-4856-9454-C0D019F9F7DF-side.log": "7932f930d24ba58e492267ea3f8190564e9968e2a2a3dabf46b4ce525e3c65d3",
+      "31F0AC3B-071A-4646-A5B2-DF0CAAAE7472-main.log": "5bf5d4b2b42945b5ad3d01532e7642b728b593e182262537209fc135f502cc0c",
+      "31F0AC3B-071A-4646-A5B2-DF0CAAAE7472-side.log": "3dd0906d00261b3477b96bfd47f3240397f1ee94d1b1fb69c5129a9003e4ca96",
+      "8B41C263-42F0-4747-BD7A-C56F246D0477-main.log": "bff6a5b5898dc5cd97f64aaeec625bfb52f7596b4c48805a3cd5c07ebe8616a6",
+      "8B41C263-42F0-4747-BD7A-C56F246D0477-side.log": "17ffea0356e7684926a679f59b4476c91ae716cee23f40701397977447970032",
+      "Always-0-after.json": "b59736f3747d5736bbf4faa27b80d638cb3d4a9726a8979313f5efc111447e32",
+      "Always-0-before.json": "bc2e0a39edfee622ef849c295c9e02517f65433e4afa06b09866db794ef1a29e",
+      "CEF5C493-22DA-411D-A080-981D9F2EBABB-main.log": "3532108240fbfb27937ee2e5d738f5172f400ef31593e4c175dea748e55c61bd",
+      "CEF5C493-22DA-411D-A080-981D9F2EBABB-side.1.log": "de390ad6e06ece9a7c7b4a5f6991079f1abbff7466c131b2918bc4c8096b74ac",
+      "CEF5C493-22DA-411D-A080-981D9F2EBABB-side.2.log": "b19c9ab8271c9e8ffeb56f13cdbd94fbf7bbce698b363a103cbf4fbb25742913",
+      "CEF5C493-22DA-411D-A080-981D9F2EBABB-side.3.log": "f1826d1160fe289173e9297f9469303ad6c79c045613cd1c27e67794f1f1ff24",
+      "CEF5C493-22DA-411D-A080-981D9F2EBABB-side.4.log": "d5479884a5217a9e6916a441db688d4b67395bd6a8ec19fc098cd20600055e00",
+      "CEF5C493-22DA-411D-A080-981D9F2EBABB-side.log": "27b62cdad1bfea247a0cff87651e30eac532c055ca8dc97ba34cd749d55bc11c",
+      "Never-7-after.json": "25f78a28955a5becb47e719497add164db68790b4c812f3336b090c459710dd0",
+      "Never-7-before.json": "d212d0b802c3d35b9b0c66ef3cca1d11d37f2c68cf235635d99a9c1c08b1d8da",
+      "OnFailure-0-after.json": "1d7661a86f73378c400d97f18750ec57be36114e28e52bc5dc93f821d4b9603d",
+      "OnFailure-0-before.json": "c93fed76e6506bca4c52246c3532e7907797fe4dba0d595b9e0e7d592e241d36",
+      "OnFailure-7-after.json": "807b6167ee47cca5974f4a41be47cd784b03ee7fa738bd9b113c389b7bfb84c4",
+      "OnFailure-7-before.json": "b89fc107471a6b04dc57ce9498b17652f8ea1a624f0d6c40b24cafc4c59ceb60",
+      "backoff-after-restart.json": "0e4543bc37053f32c5d1a52dd91c41749ed52d18200d5aac7a83d179bb2516c0",
+      "backoff-before-restart.json": "0e4543bc37053f32c5d1a52dd91c41749ed52d18200d5aac7a83d179bb2516c0",
+      "gr8s.log": "aae5551113f5b8b81b36e936ed3db7887e437a3280269728ec1816df80983b41",
+      "report.json": "bf0a398ef5219e6dee1e8c7d64d8bfe26808791f5ef73e305ec25f3e9a0cae66"
+    }
+  },
+  "previousNative": {
+    "sourceCommit": "3e37177",
+    "binarySHA256": "5ae5f11544321d26ba24ec147d0980cc2d483db7ec638bb6882b6800526df539",
+    "artifactDirectory": "build/conformance/2026-11-04-restarts-vauz5tj6",
+    "passed": false,
+    "cause": "Omitted protobuf enum zero decoded as NIL; Ready/Created checks raised NIL is not NUMBER. Intentionally stopped after evidence, with clean native exit and zero owned shims. Wire-state regression and corrected native rerun prove the fix.",
+    "reportSHA256": "41bb5ae6469b53c96337c5776f4c453be15dc05791b8719005ea042524d75540"
+  },
+  "host": {
+    "sourceCommit": "eed65aea849b58215f0562261e3b1d9efd4cce20",
+    "focusedRecoveryChecks": 122,
+    "command": "flock /tmp/gr8s-host-http-tests.lock make test",
+    "checks": 2346,
+    "passed": 2341,
+    "optionalSkipped": 5,
+    "failed": 0,
+    "log": "/tmp/gr8s-restarts-final-integrated-host-gate.log",
+    "logSHA256": "7563267e39e99a7ce0d705edeee3cd8ea4f41399fe4ed4a4627ae1fa100e249b",
+    "integration": "Includes merged workload/storage/atomic fixture and proven HTTP2 cleanup fixes. Earlier failing handshake gates are retained under independent transport issue podster-uqb.18; its remaining stress symptom is not claimed solved."
+  },
+  "limitations": [
+    "Dead-sandbox replacement, missing CRI history, retained logs and explicit Unknown handling are covered by deterministic host CRI regressions; the five native scenarios exercise the listed restart policies and process restart.",
+    "A desired Pod spec fingerprint change still replaces the sandbox; independent mutable image updates remain follow-up work.",
+    "Targeted results do not update the completed full conformance baseline or establish Kubernetes certification."
+  ]
+}

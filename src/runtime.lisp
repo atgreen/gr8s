@@ -57,6 +57,15 @@
 
 (defgeneric runtime-observe (runtime uid))
 (defgeneric runtime-ensure (runtime pod))
+(defgeneric runtime-reconcile-containers (runtime pod observed)
+  (:documentation "Advance container lifecycle in POD, preserving healthy siblings in native runtimes."))
+(defmethod runtime-reconcile-containers ((runtime t) pod observed)
+  "Provide whole-Pod restart fallback for simple runtime adapters."
+  (let ((policy (pod-restart-policy pod)) (phase (runtime-pod-phase observed)))
+    (if (or (and (equal policy "Always") (not (equal phase "Running")))
+            (and (equal policy "OnFailure") (equal phase "Failed")))
+        (runtime-ensure runtime pod)
+        observed)))
 (defgeneric runtime-delete (runtime uid))
 (defgeneric runtime-delete-pod (runtime pod)
   (:documentation "Advance durable Pod shutdown; return true only when deletion is complete."))
