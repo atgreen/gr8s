@@ -46,6 +46,39 @@
                        (error () (return)))))
              :name (format nil "backend ~A" label)))))
 
+(defvar *udp-port* 19053)
+
+(defun start-udp-echo (address)
+  "A UDP echo server on ADDRESS:*udp-port*, to test non-VIP connect() passthrough."
+  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :datagram :protocol :udp)))
+    (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
+    (sb-bsd-sockets:socket-bind socket (sb-bsd-sockets:make-inet-address address) *udp-port*)
+    (values socket
+            (bt:make-thread
+             (lambda ()
+               (loop (handler-case
+                         (multiple-value-bind (buf n peer port)
+                             (sb-bsd-sockets:socket-receive socket (make-array 8 :element-type '(unsigned-byte 8)) 8)
+                           (declare (ignore n))
+                           (sb-bsd-sockets:socket-send socket buf 1 :address (list peer port)))
+                       (error () (return)))))
+             :name "udp echo"))))
+
+(defun udp-passthrough-ok-p (address)
+  "Connect a UDP socket to a NON-VIP ADDRESS and round-trip a byte.  connect4
+fires (map miss) and must leave the destination untouched; a failure here is the
+same EHOSTUNREACH the full smoke hits on nslookup."
+  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :datagram :protocol :udp)))
+    (unwind-protect
+         (handler-case
+             (sb-ext:with-timeout 5
+               (sb-bsd-sockets:socket-connect socket (sb-bsd-sockets:make-inet-address address) *udp-port*)
+               (sb-bsd-sockets:socket-send socket (make-array 1 :element-type '(unsigned-byte 8) :initial-element 7) 1)
+               (multiple-value-bind (buf n) (sb-bsd-sockets:socket-receive socket (make-array 1 :element-type '(unsigned-byte 8)) 1)
+                 (declare (ignore buf)) (plusp n)))
+           (error (c) (format t "~&  udp passthrough error: ~A~%" c) nil))
+      (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+
 (defun connect-vip ()
   (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect

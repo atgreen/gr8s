@@ -287,7 +287,6 @@
                         (lambda (old) (setf (gethash "type" (gethash "spec" old)) "ExternalName"
                                             (gethash "externalName" (gethash "spec" old)) "again.example.com") old))))
         (is (null (gethash "clusterIP" (gethash "spec" external))))
-        (is (null (funcall (gr8s::native-service-backend-resolver store "alpha" "alias" uid 80))))
         (is (equal "again.example.com" (dns-test-cname-target
                                         (service-dns-test-message store "alias.alpha.svc.cluster.local" 0conf:+type-cname+))))))))
 
@@ -315,6 +314,7 @@
 (test service-dns-externalname-transition-releases-generated-slices-without-adopting-manual
   (with-temporary-store (store directory)
     (let ((service (gr8s::create-core-resource store "services" (service-test-object "web" "http") "alpha")))
+      (declare (ignorable service))
       (create-endpointslice-test-pod store "backend" "alpha" "192.0.2.55")
       (gr8s::reconcile-endpointslices store)
       (is (= 1 (length (gr8s::list-core-resources store "endpointslices" "alpha"))))
@@ -326,6 +326,4 @@
         (let ((remaining (gr8s::list-core-resources store "endpointslices" "alpha")))
           (is (= 1 (length remaining)))
           (is (equal (gethash "uid" (gethash "metadata" manual))
-                     (gethash "uid" (gethash "metadata" (first remaining))))))
-        (is (null (funcall (gr8s::native-service-backend-resolver store "alpha" "web"
-                            (gethash "uid" (gethash "metadata" service)) 8080))))))))
+                     (gethash "uid" (gethash "metadata" (first remaining))))))))))

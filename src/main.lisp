@@ -480,7 +480,6 @@
          (pki (ensure-cluster-pki (merge-pathnames "pki/" state-directory)))
          (server nil)
          (api-server nil)
-         (service-controller nil)
          (service-network-created nil)
          (worker nil)
          (node-server nil)
@@ -510,8 +509,7 @@
                       (ensure-native-bootstrap-namespaces store)
                       (ensure-native-api-service store)
                       (setf service-network-created (ensure-in-cluster-network pki))
-                      (setf api-server (start-in-cluster-api store runtime reconciler pki)
-                            service-controller (make-native-service-controller store))
+                      (setf api-server (start-in-cluster-api store runtime reconciler pki))
                       (setf (pod-store-in-cluster-config store)
                             (list :host "10.96.0.1" :port 443
                                   :ca-pem (uiop:read-file-string (cluster-pki-ca-certificate-path pki))))
@@ -531,9 +529,11 @@
                                       (reconcile-workloads reconciler)
                                       (reconcile-endpointslices store)
                                       (publish-service-discovery-snapshots runtime)
-                                      (when service-controller
-                                        (ensure-in-cluster-network pki)
-                                        (reconcile-native-services service-controller)))))
+                                      ;; ClusterIP Services are load-balanced in-kernel by the
+                                      ;; agent's eBPF socket LB; the control plane only keeps the
+                                      ;; in-cluster API address present.
+                                      (when service-network-created
+                                        (ensure-in-cluster-network pki)))))
                     (when (getf options :kubeconfig)
                       (write-kubeconfig
                        (getf options :kubeconfig)
@@ -544,7 +544,6 @@
                (when worker (stop-reconciliation-worker worker))
                (when runtime (stop-runtime-deletions runtime))
                (when server (stop-server server))
-               (when service-controller (stop-native-service-controller service-controller))
                (when api-server (stop-server api-server))
                (when (or api-server service-network-created) (remove-in-cluster-network pki))
                (setf (pod-store-in-cluster-config store) nil))))
