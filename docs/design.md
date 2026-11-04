@@ -36,8 +36,7 @@ into the API response.
 
 `gr8s-runtime` is a protocol for observing and changing runtime Pods. The
 production adapter calls Kubernetes CRI v1 over a private Unix socket using
-ag-gRPC. A deterministic fake implementation supports unit and API tests. The
-old Podman adapter is retained only as an optional compatibility path.
+ag-gRPC. A deterministic fake implementation supports unit and API tests.
 
 The native image contains containerd, its runc-v2 shim, runc, the bridge,
 host-local, and loopback CNI plugins, and a Whistler-generated eBPF object. The

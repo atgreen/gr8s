@@ -4,7 +4,7 @@ gr8s is a small Kubernetes-compatible Pod control plane written in Common
 Lisp. One dumped native image provides the control-plane, node-agent, and CNI
 roles. It serves the Kubernetes HTTP API on loopback and uses the same basic
 runtime boundary as k3s: containerd reached through the Kubernetes CRI, rather
-than shelling out to Podman. Workload execution is currently verified on the
+than shelling out to a container CLI. Workload execution is currently verified on the
 local node through the same private gRPC control channel used by standalone
 agents. The control plane schedules Pods and publishes desired state; the agent
 owns the node runtime and reports observed status.
@@ -44,8 +44,7 @@ kubectl -> gr8s HTTP API -> scheduler -> desired-state snapshot
 Verified CRI operations include runtime version discovery, image pull, Pod
 sandbox creation, container creation and start, status/exit-code observation,
 CRI log output, and clean container/sandbox removal. The node agent uses this
-managed containerd adapter by default. The existing Podman adapter remains only
-as a legacy compatibility implementation.
+managed containerd adapter by default.
 
 ## Kubernetes surface
 
@@ -197,7 +196,6 @@ recreate a deleted Pod.
   privileges for the Whistler CNI stage
 - Python 3, `ip`, `nsenter`, `nft`, and a non-loopback upstream resolver for
   the privileged two-node smoke
-- Podman only for the optional legacy-adapter integration test
 
 ## Build and run the self-contained server
 
@@ -210,7 +208,7 @@ sudo build/gr8s serve \
   --kubeconfig /tmp/gr8s.kubeconfig
 ```
 
-No Podman, system containerd, or host glibc is used by the embedded runtime
+No system containerd or host glibc is used by the embedded runtime
 payload. Root is still required for the Linux facilities used by containers:
 mounts, namespaces, cgroups, and the overlay snapshotter.
 
@@ -356,12 +354,6 @@ both Pods reach Running. Remote VTEP source validation, abrupt agent/crash
 recovery, and the remaining Pod-pool configuration requirements are still tracked
 work.
 
-The disposable legacy Podman test is opt-in:
-
-```sh
-make test-podman
-```
-
 The direct containerd checks are opt-in and require a prepared CRI socket:
 
 ```sh
@@ -390,7 +382,6 @@ Useful targets include:
 make containerd-bundle build and verify containerd, runc, and CNI payloads
 make test          unit and HTTP tests
 make test-containerd include live CRI/containerd integration tests
-make test-podman   include the legacy Podman integration test
 make test-whistler-cni build the eBPF object and test the Common Lisp CNI path
 make check         shell syntax checks plus tests
 make smoke         build normally, then sudo the embedded-containerd smoke workflow

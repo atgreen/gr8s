@@ -22,7 +22,7 @@ NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
 NODE_PROTOCOL_LISP := src/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 
-.PHONY: all help containerd-bundle generate-protocol test test-containerd test-podman test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb test-core-api check smoke smoke-two-node run kubeconfig native clean
+.PHONY: all help containerd-bundle generate-protocol test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb test-core-api check smoke smoke-two-node run kubeconfig native clean
 
 all: native
 
@@ -40,7 +40,6 @@ help:
 	@echo "  test-vxlan-network Test two-node VXLAN and routed Pod connectivity"
 	@echo "  test-agent-network Test agent CNI IPC, IPAM recovery, and Pod DNS"
 	@echo "  test-node-topology Test live node snapshots, VXLAN, and route recovery"
-	@echo "  test-podman   Include the disposable rootless Podman integration test"
 	@echo "  test-whistler-cni Test the chained Whistler TC/eBPF CNI plugin"
 	@echo "  test-service-lb Load/attach/pin the ClusterIP socket LB on a real kernel (sudo)"
 	@echo "  smoke-service-lb End-to-end: redirect an unrouted ClusterIP connect to backends (sudo)"
@@ -101,9 +100,6 @@ test-endpoint-policy-kernel: build/gr8s-endpoint-test.json
 
 test-core-api:
 	scripts/test-core-api.sh
-
-test-podman:
-	GR8S_RUN_PODMAN_TESTS=1 $(SBCL) --noinform --non-interactive $(TEST_EVAL)
 
 test-whistler-cni: containerd-bundle test
 
