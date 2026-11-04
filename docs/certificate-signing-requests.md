@@ -45,6 +45,12 @@ Denied/Failed, the three built-ins issue actual CA-signed certificates:
 - `kubernetes.io/kubelet-serving` requires the node subject, server usages,
   at least one DNS/IP SAN and no email/URI SANs.
 
+Repeated common-name attributes follow Go `pkix.Name` semantics: the last
+signed common name drives kubelet policy and certificate-user identity. Raw
+subjects are preserved in the issued certificate; multi-CN subjects are not
+blanket rejected. Independent Go signature/subject/leaf verification covers
+both common-name orderings and all three built-in signers.
+
 Policy failures receive a real Failed condition. Custom signers remain Pending
 unless an authorized external signer supplies an actual certificate through
 status. This is normal Kubernetes behavior; optional custom-signer controller

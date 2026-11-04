@@ -11,6 +11,31 @@
 (def-suite csr-apis :in gr8s)
 (in-suite csr-apis)
 
+(test csr-kubelet-policy-uses-the-last-signed-common-name
+  (with-temporary-store (store directory)
+    (let ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory))))
+      (loop for (subject expected-name eligible) in
+            '(("/CN=ordinary-first/CN=system:node:last-node/O=system:nodes" "system:node:last-node" t)
+              ("/CN=system:node:first-node/CN=ordinary-last/O=system:nodes" "ordinary-last" nil))
+            for index from 0
+            for name = (format nil "multi-cn-~D" index)
+            for request = (csr-crypto-fixture directory "ec" :subject subject :sans nil)
+            for parsed = (gr8s::parse-and-verify-certificate-request request)
+            for fixture = (csr-fixture request :name name :signer "kubernetes.io/kube-apiserver-client-kubelet"
+                                       :usages #("digital signature" "client auth"))
+            do (is (equal expected-name (gr8s::csr-subject-common-name (gr8s::parsed-certificate-request-subject parsed))))
+               (is (eq eligible (null (gr8s::csr-signer-policy-failure parsed (gethash "spec" fixture)))))
+               (gr8s::create-core-resource store "certificatesigningrequests" fixture nil)
+               (approve-csr-fixture store name)
+               (gr8s::reconcile-certificate-signing-requests store pki)
+               (let ((status (gethash "status" (gr8s::get-core-resource store "certificatesigningrequests" nil name))))
+                 (if eligible
+                     (let ((certificate (gr8s::certificate-from-pem
+                                          (trivial-utf-8:utf-8-bytes-to-string
+                                            (gr8s::core-base64-bytes (gethash "certificate" status) "certificate")))))
+                       (is (equal expected-name (gr8s::csr-subject-common-name (pure-tls::x509-certificate-subject certificate)))))
+                     (is-true (gr8s::csr-condition status "Failed"))))))))
+
 (defun csr-fixture (request &key (name "example-csr") (signer "example.test/custom") (usages #("digital signature" "key encipherment" "server auth")))
   "Build a typed request around actual PKCS#10 PEM bytes."
   (gr8s::core-object "apiVersion" "certificates.k8s.io/v1" "kind" "CertificateSigningRequest"

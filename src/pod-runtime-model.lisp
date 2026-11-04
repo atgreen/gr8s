@@ -64,7 +64,9 @@
                 (invalid-pod "environment key reference optional must be boolean"))))))))
 
 (defun validate-runtime-container (container)
-  "Validate mount declarations, image policy and container security settings."
+  "Validate mount declarations, executable probes, image policy and security settings."
+  (dolist (kind '("startupProbe" "readinessProbe" "livenessProbe"))
+    (when (gethash kind container) (validate-container-probe (gethash kind container) kind)))
   (when (gethash "imagePullPolicy" container)
     (unless (member (gethash "imagePullPolicy" container) '("Always" "IfNotPresent" "Never") :test #'equal)
       (invalid-pod "invalid imagePullPolicy")))

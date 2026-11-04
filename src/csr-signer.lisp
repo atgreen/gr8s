@@ -40,7 +40,7 @@
          "Client signer requires client auth and permits only digital signature/key encipherment"))
       ((not (equal '("system:nodes") (loop for (oid . value) in subject when (eq oid :organization-name) collect value)))
        "Kubelet CSR organization must be exactly system:nodes")
-      ((not (let ((name (cdr (assoc :common-name subject)))) (and name (uiop:string-prefix-p "system:node:" name))))
+      ((not (let ((name (csr-subject-common-name (parsed-certificate-request-subject parsed)))) (and name (uiop:string-prefix-p "system:node:" name))))
        "Kubelet CSR common name must begin system:node:")
       ((not (or (and (= (length usages) 2) (member "digital signature" usages :test #'equal)
                       (member (if serving "server auth" "client auth") usages :test #'equal))

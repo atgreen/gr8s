@@ -1,0 +1,714 @@
+{
+  "focus": "Probing container.*\\[Conformance\\]",
+  "mode": "focused",
+  "isCertificationResult": false,
+  "nativeSHA256": "f4e09c4e047114c3c357f46936bc8c15da1fb4cfce03f964a2bf1b068da2f5fc",
+  "stateDirectory": "/var/tmp/gr8s-conformance.a4fy165q/state",
+  "reusedState": true,
+  "nativeAgentReady": true,
+  "version": {
+    "major": "1",
+    "minor": "36",
+    "gitVersion": "v1.36.0-gr8s.0",
+    "gitCommit": "unknown",
+    "gitTreeState": "clean",
+    "buildDate": "1970-01-01T00:00:00Z",
+    "goVersion": "common-lisp",
+    "compiler": "sbcl",
+    "platform": "linux/amd64"
+  },
+  "sonobuoyVersion": "v0.57.5",
+  "stateReuseCleanupOperations": [
+    {
+      "resource": "configmaps",
+      "name": "kube-root-ca.crt",
+      "uid": "A181F260-ED88-4B9C-9E2A-533E60FC3327",
+      "code": 200
+    },
+    {
+      "resource": "configmaps",
+      "name": "sonobuoy-config-cm",
+      "uid": "CE2D2FF7-B7E3-460C-9380-E246A06311EA",
+      "code": 200
+    },
+    {
+      "resource": "configmaps",
+      "name": "sonobuoy-plugins-cm",
+      "uid": "FFBC1306-36CD-4A77-8CF2-B037543977A8",
+      "code": 200
+    },
+    {
+      "resource": "secrets",
+      "name": "sonobuoy-serviceaccount-token-db7fed4f",
+      "uid": "8E106F69-A350-4C80-AEE2-5201767E469E",
+      "code": 200
+    },
+    {
+      "resource": "serviceaccounts",
+      "name": "default",
+      "uid": "507DEA7C-1268-46A9-95D8-720230E1985A",
+      "code": 200
+    },
+    {
+      "resource": "serviceaccounts",
+      "name": "sonobuoy-serviceaccount",
+      "uid": "DB7FED4F-88C9-4CBD-BEB1-0442E41CD378",
+      "code": 200
+    },
+    {
+      "resource": "services",
+      "name": "sonobuoy-aggregator",
+      "uid": "D8796F81-5309-4285-B3E9-4AB8B2DD361D",
+      "code": 200
+    },
+    {
+      "resource": "clusterrolebindings",
+      "name": "sonobuoy-serviceaccount-sonobuoy",
+      "uid": "505E6D3B-EB45-4D5A-A8E4-ED426D2998C6",
+      "code": 200
+    },
+    {
+      "resource": "clusterroles",
+      "name": "sonobuoy-serviceaccount-sonobuoy",
+      "uid": "6A8E74A4-A939-4E77-B16E-A2FEE676B71E",
+      "code": 200
+    },
+    {
+      "resource": "namespaces",
+      "name": "sonobuoy",
+      "code": 200
+    }
+  ],
+  "command": [
+    "/root/sonobuoy",
+    "run",
+    "--kubeconfig",
+    "/var/tmp/gr8s-podtemplates._wjt0leg/kubeconfig",
+    "--dns-pod-labels=",
+    "--plugin=e2e",
+    "--e2e-focus=Probing container.*\\[Conformance\\]",
+    "--e2e-skip="
+  ],
+  "sonobuoyRunExitCode": 0,
+  "podsAtCompletion": [
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "labels": {
+          "component": "sonobuoy",
+          "sonobuoy-component": "aggregator",
+          "tier": "analysis"
+        },
+        "name": "sonobuoy",
+        "namespace": "sonobuoy",
+        "uid": "5CBAE1B0-EF98-47D9-9D3D-158DB1FB1981",
+        "resourceVersion": "213",
+        "generation": 1,
+        "creationTimestamp": "2026-11-04T03:27:00Z",
+        "annotations": {
+          "sonobuoy.hept.io/status": "{\"plugins\":[{\"plugin\":\"e2e\",\"node\":\"global\",\"status\":\"complete\",\"result-status\":\"passed\",\"result-counts\":{\"passed\":17,\"skipped\":7569},\"progress\":{\"name\":\"e2e\",\"node\":\"global\",\"timestamp\":\"2026-11-04T03:54:48.404320434Z\",\"msg\":\"Test Suite completed\",\"total\":10,\"completed\":0}}],\"status\":\"complete\",\"tar-info\":{\"name\":\"202611040327_sonobuoy_6235ffe5-7a70-459f-8996-2277241828d6.tar.gz\",\"created\":\"2026-11-04T03:55:05.803465258Z\",\"sha256\":\"53df5103119704762eb0242a882f2e03bc6eb524299ecaba07d5ce419300b830\",\"size\":208791}}"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "args": [
+              "aggregator",
+              "--no-exit",
+              "--level=info",
+              "-v=4",
+              "--alsologtostderr"
+            ],
+            "command": [
+              "/sonobuoy"
+            ],
+            "env": [
+              {
+                "name": "SONOBUOY_ADVERTISE_IP",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "status.podIP"
+                  }
+                }
+              },
+              {
+                "name": "KUBERNETES_SERVICE_HOST",
+                "value": "10.96.0.1"
+              },
+              {
+                "name": "KUBERNETES_SERVICE_PORT",
+                "value": "443"
+              },
+              {
+                "name": "KUBERNETES_SERVICE_PORT_HTTPS",
+                "value": "443"
+              }
+            ],
+            "image": "sonobuoy/sonobuoy:v0.57.5",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "kube-sonobuoy",
+            "volumeMounts": [
+              {
+                "mountPath": "/etc/sonobuoy",
+                "name": "sonobuoy-config-volume"
+              },
+              {
+                "mountPath": "/plugins.d",
+                "name": "sonobuoy-plugins-volume"
+              },
+              {
+                "mountPath": "/tmp/sonobuoy",
+                "name": "output-volume"
+              },
+              {
+                "name": "gr8s-api-access",
+                "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+                "readOnly": true
+              }
+            ]
+          }
+        ],
+        "restartPolicy": "Never",
+        "securityContext": {
+          "fsGroup": 2000,
+          "runAsGroup": 3000,
+          "runAsUser": 1000
+        },
+        "serviceAccountName": "sonobuoy-serviceaccount",
+        "tolerations": [
+          {
+            "key": "kubernetes.io/e2e-evict-taint-key",
+            "operator": "Exists"
+          }
+        ],
+        "volumes": [
+          {
+            "configMap": {
+              "name": "sonobuoy-config-cm"
+            },
+            "name": "sonobuoy-config-volume"
+          },
+          {
+            "configMap": {
+              "name": "sonobuoy-plugins-cm"
+            },
+            "name": "sonobuoy-plugins-volume"
+          },
+          {
+            "emptyDir": {},
+            "name": "output-volume"
+          },
+          {
+            "name": "gr8s-api-access",
+            "secret": {
+              "secretName": "sonobuoy-serviceaccount-token-a5af443a",
+              "defaultMode": 420
+            }
+          }
+        ],
+        "terminationGracePeriodSeconds": 30,
+        "nodeName": "gr8s-local"
+      },
+      "status": {
+        "containerStatuses": [
+          {
+            "name": "kube-sonobuoy",
+            "containerID": "containerd://bfb39c1ee89f14a07abd2fd689e85b58b8b312b46459bbee62a81059c15e97df",
+            "image": "docker.io/sonobuoy/sonobuoy:v0.57.5",
+            "imageID": "docker.io/sonobuoy/sonobuoy@sha256:7a65a613a53017dfbe674f61890f8f5b16b4a8085286f625eeb42b6ae64c48b8",
+            "restartCount": 0,
+            "ready": true,
+            "started": true,
+            "state": {
+              "running": {
+                "startedAt": "2026-11-04T03:27:22Z"
+              }
+            }
+          }
+        ],
+        "phase": "Running",
+        "podIP": "10.88.0.1",
+        "podIPs": [
+          {
+            "ip": "10.88.0.1"
+          }
+        ],
+        "observedGeneration": 1,
+        "conditions": [
+          {
+            "type": "PodScheduled",
+            "status": "True",
+            "lastTransitionTime": "2026-11-04T03:27:00Z",
+            "observedGeneration": 1
+          },
+          {
+            "type": "Initialized",
+            "status": "True",
+            "lastTransitionTime": "2026-11-04T03:27:00Z",
+            "observedGeneration": 1
+          },
+          {
+            "type": "ContainersReady",
+            "status": "True",
+            "lastTransitionTime": "2026-11-04T03:27:22Z",
+            "observedGeneration": 1
+          },
+          {
+            "type": "Ready",
+            "status": "True",
+            "lastTransitionTime": "2026-11-04T03:27:22Z",
+            "observedGeneration": 1
+          }
+        ]
+      }
+    },
+    {
+      "kind": "Pod",
+      "apiVersion": "v1",
+      "metadata": {
+        "name": "sonobuoy-e2e-job-e3f0055ec5fa4a13",
+        "namespace": "sonobuoy",
+        "creationTimestamp": "2026-11-04T03:27:22Z",
+        "labels": {
+          "component": "sonobuoy",
+          "sonobuoy-component": "plugin",
+          "sonobuoy-plugin": "e2e",
+          "sonobuoy-run": "e3f0055ec5fa4a13",
+          "tier": "analysis"
+        },
+        "annotations": {
+          "sonobuoy-driver": "Job",
+          "sonobuoy-plugin": "e2e"
+        },
+        "ownerReferences": [
+          {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "name": "sonobuoy",
+            "uid": "5CBAE1B0-EF98-47D9-9D3D-158DB1FB1981"
+          }
+        ],
+        "uid": "C956DE03-E064-4DF4-AD7A-37813BDFDE54",
+        "resourceVersion": "2",
+        "generation": 1
+      },
+      "spec": {
+        "volumes": [
+          {
+            "name": "results",
+            "emptyDir": {}
+          },
+          {
+            "name": "gr8s-api-access",
+            "secret": {
+              "secretName": "sonobuoy-serviceaccount-token-a5af443a",
+              "defaultMode": 420
+            }
+          }
+        ],
+        "containers": [
+          {
+            "name": "e2e",
+            "image": "registry.k8s.io/conformance:v1.36.0",
+            "command": [
+              "/run_e2e.sh"
+            ],
+            "env": [
+              {
+                "name": "E2E_EXTRA_ARGS",
+                "value": "--progress-report-url=http://localhost:8099/progress"
+              },
+              {
+                "name": "E2E_FOCUS",
+                "value": "Probing container.*\\[Conformance\\]"
+              },
+              {
+                "name": "E2E_PARALLEL",
+                "value": "false"
+              },
+              {
+                "name": "E2E_USE_GO_RUNNER",
+                "value": "true"
+              },
+              {
+                "name": "RESULTS_DIR",
+                "value": "/tmp/sonobuoy/results"
+              },
+              {
+                "name": "SONOBUOY",
+                "value": "true"
+              },
+              {
+                "name": "SONOBUOY_CONFIG_DIR",
+                "value": "/tmp/sonobuoy/config"
+              },
+              {
+                "name": "SONOBUOY_K8S_VERSION",
+                "value": "v1.36.0"
+              },
+              {
+                "name": "SONOBUOY_PROGRESS_PORT",
+                "value": "8099"
+              },
+              {
+                "name": "SONOBUOY_RESULTS_DIR",
+                "value": "/tmp/sonobuoy/results"
+              },
+              {
+                "name": "KUBERNETES_SERVICE_HOST",
+                "value": "10.96.0.1"
+              },
+              {
+                "name": "KUBERNETES_SERVICE_PORT",
+                "value": "443"
+              },
+              {
+                "name": "KUBERNETES_SERVICE_PORT_HTTPS",
+                "value": "443"
+              }
+            ],
+            "resources": {},
+            "volumeMounts": [
+              {
+                "name": "results",
+                "mountPath": "/tmp/sonobuoy/results"
+              },
+              {
+                "name": "gr8s-api-access",
+                "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+                "readOnly": true
+              }
+            ],
+            "imagePullPolicy": "IfNotPresent"
+          },
+          {
+            "name": "sonobuoy-worker",
+            "image": "sonobuoy/sonobuoy:v0.57.5",
+            "command": [
+              "/sonobuoy"
+            ],
+            "args": [
+              "worker",
+              "global",
+              "--level=trace",
+              "-v=6",
+              "--logtostderr"
+            ],
+            "env": [
+              {
+                "name": "AGGREGATOR_URL",
+                "value": "https://10.88.0.1:8080"
+              },
+              {
+                "name": "CA_CERT",
+                "value": "-----BEGIN CERTIFICATE-----\nMIIB3DCCAYOgAwIBAgIBATAKBggqhkjOPQQDAjBKMQwwCgYDVQQGEwNVU0ExFjAU\nBgNVBAcTDVBhbG8gQWx0bywgQ0ExDzANBgNVBAoTBlZNd2FyZTERMA8GA1UECxMI\nU29ub2J1b3kwHhcNMjYxMTA0MDMyNzIyWhcNMjYxMTA2MDMyNzIyWjBKMQwwCgYD\nVQQGEwNVU0ExFjAUBgNVBAcTDVBhbG8gQWx0bywgQ0ExDzANBgNVBAoTBlZNd2Fy\nZTERMA8GA1UECxMIU29ub2J1b3kwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASA\ncZTO2OjN+q/ZBTgjFllPmyH1mz99PDfMJp3ukNTPweGPNhlco0lHR6EtpSlXiRUq\ncRdUdkobRhDrss46oTh1o1owWDAOBgNVHQ8BAf8EBAMCAgQwDwYDVR0TAQH/BAUw\nAwEB/zAdBgNVHQ4EFgQU/4szQynUaIDNZDwjyFs0regw5BcwFgYDVR0RBA8wDYIL\nc29ub2J1b3ktY2EwCgYIKoZIzj0EAwIDRwAwRAIgHSyzYgQ2un7III5Zaq7wTlYN\n/dyPQc4MZxXqnH1yQJ4CICyE97acRAvuZ6i4j7dfCLKXi3t44licoIUMf5Ni50Ut\n-----END CERTIFICATE-----\n"
+              },
+              {
+                "name": "CLIENT_CERT",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "name": "sonobuoy-plugin-e2e-e3f0055ec5fa4a13",
+                    "key": "tls.crt"
+                  }
+                }
+              },
+              {
+                "name": "CLIENT_KEY",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "name": "sonobuoy-plugin-e2e-e3f0055ec5fa4a13",
+                    "key": "tls.key"
+                  }
+                }
+              },
+              {
+                "name": "E2E_EXTRA_ARGS",
+                "value": "--progress-report-url=http://localhost:8099/progress"
+              },
+              {
+                "name": "E2E_FOCUS",
+                "value": "Probing container.*\\[Conformance\\]"
+              },
+              {
+                "name": "E2E_PARALLEL",
+                "value": "false"
+              },
+              {
+                "name": "E2E_USE_GO_RUNNER",
+                "value": "true"
+              },
+              {
+                "name": "NODE_NAME",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "spec.nodeName"
+                  }
+                }
+              },
+              {
+                "name": "RESULT_TYPE",
+                "value": "e2e"
+              },
+              {
+                "name": "RESULTS_DIR",
+                "value": "/tmp/sonobuoy/results"
+              },
+              {
+                "name": "SONOBUOY",
+                "value": "true"
+              },
+              {
+                "name": "SONOBUOY_CONFIG_DIR",
+                "value": "/tmp/sonobuoy/config"
+              },
+              {
+                "name": "SONOBUOY_DIR",
+                "value": "/tmp/sonobuoy"
+              },
+              {
+                "name": "SONOBUOY_K8S_VERSION",
+                "value": "v1.36.0"
+              },
+              {
+                "name": "SONOBUOY_NS",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.namespace"
+                  }
+                }
+              },
+              {
+                "name": "SONOBUOY_PLUGIN_POD",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.name"
+                  }
+                }
+              },
+              {
+                "name": "SONOBUOY_PROGRESS_PORT",
+                "value": "8099"
+              },
+              {
+                "name": "SONOBUOY_RESULTS_DIR",
+                "value": "/tmp/sonobuoy/results"
+              },
+              {
+                "name": "SONOBUOY_WORKER_CONTAINER",
+                "value": "sonobuoy-worker"
+              },
+              {
+                "name": "KUBERNETES_SERVICE_HOST",
+                "value": "10.96.0.1"
+              },
+              {
+                "name": "KUBERNETES_SERVICE_PORT",
+                "value": "443"
+              },
+              {
+                "name": "KUBERNETES_SERVICE_PORT_HTTPS",
+                "value": "443"
+              }
+            ],
+            "resources": {},
+            "volumeMounts": [
+              {
+                "name": "results",
+                "mountPath": "/tmp/sonobuoy/results"
+              },
+              {
+                "name": "gr8s-api-access",
+                "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+                "readOnly": true
+              }
+            ],
+            "imagePullPolicy": "IfNotPresent"
+          }
+        ],
+        "restartPolicy": "Never",
+        "nodeSelector": {
+          "kubernetes.io/os": "linux"
+        },
+        "serviceAccountName": "sonobuoy-serviceaccount",
+        "tolerations": [
+          {
+            "key": "node-role.kubernetes.io/master",
+            "operator": "Exists",
+            "effect": "NoSchedule"
+          },
+          {
+            "key": "CriticalAddonsOnly",
+            "operator": "Exists"
+          },
+          {
+            "key": "kubernetes.io/e2e-evict-taint-key",
+            "operator": "Exists"
+          }
+        ],
+        "terminationGracePeriodSeconds": 30,
+        "nodeName": "gr8s-local"
+      },
+      "status": {
+        "containerStatuses": [
+          {
+            "name": "e2e",
+            "containerID": "containerd://319560a6b451546000bfdc865ff2c3ddf0449c52dda3d2009a0f51c0c83058db",
+            "image": "registry.k8s.io/conformance:v1.36.0",
+            "imageID": "registry.k8s.io/conformance@sha256:d2158f40555e28265994711e971c3f6f9f5591ffcae7ca0209909ae4bd71c21e",
+            "restartCount": 0,
+            "ready": false,
+            "started": false,
+            "state": {
+              "terminated": {
+                "exitCode": 0,
+                "containerID": "containerd://319560a6b451546000bfdc865ff2c3ddf0449c52dda3d2009a0f51c0c83058db",
+                "startedAt": "2026-11-04T03:27:35Z",
+                "finishedAt": "2026-11-04T03:54:48Z",
+                "reason": "Completed",
+                "message": ""
+              }
+            }
+          },
+          {
+            "name": "sonobuoy-worker",
+            "containerID": "containerd://c0d98c80d389e2717dbab46aa7d41ac89fa25fcbc62126f908fb82a3f47fd180",
+            "image": "docker.io/sonobuoy/sonobuoy:v0.57.5",
+            "imageID": "docker.io/sonobuoy/sonobuoy@sha256:7a65a613a53017dfbe674f61890f8f5b16b4a8085286f625eeb42b6ae64c48b8",
+            "restartCount": 0,
+            "ready": false,
+            "started": false,
+            "state": {
+              "terminated": {
+                "exitCode": 0,
+                "containerID": "containerd://c0d98c80d389e2717dbab46aa7d41ac89fa25fcbc62126f908fb82a3f47fd180",
+                "startedAt": "2026-11-04T03:27:46Z",
+                "finishedAt": "2026-11-04T03:54:54Z",
+                "reason": "Completed",
+                "message": ""
+              }
+            }
+          }
+        ],
+        "phase": "Succeeded",
+        "podIP": "10.88.0.2",
+        "podIPs": [
+          {
+            "ip": "10.88.0.2"
+          }
+        ],
+        "observedGeneration": 1,
+        "conditions": [
+          {
+            "type": "PodScheduled",
+            "status": "True",
+            "lastTransitionTime": "2026-11-04T03:27:22Z",
+            "observedGeneration": 1
+          },
+          {
+            "type": "Initialized",
+            "status": "True",
+            "lastTransitionTime": "2026-11-04T03:27:22Z",
+            "observedGeneration": 1,
+            "reason": "PodCompleted"
+          },
+          {
+            "type": "ContainersReady",
+            "status": "False",
+            "lastTransitionTime": "2026-11-04T03:54:53Z",
+            "observedGeneration": 1,
+            "reason": "PodCompleted"
+          },
+          {
+            "type": "Ready",
+            "status": "False",
+            "lastTransitionTime": "2026-11-04T03:54:53Z",
+            "observedGeneration": 1,
+            "reason": "PodCompleted"
+          }
+        ]
+      }
+    }
+  ],
+  "passed": true,
+  "suiteStarts": 1,
+  "selectedSpecs": [
+    [
+      "10",
+      "7579"
+    ]
+  ],
+  "upstreamCases": [
+    {
+      "name": "[It] [sig-node] Probing container should *not* be restarted with a /healthz http liveness probe [NodeConformance] [Conformance]",
+      "seconds": "265.127088079",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-node] Probing container should *not* be restarted with a GRPC liveness probe [NodeConformance] [Conformance]",
+      "seconds": "257.051410543",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-node] Probing container should *not* be restarted with a exec \"cat /tmp/health\" liveness probe [NodeConformance] [Conformance]",
+      "seconds": "263.129509456",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-node] Probing container should *not* be restarted with a tcp:8080 liveness probe [NodeConformance] [Conformance]",
+      "seconds": "259.116893445",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-node] Probing container should be restarted with a /healthz http liveness probe [NodeConformance] [Conformance]",
+      "seconds": "42.400446614",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-node] Probing container should be restarted with a GRPC liveness probe [NodeConformance] [Conformance]",
+      "seconds": "101.14068908",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-node] Probing container should be restarted with a exec \"cat /tmp/health\" liveness probe [NodeConformance] [Conformance]",
+      "seconds": "40.446465287",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-node] Probing container should have monotonically increasing restart count [NodeConformance] [Conformance]",
+      "seconds": "293.85246847",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-node] Probing container with readiness probe should not be ready before initial delay and never restart [NodeConformance] [Conformance]",
+      "seconds": "38.371035198",
+      "passed": true
+    },
+    {
+      "name": "[It] [sig-node] Probing container with readiness probe that fails should never be ready and never restart [NodeConformance] [Conformance]",
+      "seconds": "60.217668407",
+      "passed": true
+    }
+  ],
+  "suiteHookEntries": 7,
+  "nativeExitCode": 0,
+  "ownedShimsRemaining": [],
+  "artifactSHA256": {
+    "gr8s.log": "d425d1f4346d2839890239ce8ef9a9f1a1747b8478a4d94288d1955840304b84",
+    "kubeconfig": "6cacedfa8b519928003c14d32486a684235b8210e2681f81950a9cac47a62abb",
+    "sonobuoy.stdout.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sonobuoy.stderr.log": "cd179872bd4b45ed390375c0ae6e948b25b4c194a2da7639612779063a0d4e05",
+    "sonobuoy-results.tar.gz": "53df5103119704762eb0242a882f2e03bc6eb524299ecaba07d5ce419300b830",
+    "kube-sonobuoy.log": "cab881e573ee40a568e37ee46f3b6754889cfc67c595b653f769ac0542156eb5",
+    "e2e.log": "e5a3c358487f507175b91251764dae9330532f05f79aa4c5c0afe38c08664f07",
+    "sonobuoy-worker.log": "7dfa416d0b5b58e7a3b28b659eec8e9f9007f9479ec6e6d09498a6ed58e0545d",
+    "sonobuoy-results.txt": "2ca7eaec103ce037c21c94073cbc9367b3f07c17376b8d58aeef0505980174be"
+  },
+  "sourceCommit": "b169681",
+  "mergedMain": "ffe26512f260ecfd982edb174479c365dd633f72",
+  "guestReportDirectory": "/var/tmp/gr8s-podtemplates._wjt0leg",
+  "localArtifacts": "build/conformance/2026-11-04-probes-upstream-_wjt0leg",
+  "scope": "Ten unchanged Kubernetes v1.36 Probing container conformance specs; focused supplemental evidence, not certification",
+  "reportSHA256": "19ab4eb46ea2f162e8f0b49a2920943d1c709c9fa4cc5608d4f71d93a8927242",
+  "verifiedCaseInventory": "All ten actual passing JUnit cases exactly match the prior full conformance probe inventory; suite hook entries excluded."
+}

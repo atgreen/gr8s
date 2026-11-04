@@ -29,6 +29,7 @@ func fail(err error) {
 
 // main validates a real PEM leaf, policy and optional ordinary TLS handshake.
 func main() {
+	requestPath := flag.String("request", "", "optional signed CSR PEM for independent subject/signature decoding")
 	certificatePath := flag.String("certificate", "", "issued certificate PEM")
 	caPath := flag.String("ca", "", "real cluster CA PEM")
 	keyPath := flag.String("key", "", "optional matching key for TLS proof")
@@ -37,6 +38,19 @@ func main() {
 	serverCertificate := flag.String("server-certificate", "", "server certificate for mutual client TLS proof")
 	serverKey := flag.String("server-key", "", "server key for mutual client TLS proof")
 	flag.Parse()
+	if *requestPath != "" {
+		data, err := os.ReadFile(*requestPath)
+		fail(err)
+		block, rest := pem.Decode(data)
+		if block == nil || len(rest) != 0 || block.Type != "CERTIFICATE REQUEST" {
+			fail(fmt.Errorf("expected one actual CSR PEM block"))
+		}
+		request, err := x509.ParseCertificateRequest(block.Bytes)
+		fail(err)
+		fail(request.CheckSignature())
+		fail(json.NewEncoder(os.Stdout).Encode(map[string]any{"signatureVerified": true, "subjectCommonName": request.Subject.CommonName, "subjectOrganizations": request.Subject.Organization}))
+		return
+	}
 	data, err := os.ReadFile(*certificatePath)
 	fail(err)
 	var certificates []*x509.Certificate
@@ -84,7 +98,7 @@ func main() {
 	if !found {
 		fail(fmt.Errorf("issuer-controlled API policy is missing"))
 	}
-	result := map[string]any{"verified": true, "singleLeaf": true, "profilePolicy": profile, "purpose": *purpose}
+	result := map[string]any{"verified": true, "singleLeaf": true, "profilePolicy": profile, "purpose": *purpose, "subjectCommonName": leaf.Subject.CommonName}
 	if *keyPath != "" {
 		pair, err := tls.LoadX509KeyPair(*certificatePath, *keyPath)
 		fail(err)

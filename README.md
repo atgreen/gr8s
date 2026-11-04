@@ -446,8 +446,27 @@ container. Terminal Pods report false readiness, and unavailable node/runtime
 observations report unknown readiness. Condition transition history and actual
 observed revisions persist separately across restarts. Valid node readiness
 leases survive a control-plane restart, and reconnecting agents receive snapshot
-revisions beyond their saved acknowledgements. Probes, init containers and
-readiness gates remain unsupported.
+revisions beyond their saved acknowledgements. Startup, readiness and liveness
+probes execute real exec, HTTP(S), TCP and standard gRPC Health checks. Startup
+success gates readiness/liveness; consecutive thresholds control readiness and
+exact-container restart, preserving healthy siblings. Probe-specific termination
+grace and actual failure Events survive node process restarts. Init containers
+and readiness gates remain unsupported.
+
+All ten unchanged upstream probe conformance cases pass in the
+[focused result](docs/container-probes-upstream-2026-11-04.json). The
+[native validation record](docs/container-probes-native-2026-11-04.json)
+records seven real scenarios, including physical cleanup of a blocked exec probe.
+These focused results do not establish full Kubernetes certification.
+
+Pod HTTP proxy requests use the assigned Pod's actual observed address and
+first declared port (or an explicit numeric port). Ordinary GET, POST, PUT,
+PATCH, DELETE, HEAD and OPTIONS requests forward real bodies, status codes and
+application headers, with separate `pods/proxy` authorization. Same-server
+absolute redirects remain within the proxy URL. Connection upgrades and HTML
+link rewriting remain tracked gaps; upgrades return HTTP 501. The
+[proxy validation record](docs/pod-http-proxy-validation-2026-11-04.json)
+includes actual workload forwarding and preserved test failures.
 
 The [readiness validation record](docs/pod-readiness-validation-2026-11-03.json)
 captures seven passing native scenarios and the official graceful-generation

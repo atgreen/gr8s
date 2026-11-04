@@ -1,3 +1,10 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Perform native CRI requests with exact container identities, typed wire
+;;;; observations, command budgets and separately bounded transport cleanup.
+
 (in-package #:gr8s)
 
 (defstruct cri-version-info
@@ -38,6 +45,7 @@
   (or (gr8s.cri.v1::state message) 0))
 
 (defun ensure-cri-status (operation status)
+  "Reject unsuccessful CRI operations with their actual gRPC status."
   (unless (= status ag-grpc:+grpc-status-ok+)
     (error 'runtime-error
            :message
@@ -51,6 +59,7 @@
 
 (defun make-cri-exec-request
     (container-id command &key stdin stdout stderr tty)
+  "Build an exact-container streaming Exec request with the requested channels."
   (make-instance 'gr8s.cri.v1::exec-request
                  :container-id container-id
                  :cmd command
@@ -60,6 +69,7 @@
                  :tty tty))
 
 (defun make-cri-exec-sync-request (container-id command timeout)
+  "Keep the declared command timeout in the CRI request independently of RPC overhead."
   (make-instance 'gr8s.cri.v1::exec-sync-request
                  :container-id container-id
                  :cmd command
@@ -82,21 +92,41 @@
            (gr8s.cri.v1::url response))
       (ag-grpc:channel-close channel))))
 
+(defparameter *cri-runtime-request-timeout* 120
+  "Pinned kubelet CRI request overhead/cleanup budget, separate from command duration.")
+
+(define-condition cri-command-timeout (runtime-error) ()
+  (:documentation "A server-reported CRI ExecSync deadline, distinct from local transport expiry."))
+
+(defun cri-server-command-timeout-p (condition)
+  "Require real server grpc-status metadata and no local timeout cause."
+  (and (= ag-grpc:+grpc-status-deadline-exceeded+ (ag-grpc::grpc-status-error-code condition))
+       (null (ag-grpc::grpc-status-error-cause condition))
+       (some (lambda (headers)
+               (equal "4" (cdr (assoc "grpc-status" headers :test #'string-equal))))
+             (list (ag-grpc::grpc-status-error-headers condition) (ag-grpc::grpc-status-error-trailers condition)))))
+
 (defun cri-exec-sync
     (socket-path container-id command &key (timeout 30))
-  "Run COMMAND synchronously in CONTAINER-ID and return captured output."
-  (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
+  "Keep the command timeout on the wire and allow kubelet's separate CRI cleanup budget."
+  (let* ((client-timeout (when (plusp timeout) (+ *cri-runtime-request-timeout* timeout)))
+         (channel (make-unix-grpc-channel socket-path :timeout client-timeout)))
     (unwind-protect
-         (multiple-value-bind (response status)
-             (gr8s.cri.v1::runtime-service-exec-sync
-              (gr8s.cri.v1::make-runtime-service-stub channel)
-              (make-cri-exec-sync-request container-id command timeout)
-              :timeout timeout)
-           (ensure-cri-status "ExecSync" status)
-           (make-runtime-exec-result
-            :stdout (gr8s.cri.v1::stdout response)
-            :stderr (gr8s.cri.v1::stderr response)
-            :exit-code (gr8s.cri.v1::exit-code response)))
+         (handler-case
+             (multiple-value-bind (response status)
+                 (gr8s.cri.v1::runtime-service-exec-sync
+                  (gr8s.cri.v1::make-runtime-service-stub channel)
+                  (make-cri-exec-sync-request container-id command timeout)
+                  :timeout client-timeout)
+               (ensure-cri-status "ExecSync" status)
+               (make-runtime-exec-result
+                :stdout (gr8s.cri.v1::stdout response)
+                :stderr (gr8s.cri.v1::stderr response)
+                :exit-code (gr8s.cri.v1::exit-code response)))
+           (ag-grpc::grpc-status-error (condition)
+             (if (cri-server-command-timeout-p condition)
+                 (error 'cri-command-timeout :message (princ-to-string condition))
+                 (error condition))))
       (ag-grpc:channel-close channel))))
 
 (defun cri-runtime-version (socket-path &key (timeout 10))
@@ -121,6 +151,7 @@
 (defun make-cri-pod-sandbox-config
     (name uid namespace attempt log-directory host-network
      &key resource-version spec-fingerprint dns-servers dns-searches dns-options privileged)
+  "Build the sandbox identity, ownership labels and declared native network/security configuration."
   (let ((metadata
           (make-instance 'gr8s.cri.v1::pod-sandbox-metadata
                          :name name
@@ -188,11 +219,13 @@
       (ag-grpc:channel-close channel))))
 
 (defun cri-pod-sandbox-ip-from-response (response)
+  "Read the real CRI network address, leaving absent assignments empty."
   (let* ((sandbox (gr8s.cri.v1::status response))
          (network (and sandbox (gr8s.cri.v1::network sandbox))))
     (if network (gr8s.cri.v1::ip network) "")))
 
 (defun cri-pod-sandbox-ip (socket-path sandbox-id &key (timeout 5))
+  "Fetch one native sandbox address within the requested observation budget."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
          (multiple-value-bind (response status)

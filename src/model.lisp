@@ -180,7 +180,8 @@
   "Validate a container JSON OBJECT and return a CONTAINER-SPEC."
   (reject-unsupported-fields
    object '("name" "image" "command" "args" "env" "ports" "resources"
-            "imagePullPolicy" "volumeMounts" "securityContext" "workingDir")
+            "imagePullPolicy" "volumeMounts" "securityContext" "workingDir"
+            "startupProbe" "readinessProbe" "livenessProbe")
    "container")
   (require-empty-object-if-present object "resources" "container.resources")
   (validate-runtime-container object)

@@ -140,6 +140,10 @@
           (push (cons (pure-tls::oid-name (pure-tls::asn1-node-value oid)) decoded) rdns))))
     (pure-tls::make-x509-name :rdns (nreverse rdns))))
 
+(defun csr-subject-common-name (subject)
+  "Use the last signed common-name attribute, matching Go pkix.Name.FillFromRDNSequence."
+  (cdr (assoc :common-name (reverse (pure-tls::x509-name-rdns subject)))))
+
 (defun validate-csr-public-key-algorithm (algorithm algorithm-node spki-node spki)
   "Require the declared public-key family to match the real signature algorithm."
   (let* ((key-algorithm (getf spki :algorithm))

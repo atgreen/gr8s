@@ -14,7 +14,7 @@
   :version "0.1.0"
   :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cl-cancel"
                "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
-               "pure-tls/acme"
+               "pure-tls/acme" "drakma"
                "sb-posix" "trivial-utf-8" "usocket" "whistler/loader")
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
@@ -38,13 +38,14 @@
                              (:file "dns")
                              (:file "model")
                              (:file "pod-runtime-model")
+                             (:file "container-probe-spec")
                              (:file "store")
                              (:file "pod-status-store")
                              (:file "pod-deletion")
                              (:file "scheduler")
+                             (:file "certificate-profiles")
                              (:file "pki")
                              (:file "node-tls")
-                             (:file "certificate-profiles")
                              (:file "csr-crypto")
                              (:file "core-resources")
                              (:file "podtemplate-history")
@@ -59,6 +60,7 @@
                              (:file "endpointslice-api")
                              (:file "storage-controller")
                              (:file "events")
+                             (:file "node-runtime-events")
                              (:file "csr-resources")
                              (:file "csr-signer")
                              (:file "crd-schema")
@@ -82,6 +84,8 @@
                              (:file "cri")
                              (:file "containerd")
                              (:file "container-lifecycle")
+                             (:file "container-probe-transport")
+                             (:file "container-probe-manager")
                              (:file "podman")
                              (:file "reconciler")
                              (:file "service-dns")
@@ -90,6 +94,7 @@
                              (:file "storage-volumes")
                              (:file "telemetry")
                              (:file "agent-runtime")
+                             (:file "pod-http-proxy")
                              (:file "http")
                              (:file "core-resource-http")
                              (:file "storage-http")
@@ -139,9 +144,13 @@
                              (:file "managed-containerd-test")
                              (:file "containerd-test")
                              (:file "container-lifecycle-test")
+                             (:file "container-probe-test")
+                             (:file "container-probe-manager-test")
+                             (:file "container-probe-events-test")
                              (:file "podman-test")
                              (:file "main-test")
                              (:file "http-test")
+                             (:file "pod-http-proxy-test")
                              (:file "core-resource-http-test")
                              (:file "crd-api-test")
                              (:file "crd-protobuf-test")
