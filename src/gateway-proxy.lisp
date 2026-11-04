@@ -202,18 +202,24 @@
 ;;; Backend resolution + listener lifecycle.
 
 (defun make-service-backend-resolver (store)
-  "A resolver that maps a GW-BACKEND (a Service reference) to its ClusterIP and
-   the backendRef port. The eBPF/socket service LB then spreads the ClusterIP
-   across ready Pod endpoints (podster-43k.7 refines this to direct endpoints)."
+  "A resolver mapping a GW-BACKEND (a Service reference) to an address. It
+   prefers a randomly chosen ready Pod endpoint (direct dial, independent of the
+   service-LB cgroup interception), and falls back to the Service ClusterIP (which
+   the socket/eBPF service LB then spreads) when no endpoint is resolvable."
   (lambda (backend)
     (let* ((namespace (or (gw-backend-namespace backend) "default"))
            (service (ignore-errors (get-core-resource store "services" namespace
                                                        (gw-backend-name backend)))))
       (when service
-        (let ((cluster-ip (gethash "clusterIP" (gethash "spec" service))))
-          (when (and (stringp cluster-ip) (plusp (length cluster-ip))
-                     (not (equal cluster-ip "None")))
-            (values cluster-ip (gw-backend-port backend))))))))
+        (let ((endpoints (ignore-errors
+                          (service-pod-endpoints store service (gw-backend-port backend)))))
+          (if endpoints
+              (let ((endpoint (nth (random (length endpoints)) endpoints)))
+                (values (first endpoint) (second endpoint)))
+              (let ((cluster-ip (gethash "clusterIP" (gethash "spec" service))))
+                (when (and (stringp cluster-ip) (plusp (length cluster-ip))
+                           (not (equal cluster-ip "None")))
+                  (values cluster-ip (gw-backend-port backend))))))))))
 
 (defun start-gateway-listener (&key (address "127.0.0.1") port router resolver (name "gateway"))
   "Start a Gateway listener acceptor on PORT. ROUTER is a compiled dispatch fn
