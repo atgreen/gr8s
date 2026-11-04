@@ -175,16 +175,23 @@
                           value))))
 
 (defun parse-ports (container)
-  "Parse and validate the supported TCP container ports in CONTAINER."
+  "Parse and validate the supported TCP container ports and host ports in CONTAINER."
   (loop for port across (optional-vector container "ports" "container")
         collect
         (progn
           (reject-unsupported-fields
-           port '("containerPort" "name" "protocol") "port")
+           port '("containerPort" "hostPort" "hostIP" "name" "protocol") "port")
           (let ((number (object-value port "containerPort" "port"))
-                (protocol (gethash "protocol" port "TCP")))
+                (protocol (gethash "protocol" port "TCP"))
+                (host-port (gethash "hostPort" port 0))
+                (host-ip (gethash "hostIP" port "")))
             (unless (and (integerp number) (<= 1 number 65535))
               (invalid-pod "containerPort must be between 1 and 65535"))
+            (unless (and (integerp host-port) (<= 0 host-port 65535))
+              (invalid-pod "hostPort must be between 1 and 65535"))
+            (unless (and (stringp host-ip)
+                         (or (zerop (length host-ip)) (ignore-errors (parse-ipv4-integer host-ip))))
+              (invalid-pod "hostIP must be an IPv4 address"))
             (unless (and (stringp protocol) (string= protocol "TCP"))
               (invalid-pod "only TCP container ports are supported"))
             number))))
