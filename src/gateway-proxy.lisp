@@ -37,8 +37,9 @@
   (mapcar (lambda (header) (cons (string-downcase (string (car header))) (cdr header)))
           (hunchentoot:headers-in* request)))
 
-(defun gateway-select-backend (acceptor request)
-  "Run the listener's compiled router against REQUEST. Returns a GW-BACKEND or NIL."
+(defun gateway-dispatch-for-request (acceptor request)
+  "Run the listener's compiled router against REQUEST. Returns a GW-DISPATCH
+   (backend + matched rule's filters + matched GW-MATCH) or NIL."
   (let ((router (gateway-acceptor-router acceptor)))
     (when router
       (funcall router
@@ -52,20 +53,97 @@
   (let ((resolver (gateway-acceptor-resolver acceptor)))
     (when resolver (funcall resolver backend))))
 
-(defun gateway-proxy-exchange (target method)
-  "Proxy the current Hunchentoot request to TARGET (a \"http://host:port\" URL),
-   streaming the real upstream status, headers and framed body back to the
-   client. Shares header hygiene and body copying with the Pod proxy."
-  (let* ((raw (hunchentoot:request-uri*))
-         (url (concatenate 'string target raw))
-         (host (hunchentoot:header-in* :host))
+(defun gateway-error-response (code fmt &rest args)
+  "Emit a minimal text error unless the response has already been committed."
+  (setf (hunchentoot:return-code*) code
+        (hunchentoot:content-type*) "text/plain; charset=utf-8")
+  (apply #'format nil fmt args))
+
+;;; ---------------------------------------------------------------------------
+;;; HTTP filters (podster-43k.7): header modifiers, redirect, URL rewrite.
+
+(defun gateway-find-filter (filters type)
+  "The parsed data plist of the first FILTER of TYPE, or NIL."
+  (let ((filter (find type filters :key #'gw-filter-type)))
+    (and filter (gw-filter-data filter))))
+
+(defun gateway-apply-header-ops (headers ops)
+  "Apply a {:set :add :remove} header modifier to an alist of (name . value).
+   remove drops by case-insensitive name; set replaces; add appends."
+  (if (null ops)
+      headers
+      (let ((result headers))
+        (dolist (name (getf ops :remove))
+          (setf result (remove name result :key #'car :test #'string-equal)))
+        (dolist (pair (getf ops :set))
+          (setf result (remove (car pair) result :key #'car :test #'string-equal))
+          (setf result (append result (list (cons (string-downcase (car pair)) (cdr pair))))))
+        (dolist (pair (getf ops :add))
+          (setf result (append result (list (cons (string-downcase (car pair)) (cdr pair))))))
+        result)))
+
+(defun gateway-join-prefix-rewrite (replacement rest)
+  "Join a ReplacePrefixMatch REPLACEMENT with the REST of the path after the
+   matched prefix (REST is \"\" or starts with \"/\")."
+  (let ((replacement (if (string= replacement "") "/" replacement)))
+    (cond ((string= rest "") replacement)
+          ((char= #\/ (char replacement (1- (length replacement))))
+           (concatenate 'string replacement (subseq rest 1)))
+          (t (concatenate 'string replacement rest)))))
+
+(defun gateway-apply-path-modifier (path match path-mod)
+  "Rewrite PATH per a filter path modifier. For ReplacePrefixMatch, the matched
+   GW-MATCH's path is the prefix that is replaced."
+  (cond ((null path-mod) path)
+        ((eq (getf path-mod :type) :full) (or (getf path-mod :value) "/"))
+        ((eq (getf path-mod :type) :prefix)
+         (let* ((prefix (and match (gw-match-path match)))
+                (plen (and prefix (length prefix))))
+           (if (and prefix (>= (length path) plen) (string= path prefix :end1 plen))
+               (gateway-join-prefix-rewrite (or (getf path-mod :value) "/") (subseq path plen))
+               path)))
+        (t path)))
+
+(defun gateway-apply-redirect (dispatch request)
+  "Short-circuit a RequestRedirect filter: emit a 3xx with a computed Location."
+  (let* ((data (gateway-find-filter (gw-dispatch-filters dispatch) :redirect))
+         (scheme (or (getf data :scheme)
+                     (if (hunchentoot:acceptor-ssl-p hunchentoot:*acceptor*) "https" "http")))
+         (host (or (getf data :hostname) (gateway-request-host request)))
+         (port (getf data :port))
+         (authority (if port (format nil "~A:~A" host port) host))
+         (path (gateway-apply-path-modifier (hunchentoot:script-name request)
+                                            (gw-dispatch-match dispatch) (getf data :path)))
+         (query (hunchentoot:query-string request))
+         (location (format nil "~A://~A~A~@[?~A~]" scheme authority path
+                           (and query (plusp (length query)) query))))
+    (setf (hunchentoot:header-out :location) location)
+    (gateway-error-response (or (getf data :status-code) 302) "")))
+
+(defun gateway-proxy-exchange (dispatch request target method)
+  "Proxy REQUEST to TARGET (\"http://host:port\"), applying the matched rule's
+   URL rewrite and request/response header modifiers, and streaming the real
+   upstream status, headers and framed body back. Shares header hygiene and body
+   copying with the Pod proxy."
+  (let* ((rewrite (gateway-find-filter (gw-dispatch-filters dispatch) :rewrite))
+         (req-ops (gateway-find-filter (gw-dispatch-filters dispatch) :request-headers))
+         (resp-ops (gateway-find-filter (gw-dispatch-filters dispatch) :response-headers))
+         (path (if rewrite
+                   (gateway-apply-path-modifier (hunchentoot:script-name request)
+                                                (gw-dispatch-match dispatch) (getf rewrite :path))
+                   (hunchentoot:script-name request)))
+         (query (hunchentoot:query-string request))
+         (url (format nil "~A~A~@[?~A~]" target path (and query (plusp (length query)) query)))
+         (orig-host (hunchentoot:header-in* :host))
+         (host (or (and rewrite (getf rewrite :hostname)) orig-host))
          (scheme (if (hunchentoot:acceptor-ssl-p hunchentoot:*acceptor*) "https" "http"))
-         (headers (pod-proxy-end-to-end-headers (gateway-request-headers hunchentoot:*request*)
-                                                :request t))
+         (headers (gateway-apply-header-ops
+                   (pod-proxy-end-to-end-headers (gateway-request-headers request) :request t)
+                   req-ops))
          (body (hunchentoot:raw-post-data :force-binary t)))
-    (setf headers (append (list (cons "Host" host) (cons "X-Forwarded-Host" host)
+    (setf headers (append (list (cons "Host" host) (cons "X-Forwarded-Host" orig-host)
                                 (cons "X-Forwarded-Proto" scheme)
-                                (cons "X-Forwarded-Uri" (hunchentoot:script-name*)))
+                                (cons "X-Forwarded-Uri" (hunchentoot:script-name request)))
                           headers))
     (handler-case
         (multiple-value-bind (upstream code response-headers)
@@ -78,9 +156,11 @@
           (unwind-protect
                (progn
                  (setf (hunchentoot:return-code*) code (hunchentoot:content-type*) nil)
-                 (dolist (header (pod-proxy-end-to-end-headers
-                                  (mapcar (lambda (h) (cons (string-downcase (string (car h))) (cdr h)))
-                                          response-headers)))
+                 (dolist (header (gateway-apply-header-ops
+                                  (pod-proxy-end-to-end-headers
+                                   (mapcar (lambda (h) (cons (string-downcase (string (car h))) (cdr h)))
+                                           response-headers))
+                                  resp-ops))
                    (let ((name (intern (string-upcase (car header)) :keyword)))
                      (case name
                        (:content-length (setf (hunchentoot:header-out name) (parse-integer (cdr header))))
@@ -96,27 +176,27 @@
             (error condition)
             (gateway-error-response 502 "the gateway backend connection failed: ~A" condition))))))
 
-(defun gateway-error-response (code fmt &rest args)
-  "Emit a minimal text error unless the response has already been committed."
-  (setf (hunchentoot:return-code*) code
-        (hunchentoot:content-type*) "text/plain; charset=utf-8")
-  (apply #'format nil fmt args))
-
 (defmethod hunchentoot:acceptor-dispatch-request ((acceptor gateway-acceptor) request)
-  (let ((backend (gateway-select-backend acceptor request)))
+  (let ((dispatch (gateway-dispatch-for-request acceptor request)))
     (cond
-      ((null backend)
+      ((null dispatch)
        (gateway-error-response 404 "No route matched for ~A ~A"
                                (hunchentoot:host request) (hunchentoot:script-name request)))
+      ;; A RequestRedirect filter short-circuits before any backend connect.
+      ((gateway-find-filter (gw-dispatch-filters dispatch) :redirect)
+       (gateway-apply-redirect dispatch request))
       (t
-       (multiple-value-bind (host port) (gateway-resolve-backend acceptor backend)
-         (if host
-             (gateway-proxy-exchange
-              (format nil "http://~A:~A"
-                      (if (find #\: host) (format nil "[~A]" host) host) port)
-              (hunchentoot:request-method request))
-             (gateway-error-response 503 "No reachable backend for ~A"
-                                     (gw-backend-name backend))))))))
+       (let ((backend (gw-dispatch-backend dispatch)))
+         (if (null backend)
+             (gateway-error-response 500 "Matched rule has no backend")
+             (multiple-value-bind (host port) (gateway-resolve-backend acceptor backend)
+               (if host
+                   (gateway-proxy-exchange
+                    dispatch request
+                    (format nil "http://~A:~A" (if (find #\: host) (format nil "[~A]" host) host) port)
+                    (hunchentoot:request-method request))
+                   (gateway-error-response 503 "No reachable backend for ~A"
+                                           (gw-backend-name backend))))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Backend resolution + listener lifecycle.

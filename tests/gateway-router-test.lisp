@@ -20,6 +20,12 @@
 (defun gwr-backend (name &key (port 80) (weight 1) namespace)
   (gr8s::make-gw-backend :name name :port port :weight weight :namespace namespace))
 
+(defun gwr-dispatch-name (dispatch)
+  "The chosen backend name of a router dispatch result, or NIL."
+  (and dispatch
+       (let ((backend (gr8s::gw-dispatch-backend dispatch)))
+         (and backend (gr8s::gw-backend-name backend)))))
+
 (test gateway-router-honors-match-precedence
   (let* ((routes
            (list
@@ -34,8 +40,7 @@
                        (gwr-rule (list (gr8s::make-gw-match :path-type :prefix :path "/"))
                                  (list (gwr-backend "wildcard-svc"))))))
          (router (gr8s::compile-gateway-router routes)))
-    (flet ((route (host path method) (let ((b (funcall router host path method '())))
-                                       (and b (gr8s::gw-backend-name b)))))
+    (flet ((route (host path method) (gwr-dispatch-name (funcall router host path method '()))))
       (is (equal "health-svc"      (route "api.example.com" "/health" "GET")))
       (is (equal "api-default-svc" (route "api.example.com" "/health" "POST"))) ; non-GET falls through
       (is (equal "api-v1-svc"      (route "api.example.com" "/v1/users" "GET"))) ; longer prefix wins
@@ -52,9 +57,9 @@
                                                   (gwr-backend "v1" :weight 1))))))
          (router (gr8s::compile-gateway-router routes)))
     (let ((gr8s::*gw-weighted-pick* (lambda (total) (declare (ignore total)) 0)))
-      (is (equal "v2" (gr8s::gw-backend-name (funcall router "split.example.com" "/a" "GET" '())))))
+      (is (equal "v2" (gwr-dispatch-name (funcall router "split.example.com" "/a" "GET" '())))))
     (let ((gr8s::*gw-weighted-pick* (lambda (total) (declare (ignore total)) 3)))
-      (is (equal "v1" (gr8s::gw-backend-name (funcall router "split.example.com" "/a" "GET" '())))))))
+      (is (equal "v1" (gwr-dispatch-name (funcall router "split.example.com" "/a" "GET" '())))))))
 
 (test gateway-router-matches-exact-headers
   (let* ((routes (list (gwr-route "default" '("h.example.com")
@@ -64,7 +69,7 @@
                                             (list (gwr-backend "canary-svc"))))))
          (router (gr8s::compile-gateway-router routes)))
     (is (equal "canary-svc"
-               (gr8s::gw-backend-name (funcall router "h.example.com" "/x" "GET" '(("X-Canary" . "yes"))))))
+               (gwr-dispatch-name (funcall router "h.example.com" "/x" "GET" '(("X-Canary" . "yes"))))))
     (is (null (funcall router "h.example.com" "/x" "GET" '(("x-canary" . "no")))))
     (is (null (funcall router "h.example.com" "/x" "GET" '())))))
 
@@ -107,9 +112,30 @@
                                          \"backendRefs\":[{\"name\":\"health\",\"port\":80}]},
                                         {\"backendRefs\":[{\"name\":\"web\",\"port\":80}]}]}}"))
          (router (gr8s::compile-gateway-router (list (gr8s::parse-httproute object)))))
-    (is (equal "health" (gr8s::gw-backend-name (funcall router "shop.example.com" "/health" "GET" '()))))
-    (is (equal "web"    (gr8s::gw-backend-name (funcall router "shop.example.com" "/other" "GET" '()))))
+    (is (equal "health" (gwr-dispatch-name (funcall router "shop.example.com" "/health" "GET" '()))))
+    (is (equal "web"    (gwr-dispatch-name (funcall router "shop.example.com" "/other" "GET" '()))))
     (is (null (funcall router "nope.example.com" "/health" "GET" '())))))
+
+(test gateway-router-parses-rule-filters
+  (let* ((object (com.inuoe.jzon:parse
+                  "{\"metadata\":{\"name\":\"f\",\"namespace\":\"d\"},
+                    \"spec\":{\"rules\":[{\"filters\":[
+                                {\"type\":\"RequestHeaderModifier\",\"requestHeaderModifier\":{\"set\":[{\"name\":\"X-A\",\"value\":\"1\"}],\"remove\":[\"X-B\"]}},
+                                {\"type\":\"URLRewrite\",\"urlRewrite\":{\"path\":{\"type\":\"ReplacePrefixMatch\",\"replacePrefixMatch\":\"/v2\"}}},
+                                {\"type\":\"RequestRedirect\",\"requestRedirect\":{\"scheme\":\"https\",\"statusCode\":301}}],
+                              \"backendRefs\":[{\"name\":\"svc\",\"port\":80}]}]}}"))
+         (route (gr8s::parse-httproute object))
+         (filters (gr8s::gw-rule-filters (first (gr8s::gw-route-rules route)))))
+    (is (= 3 (length filters)))
+    (let ((hdr (find :request-headers filters :key #'gr8s::gw-filter-type)))
+      (is (equal '(("X-A" . "1")) (getf (gr8s::gw-filter-data hdr) :set)))
+      (is (equal '("X-B") (getf (gr8s::gw-filter-data hdr) :remove))))
+    (let ((rw (find :rewrite filters :key #'gr8s::gw-filter-type)))
+      (is (eq :prefix (getf (getf (gr8s::gw-filter-data rw) :path) :type)))
+      (is (equal "/v2" (getf (getf (gr8s::gw-filter-data rw) :path) :value))))
+    (let ((rd (find :redirect filters :key #'gr8s::gw-filter-type)))
+      (is (equal "https" (getf (gr8s::gw-filter-data rd) :scheme)))
+      (is (= 301 (getf (gr8s::gw-filter-data rd) :status-code))))))
 
 (test gateway-router-rejects-unsupported-matches
   (signals gr8s::gateway-route-error

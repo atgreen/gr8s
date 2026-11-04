@@ -33,9 +33,19 @@
   (method nil)                          ; nil | "GET" ...
   (headers '() :type list))             ; alist (name . value), exact
 
+(defstruct gw-filter
+  (type nil)                            ; :request-headers :response-headers :redirect :rewrite
+  (data nil))                           ; a plist of parsed fields (see gw-parse-filter)
+
 (defstruct gw-rule
   (matches '() :type list)              ; list of GW-MATCH (any match -> rule applies)
+  (filters '() :type list)              ; list of GW-FILTER applied to the matched exchange
   (backends '() :type list))            ; list of GW-BACKEND (weighted)
+
+(defstruct gw-dispatch
+  (backend nil)                         ; chosen GW-BACKEND, or NIL (filter-only rule)
+  (filters '() :type list)              ; the matched rule's GW-FILTERs
+  (match nil))                          ; the matched GW-MATCH (for prefix rewrite)
 
 (defstruct gw-route
   (namespace nil)                       ; the HTTPRoute's namespace (backendRef default)
@@ -95,14 +105,63 @@
    :port (or (gethash "port" ref) (gw-route-error "backendRef ~S needs a port" (gethash "name" ref)))
    :weight (let ((w (gethash "weight" ref))) (if w w 1))))
 
+(defun gw-name-value-alist (value)
+  "Convert a JSON array of {name,value} into an alist of (name . value)."
+  (when value
+    (loop for h across value
+          collect (cons (or (gethash "name" h) (gw-route-error "header filter needs a name"))
+                        (or (gethash "value" h) "")))))
+
+(defun gw-parse-header-ops (object)
+  "Normalize a {set,add,remove} header modifier into a plist."
+  (let ((object (or object (make-hash-table :test 'equal))))
+    (list :set (gw-name-value-alist (gethash "set" object))
+          :add (gw-name-value-alist (gethash "add" object))
+          :remove (gw-string-list (gethash "remove" object)))))
+
+(defun gw-parse-path-modifier (path)
+  "Normalize a filter path modifier ({type, replaceFullPath|replacePrefixMatch})."
+  (when path
+    (let ((type (gethash "type" path)))
+      (cond ((equal type "ReplaceFullPath") (list :type :full :value (gethash "replaceFullPath" path)))
+            ((equal type "ReplacePrefixMatch") (list :type :prefix :value (gethash "replacePrefixMatch" path)))
+            (t (gw-route-error "unsupported HTTPRoute path modifier type ~S" type))))))
+
+(defun gw-parse-filter (object)
+  "Normalize an HTTPRouteFilter. Fail closed on unimplemented filter types."
+  (let ((type (gethash "type" object)))
+    (cond
+      ((equal type "RequestHeaderModifier")
+       (make-gw-filter :type :request-headers
+                       :data (gw-parse-header-ops (gethash "requestHeaderModifier" object))))
+      ((equal type "ResponseHeaderModifier")
+       (make-gw-filter :type :response-headers
+                       :data (gw-parse-header-ops (gethash "responseHeaderModifier" object))))
+      ((equal type "RequestRedirect")
+       (let ((r (or (gethash "requestRedirect" object) (make-hash-table :test 'equal))))
+         (make-gw-filter :type :redirect
+                         :data (list :scheme (gethash "scheme" r)
+                                     :hostname (gethash "hostname" r)
+                                     :port (gethash "port" r)
+                                     :status-code (or (gethash "statusCode" r) 302)
+                                     :path (gw-parse-path-modifier (gethash "path" r))))))
+      ((equal type "URLRewrite")
+       (let ((r (or (gethash "urlRewrite" object) (make-hash-table :test 'equal))))
+         (make-gw-filter :type :rewrite
+                         :data (list :hostname (gethash "hostname" r)
+                                     :path (gw-parse-path-modifier (gethash "path" r))))))
+      (t (gw-route-error "unsupported HTTPRoute filter type ~S" type)))))
+
 (defun gw-parse-rule (rule-object route-namespace)
   (let* ((matches (gethash "matches" rule-object))
+         (filters (gethash "filters" rule-object))
          (backend-refs (gethash "backendRefs" rule-object)))
     (make-gw-rule
      ;; No matches -> the Gateway-API default of PathPrefix "/".
      :matches (if (and matches (plusp (length matches)))
                   (map 'list #'gw-parse-match matches)
                   (list (make-gw-match :path-type :prefix :path "/")))
+     :filters (when filters (map 'list #'gw-parse-filter filters))
      :backends (when backend-refs
                  (map 'list (lambda (r) (gw-parse-backend r route-namespace)) backend-refs)))))
 
@@ -168,7 +227,7 @@ NIL uses cl:random.")
         ((= 1 (gw-host-tier hostname)) (- (length hostname) 2)) ; drop "*."
         (t (length hostname))))
 
-(defstruct gw-candidate hostname match backends key)
+(defstruct gw-candidate hostname match filters backends key)
 
 (defun gw-candidate-precedence (hostname match)
   "Descending-sort key per Gateway-API precedence: hostname specificity, then
@@ -193,6 +252,7 @@ path (Exact > longer PathPrefix), then method present, then #headers."
         (dolist (m (gw-rule-matches rule))
           (dolist (host (or (gw-route-hostnames route) (list nil)))
             (push (make-gw-candidate :hostname host :match m
+                                     :filters (gw-rule-filters rule)
                                      :backends (gw-rule-backends rule)
                                      :key (gw-candidate-precedence host m))
                   cands)))))
@@ -221,12 +281,15 @@ path (Exact > longer PathPrefix), then method present, then #headers."
 (defun gw-candidate-clause (candidate)
   `((and ,(gw-host-test-form (gw-candidate-hostname candidate))
          ,(gw-match-test-form (gw-candidate-match candidate)))
-    (gw-pick-weighted ',(gw-candidate-backends candidate))))
+    (make-gw-dispatch :backend (gw-pick-weighted ',(gw-candidate-backends candidate))
+                      :filters ',(gw-candidate-filters candidate)
+                      :match ',(gw-candidate-match candidate))))
 
 (defun compile-gateway-router (routes)
   "Compile ROUTES (a list of GW-ROUTE) into a native function
-   (host path method headers) -> a GW-BACKEND, or NIL when nothing matches
-   (the caller serves 404). HEADERS is an alist of (name . value)."
+   (host path method headers) -> a GW-DISPATCH (chosen backend + the matched
+   rule's filters + matched GW-MATCH), or NIL when nothing matches (the caller
+   serves 404). HEADERS is an alist of (name . value)."
   (let ((form `(lambda (host path method headers)
                  (declare (ignorable host path method headers)
                           (optimize (speed 2) (safety 1)))
