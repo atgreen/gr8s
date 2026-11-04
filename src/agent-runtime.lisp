@@ -383,10 +383,18 @@
         ;; Serialize with the background reconciler and persist deletion intent
         ;; before CRI calls. A transient removal failure must never turn into
         ;; runtime-ensure recreating an assignment the server has withdrawn.
+        (when (pod-finalizers-present-p pod)
+          (let ((store (node-runtime-store node-runtime)))
+            (with-store-lock (store)
+              (let ((current (gethash (pod-key (pod-namespace pod) (pod-name pod)) (pod-store-pods store))))
+                (when (and current (equal (pod-uid current) (pod-uid pod)))
+                  (let ((copy (copy-core-object (pod-to-object current))))
+                    (setf (gethash "finalizers" (gethash "metadata" copy)) #())
+                    (update-pod-unlocked store (parse-pod copy) (pod-resource-version current))))))))
         (delete-reconciled-pod (node-runtime-reconciler node-runtime)
-                               (pod-namespace pod) (pod-name pod) :grace-period 0)))))
+                               (pod-namespace pod) (pod-name pod) :uid (pod-uid pod) :grace-period 0)))))
 
-(defun pod-observed-status-message (pod status)
+(defun pod-observed-status-message (pod status &key runtime-deleted)
   (make-instance
    'gr8s.node.v1::pod-observed-status
    :namespace (pod-namespace pod)
@@ -397,11 +405,13 @@
    :reason (gethash "reason" status "")
    :message (gethash "message" status "")
    :pod-ip (gethash "podIP" status "")
-   :status-json (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify status))))
+   :status-json (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify status))
+   :runtime-deleted runtime-deleted))
 
 (defun cache-node-observation (node-runtime pod status)
   (save-pod-observation (node-runtime-store node-runtime) pod status)
-  (let ((message (pod-observed-status-message pod status)))
+  (let* ((finalization (pod-finalization-state (node-runtime-store node-runtime) pod))
+         (message (pod-observed-status-message pod status :runtime-deleted (and finalization (gethash "runtimeDeleted" finalization)))))
     (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
       (setf (gethash (pod-uid pod) (node-runtime-observed-statuses node-runtime)) message))
     message))

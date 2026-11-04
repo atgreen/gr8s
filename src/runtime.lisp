@@ -72,6 +72,11 @@
 (defmethod runtime-delete-pod ((runtime t) pod)
   (runtime-delete runtime (pod-uid pod))
   t)
+(defgeneric runtime-forget-pod-finalization (runtime uid)
+  (:documentation "Forget retained native terminal history after finalizers release an API Pod."))
+(defmethod runtime-forget-pod-finalization ((runtime t) uid)
+  (declare (ignore runtime uid)) nil)
+
 (defgeneric stop-runtime-deletions (runtime)
   (:documentation "Cancel and join background deletion operations before runtime services stop."))
 (defmethod stop-runtime-deletions ((runtime t)) nil)

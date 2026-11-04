@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Anthony Green
+// SPDX-License-Identifier: MIT
+
 syntax = "proto3";
 
 package gr8s.node.v1;
@@ -100,6 +103,8 @@ message PodObservedStatus {
   string message = 7;
   string pod_ip = 8;
   bytes status_json = 9;
+  // Physical cleanup can complete while public Pod finalizers retain the API object.
+  bool runtime_deleted = 10;
 }
 
 enum OperationStatus {
