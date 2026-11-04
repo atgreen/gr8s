@@ -40,16 +40,61 @@
       "log": "/tmp/gr8s-pod-dns-config-node-op-targeted.log",
       "timeoutsUnchanged": true
     },
-    "nativeDNSFixtureSelfCheck": "Actual host-loopback UDP and TCP replies returned configured real-shaped backend IP; unknown name returnedNXDOMAIN; both listener threads stopped."
+    "nativeDNSFixtureSelfCheck": "Actual host-loopback UDP and TCP replies returned configured real-shaped backend IP; unknown name returnedNXDOMAIN; both listener threads stopped.",
+    "finalIntegratedFullHostSuite": {
+      "sourceCommit": "de06095a61553146a7fd94e73a175f103d32c032",
+      "includes": [
+        "main615a257 DNS UDP/TCP pair reservation",
+        "recovery67fcba lifecycle recovery",
+        "mainfd439fb actual Pod HTTP proxy and probes"
+      ],
+      "checks": 3384,
+      "passed": 3379,
+      "skipped": 5,
+      "failed": 0,
+      "log": "/tmp/gr8s-pod-dns-config-final-union.log",
+      "logSHA256": "9237e78b402ae99d14cf4d4042f0d86c8e48500370d3df13462e1bdb50b4c547",
+      "artifactDirectory": "build/conformance/2026-11-04-pod-dns-config-host-de06095"
+    }
   },
   "nativeValidation": {
-    "status": "Not run; VM22290 remains stopped/dirty for owner-coordinated lifecycle and ACK diagnostics. No guest mutations or new native processes were started.",
+    "status": "Passed genuine custom resolver, actual HTTP search, unchanged container identity across restart, clean owned runtime deletion and normal shutdown.",
     "harness": "scripts/test-pod-dns-config.py",
-    "intendedProof": "Distinct custom resolver IP serves actual UDP/TCP queries from a real Pod; HTTP fetch by custom search name reaches actual observed backend Pod; actual resolv.conf, all container identities across restart and zero-shim cleanup."
+    "sourceCommit": "de06095a61553146a7fd94e73a175f103d32c032",
+    "binarySHA256": "afa68c8326f89147816d75e0d7a521a59ca984dc8e3604e9eda8ef2faebcc67f",
+    "harnessSHA256": "eaeceec13742aea0520785a0da071ea013ed7cd4f0580a3e03398e851eb69489",
+    "artifactDirectory": "build/conformance/2026-11-04-pod-dns-config-native-qtom7pjv",
+    "reportSHA256": "9f64dcc5336fa74806d2884776b2793e2946b26fc9bda71212d5becd1fbb82bd",
+    "passed": true,
+    "nativeExitCodes": [
+      0,
+      0
+    ],
+    "ownedShimsRemaining": [],
+    "customDNS": {
+      "address": "169.254.1.2",
+      "backendUID": "ED54F246-95B5-47E1-9047-3CA94A9EA963",
+      "backendIP": "10.88.0.1",
+      "clientUID": "C5A70B8F-0C45-43B6-999F-09B0B660000F",
+      "resolverContents": "search custom.test\nnameserver 169.254.1.2\noptions ndots:2",
+      "actualHTTPResponse": "resolver-b4c62c93-actual-backend",
+      "actualUDPAnswer": "10.88.0.1",
+      "actualTCPAnswer": "10.88.0.1"
+    },
+    "unchangedContainerIdentitiesAfterRestart": {
+      "ED54F246-95B5-47E1-9047-3CA94A9EA963": {
+        "http": "containerd://97eea6c10bce2fab08d779d408d9d03d763ca95022854fa24cc7a3714af00a1f"
+      },
+      "C5A70B8F-0C45-43B6-999F-09B0B660000F": {
+        "queries": "containerd://ba77c0d87828ca1cbef9162d3574ff2b0b94cac882051aeab1151b5bd8e1a937",
+        "web": "containerd://4b509314c0806fbf5bd358f478a68387952d1265aaf6a337216e310bce75959b"
+      }
+    },
+    "allDeclaredLogHashesVerified": true
   },
   "remaining": [
-    "Root node-session issue25 must be resolved before a final full-suite gate; no blanket reruns until coordination.",
-    "Actual native proof and exact unchanged configurable-nameservers conformance case remain pending safe guest release.",
+    "Root node-session issue25 retains the earlier independent operation timeout evidence; the integrated source passed its complete3384-check gate without deadline changes.",
+    "Exact unchanged DNS Services, ExternalName and configurable-nameservers upstream cases are running as one expected3 supplemental selection on source de06095; no result claimed yet.",
     "Truncation emits actual DNSConfigForming runtime warnings; forwarding those warnings as Kubernetes Events is a follow-up to the generic runtime-event bridge."
   ]
 }
