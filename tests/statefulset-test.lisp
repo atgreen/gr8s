@@ -323,6 +323,16 @@
     (is (null (gr8s::list-core-resources store "persistentvolumeclaims" "alpha")))
     (is (null (stateful-pod-names store)))))
 
+(test pod-lists-come-back-in-key-order-whatever-the-creation-order
+  (with-budget-api (store runtime reconciler)
+    (values runtime)
+    (dolist (name '("web-2" "web-0" "web-1")) (budget-test-pod store name))
+    (gr8s::delete-reconciled-pod reconciler "alpha" "web-0" :grace-period 0)
+    (budget-test-pod store "web-0")
+    (is (equal '("web-0" "web-1" "web-2")
+               (map 'list (lambda (pod) (gethash "name" (gethash "metadata" pod)))
+                    (gethash "items" (check-core-status 200 "/api/v1/namespaces/alpha/pods")))))))
+
 (test statefulset-http-serves-status-scale-and-keeps-client-conditions
   (with-budget-api (store runtime reconciler)
     (let* ((collection "/apis/apps/v1/namespaces/alpha/statefulsets")
