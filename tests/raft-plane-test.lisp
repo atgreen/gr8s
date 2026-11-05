@@ -29,3 +29,23 @@
     (is (eq :c (gr8s::raft-plane-submit plane "configmaps" :put)))
     (is (eq :l (gr8s::raft-plane-submit plane "events" :put)))
     (is (equal '((:consensus . :put) (:local . :put)) (nreverse routed)))))
+
+(test raft-leader-aware-http-redirect
+  ;; Method classification.
+  (is (not (gr8s::raft-mutating-method-p :get)))
+  (is (not (gr8s::raft-mutating-method-p "HEAD")))
+  (is (gr8s::raft-mutating-method-p :post))
+  (is (gr8s::raft-mutating-method-p "DELETE"))
+  (let ((leader "https://10.0.0.2:6443"))
+    ;; A follower forwards a mutating request to the leader, preserving path+query.
+    (is (equal "https://10.0.0.2:6443/api/v1/namespaces/default/configmaps?x=1"
+               (gr8s::raft-leader-redirect-url
+                :post "/api/v1/namespaces/default/configmaps?x=1" nil leader)))
+    ;; A trailing slash on the base URL does not double up.
+    (is (equal "https://10.0.0.2:6443/api/v1/configmaps"
+               (gr8s::raft-leader-redirect-url :put "/api/v1/configmaps" nil "https://10.0.0.2:6443/")))
+    ;; The leader serves writes locally; reads are always local.
+    (is (null (gr8s::raft-leader-redirect-url :post "/api/v1/configmaps" t leader)))
+    (is (null (gr8s::raft-leader-redirect-url :get "/api/v1/configmaps" nil leader)))
+    ;; No known leader -> no redirect (caller answers 503).
+    (is (null (gr8s::raft-leader-redirect-url :post "/api/v1/configmaps" nil nil)))))
