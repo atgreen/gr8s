@@ -20,6 +20,12 @@
   "Return whether POD's spec sets the boolean FIELD to true."
   (eq t (gethash field (gethash "spec" (pod-to-object pod)))))
 
+(defun pod-pid-namespace-mode (pod)
+  "Return POD's CRI PID namespace mode: each container alone unless the spec shares one."
+  (cond ((pod-spec-flag-p pod "hostPID") gr8s.cri.v1::+namespacemode-node+)
+        ((pod-spec-flag-p pod "shareProcessNamespace") gr8s.cri.v1::+namespacemode-pod+)
+        (t gr8s.cri.v1::+namespacemode-container+)))
+
 (defun pod-host-network-p (pod)
   "Return whether POD shares its node's network namespace."
   (pod-spec-flag-p pod "hostNetwork"))
@@ -92,11 +98,13 @@ Net sysctls cannot be set in the node's own namespace, and others need the node'
 
 (defun validate-pod-host-settings (spec)
   "Validate node namespace flags, the Pod's declared OS and its hosts aliases."
-  (dolist (field '("hostNetwork" "hostPID" "hostIPC"))
+  (dolist (field '("hostNetwork" "hostPID" "hostIPC" "shareProcessNamespace"))
     (when (eq (gethash field spec) 'null) (remhash field spec))
     (multiple-value-bind (value present) (gethash field spec)
       (when (and present (not (member value '(t nil))))
         (invalid-pod "spec.~A must be boolean" field))))
+  (when (and (eq t (gethash "hostPID" spec)) (eq t (gethash "shareProcessNamespace" spec)))
+    (invalid-pod "spec.shareProcessNamespace cannot be set with spec.hostPID"))
   (when (eq (gethash "os" spec) 'null) (remhash "os" spec))
   (let ((os (gethash "os" spec)))
     (when os

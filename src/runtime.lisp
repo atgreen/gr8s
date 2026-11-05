@@ -154,6 +154,14 @@
   (declare (ignore runtime uid container command stdin stdout stderr tty))
   (error 'runtime-error :message "This runtime does not support interactive Pod exec"))
 
+(defmethod runtime-attach-url ((runtime t) uid container &key stdin stdout stderr tty)
+  (declare (ignore runtime uid container stdin stdout stderr tty))
+  (error 'runtime-error :message "This runtime does not support Pod attach"))
+
+(defmethod runtime-start-attach-session ((runtime t) uid container &key stdin stdout stderr tty)
+  (declare (ignore runtime uid container stdin stdout stderr tty))
+  (error 'runtime-error :message "This runtime does not support interactive Pod attach"))
+
 (defstruct (fake-runtime (:constructor make-fake-runtime ()))
   (pods (make-hash-table :test #'equal))
   (ensure-count 0)
@@ -207,6 +215,11 @@
         (list uid container command stdin stdout stderr tty))
   (or (fake-runtime-exec-url runtime)
       (call-next-method)))
+
+(defmethod runtime-attach-url ((runtime fake-runtime) uid container &key stdin stdout stderr tty)
+  (declare (ignore uid container stdin stdout stderr tty))
+  (or (fake-runtime-exec-url runtime)
+      (error 'runtime-error :message "Fake runtime exec URL was not configured")))
 
 (defmethod runtime-exec-sync
     ((runtime fake-runtime) uid container command &key timeout)

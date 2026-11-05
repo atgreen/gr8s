@@ -52,7 +52,8 @@
 
 (test sandbox-config-carries-sysctls-and-node-namespaces
   (let* ((config (gr8s::make-cri-pod-sandbox-config
-                  "pod" "uid" "ns" 0 "/logs" t :sysctls '(("kernel.shm_rmid_forced" . "1")) :host-pid t))
+                  "pod" "uid" "ns" 0 "/logs" t :sysctls '(("kernel.shm_rmid_forced" . "1"))
+                  :pid-mode gr8s.cri.v1::+namespacemode-node+))
          (linux (gr8s.cri.v1::linux config))
          (options (gr8s.cri.v1::namespace-options (gr8s.cri.v1::security-context linux))))
     (is (equal '(("kernel.shm_rmid_forced" . "1")) (gr8s.cri.v1::sysctls linux)))
@@ -714,3 +715,30 @@
       (is-true (gr8s::pod-container-finished-p store pod "main"))
       (gr8s::remove-pod store (pod-namespace pod) (pod-name pod))
       (is-true (gr8s::pod-container-finished-p store pod "main")))))
+
+(test pods-get-private-pid-namespaces-unless-their-spec-shares-one
+  (flet ((pid-mode (&rest options)
+           (let* ((pod (parse-pod (apply #'gap-pod-object options)))
+                  (context (gr8s::containerd-pod-security-context pod (aref (pod-containers pod) 0))))
+             (values (gr8s::pod-pid-namespace-mode pod)
+                     (slot-value (gr8s.cri.v1::namespace-options context) 'gr8s.cri.v1::pid)))))
+    (is (equal (list gr8s.cri.v1::+namespacemode-container+ gr8s.cri.v1::+namespacemode-container+)
+               (multiple-value-list (pid-mode))))
+    (is (equal (list gr8s.cri.v1::+namespacemode-pod+ gr8s.cri.v1::+namespacemode-pod+)
+               (multiple-value-list (pid-mode "shareProcessNamespace" t))))
+    (is (equal (list gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-node+)
+               (multiple-value-list (pid-mode "hostPID" t)))))
+  (signals gr8s::kubernetes-error
+    (parse-pod (gap-pod-object "hostPID" t "shareProcessNamespace" t))))
+
+(test ephemeral-containers-join-their-target-pid-namespace
+  (let* ((pod (parse-pod (gap-pod-object)))
+         (options (gr8s.cri.v1::namespace-options
+                   (gr8s::containerd-pod-security-context pod (aref (pod-containers pod) 0) :target-id "abc"))))
+    (is (= gr8s.cri.v1::+namespacemode-target+ (slot-value options 'gr8s.cri.v1::pid)))
+    (is (equal "abc" (slot-value options 'gr8s.cri.v1::target-id))))
+  (let* ((pod (parse-pod (gap-pod-object "shareProcessNamespace" t)))
+         (options (gr8s.cri.v1::namespace-options
+                   (gr8s::containerd-pod-security-context pod (aref (pod-containers pod) 0) :target-id "abc"))))
+    (is (= gr8s.cri.v1::+namespacemode-pod+ (slot-value options 'gr8s.cri.v1::pid)))))
+
