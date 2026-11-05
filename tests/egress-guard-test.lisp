@@ -87,6 +87,28 @@
     (is (= 901 (whistler/loader:prog-info-fd
                 (gr8s::egress-policy-object-find-program object "gr8s_egress_guard"))))))
 
+;; podster-uqb.97: this took 0.53s of the 0.58s of agent CNI handling for each Pod.
+(test egress-policy-objects-compile-the-guard-once
+  (let ((saved gr8s::*egress-guard-specs*)
+        (compiles 0))
+    (setf gr8s::*egress-guard-specs* nil)
+    (sb-int:encapsulate 'gr8s::compile-egress-guard 'count-compiles
+                        (lambda (function &rest arguments)
+                          (incf compiles)
+                          (apply function arguments)))
+    (unwind-protect
+         (let* ((threads (loop repeat 4
+                               collect (bt:make-thread #'gr8s::compile-egress-policy-object)))
+                (objects (mapcar #'bt:join-thread threads)))
+           (is (= 1 compiles))
+           (is (eq (gr8s::egress-policy-object-program-specs (first objects))
+                   (gr8s::egress-policy-object-program-specs (second objects))))
+           ;; Each Pod still gets its own object for its own map and program fds.
+           (is (not (eq (first objects) (second objects))))
+           (is (plusp (length (gr8s::egress-policy-object-map-specs (first objects))))))
+      (sb-int:unencapsulate 'gr8s::compile-egress-guard 'count-compiles)
+      (setf gr8s::*egress-guard-specs* saved))))
+
 (test egress-policy-object-close-releases-all-fds
   (let ((object (gr8s::compile-egress-policy-object))
         (closed nil))
