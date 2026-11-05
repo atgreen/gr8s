@@ -141,9 +141,11 @@ program is missing.  Used for optional host tools like firewall-cmd."
             (cond
               ((not active) (note :ok "firewall DNS" "no active firewalld"))
               ((doctor-firewall-blocks-dns-p active ports services)
-               (note :warn "firewall DNS"
-                     "firewalld is active and does not allow inbound DNS (port 53)"
-                     "Pod DNS to 169.254.1.1:53 will be rejected; allow it (e.g. firewall-cmd --zone=trusted --add-interface=gr8s-gateway) or stop firewalld"))
+               ;; Not a problem since podster-sp5: Pod DNS to 169.254.1.1:53 is
+               ;; eBPF-redirected to loopback ingress, bypassing the host
+               ;; firewall's inbound path, so an un-opened :53 no longer blocks it.
+               (note :ok "firewall DNS"
+                     "firewalld active without inbound :53; Pod DNS still served via the eBPF redirect-to-loopback"))
               (t (note :ok "firewall DNS" "inbound DNS is permitted"))))
         (error (c) (note :warn "firewall DNS" (format nil "could not check: ~A" c))))
 
