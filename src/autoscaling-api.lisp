@@ -143,7 +143,6 @@
 (defun autoscaling-discovery-response (version)
   "Advertise the autoscaler collection in VERSION, v1 or v2."
   (let ((resources (stored-resource-discovery "autoscaling/v2")))
-    (loop for resource across resources do (setf (gethash "shortNames" resource) #("hpa")))
     (json-response (core-object "apiVersion" "v1" "kind" "APIResourceList"
                                 "groupVersion" (format nil "autoscaling/~A" version)
                                 "resources" resources))))
@@ -158,9 +157,7 @@
   "Advertise APIServices as read-only, since nothing can be registered."
   (json-response
    (core-object "apiVersion" "v1" "kind" "APIResourceList" "groupVersion" "apiregistration.k8s.io/v1"
-                "resources" (vector (core-object "name" "apiservices" "singularName" "apiservice" "namespaced" nil
-                                                 "kind" "APIService" "categories" #("api-extensions")
-                                                 "verbs" #("get" "list"))))))
+                "resources" (vector (resource-discovery-entry "apiservices" "apiservice" nil "APIService" #("get" "list"))))))
 
 (defun local-apiservices (store)
   "Describe each API version this server serves itself as an available local APIService."

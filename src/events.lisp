@@ -163,8 +163,8 @@
   "Advertise the actual versioned Event CRUD, list and watch operations."
   (json-response
    (core-object "apiVersion" "v1" "kind" "APIResourceList" "groupVersion" "events.k8s.io/v1"
-                "resources" (vector (core-object "name" "events" "singularName" "event" "namespaced" t "kind" "Event"
-                                                 "verbs" #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch"))))))
+                "resources" (vector (resource-discovery-entry "events" "event" t "Event"
+                                                              #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch"))))))
 
 (defun add-event-openapi-paths (paths modern-p)
   "Describe both Event API versions with their actual schemas and operations."
