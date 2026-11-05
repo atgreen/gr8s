@@ -14,6 +14,22 @@
   (signals error
     (gr8s::containerd-platform-for-machine "mips64")))
 
+(test managed-containerd-syncs-metadata-unless-told-not-to
+  (flet ((config (&rest arguments)
+           (gr8s::managed-containerd-config-text
+            (apply #'gr8s::make-managed-containerd
+                   :state-directory "/var/lib/gr8s/" :executable "/opt/gr8s/bin/containerd"
+                   :oci-runtime "/opt/gr8s/bin/runc" :cni-bin-directory "/opt/gr8s/bin/cni/"
+                   :platform "linux/amd64" arguments))))
+    (is (not (search "no_sync" (config))))
+    (let ((unsynced (config :metadata-no-sync t)))
+      (is (search "[plugins.'io.containerd.metadata.v1.bolt']" unsynced))
+      (is (search "no_sync = true" unsynced))
+      ;; The table must not swallow the keys that follow it.
+      (is (search "snapshotter = 'overlayfs'" unsynced))))
+  (is (getf (gr8s::parse-cli-options '("serve" "--containerd-no-sync" "--port" "18080")) :containerd-no-sync))
+  (is (not (getf (gr8s::parse-cli-options '("serve" "--port" "18080")) :containerd-no-sync))))
+
 (test managed-containerd-keeps-all-state-under-its-private-directory
   (let* ((manager
            (gr8s::make-managed-containerd
