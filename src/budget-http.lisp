@@ -16,7 +16,6 @@
 (defun budget-resources-response ()
   "Advertise PodDisruptionBudgets and their separately authorized status subresource."
   (let ((resources (stored-resource-discovery "policy/v1")))
-    (loop for resource across resources do (setf (gethash "shortNames" resource) #("pdb")))
     (json-response
      (core-object "apiVersion" "v1" "kind" "APIResourceList" "groupVersion" "policy/v1"
                   "resources" (concatenate 'vector resources
