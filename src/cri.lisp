@@ -286,8 +286,9 @@
              (ensure-cri-deletion-status "RemovePodSandbox" status)))
       (ag-grpc:channel-close channel))))
 
-(defun cri-pull-image (socket-path image &key timeout)
-  "Pull IMAGE without a default operation deadline; callers may supply TIMEOUT."
+(defun cri-pull-image (socket-path image &key timeout auth)
+  "Pull IMAGE without a default operation deadline; callers may supply TIMEOUT.
+AUTH is a (username . password) credential for the registry."
   ;; Download and extraction can exceed an ordinary CRI request's deadline.
   ;; Match Kubernetes' remote image client: keep the cancellable call context,
   ;; but do not abort an active pull merely because two minutes have elapsed.
@@ -298,7 +299,9 @@
               (gr8s.cri.v1::make-image-service-stub channel)
               (make-instance
                'gr8s.cri.v1::pull-image-request
-               :image (make-instance 'gr8s.cri.v1::image-spec :image image))
+               :image (make-instance 'gr8s.cri.v1::image-spec :image image)
+               :auth (when auth
+                       (make-instance 'gr8s.cri.v1::auth-config :username (car auth) :password (cdr auth))))
               :timeout timeout)
            (ensure-cri-status "PullImage" status)
            (gr8s.cri.v1::image-ref response))

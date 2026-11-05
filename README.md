@@ -699,6 +699,11 @@ postStart and preStop hooks run against the exact attempt, and termination messa
 come from a per-attempt file with optional log fallback. A container whose
 configuration cannot be generated reports `CreateContainerConfigError` while its
 siblings run; image pulls run in the background and failures report `ErrImagePull`.
+Private registries work through the `imagePullSecrets` of a Pod or its ServiceAccount,
+matched as the kubelet matches them apart from `[...]` patterns in host names. There's
+no node-wide credential file or credential provider plugin. An image already on a node
+isn't checked against a Pod's credentials, so any Pod there can use it with
+`IfNotPresent`; upstream's kubelet has checked this by default since v1.35.
 Ephemeral containers are added through `pods/ephemeralcontainers`, and `pods/resize`
 changes CPU and memory in place, or restarts that container under a RestartContainer
 policy. Readiness gates and a Pod's own `resources` remain unsupported.

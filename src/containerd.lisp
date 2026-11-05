@@ -277,7 +277,10 @@ A container running as any user can write here, and a user mount at the path tak
   (let ((socket (containerd-runtime-socket-path runtime)))
     (let ((policy (gethash "imagePullPolicy" (pod-runtime-container-object pod spec)
                            (default-image-pull-policy (container-spec-image spec)))))
-      (ensure-container-image runtime (container-spec-image spec) policy))
+      (ensure-container-image runtime (container-spec-image spec) policy
+                              (lambda ()
+                                (pod-image-pull-credentials runtime pod (container-spec-name spec)
+                                                            (container-spec-image spec)))))
     (let* ((environment (containerd-pod-environment runtime pod spec sandbox-id))
            (mounts (containerd-container-mounts runtime pod spec sandbox-id environment))
            (security (containerd-pod-security-context

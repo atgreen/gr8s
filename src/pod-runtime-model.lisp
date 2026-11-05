@@ -389,6 +389,13 @@
   (multiple-value-bind (value present) (gethash "automountServiceAccountToken" spec)
     (when (and present (not (member value '(t nil))))
       (invalid-pod "automountServiceAccountToken must be boolean")))
+  (when (eq (gethash "imagePullSecrets" spec) 'null) (remhash "imagePullSecrets" spec))
+  (loop for reference across (optional-vector spec "imagePullSecrets" "spec")
+        do (drop-null-fields (require-object reference "imagePullSecrets"))
+           (reject-unsupported-fields reference '("name") "imagePullSecrets")
+           ;; As upstream, an empty name is accepted and then ignored.
+           (unless (equal "" (gethash "name" reference ""))
+             (require-dns-subdomain (gethash "name" reference) "imagePullSecrets.name")))
   (let ((names nil))
     (loop for volume across (optional-vector spec "volumes" "spec")
           do (validate-pod-volume volume)
