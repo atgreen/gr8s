@@ -451,6 +451,7 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
                        (node-record-taints current) (node-record-taints updated)
                        (node-record-unschedulable current) (node-record-unschedulable updated)
                        (node-record-resource-version current) (node-record-resource-version updated))
+                 (note-node-desired-change store)   ; desired API write (8ia.4)
                  current))))))))))
 
 (defun nodes-api-response (store &optional name)

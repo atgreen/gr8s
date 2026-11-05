@@ -128,42 +128,70 @@
 (defparameter +template-history-recent-limit+ 512
   "Newest journal entries kept separately, so that an idle watch reads few of them.")
 
+(defun core-state-json (store resources revision workload-deletions job-controller-states)
+  "Serialize the complete durable core-resource state to the JSON written to disk.
+   Returns (values json history floor token-key event-expirations added) so the
+   direct publish path can also set the derived in-memory slots."
+  (multiple-value-bind (history floor added) (next-template-history store resources revision)
+    (let* ((token-key (or (pod-store-template-token-key store) (secure-random-octets 32)))
+           (event-expirations (next-event-expirations store resources))
+           (json (com.inuoe.jzon:stringify
+                  (core-object "version" 2 "revision" revision "workloadDeletions" workload-deletions
+                               "jobControllerStates" job-controller-states
+                               "templateHistory" (coerce history 'vector) "templateHistoryFloor" floor
+                               "templateTokenKey" (ag-grpc:base64-encode token-key)
+                               "resourceHistoryStart" (pod-store-resource-history-start store)
+                               "eventExpirations" event-expirations
+                               "items" (coerce (loop for key being the hash-keys of resources using (hash-value object)
+                                                     unless (custom-resource-key-p (first key)) collect object) 'vector)
+                               "customResourceItems" (coerce (loop for key being the hash-keys of resources using (hash-value object)
+                                                                   when (custom-resource-key-p (first key))
+                                                                     collect (core-object "resource" (first key) "object" object)) 'vector)))))
+      (values json history floor token-key event-expirations added))))
+
 (defun commit-core-resources (store resources revision
                               &key (workload-deletions (pod-store-workload-deletions store))
                                 (job-controller-states (pod-store-job-controller-states store)))
-  "Atomically commit API status, Job retry state and durable deletion/history indexes before publishing memory."
+  "Commit a durable core-resource transition. Normally (and always without HA)
+   writes the complete new state to disk and publishes it in memory. Inside a
+   WITH-CORE-WRITE on an HA store, instead stashes the committed state blob so the
+   caller can replicate it through Raft once the store lock is released; every
+   replica then installs it via INSTALL-CORE-STATE-BLOB."
   ;; Write the complete new state before publishing it in memory. A failed
   ;; atomic write leaves both the old disk state and the old index intact.
-  (multiple-value-bind (history floor added) (next-template-history store resources revision)
-   (let ((token-key (or (pod-store-template-token-key store) (secure-random-octets 32)))
-         (event-expirations (next-event-expirations store resources)))
-    (write-private-text-atomically
-   (core-resource-state-path store)
-   (com.inuoe.jzon:stringify
-    (core-object "version" 2 "revision" revision "workloadDeletions" workload-deletions
-                 "jobControllerStates" job-controller-states
-                 "templateHistory" (coerce history 'vector) "templateHistoryFloor" floor
-                 "templateTokenKey" (ag-grpc:base64-encode token-key)
-                 "resourceHistoryStart" (pod-store-resource-history-start store)
-                 "eventExpirations" event-expirations
-                 "items" (coerce (loop for key being the hash-keys of resources using (hash-value object)
-                                       unless (custom-resource-key-p (first key)) collect object) 'vector)
-                 "customResourceItems" (coerce (loop for key being the hash-keys of resources using (hash-value object)
-                                       when (custom-resource-key-p (first key))
-                                         collect (core-object "resource" (first key) "object" object)) 'vector))))
-  (setf (pod-store-resources store) resources
-        (pod-store-workload-deletions store) workload-deletions
-        (pod-store-job-controller-states store) job-controller-states
-        (pod-store-resource-revision store) revision
-        (pod-store-template-history store) history
-        (pod-store-template-history-recent store)
-        (let ((recent (append added (pod-store-template-history-recent store))))
-          (if (nthcdr +template-history-recent-limit+ recent)
-              (subseq recent 0 +template-history-recent-limit+)
-              recent))
-        (pod-store-template-history-floor store) floor
-        (pod-store-template-token-key store) token-key
-        (pod-store-event-expirations store) event-expirations))))
+  (multiple-value-bind (json history floor token-key event-expirations added)
+      (core-state-json store resources revision workload-deletions job-controller-states)
+    (cond
+      ((and *core-write-active* (pod-store-consensus-commit-fn store))
+       ;; HA: defer publication to the replicated apply path.
+       (setf *pending-consensus-commit* json))
+      (t
+       (write-private-text-atomically (core-resource-state-path store) json)
+       (setf (pod-store-resources store) resources
+             (pod-store-workload-deletions store) workload-deletions
+             (pod-store-job-controller-states store) job-controller-states
+             (pod-store-resource-revision store) revision
+             (pod-store-template-history store) history
+             (pod-store-template-history-recent store)
+             (let ((recent (append added (pod-store-template-history-recent store))))
+               (if (nthcdr +template-history-recent-limit+ recent)
+                   (subseq recent 0 +template-history-recent-limit+)
+                   recent))
+             (pod-store-template-history-floor store) floor
+             (pod-store-template-token-key store) token-key
+             (pod-store-event-expirations store) event-expirations)))))
+
+(defun install-core-state-blob (store json)
+  "Install a replicated core-resource state JSON blob on this replica: write it to
+   disk and reload the in-memory index from it. Runs on every member when a
+   :core-state entry commits (podster-c2d.7.2). Uses the RAW store lock, never
+   WITH-STORE-LOCK: on the leader this runs while the proposing writer still holds
+   the consensus-write lock during its flush, so acquiring that lock again here
+   would deadlock."
+  (bt:with-lock-held ((pod-store-lock store))
+    (write-private-text-atomically (core-resource-state-path store) json)
+    (clrhash (pod-store-resources store))
+    (load-core-resources store)))
 
 (defun copy-core-resource-index (store)
   (let ((copy (make-hash-table :test #'equal)))
@@ -428,7 +456,7 @@
          (map-equal (gethash "binaryData" left) (gethash "binaryData" right)))))
 
 (defun create-core-resource (store resource input namespace &key dry-run)
-  (with-store-lock (store)
+  (with-core-write (store)
     (expire-core-events-unlocked store)
     (unless (or (equal resource "events") *resource-quota-admission-exempt*)
       (require-namespace-accepts-content store namespace))
@@ -484,7 +512,7 @@
         (t (copy-core-object existing))))
 
 (defun update-core-resource (store resource namespace name transform &key dry-run)
-  (with-store-lock (store)
+  (with-core-write (store)
     (expire-core-events-unlocked store)
     (let* ((existing (get-core-resource-unlocked store resource namespace name))
            (existing-metadata (gethash "metadata" existing))
@@ -540,28 +568,34 @@
       (copy-core-object object))))
 
 (defun delete-core-resource (store resource namespace name &key uid resource-version dry-run)
-  (with-store-lock (store)
+  ;; A COND (not RETURN-FROM) so WITH-CORE-WRITE's consensus flush always runs on
+  ;; the delegated CRD/CSR/storage delete paths too (they stash via COMMIT-CORE-RESOURCES).
+  (with-core-write (store)
     (expire-core-events-unlocked store)
     (let* ((existing (get-core-resource-unlocked store resource namespace name))
            (metadata (gethash "metadata" existing)))
       (when (or (and uid (not (equal uid (gethash "uid" metadata))))
                 (and resource-version (not (equal resource-version (gethash "resourceVersion" metadata)))))
         (core-resource-error 409 "Conflict" "Delete precondition does not match the stored object"))
-      (when (or (equal resource "customresourcedefinitions") (custom-resource-key-p resource))
-        (return-from delete-core-resource (delete-crd-object-unlocked store resource existing dry-run)))
-      (when (csr-resource-p resource)
-        (return-from delete-core-resource (delete-csr-unlocked store existing dry-run)))
-      (when (storage-resource-p resource)
-        (return-from delete-core-resource (delete-storage-resource-unlocked store resource existing dry-run)))
-      (when (equal resource "namespaces")
-        (return-from delete-core-resource (delete-namespace-unlocked store existing dry-run)))
-      (when (typed-api-resource-p resource)
-        (return-from delete-core-resource (delete-typed-api-resource-unlocked store resource existing dry-run)))
-      (when (policy-resource-p resource) (validate-policy-delete resource existing))
-      (let ((resources (copy-core-resource-index store)))
-        (remhash (core-resource-key resource namespace name) resources)
-        ;; A selector Service owns the Endpoints of its name; a manual Endpoints object outlives its Service.
-        (when (and (equal resource "services") (plusp (hash-table-count (gethash "selector" (gethash "spec" existing) (core-object)))))
-          (remhash (core-resource-key "endpoints" namespace name) resources))
-        (unless dry-run (commit-core-resources store resources (1+ (pod-store-resource-revision store)))))
-      (copy-core-object existing))))
+      ;; A COND (not RETURN-FROM) so WITH-CORE-WRITE's consensus flush always runs
+      ;; on the delegated delete paths too (they stash via COMMIT-CORE-RESOURCES).
+      (cond
+        ((or (equal resource "customresourcedefinitions") (custom-resource-key-p resource))
+         (delete-crd-object-unlocked store resource existing dry-run))
+        ((csr-resource-p resource)
+         (delete-csr-unlocked store existing dry-run))
+        ((storage-resource-p resource)
+         (delete-storage-resource-unlocked store resource existing dry-run))
+        ((equal resource "namespaces")
+         (delete-namespace-unlocked store existing dry-run))
+        ((typed-api-resource-p resource)
+         (delete-typed-api-resource-unlocked store resource existing dry-run))
+        (t
+         (when (policy-resource-p resource) (validate-policy-delete resource existing))
+         (let ((resources (copy-core-resource-index store)))
+           (remhash (core-resource-key resource namespace name) resources)
+           ;; A selector Service owns the Endpoints of its name; a manual Endpoints object outlives its Service.
+           (when (and (equal resource "services") (plusp (hash-table-count (gethash "selector" (gethash "spec" existing) (core-object)))))
+             (remhash (core-resource-key "endpoints" namespace name) resources))
+           (unless dry-run (commit-core-resources store resources (1+ (pod-store-resource-revision store)))))
+         (copy-core-object existing))))))
