@@ -124,7 +124,7 @@
         (unless (and (>= (length bytes) 4) (equalp (subseq bytes 0 4) #(107 56 115 0)))
           (error "Missing Kubernetes protobuf prefix"))
         (let* ((descriptor (find expected-kind *stored-resource-types* :key #'second :test #'equal))
-               (expected-version (or version-override (if descriptor (third descriptor) "v1")))
+               (expected-version (or version-override (if descriptor (third descriptor) (or (auth-review-kind-version expected-kind) "v1"))))
                (envelope (core-protobuf-fields (subseq bytes 4)))
                (type-meta (core-protobuf-fields (or (core-protobuf-value envelope 1)
                                                    (make-array 0 :element-type '(unsigned-byte 8)))))
@@ -141,6 +141,10 @@
             (return-from decode-core-resource-protobuf (decode-csr-protobuf raw)))
           (when (equal kind "CustomResourceDefinition")
             (return-from decode-core-resource-protobuf (decode-crd-protobuf raw)))
+          (when (typed-api-kind-p kind)
+            (return-from decode-core-resource-protobuf (decode-typed-api-protobuf raw kind version)))
+          (when (auth-review-kind-version kind)
+            (return-from decode-core-resource-protobuf (decode-auth-review-protobuf raw kind version)))
           (when (member kind '("Endpoints" "Ingress" "IngressClass" "ServiceCIDR" "IPAddress") :test #'equal)
             (return-from decode-core-resource-protobuf (decode-networking-protobuf raw kind version)))
           (when (member kind '("ResourceQuota" "LimitRange" "RuntimeClass" "PriorityClass") :test #'equal)
@@ -198,10 +202,13 @@
                     (unless (= 2 (second field)) (error "Invalid Namespace finalizer"))
                     (push (trivial-utf-8:utf-8-bytes-to-string (third field)) finalizers))))
               (when finalizers (setf (gethash "finalizers" spec) (coerce (nreverse finalizers) 'vector)))
-              ;; Namespace status is server-owned and normalized on admission.
-              (return-from decode-core-resource-protobuf
-                (core-object "apiVersion" "v1" "kind" kind "spec" spec
-                             "metadata" (if metadata (core-protobuf-metadata metadata) (core-object))))))
+              ;; Namespace status is server-owned unless this is its status subresource.
+              (let ((object (core-object "apiVersion" "v1" "kind" kind "spec" spec
+                                         "metadata" (if metadata (core-protobuf-metadata metadata) (core-object))))
+                    (status (core-protobuf-value fields 3)))
+                (when (and status *typed-api-status-write*)
+                  (setf (gethash "status" object) (template-protobuf-message "k8s.io.api.core.v1.NamespaceStatus" status)))
+                (return-from decode-core-resource-protobuf object))))
           (unless (member kind '("ConfigMap" "Secret") :test #'equal) (error "Unsupported protobuf kind"))
           (let* ((fields (core-protobuf-fields raw))
                  (metadata (core-protobuf-value fields 1))

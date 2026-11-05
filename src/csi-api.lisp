@@ -2,8 +2,8 @@
 ;;;; SPDX-License-Identifier: MIT
 ;;;;
 ;;;; Purpose:
-;;;; Serve the storage.k8s.io objects CSI drivers and their sidecars read and write,
-;;;; and coordination.k8s.io Leases, which those sidecars use for leader election.
+;;;; Serve the storage.k8s.io objects CSI drivers and their sidecars read and write.
+;;;; Their leader-election Leases are served with the other typed APIs.
 
 (in-package #:gr8s)
 
@@ -11,17 +11,13 @@
   (dolist (type '(("csidrivers" "CSIDriver" "storage.k8s.io/v1" nil)
                   ("csinodes" "CSINode" "storage.k8s.io/v1" nil)
                   ("volumeattachments" "VolumeAttachment" "storage.k8s.io/v1" nil)
-                  ("csistoragecapacities" "CSIStorageCapacity" "storage.k8s.io/v1" t)
-                  ("leases" "Lease" "coordination.k8s.io/v1" t)))
+                  ("csistoragecapacities" "CSIStorageCapacity" "storage.k8s.io/v1" t)))
     (setf *stored-resource-types*
           (append (remove (first type) *stored-resource-types* :key #'first :test #'equal) (list type)))))
 
 (defun csi-storage-resource-p (resource)
   "Return whether RESOURCE is a storage.k8s.io object that describes CSI state."
   (member resource '("csidrivers" "csinodes" "volumeattachments" "csistoragecapacities") :test #'equal))
-
-(defun lease-resource-p (resource)
-  (equal resource "leases"))
 
 (defun csi-driver-name-valid-p (name)
   "Accept a CSI driver name: a DNS subdomain of at most 63 characters."
@@ -85,31 +81,6 @@
       ((equal resource "csistoragecapacities")
        (unless (equal (gethash "storageClassName" before) (gethash "storageClassName" after))
          (core-resource-error 422 "Invalid" "CSIStorageCapacity storageClassName is immutable"))))))
-
-(defun normalize-lease-resource (input namespace name)
-  "Admit a Lease; its holder fields are the clients' own and need no controller."
-  (let* ((object (copy-core-object (require-object input "Lease")))
-         (metadata (require-object (gethash "metadata" object) "metadata")))
-    (validate-core-metadata metadata namespace name :allow-finalizers t)
-    (setf (gethash "apiVersion" object) "coordination.k8s.io/v1"
-          (gethash "kind" object) "Lease"
-          (gethash "namespace" metadata) namespace)
-    (when (and (gethash "spec" object) (not (eq 'null (gethash "spec" object))))
-      (reject-unsupported-fields (require-object (gethash "spec" object) "spec")
-                                 '("holderIdentity" "leaseDurationSeconds" "acquireTime" "renewTime"
-                                   "leaseTransitions" "strategy" "preferredHolder")
-                                 "Lease spec"))
-    object))
-
-(defun coordination-api-group ()
-  (core-object "apiVersion" "v1" "kind" "APIGroup" "name" "coordination.k8s.io"
-               "versions" (vector (core-object "groupVersion" "coordination.k8s.io/v1" "version" "v1"))
-               "preferredVersion" (core-object "groupVersion" "coordination.k8s.io/v1" "version" "v1")))
-
-(defun coordination-discovery-response ()
-  (json-response (core-object "apiVersion" "v1" "kind" "APIResourceList"
-                              "groupVersion" "coordination.k8s.io/v1"
-                              "resources" (stored-resource-discovery "coordination.k8s.io/v1"))))
 
 ;;; Provisioning through a driver's external-provisioner sidecar
 

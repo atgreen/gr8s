@@ -31,7 +31,8 @@
                    (core-resource-error 422 "Invalid" "Nonresource rules cannot contain resource fields"))
                  (bootstrap-string-array (gethash "nonResourceURLs" rule) "rule.nonResourceURLs" :nonempty t)
                  (loop for url across (gethash "nonResourceURLs" rule)
-                       unless (char= #\/ (char url 0))
+                       ;; A lone * is how upstream's cluster-admin grants every URL.
+                       unless (or (equal url "*") (and (plusp (length url)) (char= #\/ (char url 0))))
                          do (core-resource-error 422 "Invalid" "nonResourceURLs must begin with /")))
                (progn
                  (bootstrap-string-array (gethash "resources" rule) "rule.resources" :nonempty t)
@@ -55,7 +56,7 @@
     (default-rbac-api-group ref "rbac.authorization.k8s.io")
     (unless (and (equal "rbac.authorization.k8s.io" (gethash "apiGroup" ref))
                  (member (gethash "kind" ref) (if cluster-p '("ClusterRole") '("Role" "ClusterRole")) :test #'equal)
-                 (dns-subdomain-p (gethash "name" ref)))
+                 (path-segment-name-p (gethash "name" ref)))
       (core-resource-error 422 "Invalid" "Invalid roleRef"))
     (unless (and (vectorp subjects) (not (stringp subjects)))
       (core-resource-error 422 "Invalid" "subjects must be an array"))
@@ -177,7 +178,7 @@
                  (equal kind (gethash "kind" object kind)))
       (core-resource-error 400 "BadRequest" "Expected ~A ~A" version kind))
     (reject-unsupported-fields object (append '("apiVersion" "kind" "metadata") fields) kind)
-    (validate-core-metadata metadata namespace name)
+    (validate-core-metadata metadata namespace name :name-test (when (rbac-resource-p resource) #'path-segment-name-p))
     (setf (gethash "kind" object) kind (gethash "apiVersion" object) version)
     (if namespace (setf (gethash "namespace" metadata) namespace) (remhash "namespace" metadata))
     (cond
@@ -188,8 +189,9 @@
          (reject-unsupported-fields spec '("finalizers") "Namespace.spec")
          (when (gethash "finalizers" spec)
            (bootstrap-string-array (gethash "finalizers" spec) "spec.finalizers"))
-         (setf (gethash "spec" object) spec
-               (gethash "status" object) (core-object "phase" "Active"))))
+         (setf (gethash "spec" object) spec)
+         (normalize-namespace-lifecycle
+          object (and name store (gethash (core-resource-key "namespaces" nil name) (pod-store-resources store))))))
       ((equal resource "serviceaccounts")
        (multiple-value-bind (automount present) (gethash "automountServiceAccountToken" object)
          (when (and present (not (member automount '(t nil))))
@@ -242,9 +244,9 @@
                                                    ((equal resource "limitranges") #("limits"))
                                                    ((equal resource "priorityclasses") #("pc")) (t #()))
                                 "verbs" (if (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource)
-                                                (policy-resource-p resource) (networking-resource-p resource)
+                                                (policy-resource-p resource) (typed-api-resource-p resource) (networking-resource-p resource)
                                                 (admission-config-resource-p resource)
-                                                (member resource '("services" "networkpolicies" "podtemplates" "events" "horizontalpodautoscalers" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions" "customresourcedefinitions") :test #'equal))
+                                                (member resource '("configmaps" "secrets" "serviceaccounts" "roles" "rolebindings" "clusterroles" "clusterrolebindings" "networkpolicies" "services" "podtemplates" "events" "horizontalpodautoscalers" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions" "customresourcedefinitions") :test #'equal))
                                             #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
                                             #("create" "delete" "get" "list" "patch" "update" "watch"))))
    'vector))

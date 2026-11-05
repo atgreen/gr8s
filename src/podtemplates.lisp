@@ -48,6 +48,19 @@
              ((equal type "bytes") (ag-grpc:base64-encode value))
              (t (template-protobuf-message type value (1+ depth))))))))
 
+(defun protobuf-timestamp-fields (seconds)
+  "Split Unix SECONDS into proleptic Gregorian UTC fields, covering Go's zero time in year 1."
+  (multiple-value-bind (days second-of-day) (floor seconds 86400)
+    ;; Days-to-civil over 400-year eras, shifted so each computed year starts in March.
+    (let* ((shifted (+ days 719468)) (era (floor shifted 146097)) (day-of-era (- shifted (* era 146097)))
+           (year-of-era (floor (- day-of-era (floor day-of-era 1460) (- (floor day-of-era 36524)) (floor day-of-era 146096)) 365))
+           (day-of-year (- day-of-era (- (+ (* 365 year-of-era) (floor year-of-era 4)) (floor year-of-era 100))))
+           (shifted-month (floor (+ (* 5 day-of-year) 2) 153))
+           (day (1+ (- day-of-year (floor (+ (* 153 shifted-month) 2) 5))))
+           (month (if (< shifted-month 10) (+ shifted-month 3) (- shifted-month 9)))
+           (year (+ year-of-era (* era 400) (if (<= month 2) 1 0))))
+      (values year month day (floor second-of-day 3600) (floor (mod second-of-day 3600) 60) (mod second-of-day 60)))))
+
 (defun template-protobuf-message (name bytes &optional (depth 0))
   "Decode all declared PodTemplate message fields, including maps and repeated messages."
   (when (> depth 64) (error "Template protobuf nesting exceeds 64"))
@@ -100,13 +113,15 @@
        ;; Keep the client's key order: a revision's data is compared byte for byte.
        (let ((raw (gethash "raw" object)))
          (if raw (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (ag-grpc:base64-decode raw))) (core-object))))
+      ((member name '("k8s.io.api.authorization.v1.ExtraValue" "k8s.io.api.authentication.v1.ExtraValue") :test #'equal)
+       (gethash "items" object #()))
       ((equal name "k8s.io.apimachinery.pkg.apis.meta.v1.FieldsV1")
        (let ((raw (gethash "Raw" object)))
          (if raw (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (ag-grpc:base64-decode raw))) (core-object))))
       ((member name '("k8s.io.apimachinery.pkg.apis.meta.v1.Time" "k8s.io.apimachinery.pkg.apis.meta.v1.MicroTime") :test #'equal)
        (if (zerop (hash-table-count object)) 'null
-           (multiple-value-bind (second minute hour day month year)
-               (decode-universal-time (+ 2208988800 (gethash "seconds" object 0)) 0)
+           (multiple-value-bind (year month day hour minute second)
+               (protobuf-timestamp-fields (gethash "seconds" object 0))
              (let ((nanos (gethash "nanos" object 0)))
                (unless (<= 0 nanos 999999999) (error "Invalid protobuf timestamp nanoseconds"))
                (concatenate 'string (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0D" year month day hour minute second)

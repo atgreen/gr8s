@@ -19,12 +19,42 @@
               (declare (ignore store))
               (csr-crypto-fixture directory "ec")))))
 
+(defun typed-api-watch-fixture (resource object)
+  "Give OBJECT the minimum content a typed RESOURCE requires."
+  (flet ((spec (&rest fields) (setf (gethash "spec" object) (apply #'gr8s::core-object fields))))
+    (let ((claim (gr8s::core-object "devices" (gr8s::core-object "requests" #())))
+          (match (gr8s::core-object "resourceRules"
+                   (vector (gr8s::core-object "operations" #("CREATE") "apiGroups" #("") "apiVersions" #("v1")
+                                              "resources" #("watched-kind"))))))
+      (cond
+        ((equal resource "leases") (spec))
+        ((equal resource "prioritylevelconfigurations") (spec "type" "Exempt"))
+        ((equal resource "flowschemas") (spec "priorityLevelConfiguration" (gr8s::core-object "name" "exempt")))
+        ((equal resource "deviceclasses") (spec))
+        ((equal resource "resourceclaims") (setf (gethash "spec" object) claim))
+        ((equal resource "resourceclaimtemplates") (spec "spec" claim))
+        ((equal resource "resourceslices")
+         (spec "driver" "example.com" "allNodes" t
+               "pool" (gr8s::core-object "name" "pool" "generation" 1 "resourceSliceCount" 1)))
+        ((equal resource "validatingadmissionpolicies")
+         (spec "matchConstraints" match "validations" (vector (gr8s::core-object "expression" "true"))))
+        ((equal resource "validatingadmissionpolicybindings")
+         (spec "policyName" "absent" "validationActions" #("Deny")))
+        ((equal resource "mutatingadmissionpolicies")
+         (spec "matchConstraints" match
+               "mutations" (vector (gr8s::core-object "patchType" "ApplyConfiguration"
+                                     "applyConfiguration" (gr8s::core-object "expression" "Object{}")))))
+        ((equal resource "mutatingadmissionpolicybindings") (spec "policyName" "absent")))))
+  object)
+
 (defun durable-watch-fixture (resource name)
   "Build a valid stored resource with labels for cross-kind watch checks."
   (let ((object (gr8s::core-object "apiVersion" (gr8s::core-resource-api-version resource)
                                  "kind" (gr8s::core-resource-kind resource)
                                  "metadata" (gr8s::core-object "name" name "labels" (gr8s::core-object "app" "watched")))))
-    (cond ((equal resource "jobs")
+    (cond ((gr8s::typed-api-resource-p resource)
+           (typed-api-watch-fixture resource object))
+          ((equal resource "jobs")
            (setf (gethash "spec" object) (gethash "spec" (batch-test-job))))
           ((equal resource "cronjobs")
            (setf (gethash "spec" object)
@@ -161,6 +191,12 @@
                          (setf (gethash "app" (gethash "labels" (gethash "metadata" object))) "watched") object))
                      (is (equal "ADDED" (gethash "type" (read-template-watch-event stream))))
                      (gr8s::delete-core-resource store resource namespace name)
+                     ;; A Namespace first turns Terminating, until its controller releases it.
+                     (when (equal resource "namespaces")
+                       (is (equal "MODIFIED" (gethash "type" (read-template-watch-event stream))))
+                       (gr8s::reconcile-namespace-deletions (gr8s::make-reconciler store (make-fake-runtime)))
+                       ;; The controller reports its conditions and releases its finalizer on the way out.
+                       (loop repeat 2 do (is (equal "MODIFIED" (gethash "type" (read-template-watch-event stream))))))
                      (is (equal "DELETED" (gethash "type" (read-template-watch-event stream)))))
                 (close stream)))))))))
 

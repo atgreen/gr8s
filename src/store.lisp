@@ -26,6 +26,11 @@
   (event-expirations (make-hash-table :test #'equal))
   in-cluster-config
   (credential-lock (bt:make-lock "gr8s ServiceAccount credentials"))
+  service-account-signing-key
+  ;; Digest of each verified token to its claims.
+  (verified-tokens (make-hash-table :test #'equal))
+  ;; (Pod UID, token identity) to the projected token last minted for it.
+  (projected-tokens (make-hash-table :test #'equal))
   (workload-lock (bt:make-lock "gr8s workload controllers"))
   (workload-deletions (make-hash-table :test #'equal))
   (job-controller-states (make-hash-table :test #'equal))

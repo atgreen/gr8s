@@ -246,6 +246,11 @@
                (multiple-value-bind (code created)
                    (certificate-api-test-request pki certificate key collection :method "POST" :object fixture
                      :headers '("Impersonate-User: forged" "X-Remote-User: forged"))
+                 ;; Only an authorized impersonator can name another user.
+                 (is (= 403 code)))
+               (multiple-value-bind (code created)
+                   (certificate-api-test-request pki certificate key collection :method "POST" :object fixture
+                     :headers '("X-Remote-User: forged"))
                  (is (= 201 code))
                  (let ((spec (gethash "spec" created)))
                    (is (equal "tester-csr" (gethash "username" spec)))

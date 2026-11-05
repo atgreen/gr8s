@@ -55,6 +55,10 @@
         (handler-case (push (get-core-resource store resource (pod-namespace pod) name) result)
           (kubernetes-error (condition)
             (unless (and optional (= 404 (kubernetes-error-status-code condition))) (error condition))))))
+    (let ((token-object (handler-case (pod-projected-token-object store pod)
+                          ;; A missing account delays only this Pod, as its unready volume reports.
+                          (kubernetes-error () nil))))
+      (when token-object (push token-object result)))
     (remove-duplicates (append result (pod-persistent-resource-objects store pod)) :test #'equalp)))
 
 (defun assignment-resource-objects (assignment)
@@ -78,8 +82,10 @@
             (unless (if (storage-resource-p resource)
                         (assigned-storage-resource-p object pod projected)
                         (or (and (equal namespace (pod-namespace pod))
-                                 (some (lambda (reference) (and (equal resource (first reference)) (equal name (second reference))))
-                                       (pod-resource-reference-declarations pod)))
+                                 (or (and (equal resource "secrets") (equal name (projected-token-secret-name pod))
+                                          (pod-projected-token-sources pod))
+                                     (some (lambda (reference) (and (equal resource (first reference)) (equal name (second reference))))
+                                           (pod-resource-reference-declarations pod))))
                             (and (equal resource "secrets") (csi-volume-secret-reference-p object projected))))
               (invalid-pod "assignment contains an unreferenced, cross-namespace or incorrectly bound resource"))
             ;; This status came from the authenticated control plane, rather than

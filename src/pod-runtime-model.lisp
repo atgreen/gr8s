@@ -272,6 +272,18 @@
                (validate-resource-field-reference resource)
                (require-nonempty-string (gethash "containerName" resource) "resourceFieldRef.containerName")))))
 
+(defun validate-projected-token-source (source)
+  "Validate one serviceAccountToken projection's path, audience and lifetime."
+  (drop-null-fields (require-object source "serviceAccountToken"))
+  (reject-unsupported-fields source '("path" "audience" "expirationSeconds") "serviceAccountToken")
+  (unless (safe-volume-relative-path-p (gethash "path" source))
+    (invalid-pod "serviceAccountToken.path must be a safe relative path"))
+  (let ((audience (gethash "audience" source)))
+    (when (and audience (not (stringp audience))) (invalid-pod "serviceAccountToken.audience must be a string")))
+  (let ((seconds (gethash "expirationSeconds" source)))
+    (when (and seconds (not (and (integerp seconds) (<= 600 seconds (expt 2 32)))))
+      (invalid-pod "serviceAccountToken.expirationSeconds must be between 10 minutes and 2^32 seconds"))))
+
 (defun validate-projected-source (projected)
   "Validate a projected volume, refusing sources that have no real implementation here."
   (drop-null-fields projected)
@@ -280,7 +292,7 @@
   (let ((paths nil))
     (loop for source across (optional-vector projected "sources" "projected")
           do (drop-null-fields source)
-             (reject-unsupported-fields source '("configMap" "secret" "downwardAPI") "projected source")
+             (reject-unsupported-fields source '("configMap" "secret" "downwardAPI" "serviceAccountToken") "projected source")
              (unless (= 1 (hash-table-count source))
                (invalid-pod "projected source requires exactly one kind"))
              (let ((part (or (gethash "configMap" source) (gethash "secret" source))))
@@ -293,11 +305,18 @@
                  (drop-null-fields (require-object part "downwardAPI"))
                  (reject-unsupported-fields part '("items") "downwardAPI")
                  (validate-downward-items part)))
+             (let ((part (gethash "serviceAccountToken" source)))
+               (when part
+                 (validate-projected-token-source part)
+                 (when (member (gethash "path" part) paths :test #'equal)
+                   (invalid-pod "projected volume has conflicting path ~S" (gethash "path" part)))
+                 (push (gethash "path" part) paths)))
              (let ((part (or (gethash "configMap" source) (gethash "secret" source) (gethash "downwardAPI" source))))
-               (loop for item across (gethash "items" part #())
-                     do (when (member (gethash "path" item) paths :test #'equal)
-                          (invalid-pod "projected volume has conflicting path ~S" (gethash "path" item)))
-                        (push (gethash "path" item) paths))))))
+               (when part
+                 (loop for item across (gethash "items" part #())
+                       do (when (member (gethash "path" item) paths :test #'equal)
+                            (invalid-pod "projected volume has conflicting path ~S" (gethash "path" item)))
+                          (push (gethash "path" item) paths)))))))
 
 (defun validate-pod-volume (volume)
   "Validate a durable ConfigMap, Secret, downward API, projected, disk or tmpfs volume."
