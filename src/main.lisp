@@ -741,7 +741,8 @@ handler and never gets here. A busy host makes this race likely."
     (write-line line))
   (terpri)
   (format t "   gr8s ~A · a Kubernetes-compatible control plane in Common Lisp~%" +gr8s-version+)
-  (format t "   Kubernetes API v1.36 · ~A · no Envoy, no kube-proxy, no etcd~%~%" role)
+  (multiple-value-bind (major minor) (kubernetes-api-version-components)
+    (format t "   Kubernetes API v~A.~A · ~A · no Envoy, no kube-proxy, no etcd~%~%" major minor role))
   (finish-output))
 
 (defun main-with-environment (arguments environment cni-entry)

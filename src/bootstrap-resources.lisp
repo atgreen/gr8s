@@ -354,7 +354,7 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
                "capacity" (node-resource-list node)
                "allocatable" (node-resource-list node)
                "nodeInfo" (core-object "operatingSystem" "linux" "architecture" (native-node-architecture)
-                                        "kubeletVersion" "v1.36.0-gr8s.0"))))))
+                                        "kubeletVersion" (kubernetes-git-version)))))))
 
 (defun node-write-input (node method)
   "Return the requested Node object from a typed or JSON PUT, or a patch applied to NODE's view."
