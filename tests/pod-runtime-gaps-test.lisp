@@ -27,6 +27,34 @@
   "Return a Pod security context requesting sysctls NAMES, each set to 1."
   (gr8s::core-object "sysctls" (map 'vector (lambda (name) (gr8s::core-object "name" name "value" "1")) names)))
 
+(test scheduler-name-default-is-accepted-and-a-custom-one-is-refused
+  ;; Controller-generated specs routinely set schedulerName: default-scheduler;
+  ;; gr8s runs that one built-in scheduler, so it admits it (ate's
+  ;; podcertcontroller needs this) but refuses a scheduler it would never bind.
+  (is (gr8s::pod-name (parse-pod (gap-pod-object "schedulerName" "default-scheduler"))))
+  (signals kubernetes-error (parse-pod (gap-pod-object "schedulerName" "custom-scheduler")))
+  ;; topologySpreadConstraints is admitted (unhonored on a single node) rather
+  ;; than blocking an otherwise valid Pod.
+  (is (gr8s::pod-name
+       (parse-pod (gap-pod-object "topologySpreadConstraints"
+                                  (vector (gr8s::core-object "maxSkew" 1 "topologyKey" "kubernetes.io/hostname"
+                                                             "whenUnsatisfiable" "ScheduleAnyway")))))))
+
+(test run-as-non-root-is-verified-against-the-image-user
+  ;; runAsNonRoot with an explicit runAsUser only needs that uid nonzero; without
+  ;; one, the image's own user decides -- a non-root image (ko builds run as
+  ;; 65532) passes, a root image is refused. This is what let ate's
+  ;; podcertcontroller (runAsNonRoot, no runAsUser, image user 65532) run.
+  (flet ((ok (user uid name) (finishes (gr8s::verify-run-as-non-root user uid name)))
+         (bad (user uid name) (signals gr8s::container-config-error (gr8s::verify-run-as-non-root user uid name))))
+    (ok 1000 nil nil)          ; explicit non-root uid
+    (bad 0 nil nil)            ; explicit uid 0
+    (ok nil 65532 "")          ; image's non-root uid
+    (bad nil 0 "")             ; image runs as root uid 0
+    (ok nil nil "nonroot")     ; image's non-root username
+    (bad nil nil "root")       ; image username root
+    (bad nil nil "")))         ; nothing proves non-root
+
 (test sysctl-names-are-validated-together-and-either-separator-means-the-same-variable
   (is (gr8s::pod-name (parse-pod (gap-pod-object "securityContext" (gap-sysctl-security "kernel.shm_rmid_forced")))))
   (let ((message (handler-case

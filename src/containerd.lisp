@@ -283,8 +283,11 @@ A container running as any user can write here, and a user mount at the path tak
                                                             (container-spec-image spec)))))
     (let* ((environment (containerd-pod-environment runtime pod spec sandbox-id))
            (mounts (containerd-container-mounts runtime pod spec sandbox-id environment))
-           (security (containerd-pod-security-context
-                      pod spec :target-id (containerd-ephemeral-target-id runtime pod spec)))
+           (security (multiple-value-bind (image-uid image-username)
+                         (cri-image-user socket (container-spec-image spec))
+                       (containerd-pod-security-context
+                        pod spec :target-id (containerd-ephemeral-target-id runtime pod spec)
+                        :image-uid image-uid :image-username image-username)))
            (termination (containerd-termination-file runtime pod spec attempt mounts))
            (termination-labels
              (when termination

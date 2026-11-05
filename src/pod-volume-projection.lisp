@@ -122,9 +122,13 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
 
 (defun build-pod-certificate-request (&key name namespace signer-name pkix-public-key
                                            pod-name pod-uid service-account-name service-account-uid
-                                           node-name node-uid max-expiration-seconds proof-of-possession)
-  "Build a PodCertificateRequest object for a pod's podCertificate volume: its
-   PKIX public key (base64 DER) plus the pod/SA/node identity the signer checks."
+                                           node-name node-uid max-expiration-seconds
+                                           unverified-user-annotations)
+  "Build a PodCertificateRequest object (certificates.k8s.io/v1beta1) for a pod's
+   podCertificate volume: its PKIX public key (base64 DER -- accepted by signers
+   as the transition fallback for stubPKCS10Request) plus the pod/SA/node
+   identity the signer checks, and any signer-domain pod annotations the signer
+   reads via unverifiedUserAnnotations."
   (let ((spec (core-object "signerName" signer-name
                            "podName" pod-name "podUID" pod-uid
                            "serviceAccountName" service-account-name
@@ -133,9 +137,9 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
                            "pkixPublicKey" pkix-public-key)))
     (when max-expiration-seconds
       (setf (gethash "maxExpirationSeconds" spec) max-expiration-seconds))
-    (when proof-of-possession
-      (setf (gethash "proofOfPossession" spec) proof-of-possession))
-    (core-object "apiVersion" "certificates.k8s.io/v1alpha1" "kind" "PodCertificateRequest"
+    (when (and unverified-user-annotations (plusp (hash-table-count unverified-user-annotations)))
+      (setf (gethash "unverifiedUserAnnotations" spec) unverified-user-annotations))
+    (core-object "apiVersion" "certificates.k8s.io/v1beta1" "kind" "PodCertificateRequest"
                  "metadata" (core-object "name" name "namespace" namespace)
                  "spec" spec)))
 

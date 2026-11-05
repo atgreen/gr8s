@@ -567,3 +567,13 @@ AUTH is a (username . password) credential for the registry."
   "Return the ID of the local image IMAGE currently names, or NIL when the node lacks it."
   (let ((record (cri-local-image socket-path image timeout)))
     (when record (gr8s.cri.v1::id record))))
+
+(defun cri-image-user (socket-path image &key (timeout 30))
+  "Return the user a local IMAGE is configured to run as, for verifying
+   runAsNonRoot when a Pod sets no explicit runAsUser (as the kubelet does):
+   (values UID-or-NIL USERNAME), both NIL/\"\" when the node lacks the image."
+  (let ((record (cri-local-image socket-path image timeout)))
+    (when record
+      (let ((uid (gr8s.cri.v1::uid record)))
+        (values (when uid (gr8s.cri.v1::value uid))
+                (gr8s.cri.v1::username record))))))

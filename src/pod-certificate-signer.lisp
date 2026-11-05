@@ -15,10 +15,14 @@
 (defparameter *pod-certificate-trust-domain* "cluster.local"
   "The SPIFFE trust domain the built-in pod-certificate signer issues under.")
 
-(defparameter *pod-certificate-signers*
-  '("podidentity.podcert.ate.dev/identity" "servicedns.podcert.ate.dev/identity")
-  "signerNames the built-in signer issues for. Requests for any other signer stay
-   Pending for whatever external controller owns that name, exactly as upstream.")
+(defparameter *pod-certificate-signers* '()
+  "signerNames the built-in signer issues for. Empty by default: gr8s provides
+   the KEP-4317 kubelet mechanics (the PodCertificateRequest API, projection and
+   volumes) and leaves signing to whatever controller owns each signer -- as a
+   real cluster does, and as Agent Substrate expects (it deploys its own
+   podcertcontroller, which signs under its own CA). Set this (e.g. to
+   '(\"podidentity.podcert.ate.dev/identity\")) only for a standalone gr8s that
+   should self-sign those names from the cluster CA.")
 
 (defparameter *pod-certificate-default-duration* (* 24 60 60)
   "The lifetime the built-in signer issues when a request sets no bound.")
@@ -36,6 +40,26 @@
   (let ((spec (gethash "spec" pcr (core-object))))
     (and (equal pod-uid (gethash "podUID" spec))
          (equal pkix (gethash "pkixPublicKey" spec)))))
+
+(defun signer-domain (signer-name)
+  "The domain of a signerName, e.g. postgres.podcert.ate.dev for
+   postgres.podcert.ate.dev/identity (the part before the final slash)."
+  (let ((slash (position #\/ signer-name :from-end t)))
+    (if slash (subseq signer-name 0 slash) signer-name)))
+
+(defun pod-signer-user-annotations (store namespace pod-name pod-uid signer-name)
+  "The pod annotations a signer may read as unverifiedUserAnnotations: those whose
+   key is in the signer's own domain (KEP-4317), copied from the live pod so a
+   node cannot assert annotations the pod does not carry."
+  (let ((pod (ignore-errors (get-pod store namespace pod-name)))
+        (domain (concatenate 'string (signer-domain signer-name) "/"))
+        (result (core-object)))
+    (when (and pod (equal pod-uid (pod-uid pod)))
+      (let ((annotations (gethash "annotations" (gethash "metadata" (pod-to-object pod)) (core-object))))
+        (maphash (lambda (key value)
+                   (when (uiop:string-prefix-p domain key) (setf (gethash key result) value)))
+                 annotations)))
+    result))
 
 (defun ensure-pod-certificate-request-from-claim (store node-name claim)
   "Idempotently ensure the PodCertificateRequest a node's CLAIM asks for exists
@@ -63,7 +87,11 @@
         :service-account-uid (let ((uid (slot-value claim 'gr8s.node.v1::service-account-uid)))
                                (when (plusp (length uid)) uid))
         :node-name node-name :node-uid (node-metadata-uid store node-name)
-        :max-expiration-seconds (when (plusp max) max))
+        :max-expiration-seconds (when (plusp max) max)
+        :unverified-user-annotations
+        (pod-signer-user-annotations store namespace
+                                     (slot-value claim 'gr8s.node.v1::pod-name) pod-uid
+                                     (slot-value claim 'gr8s.node.v1::signer-name)))
        namespace))))
 
 ;;; ---------------------------------------------------------------------------
@@ -156,6 +184,11 @@
                     (gethash "notBefore" status) (stamp not-before)
                     (gethash "notAfter" status) (stamp not-after)
                     (gethash "beginRefreshAt" status) (stamp (- not-after (floor (- not-after not-before) 3)))
+                    ;; The v1beta1 terminal condition clients wait on.
+                    (gethash "conditions" status)
+                    (vector (core-object "type" "Issued" "status" "True" "reason" "Issued"
+                                         "message" "gr8s built-in signer issued the certificate"
+                                         "lastTransitionTime" (stamp not-before)))
                     (gethash "status" current) status))
             current))))))
 

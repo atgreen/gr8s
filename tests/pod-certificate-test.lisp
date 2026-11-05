@@ -104,7 +104,10 @@
   (gr8s::pod-certificate-claim-message (first (gr8s::node-pending-pod-certificate-claims store))))
 
 (test pod-certificate-control-plane-creates-and-signs
-  (with-projection (runtime store directory)
+  ;; Exercise gr8s's optional built-in signer (off by default) by opting this
+  ;; signer name in, as a standalone gr8s without Agent Substrate would.
+  (let ((gr8s::*pod-certificate-signers* '("podidentity.podcert.ate.dev/identity")))
+   (with-projection (runtime store directory)
     (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
            (pod (create-pod store (projection-pod *pod-certificate-volume*)))
            (volume (aref (gethash "volumes" (gethash "spec" (gr8s::pod-to-object pod))) 0)))
@@ -131,10 +134,13 @@
           (is (plusp (length (gethash "notBefore" status)))))
         ;; With the signed request in its store, the node now mounts the bundle.
         (let ((files (gr8s::pod-volume-desired-files runtime pod volume)))
-          (is (= 3 (length files))))))))
+          (is (= 3 (length files)))))))))
 
 (test pod-certificate-signer-leaves-foreign-signers-pending
-  (with-temporary-store (store directory)
+  ;; The built-in signer owns one name here; a request for any other signer is
+  ;; left Pending for whatever controller owns it (e.g. Agent Substrate's).
+  (let ((gr8s::*pod-certificate-signers* '("podidentity.podcert.ate.dev/identity")))
+   (with-temporary-store (store directory)
     (let ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory))))
       (gr8s::create-core-resource
        store "podcertificaterequests"
@@ -144,7 +150,7 @@
        "default")
       (gr8s::reconcile-pod-certificate-requests store pki)
       (let ((pcr (gr8s::get-core-resource store "podcertificaterequests" "default" "foreign")))
-        (is (zerop (length (gethash "certificateChain" (gethash "status" pcr (gr8s::core-object)) ""))))))))
+        (is (zerop (length (gethash "certificateChain" (gethash "status" pcr (gr8s::core-object)) "")))))))))
 
 ;;; --- projection back to the node --------------------------------------------
 

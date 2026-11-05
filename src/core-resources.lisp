@@ -93,13 +93,14 @@
     ("certificaterequests" "CertificateRequest" "cert-manager.io/v1" t)
     ;; KEP-3257/4317 trust distribution: cluster-scoped CA trust anchors a
     ;; signer publishes, consumed by the clusterTrustBundle projected volume
-    ;; source. Served under certificates.k8s.io/v1beta1 (its upstream GA-track
-    ;; group-version) alongside the v1 CertificateSigningRequest API.
-    ("clustertrustbundles" "ClusterTrustBundle" "certificates.k8s.io/v1beta1" nil)
+    ;; source. GA at certificates.k8s.io/v1 in Kubernetes 1.37, the version
+    ;; Agent Substrate's client uses, alongside the v1 CertificateSigningRequest.
+    ("clustertrustbundles" "ClusterTrustBundle" "certificates.k8s.io/v1" nil)
     ;; KEP-4317 PodCertificateRequest: the node asks a signer for a short-lived
     ;; pod X.509 (the podCertificate projected volume). Namespaced; the signer
-    ;; fills status.certificateChain. Served at certificates.k8s.io/v1alpha1.
-    ("podcertificaterequests" "PodCertificateRequest" "certificates.k8s.io/v1alpha1" t)))
+    ;; fills status.certificateChain. Served at certificates.k8s.io/v1beta1 (the
+    ;; Kubernetes 1.37 group-version Agent Substrate's controller speaks).
+    ("podcertificaterequests" "PodCertificateRequest" "certificates.k8s.io/v1beta1" t)))
 
 (defun stored-resource-type (resource)
   "Return the descriptor for a durable Kubernetes resource collection."

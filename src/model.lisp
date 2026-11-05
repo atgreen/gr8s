@@ -312,7 +312,14 @@
             "securityContext" "serviceAccountName" "automountServiceAccountToken" "imagePullSecrets"
             "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig"
             "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
-            "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "shareProcessNamespace" "hostAliases" "ephemeralContainers") "spec")
+            "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "shareProcessNamespace" "hostAliases" "ephemeralContainers"
+            "schedulerName" "topologySpreadConstraints") "spec")
+    ;; gr8s runs the one built-in scheduler, which is the default scheduler, so a
+    ;; Pod may name it (controller-generated specs routinely do) but not request
+    ;; another, which nothing here would ever bind.
+    (let ((scheduler (gethash "schedulerName" spec)))
+      (when (and scheduler (not (equal scheduler "default-scheduler")))
+        (invalid-pod "spec.schedulerName ~S is not supported (only default-scheduler)" scheduler)))
     (dolist (field '("hostname" "subdomain"))
       (when (eq (gethash field spec) 'null) (remhash field spec))
       (let ((value (gethash field spec "")))
