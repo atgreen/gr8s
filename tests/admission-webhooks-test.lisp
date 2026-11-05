@@ -791,15 +791,18 @@
       (let ((body (check-core-status 501 "/api/v1/namespaces/alpha/pods/held/attach?container=other&stdin=true" :method :post)))
         (is (search "not implemented" (gethash "message" body)))))))
 
-(test containers-refuse-termination-messages-they-cannot-honor
+(test containers-validate-termination-message-settings
   (flet ((pod-with (field value)
            (let* ((object (gr8s::copy-core-object (pod-to-object (parse-pod *valid-pod-json*))))
                   (container (aref (gethash "containers" (gethash "spec" object)) 0)))
              (setf (gethash field container) value)
              object)))
     (is (gr8s::pod-name (parse-pod (pod-with "terminationMessagePolicy" "File"))))
-    (signals kubernetes-error (parse-pod (pod-with "terminationMessagePolicy" "FallbackToLogsOnError")))
-    (signals kubernetes-error (parse-pod (pod-with "terminationMessagePath" "/elsewhere")))))
+    (is (gr8s::pod-name (parse-pod (pod-with "terminationMessagePolicy" "FallbackToLogsOnError"))))
+    (is (gr8s::pod-name (parse-pod (pod-with "terminationMessagePath" "/elsewhere"))))
+    (signals kubernetes-error (parse-pod (pod-with "terminationMessagePolicy" "Sometimes")))
+    (signals kubernetes-error (parse-pod (pod-with "terminationMessagePath" "relative/path")))
+    (signals kubernetes-error (parse-pod (pod-with "terminationMessagePath" "/a/../b")))))
 
 (test webhook-configurations-accept-hyphenated-custom-kinds
   (with-admission-api (store)

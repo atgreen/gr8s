@@ -5,11 +5,28 @@
 (defparameter +gr8s-resource-version-label+ "io.gr8s.resource-version")
 (defparameter +gr8s-container-label+ "io.gr8s.container")
 (defparameter +gr8s-spec-fingerprint-label+ "io.gr8s.spec-fingerprint")
+(defparameter +gr8s-host-network-label+ "io.gr8s.host-network")
 
 (define-condition runtime-error (error)
   ((message :initarg :message :reader runtime-error-message))
   (:report (lambda (condition stream)
              (write-string (runtime-error-message condition) stream))))
+
+(define-condition container-config-error (runtime-error) ()
+  (:documentation "Report a container whose configuration cannot be generated yet, which later attempts may resolve."))
+
+(defun container-config-error (control &rest arguments)
+  "Signal a CONTAINER-CONFIG-ERROR with a formatted message."
+  (error 'container-config-error :message (apply #'format nil control arguments)))
+
+(define-condition container-image-pending (runtime-error) ()
+  (:documentation "Report that a container's image is still being pulled, so its creation must wait."))
+
+(define-condition container-image-pull-error (container-config-error) ()
+  (:documentation "Report that a container's image could not be pulled; a later pass retries it."))
+
+(defparameter +gr8s-termination-file-label+ "io.gr8s.termination-file")
+(defparameter +gr8s-termination-policy-label+ "io.gr8s.termination-policy")
 
 (defstruct runtime-pod
   uid
@@ -51,6 +68,13 @@
     (remhash "terminationGracePeriodSeconds" spec)
     ;; A lowered active deadline changes when the Pod stops, never what runs.
     (remhash "activeDeadlineSeconds" spec)
+    ;; Adding an ephemeral container starts it beside the running workload.
+    (remhash "ephemeralContainers" spec)
+    ;; Each of these changes one container in place, or restarts just that one.
+    (remhash "tolerations" spec)
+    (dolist (field '("containers" "initContainers"))
+      (loop for container across (gethash field spec #())
+            do (dolist (key '("image" "resources" "resizePolicy")) (remhash key container))))
     (octets-to-hex (ironclad:digest-sequence :sha256
                   (trivial-utf-8:string-to-utf-8-bytes
                    (canonical-workload-json spec))))))
@@ -95,7 +119,7 @@
 (defgeneric stop-runtime-deletions (runtime)
   (:documentation "Cancel and join background deletion operations before runtime services stop."))
 (defmethod stop-runtime-deletions ((runtime t)) nil)
-(defgeneric runtime-logs (runtime uid container &key tail))
+(defgeneric runtime-logs (runtime uid container &key tail previous))
 (defgeneric runtime-exec-url
     (runtime uid container command &key stdin stdout stderr tty))
 (defgeneric runtime-exec-sync
@@ -170,8 +194,8 @@
   (fail-if-requested runtime)
   (remhash uid (fake-runtime-pods runtime)))
 
-(defmethod runtime-logs ((runtime fake-runtime) uid container &key tail)
-  (declare (ignore tail))
+(defmethod runtime-logs ((runtime fake-runtime) uid container &key tail previous)
+  (declare (ignore tail previous))
   (fail-if-requested runtime)
   (let ((pod (runtime-observe runtime uid)))
     (and pod (gethash container (runtime-pod-logs pod) ""))))

@@ -179,10 +179,13 @@ the rest of the history instead of deleting one a client is about to use."
                                :test #'equal))))
 
 (defun daemonset-node-eligible-p (daemonset node)
-  "Return whether DAEMONSET's template selects NODE. gr8s nodes carry no taints to tolerate."
+  "Return whether DAEMONSET's template selects NODE, whose taints it must tolerate.
+A daemon Pod ignores a node being cordoned, but needs an agent to run on."
   (let* ((pod-spec (gethash "spec" (gethash "template" (gethash "spec" daemonset))))
          (template-pod (make-pod :object (core-object "spec" pod-spec))))
-    (and (node-selector-matches-p (gethash "nodeSelector" pod-spec) node)
+    (and (not (node-record-api-only node))
+         (spec-tolerates-node-scheduling-p pod-spec node)
+         (node-selector-matches-p (gethash "nodeSelector" pod-spec) node)
          (pod-node-affinity-matches-p template-pod node)
          (member (gethash "nodeName" pod-spec) (list nil "" 'null (node-record-name node)) :test #'equal))))
 

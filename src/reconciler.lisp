@@ -8,7 +8,9 @@
   (urgent-deletions (make-hash-table :test #'equal))
   (convergence-lock (bt:make-lock "gr8s running convergence ownership"))
   ;; Pod UID to the universal time its local storage was last measured.
-  (storage-measurements (make-hash-table :test #'equal)))
+  (storage-measurements (make-hash-table :test #'equal))
+  ;; Pod UID to when a NoExecute taint with a finite toleration was first noticed.
+  (taint-timers (make-hash-table :test #'equal)))
 
 (define-condition pod-reconciliation-superseded (serious-condition) ()
   (:documentation "Unwind obsolete creation without translating cancellation into a Pod failure."))
@@ -277,10 +279,10 @@
                      (list status))
                  (pod-reconciliation-superseded () nil))))
 
-(defun reconciler-logs (reconciler uid container &key tail)
+(defun reconciler-logs (reconciler uid container &key tail previous)
   (bt:with-lock-held ((reconciler-lock reconciler))
     (runtime-logs (reconciler-runtime reconciler)
-                  uid container :tail tail)))
+                  uid container :tail tail :previous previous)))
 
 (defun reconciler-exec-url
     (reconciler uid container command &key stdin stdout stderr tty)

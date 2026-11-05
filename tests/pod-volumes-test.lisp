@@ -14,6 +14,12 @@
   "Return a Pod using projected data, an emptyDir and downward environment."
   (parse-pod "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"projection\",\"namespace\":\"sonobuoy\"},\"spec\":{\"securityContext\":{\"runAsUser\":1000,\"runAsGroup\":3000,\"fsGroup\":2000},\"serviceAccountName\":\"sonobuoy-serviceaccount\",\"nodeSelector\":{\"kubernetes.io/os\":\"linux\"},\"volumes\":[{\"name\":\"config\",\"configMap\":{\"name\":\"settings\"}},{\"name\":\"secret\",\"secret\":{\"secretName\":\"credentials\",\"items\":[{\"key\":\"binary\",\"path\":\"nested/binary\",\"mode\":256}]}},{\"name\":\"work\",\"emptyDir\":{}}],\"containers\":[{\"name\":\"reader\",\"image\":\"busybox:latest\",\"imagePullPolicy\":\"IfNotPresent\",\"env\":[{\"name\":\"NS\",\"valueFrom\":{\"fieldRef\":{\"fieldPath\":\"metadata.namespace\"}}},{\"name\":\"LITERAL\",\"value\":\"ok\"}],\"volumeMounts\":[{\"name\":\"config\",\"mountPath\":\"/config\"},{\"name\":\"secret\",\"mountPath\":\"/secret\"},{\"name\":\"work\",\"mountPath\":\"/work\"}],\"securityContext\":{\"runAsUser\":1001,\"allowPrivilegeEscalation\":false,\"readOnlyRootFilesystem\":true}}]}}"))
 
+(defun volume-test-pod-named (name)
+  "Return a copy of the volume test Pod called NAME."
+  (let ((object (pod-to-object (volume-test-pod))))
+    (setf (gethash "name" (gethash "metadata" object)) name)
+    (parse-pod (com.inuoe.jzon:stringify object))))
+
 (defun create-volume-test-data (store namespace)
   "Create ConfigMap and Secret fixtures in NAMESPACE."
   (gr8s::create-core-resource store "configmaps"
@@ -38,10 +44,27 @@
       (let ((foreign (gr8s::get-core-resource store "configmaps" "other" "settings")))
         (setf (slot-value assignment 'gr8s.node.v1::resource-objects-json)
               (list (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify foreign))))
-        (signals kubernetes-error (gr8s::install-assigned-resource-objects agent-store (list assignment))))
-      (is (= 1 (length (gr8s::list-core-resources agent-store "configmaps"))))
+        (let ((*error-output* (make-broadcast-stream)))
+          (gr8s::install-assigned-resource-objects agent-store (list assignment))))
+      (signals kubernetes-error (gr8s::get-core-resource agent-store "configmaps" "other" "settings"))
       (gr8s::install-assigned-resource-objects agent-store nil)
       (is (null (gr8s::list-core-resources agent-store "secrets"))))))
+
+(test one-pods-bad-resource-object-does-not-stop-the-others
+  (with-temporary-store (store directory)
+    (create-volume-test-data store "sonobuoy")
+    (let* ((good (gr8s::pod-assignment (create-pod store (volume-test-pod)) store))
+           (bad (gr8s::pod-assignment (create-pod store (volume-test-pod-named "projection-bad")) store))
+           (agent-store (open-store (merge-pathnames "agent/" directory))))
+      ;; An object the agent would reject on arrival, as a token Secret named after an
+      ;; uppercase Pod UID once was.
+      (setf (slot-value bad 'gr8s.node.v1::resource-objects-json)
+            (list (trivial-utf-8:string-to-utf-8-bytes
+                   "{\"kind\":\"Secret\",\"metadata\":{\"namespace\":\"sonobuoy\"}}")))
+      (let ((*error-output* (make-broadcast-stream)))
+        (finishes (gr8s::install-assigned-resource-objects agent-store (list bad good))))
+      (is (equal "hello projection"
+                 (gethash "message" (gethash "data" (gr8s::get-core-resource agent-store "configmaps" "sonobuoy" "settings"))))))))
 
 (test projected-files-and-emptydir-have-real-mount-content
   (with-temporary-store (store directory)

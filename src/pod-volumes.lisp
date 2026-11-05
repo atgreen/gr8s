@@ -54,16 +54,15 @@
             (unless (and optional (= 404 (kubernetes-error-status-code condition))) (error condition))))))
     (remove-duplicates (append result (pod-persistent-resource-objects store pod)) :test #'equalp)))
 
-(defun install-assigned-resource-objects (store assignments &optional service-discovery)
-  "Atomically install Pod-scoped references, exact PVC/PV bindings and public Service discovery."
-  (let ((resources (make-hash-table :test #'equal)))
-    (dolist (assignment assignments)
-      (let* ((pod (assignment-pod assignment))
-             (projected (mapcar (lambda (bytes)
-                                  (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string bytes)
-                                                       :max-string-length (* 2 1024 1024)))
-                                (slot-value assignment 'gr8s.node.v1::resource-objects-json))))
-        (dolist (object projected)
+(defun assignment-resource-objects (assignment)
+  "Return ASSIGNMENT's validated objects as (KEY . OBJECT), or signal if any is not acceptable."
+  (let* ((pod (assignment-pod assignment))
+         (projected (mapcar (lambda (bytes)
+                              (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string bytes)
+                                                   :max-string-length (* 2 1024 1024)))
+                            (slot-value assignment 'gr8s.node.v1::resource-objects-json))))
+    (loop for object in projected
+          collect
           (let* ((metadata (require-object (gethash "metadata" object) "metadata"))
                  (namespace (gethash "namespace" metadata)) (name (gethash "name" metadata))
                  (resource (cond ((equal "ConfigMap" (gethash "kind" object)) "configmaps")
@@ -80,8 +79,23 @@
             ;; This status came from the authenticated control plane, rather than
             ;; an API create request. Preserve its real binding observation.
             (let ((*storage-status-write* (not (null (storage-resource-p resource)))))
-              (setf (gethash (core-resource-key resource namespace name) resources)
+              (cons (core-resource-key resource namespace name)
                     (normalize-core-resource resource object namespace name)))))))
+
+(defun install-assigned-resource-objects (store assignments &optional service-discovery)
+  "Atomically install Pod-scoped references, exact PVC/PV bindings and public Service discovery."
+  (let ((resources (make-hash-table :test #'equal)))
+    (dolist (assignment assignments)
+      ;; Every snapshot carries every Pod, so failing the whole of it would stop
+      ;; all Pods on this node. One Pod's bad object delays only that Pod, whose
+      ;; volumes then report the missing resource.
+      (handler-case
+          (loop for (key . object) in (assignment-resource-objects assignment)
+                do (setf (gethash key resources) object))
+        (kubernetes-error (condition)
+          (format *error-output* "gr8s Pod ~A/~A assignment rejected: ~A~%"
+                  (slot-value assignment 'gr8s.node.v1::namespace)
+                  (slot-value assignment 'gr8s.node.v1::name) condition))))
     (install-service-discovery-projection resources service-discovery)
     (with-store-lock (store)
       (unless (equalp resources (pod-store-resources store))
@@ -226,12 +240,12 @@
          (object (handler-case (get-core-resource (containerd-runtime-resource-store runtime) resource (pod-namespace pod) name)
                    (kubernetes-error (condition)
                      (unless (and optional (= 404 (kubernetes-error-status-code condition)))
-                       (error 'runtime-error :message (format nil "Missing environment source ~A/~A" resource name))))))
+                       (container-config-error "Missing environment source ~A/~A" resource name)))))
          (data (and object (gethash "data" object))))
     (multiple-value-bind (value present) (if data (gethash key data) (values nil nil))
       (unless present
         (if optional (return-from containerd-key-environment-value (values nil nil))
-            (error 'runtime-error :message (format nil "Environment source ~A/~A lacks key ~A" resource name key))))
+            (container-config-error "Environment source ~A/~A lacks key ~A" resource name key)))
       (let ((text (if (equal resource "secrets")
                       (handler-case (trivial-utf-8:utf-8-bytes-to-string (core-base64-bytes value "Secret environment"))
                         (error () (error 'runtime-error :message "Secret environment value is not valid UTF-8"))) value)))
@@ -249,8 +263,7 @@
                    (kubernetes-error (condition)
                      (unless (and (eq t (gethash "optional" reference))
                                   (= 404 (kubernetes-error-status-code condition)))
-                       (error 'runtime-error
-                              :message (format nil "Missing environment source ~A/~A" resource name))))))
+                       (container-config-error "Missing environment source ~A/~A" resource name)))))
          (data (and object (gethash "data" object))))
     (when data
       (loop for key being the hash-keys of data using (hash-value value)
@@ -320,19 +333,30 @@
               (setf (cdr existing) (cdr pair))
               (push (cons (car pair) (cdr pair)) result)))))))
 
+(defun containerd-sandbox-address (runtime pod sandbox-id)
+  "Return POD's own address: its sandbox's, or its node's when it shares the node's network."
+  (if (containerd-pod-host-network-p runtime pod)
+      (containerd-node-address runtime)
+      (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime) sandbox-id)))
+
 (defun containerd-pod-environment (runtime pod container sandbox-id)
-  "Resolve a container's variables: Services, then envFrom in order, then explicit env."
-  (let* ((object (pod-runtime-container-object pod container)) (pod-ip nil))
+  "Resolve a container's variables: Services, then envFrom in order, then explicit env.
+A literal value may refer to any variable defined before it, as $(NAME)."
+  (let* ((object (pod-runtime-container-object pod container)) (pod-ip nil)
+         (environment
+           (merge-environment
+            (when (and runtime (containerd-runtime-resource-store runtime)) (pod-service-environment runtime pod))
+            (loop for source across (gethash "envFrom" object #())
+                  append (environment-source-pairs runtime pod source)))))
     (merge-environment
-     (when (and runtime (containerd-runtime-resource-store runtime)) (pod-service-environment runtime pod))
-     (loop for source across (gethash "envFrom" object #())
-           append (environment-source-pairs runtime pod source))
+     environment
      (loop for variable across (gethash "env" object #())
            for from = (gethash "valueFrom" variable)
            append
            (multiple-value-bind (value include)
                (cond
-                 ((null from) (values (gethash "value" variable "") t))
+                 ((null from)
+                  (values (expand-container-command-argument (gethash "value" variable "") environment) t))
                  ((gethash "secretKeyRef" from)
                   (containerd-key-environment-value runtime pod "secrets" (gethash "secretKeyRef" from)))
                  ((gethash "configMapKeyRef" from)
@@ -352,10 +376,15 @@
                              (reference
                               (let ((metadata (gethash "metadata" (pod-to-object pod))))
                                 (gethash (cdr reference) (gethash (car reference) metadata (core-object)) "")))
-                             ((equal field "status.podIP")
-                              (or pod-ip (setf pod-ip (cri-pod-sandbox-ip
-                                                      (containerd-runtime-socket-path runtime) sandbox-id))))) t))))
-             (when include (list (cons (gethash "name" variable) value))))))))
+                             ((equal field "spec.serviceAccountName")
+                              (gethash "serviceAccountName" (gethash "spec" (pod-to-object pod)) ""))
+                             ((member field '("status.hostIP" "status.hostIPs") :test #'equal)
+                              (containerd-node-address runtime))
+                             ((member field '("status.podIP" "status.podIPs") :test #'equal)
+                              (or pod-ip (setf pod-ip (containerd-sandbox-address runtime pod sandbox-id))))) t))))
+             (when include
+               (setf environment (merge-environment environment (list (cons (gethash "name" variable) value))))
+               (list (cons (gethash "name" variable) value))))))))
 
 (defun cri-seccomp-profile (context)
   "Map a validated seccompProfile to CRI, leaving an unset profile to mean Unconfined."
@@ -398,7 +427,7 @@
     (let ((user (gethash "runAsUser" effective)) (group (gethash "runAsGroup" effective)))
       (when (and (eq t (gethash "runAsNonRoot" effective))
                  (not (and user (plusp user))))
-        (error 'runtime-error :message "runAsNonRoot requires a verified nonzero runAsUser"))
+        (container-config-error "runAsNonRoot requires a verified nonzero runAsUser"))
       (make-instance
        'gr8s.cri.v1::linux-container-security-context
        :run-as-user (when user (make-instance 'gr8s.cri.v1::int64value :value user))
@@ -406,6 +435,12 @@
        :supplemental-groups (pod-supplemental-groups pod)
        :seccomp (cri-seccomp-profile effective)
        :selinux-options (cri-selinux-options effective)
+       :namespace-options (when (or (pod-spec-flag-p pod "hostPID") (pod-spec-flag-p pod "hostIPC"))
+                            (make-instance
+                             'gr8s.cri.v1::namespace-option
+                             :pid (if (pod-spec-flag-p pod "hostPID") gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
+                             :ipc (if (pod-spec-flag-p pod "hostIPC") gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
+                             :network (if (pod-host-network-p pod) gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)))
        :capabilities (let ((capabilities (gethash "capabilities" effective)))
                        (when capabilities
                          (make-instance 'gr8s.cri.v1::capability

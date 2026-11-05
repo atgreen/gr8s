@@ -198,6 +198,7 @@
       (stub 'gr8s::checkpoint-container-lifecycle-observation nil)
       (stub 'gr8s::native-container-progress-required-p nil)
       (stub 'gr8s::container-probe-restart-required-p nil)
+      (stub 'gr8s::reconcile-container-updates nil)
       (sb-int:encapsulate 'gr8s::reconcile-container-probes 'stub
                           (lambda (f r p observed) (declare (ignore f r p)) observed))
       (sb-int:encapsulate 'gr8s::refresh-pod-projected-volumes 'stub
@@ -208,6 +209,7 @@
            (is-true refreshed))
       (dolist (name '(gr8s::checkpoint-container-lifecycle-observation gr8s::native-container-progress-required-p
                       gr8s::container-probe-restart-required-p gr8s::reconcile-container-probes
+                      gr8s::reconcile-container-updates
                       gr8s::refresh-pod-projected-volumes))
         (sb-int:unencapsulate name 'stub)))))
 

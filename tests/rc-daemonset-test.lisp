@@ -441,10 +441,14 @@
       (let ((patch (gr8s::core-object "metadata" (gr8s::core-object "labels" (gr8s::core-object "daemonset-color" "green")))))
         (check-core-status 200 item :method :patch :content-type "application/merge-patch+json" :object patch))
       (is (equal "green" (gethash "daemonset-color" (gr8s::node-labels (gr8s:get-node store "node-a")))))
-      (check-core-status 422 item :method :patch :content-type "application/merge-patch+json"
+      (check-core-status 200 item :method :patch :content-type "application/merge-patch+json"
                          :object (gr8s::core-object "spec" (gr8s::core-object "unschedulable" t)))
-      (check-core-status 422 item :method :patch :content-type "application/merge-patch+json"
+      (is (gr8s::node-record-unschedulable (gr8s:get-node store "node-a")))
+      (check-core-status 200 item :method :patch :content-type "application/merge-patch+json"
                          :object (gr8s::core-object "spec" (gr8s::core-object "taints" (vector (gr8s::core-object "key" "a" "effect" "NoSchedule")))))
+      (is (= 1 (length (gr8s::node-record-taints (gr8s:get-node (open-store path) "node-a")))))
+      (check-core-status 422 item :method :patch :content-type "application/merge-patch+json"
+                         :object (gr8s::core-object "spec" (gr8s::core-object "taints" (vector (gr8s::core-object "key" "a" "effect" "Sometimes")))))
       (check-core-status 422 item :method :patch :content-type "application/merge-patch+json"
                          :object (gr8s::core-object "metadata" (gr8s::core-object "labels" (gr8s::core-object "kubernetes.io/os" "plan9")))))))
 

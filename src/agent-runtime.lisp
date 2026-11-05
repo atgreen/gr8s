@@ -161,6 +161,10 @@
 
 (defun configure-node-runtime-network (node-runtime network &key (persist t))
   (validate-node-network-object network)
+  (let ((runtime (node-runtime-runtime node-runtime))
+        (address (gethash "underlayAddress" network "")))
+    (when (and (typep runtime 'containerd-runtime) (plusp (length address)))
+      (setf (containerd-runtime-host-address runtime) address)))
   (when (node-runtime-manager node-runtime)
     (validate-pod-pool-host-routes (gethash "clusterPodCIDR" network)
                                   (node-runtime-state-directory node-runtime)))
@@ -730,7 +734,8 @@ snapshot application."
                    (runtime-logs
                     (node-runtime-runtime node-runtime)
                     (slot-value request 'gr8s.node.v1::pod-uid)
-                    (slot-value request 'gr8s.node.v1::container))))
+                    (slot-value request 'gr8s.node.v1::container)
+                    :previous (slot-value request 'gr8s.node.v1::previous))))
              (list
               (cons
                :operation-stream
