@@ -245,7 +245,8 @@
           do (loop for before across (gethash field old #())
                    for after = (find (gethash "name" before) (gethash field new #())
                                      :key (lambda (container) (gethash "name" container)) :test #'equal)
-                   do (when (and after (not (core-json-equal-p
-                                             (or (gethash "resources" before) (core-object))
-                                             (or (gethash "resources" after) (core-object)))))
+                   do (when (and after (not *pod-resize-update*)
+                                 (not (core-json-equal-p
+                                       (or (gethash "resources" before) (core-object))
+                                       (or (gethash "resources" after) (core-object)))))
                         (invalid-pod "spec.~A[~A].resources is immutable" field (gethash "name" before)))))))

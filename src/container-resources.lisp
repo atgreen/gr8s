@@ -225,17 +225,16 @@
   (container-quantity-integer quantity :scale -3))
 
 (defun cri-linux-container-resources (container)
-  "Derive actual CFS and memory cgroup settings with the kubelet's formulas, or NIL if unconstrained."
+  "Derive actual CFS and memory cgroup settings with the kubelet's formulas.
+A container without a CPU request gets the minimum share, as a kubelet gives it."
   (let* ((cpu-limit (container-resource-quantity container "limits" "cpu"))
          (cpu-request (container-resource-quantity container "requests" "cpu"))
          (memory-limit (container-resource-quantity container "limits" "memory"))
          (period 100000))
-    (when (or cpu-limit cpu-request memory-limit)
-      (make-instance
-       'gr8s.cri.v1::linux-container-resources
-       :cpu-period (if cpu-limit period 0)
-       :cpu-quota (if cpu-limit (max 1000 (floor (* (container-milli-cpu cpu-limit) period) 1000)) 0)
-       ;; 1024 shares is one CPU, and the kernel's minimum is 2.
-       :cpu-shares (max 2 (floor (* (if cpu-request (container-milli-cpu cpu-request) 0) 1024) 1000))
-       :memory-limit-in-bytes (if memory-limit (container-quantity-integer memory-limit) 0)))))
-
+    (make-instance
+     'gr8s.cri.v1::linux-container-resources
+     :cpu-period (if cpu-limit period 0)
+     :cpu-quota (if cpu-limit (max 1000 (floor (* (container-milli-cpu cpu-limit) period) 1000)) 0)
+     ;; 1024 shares is one CPU, and the kernel's minimum is 2.
+     :cpu-shares (max 2 (floor (* (if cpu-request (container-milli-cpu cpu-request) 0) 1024) 1000))
+     :memory-limit-in-bytes (if memory-limit (container-quantity-integer memory-limit) 0))))

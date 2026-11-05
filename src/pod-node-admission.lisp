@@ -76,7 +76,7 @@ no reservation; otherwise it competes as the scheduler charges it. Call with STO
   (let* ((status (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)))
          (reason (and status (gethash "reason" status))))
     (and (equal "Failed" (and status (gethash "phase" status))) (stringp reason)
-         (or (equal reason "NodePorts") (uiop:string-prefix-p "OutOf" reason)))))
+         (or (equal reason "NodePorts") (equal reason "SysctlForbidden") (uiop:string-prefix-p "OutOf" reason)))))
 
 (defun admit-assigned-pod (store pod)
   "Decide whether POD, assigned to a node, may start there, and record a refusal as a kubelet does.
@@ -87,8 +87,9 @@ A Pod the node has reported on is past admission, however full the node is now."
               ((pod-admission-rejected-p store pod) (return-from admit-assigned-pod nil))
               ((or (deletion-requested-p pod) (gethash (pod-uid pod) (pod-store-pod-observed-phases store)))
                (return-from admit-assigned-pod t))
-              (t (let ((node (get-node-unlocked store (pod-node-name pod))))
-                   (and node (first (node-pod-fit-failures store pod node :admission t)))))))))
+              (t (or (pod-forbidden-sysctl-failure pod)
+                     (let ((node (get-node-unlocked store (pod-node-name pod))))
+                       (and node (first (node-pod-fit-failures store pod node :admission t))))))))))
     (when failure
       (save-pod-observation
        store pod
@@ -103,6 +104,8 @@ A Pod the node has reported on is past admission, however full the node is now."
     (dolist (node nodes)
       (dolist (failure (or (mapcar #'car (node-pod-fit-failures store pod node))
                            (unless (node-record-ready-p node) '("node(s) not ready"))
+                           (when (node-record-unschedulable node) '("node(s) were unschedulable"))
+                           (unless (pod-node-taints-allow-p pod node) '("node(s) had untolerated taints"))
                            (unless (and (pod-node-selector-matches-p pod node) (pod-node-affinity-matches-p pod node))
                              '("node(s) didn't match Pod's node affinity/selector"))))
         (let ((entry (assoc failure counts :test #'equal)))
