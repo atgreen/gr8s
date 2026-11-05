@@ -3,7 +3,7 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Encode ClusterIP Service load-balancing state into the byte layout the
-;;;; Whistler cgroup/connect4 program expects (network/gr8s-service-lb.lisp).
+;;;; Whistler cgroup/connect4 program expects (src/service-lb-program.lisp).
 ;;;; The agent writes these entries into the pinned gr8s_service_v4 and
 ;;;; gr8s_backend_v4 maps; the in-kernel program reads them to rewrite a
 ;;;; connect(2) from a Service VIP:port to a chosen backend Pod IP:targetPort.
@@ -21,8 +21,9 @@
 ;;;;     bytes the kernel expects.
 ;;;;
 ;;;; The VIP key mirrors what the program composes from the socket address:
-;;;; (vip << 16) | htons(port), where VIP is the four address octets read as a
-;;;; little-endian integer (i.e. the network-order bytes loaded on a LE host).
+;;;; (protocol << 48) | (vip << 16) | htons(port), where VIP is the four address
+;;;; octets read as a little-endian integer (i.e. the network-order bytes loaded
+;;;; on a LE host).
 
 (in-package #:gr8s)
 
@@ -67,26 +68,40 @@ loader's map-creation and program-loading steps.  No ELF is produced."
     (dotimes (index width buffer)
       (setf (aref buffer index) (ldb (byte 8 (* 8 index)) value)))))
 
-(defun service-lb-vip-key (address port)
-  "Return the 8-octet gr8s_service_v4 key for ADDRESS:PORT.
-The program composes (vip << 16) | htons(port) where vip is the address octets
-read little-endian, then serializes that scalar; this reproduces its bytes."
+(defun service-lb-protocol-number (protocol)
+  "Return the IP protocol number the program reads from the socket for a Service PROTOCOL."
+  (cond ((equal protocol "TCP") 6) ((equal protocol "UDP") 17) ((equal protocol "SCTP") 132)
+        (t (error "Service protocol ~S is not supported" protocol))))
+
+(defun service-lb-vip-key (address port &optional (protocol "TCP"))
+  "Return the 8-octet gr8s_service_v4 key for ADDRESS:PORT/PROTOCOL.
+The program composes (protocol << 48) | (vip << 16) | htons(port) where vip is the
+address octets read little-endian, then serializes that scalar; this reproduces its bytes."
   (unless (typep port '(integer 1 65535))
     (error "Service port ~S is out of range" port))
   (destructuring-bind (o0 o1 o2 o3) (service-lb-octets address)
     (let* ((vip (logior o0 (ash o1 8) (ash o2 16) (ash o3 24)))
            (vport (logior (ash (ldb (byte 8 0) port) 8) (ldb (byte 8 8) port)))
-           (key (logior (ash vip 16) vport)))
+           (key (logior (ash (service-lb-protocol-number protocol) 48) (ash vip 16) vport)))
       (service-lb-bytes key 8))))
 
-(defun service-lb-service-value (backend-count base-slot)
-  "Return the 8-octet gr8s_service_v4 value: count u16 @0, base slot u32 @4."
+(defun service-lb-service-value (backend-count base-slot &key affinity-timeout (epoch 0))
+  "Return the 16-octet gr8s_service_v4 value: count u16 @0, affinity flag u16 @2, base
+slot u32 @4, affinity timeout seconds u32 @8, backend set epoch u32 @12."
   (unless (typep backend-count '(integer 0 65535))
     (error "Service backend count ~S is out of range" backend-count))
-  (let ((buffer (make-array 8 :element-type '(unsigned-byte 8) :initial-element 0)))
+  (let ((buffer (make-array 16 :element-type '(unsigned-byte 8) :initial-element 0)))
     (replace buffer (service-lb-bytes backend-count 2) :start1 0)
+    (replace buffer (service-lb-bytes (if affinity-timeout 1 0) 2) :start1 2)
     (replace buffer (service-lb-bytes base-slot 4) :start1 4)
+    (replace buffer (service-lb-bytes (or affinity-timeout 0) 4) :start1 8)
+    (replace buffer (service-lb-bytes epoch 4) :start1 12)
     buffer))
+
+(defun service-lb-backend-epoch (backends)
+  "Identify a set of (ip . port) BACKENDS, so client affinity ends when the set changes.
+The program compares only 16 bits; a stale match still lands on a live backend."
+  (logand (sxhash (format nil "~S" backends)) #xffff))
 
 (defun service-lb-backend-key (slot)
   "Return the 4-octet gr8s_backend_v4 key for SLOT."
@@ -103,14 +118,17 @@ network byte order so the program copies them verbatim into the socket address."
           (aref buffer 5) (ldb (byte 8 0) port))
     buffer))
 
-(defun service-lb-entries (address port base-slot backends)
-  "Plan the map entries for one ClusterIP:PORT over BACKENDS.
+(defun service-lb-entries (address port base-slot backends &key (protocol "TCP") affinity-timeout)
+  "Plan the map entries for one ClusterIP:PORT/PROTOCOL over BACKENDS.
 BACKENDS is a list of (ip . target-port) conses, assigned consecutive slots from
-BASE-SLOT.  Returns three values: the VIP key, the service value, and a list of
-(backend-key . backend-value) octet-vector pairs."
+BASE-SLOT.  AFFINITY-TIMEOUT, in seconds, keeps each client on one backend while
+it is active.  Returns three values: the VIP key, the service value, and a list
+of (backend-key . backend-value) octet-vector pairs."
   (values
-   (service-lb-vip-key address port)
-   (service-lb-service-value (length backends) base-slot)
+   (service-lb-vip-key address port protocol)
+   (service-lb-service-value (length backends) base-slot
+                             :affinity-timeout affinity-timeout
+                             :epoch (if affinity-timeout (service-lb-backend-epoch backends) 0))
    (loop for (ip . target-port) in backends
          for slot from base-slot
          collect (cons (service-lb-backend-key slot)

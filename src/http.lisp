@@ -101,7 +101,7 @@
   (let ((groups (vector (json-object "name" "rbac.authorization.k8s.io"
                                     "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
-                       (event-api-group) (workload-api-group) (batch-api-group) (budget-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group)
+                       (event-api-group) (workload-api-group) (batch-api-group) (budget-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group) (networking-api-group)
                        (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group) (cert-manager-api-group))))
     (setf groups (concatenate 'vector groups (vector (autoscaling-api-group) (apiservice-api-group))))
     (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
@@ -136,7 +136,7 @@
                    "kind" "ReplicationController" "verbs" #("get" "patch" "update"))
       (json-object "name" "replicationcontrollers/scale" "singularName" "" "namespaced" t
                    "kind" "Scale" "group" "autoscaling" "version" "v1" "verbs" #("get" "patch" "update")))
-     (stored-resource-discovery "v1") (storage-status-discovery) (policy-status-discovery)))))
+     (stored-resource-discovery "v1") (storage-status-discovery) (policy-status-discovery) (service-subresource-discovery)))))
 
 (defvar *schema-reference-prefix* "#/definitions/")
 
@@ -247,6 +247,8 @@
      "apis/admissionregistration.k8s.io/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/admissionregistration.k8s.io/v1?hash=gr8s-admissionregistration-v1")
      "apis/discovery.k8s.io/v1"
      (json-object "serverRelativeURL" "/openapi/v3/apis/discovery.k8s.io/v1?hash=gr8s-endpointslices-v1")
+     "apis/networking.k8s.io/v1"
+     (json-object "serverRelativeURL" "/openapi/v3/apis/networking.k8s.io/v1?hash=gr8s-networking-v1")
      "apis/storage.k8s.io/v1"
      (json-object "serverRelativeURL" "/openapi/v3/apis/storage.k8s.io/v1?hash=gr8s-storage-v1")
      "apis/events.k8s.io/v1"
@@ -342,6 +344,7 @@
       "paths" (cond ((equal version "certificates.k8s.io/v1") (add-csr-openapi-paths (core-object)))
                     ((equal version +admission-api-version+) (add-admission-openapi-paths (core-object)))
                     ((equal version "discovery.k8s.io/v1") (add-endpointslice-openapi-paths (core-object)))
+                    ((equal version "networking.k8s.io/v1") (add-networking-openapi-paths (core-object)))
                     ((equal version "events.k8s.io/v1") (add-event-openapi-paths (core-object) t))
                     ((equal version "apps/v1") (add-workload-openapi-paths (core-object)))
                     ((equal version "policy/v1") (add-budget-openapi-paths (core-object)))
@@ -1202,6 +1205,10 @@ Clients that can read an object as well say so with a further media range."
           ((string= path "/apis/discovery.k8s.io") (json-response (endpointslice-api-group)))
           ((string= path "/apis/discovery.k8s.io/v1") (endpointslice-discovery-response))
           ((string= path "/openapi/v3/apis/discovery.k8s.io/v1") (openapi-v3-response "discovery.k8s.io/v1"))
+          ((string= path "/apis/networking.k8s.io") (json-response (networking-api-group)))
+          ((string= path "/apis/networking.k8s.io/v1") (networking-discovery-response))
+          ((string= path "/openapi/v3/apis/networking.k8s.io/v1") (openapi-v3-response "networking.k8s.io/v1"))
+          ((networking-status-route path) (dispatch-networking-status-request store path method))
           ((string= path "/apis/storage.k8s.io") (json-response (storage-api-group)))
           ((string= path "/apis/storage.k8s.io/v1") (storage-discovery-response))
           ((string= path "/openapi/v3/apis/storage.k8s.io/v1") (openapi-v3-response "storage.k8s.io/v1"))
@@ -1239,6 +1246,10 @@ Clients that can read an object as well say so with a further media range."
           ((string= path "/openapi/v3/apis/apps/v1") (openapi-v3-response "apps/v1"))
           ((string= path "/openapi/v3/api/v1") (openapi-v3-response))
           ((string= path "/api/v1") (api-resources-response))
+          ((nth-value 3 (node-http-proxy-route path))
+           (multiple-value-bind (name port suffix) (node-http-proxy-route path)
+             (declare (ignore port))
+             (node-http-proxy-response store reconciler name suffix method)))
           ((node-status-route path) (dispatch-node-status-request store path method))
           ((and (eq method :get) (string= path "/api/v1/nodes"))
            (nodes-api-response store))
@@ -1258,6 +1269,9 @@ Clients that can read an object as well say so with a further media range."
            (dispatch-core-resource-request store path method))
           ((and (string= path "/api/v1/pods") (eq method :get))
            (list-pods-response store reconciler nil))
+          ((nth-value 2 (service-http-proxy-route path))
+           (multiple-value-bind (namespace id) (service-http-proxy-route path)
+             (service-http-proxy-response store namespace id method)))
           ((nth-value 2 (pod-http-proxy-route path))
            (multiple-value-bind (namespace id) (pod-http-proxy-route path)
              (pod-http-proxy-response store namespace id method)))

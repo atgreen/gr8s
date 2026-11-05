@@ -30,7 +30,8 @@
     (cond
       ((equal kind "Service")
        (let ((spec (core-object)))
-         (dolist (key '("clusterIP" "clusterIPs" "ipFamilies" "ports" "type" "externalName"))
+         (dolist (key '("clusterIP" "clusterIPs" "ipFamilies" "ports" "type" "externalName"
+                        "sessionAffinity" "sessionAffinityConfig"))
            (when (gethash key (gethash "spec" object))
              (setf (gethash key spec) (copy-core-object (gethash key (gethash "spec" object))))))
          (setf (gethash "spec" result) spec)))

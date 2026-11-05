@@ -15,10 +15,12 @@
 ;;; exact octets the eBPF program composes and copies into the socket address.
 
 (test service-lb-vip-key-byte-layout
-  ;; (vip << 16) | htons(port), serialized little-endian, where vip is the
-  ;; address octets read little-endian (network-order bytes on a LE host).
-  (is (equalp #(#x00 #x50 #x0A #x60 #x00 #x0A #x00 #x00)
+  ;; (protocol << 48) | (vip << 16) | htons(port), serialized little-endian, where
+  ;; vip is the address octets read little-endian (network-order bytes on a LE host).
+  (is (equalp #(#x00 #x50 #x0A #x60 #x00 #x0A #x06 #x00)
               (gr8s::service-lb-vip-key "10.96.0.10" 80)))
+  (is (equalp #(#x00 #x50 #x0A #x60 #x00 #x0A #x11 #x00)
+              (gr8s::service-lb-vip-key "10.96.0.10" 80 "UDP")))
   ;; Distinct ports and addresses must not collide into the same key.
   (is (not (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80)
                    (gr8s::service-lb-vip-key "10.96.0.10" 443))))
@@ -26,11 +28,31 @@
                    (gr8s::service-lb-vip-key "10.96.0.11" 80)))))
 
 (test service-lb-service-value-byte-layout
-  ;; count u16 @0, base slot u32 @4, both little-endian (logical integers).
-  (is (equalp #(#x01 #x00 #x00 #x00 #x07 #x00 #x00 #x00)
+  ;; count u16 @0, affinity u16 @2, base slot u32 @4, timeout u32 @8, epoch u32 @12,
+  ;; all little-endian (logical integers).
+  (is (equalp #(#x01 #x00 #x00 #x00 #x07 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00)
               (gr8s::service-lb-service-value 1 7)))
-  (is (equalp #(#x00 #x02 #x00 #x00 #xD2 #x04 #x00 #x00)
-              (gr8s::service-lb-service-value 512 1234))))
+  (is (equalp #(#x00 #x02 #x01 #x00 #xD2 #x04 #x00 #x00 #x10 #x0E #x00 #x00 #x34 #x12 #x00 #x00)
+              (gr8s::service-lb-service-value 512 1234 :affinity-timeout 3600 :epoch #x1234))))
+
+(test service-lb-plan-keys-by-protocol-and-carries-affinity
+  ;; The same port over two protocols gets two VIP entries, and ClientIP affinity
+  ;; reaches the program with its timeout.
+  (let* ((service (fake-lb-service "10.96.0.10" :ports '(80 81)))
+         (spec (gethash "spec" service)))
+    (setf (gethash "protocol" (aref (gethash "ports" spec) 0)) "TCP"
+          (gethash "port" (aref (gethash "ports" spec) 1)) 80
+          (gethash "protocol" (aref (gethash "ports" spec) 1)) "UDP"
+          (gethash "sessionAffinity" spec) "ClientIP"
+          (gethash "sessionAffinityConfig" spec)
+          (gr8s::core-object "clientIP" (gr8s::core-object "timeoutSeconds" 30)))
+    (let ((service-entries
+            (gr8s::service-lb-plan (list service) (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080))))))
+      (is (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80 "TCP") (car (first service-entries))))
+      (is (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80 "UDP") (car (second service-entries))))
+      (let ((value (cdr (first service-entries))))
+        (is (= 1 (aref value 2)))
+        (is (= 30 (aref value 8)))))))
 
 (test service-lb-backend-byte-layout
   ;; Backend slot key is little-endian; addr u32 @0 and port u16 @4 are network
@@ -63,7 +85,7 @@
 (test service-lb-program-compiles-in-process
   (multiple-value-bind (map-specs prog-specs) (gr8s::compile-service-lb)
     ;; Exactly the two maps, with the key/value sizes the encoders target.
-    (is (= 2 (length map-specs)))
+    (is (= 3 (length map-specs)))
     (let ((service (find "gr8s_service_v4" map-specs
                          :key (lambda (s) (getf s :name)) :test #'string=))
           (backend (find "gr8s_backend_v4" map-specs
@@ -71,7 +93,7 @@
       (is (not (null service)))
       (is (not (null backend)))
       (is (= 8 (getf service :key-size)))
-      (is (= 8 (getf service :value-size)))
+      (is (= 16 (getf service :value-size)))
       (is (= 4 (getf backend :key-size)))
       (is (= 8 (getf backend :value-size))))
     ;; One connect4 program with real, 8-byte-aligned instruction bytes and the
