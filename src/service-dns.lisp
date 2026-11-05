@@ -12,7 +12,8 @@
   (let* ((kind (gethash "kind" object)) (source (gethash "metadata" object))
          (metadata (core-object)) (result (core-object)))
     (unless (member kind '("Service" "EndpointSlice" "NetworkPolicy"
-                           "GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
+                           "GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute"
+                           "Secret") :test #'equal)
       (invalid-pod "unsupported public Service discovery kind"))
     (dolist (key '("name" "namespace" "uid" "resourceVersion"))
       (when (gethash key source) (setf (gethash key metadata) (gethash key source))))
@@ -22,6 +23,7 @@
                          (gethash "kubernetes.io/service-name" (gethash "labels" source (core-object))))))
     (setf (gethash "kind" result) kind
           (gethash "apiVersion" result) (cond ((equal kind "Service") "v1")
+                                              ((equal kind "Secret") "v1")
                                               ((equal kind "NetworkPolicy") "networking.k8s.io/v1")
                                               ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
                                                "gateway.networking.k8s.io/v1")
@@ -43,10 +45,49 @@
        ;; The agent's Gateway controller reconciles these into L7 proxy listeners,
        ;; so it needs the full spec (controllerName / listeners / parentRefs+rules).
        (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
+      ((equal kind "Secret")
+       ;; A Gateway HTTPS listener terminates TLS on the node, so the node needs
+       ;; the referenced certificate and private key (podster-045.6). Only
+       ;; kubernetes.io/tls Secrets are projectable, and only their type + data
+       ;; cross over, so no other Secret kind or field ever reaches the node.
+       (unless (equal (gethash "type" object) "kubernetes.io/tls")
+         (invalid-pod "only kubernetes.io/tls Secrets are projectable"))
+       (setf (gethash "type" result) (gethash "type" object)
+             (gethash "data" result) (copy-core-object (gethash "data" object))))
       (t
        (dolist (key '("addressType" "endpoints" "ports"))
          (setf (gethash key result) (copy-core-object (gethash key object))))))
     result))
+
+(defun gateway-referenced-tls-secrets (store)
+  "kubernetes.io/tls Secrets named by an HTTPS listener's certificateRefs on any
+   Gateway, so the node that terminates the listener's TLS can load the cert and
+   key (podster-045.6). Deduplicated by (namespace . name); missing Secrets are
+   skipped (the listener stays down until the Secret exists)."
+  (let ((seen (make-hash-table :test #'equal))
+        (secrets '()))
+    (dolist (gateway (list-core-resources store "gateways"))
+      (let* ((metadata (gethash "metadata" gateway))
+             (gateway-namespace (gethash "namespace" metadata))
+             (spec (gethash "spec" gateway))
+             (listeners (and spec (gethash "listeners" spec))))
+        (when listeners
+          (loop for listener across listeners
+                when (equal (gethash "protocol" listener) "HTTPS")
+                  do (let* ((tls (gethash "tls" listener))
+                            (refs (and tls (gethash "certificateRefs" tls))))
+                       (when (and refs (plusp (length refs)))
+                         (let* ((ref (aref refs 0))
+                                (kind (or (gethash "kind" ref) "Secret"))
+                                (name (gethash "name" ref))
+                                (namespace (or (gethash "namespace" ref) gateway-namespace)))
+                           (when (and (equal kind "Secret") name
+                                      (not (gethash (cons namespace name) seen)))
+                             (setf (gethash (cons namespace name) seen) t)
+                             (let ((secret (ignore-errors
+                                            (get-core-resource store "secrets" namespace name))))
+                               (when secret (push secret secrets)))))))))))
+    (nreverse secrets)))
 
 (defun service-discovery-projection (store)
   "Serialize each public Service and EndpointSlice once in stable key order."
@@ -61,7 +102,8 @@
                         (list-core-resources store "httproutes")
                         (list-core-resources store "tcproutes")
                         (list-core-resources store "tlsroutes")
-                        (list-core-resources store "grpcroutes"))
+                        (list-core-resources store "grpcroutes")
+                        (gateway-referenced-tls-secrets store))
                 #'string< :key (lambda (object)
                                  (let ((metadata (gethash "metadata" object)))
                                    (format nil "~A/~A/~A" (gethash "kind" object)
@@ -83,6 +125,7 @@
                            ((equal "TCPRoute" (gethash "kind" public)) "tcproutes")
                            ((equal "TLSRoute" (gethash "kind" public)) "tlsroutes")
                            ((equal "GRPCRoute" (gethash "kind" public)) "grpcroutes")
+                           ((equal "Secret" (gethash "kind" public)) "secrets")
                            (t "endpointslices"))))
       (unless (and (stringp name) (plusp (length name))
                    ;; GatewayClass is cluster-scoped (no namespace); all others are namespaced.
