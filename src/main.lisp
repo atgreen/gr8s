@@ -388,6 +388,8 @@
                    :oci-runtime (getf options :containerd-oci-runtime)
                    :metadata-no-sync (getf options :containerd-no-sync)
                    :runtime-assets *embedded-runtime-assets*
+                   :extra-runtime-handlers
+                   (load-installed-runtime-addons state-directory)
                    :cni-bin-directory
                    (uiop:pathname-directory-pathname
                     (pathname (getf options :containerd-executable))))))
