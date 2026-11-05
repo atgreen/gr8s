@@ -16,7 +16,7 @@
 
 (defun check-core-status (expected path &rest options)
   (multiple-value-bind (body status) (apply #'core-api-request path options)
-    (is (= expected status) "~A returned ~A: ~A" path status body)
+    (is (= expected status) "~A returned ~A: ~A" path status (com.inuoe.jzon:stringify body))
     body))
 
 (test core-resource-http-discovery-and-openapi-advertise-supported-operations

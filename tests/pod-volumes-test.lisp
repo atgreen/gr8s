@@ -476,3 +476,71 @@
                     "\"envFrom\":[{\"configMapRef\":{\"name\":\"Not_Valid\"}}]"
                     "\"envFrom\":[{\"configMapRef\":{\"name\":\"a\",\"optional\":\"yes\"}}]"))
     (signals kubernetes-error (environment-test-pod fields))))
+
+;;; Image volumes
+
+(defun image-volume-test-pod (source &optional (mount-fields ""))
+  "Return a Pod mounting image volume SOURCE, plus an image volume no container mounts."
+  (parse-pod (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"image-volume\",\"namespace\":\"sonobuoy\",\"uid\":\"image-volume-uid\"},\"spec\":{\"volumes\":[{\"name\":\"data\",\"image\":~A},{\"name\":\"unused\",\"image\":{\"reference\":\"unused:1\"}}],\"containers\":[{\"name\":\"c\",\"image\":\"busybox:1\",\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/data\"~A}]}]}}" source mount-fields)))
+
+(test pods-reject-malformed-image-volumes
+  (dolist (source '("{}" "{\"reference\":\"\"}" "{\"reference\":7}"
+                    "{\"reference\":\"a:1\",\"pullPolicy\":\"Sometimes\"}"
+                    "{\"reference\":\"a:1\",\"other\":1}"))
+    (signals kubernetes-error (image-volume-test-pod source)))
+  (signals kubernetes-error
+    (parse-pod "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"p\"},\"spec\":{\"volumes\":[{\"name\":\"v\",\"image\":{\"reference\":\"a:1\"},\"emptyDir\":{}}],\"containers\":[{\"name\":\"c\",\"image\":\"busybox\"}]}}"))
+  (is (not (null (image-volume-test-pod "{\"reference\":\"a:1\",\"pullPolicy\":\"Never\"}")))))
+
+(test image-pull-policies-default-as-kubernetes-does
+  (dolist (image '("a" "a:latest" "registry:5000/a" "registry:5000/a:latest"))
+    (is (equal "Always" (gr8s::default-image-pull-policy image)) "~A" image))
+  (dolist (image '("a:1" "registry:5000/a:1" "a@sha256:abc"))
+    (is (equal "IfNotPresent" (gr8s::default-image-pull-policy image)) "~A" image)))
+
+(test image-volumes-mount-the-pulled-image-read-only
+  (let* ((runtime (gr8s::make-containerd-runtime :log-root "/nonexistent/"))
+         (pod (image-volume-test-pod "{\"reference\":\"a:1\"}"
+                                     ",\"subPathExpr\":\"$(DIR)/x\",\"mountPropagation\":\"HostToContainer\""))
+         (present nil) (pulls nil))
+    (with-replaced-functions ((gr8s::cri-image-present-p (lambda (socket image &rest options)
+                                                           (declare (ignore socket options))
+                                                           (member image present :test #'equal)))
+                              (gr8s::cri-image-id (lambda (socket image &rest options)
+                                                    (declare (ignore socket options))
+                                                    (format nil "sha256:~A" image)))
+                              (gr8s::cri-pull-image (lambda (socket image &rest options)
+                                                      (declare (ignore socket options))
+                                                      (push image pulls))))
+      (flet ((mounts ()
+               (gr8s::containerd-pod-mounts runtime pod (aref (pod-containers pod) 0) '(("DIR" . "dir")))))
+        (signals gr8s::container-image-pending (mounts))
+        (gap-wait-for-pull runtime "a:1")
+        (is (equal '("a:1") pulls) "only the mounted image is pulled")
+        (setf present '("a:1"))
+        (let ((mount (first (mounts))))
+          (is (equal "/data" (gr8s.cri.v1::container-path mount)))
+          (is (equal "" (gr8s.cri.v1::host-path mount)) "the image and a host path are mutually exclusive")
+          (is (equal "sha256:a:1" (gr8s.cri.v1::image (gr8s.cri.v1::image mount))))
+          (is (equal "dir/x" (gr8s.cri.v1::image-sub-path mount)))
+          (is (eq t (gr8s.cri.v1::readonly mount)) "image volumes are always read-only")
+          (is (= gr8s.cri.v1::+mountpropagation-propagation_host_to_container+
+                 (gr8s.cri.v1::propagation mount))))))))
+
+(test image-volume-pull-failures-hold-the-container-as-its-own-image-would
+  (let* ((runtime (gr8s::make-containerd-runtime :log-root "/nonexistent/"))
+         (missing (image-volume-test-pod "{\"reference\":\"a:1\",\"pullPolicy\":\"Never\"}"))
+         (failing (image-volume-test-pod "{\"reference\":\"b:1\"}"))
+         (now 4000000000) (gr8s::*container-lifecycle-clock* (lambda () now)))
+    (with-replaced-functions ((gr8s::cri-image-present-p (constantly nil))
+                              (gr8s::cri-pull-image (lambda (&rest arguments)
+                                                      (declare (ignore arguments))
+                                                      (error "registry says no"))))
+      (signals gr8s::container-config-error
+        (gr8s::containerd-pod-mounts runtime missing (aref (pod-containers missing) 0)))
+      (signals gr8s::container-image-pending
+        (gr8s::containerd-pod-mounts runtime failing (aref (pod-containers failing) 0)))
+      (gap-wait-for-pull runtime "b:1")
+      (let ((condition (handler-case (gr8s::containerd-pod-mounts runtime failing (aref (pod-containers failing) 0))
+                         (gr8s::container-image-pull-error (condition) condition))))
+        (is (equal "ErrImagePull" (gr8s::container-config-error-reason condition)))))))

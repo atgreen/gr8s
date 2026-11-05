@@ -131,7 +131,7 @@
   (let ((pods (remove namespace (list-pods (reconciler-store reconciler)) :key #'pod-namespace :test-not #'equal)))
     (dolist (pod pods)
       (unless (deletion-requested-p pod)
-        (handler-case (delete-reconciled-pod reconciler namespace (pod-name pod) :uid (pod-uid pod))
+        (handler-case (delete-controller-pod reconciler namespace (pod-name pod) "namespace-controller" :uid (pod-uid pod))
           (kubernetes-error (condition)
             (unless (member (kubernetes-error-status-code condition) '(404 409)) (error condition))))))
     (length pods)))
@@ -146,11 +146,14 @@
           (let* ((metadata (gethash "metadata" object)) (name (gethash "name" metadata))
                  (held (let ((value (gethash "finalizers" metadata))) (if (member value '(nil null)) nil (coerce value 'list)))))
             (handler-case
-                (progn
-                  (delete-core-resource store (first type) namespace name :uid (gethash "uid" metadata))
-                  (when held
-                    (incf remaining)
-                    (setf finalizers (union held finalizers :test #'equal))))
+                (if (controller-delete-allowed-p store (first type) namespace name "namespace-controller")
+                    (progn
+                      (delete-core-resource store (first type) namespace name :uid (gethash "uid" metadata))
+                      (when held
+                        (incf remaining)
+                        (setf finalizers (union held finalizers :test #'equal))))
+                    ;; A webhook refused, so the namespace waits and the next pass asks again.
+                    (incf remaining))
               (kubernetes-error (condition)
                 (unless (member (kubernetes-error-status-code condition) '(404 409))
                   (incf remaining)

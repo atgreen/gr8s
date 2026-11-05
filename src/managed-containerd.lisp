@@ -8,6 +8,8 @@
   shim-socket-directory
   platform
   (snapshotter "overlayfs")
+  ;; Whether containerd skips fsync on metadata commits; see --containerd-no-sync.
+  metadata-no-sync
   launcher
   process-alive-p
   readiness-probe
@@ -86,6 +88,7 @@
           (bpf-unmounter #'unmount-managed-bpffs)
           (platform (containerd-platform-for-machine (machine-type)))
           (snapshotter "overlayfs")
+          metadata-no-sync
           (launcher #'launch-containerd-process)
           (process-alive-p #'containerd-process-alive-p)
           (readiness-probe #'containerd-cri-ready-p)
@@ -101,6 +104,7 @@
      (or shim-socket-directory (default-shim-socket-directory state))
      :platform platform
      :snapshotter snapshotter
+     :metadata-no-sync metadata-no-sync
      :launcher launcher
      :process-alive-p process-alive-p
      :readiness-probe readiness-probe
@@ -187,7 +191,7 @@
     (format
      nil
      "version = 4~%root = '~A'~%state = '~A'~%temp = '~A'~%~
-[plugins]~%  [plugins.'io.containerd.cri.v1.images']~%    snapshotter = '~A'~%~
+[plugins]~%~:[~;  [plugins.'io.containerd.metadata.v1.bolt']~%    no_sync = true~%~]  [plugins.'io.containerd.cri.v1.images']~%    snapshotter = '~A'~%~
   [plugins.'io.containerd.cri.v1.runtime']~%    disable_apparmor = true~%    restrict_oom_score_adj = true~%    netns_mounts_under_state_dir = true~%~
     [plugins.'io.containerd.cri.v1.runtime'.containerd]~%      default_runtime_name = 'runc'~%~
       [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes]~%~
@@ -200,7 +204,7 @@
     [[plugins.'io.containerd.transfer.v1.local'.unpack_config]]~%      platform = '~A'~%      snapshotter = '~A'~%~
   [plugins.'io.containerd.server.v1.grpc']~%    address = '~A'~%~
   [plugins.'io.containerd.server.v1.ttrpc']~%    address = '~A.ttrpc'~%"
-     root state temporary snapshotter
+     root state temporary (managed-containerd-metadata-no-sync manager) snapshotter
      (managed-containerd-oci-runtime manager)
      runc-root
      (managed-containerd-cni-bin-directory manager)

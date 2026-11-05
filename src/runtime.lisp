@@ -126,6 +126,16 @@
     (runtime uid container command &key timeout))
 (defgeneric runtime-start-exec-session
     (runtime uid container command &key stdin stdout stderr tty))
+(defgeneric runtime-attach-url (runtime uid container &key stdin stdout stderr tty)
+  (:documentation "Return a one-time streaming URL attached to the running CONTAINER's own process."))
+(defgeneric runtime-start-attach-session (runtime uid container &key stdin stdout stderr tty)
+  (:documentation "Start an attach whose session the exec session functions then drive."))
+(defgeneric runtime-container-metrics (runtime)
+  (:documentation "Return what running containers have used: a table of Pod UID to a table of container
+name to \"cpu\" (cumulative nanoseconds) and \"memory\" (working set bytes)."))
+(defmethod runtime-container-metrics ((runtime t))
+  (declare (ignore runtime))
+  (make-hash-table :test #'equal))
 (defgeneric runtime-send-exec-session-input
     (runtime session channel data &key rows columns eof))
 (defgeneric runtime-next-exec-session-output

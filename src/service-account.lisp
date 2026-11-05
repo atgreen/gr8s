@@ -132,6 +132,12 @@
                                  containers))
            (volume (when (and mount-p (plusp (length unmounted))) (automount-api-access-volume))))
       (setf (gethash "serviceAccountName" spec) account-name)
+      ;; A Pod naming no pull secrets uses its account's, and later edits to the account don't change it.
+      (when (and (zerop (length (gethash "imagePullSecrets" spec #())))
+                 (plusp (length (gethash "imagePullSecrets" account #()))))
+        (setf (gethash "imagePullSecrets" spec)
+              (map 'vector (lambda (reference) (core-object "name" (gethash "name" reference)))
+                   (gethash "imagePullSecrets" account))))
       (when volume
         (setf (gethash "volumes" spec) (concatenate 'vector (gethash "volumes" spec #()) (vector volume))))
       (loop for container across containers

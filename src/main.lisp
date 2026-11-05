@@ -60,10 +60,11 @@
                        :local-storage-path +default-local-storage-path+)))
     (loop while arguments
           for option = (first arguments)
-          do (if (member option '("--disable-agent" "--raft-init") :test #'string=)
+          do (if (member option '("--disable-agent" "--raft-init" "--containerd-no-sync") :test #'string=)
                  (progn
                    (cond ((string= option "--disable-agent") (setf (getf options :disable-agent) t))
-                         ((string= option "--raft-init") (setf (getf options :raft-init) t)))
+                         ((string= option "--raft-init") (setf (getf options :raft-init) t))
+                         ((string= option "--containerd-no-sync") (setf (getf options :containerd-no-sync) t)))
                    (setf arguments (rest arguments)))
                  (let ((value (option-value arguments option)))
                    (cond
@@ -128,6 +129,8 @@
                       (setf (getf options :raft-node-name) value))
                      ((string= option "--raft-token")
                       (setf (getf options :raft-token) value))
+                     ((string= option "--raft-ca-pin")
+                      (setf (getf options :raft-ca-pin) value))
                      ((string= option "--local-storage-path")
                       (unless (storage-absolute-path-p value)
                         (error "local storage path must be absolute without traversal"))
@@ -199,7 +202,7 @@
     options))
 
 (defun parse-join-token-options (arguments)
-  (let ((options (list :command :join-token
+  (let ((options (list :command :join-token :role "node"
                        :state-directory (namestring (default-state-directory)))))
     (loop while arguments
           for option = (first arguments)
@@ -209,6 +212,10 @@
                 (setf (getf options :node-name) (ensure-valid-node-name value)))
                ((string= option "--state-directory")
                 (setf (getf options :state-directory) value))
+               ((string= option "--role")
+                (unless (member value '("node" "control-plane") :test #'string=)
+                  (error "join-token --role must be node or control-plane"))
+                (setf (getf options :role) value))
                (t (error "unknown join-token option: ~A" option)))
              (setf arguments (cddr arguments)))
     (unless (getf options :node-name) (error "join-token requires --node-name"))
@@ -248,19 +255,24 @@
    and counts toward quorum, but never leads and serves no state machine."
   (multiple-value-bind (host port) (parse-agent-server (getf options :join))
     (let* ((state (uiop:ensure-directory-pathname (getf options :state-directory)))
-           (storage (open-file-raft-storage (merge-pathnames "raft/witness.log" state)))
+           (root (merge-pathnames "raft/" state))
+           (credentials (ensure-raft-joiner-credentials
+                         root (getf options :member-id) host port
+                         :role :witness :node-name (getf options :node-name)
+                         :token (getf options :token) :ca-pin (getf options :ca-pin)))
+           (storage (open-file-raft-storage (merge-pathnames "witness.log" root)))
            (member (start-raft-member (getf options :member-id)
                                       :host (getf options :listen)
                                       :port (getf options :port)
                                       :apply-fn (lambda (command) (declare (ignore command)) nil)
-                                      :storage storage)))
+                                      :storage storage
+                                      :credentials credentials)))
       (unwind-protect
            (progn
              (raft-member-start member)
              (unless (raft-cluster-join member host port
                                         :role :witness
-                                        :node-name (getf options :node-name)
-                                        :token (getf options :token))
+                                        :node-name (getf options :node-name))
                (error "witness ~A could not join the cluster at ~A:~D"
                       (getf options :member-id) host port))
              (format t "gr8s witness ~A joined the cluster via ~A:~D; holding quorum.~%"
@@ -272,7 +284,12 @@
 
 (defun print-node-join-token (options &optional (output *standard-output*))
   (let* ((state (uiop:ensure-directory-pathname (getf options :state-directory)))
-         (root (merge-pathnames "pki/" state)))
+         (root (merge-pathnames "pki/" state))
+         ;; Control-plane tokens have their own store and CA, so a token for a
+         ;; worker node can't admit a Raft member.
+         (root (if (equal "control-plane" (getf options :role))
+                   (merge-pathnames "raft/" root)
+                   root)))
     ;; The token command must use an existing control plane's CA, never create
     ;; a new trust identity merely because the caller selected the wrong path.
     (unless (and (probe-file (merge-pathnames "pki/cluster-ca.crt" root))
@@ -369,6 +386,7 @@
                    :state-directory state-directory
                    :executable (getf options :containerd-executable)
                    :oci-runtime (getf options :containerd-oci-runtime)
+                   :metadata-no-sync (getf options :containerd-no-sync)
                    :runtime-assets *embedded-runtime-assets*
                    :cni-bin-directory
                    (uiop:pathname-directory-pathname
@@ -670,6 +688,7 @@ handler and never gets here. A busy host makes this race likely."
                                   :leader-gate (when ha (lambda () (ha-control-plane-leader-p ha)))
                                   :before-reconcile (lambda ()
                                       (reconcile-crd-deletions store)
+                                      (reconcile-flowcontrol store)
                                       (collect-orphaned-custom-resources store)
                                       (reconcile-certificate-signing-requests store pki)
                                       (reconcile-certificates store pki)
@@ -680,6 +699,7 @@ handler and never gets here. A busy host makes this race likely."
                                       (reconcile-namespace-defaults store)
                                       (collect-orphaned-api-objects reconciler)
                                       (reconcile-workloads reconciler)
+                                      (reconcile-horizontal-pod-autoscalers reconciler)
                                       (reconcile-endpointslices store)
                                       (reconcile-endpoints store)
                                       (prune-projected-tokens store)
@@ -729,12 +749,13 @@ handler and never gets here. A busy host makes this race likely."
          :join-host join-host :join-port join-port
          :node-name (getf options :raft-node-name)
          :token (getf options :raft-token)
+         :ca-pin (getf options :raft-ca-pin)
          :api-url (format nil "http://~A:~D" (getf options :listen) (getf options :port))
          :pki pki)))))
 
 (defun print-help ()
   (format t
-          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE] [--local-storage-path DIR]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s witness --join HOST:PORT --node-name NAME [--token TOKEN] [--listen IPV4] [--port PORT] [--state-directory DIR]~%  gr8s kubeconfig [--output FILE] [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%  gr8s version~%"))
+          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--containerd-no-sync] [--kubeconfig FILE] [--local-storage-path DIR]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--role node|control-plane] [--state-directory CONTROL_PLANE_DIR]~%  gr8s witness --join HOST:PORT --node-name NAME [--token TOKEN --ca-pin PIN] [--listen IPV4] [--port PORT] [--state-directory DIR]~%  gr8s kubeconfig [--output FILE] [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%  gr8s version~%"))
 
 (defun print-gr8s-banner (role)
   "Print a startup banner (Spring-Boot style) naming the role gr8s is starting."

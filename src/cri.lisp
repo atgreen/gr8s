@@ -286,8 +286,9 @@
              (ensure-cri-deletion-status "RemovePodSandbox" status)))
       (ag-grpc:channel-close channel))))
 
-(defun cri-pull-image (socket-path image &key timeout)
-  "Pull IMAGE without a default operation deadline; callers may supply TIMEOUT."
+(defun cri-pull-image (socket-path image &key timeout auth)
+  "Pull IMAGE without a default operation deadline; callers may supply TIMEOUT.
+AUTH is a (username . password) credential for the registry."
   ;; Download and extraction can exceed an ordinary CRI request's deadline.
   ;; Match Kubernetes' remote image client: keep the cancellable call context,
   ;; but do not abort an active pull merely because two minutes have elapsed.
@@ -298,7 +299,9 @@
               (gr8s.cri.v1::make-image-service-stub channel)
               (make-instance
                'gr8s.cri.v1::pull-image-request
-               :image (make-instance 'gr8s.cri.v1::image-spec :image image))
+               :image (make-instance 'gr8s.cri.v1::image-spec :image image)
+               :auth (when auth
+                       (make-instance 'gr8s.cri.v1::auth-config :username (car auth) :password (cdr auth))))
               :timeout timeout)
            (ensure-cri-status "PullImage" status)
            (gr8s.cri.v1::image-ref response))
@@ -407,6 +410,31 @@
            (ensure-cri-status "StartContainer" status))
       (ag-grpc:channel-close channel))))
 
+(defun cri-container-metrics (socket-path &key (timeout 30))
+  "Return every gr8s container's CPU seconds used and working set, by Pod UID and container name."
+  (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)) (pods (make-hash-table :test #'equal)))
+    (unwind-protect
+         (multiple-value-bind (response status)
+             (gr8s.cri.v1::runtime-service-list-container-stats
+              (gr8s.cri.v1::make-runtime-service-stub channel)
+              (make-instance 'gr8s.cri.v1::list-container-stats-request
+                             :filter (make-instance 'gr8s.cri.v1::container-stats-filter))
+              :timeout timeout)
+           (ensure-cri-status "ListContainerStats" status)
+           (dolist (stats (gr8s.cri.v1::stats response) pods)
+             (let* ((attributes (gr8s.cri.v1::attributes stats))
+                    (labels (and attributes (gr8s.cri.v1::labels attributes)))
+                    (uid (cdr (assoc +gr8s-uid-label+ labels :test #'string=)))
+                    (name (cdr (assoc +gr8s-container-label+ labels :test #'string=)))
+                    (cpu (gr8s.cri.v1::cpu stats)) (memory (gr8s.cri.v1::memory stats))
+                    (used (and cpu (gr8s.cri.v1::usage-core-nano-seconds cpu)))
+                    (working (and memory (gr8s.cri.v1::working-set-bytes memory))))
+               (when (and uid name used)
+                 (setf (gethash name (or (gethash uid pods) (setf (gethash uid pods) (make-hash-table :test #'equal))))
+                       (core-object "cpu" (gr8s.cri.v1::value used)
+                                    "memory" (if working (gr8s.cri.v1::value working) 0)))))))
+      (ag-grpc:channel-close channel))))
+
 (defun cri-container-writable-bytes (socket-path sandbox-id &key (timeout 30))
   "Return (container-name . writable-layer-bytes) entries for SANDBOX-ID's containers."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
@@ -503,8 +531,8 @@
              (ensure-cri-deletion-status "RemoveContainer" status)))
       (ag-grpc:channel-close channel))))
 
-(defun cri-image-present-p (socket-path image &key (timeout 30))
-  "Query the CRI image service without contacting a registry."
+(defun cri-local-image (socket-path image timeout)
+  "Return IMAGE's CRI record without contacting a registry, or NIL when the node lacks it."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
          (multiple-value-bind (response status)
@@ -514,5 +542,14 @@
                              :image (make-instance 'gr8s.cri.v1::image-spec :image image))
               :timeout timeout)
            (ensure-cri-status "ImageStatus" status)
-           (not (null (gr8s.cri.v1::image response))))
+           (gr8s.cri.v1::image response))
       (ag-grpc:channel-close channel))))
+
+(defun cri-image-present-p (socket-path image &key (timeout 30))
+  "Query the CRI image service without contacting a registry."
+  (not (null (cri-local-image socket-path image timeout))))
+
+(defun cri-image-id (socket-path image &key (timeout 30))
+  "Return the ID of the local image IMAGE currently names, or NIL when the node lacks it."
+  (let ((record (cri-local-image socket-path image timeout)))
+    (when record (gr8s.cri.v1::id record))))

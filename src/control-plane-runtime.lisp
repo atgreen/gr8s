@@ -76,9 +76,26 @@
     ;; reconciliation worker retries scheduling when a node becomes Ready.
     (and pod (pod-node-name pod) (control-plane-observation runtime pod))))
 
+(defun node-snapshot-carries-pod-p (runtime node-name pod)
+  "Return whether NODE-NAME's latest published snapshot already assigns POD's exact revision."
+  (let* ((server (control-plane-runtime-node-server runtime))
+         (snapshot (bt:with-lock-held ((node-grpc-server-lock server))
+                     (gethash node-name (node-grpc-server-snapshots server))))
+         (assignment (and snapshot
+                          (find (pod-uid pod) (slot-value snapshot 'gr8s.node.v1::pods)
+                                :key (lambda (item) (slot-value item 'gr8s.node.v1::uid))
+                                :test #'equal))))
+    (and assignment
+         (equal (pod-resource-version pod)
+                (slot-value assignment 'gr8s.node.v1::resource-version)))))
+
 (defmethod runtime-ensure ((runtime control-plane-runtime) pod)
   (let ((node (schedule-pod (control-plane-runtime-store runtime) pod)))
-    (when node
+    ;; Every read of a Pod the agent has not yet reported lands here. Building a
+    ;; snapshot costs every Pod's JSON, so a list of N Pending Pods would cost N^2
+    ;; just to find nothing changed. A Pod the node already has needs no snapshot;
+    ;; changes to the objects it references go out on publish-service-discovery-snapshots.
+    (when (and node (not (node-snapshot-carries-pod-p runtime (node-record-name node) pod)))
       (publish-node-snapshot runtime (node-record-name node)))
     (control-plane-observation runtime pod)))
 
@@ -233,6 +250,27 @@
   (start-control-plane-stream-session
    runtime uid container gr8s.node.v1::+operationkind-operation_kind_attach+ nil
    :stdin stdin :stdout stdout :stderr stderr :tty tty))
+
+(defmethod runtime-container-metrics ((runtime control-plane-runtime))
+  "Ask each node for its containers' usage; a node that cannot answer has no measures this time."
+  (let ((metrics (make-hash-table :test #'equal)))
+    (dolist (node (list-nodes (control-plane-runtime-store runtime)) metrics)
+      (unless (node-record-api-only node)
+        (handler-case
+            (let* ((operation
+                     (request-node-operation
+                      (control-plane-runtime-node-server runtime) (node-record-name node)
+                      (make-instance 'gr8s.node.v1::operation-request
+                                     :operation-id (generate-uid)
+                                     :kind gr8s.node.v1::+operationkind-operation_kind_metrics+)
+                      :timeout 5))
+                   (report (node-operation-channel-data
+                            operation gr8s.node.v1::+streamchannel-stream_channel_stdout+)))
+              (when (plusp (length report))
+                (maphash (lambda (uid containers) (setf (gethash uid metrics) containers))
+                         (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (coerce report '(vector (unsigned-byte 8))))))))
+          (error (condition)
+            (format *error-output* "gr8s HPA metrics from ~A: ~A~%" (node-record-name node) condition)))))))
 
 (defmethod runtime-send-exec-session-input
     ((runtime control-plane-runtime) (session control-plane-exec-session)

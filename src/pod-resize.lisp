@@ -112,6 +112,22 @@
       (invalid-pod "Pod QoS is immutable: resizing would change it from ~A to ~A"
                    (pod-spec-qos-class old) (pod-spec-qos-class new)))))
 
+(defun refuse-pod-resize-beyond-node (store pod replacement)
+  "Refuse a resize its node could never hold, which a client can only learn about in time from here."
+  (let ((node (and (pod-node-name pod)
+                   (with-store-lock (store) (gethash (pod-node-name pod) (pod-store-nodes store))))))
+    (when node
+      (let ((allocatable (node-allocatable-table node)) (old (pod-requests-table pod)) (new (pod-requests-table replacement)))
+        (dolist (resource '("cpu" "memory"))
+          (multiple-value-bind (limit known) (gethash resource allocatable)
+            (when (and known (> (gethash resource new 0) limit) (> (gethash resource new 0) (gethash resource old 0)))
+              (let ((message (format nil "Pod resize rejected: node didn't have enough allocatable resources: ~A, requested: ~A, allocatable: ~A"
+                                     resource (policy-value-string (gethash resource new)) (policy-value-string limit))))
+                (error 'kubernetes-error
+                       :status-code 403 :reason "Forbidden" :message message
+                       :details (core-object "name" (pod-name pod) "kind" "pods"
+                                             "causes" (vector (core-object "reason" "NodeCapacity" "message" message))))))))))))
+
 (defun write-pod-resize-response (store reconciler name namespace method)
   "Declare new resources for POD's containers, and leave carrying them out to its node."
   (let* ((pod (get-pod store namespace name))
@@ -128,6 +144,7 @@
       (core-resource-error 409 "Conflict" "Pod resourceVersion has changed"))
     (let ((replacement (parse-pod (pod-resize-merged-object pod input))))
       (validate-pod-resize pod replacement)
+      (refuse-pod-resize-beyond-node store pod replacement)
       (if (core-resource-dry-run-p)
           (json-response (pod-response-object replacement (reconcile-pod reconciler namespace name)))
           (let ((updated (let ((*pod-resize-update* t))
@@ -180,9 +197,78 @@
            (ensure-cri-status "UpdateContainerResources" status))
       (ag-grpc:channel-close channel))))
 
+(defun pod-applied-requests (runtime pod)
+  "Return POD's requests as its containers actually run them, which a pending resize has not changed."
+  (let* ((state (load-container-lifecycle-state runtime (pod-uid pod)))
+         (spec (copy-core-object (gethash "spec" (pod-to-object pod)))))
+    (dolist (field '("initContainers" "containers"))
+      (loop for object across (gethash field spec #())
+            for entry = (gethash (gethash "name" object) (gethash "containers" state))
+            for applied = (and entry (gethash "appliedResources" entry))
+            when applied do (setf (gethash "resources" object) applied)))
+    (values (pod-spec-resource-totals spec))))
+
+(defun pod-resize-outranks-p (left right)
+  "Return whether a pending resize of Pod LEFT goes before one of Pod RIGHT, by priority then QoS class."
+  (flet ((qos-rank (pod)
+           (position (pod-spec-qos-class (gethash "spec" (pod-to-object pod))) '("BestEffort" "Burstable" "Guaranteed")
+                     :test #'equal)))
+    (or (> (pod-spec-priority left) (pod-spec-priority right))
+        (and (= (pod-spec-priority left) (pod-spec-priority right))
+             (> (qos-rank left) (qos-rank right))))))
+
+(defun pod-resize-verdict (desired applied used capacity)
+  "Judge requests DESIRED against CAPACITY and the amounts other Pods have USED, as a kubelet does.
+Return NIL when the resize may go ahead, or its pending reason and message. Giving back resources
+always may, since waiting could not help."
+  (flet ((amount (table name) (gethash name table 0)))
+    (when (some (lambda (name) (> (amount desired name) (amount applied name))) '("cpu" "memory"))
+      (dolist (name '("cpu" "memory"))
+        (multiple-value-bind (limit known) (gethash name capacity)
+          (when (and known (> (amount desired name) limit))
+            (return-from pod-resize-verdict
+              (values "Infeasible"
+                      (format nil "Node didn't have enough capacity: ~A, requested: ~A, capacity: ~A"
+                              name (policy-value-string (amount desired name)) (policy-value-string limit)))))))
+      (dolist (name '("cpu" "memory"))
+        (multiple-value-bind (limit known) (gethash name capacity)
+          (when (and known (> (+ (amount desired name) (amount used name)) limit))
+            (return-from pod-resize-verdict
+              (values "Deferred"
+                      (format nil "Node didn't have enough resource: ~A, requested: ~A, used: ~A, capacity: ~A"
+                              name (policy-value-string (amount desired name)) (policy-value-string (amount used name))
+                              (policy-value-string limit))))))))))
+
+(defun pod-resize-judgement (runtime pod)
+  "Return the pending reason and message of POD's declared resources on this node, if any."
+  (let ((used (make-hash-table :test #'equal))
+        (lister (containerd-runtime-pod-lister runtime)))
+    (when lister
+      (dolist (other (funcall lister))
+        (unless (equal (pod-uid other) (pod-uid pod))
+          ;; Another Pod's waiting increase only counts against this one if it goes first.
+          (let ((amounts (if (pod-resize-outranks-p other pod)
+                             (pod-requests-table other)
+                             (pod-applied-requests runtime other))))
+            (maphash (lambda (name value) (incf (gethash name used 0) value)) amounts)))))
+    (let ((capacity (make-hash-table :test #'equal)))
+      (maphash (lambda (name value) (setf (gethash name capacity) (policy-value value))) (node-reported-capacity))
+      (pod-resize-verdict (pod-requests-table pod) (pod-applied-requests runtime pod) used capacity))))
+
+(defun note-pod-resize-pending (state reason message)
+  "Durably record why a resize waits, returning whether that changed anything observable."
+  (let ((old (gethash "resizePending" state)))
+    (cond ((and reason (not (and old (equal reason (gethash "reason" old)) (equal message (gethash "message" old)))))
+           (setf (gethash "resizePending" state) (core-object "type" "PodResizePending" "status" "True"
+                                                               "reason" reason "message" message))
+           t)
+          ((and old (null reason)) (remhash "resizePending" state) t))))
+
 (defun reconcile-container-updates (runtime pod observed)
-  "Carry out changed images and resources for POD's running containers, returning true on any change."
-  (let* ((uid (pod-uid pod)) (state (load-container-lifecycle-state runtime uid)) (changed nil))
+  "Carry out changed images and resources for POD's running containers, returning true on any change.
+A node that cannot take a resize keeps the old resources and says why, as PodResizePending."
+  (let* ((uid (pod-uid pod)) (state (load-container-lifecycle-state runtime uid)) (changed nil)
+         (reason nil) (message nil) (judged nil))
     (dolist (object (pod-probed-container-objects pod))
       (let* ((name (gethash "name" object))
              (entry (gethash name (gethash "containers" state)))
@@ -202,12 +288,18 @@
             ((not (equal applied-image (gethash "image" object)))
              (request-container-update-restart pod state name id) (setf changed t))
             ((container-resources-equal-p applied desired))
+            ((progn
+               (unless judged
+                 (multiple-value-setq (reason message) (pod-resize-judgement runtime pod))
+                 (setf judged t))
+               reason))
             ((container-resize-restart-required-p object applied desired)
              (request-container-update-restart pod state name id) (setf changed t))
             (t
              (cri-update-container-resources (containerd-runtime-socket-path runtime) id
                                              (cri-linux-container-resources object))
              (setf (gethash "appliedResources" entry) (copy-core-object desired) changed t))))))
+    (when (note-pod-resize-pending state reason message) (setf changed t))
     (when changed (save-container-lifecycle-state runtime uid state))
     changed))
 

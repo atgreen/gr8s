@@ -25,15 +25,22 @@ EXTRA_SOURCES = {
     "authentication.proto": (PREFIX + "authentication/v1/generated.proto", "cf5ea7e838b8e0f9813b2de1fb92ca51980b48aaa5ac119cb67a317295b67c8e"),
     "authentication-types.go": (PREFIX + "authentication/v1/types.go", "f1c306a4db914b0582503120adfd902d1a24d4bff2674c487c90cae461d16b10"),
     "admission.proto": (PREFIX + "admissionregistration/v1/generated.proto", "b3e61003741775cbbde27473bb52b8b35a6191013bb8dd231a1e7d21d86b6b93"),
+    "autoscaling1.proto": (PREFIX + "autoscaling/v1/generated.proto", "c3db74d68ab413a0413562da6e3951f7cb21198ef2ea2877bce24381bf9c756a"),
+    "autoscaling1-types.go": (PREFIX + "autoscaling/v1/types.go", "ab10da716388987895cb94be11cf776b5632644128de7959cd97bc37b5b874c6"),
+    "autoscaling2.proto": (PREFIX + "autoscaling/v2/generated.proto", "5685de748fa37900a21082f826e93f349a7e3203d4c6bfd2225ba893d5b9a01a"),
+    "autoscaling2-types.go": (PREFIX + "autoscaling/v2/types.go", "68f36b28a6bb91cb0c9ca53591d8e5d52778f7f2ca69cea3120ba7eae95910aa"),
     "admission-types.go": (PREFIX + "admissionregistration/v1/types.go", "35f58a673ffd825f9bf1ba7ac36795be353978e9d0db507eb7874b8d86bc9b74"),
 }
 TYPES = [("core-types.go", "k8s.io.api.core.v1."), ("coordination-types.go", "k8s.io.api.coordination.v1."),
          ("flowcontrol-types.go", "k8s.io.api.flowcontrol.v1."), ("dra-types.go", "k8s.io.api.resource.v1."),
          ("authorization-types.go", "k8s.io.api.authorization.v1."), ("authentication-types.go", "k8s.io.api.authentication.v1."),
-         ("admission-types.go", "k8s.io.api.admissionregistration.v1.")]
+         ("admission-types.go", "k8s.io.api.admissionregistration.v1."),
+         ("autoscaling1-types.go", "k8s.io.api.autoscaling.v1."), ("autoscaling2-types.go", "k8s.io.api.autoscaling.v2.")]
 ROOTS = [package + kind for package, kinds in (
     ("k8s.io.api.core.v1.", ["NamespaceStatus"]),
     ("k8s.io.api.coordination.v1.", ["Lease"]),
+    ("k8s.io.api.autoscaling.v1.", ["HorizontalPodAutoscaler"]),
+    ("k8s.io.api.autoscaling.v2.", ["HorizontalPodAutoscaler"]),
     ("k8s.io.api.flowcontrol.v1.", ["PriorityLevelConfiguration", "FlowSchema"]),
     ("k8s.io.api.resource.v1.", ["DeviceClass", "ResourceClaim", "ResourceClaimTemplate", "ResourceSlice"]),
     ("k8s.io.api.admissionregistration.v1.", ["ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding",

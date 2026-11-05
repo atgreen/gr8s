@@ -4,6 +4,8 @@
   socket-path
   log-root
   host-network
+  ;; Returns the Pods sharing this node, once an agent knows them; resizes are judged against them.
+  pod-lister
   ;; The node's own address once an agent knows it; hostNetwork Pods share it.
   host-address
   dns-servers
@@ -274,10 +276,11 @@ A container running as any user can write here, and a user mount at the path tak
 (defun containerd-create-container (runtime pod sandbox-id sandbox-config spec &key (attempt 0))
   (let ((socket (containerd-runtime-socket-path runtime)))
     (let ((policy (gethash "imagePullPolicy" (pod-runtime-container-object pod spec)
-                           (if (or (uiop:string-suffix-p (container-spec-image spec) ":latest")
-                                   (not (find #\: (car (last (uiop:split-string (container-spec-image spec) :separator '(#\/)))))))
-                               "Always" "IfNotPresent"))))
-      (ensure-container-image runtime (container-spec-image spec) policy))
+                           (default-image-pull-policy (container-spec-image spec)))))
+      (ensure-container-image runtime (container-spec-image spec) policy
+                              (lambda ()
+                                (pod-image-pull-credentials runtime pod (container-spec-name spec)
+                                                            (container-spec-image spec)))))
     (let* ((environment (containerd-pod-environment runtime pod spec sandbox-id))
            (mounts (containerd-container-mounts runtime pod spec sandbox-id environment))
            (security (containerd-pod-security-context
@@ -437,6 +440,10 @@ A container running as any user can write here, and a user mount at the path tak
        (cri-attach-url (containerd-runtime-socket-path runtime)
                        (cri-container-summary-id container)
                        :stdin stdin :stdout stdout :stderr stderr :tty tty)))))
+
+(defmethod runtime-container-metrics ((runtime containerd-runtime))
+  (call-containerd-runtime
+   (lambda () (cri-container-metrics (containerd-runtime-socket-path runtime)))))
 
 (defmethod runtime-exec-sync
     ((runtime containerd-runtime) uid container-name command &key (timeout 30))
