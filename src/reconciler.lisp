@@ -15,6 +15,9 @@
 (define-condition pod-reconciliation-superseded (serious-condition) ()
   (:documentation "Unwind obsolete creation without translating cancellation into a Pod failure."))
 
+(define-condition node-snapshot-incomplete (runtime-error) ()
+  (:documentation "Every other Pod was applied, but a Pod's assignment isn't durable, so this revision can't be acknowledged."))
+
 (defstruct running-pod-convergence
   "A narrowly owned, cancellable running-Pod operation; deletion never registers here."
   thread uid finished-p)
@@ -297,7 +300,12 @@
                    (let ((status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
                      (when observer (funcall observer pod status))
                      (list status))
-                 (pod-reconciliation-superseded () nil))))
+                 (pod-reconciliation-superseded () nil)
+                 ;; One Pod's failure must not starve the Pods sorted after it on every pass.
+                 (error (condition)
+                   (format *error-output* "gr8s Pod ~A/~A reconciliation failed: ~A~%"
+                           (pod-namespace pod) (pod-name pod) condition)
+                   nil))))
 
 (defun reconciler-logs (reconciler uid container &key tail previous)
   (bt:with-lock-held ((reconciler-lock reconciler))
