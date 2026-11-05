@@ -51,6 +51,42 @@
     (is (eq t (gethash "namespaced" entry)))
     (is (string= "PodCertificateRequest" (gethash "kind" entry)))))
 
+(test podcertificaterequest-decodes-from-client-go-protobuf
+  ;; The signer writes status.certificateChain + an Issued condition over
+  ;; client-go protobuf; gr8s must decode the PodCertificateRequest body,
+  ;; including spec ints/bytes and the status conditions and Time fields.
+  (let* ((meta (core-test-protobuf (list (list 1 "postgres-0-abc"))))
+         (spec (core-test-protobuf (list (list 1 "servicedns.podcert.ate.dev/identity")
+                                         (list 3 "pod-uid-1") (list 8 86400)
+                                         (list 9 (trivial-utf-8:string-to-utf-8-bytes "KEYBYTES")))))
+         (cond1 (core-test-protobuf (list (list 1 "Issued") (list 2 "True") (list 5 "Issued"))))
+         (status (core-test-protobuf (list (list 1 cond1)
+                                           (list 2 (format nil "-----BEGIN CERTIFICATE-----~%L~%-----END CERTIFICATE-----~%")))))
+         (bytes (core-test-protobuf-envelope "PodCertificateRequest"
+                                             (list (list 1 meta) (list 2 spec) (list 3 status))
+                                             "certificates.k8s.io/v1beta1"))
+         (object (gr8s::decode-core-resource-protobuf bytes "PodCertificateRequest")))
+    (is (string= "PodCertificateRequest" (gethash "kind" object)))
+    (is (string= "postgres-0-abc" (gethash "name" (gethash "metadata" object))))
+    (is (string= "servicedns.podcert.ate.dev/identity" (gethash "signerName" (gethash "spec" object))))
+    (is (eql 86400 (gethash "maxExpirationSeconds" (gethash "spec" object))))
+    (let ((st (gethash "status" object)))
+      (is (search "BEGIN CERTIFICATE" (gethash "certificateChain" st)))
+      (is (string= "Issued" (gethash "type" (aref (gethash "conditions" st) 0))))
+      (is (string= "True" (gethash "status" (aref (gethash "conditions" st) 0)))))))
+
+(test podcertificaterequest-builder-emits-strings-never-nil
+  ;; gr8s serializes Lisp NIL as JSON false, which a typed client cannot decode
+  ;; into a string field (the signer's PodCertificateRequest watch dies). When
+  ;; the node cannot resolve the SA/node UID, those spec fields must be "", not nil.
+  (let ((spec (gethash "spec"
+               (gr8s::build-pod-certificate-request
+                :name "c" :namespace "ate-system"
+                :signer-name "servicedns.podcert.ate.dev/identity"
+                :pkix-public-key "QUJD" :pod-name "p" :pod-uid "u"))))
+    (dolist (field '("serviceAccountName" "serviceAccountUID" "nodeName" "nodeUID"))
+      (is (stringp (gethash field spec)) "~A must be a string, not ~S" field (gethash field spec)))))
+
 (test podcertificaterequest-builders-produce-request-and-bundle
   ;; The request object carries the pod/SA/node identity and public key a signer
   ;; verifies.

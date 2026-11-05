@@ -58,7 +58,12 @@
              (gethash "data" result) (copy-core-object (gethash "data" object))))
       ((equal kind "ClusterTrustBundle")
        ;; Trust anchors a node needs for the clusterTrustBundle projected volume
-       ;; (KEP-4317). The whole spec (signerName + trustBundle PEM) is public.
+       ;; (KEP-4317). The whole spec (signerName + trustBundle PEM) is public, and
+       ;; the labels must cross too: a clusterTrustBundle source selects bundles
+       ;; by labelSelector (e.g. podcert.ate.dev/canarying=live), so dropping
+       ;; them would leave a signerName+selector volume matching nothing.
+       (when (gethash "labels" source)
+         (setf (gethash "labels" metadata) (copy-core-object (gethash "labels" source))))
        (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
       ((equal kind "PodCertificateRequest")
        ;; The node created this request's public key and now needs the signed

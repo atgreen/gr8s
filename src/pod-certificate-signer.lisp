@@ -84,8 +84,14 @@
         :pkix-public-key pkix
         :pod-name (slot-value claim 'gr8s.node.v1::pod-name) :pod-uid pod-uid
         :service-account-name (slot-value claim 'gr8s.node.v1::service-account-name)
-        :service-account-uid (let ((uid (slot-value claim 'gr8s.node.v1::service-account-uid)))
-                               (when (plusp (length uid)) uid))
+        ;; The node cannot resolve the SA UID (ServiceAccounts are not projected
+        ;; to it), so the control plane fills it from its own store by SA name.
+        :service-account-uid (let ((uid (slot-value claim 'gr8s.node.v1::service-account-uid))
+                                   (sa-name (slot-value claim 'gr8s.node.v1::service-account-name)))
+                               (if (plusp (length uid)) uid
+                                   (let ((sa (ignore-errors
+                                              (get-core-resource store "serviceaccounts" namespace sa-name))))
+                                     (and sa (gethash "uid" (gethash "metadata" sa))))))
         :node-name node-name :node-uid (node-metadata-uid store node-name)
         :max-expiration-seconds (when (plusp max) max)
         :unverified-user-annotations

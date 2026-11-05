@@ -65,7 +65,10 @@
           (is (string= "projected" (getf claim :pod-name)))
           (is (plusp (length (getf claim :pkix-public-key))))
           ;; The claim carries no private key material of any kind.
-          (is (null (getf claim :private-key-pem))))
+          (is (null (getf claim :private-key-pem)))
+          ;; A source that names no lifetime still gets the kubelet default, so
+          ;; signers that dereference maxExpirationSeconds don't see nil.
+          (is (eql 86400 (getf claim :max-expiration-seconds))))
         ;; The claim name is stable across retries (same keypair, same request).
         (signals gr8s:runtime-error (gr8s::pod-volume-desired-files runtime pod volume))
         (is (string= (getf (first (gr8s::node-pending-pod-certificate-claims store)) :name)

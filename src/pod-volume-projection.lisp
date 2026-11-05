@@ -120,6 +120,11 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
 (defparameter +pod-certificate-key-type+ "ECDSAP256"
   "The one podCertificate keyType gr8s can generate and serialize (KEP-4317).")
 
+(defparameter +pod-certificate-default-max-expiration-seconds+ 86400
+  "The lifetime a node requests when a podCertificate source names none. The
+   kubelet always sets maxExpirationSeconds, and signers dereference it, so it
+   must never be absent (the signer caps it to its own maximum).")
+
 (defun build-pod-certificate-request (&key name namespace signer-name pkix-public-key
                                            pod-name pod-uid service-account-name service-account-uid
                                            node-name node-uid max-expiration-seconds
@@ -129,12 +134,16 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
    as the transition fallback for stubPKCS10Request) plus the pod/SA/node
    identity the signer checks, and any signer-domain pod annotations the signer
    reads via unverifiedUserAnnotations."
-  (let ((spec (core-object "signerName" signer-name
-                           "podName" pod-name "podUID" pod-uid
-                           "serviceAccountName" service-account-name
-                           "serviceAccountUID" service-account-uid
-                           "nodeName" node-name "nodeUID" node-uid
-                           "pkixPublicKey" pkix-public-key)))
+  ;; Every spec string must be a string, never NIL: gr8s serializes NIL as JSON
+  ;; false, which a typed client (the signer's PodCertificateRequest watch)
+  ;; cannot decode into a string field. The node often cannot resolve the SA or
+  ;; node UID (ServiceAccounts are not projected to it), so coerce to "".
+  (let ((spec (core-object "signerName" (or signer-name "")
+                           "podName" (or pod-name "") "podUID" (or pod-uid "")
+                           "serviceAccountName" (or service-account-name "")
+                           "serviceAccountUID" (or service-account-uid "")
+                           "nodeName" (or node-name "") "nodeUID" (or node-uid "")
+                           "pkixPublicKey" (or pkix-public-key ""))))
     (when max-expiration-seconds
       (setf (gethash "maxExpirationSeconds" spec) max-expiration-seconds))
     (when (and unverified-user-annotations (plusp (hash-table-count unverified-user-annotations)))
@@ -190,7 +199,9 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
                                       :pod-name (pod-name pod) :pod-uid (pod-uid pod)
                                       :service-account-name sa-name
                                       :service-account-uid (and sa (gethash "uid" (gethash "metadata" sa)))
-                                      :max-expiration-seconds (gethash "maxExpirationSeconds" source)))))
+                                      :max-expiration-seconds
+                                      (gethash "maxExpirationSeconds" source
+                                               +pod-certificate-default-max-expiration-seconds+)))))
             (bt:with-lock-held ((pod-store-credential-lock store))
               ;; Another thread may have generated one first; keep whichever is stored.
               (or (gethash cache-key cache) (setf (gethash cache-key cache) material))))))))

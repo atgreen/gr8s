@@ -64,6 +64,7 @@
     (drop-null-fields (require-object context "securityContext"))
     (reject-unsupported-fields context
                                (if pod '("runAsUser" "runAsGroup" "runAsNonRoot" "fsGroup"
+                                         "fsGroupChangePolicy"
                                          "supplementalGroups" "seLinuxOptions" "seccompProfile" "sysctls")
                                    '("runAsUser" "runAsGroup" "runAsNonRoot" "privileged"
                                      "readOnlyRootFilesystem" "allowPrivilegeEscalation"
@@ -85,7 +86,12 @@
           (invalid-pod "securityContext.~A must be boolean" field))))
     (when (and (eq t (gethash "runAsNonRoot" context))
                (eql 0 (gethash "runAsUser" context)))
-      (invalid-pod "runAsNonRoot cannot be combined with runAsUser 0"))))
+      (invalid-pod "runAsNonRoot cannot be combined with runAsUser 0"))
+    ;; gr8s applies fsGroup ownership on volume setup; accept the policy knob
+    ;; (controller-generated specs set it) and validate its enum.
+    (let ((policy (gethash "fsGroupChangePolicy" context)))
+      (when (and policy (not (member policy '("Always" "OnRootMismatch") :test #'equal)))
+        (invalid-pod "securityContext.fsGroupChangePolicy must be Always or OnRootMismatch")))))
 
 (defun pod-metadata-subscript-reference (field)
   "Recognize a valid single-key label/annotation downward environment reference."

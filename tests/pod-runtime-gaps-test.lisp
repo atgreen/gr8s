@@ -40,6 +40,15 @@
                                   (vector (gr8s::core-object "maxSkew" 1 "topologyKey" "kubernetes.io/hostname"
                                                              "whenUnsatisfiable" "ScheduleAnyway")))))))
 
+(test fs-group-change-policy-is-accepted
+  ;; A standard pod securityContext knob controller-generated StatefulSets set
+  ;; (ate's postgres); gr8s applies fsGroup ownership and accepts the policy.
+  (is (gr8s::pod-name (parse-pod (gap-pod-object "securityContext"
+                                 (gr8s::core-object "fsGroup" 2000 "fsGroupChangePolicy" "OnRootMismatch")))))
+  (signals kubernetes-error
+    (parse-pod (gap-pod-object "securityContext"
+               (gr8s::core-object "fsGroupChangePolicy" "Sometimes")))))
+
 (test run-as-non-root-is-verified-against-the-image-user
   ;; runAsNonRoot with an explicit runAsUser only needs that uid nonzero; without
   ;; one, the image's own user decides -- a non-root image (ko builds run as
