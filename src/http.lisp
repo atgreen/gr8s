@@ -732,17 +732,24 @@
                (finish-output output)))))
 
 (defun relay-runtime-stream (client upstream socket)
-  (let ((client-to-runtime
-          (bt:make-thread
-           (lambda ()
-             (unwind-protect
-                  (ignore-errors (copy-binary-stream client upstream))
-               (ignore-errors (usocket:socket-shutdown socket :io))))
-           :name "gr8s exec client-to-runtime")))
-    (declare (ignore client-to-runtime))
+  "Copy both ways until the runtime ends the stream. The other direction's thread can outlive
+this: it ends with the client's connection, by which time SOCKET's descriptor number may
+belong to another connection, so it must not shut SOCKET down after it has been closed."
+  (let ((lock (bt:make-lock "gr8s exec relay socket"))
+        (closed nil))
+    (bt:make-thread
+     (lambda ()
+       (unwind-protect
+            (ignore-errors (copy-binary-stream client upstream))
+         (bt:with-lock-held (lock)
+           (unless closed
+             (ignore-errors (usocket:socket-shutdown socket :io))))))
+     :name "gr8s exec client-to-runtime")
     (unwind-protect
          (copy-binary-stream upstream client)
-      (ignore-errors (usocket:socket-close socket)))))
+      (bt:with-lock-held (lock)
+        (setf closed t)
+        (ignore-errors (usocket:socket-close socket))))))
 
 (defun proxy-runtime-stream (url)
   (multiple-value-bind (host port target)
@@ -886,7 +893,28 @@ its clients treat any other multi-byte frame as an error message."
        client 8 (make-array 2 :element-type '(unsigned-byte 8)
                             :initial-contents '(3 232))))))
 
-(define-condition exec-input-reader-stopped (error) ())
+(defvar *exec-input-reader-tag* nil
+  "The catch tag of this thread's exec input reader, set only while its catch is established.")
+
+(defmacro with-exec-input-reader-stop (&body body)
+  "Run BODY until STOP-EXEC-INPUT-READER throws out of it.
+A throw needs no handler: an error signalled from an interrupt can land while the thread is
+already signalling, with its handlers unbound for the handler tests, and then finds none."
+  (let ((tag (gensym "EXEC-INPUT")))
+    `(let ((,tag (list :exec-input)))
+       (catch ,tag
+         (let ((*exec-input-reader-tag* ,tag))
+           ,@body)))))
+
+(defun stop-exec-input-reader (thread)
+  "Unwind THREAD's exec input reader. An interrupt that arrives after its catch has gone does nothing."
+  (when (bt:thread-alive-p thread)
+    (ignore-errors
+     (bt:interrupt-thread
+      thread
+      (lambda ()
+        (when *exec-input-reader-tag*
+          (throw *exec-input-reader-tag* nil)))))))
 
 (defun begin-kubernetes-websocket ()
   (let ((key (hunchentoot:header-in* :sec-websocket-key))
@@ -916,7 +944,8 @@ its clients treat any other multi-byte frame as an error message."
 (defun forward-kubernetes-exec-input
     (reconciler session stream write-lock finished-p)
   (handler-case
-      (loop until (funcall finished-p)
+      (with-exec-input-reader-stop
+       (loop until (funcall finished-p)
             do (multiple-value-bind (opcode payload fin-p masked-p)
                    (read-websocket-frame stream)
                  (declare (ignore fin-p))
@@ -964,8 +993,7 @@ its clients treat any other multi-byte frame as an error message."
                    (10)
                    (otherwise
                     (error 'runtime-error
-                           :message "Unsupported WebSocket input frame")))))
-    (exec-input-reader-stopped () nil)
+                           :message "Unsupported WebSocket input frame"))))))
     (error (condition)
       (unless (funcall finished-p)
         (ignore-errors
@@ -1046,10 +1074,7 @@ its clients treat any other multi-byte frame as an error message."
             (reconciler-cancel-exec-session
              reconciler session "API exec stream ended")))
         (reconciler-release-exec-session reconciler session)
-        (when (and input-thread (bt:thread-alive-p input-thread))
-          (bt:interrupt-thread
-           input-thread
-           (lambda () (error 'exec-input-reader-stopped))))
+        (when input-thread (stop-exec-input-reader input-thread))
         (when input-thread
           (ignore-errors (bt:join-thread input-thread)))))))
 
