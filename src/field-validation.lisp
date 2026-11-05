@@ -40,7 +40,9 @@
   (let* ((version (or *core-resource-view-version* "v1"))
          (slash (position #\/ version))
          (group (if slash (subseq version 0 (or (position #\. version) slash)) "core"))
-         (name (format nil "io.k8s.api.~A.~A.~A" group (if slash (subseq version (1+ slash)) version) kind)))
+         (name (if (equal group "apiregistration")
+                   (format nil "io.k8s.kube-aggregator.pkg.apis.apiregistration.v1.~A" kind)
+                   (format nil "io.k8s.api.~A.~A.~A" group (if slash (subseq version (1+ slash)) version) kind))))
     (values (gethash name (gethash "definitions" *podtemplate-schema*)))))
 
 (defun prune-typed-unknown-fields (value schema &optional (path "") (depth 0))
