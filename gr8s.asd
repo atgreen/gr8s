@@ -261,6 +261,7 @@
                              (:file "raft-plane-test")
                              (:file "raft-membership-test")
                              (:file "raft-tls-test")
+                             (:file "ha-certificates-test")
                              (:file "core-resources-test")
                              (:file "re2-test")
                              (:file "crd-schema-test")
