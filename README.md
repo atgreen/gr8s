@@ -361,6 +361,10 @@ sudo build/gr8s serve \
   --kubeconfig /tmp/gr8s.kubeconfig
 ```
 
+Without `--kubeconfig`, `serve` writes an owner-only `kubeconfig` file in the
+state directory and prints its path. `gr8s kubeconfig [--server URL]` prints a
+kubeconfig to standard output, or writes it with `--output FILE`.
+
 No system containerd or host glibc is used by the embedded runtime
 payload. Root is still required for the Linux facilities used by containers:
 mounts, namespaces, cgroups, and the overlay snapshotter.
