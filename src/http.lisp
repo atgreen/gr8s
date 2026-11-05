@@ -546,6 +546,13 @@
              :reason "BadRequest"
              :message (format nil "container ~A is not valid for pod ~A"
                               container name)))
+    (let* ((status (pod-observed-status store pod))
+           (observed (and status (find container (gethash "containerStatuses" status #()) :test #'equal
+                                       :key (lambda (entry) (gethash "name" entry))))))
+      (when (and observed (container-status-never-started-p observed))
+        (error 'kubernetes-error :status-code 400 :reason "BadRequest"
+               :message (format nil "container ~S in pod ~S is waiting to start: ~A" container name
+                                (gethash "reason" (gethash "waiting" (gethash "state" observed)) "ContainerCreating")))))
     (let* ((previous (true-parameter-p (hunchentoot:parameter "previous")))
            (raw (or (reconciler-logs reconciler (pod-uid pod) container :previous previous) ""))
            (text (format-pod-logs-for-request raw)))
