@@ -44,6 +44,9 @@
   (pod-watch-floor 0)
   pod-watch-journal
   (pod-watch-journal-length 0)
+  (node-watch-floor 0)
+  node-watch-journal
+  (node-watch-journal-length 0)
   (pod-published-statuses (make-hash-table :test #'equal))
   (pod-client-statuses (make-hash-table :test #'equal))
   ;; Pod UID to the node reserved for it while its preemption victims terminate.

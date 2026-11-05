@@ -25,12 +25,16 @@ It needs a file type, since atomic renames merge a missing one from the temporar
   "Resume above every revision that could have been issued before the last shutdown."
   (let* ((path (pod-revision-ceiling-path store))
          (ceiling (if (probe-file path) (parse-integer (uiop:read-file-string path)) 0))
-         (revision (reduce #'max (loop for pod being the hash-values of (pod-store-pods store)
-                                       collect (parse-integer (pod-resource-version pod)))
+         (revision (reduce #'max (append
+                                  (loop for pod being the hash-values of (pod-store-pods store)
+                                        collect (parse-integer (pod-resource-version pod)))
+                                  (loop for node being the hash-values of (pod-store-nodes store)
+                                        collect (parse-integer (node-record-resource-version node))))
                            :initial-value ceiling)))
     (setf (pod-store-pod-revision store) revision
           (pod-store-pod-revision-ceiling store) revision
-          (pod-store-pod-watch-floor store) revision)
+          (pod-store-pod-watch-floor store) revision
+          (pod-store-node-watch-floor store) revision)
     store))
 
 (defun next-pod-revision-unlocked (store)
@@ -111,24 +115,29 @@ Status-only revisions are newer than that write but do not make a client's spec 
            (or (null namespace) (equal namespace (gethash "namespace" (gethash "metadata" object))))
            (funcall label-test object) (funcall field-test object)))))
 
-(defun pod-watch-events (store namespace labels fields revision)
-  "Read matching events after REVISION, oldest first, with the current watermark.
+(defun revision-journal-events (journal revision matches)
+  "Turn JOURNAL's entries after REVISION into watch events, oldest first.
 Selector transitions become ADDED and DELETED, as if the object entered or left a set."
+  (let ((events nil))
+    (loop for (entry-revision old new) in journal
+          while (> entry-revision revision)
+          do (let ((before (funcall matches old)) (after (funcall matches new)))
+               (when (or before after)
+                 (let ((object (copy-core-object (if after new old))))
+                   (setf (gethash "resourceVersion" (gethash "metadata" object))
+                         (write-to-string entry-revision))
+                   (push (core-object "type" (cond ((and before after) "MODIFIED") (after "ADDED") (t "DELETED"))
+                                      "object" object)
+                         events)))))
+    events))
+
+(defun pod-watch-events (store namespace labels fields revision)
+  "Read matching events after REVISION, oldest first, with the current watermark."
   (let ((matches (pod-watch-predicate namespace labels fields)))
     (with-store-lock (store)
       (check-pod-watch-revision-unlocked store revision)
-      (let ((events nil))
-        (loop for (entry-revision old new) in (pod-store-pod-watch-journal store)
-              while (> entry-revision revision)
-              do (let ((before (funcall matches old)) (after (funcall matches new)))
-                   (when (or before after)
-                     (let ((object (copy-core-object (if after new old))))
-                       (setf (gethash "resourceVersion" (gethash "metadata" object))
-                             (write-to-string entry-revision))
-                       (push (core-object "type" (cond ((and before after) "MODIFIED") (after "ADDED") (t "DELETED"))
-                                          "object" object)
-                             events)))))
-        (values events (pod-store-pod-revision store))))))
+      (values (revision-journal-events (pod-store-pod-watch-journal store) revision matches)
+              (pod-store-pod-revision store)))))
 
 (defun pod-watch-page (store namespace labels fields resource-version match)
   "Return the start revision and current API views for a new Pod watch."

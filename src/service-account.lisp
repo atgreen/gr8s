@@ -247,17 +247,12 @@
 
 (defun ensure-system-cluster-roles (store)
   "Create the upstream bootstrap ClusterRoles clients bind to by name, keeping any existing one."
-  (flet ((ensure (name &rest rules)
-           (handler-case
-               (create-core-resource store "clusterroles"
-                (core-object "metadata" (core-object "name" name) "rules" (coerce rules 'vector)) nil)
-             (kubernetes-error (condition)
-               (unless (= 409 (kubernetes-error-status-code condition)) (error condition))))))
-    (ensure "cluster-admin"
-            (core-object "apiGroups" #("*") "resources" #("*") "verbs" #("*"))
-            (core-object "nonResourceURLs" #("*") "verbs" #("*")))
-    (ensure "system:service-account-issuer-discovery"
-            (core-object "nonResourceURLs" #("/.well-known/openid-configuration" "/openid/v1/jwks") "verbs" #("get")))))
+  (ensure-default-cluster-roles store)
+  (ensure-default-rbac-object
+   store "clusterroles"
+   (core-object "metadata" (default-rbac-metadata "system:service-account-issuer-discovery")
+                "rules" (vector (core-object "nonResourceURLs" #("/.well-known/openid-configuration" "/openid/v1/jwks")
+                                             "verbs" #("get"))))))
 
 (defun ensure-native-bootstrap-namespaces (store)
   "Create the standard namespaces and their default accounts for a native cluster."
