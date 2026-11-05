@@ -26,7 +26,26 @@
 (defstruct (node-agent-session
              (:constructor make-node-agent-session (stream)))
   stream
-  (lock (bt:make-lock "gr8s node agent session")))
+  (lock (bt:make-lock "gr8s node agent session"))
+  (last-envelope-time (get-universal-time))
+  (evicted-p nil))
+
+(defvar *node-session-stall-seconds* 30
+  "Silence after which either end of a node session treats it as wedged.")
+
+(defun log-node-session-stall (message &rest arguments)
+  "Report a wedged session with every thread's stack, which is otherwise lost."
+  (format *error-output* "gr8s node session stalled: ~?~%" message arguments)
+  ;; Threads that cannot answer take seconds each, and recovery must not wait
+  ;; for all of them. A late report is still printed.
+  (let* ((output *error-output*)
+         (report (bt:make-thread
+                  (lambda ()
+                    (let ((*standard-output* output))
+                      (ignore-errors (debug-backtraces "" 2)))
+                    (finish-output output))
+                  :name "gr8s node session stall report")))
+    (sb-thread:join-thread report :default nil :timeout 5)))
 
 (defstruct (pending-node-operation
              (:constructor make-pending-node-operation (node-name request)))
@@ -451,7 +470,10 @@
                                    :sequence sequence)))))
              (when topology-changed (refresh-node-peer-topology server node-name))
              (loop for envelope = (ag-grpc:stream-recv stream)
-                   while envelope do (handle-node-agent-envelope server node-name envelope)))
+                   while envelope
+                   do (setf (node-agent-session-last-envelope-time session) (get-universal-time))
+                      (handle-node-agent-envelope server node-name envelope)
+                      (setf (node-agent-session-last-envelope-time session) (get-universal-time))))
         (bt:with-lock-held ((node-grpc-server-lock server))
           (when (eq session (gethash node-name (node-grpc-server-sessions server)))
             (remhash node-name (node-grpc-server-sessions server))))
@@ -465,12 +487,33 @@
       ;; stream ends. The listener and other node sessions remain untouched.
       (send-node-protocol-error stream condition))))
 
+(defun evict-silent-node-sessions (server now)
+  "Close sessions whose peer or handler has gone quiet, so a live agent reconnects."
+  ;; An agent can keep sending into a connection whose handler is stuck, and
+  ;; cannot tell from its side. Readiness alone would stay false forever.
+  (let ((silent (bt:with-lock-held ((node-grpc-server-lock server))
+                  (loop for node-name being the hash-keys of (node-grpc-server-sessions server)
+                          using (hash-value session)
+                        when (and (not (node-agent-session-evicted-p session))
+                                  (> (- now (node-agent-session-last-envelope-time session))
+                                     (max *node-session-stall-seconds*
+                                          (* 2 (node-grpc-server-heartbeat-timeout-seconds server)))))
+                          collect (cons node-name session)))))
+    (loop for (node-name . session) in silent
+          do (setf (node-agent-session-evicted-p session) t)
+             (log-node-session-stall "no envelope handled from node ~A; closing its session" node-name)
+             (let ((stream (node-agent-session-stream session)))
+               (when (typep stream 'ag-grpc::grpc-server-call-stream)
+                 (ignore-errors
+                  (ag-http2:connection-close (ag-grpc::server-stream-connection stream))))))))
+
 (defun monitor-node-heartbeats (server)
   (loop until (node-grpc-server-stopping-p server)
         do (let ((now (get-universal-time)))
              (expire-node-heartbeats
               (node-grpc-server-store server)
-              (- now (node-grpc-server-heartbeat-timeout-seconds server)) :now now))
+              (- now (node-grpc-server-heartbeat-timeout-seconds server)) :now now)
+             (evict-silent-node-sessions server now))
            (sleep 0.05)))
 
 (defun handle-node-enrollment (server request context)
@@ -801,13 +844,46 @@
 
 (define-condition node-session-interrupted (error) ())
 
+(defvar *node-session-interruptible* nil
+  "True only where a thread has a handler for NODE-SESSION-INTERRUPTED; a late interrupt is dropped.")
+
+(defun agent-session-status-reporter (session heartbeat-interval finished-p status-provider)
+  "Report status on its own thread: a slow provider must not delay the heartbeat."
+  (handler-case
+      (let ((*node-session-interruptible* t))
+       (loop until (funcall finished-p)
+            do (handler-case
+                   (let ((status (funcall status-provider)))
+                     (when status
+                       (unless (typep status 'gr8s.node.v1::node-status)
+                         (error "node status provider returned an invalid message"))
+                       (send-agent-session-envelope session :status status)))
+                 (node-session-interrupted (condition) (error condition))
+                 (error (condition)
+                   (format *error-output* "gr8s status reporting failed: ~A~%" condition)))
+               (let ((deadline (+ (get-internal-real-time)
+                                  (* (funcall heartbeat-interval) internal-time-units-per-second))))
+                 (loop until (or (funcall finished-p) (>= (get-internal-real-time) deadline))
+                       do (sleep 0.05)))))
+    (node-session-interrupted () nil)))
+
+(defun agent-session-watchdog (finished-p last-progress on-stall)
+  "Call ON-STALL once LAST-PROGRESS, in internal time, is too long ago."
+  (loop until (funcall finished-p)
+        do (when (> (- (get-internal-real-time) (funcall last-progress))
+                    (* *node-session-stall-seconds* internal-time-units-per-second))
+             (funcall on-stall)
+             (return))
+           (sleep 0.25)))
+
 (defun agent-session-monitor
     (session control session-thread heartbeat-interval
-     stop-predicate finished-p finish-session status-provider)
+     stop-predicate finished-p finish-session note-progress)
   (let ((next-heartbeat
           (+ (get-internal-real-time)
              (* (funcall heartbeat-interval) internal-time-units-per-second))))
     (handler-case
+       (let ((*node-session-interruptible* t))
         (loop until (funcall finished-p)
               do (when (or (node-session-cancelled-p control)
                            (funcall stop-predicate))
@@ -826,21 +902,16 @@
                    (send-agent-session-envelope
                     session :heartbeat
                     (make-instance 'gr8s.node.v1::heartbeat))
-                   (when status-provider
-                     (handler-case
-                         (let ((status (funcall status-provider)))
-                           (when status
-                             (unless (typep status 'gr8s.node.v1::node-status)
-                               (error "node status provider returned an invalid message"))
-                             (send-agent-session-envelope session :status status)))
-                       (error (condition)
-                         (format *error-output* "gr8s status reporting failed: ~A~%" condition))))
+                   (funcall note-progress)
                    (setf next-heartbeat
                          (+ (get-internal-real-time)
                             (* (funcall heartbeat-interval)
                                internal-time-units-per-second))))
-                 (sleep 0.05))
-      (error ()
+                 (sleep 0.05)))
+      (node-session-interrupted ()
+        (funcall finish-session))
+      (error (condition)
+        (format *error-output* "gr8s node session heartbeat failed: ~A~%" condition)
         (funcall finish-session)))))
 
 (define-condition node-snapshot-stopped (serious-condition) ()
@@ -907,6 +978,7 @@
                        ;; Its revision was not applied and must not be acked.
                        (pod-reconciliation-superseded () (retry-agent-snapshot-work worker work)))))
                (error (condition)
+                 (format *error-output* "gr8s node snapshot application failed: ~A~%" condition)
                  (bt:with-lock-held ((agent-snapshot-worker-lock worker))
                    (setf (agent-snapshot-worker-failure worker) condition
                          (agent-snapshot-worker-stopping-p worker) t
@@ -1002,12 +1074,35 @@
                                              :private-key-path private-key-path)
                       (ag-grpc:make-channel host port :timeout session-timeout)))
          (monitor-thread nil)
+         (status-thread nil)
+         (watchdog-thread nil)
          (snapshot-worker nil)
          (heartbeat-interval 1)
          (operation-session-p nil)
          (session-finished-p nil)
+         (session-cleanup-p nil)
+         (last-progress (get-internal-real-time))
          (finish-lock (bt:make-lock "gr8s agent node session finish")))
-    (labels ((finished-p ()
+    (labels ((recover-stalled-session ()
+               (log-node-session-stall "no heartbeat sent to ~A:~A; reconnecting" host port)
+               (finish-session)
+               ;; Closing does not reliably wake a thread already in poll(2) or a
+               ;; blocking write. Cleanup itself must run to completion, so the
+               ;; owner only takes this interrupt before it has started.
+               (flet ((interrupt (thread)
+                        (when (and thread (bt:thread-alive-p thread))
+                          (ignore-errors
+                           (bt:interrupt-thread
+                            thread
+                            (lambda ()
+                              (when (if (eq thread session-thread)
+                                        (not session-cleanup-p)
+                                        *node-session-interruptible*)
+                                (error 'node-session-interrupted))))))))
+                 (interrupt monitor-thread)
+                 (interrupt status-thread)
+                 (interrupt session-thread)))
+             (finished-p ()
                (bt:with-lock-held (finish-lock) session-finished-p))
              (finish-session ()
                (let ((close-p nil))
@@ -1048,9 +1143,22 @@
                        session control session-thread
                        (lambda () heartbeat-interval)
                        stop-predicate #'finished-p #'finish-session
-                       (when status-provider
-                         (lambda () (when operation-session-p (funcall status-provider))))))
-                    :name "gr8s agent session heartbeat")))
+                       (lambda () (setf last-progress (get-internal-real-time)))))
+                    :name "gr8s agent session heartbeat"))
+             (when status-provider
+               (setf status-thread
+                     (bt:make-thread
+                      (lambda ()
+                        (agent-session-status-reporter
+                         session (lambda () heartbeat-interval) #'finished-p
+                         (lambda () (when operation-session-p (funcall status-provider)))))
+                      :name "gr8s agent session status")))
+             (setf watchdog-thread
+                   (bt:make-thread
+                    (lambda ()
+                      (agent-session-watchdog
+                       #'finished-p (lambda () last-progress) #'recover-stalled-session))
+                    :name "gr8s agent session watchdog")))
            (let ((server-hello
                    (require-server-envelope
                     (ag-grpc:stream-read-message stream) :hello)))
@@ -1088,6 +1196,7 @@
                            do (handle-node-server-envelope
                                session envelope identity identity-path
                                apply-snapshot operation-handler snapshot-worker)))))))
+      (setf session-cleanup-p t)
       (finish-session)
       (stop-agent-snapshot-worker snapshot-worker)
       (when (and operation-session-p operation-handler)
@@ -1098,6 +1207,10 @@
           (funcall operation-handler :session-closed nil nil)))
       (when monitor-thread
         (ignore-errors (bt:join-thread monitor-thread)))
+      ;; The status thread is not joined: a provider blocked on a runtime lock
+      ;; must not hold up the replacement session. It exits once it returns.
+      (when watchdog-thread
+        (ignore-errors (bt:join-thread watchdog-thread)))
       (ignore-errors (ag-grpc:channel-close channel)))))))
 
 (defun run-node-session (host port node-name identity-path apply-snapshot
@@ -1121,7 +1234,10 @@
               (return completed)))
         (error (condition)
           (when max-sessions
-            (error condition))))
+            (error condition))
+          (unless (or (node-session-cancelled-p control)
+                      (typep condition 'node-session-interrupted))
+            (format *error-output* "gr8s node session ended: ~A; reconnecting~%" condition))))
              (unless (or (node-session-cancelled-p control)
                          (funcall stop-predicate))
                (sleep reconnect-delay)))
