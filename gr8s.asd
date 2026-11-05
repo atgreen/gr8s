@@ -234,6 +234,7 @@
                              (:file "ha-controller-write-test")
                              (:file "ha-pod-failover-test")
                              (:file "ha-node-cidr-test")
+                             (:file "ha-local-plane-test")
                              (:file "ha-redirect-http-test")
                              (:file "agent-failover-test")
                              (:file "ha-smoke-test")
