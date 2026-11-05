@@ -228,6 +228,8 @@
            collect (core-object "name" resource "singularName" (string-downcase kind)
                                 "namespaced" namespaced "kind" kind
                                 "shortNames" (cond ((equal resource "certificatesigningrequests") #("csr"))
+                                                   ((equal resource "namespaces") #("ns"))
+                                                   ((equal resource "serviceaccounts") #("sa"))
                                                    ((equal resource "configmaps") #("cm"))
                                                    ((equal resource "services") #("svc"))
                                                    ((equal resource "endpoints") #("ep"))
