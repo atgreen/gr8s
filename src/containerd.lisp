@@ -4,6 +4,8 @@
   socket-path
   log-root
   host-network
+  ;; Returns the Pods sharing this node, once an agent knows them; resizes are judged against them.
+  pod-lister
   ;; The node's own address once an agent knows it; hostNetwork Pods share it.
   host-address
   dns-servers
