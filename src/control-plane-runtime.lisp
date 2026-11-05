@@ -76,9 +76,26 @@
     ;; reconciliation worker retries scheduling when a node becomes Ready.
     (and pod (pod-node-name pod) (control-plane-observation runtime pod))))
 
+(defun node-snapshot-carries-pod-p (runtime node-name pod)
+  "Return whether NODE-NAME's latest published snapshot already assigns POD's exact revision."
+  (let* ((server (control-plane-runtime-node-server runtime))
+         (snapshot (bt:with-lock-held ((node-grpc-server-lock server))
+                     (gethash node-name (node-grpc-server-snapshots server))))
+         (assignment (and snapshot
+                          (find (pod-uid pod) (slot-value snapshot 'gr8s.node.v1::pods)
+                                :key (lambda (item) (slot-value item 'gr8s.node.v1::uid))
+                                :test #'equal))))
+    (and assignment
+         (equal (pod-resource-version pod)
+                (slot-value assignment 'gr8s.node.v1::resource-version)))))
+
 (defmethod runtime-ensure ((runtime control-plane-runtime) pod)
   (let ((node (schedule-pod (control-plane-runtime-store runtime) pod)))
-    (when node
+    ;; Every read of a Pod the agent has not yet reported lands here. Building a
+    ;; snapshot costs every Pod's JSON, so a list of N Pending Pods would cost N^2
+    ;; just to find nothing changed. A Pod the node already has needs no snapshot;
+    ;; changes to the objects it references go out on publish-service-discovery-snapshots.
+    (when (and node (not (node-snapshot-carries-pod-p runtime (node-record-name node) pod)))
       (publish-node-snapshot runtime (node-record-name node)))
     (control-plane-observation runtime pod)))
 
