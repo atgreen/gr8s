@@ -141,6 +141,8 @@
             (return-from decode-core-resource-protobuf (decode-csr-protobuf raw)))
           (when (equal kind "CustomResourceDefinition")
             (return-from decode-core-resource-protobuf (decode-crd-protobuf raw)))
+          (when (member kind '("Endpoints" "Ingress" "IngressClass" "ServiceCIDR" "IPAddress") :test #'equal)
+            (return-from decode-core-resource-protobuf (decode-networking-protobuf raw kind version)))
           (when (member kind '("ResourceQuota" "LimitRange" "RuntimeClass" "PriorityClass") :test #'equal)
             (return-from decode-core-resource-protobuf (decode-policy-protobuf raw kind version)))
           (when (string= kind "Node")

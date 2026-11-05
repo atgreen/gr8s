@@ -33,6 +33,8 @@
   service-lb-controller
   ;; Listening host ports by (ip . port); see pod-host-ports.lisp.
   (host-port-forwarders (make-hash-table :test #'equal))
+  ;; Listening Service node ports by (protocol ip . port), likewise.
+  (node-port-forwarders (make-hash-table :test #'equal))
   ;; Gateway API L7 proxy listeners, reconciled from stored Gateway/HTTPRoute
   ;; objects. NIL until the first reconcile creates it.
   gateway-controller)
@@ -283,6 +285,7 @@
       (stop-reconciliation-worker (node-runtime-worker node-runtime))
       (setf (node-runtime-worker node-runtime) nil))
     (stop-host-port-forwarders (node-runtime-host-port-forwarders node-runtime))
+    (stop-host-port-forwarders (node-runtime-node-port-forwarders node-runtime))
     (stop-runtime-deletions (node-runtime-runtime node-runtime))))
 
 (defun call-with-agent-cni-server
@@ -663,6 +666,11 @@ snapshot application."
             (converge-service-lb-controller (node-runtime-service-lb-controller node-runtime))
           (error (condition)
             (format *error-output* "gr8s: Service LB convergence failed: ~A~%" condition))))
+      (handler-case
+          (converge-node-port-forwarders (node-runtime-node-port-forwarders node-runtime)
+                                         (node-runtime-store node-runtime))
+        (error (condition)
+          (format *error-output* "gr8s: node port convergence failed: ~A~%" condition)))
       ;; Attach per-Pod NetworkPolicy classifiers from the just-installed policy
       ;; objects. Fail-soft, like the Service LB above.
       (when (node-runtime-manager node-runtime)

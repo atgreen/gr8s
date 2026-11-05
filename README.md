@@ -652,8 +652,8 @@ The scheduler keeps TCP host ports, as well as declared requests, within what a 
 has, leaving a Pod that does not fit Pending with the reason in its `PodScheduled`
 condition. A Pod that named its own node bypasses the scheduler, so it fails with
 `OutOfcpu`, `OutOfmemory`, `OutOfpods` or `NodePorts` as a kubelet would fail it. The agent makes a `hostPort` real with a userspace TCP
-relay, so a Pod sees the node, not the original client, as the connection's source;
-UDP host ports are refused.
+or UDP relay, so a Pod sees the node, not the original client, as the source;
+SCTP host ports are scheduled but not relayed.
 
 Deployments and ReplicaSets expose `apps/v1` JSON/protobuf CRUD, selectors,
 resumable watches, revision-consistent lists, strategic patches and separate
@@ -774,14 +774,31 @@ The [native validation record](docs/podtemplate-conformance-2026-11-03.json)
 captures all five upstream cases passing, plus local API and persistence checks.
 
 Services accept JSON and typed Kubernetes protobuf requests, including numeric
-and named target ports. Managed native clusters allocate durable IPv4 TCP
-ClusterIP Services from
-`10.96.0.0/16`. Native listeners forward connections to ready Service backends, resolving numeric
-or named target ports against selected Pods or manually managed slices. The
-reserved `default/kubernetes` Service describes the HTTPS API at `10.96.0.1:443`.
-This initial implementation supports single-stack TCP without session affinity;
-UDP, NodePort, LoadBalancer and legacy Endpoints resources remain unsupported.
-TCP forwarding currently replaces the original client source address.
+and named target ports. Managed native clusters allocate durable IPv4 ClusterIP
+Services from `10.96.0.0/16`, over TCP, UDP or SCTP. A cgroup `connect4` eBPF
+program rewrites a Pod's connect(2) to a ready backend, resolving numeric or named
+target ports against selected Pods or manually managed slices; unconnected UDP
+`sendto(2)` does not pass through it. `sessionAffinity: ClientIP` holds each
+client's network namespace on one backend until the timeout passes or the
+Service's backend set changes. The reserved `default/kubernetes` Service describes
+the HTTPS API at `10.96.0.1:443`, with matching Endpoints and an EndpointSlice.
+
+`NodePort` and `LoadBalancer` Services allocate node ports from 30000-32767. The
+agent relays each in userspace, for TCP and UDP, with client-address affinity, so a
+Pod sees the node as the source; a port with no ready backends has no listener.
+No cloud controller assigns a LoadBalancer an address, and only `Cluster` traffic
+policies are accepted.
+
+The API server proxies `services/[scheme:]name[:port]/proxy` to a ready backend,
+as it does for Pods, and keeps a proxied HTML page's rooted links inside the proxy.
+`nodes/name/proxy` answers the kubelet reads `/pods` and `/healthz` from the store,
+since no kubelet HTTP server exists to forward to.
+
+Core Endpoints follow selector Services, and manual Endpoints behind a selectorless
+Service are mirrored into EndpointSlices. The `networking.k8s.io/v1` API serves
+Ingress and IngressClass with no controller behind them, IPAddress as stored
+objects that allocation does not create, and ServiceCIDR, where only the default
+`kubernetes` range is `Ready` because nothing allocates from another.
 
 EndpointSlices expose the stable `discovery.k8s.io/v1` JSON/protobuf API with
 selector lists, durable watches, strategic patches and collection deletion. The

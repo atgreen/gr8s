@@ -267,7 +267,11 @@
       (is (equal "http" (gethash "targetPort" port)))
       (check-core-status 422 "/api/v1/namespaces/alpha/services" :method :post
                          :content-type "application/vnd.kubernetes.protobuf"
-                         :octets (service-wire-fixture "nodeport" :type "NodePort"))
-      (is (= 1 (length (gr8s::list-core-resources store "services" "alpha")))))))
+                         :octets (service-wire-fixture "bogus" :type "Bogus"))
+      (is (= 1 (length (gr8s::list-core-resources store "services" "alpha"))))
+      (let ((node-port (check-core-status 201 "/api/v1/namespaces/alpha/services" :method :post
+                                          :content-type "application/vnd.kubernetes.protobuf"
+                                          :octets (service-wire-fixture "nodeport" :type "NodePort"))))
+        (is (integerp (gethash "nodePort" (aref (gethash "ports" (gethash "spec" node-port)) 0))))))))
 
 (in-suite gr8s)
