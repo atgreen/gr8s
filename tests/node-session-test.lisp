@@ -223,6 +223,83 @@
         (sb-int:unencapsulate 'gr8s::send-agent-session-envelope 'block-heartbeat)
         (setf gr8s::*node-session-stall-seconds* saved)))))
 
+;; podster-uqb.109: the interrupt found the session thread in %SIGNAL for a stream
+;; error. A handler function runs with the clusters rebound to those outside it, as
+;; a handler test does, and with none outside an ERROR killed the thread.
+(test node-session-interrupt-during-signal-still-unwinds
+  (let* ((tag (list :test))
+         (signalling (bt:make-semaphore))
+         (cleaned-up nil)
+         (thread (bt:make-thread
+                  (lambda ()
+                    (gr8s::with-node-session-interruption (tag)
+                      (unwind-protect
+                           (handler-bind
+                               ((error (lambda (condition)
+                                         (declare (ignore condition))
+                                         (bt:signal-semaphore signalling)
+                                         (sleep 3600))))
+                             (error "read failed"))
+                        (setf cleaned-up t))))
+                  :name "gr8s interrupted session test")))
+    (bt:wait-on-semaphore signalling)
+    (gr8s::interrupt-node-session-thread thread tag)
+    (is (eq :interrupted (bt:join-thread thread)))
+    (is-true cleaned-up)))
+
+(test node-session-interrupt-passes-handlers-that-recover-from-errors
+  (let* ((tag (list :test))
+         (blocked (bt:make-semaphore))
+         (swallowed nil)
+         (thread (bt:make-thread
+                  (lambda ()
+                    (gr8s::with-node-session-interruption (tag)
+                      (handler-case (progn (bt:signal-semaphore blocked) (sleep 3600))
+                        (serious-condition () (setf swallowed t))))))))
+    (bt:wait-on-semaphore blocked)
+    (gr8s::interrupt-node-session-thread thread tag)
+    (is (eq :interrupted (bt:join-thread thread)))
+    (is-false swallowed)))
+
+(test node-session-interrupt-outside-its-scope-is-ignored
+  (let* ((tag (list :old-session))
+         (left (bt:make-semaphore))
+         (received (bt:make-semaphore))
+         (thread (bt:make-thread
+                  (lambda ()
+                    (gr8s::with-node-session-interruption (tag) nil)
+                    (bt:signal-semaphore left)
+                    ;; Cleanup after the scope, then a newer session on the same
+                    ;; thread: neither may be unwound by the old session's interrupt.
+                    (bt:wait-on-semaphore received)
+                    (gr8s::with-node-session-interruption ((list :new-session))
+                      (bt:signal-semaphore left)
+                      (bt:wait-on-semaphore received)
+                      :finished)))))
+    (bt:wait-on-semaphore left)
+    (gr8s::interrupt-node-session-thread thread tag)
+    (bt:signal-semaphore received)
+    (bt:wait-on-semaphore left)
+    (gr8s::interrupt-node-session-thread thread tag)
+    (bt:signal-semaphore received)
+    (is (eq :finished (bt:join-thread thread)))))
+
+(test stopping-a-snapshot-worker-passes-handlers-that-recover-from-errors
+  (let* ((blocked (bt:make-semaphore))
+         (swallowed nil)
+         (worker (gr8s::start-agent-snapshot-worker
+                  (lambda (snapshot replay)
+                    (declare (ignore snapshot replay))
+                    (handler-case (progn (bt:signal-semaphore blocked) (sleep 3600))
+                      (serious-condition () (setf swallowed t))))
+                  (lambda ()))))
+    (gr8s::queue-agent-snapshot-work
+     worker (make-instance 'gr8s.node.v1::desired-state-snapshot :revision 1))
+    (bt:wait-on-semaphore blocked)
+    (gr8s::stop-agent-snapshot-worker worker)
+    (is-false swallowed)
+    (is-false (bt:thread-alive-p (gr8s::agent-snapshot-worker-thread worker)))))
+
 (test silent-node-session-is-evicted-so-the-agent-reconnects
   (let ((*error-output* (make-broadcast-stream)))
     (call-with-persistent-node-session
