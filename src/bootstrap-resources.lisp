@@ -109,6 +109,42 @@
          (when hostnames
            (bootstrap-string-array hostnames "spec.hostnames")))))))
 
+(defun validate-cert-manager-resource (resource object)
+  "Validate a cert-manager.io/v1 object against the subset gr8s implements. Fails
+   closed (422) on unsupported issuer types or missing required fields."
+  (let ((spec (gethash "spec" object)))
+    (unless (hash-table-p spec)
+      (core-resource-error 422 "Invalid" "~A spec must be an object"
+                           (core-resource-kind resource)))
+    (cond
+      ((member resource '("issuers" "clusterissuers") :test #'equal)
+       (let ((configured (loop for key in '("selfSigned" "ca" "acme" "vault" "venafi")
+                               when (nth-value 1 (gethash key spec)) collect key)))
+         (unless (= 1 (length configured))
+           (core-resource-error 422 "Invalid" "Issuer spec must configure exactly one issuer type"))
+         (let ((type (first configured)))
+           (cond
+             ((equal type "selfSigned")
+              (require-object (gethash "selfSigned" spec) "spec.selfSigned"))
+             ((equal type "ca")
+              (let ((ca (require-object (gethash "ca" spec) "spec.ca")))
+                (require-nonempty-string (gethash "secretName" ca) "spec.ca.secretName")))
+             (t (core-resource-error 422 "Invalid" "Issuer type ~A is not implemented" type))))))
+      ((equal resource "certificates")
+       (require-nonempty-string (gethash "secretName" spec) "spec.secretName")
+       (let ((ref (require-object (gethash "issuerRef" spec) "spec.issuerRef")))
+         (require-nonempty-string (gethash "name" ref) "spec.issuerRef.name"))
+       (let ((dns-names (gethash "dnsNames" spec))
+             (common-name (gethash "commonName" spec)))
+         (when dns-names (bootstrap-string-array dns-names "spec.dnsNames"))
+         (unless (or (and dns-names (plusp (length dns-names)))
+                     (and (stringp common-name) (plusp (length common-name))))
+           (core-resource-error 422 "Invalid"
+                                "Certificate requires spec.commonName or a nonempty spec.dnsNames"))))
+      ((equal resource "certificaterequests")
+       (let ((ref (require-object (gethash "issuerRef" spec) "spec.issuerRef")))
+         (require-nonempty-string (gethash "name" ref) "spec.issuerRef.name"))))))
+
 (defun normalize-bootstrap-resource (resource input namespace name &optional store)
   "Copy, validate and default an implemented bootstrap API object."
   (when (workload-resource-p resource)
@@ -132,6 +168,9 @@
                        ((equal resource "gatewayclasses") '("spec" "status"))
                        ((member resource '("gateways" "httproutes"
                                            "tcproutes" "tlsroutes" "grpcroutes") :test #'equal)
+                        '("spec" "status"))
+                       ((member resource '("issuers" "clusterissuers"
+                                           "certificates" "certificaterequests") :test #'equal)
                         '("spec" "status"))
                        (t '("roleRef" "subjects")))))
     (unless (and (equal version (gethash "apiVersion" object version))
@@ -173,6 +212,9 @@
       ((member resource '("gatewayclasses" "gateways" "httproutes"
                           "tcproutes" "tlsroutes" "grpcroutes") :test #'equal)
        (validate-gateway-resource resource object))
+      ((member resource '("issuers" "clusterissuers" "certificates" "certificaterequests")
+               :test #'equal)
+       (validate-cert-manager-resource resource object))
       (t (validate-rbac-binding object (equal resource "clusterrolebindings"))))
     object))
 
