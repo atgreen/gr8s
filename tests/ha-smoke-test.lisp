@@ -37,35 +37,35 @@
   (find-if (lambda (n) (gr8s::ha-control-plane-leader-p (smoke-node-hcp n))) nodes))
 
 (test three-member-control-plane-survives-leader-loss
-  (let ((base-http 18093) (nodes '()))
+  ;; Each member's API takes a kernel-assigned port: fixed ones collided with other
+  ;; suites' servers in the same run (podster-uqb.119).
+  (let ((nodes '()))
     (with-temporary-store (s1 p1)
       (with-temporary-store (s2 p2)
         (with-temporary-store (s3 p3)
           (declare (ignore p1 p2 p3))
           (unwind-protect
-               (labels ((bring-up (store id http-port hcp)
-                          (let ((server (gr8s::start-server
-                                         :address "127.0.0.1" :port http-port
-                                         :store store
-                                         :leader-status-fn (lambda () (gr8s::ha-control-plane-leader-status hcp)))))
-                            (push (make-smoke-node :hcp hcp :store store :server server :port http-port) nodes)))
-                        (store-for (node) (smoke-node-store node)))
-                 (declare (ignore #'store-for))
+               (labels ((bring-up (store start)
+                          ;; The API listens before its member starts, which needs the
+                          ;; API's URL; it answers leadership once the member exists.
+                          (let* ((hcp nil)
+                                 (server (gr8s::start-server
+                                          :address "127.0.0.1" :port 0
+                                          :store store
+                                          :leader-status-fn (lambda () (gr8s::ha-control-plane-leader-status hcp))))
+                                 (http-port (hunchentoot:acceptor-port server)))
+                            (setf hcp (funcall start (format nil "http://127.0.0.1:~D" http-port)))
+                            (push (make-smoke-node :hcp hcp :store store :server server :port http-port) nodes)
+                            hcp)))
                  ;; Found cp1, then join cp2 and cp3, each with its API URL.
-                 (let* ((h1 (gr8s::start-ha-control-plane
-                             s1 :id "cp1" :init t
-                             :api-url (format nil "http://127.0.0.1:~D" base-http))))
-                   (bring-up s1 "cp1" base-http h1)
+                 (let ((h1 (bring-up s1 (lambda (url) (gr8s::start-ha-control-plane
+                                                       s1 :id "cp1" :init t :api-url url)))))
                    (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p h1))))
                    (let ((lp (gr8s::raft-member-port (gr8s::ha-control-plane-member h1))))
-                     (let ((h2 (gr8s::start-ha-control-plane
-                                s2 :id "cp2" :join-host "127.0.0.1" :join-port lp
-                                :api-url (format nil "http://127.0.0.1:~D" (+ base-http 1)))))
-                       (bring-up s2 "cp2" (+ base-http 1) h2))
-                     (let ((h3 (gr8s::start-ha-control-plane
-                                s3 :id "cp3" :join-host "127.0.0.1" :join-port lp
-                                :api-url (format nil "http://127.0.0.1:~D" (+ base-http 2)))))
-                       (bring-up s3 "cp3" (+ base-http 2) h3))))
+                     (bring-up s2 (lambda (url) (gr8s::start-ha-control-plane
+                                                 s2 :id "cp2" :join-host "127.0.0.1" :join-port lp :api-url url)))
+                     (bring-up s3 (lambda (url) (gr8s::start-ha-control-plane
+                                                 s3 :id "cp3" :join-host "127.0.0.1" :join-port lp :api-url url)))))
                  (is (poll-until
                       (lambda ()
                         (let ((l (smoke-leader nodes)))

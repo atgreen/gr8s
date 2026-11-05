@@ -458,3 +458,62 @@
               (probe-request-lines stream) (incf requests)
               (write-probe-http-response stream 200 '(("Content-Length" . "5")) "no")))
         (gr8s::stop-container-probes runtime)))))
+
+;; podster-uqb.114: stopping a probe interrupted its thread with an ERROR, which finds
+;; no handler if the thread is already signalling another error.
+(test stopping-a-probe-during-a-signal-still-unwinds-it
+  (let* ((owner (list :probe))
+         (signalling (bt:make-semaphore))
+         (cleaned-up nil)
+         (thread (bt:make-thread
+                  (lambda ()
+                    (gr8s::with-container-probe-stop (owner)
+                      (unwind-protect
+                           (handler-bind ((error (lambda (condition)
+                                                   (declare (ignore condition))
+                                                   (bt:signal-semaphore signalling)
+                                                   (sleep 3600))))
+                             (error "probe failed"))
+                        (setf cleaned-up t)))
+                    :stopped)
+                  :name "gr8s stopped probe test")))
+    (is-true (bt:wait-on-semaphore signalling :timeout 10))
+    (gr8s::stop-container-probe-thread thread owner)
+    (is (eq :stopped (bt:join-thread thread)))
+    (is-true cleaned-up)))
+
+(test stopping-a-probe-stop-job-passes-handlers-that-recover-from-errors
+  (let* ((runtime (gr8s::make-containerd-runtime)) (manager (gr8s::make-container-probe-manager))
+         (job (gr8s::make-container-probe-stop-job :uid "actual-uid" :id "actual-id" :deadline 0))
+         (blocked (bt:make-semaphore)) (swallowed nil) (thread nil)
+         (original (symbol-function 'gr8s::cri-stop-container)))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'gr8s::cri-stop-container)
+                 (lambda (&rest args)
+                   (declare (ignore args))
+                   (handler-case (progn (bt:signal-semaphore blocked) (sleep 3600))
+                     (serious-condition () (setf swallowed t)))))
+           (setf thread (bt:make-thread (lambda () (gr8s::run-container-probe-stop runtime manager job))))
+           (is-true (bt:wait-on-semaphore blocked :timeout 10))
+           (gr8s::stop-container-probe-thread thread job)
+           (bt:join-thread thread)
+           (is-false swallowed)
+           (is-true (gr8s::container-probe-stop-job-finished-p job))
+           (is (null (gr8s::container-probe-stop-job-failure job))))
+      (setf (symbol-function 'gr8s::cri-stop-container) original))))
+
+(test a-late-probe-stop-is-ignored
+  (let* ((owner (list :probe))
+         (left (bt:make-semaphore))
+         (received (bt:make-semaphore))
+         (thread (bt:make-thread
+                  (lambda ()
+                    (gr8s::with-container-probe-stop (owner) nil)
+                    (bt:signal-semaphore left)
+                    (bt:wait-on-semaphore received)
+                    :finished))))
+    (bt:wait-on-semaphore left)
+    (gr8s::stop-container-probe-thread thread owner)
+    (bt:signal-semaphore received)
+    (is (eq :finished (bt:join-thread thread)))))
