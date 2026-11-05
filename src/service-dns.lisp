@@ -13,7 +13,7 @@
          (metadata (core-object)) (result (core-object)))
     (unless (member kind '("Service" "EndpointSlice" "NetworkPolicy"
                            "GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute"
-                           "Secret") :test #'equal)
+                           "Secret" "ClusterTrustBundle" "PodCertificateRequest") :test #'equal)
       (invalid-pod "unsupported public Service discovery kind"))
     (dolist (key '("name" "namespace" "uid" "resourceVersion"))
       (when (gethash key source) (setf (gethash key metadata) (gethash key source))))
@@ -24,6 +24,8 @@
     (setf (gethash "kind" result) kind
           (gethash "apiVersion" result) (cond ((equal kind "Service") "v1")
                                               ((equal kind "Secret") "v1")
+                                              ((equal kind "ClusterTrustBundle") "certificates.k8s.io/v1beta1")
+                                              ((equal kind "PodCertificateRequest") "certificates.k8s.io/v1alpha1")
                                               ((equal kind "NetworkPolicy") "networking.k8s.io/v1")
                                               ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
                                                "gateway.networking.k8s.io/v1")
@@ -54,6 +56,18 @@
          (invalid-pod "only kubernetes.io/tls Secrets are projectable"))
        (setf (gethash "type" result) (gethash "type" object)
              (gethash "data" result) (copy-core-object (gethash "data" object))))
+      ((equal kind "ClusterTrustBundle")
+       ;; Trust anchors a node needs for the clusterTrustBundle projected volume
+       ;; (KEP-4317). The whole spec (signerName + trustBundle PEM) is public.
+       (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
+      ((equal kind "PodCertificateRequest")
+       ;; The node created this request's public key and now needs the signed
+       ;; result back to mount it (KEP-4317). Both spec (which pins the node, pod
+       ;; and key) and status (the issued certificateChain) carry only public
+       ;; data; the private key never left the node.
+       (setf (gethash "spec" result) (copy-core-object (gethash "spec" object)))
+       (when (gethash "status" object)
+         (setf (gethash "status" result) (copy-core-object (gethash "status" object)))))
       (t
        (dolist (key '("addressType" "endpoints" "ports"))
          (setf (gethash key result) (copy-core-object (gethash key object))))))
@@ -103,6 +117,8 @@
                         (list-core-resources store "tcproutes")
                         (list-core-resources store "tlsroutes")
                         (list-core-resources store "grpcroutes")
+                        (list-core-resources store "clustertrustbundles")
+                        (list-core-resources store "podcertificaterequests")
                         (gateway-referenced-tls-secrets store))
                 #'string< :key (lambda (object)
                                  (let ((metadata (gethash "metadata" object)))
@@ -126,10 +142,14 @@
                            ((equal "TLSRoute" (gethash "kind" public)) "tlsroutes")
                            ((equal "GRPCRoute" (gethash "kind" public)) "grpcroutes")
                            ((equal "Secret" (gethash "kind" public)) "secrets")
+                           ((equal "ClusterTrustBundle" (gethash "kind" public)) "clustertrustbundles")
+                           ((equal "PodCertificateRequest" (gethash "kind" public)) "podcertificaterequests")
                            (t "endpointslices"))))
       (unless (and (stringp name) (plusp (length name))
-                   ;; GatewayClass is cluster-scoped (no namespace); all others are namespaced.
-                   (if (equal resource "gatewayclasses") (null namespace) (dns-label-p namespace)))
+                   ;; GatewayClass and ClusterTrustBundle are cluster-scoped (no
+                   ;; namespace); all others are namespaced.
+                   (if (member resource '("gatewayclasses" "clustertrustbundles") :test #'equal)
+                       (null namespace) (dns-label-p namespace)))
         (invalid-pod "public Service discovery metadata is invalid"))
       (setf (gethash (core-resource-key resource namespace name) resources) public))))
 
