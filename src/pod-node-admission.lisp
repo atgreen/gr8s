@@ -108,7 +108,9 @@ A Pod the node has reported on is past admission, however full the node is now."
                            (when (node-record-unschedulable node) '("node(s) were unschedulable"))
                            (unless (pod-node-taints-allow-p pod node) '("node(s) had untolerated taints"))
                            (unless (and (pod-node-selector-matches-p pod node) (pod-node-affinity-matches-p pod node))
-                             '("node(s) didn't match Pod's node affinity/selector"))))
+                             '("node(s) didn't match Pod's node affinity/selector"))
+                           (let ((failure (pod-affinity-failure-unlocked store pod node)))
+                             (when failure (list failure)))))
         (let ((entry (assoc failure counts :test #'equal)))
           (if entry (incf (cdr entry)) (push (cons failure 1) counts)))))
     (format nil "0/~D nodes are available~@[: ~{~A~^, ~}~]."
