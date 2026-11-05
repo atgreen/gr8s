@@ -24,6 +24,14 @@ and the API Service (10.96.0.1, served by the real HTTPS listener) are excluded.
          (not (equal address "None"))
          (not (equal address "10.96.0.1")))))
 
+(defun service-affinity-timeout (service)
+  "Return the seconds a ClientIP-affinity SERVICE keeps a client on one backend, or NIL."
+  (let ((spec (gethash "spec" service)))
+    (when (equal "ClientIP" (gethash "sessionAffinity" spec))
+      (let* ((config (gethash "sessionAffinityConfig" spec))
+             (client (and (hash-table-p config) (gethash "clientIP" config))))
+        (or (and (hash-table-p client) (gethash "timeoutSeconds" client)) 10800)))))
+
 (defun service-lb-plan (services endpoints-of)
   "Pack SERVICES into load-balancer map entries.
 ENDPOINTS-OF is a function of (service port-object) returning a list of
@@ -34,13 +42,17 @@ consecutive slots from 0, assigned in a deterministic Service/port order."
   (let ((service-entries nil) (backend-entries nil) (slot 0))
     (dolist (service (stable-sort (remove-if-not #'service-lb-eligible-p (copy-list services))
                                   #'string< :key (lambda (s) (gethash "clusterIP" (gethash "spec" s)))))
-      (let ((address (gethash "clusterIP" (gethash "spec" service))))
+      (let ((address (gethash "clusterIP" (gethash "spec" service)))
+            (timeout (service-affinity-timeout service)))
         (loop for port across (gethash "ports" (gethash "spec" service))
               for number = (gethash "port" port)
-              for backends = (mapcar (lambda (endpoint) (cons (first endpoint) (second endpoint)))
-                                     (funcall endpoints-of service port))
+              ;; Sorted so a client's backend offset means the same thing on every plan.
+              for backends = (sort (mapcar (lambda (endpoint) (cons (first endpoint) (second endpoint)))
+                                           (funcall endpoints-of service port))
+                                   #'string< :key #'prin1-to-string)
               do (multiple-value-bind (vip-key service-value packed)
-                     (service-lb-entries address number slot backends)
+                     (service-lb-entries address number slot backends
+                                         :protocol (gethash "protocol" port "TCP") :affinity-timeout timeout)
                    (push (cons vip-key service-value) service-entries)
                    (dolist (entry packed) (push entry backend-entries))
                    (incf slot (length backends))))))

@@ -263,13 +263,14 @@
             (apply-core-json-patch old patch)
             (if (and (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource)
                          (budget-resource-p resource)
-                         (policy-resource-p resource)
+                         (policy-resource-p resource) (networking-resource-p resource)
                          (member resource '("podtemplates" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions") :test #'equal))
                      (equal content-type "application/strategic-merge-patch+json"))
                 (template-strategic-merge old (require-object patch "patch")
                   (template-schema (cond ((csr-resource-p resource) *csr-schema-name*)
                                          ((storage-resource-p resource) (storage-resource-schema-name resource))
                                          ((policy-resource-p resource) (policy-resource-schema-name resource))
+                                         ((networking-resource-p resource) (networking-resource-schema-name resource))
                                          ((endpointslice-resource-p resource) "io.k8s.api.discovery.v1.EndpointSlice")
                                          ((budget-resource-p resource) "io.k8s.api.policy.v1.PodDisruptionBudget")
                                          ((equal resource "podtemplates") "io.k8s.api.core.v1.PodTemplate")
@@ -281,7 +282,9 @@
   (destructuring-bind (resource namespace name) (core-resource-route path)
     (when (and namespace (not (dns-label-p namespace)))
       (core-resource-error 400 "BadRequest" "Invalid request namespace"))
-    (when (and name (not (if (csr-resource-p resource) (csr-path-name-p name) (dns-subdomain-p name))))
+    (when (and name (not (cond ((csr-resource-p resource) (csr-path-name-p name))
+                               ((equal resource "ipaddresses") (networking-canonical-ip-p name))
+                               (t (dns-subdomain-p name)))))
       (core-resource-error 400 "BadRequest" "Invalid request name"))
     (let ((*csr-request-actor* (if (csr-resource-p resource) (csr-http-request-actor store) (core-object)))
           (*core-resource-view-version* (cond ((and (equal resource "events") (uiop:string-prefix-p "/apis/" path)) "events.k8s.io/v1")
@@ -304,7 +307,7 @@
                                                         (lambda (old) (declare (ignore old)) replacement) :dry-run dry-run))))
         ((and writable-scope name (eq method :patch)) (core-resource-patch-response store resource namespace name dry-run))
         ((and writable-scope (null name)
-              (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource) (batch-resource-p resource) (budget-resource-p resource) (admission-config-resource-p resource) (policy-resource-p resource) (member resource '("podtemplates" "events" "horizontalpodautoscalers" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions" "customresourcedefinitions") :test #'equal))
+              (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource) (batch-resource-p resource) (budget-resource-p resource) (admission-config-resource-p resource) (policy-resource-p resource) (networking-resource-p resource) (member resource '("services" "networkpolicies" "podtemplates" "events" "horizontalpodautoscalers" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions" "customresourcedefinitions") :test #'equal))
               (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
                 (options (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions")))
@@ -320,7 +323,8 @@
                   (delete-csr-collection store (or (hunchentoot:parameter "labelSelector") "") (or (hunchentoot:parameter "fieldSelector") "") :dry-run (or dry-run preview)))
                  ((or (workload-resource-p resource) (batch-resource-p resource))
                   (delete-workload-collection store resource namespace options (or dry-run preview)))
-                 ((or (storage-resource-p resource) (endpointslice-resource-p resource) (policy-resource-p resource))
+                 ((or (storage-resource-p resource) (endpointslice-resource-p resource) (policy-resource-p resource)
+                      (networking-resource-p resource) (member resource '("services" "networkpolicies") :test #'equal))
                   (delete-storage-collection store resource namespace (or (hunchentoot:parameter "labelSelector") "")
                                              (or (hunchentoot:parameter "fieldSelector") "") :dry-run (or dry-run preview)))
                  (t (delete-template-collection store namespace (or (hunchentoot:parameter "labelSelector") "")
@@ -385,7 +389,12 @@
                                   "io.k8s.api.core.v1.LimitRange" "io.k8s.api.core.v1.LimitRangeList"
                                   "io.k8s.api.node.v1.RuntimeClass" "io.k8s.api.node.v1.RuntimeClassList"
                                   "io.k8s.api.scheduling.v1.PriorityClass" "io.k8s.api.scheduling.v1.PriorityClassList"
-                                  "io.k8s.api.discovery.v1.EndpointSlice" "io.k8s.api.discovery.v1.EndpointSliceList") :test #'equal))
+                                  "io.k8s.api.discovery.v1.EndpointSlice" "io.k8s.api.discovery.v1.EndpointSliceList"
+                                  "io.k8s.api.core.v1.Endpoints" "io.k8s.api.core.v1.EndpointsList"
+                                  "io.k8s.api.networking.v1.Ingress" "io.k8s.api.networking.v1.IngressList"
+                                  "io.k8s.api.networking.v1.IngressClass" "io.k8s.api.networking.v1.IngressClassList"
+                                  "io.k8s.api.networking.v1.ServiceCIDR" "io.k8s.api.networking.v1.ServiceCIDRList"
+                                  "io.k8s.api.networking.v1.IPAddress" "io.k8s.api.networking.v1.IPAddressList") :test #'equal))
                  name (concatenate 'string "io.gr8s.template." name)))
            (rewrite (schema)
              (cond ((hash-table-p schema)

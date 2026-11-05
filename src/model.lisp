@@ -190,7 +190,7 @@
                           value))))
 
 (defun parse-ports (container)
-  "Parse and validate the supported TCP container ports and host ports in CONTAINER."
+  "Parse and validate the container ports and host ports in CONTAINER."
   (loop for port across (optional-vector container "ports" "container")
         collect
         (progn
@@ -207,8 +207,8 @@
             (unless (and (stringp host-ip)
                          (or (zerop (length host-ip)) (ignore-errors (parse-ipv4-integer host-ip))))
               (invalid-pod "hostIP must be an IPv4 address"))
-            (unless (and (stringp protocol) (string= protocol "TCP"))
-              (invalid-pod "only TCP container ports are supported"))
+            (unless (member protocol '("TCP" "UDP" "SCTP") :test #'equal)
+              (invalid-pod "container port protocol must be TCP, UDP or SCTP"))
             number))))
 
 (defun default-container-termination-message (object)

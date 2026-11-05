@@ -28,6 +28,7 @@
                (:static-file "schema/policy-v1.json")
                (:static-file "schema/certificates-v1.json")
                (:static-file "schema/endpointslices-v1.json")
+               (:static-file "schema/networking-v1.json")
                (:module "src"
                 :serial t
                 :components ((:file "package")
@@ -79,6 +80,7 @@
                              (:file "node-taints")
                              (:file "pod-node-admission")
                              (:file "endpointslice-api")
+                             (:file "networking-api")
                              (:file "storage-controller")
                              (:file "events")
                              (:file "node-runtime-events")
@@ -159,6 +161,7 @@
                              (:file "in-cluster-api")
                              (:file "services")
                              (:file "endpointslice-controller")
+                             (:file "endpoints-controller")
                              (:file "service-lb-controller")
                              (:file "endpointslice-http")
                              (:file "gateway-sni")
@@ -278,6 +281,7 @@
                              (:file "network-policy-resolution-test")
                              (:file "services-test")
                              (:file "endpointslices-test")
+                             (:file "networking-test")
                              (:file "service-dns-test")
                              (:file "container-expansion-test")
                              (:file "pod-hostname-test")

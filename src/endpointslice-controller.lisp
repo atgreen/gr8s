@@ -153,7 +153,7 @@
   store)
 
 (defun service-slice-endpoints (store service port)
-  "Resolve real TCP forwarding backends from matching slices, including selectorless manual Services."
+  "Resolve real forwarding backends for PORT's protocol from matching slices, including selectorless manual Services."
   (let* ((metadata (gethash "metadata" service)) (name (gethash "name" metadata))
          (port-name (gethash "name" port "")) (result nil) (found nil))
     (dolist (slice (list-core-resources store "endpointslices" (gethash "namespace" metadata)))
@@ -162,7 +162,8 @@
         (setf found t)
         (let ((target (find-if (lambda (candidate)
                                  (and (equal port-name (gethash "name" candidate ""))
-                                      (equal "TCP" (gethash "protocol" candidate "TCP")))) (gethash "ports" slice #()))))
+                                      (equal (gethash "protocol" port "TCP") (gethash "protocol" candidate "TCP"))))
+                               (gethash "ports" slice #()))))
           (when (and target (integerp (gethash "port" target)))
             (loop for endpoint across (gethash "endpoints" slice #())
                   for conditions = (gethash "conditions" endpoint (core-object))
