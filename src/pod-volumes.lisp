@@ -52,9 +52,12 @@
   (let ((result nil))
     (dolist (reference (pod-resource-reference-declarations pod))
       (destructuring-bind (resource name optional) reference
+        (declare (ignore optional))
         (handler-case (push (get-core-resource store resource (pod-namespace pod) name) result)
+          ;; Every snapshot carries every Pod on the node, so signalling here would
+          ;; stop them all. The agent reports a required object's absence on this Pod.
           (kubernetes-error (condition)
-            (unless (and optional (= 404 (kubernetes-error-status-code condition))) (error condition))))))
+            (unless (= 404 (kubernetes-error-status-code condition)) (error condition))))))
     (let ((token-object (handler-case (pod-projected-token-object store pod)
                           ;; A missing account delays only this Pod, as its unready volume reports.
                           (kubernetes-error () nil))))
