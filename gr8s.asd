@@ -287,6 +287,7 @@
                              (:file "rtnetlink-test")
                              (:file "managed-containerd-test")
                              (:file "runtime-addons-test")
+                             (:file "clustertrustbundle-test")
                              (:file "containerd-test")
                              (:file "container-lifecycle-test")
                              (:file "init-containers-test")

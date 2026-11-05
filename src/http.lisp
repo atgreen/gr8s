@@ -1301,6 +1301,7 @@ than wait for the next, which truncates any body that spans records in flight."
           ((string= path "/openapi/v3/apis/admissionregistration.k8s.io/v1") (openapi-v3-response +admission-api-version+))
           ((string= path "/apis/certificates.k8s.io") (json-response (csr-api-group)))
           ((string= path "/apis/certificates.k8s.io/v1") (csr-discovery-response))
+          ((string= path "/apis/certificates.k8s.io/v1beta1") (csr-v1beta1-discovery-response))
           ((string= path "/openapi/v3/apis/certificates.k8s.io/v1") (openapi-v3-response "certificates.k8s.io/v1"))
           ((csr-subresource-route path) (dispatch-csr-subresource store path method))
           ((string= path "/apis/discovery.k8s.io") (json-response (endpointslice-api-group)))

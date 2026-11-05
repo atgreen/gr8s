@@ -11,8 +11,17 @@
 (defun csr-api-group ()
   "Describe the implemented stable certificates API group."
   (core-object "apiVersion" "v1" "kind" "APIGroup" "name" "certificates.k8s.io"
-               "versions" (vector (core-object "groupVersion" "certificates.k8s.io/v1" "version" "v1"))
+               "versions" (vector (core-object "groupVersion" "certificates.k8s.io/v1" "version" "v1")
+                                  (core-object "groupVersion" "certificates.k8s.io/v1beta1" "version" "v1beta1"))
+               ;; CertificateSigningRequest (v1) stays the preferred version; the
+               ;; v1beta1 version carries ClusterTrustBundle.
                "preferredVersion" (core-object "groupVersion" "certificates.k8s.io/v1" "version" "v1")))
+
+(defun csr-v1beta1-discovery-response ()
+  "Advertise the certificates.k8s.io/v1beta1 resources (ClusterTrustBundle)."
+  (json-response (core-object "apiVersion" "v1" "kind" "APIResourceList"
+                              "groupVersion" "certificates.k8s.io/v1beta1"
+                              "resources" (stored-resource-discovery "certificates.k8s.io/v1beta1"))))
 
 (defun csr-discovery-response ()
   "Advertise only actual collection, status and approval operations."
