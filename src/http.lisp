@@ -1246,7 +1246,7 @@ Clients that can read an object as well say so with a further media range."
            (openapi-v3-complete-response store runtime reconciler path))
           ((string= path "/metrics")
            (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
-           (concatenate 'string (runtime-network-metrics runtime) (gateway-metrics-text)))
+           (concatenate 'string (runtime-network-metrics runtime) (gateway-metrics-text) (volume-reclaim-metrics-text)))
           ((string= path "/version") (version-response))
           ((string= path "/api")
            (if (aggregated-discovery-requested-p)
