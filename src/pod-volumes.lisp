@@ -326,18 +326,23 @@
       (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime) sandbox-id)))
 
 (defun containerd-pod-environment (runtime pod container sandbox-id)
-  "Resolve a container's variables: Services, then envFrom in order, then explicit env."
-  (let* ((object (pod-runtime-container-object pod container)) (pod-ip nil))
+  "Resolve a container's variables: Services, then envFrom in order, then explicit env.
+A literal value may refer to any variable defined before it, as $(NAME)."
+  (let* ((object (pod-runtime-container-object pod container)) (pod-ip nil)
+         (environment
+           (merge-environment
+            (when (and runtime (containerd-runtime-resource-store runtime)) (pod-service-environment runtime pod))
+            (loop for source across (gethash "envFrom" object #())
+                  append (environment-source-pairs runtime pod source)))))
     (merge-environment
-     (when (and runtime (containerd-runtime-resource-store runtime)) (pod-service-environment runtime pod))
-     (loop for source across (gethash "envFrom" object #())
-           append (environment-source-pairs runtime pod source))
+     environment
      (loop for variable across (gethash "env" object #())
            for from = (gethash "valueFrom" variable)
            append
            (multiple-value-bind (value include)
                (cond
-                 ((null from) (values (gethash "value" variable "") t))
+                 ((null from)
+                  (values (expand-container-command-argument (gethash "value" variable "") environment) t))
                  ((gethash "secretKeyRef" from)
                   (containerd-key-environment-value runtime pod "secrets" (gethash "secretKeyRef" from)))
                  ((gethash "configMapKeyRef" from)
@@ -363,7 +368,9 @@
                               (containerd-node-address runtime))
                              ((member field '("status.podIP" "status.podIPs") :test #'equal)
                               (or pod-ip (setf pod-ip (containerd-sandbox-address runtime pod sandbox-id))))) t))))
-             (when include (list (cons (gethash "name" variable) value))))))))
+             (when include
+               (setf environment (merge-environment environment (list (cons (gethash "name" variable) value))))
+               (list (cons (gethash "name" variable) value))))))))
 
 (defun cri-seccomp-profile (context)
   "Map a validated seccompProfile to CRI, leaving an unset profile to mean Unconfined."

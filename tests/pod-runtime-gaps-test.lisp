@@ -624,3 +624,20 @@
         (let ((scheduled (find "Scheduled" (events) :test #'equal :key (lambda (event) (gethash "reason" event)))))
           (is (equal "Normal" (gethash "type" scheduled)))
           (is (search "Successfully assigned default/hello to node" (gethash "message" scheduled))))))))
+
+(test environment-values-may-refer-to-earlier-variables
+  (let* ((runtime (gr8s::make-containerd-runtime :log-root "/nonexistent/"))
+         (pod (parse-pod (gap-pod-object
+                          "containers"
+                          (vector (gap-container
+                                   "c" "env" (vector (gr8s::core-object "name" "FOO" "value" "foo-value")
+                                                     (gr8s::core-object "name" "BAR" "value" "bar-value")
+                                                     (gr8s::core-object "name" "FOOBAR" "value" "$(FOO);;$(BAR)")
+                                                     (gr8s::core-object "name" "EARLY" "value" "$(LATER)")
+                                                     (gr8s::core-object "name" "LATER" "value" "set")
+                                                     (gr8s::core-object "name" "ESCAPED" "value" "$$(FOO)")))))))
+         (environment (gr8s::containerd-pod-environment runtime pod (aref (gr8s::pod-containers pod) 0) "sandbox")))
+    (flet ((value (name) (cdr (assoc name environment :test #'equal))))
+      (is (equal "foo-value;;bar-value" (value "FOOBAR")))
+      (is (equal "$(LATER)" (value "EARLY")) "only earlier variables are known")
+      (is (equal "$(FOO)" (value "ESCAPED"))))))
