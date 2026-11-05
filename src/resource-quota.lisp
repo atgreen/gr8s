@@ -107,7 +107,8 @@
         ((equal scope "NotTerminating") (not (quota-pod-terminating-p object)))
         ((equal scope "BestEffort") (quota-pod-best-effort-p object))
         ((equal scope "NotBestEffort") (not (quota-pod-best-effort-p object)))
-        ((equal scope "PriorityClass") (gethash "priorityClassName" (gethash "spec" object)))))
+        ((equal scope "PriorityClass") (gethash "priorityClassName" (gethash "spec" object)))
+        ((equal scope "CrossNamespacePodAffinity") (pod-cross-namespace-affinity-p object))))
 
 (defun quota-selector-term-matches-pod-p (term object)
   "Evaluate one scopeSelector expression against a Pod OBJECT."

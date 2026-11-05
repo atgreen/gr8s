@@ -143,7 +143,10 @@ The scheduler charges Pod requests and overhead against the CPU, memory, storage
 and Pod count agents report, and against extended resources advertised through
 Node status. It evaluates node selectors and node affinity, and when nothing fits
 it preempts lower-priority Pods, marking them with a `DisruptionTarget` condition.
-Pod affinity and anti-affinity are refused. `spec.activeDeadlineSeconds` is counted
+Pod affinity and anti-affinity filter and order nodes as upstream's plugin does, in
+both directions, and quota has a `CrossNamespacePodAffinity` scope. Containers get
+private PID namespaces unless `shareProcessNamespace` sets one for the Pod.
+`spec.activeDeadlineSeconds` is counted
 from Pod creation rather than from the first node's acceptance. A declared
 `ephemeral-storage` limit counts for quota, LimitRange and scheduling, and the node
 evicts a Pod whose writable layers and disk-backed emptyDirs exceed it, checking

@@ -380,13 +380,56 @@ def resize_scenarios(cluster, check):
     check("fittingResizeReachesTheCgroup", weight.stdout.startswith("30000 "), weight.stdout)
 
 
+def affinity_scenarios(cluster, check):
+    """Place real Pods by what already runs on the node, with the one node this cluster has."""
+    def labelled(name, app, **spec):
+        manifest = pod(name, container("main", LONG), **spec)
+        manifest["metadata"]["labels"] = {"app": app}
+        return manifest
+
+    def term(app, **fields):
+        return {"topologyKey": "kubernetes.io/hostname", "labelSelector": {"matchLabels": {"app": app}}, **fields}
+
+    def phase(name):
+        return cluster.kubectl("get", "pod", name, "-o", "jsonpath={.status.phase}", check=False)
+
+    def unschedulable(name):
+        return json.loads(cluster.kubectl("get", "pod", name, "-o", "json"))["status"]["conditions"][0].get("message", "")
+
+    cluster.apply(labelled("aff-db", "db"))
+    cluster.ready("aff-db")
+    cluster.apply(labelled("aff-near", "web", affinity={"podAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [term("db")]}}))
+    cluster.ready("aff-near", 300)
+    check("podAffinityPlacesBesideItsTarget", phase("aff-near") == "Running", phase("aff-near"))
+
+    cluster.apply(labelled("aff-none", "web", affinity={"podAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [term("absent")]}}))
+    message = wait_for("the Pod with no target to be judged", 60, lambda: unschedulable("aff-none"))
+    check("podAffinityWithoutATargetWaits", phase("aff-none") == "Pending" and "pod affinity" in message, message)
+
+    cluster.apply(labelled("aff-self", "group", affinity={"podAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [term("group")]}}))
+    cluster.ready("aff-self", 300)
+    check("podAffinityLetsAGroupStartItself", phase("aff-self") == "Running", phase("aff-self"))
+
+    cluster.apply(labelled("aff-away", "web", affinity={"podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [term("db")]}}))
+    message = wait_for("the anti-affine Pod to be judged", 60, lambda: unschedulable("aff-away"))
+    check("podAntiAffinityKeepsAPodOffTheNode", phase("aff-away") == "Pending" and "anti-affinity" in message, message)
+    cluster.kubectl("delete", "pod", "aff-db")
+    cluster.ready("aff-away", 300)
+    check("podAntiAffinityReleasesWhenItsTargetGoes", phase("aff-away") == "Running", phase("aff-away"))
+
+    # Now aff-away refuses db Pods, so a newcomer labelled db is held by the existing Pod's rule.
+    cluster.apply(labelled("aff-newcomer", "db"))
+    message = wait_for("the existing rule to hold the newcomer", 60, lambda: unschedulable("aff-newcomer"))
+    check("existingAntiAffinityKeepsANewcomerOff", phase("aff-newcomer") == "Pending" and "anti-affinity" in message, message)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--gr8s", required=True, type=Path)
     parser.add_argument("--state-parent", type=Path, default=Path("/var/tmp"))
     parser.add_argument("--api-port", type=int, default=18194)
     parser.add_argument("--node-port", type=int, default=17451)
-    parser.add_argument("--only", default="attach,logs,pid,owners,sidecars,resize")
+    parser.add_argument("--only", default="attach,logs,pid,owners,sidecars,resize,affinity")
     arguments, _ = parser.parse_known_args()
     if os.geteuid() != 0:
         sys.exit("this test runs containers; use a disposable guest as root")
@@ -401,7 +444,8 @@ def main():
             failures.append(name)
 
     scenarios = {"attach": attach_scenarios, "logs": log_scenarios, "pid": pid_scenarios,
-                 "owners": owner_scenarios, "sidecars": sidecar_scenarios, "resize": resize_scenarios}
+                 "owners": owner_scenarios, "sidecars": sidecar_scenarios, "resize": resize_scenarios,
+                 "affinity": affinity_scenarios}
     try:
         cluster.start()
         for name in arguments.only.split(","):
