@@ -311,8 +311,10 @@
               do (core-resource-error 422 "Invalid" "Invalid finalizer name"))))
   (dolist (field (unless allow-finalizers '("finalizers")))
     (let ((value (gethash field metadata)))
+      ;; A deletion held for its dependents shows a finalizer that clients echo back.
       (when (and value (not (eq value 'null))
-                 (or (not (vectorp value)) (plusp (length value))))
+                 (or (not (vectorp value))
+                     (notevery (lambda (name) (member name '("foregroundDeletion" "orphan") :test #'equal)) value)))
         (core-resource-error 422 "Invalid" "metadata.~A is not supported" field))))
   metadata)
 

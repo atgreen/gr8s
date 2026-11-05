@@ -768,8 +768,8 @@ supported Pod subset. Rejected Pod admission produces a ReplicaFailure condition
 rather than reporting successful replicas. Background deletion cascades through
 the existing owner collector. Foreground and orphan workload deletion checkpoint
 their intent: foreground waits for owned children, while orphaning releases
-controller references before removing the parent. Custom finalizers remain
-unsupported.
+controller references before removing the parent. Custom finalizers on workloads
+remain unsupported.
 
 ReplicationControllers expose the same controller, `scale` and `status` through
 `core/v1`, with a mutable map selector and, as upstream, orphaning as the default
