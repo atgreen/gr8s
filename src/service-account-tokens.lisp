@@ -289,9 +289,10 @@ Returns the identity and the audiences it is valid for, intersected with REQUIRE
     (list (list (gethash "path" source) (ag-grpc:base64-decode encoded) default-mode))))
 
 (defun prune-projected-tokens (store)
-  "Forget the cached tokens of Pods that no longer exist."
-  (let ((live (make-hash-table :test #'equal)) (cache (pod-store-projected-tokens store)))
+  "Forget the cached tokens and podCertificate keys of Pods that no longer exist."
+  (let ((live (make-hash-table :test #'equal)))
     (dolist (pod (list-pods store)) (setf (gethash (pod-uid pod) live) t))
     (bt:with-lock-held ((pod-store-credential-lock store))
-      (loop for key being the hash-keys of cache using (hash-value entry)
-            unless (gethash (getf entry :pod) live) do (remhash key cache)))))
+      (dolist (cache (list (pod-store-projected-tokens store) (pod-store-pod-certificates store)))
+        (loop for key being the hash-keys of cache using (hash-value entry)
+              unless (gethash (getf entry :pod) live) do (remhash key cache))))))

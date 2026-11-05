@@ -284,6 +284,34 @@
     (when (and seconds (not (and (integerp seconds) (<= 600 seconds (expt 2 32)))))
       (invalid-pod "serviceAccountToken.expirationSeconds must be between 10 minutes and 2^32 seconds"))))
 
+(defun validate-pod-certificate-source (source paths)
+  "Validate one podCertificate projection (KEP-4317): its required signerName, the
+   one keyType gr8s issues, its bounded lifetime and its distinct output paths.
+   Returns the paths it contributes, so the caller can keep them conflict-free."
+  (drop-null-fields (require-object source "podCertificate"))
+  (reject-unsupported-fields source '("signerName" "keyType" "maxExpirationSeconds"
+                                      "credentialBundlePath" "keyPath" "certificateChainPath")
+                             "podCertificate")
+  (require-nonempty-string (gethash "signerName" source) "podCertificate.signerName")
+  (let ((key-type (gethash "keyType" source)))
+    (unless (equal key-type "ECDSAP256")
+      (invalid-pod "podCertificate.keyType must be ECDSAP256 (the only type gr8s issues)")))
+  (let ((seconds (gethash "maxExpirationSeconds" source)))
+    (when (and seconds (not (and (integerp seconds) (<= 3600 seconds (expt 2 31)))))
+      (invalid-pod "podCertificate.maxExpirationSeconds must be between 3600 and 2^31 seconds")))
+  (let ((contributed nil))
+    (dolist (field '("credentialBundlePath" "keyPath" "certificateChainPath"))
+      (let ((path (gethash field source)))
+        (when path
+          (unless (safe-volume-relative-path-p path)
+            (invalid-pod "podCertificate.~A must be a safe relative path" field))
+          (when (or (member path paths :test #'equal) (member path contributed :test #'equal))
+            (invalid-pod "projected volume has conflicting path ~S" path))
+          (push path contributed))))
+    (unless contributed
+      (invalid-pod "podCertificate requires at least one of credentialBundlePath, keyPath or certificateChainPath"))
+    contributed))
+
 (defun validate-projected-source (projected)
   "Validate a projected volume, refusing sources that have no real implementation here."
   (drop-null-fields projected)
@@ -292,7 +320,8 @@
   (let ((paths nil))
     (loop for source across (optional-vector projected "sources" "projected")
           do (drop-null-fields source)
-             (reject-unsupported-fields source '("configMap" "secret" "downwardAPI" "serviceAccountToken") "projected source")
+             (reject-unsupported-fields source '("configMap" "secret" "downwardAPI" "serviceAccountToken"
+                                                 "clusterTrustBundle" "podCertificate") "projected source")
              (unless (= 1 (hash-table-count source))
                (invalid-pod "projected source requires exactly one kind"))
              (let ((part (or (gethash "configMap" source) (gethash "secret" source))))
@@ -311,6 +340,28 @@
                  (when (member (gethash "path" part) paths :test #'equal)
                    (invalid-pod "projected volume has conflicting path ~S" (gethash "path" part)))
                  (push (gethash "path" part) paths)))
+             (let ((part (gethash "clusterTrustBundle" source)))
+               (when part
+                 (drop-null-fields (require-object part "clusterTrustBundle"))
+                 (reject-unsupported-fields part '("path" "name" "signerName" "labelSelector" "optional")
+                                            "clusterTrustBundle")
+                 (let ((path (gethash "path" part))
+                       (name (gethash "name" part))
+                       (signer (gethash "signerName" part)))
+                   (unless (and (stringp path) (plusp (length path)))
+                     (invalid-pod "clusterTrustBundle projection requires a path"))
+                   ;; Exactly one selector: a concrete name, or a signerName
+                   ;; (optionally narrowed by labelSelector).
+                   (unless (if name (not signer) signer)
+                     (invalid-pod "clusterTrustBundle requires exactly one of name or signerName"))
+                   (when (and name (gethash "labelSelector" part))
+                     (invalid-pod "clusterTrustBundle labelSelector applies only with signerName"))
+                   (when (member path paths :test #'equal)
+                     (invalid-pod "projected volume has conflicting path ~S" path))
+                   (push path paths))))
+             (let ((part (gethash "podCertificate" source)))
+               (when part
+                 (setf paths (append (validate-pod-certificate-source part paths) paths))))
              (let ((part (or (gethash "configMap" source) (gethash "secret" source) (gethash "downwardAPI" source))))
                (when part
                  (loop for item across (gethash "items" part #())

@@ -416,7 +416,15 @@ What was consumed isn't kept, for streams too long to hold in memory."
                     ;; lose the rest of this report and end the session of every Pod.
                     (error (condition)
                       (format *error-output* "gr8s Pod ~A/~A status update failed: ~A~%"
-                              (pod-namespace pod) (pod-name pod) condition))))))
+                              (pod-namespace pod) (pod-name pod) condition))))
+       (loop for claim in (slot-value status 'gr8s.node.v1::pod-certificate-requests)
+             do (handler-case
+                    (ensure-pod-certificate-request-from-claim
+                     (node-grpc-server-store server) node-name claim)
+                  (error (condition)
+                    (format *error-output* "gr8s PodCertificateRequest ~A/~A from node ~A failed: ~A~%"
+                            (slot-value claim 'gr8s.node.v1::namespace)
+                            (slot-value claim 'gr8s.node.v1::name) node-name condition))))))
     (:operation-response
      (note-node-operation-response
       server (slot-value envelope 'gr8s.node.v1::operation-response)))

@@ -128,6 +128,15 @@
           ((member resource '("roles" "clusterroles") :test #'equal) (setf (gethash "rules" object) #()))
           ((member resource '("rolebindings" "clusterrolebindings") :test #'equal)
            (setf (gethash "roleRef" object) (gr8s::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "ClusterRole" "name" "reader")))
+          ((equal resource "clustertrustbundles")
+           (setf (gethash "spec" object)
+                 (gr8s::core-object "signerName" "servicedns.podcert.ate.dev/identity"
+                                    "trustBundle" (format nil "-----BEGIN CERTIFICATE-----~%MIIBtest~%-----END CERTIFICATE-----~%"))))
+          ((equal resource "podcertificaterequests")
+           (setf (gethash "spec" object)
+                 (gr8s::core-object "signerName" "podidentity.podcert.ate.dev/identity"
+                                    "podName" "demo" "podUID" "11111111-1111-1111-1111-111111111111"
+                                    "serviceAccountName" "default" "nodeName" "node" "pkixPublicKey" "QUJD")))
           ((equal resource "gatewayclasses")
            (setf (gethash "spec" object) (gr8s::core-object "controllerName" "gr8s.io/gateway-controller")))
           ((equal resource "gateways")
