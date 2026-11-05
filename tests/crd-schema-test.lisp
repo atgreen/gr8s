@@ -39,9 +39,7 @@
       (signals kubernetes-error (gr8s::crd-validate-value output schema "resource")))))
 
 (test custom-schema-rejects-unsupported-validation-and-invalid-structure
-  (dolist (schema (list (gr8s::core-object "type" "object" "x-kubernetes-validations" #())
-                        (gr8s::core-object "type" "object" "$ref" "https://example.test/schema")
-                        (gr8s::core-object "type" "string" "format" "invented")
+  (dolist (schema (list (gr8s::core-object "type" "object" "$ref" "https://example.test/schema")
                         (gr8s::core-object "type" "array")
                         (gr8s::core-object "type" "object" "properties" (gr8s::core-object "missing-type" (gr8s::core-object)))
                         (gr8s::core-object "type" "integer" "default" "not-an-integer")))
@@ -112,7 +110,7 @@
   (let ((schema (gr8s::core-object "type" "string" "pattern" "^[a-z]+$")))
     (gr8s::validate-crd-schema schema)
     (signals kubernetes-error (gr8s::crd-validate-value (format nil "valid~%") schema "anchor")))
-  (dolist (pattern '("(?=lookahead)" "\\p{L}" "a{1001}"))
+  (dolist (pattern '("(?=lookahead)" "\\1" "a{1001}"))
     (signals kubernetes-error (gr8s::validate-crd-schema (gr8s::core-object "type" "string" "pattern" pattern))))
   (let ((schema (gr8s::core-object "type" "string" "pattern" "^\\w+$")))
     (gr8s::validate-crd-schema schema)

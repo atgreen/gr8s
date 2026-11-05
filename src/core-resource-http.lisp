@@ -289,6 +289,7 @@
                                (t (dns-subdomain-p name)))))
       (core-resource-error 400 "BadRequest" "Invalid request name"))
     (let ((*csr-request-actor* (if (csr-resource-p resource) (csr-http-request-actor store) (core-object)))
+          (*apply-update-manager* (and (member method '(:post :put :patch)) (list (apply-default-manager) nil)))
           (*core-resource-view-version* (cond ((and (equal resource "events") (uiop:string-prefix-p "/apis/" path)) "events.k8s.io/v1")
                                               ((uiop:string-prefix-p "/apis/autoscaling/v1/" path) "autoscaling/v1")
                                               (t (core-resource-api-version resource))))
@@ -379,9 +380,14 @@
   (labels ((alias (name)
              (if (or (uiop:string-prefix-p "io.k8s.api.certificates.v1." name)
                      (uiop:string-prefix-p "io.k8s.api.apps.v1." name)
-                     (uiop:string-prefix-p "io.k8s.api.autoscaling.v1." name)
+                     (uiop:string-prefix-p "io.k8s.api.autoscaling." name)
                      (uiop:string-prefix-p "io.k8s.api.policy.v1." name)
                      (uiop:string-prefix-p "io.k8s.api.admissionregistration.v1." name)
+                     (uiop:string-prefix-p "io.k8s.api.flowcontrol." name)
+                     (uiop:string-prefix-p "io.k8s.api.resource." name)
+                     (uiop:string-prefix-p "io.k8s.api.coordination." name)
+                     (uiop:string-prefix-p "io.k8s.api.authorization." name)
+                     (uiop:string-prefix-p "io.k8s.api.authentication." name)
                      (member name '("io.k8s.api.core.v1.PodTemplate" "io.k8s.api.core.v1.PodTemplateList"
                                   "io.k8s.api.core.v1.ReplicationController" "io.k8s.api.core.v1.ReplicationControllerList"
                                   "io.k8s.api.core.v1.Event" "io.k8s.api.core.v1.EventList"
@@ -423,7 +429,11 @@
   (let* ((parts (uiop:split-string name :separator '(#\.)))
          (kind (car (last parts))) (version (car (last parts 2))) (group (car (last parts 3))))
     (vector (json-object "group" (cond ((equal group "core") "")
-                                       ((member group '("certificates" "discovery" "events" "storage") :test #'equal)
+                                       ((equal group "flowcontrol") "flowcontrol.apiserver.k8s.io")
+                                       ((member group '("certificates" "discovery" "events" "storage" "admissionregistration"
+                                                        "networking" "scheduling" "node" "coordination" "resource"
+                                                        "authentication" "authorization")
+                                                :test #'equal)
                                         (concatenate 'string group ".k8s.io"))
                                        (t group))
                          "version" version "kind" kind))))

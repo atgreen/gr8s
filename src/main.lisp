@@ -672,6 +672,7 @@ handler and never gets here. A busy host makes this race likely."
                                   :leader-gate (when ha (lambda () (ha-control-plane-leader-p ha)))
                                   :before-reconcile (lambda ()
                                       (reconcile-crd-deletions store)
+                                      (reconcile-flowcontrol store)
                                       (collect-orphaned-custom-resources store)
                                       (reconcile-certificate-signing-requests store pki)
                                       (reconcile-certificates store pki)
