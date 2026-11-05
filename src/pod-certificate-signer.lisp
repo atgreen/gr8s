@@ -1,0 +1,170 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; The control-plane half of podCertificate projected volumes (KEP-4317). A
+;;;; node reports a PodCertificateClaim -- the public key it generated for a pod,
+;;;; with that pod's identity -- in its NodeStatus; here we turn each claim into
+;;;; a PodCertificateRequest, attributing the node from the authenticated
+;;;; session rather than the claim. A built-in signer then issues a short-lived
+;;;; SPIFFE leaf from the cluster CA for the signers gr8s hosts, filling
+;;;; status.certificateChain so the request can be projected back and mounted.
+
+(in-package #:gr8s)
+
+(defparameter *pod-certificate-trust-domain* "cluster.local"
+  "The SPIFFE trust domain the built-in pod-certificate signer issues under.")
+
+(defparameter *pod-certificate-signers*
+  '("podidentity.podcert.ate.dev/identity" "servicedns.podcert.ate.dev/identity")
+  "signerNames the built-in signer issues for. Requests for any other signer stay
+   Pending for whatever external controller owns that name, exactly as upstream.")
+
+(defparameter *pod-certificate-default-duration* (* 24 60 60)
+  "The lifetime the built-in signer issues when a request sets no bound.")
+
+;;; ---------------------------------------------------------------------------
+;;; Node claim -> PodCertificateRequest resource
+;;; ---------------------------------------------------------------------------
+
+(defun node-metadata-uid (store node-name)
+  "The API UID of NODE-NAME, or NIL, for attributing a request to its node."
+  (ignore-errors (gethash "uid" (gethash "metadata" (node-api-object (get-node store node-name))))))
+
+(defun pod-certificate-request-matches-claim-p (pcr pod-uid pkix)
+  "True when an existing PCR already belongs to this pod incarnation and key."
+  (let ((spec (gethash "spec" pcr (core-object))))
+    (and (equal pod-uid (gethash "podUID" spec))
+         (equal pkix (gethash "pkixPublicKey" spec)))))
+
+(defun ensure-pod-certificate-request-from-claim (store node-name claim)
+  "Idempotently ensure the PodCertificateRequest a node's CLAIM asks for exists
+   and belongs to the current pod incarnation, creating or replacing it. The node
+   name and UID come from the authenticated session, never from the claim."
+  (let* ((namespace (slot-value claim 'gr8s.node.v1::namespace))
+         (name (slot-value claim 'gr8s.node.v1::name))
+         (pod-uid (slot-value claim 'gr8s.node.v1::pod-uid))
+         (pkix (slot-value claim 'gr8s.node.v1::pkix-public-key))
+         (existing (ignore-errors (get-core-resource store "podcertificaterequests" namespace name))))
+    (when (and existing (pod-certificate-request-matches-claim-p existing pod-uid pkix))
+      (return-from ensure-pod-certificate-request-from-claim existing))
+    (when existing
+      ;; A request left from a prior incarnation or key: remove and reissue.
+      (ignore-errors (delete-core-resource store "podcertificaterequests" namespace name)))
+    (let ((max (slot-value claim 'gr8s.node.v1::max-expiration-seconds)))
+      (create-core-resource
+       store "podcertificaterequests"
+       (build-pod-certificate-request
+        :name name :namespace namespace
+        :signer-name (slot-value claim 'gr8s.node.v1::signer-name)
+        :pkix-public-key pkix
+        :pod-name (slot-value claim 'gr8s.node.v1::pod-name) :pod-uid pod-uid
+        :service-account-name (slot-value claim 'gr8s.node.v1::service-account-name)
+        :service-account-uid (let ((uid (slot-value claim 'gr8s.node.v1::service-account-uid)))
+                               (when (plusp (length uid)) uid))
+        :node-name node-name :node-uid (node-metadata-uid store node-name)
+        :max-expiration-seconds (when (plusp max) max))
+       namespace))))
+
+;;; ---------------------------------------------------------------------------
+;;; Built-in signer
+;;; ---------------------------------------------------------------------------
+
+(defun pod-certificate-spiffe-id (namespace service-account)
+  "The SPIFFE ID a pod SVID carries: spiffe://<trust-domain>/ns/<ns>/sa/<sa>."
+  (format nil "spiffe://~A/ns/~A/sa/~A"
+          *pod-certificate-trust-domain* namespace (or service-account "default")))
+
+(defun pod-certificate-leaf-pem (pki spki-der spiffe-id duration)
+  "Issue a short-lived SPIFFE leaf: an empty subject with a URI SAN, bound to the
+   node-provided public key SPKI-DER and signed by the cluster CA for DURATION."
+  (let* ((now (funcall *csr-signer-clock*))
+         (ca-expiry (pure-tls::x509-certificate-validity-not-after (cluster-pki-ca-certificate pki)))
+         (not-after (min ca-expiry (+ now duration)))
+         (algorithm (pure-tls/acme::encode-sequence
+                     (pure-tls/acme::encode-oid pure-tls/acme::*oid-ecdsa-with-sha256*)))
+         (extensions
+           (list (pure-tls/acme::encode-critical-extension +oid-basic-constraints+
+                   (pure-tls/acme::encode-sequence))
+                 (pure-tls/acme::encode-critical-extension +oid-key-usage+
+                   (pure-tls/acme::encode-bit-string #(#x80) 7)) ; digitalSignature
+                 (pure-tls/acme::encode-extension +oid-extended-key-usage+
+                   (pure-tls/acme::encode-sequence
+                    (pure-tls/acme::encode-oid +oid-client-auth+)
+                    (pure-tls/acme::encode-oid '(1 3 6 1 5 5 7 3 1)))) ; serverAuth
+                 (pure-tls/acme::encode-extension '(2 5 29 17)
+                   (pure-tls/acme::encode-sequence
+                    (pure-tls/acme::encode-der #x86 (pki-ascii-octets spiffe-id)))))))
+    (unless (> not-after now) (error "Cluster CA has expired; cannot sign pod certificate"))
+    (values
+     (let ((tbs (pure-tls/acme::encode-sequence
+                 (pure-tls/acme::encode-context-tag 0 (pure-tls/acme::encode-integer 2))
+                 (pure-tls/acme::encode-integer (random-positive-serial)) algorithm
+                 (csr-ca-subject-der pki)
+                 (pure-tls/acme::encode-validity (- now 300) not-after)
+                 (pure-tls/acme::encode-sequence) ; empty subject: identity is the SAN
+                 spki-der
+                 (pure-tls/acme::encode-x509-extensions extensions))))
+       (pure-tls/acme::wrap-pem "CERTIFICATE"
+         (pure-tls/acme::encode-sequence tbs algorithm
+           (pure-tls/acme::encode-bit-string (ecdsa-sign-der (cluster-pki-ca-private-key pki) tbs)))))
+     (- now 300) not-after)))
+
+(defun pod-certificate-ca-pem (pki)
+  "The cluster CA certificate as PEM, appended to a pod leaf to complete its chain."
+  (pure-tls/acme::wrap-pem "CERTIFICATE"
+    (pure-tls::x509-certificate-raw-der (cluster-pki-ca-certificate pki))))
+
+(defun pod-certificate-request-ready-for-signing-p (object)
+  "A request this built-in signer owns, not yet issued, denied or failed."
+  (let ((status (gethash "status" object (core-object))))
+    (and (member (gethash "signerName" (gethash "spec" object (core-object)))
+                 *pod-certificate-signers* :test #'equal)
+         (not (gethash "deletionTimestamp" (gethash "metadata" object)))
+         (zerop (length (gethash "certificateChain" status "")))
+         (not (pod-certificate-request-failure object)))))
+
+(defun sign-pod-certificate-request (store pki object)
+  "Issue the SPIFFE leaf for one eligible PodCertificateRequest, writing
+   status.certificateChain, notBefore and notAfter under a conditional update so
+   a concurrently changed request is left alone."
+  (let* ((spec (gethash "spec" object)) (metadata (gethash "metadata" object))
+         (pkix (gethash "pkixPublicKey" spec))
+         (duration (let ((max (gethash "maxExpirationSeconds" spec)))
+                     (if (and (integerp max) (plusp max))
+                         (min max *pod-certificate-default-duration*)
+                         *pod-certificate-default-duration*)))
+         (spki (handler-case (core-base64-bytes pkix "pkixPublicKey")
+                 (error () (return-from sign-pod-certificate-request nil))))
+         (spiffe (pod-certificate-spiffe-id (gethash "namespace" metadata)
+                                            (gethash "serviceAccountName" spec))))
+    (multiple-value-bind (chain not-before not-after)
+        (bt:with-lock-held ((cluster-pki-lock pki))
+          (multiple-value-bind (leaf nb na)
+              (pod-certificate-leaf-pem pki spki spiffe duration)
+            (values (concatenate 'string leaf (pod-certificate-ca-pem pki)) nb na)))
+      (flet ((stamp (seconds) (rfc3339-from-unix (- seconds 2208988800))))
+        (update-core-resource store "podcertificaterequests" (gethash "namespace" metadata)
+                               (gethash "name" metadata)
+          (lambda (current)
+            (unless (and (pod-certificate-request-ready-for-signing-p current)
+                         (equal (gethash "uid" metadata) (gethash "uid" (gethash "metadata" current)))
+                         (equal pkix (gethash "pkixPublicKey" (gethash "spec" current))))
+              (return-from sign-pod-certificate-request nil))
+            (let ((status (gethash "status" current (core-object))))
+              (setf (gethash "certificateChain" status) chain
+                    (gethash "notBefore" status) (stamp not-before)
+                    (gethash "notAfter" status) (stamp not-after)
+                    (gethash "beginRefreshAt" status) (stamp (- not-after (floor (- not-after not-before) 3)))
+                    (gethash "status" current) status))
+            current))))))
+
+(defun reconcile-pod-certificate-requests (store pki)
+  "Sign every eligible PodCertificateRequest for a gr8s-hosted signer, resuming
+   after a restart. Requests for other signers are left Pending for their owner."
+  (dolist (snapshot (list-core-resources store "podcertificaterequests"))
+    (when (pod-certificate-request-ready-for-signing-p snapshot)
+      (handler-case (sign-pod-certificate-request store pki snapshot)
+        (error (condition)
+          (format *error-output* "gr8s pod certificate signing failed: ~A~%" condition)))))
+  nil)

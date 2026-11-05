@@ -31,6 +31,10 @@
   (verified-tokens (make-hash-table :test #'equal))
   ;; (Pod UID, token identity) to the projected token last minted for it.
   (projected-tokens (make-hash-table :test #'equal))
+  ;; (Pod UID, PodCertificateRequest name) to the node-generated private key
+  ;; material for a podCertificate projected volume. The key never leaves the
+  ;; node, so it lives only here and is regenerated if the node restarts.
+  (pod-certificates (make-hash-table :test #'equal))
   (workload-lock (bt:make-lock "gr8s workload controllers"))
   (workload-deletions (make-hash-table :test #'equal))
   (job-controller-states (make-hash-table :test #'equal))

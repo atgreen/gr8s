@@ -80,6 +80,25 @@ message NodeStatus {
   repeated EndpointTelemetry endpoints = 3;
   // Every CSI driver registered on this node, in full on each report.
   repeated CsiDriverRegistration csi_drivers = 4;
+  // podCertificate projected volumes (KEP-4317): the node generates each pod's
+  // keypair locally and reports only the public key, so the control plane can
+  // create the PodCertificateRequest. The private key never leaves the node.
+  repeated PodCertificateClaim pod_certificate_requests = 5;
+}
+
+// A node's request that the control plane create a PodCertificateRequest for a
+// pod's podCertificate projected volume (KEP-4317). The control plane fills in
+// the node name and UID from the authenticated session, never from the claim.
+message PodCertificateClaim {
+  string name = 1;              // deterministic PodCertificateRequest name
+  string namespace = 2;         // the pod's namespace
+  string signer_name = 3;
+  string pkix_public_key = 4;   // base64 SubjectPublicKeyInfo DER
+  string pod_name = 5;
+  string pod_uid = 6;
+  string service_account_name = 7;
+  string service_account_uid = 8;
+  int64 max_expiration_seconds = 9;
 }
 
 message CsiDriverRegistration {
