@@ -37,22 +37,39 @@
       (format out "fe00::0~Cip6-localnet~%ff00::0~Cip6-mcastprefix~%ff02::1~Cip6-allnodes~%ff02::2~Cip6-allrouters~%"
               #\Tab #\Tab #\Tab #\Tab)
       (if domain (format out "~A~C~A.~A~C~A~%" address #\Tab hostname domain #\Tab hostname)
-          (format out "~A~C~A~%" address #\Tab hostname)))))
+          (format out "~A~C~A~%" address #\Tab hostname))
+      (write-string (pod-host-aliases-content pod) out))))
+
+(defparameter *node-hosts-path* #P"/etc/hosts"
+  "The node's own hosts file, which a hostNetwork Pod sees.")
+
+(defun write-pod-hosts-file (runtime pod content)
+  "Publish CONTENT as POD's hosts file and return the mount that presents it at /etc/hosts."
+  (let ((target (merge-pathnames "hosts" (containerd-pod-log-directory runtime (pod-uid pod)))))
+    (write-projected-volume-file target (trivial-utf-8:string-to-utf-8-bytes content) #o644 nil)
+    (make-instance 'gr8s.cri.v1::mount :container-path "/etc/hosts" :host-path (namestring target) :readonly nil)))
 
 (defun containerd-container-mounts (runtime pod container sandbox-id &optional environment)
-  "Append the real Pod hosts mount unless host networking or an explicit user mount applies."
+  "Append the real Pod hosts mount unless an explicit user mount applies.
+A hostNetwork Pod sees the node's file, which the runtime supplies unless aliases extend it."
   (let ((mounts (containerd-pod-mounts runtime pod container environment)))
-    (if (or (containerd-pod-host-network-p runtime pod)
-            (find "/etc/hosts" mounts :test #'equal
-                  :key (lambda (mount) (slot-value mount 'gr8s.cri.v1::container-path))))
-        mounts
-        (let* ((address (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime) sandbox-id))
-               (target (merge-pathnames "hosts" (containerd-pod-log-directory runtime (pod-uid pod)))))
-          (unless (and (stringp address) (plusp (length address)))
-            (error 'runtime-error :message "Pod hosts file requires the actual sandbox IP"))
-          (if (find #\: address) (0conf:parse-ipv6 address) (0conf:parse-ipv4 address))
-          (write-projected-volume-file target
-            (trivial-utf-8:string-to-utf-8-bytes (pod-managed-hosts-content pod address)) #o644 nil)
-          (append mounts (list (make-instance 'gr8s.cri.v1::mount
-                                              :container-path "/etc/hosts" :host-path (namestring target)
-                                              :readonly nil)))))))
+    (cond
+      ((find "/etc/hosts" mounts :test #'equal
+             :key (lambda (mount) (slot-value mount 'gr8s.cri.v1::container-path)))
+       mounts)
+      ((containerd-pod-host-network-p runtime pod)
+       (let ((aliases (pod-host-aliases-content pod)))
+         (if (zerop (length aliases))
+             mounts
+             (append mounts
+                     (list (write-pod-hosts-file
+                            runtime pod
+                            (concatenate 'string
+                                         (if (probe-file *node-hosts-path*) (uiop:read-file-string *node-hosts-path*) "")
+                                         aliases)))))))
+      (t
+       (let ((address (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime) sandbox-id)))
+         (unless (and (stringp address) (plusp (length address)))
+           (error 'runtime-error :message "Pod hosts file requires the actual sandbox IP"))
+         (if (find #\: address) (0conf:parse-ipv6 address) (0conf:parse-ipv4 address))
+         (append mounts (list (write-pod-hosts-file runtime pod (pod-managed-hosts-content pod address)))))))))

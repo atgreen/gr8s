@@ -222,13 +222,27 @@
          (previous (and entry (gethash "lastTermination" entry))))
     (when (and previous (not (equal (cri-container-info-id info) (gethash "lastExitID" entry))))
       (setf (gethash "lastState" status) (core-object "terminated" (copy-core-object previous))))
+    (let ((applied (and entry (gethash "appliedResources" entry))))
+      (when (and applied (gethash "running" (gethash "state" status)))
+        (setf (gethash "resources" status) (copy-core-object applied))
+        (when (gethash "requests" applied)
+          (setf (gethash "allocatedResources" status) (copy-core-object (gethash "requests" applied))))))
     status))
+
+(defun container-update-restart-requested-p (info state)
+  "Return whether INFO's exact attempt was stopped to apply a changed declaration."
+  (let* ((entry (and state info (gethash (cri-container-info-name info) (gethash "containers" state))))
+         (request (and entry (gethash "probeRestart" entry))))
+    (and request (equal "update" (gethash "kind" request))
+         (equal (cri-container-info-id info) (gethash "containerID" request)))))
 
 (defun container-restart-eligible-p (pod info &optional state)
   "Apply policy to actual exits, including a completed probe-requested stop."
   (let ((policy (container-effective-restart-policy pod (and info (cri-container-info-name info)))))
     (and info (= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_exited+)
        (or (equal "Always" policy)
+           ;; A changed declaration restarts the container whatever the Pod's policy.
+           (container-update-restart-requested-p info state)
            (and (equal "OnFailure" policy)
                 (or (not (zerop (cri-container-info-exit-code info)))
                     (let* ((entry (and state (gethash (cri-container-info-name info) (gethash "containers" state))))
@@ -242,6 +256,9 @@
     (return-from native-container-progress-required-p
       (not (equal "Failed" (runtime-pod-phase observed)))))
   (when (equal "Unknown" (runtime-pod-phase observed))
+    (return-from native-container-progress-required-p t))
+  (when (or (pod-sidecar-progress-required-p pod (runtime-pod-status observed))
+            (pod-ephemeral-progress-required-p pod (runtime-pod-status observed)))
     (return-from native-container-progress-required-p t))
   (let ((statuses (gethash "containerStatuses" (runtime-pod-status observed))))
     (loop for spec across (pod-containers pod)
@@ -280,6 +297,10 @@
         (setf (gethash name entries) entry)))
     (gethash name entries)))
 
+(defun containerd-pod-host-network-p (runtime pod)
+  "Return whether POD's sandbox joins the node's network, by its own spec or the runtime's mode."
+  (or (containerd-runtime-host-network runtime) (pod-host-network-p pod)))
+
 (defun containerd-sandbox-config (runtime pod)
   "Build the sandbox configuration used for initial and subsequent container attempts."
   (multiple-value-bind (servers searches options) (containerd-pod-dns-configuration runtime pod)
@@ -291,6 +312,7 @@
      :privileged (pod-requests-privileged-container-p pod)
      :hostname (pod-runtime-hostname pod)
      :security (containerd-pod-sandbox-security pod)
+     :sysctls (pod-sysctls pod) :host-pid (pod-spec-flag-p pod "hostPID") :host-ipc (pod-spec-flag-p pod "hostIPC")
      :dns-servers servers :dns-searches searches :dns-options options)))
 
 (defun containerd-start-sandbox (runtime pod)
@@ -308,6 +330,7 @@
             :hostname (pod-runtime-hostname pod)
             :security (containerd-pod-sandbox-security pod)
             :runtime-handler (pod-runtime-handler pod)
+            :sysctls (pod-sysctls pod) :host-pid (pod-spec-flag-p pod "hostPID") :host-ipc (pod-spec-flag-p pod "hostIPC")
             :dns-servers servers :dns-searches searches :dns-options options)))))
 
 (defun containerd-prune-old-attempts (runtime infos &optional created-names)
@@ -370,6 +393,25 @@
         for entry = (gethash (container-spec-name spec) (gethash "containers" state))
         always (and entry (gethash "restartSuppressed" entry) (gethash "lastTermination" entry))))
 
+(defun container-config-error-reason (condition)
+  "Return the waiting reason a kubelet would report for CONDITION."
+  (if (typep condition 'container-image-pull-error) "ErrImagePull" "CreateContainerConfigError"))
+
+(defun report-container-config-error (observed spec message &optional (reason "CreateContainerConfigError"))
+  "Report SPEC, unable to start for lack of valid configuration, as a kubelet does."
+  (let* ((status (runtime-pod-status observed))
+         (name (container-spec-name spec))
+         (state (core-object "waiting" (core-object "reason" reason "message" message)))
+         (finder (lambda (item) (equal name (gethash "name" item))))
+         (known (or (find-if finder (gethash "containerStatuses" status #()))
+                    (find-if finder (gethash "initContainerStatuses" status #())))))
+    (if known
+        (setf (gethash "state" known) state (gethash "ready" known) nil (gethash "started" known) nil)
+        (setf (gethash "containerStatuses" status)
+              (concatenate 'vector (gethash "containerStatuses" status #())
+                           (list (core-object "name" name "image" (container-spec-image spec) "imageID" ""
+                                              "restartCount" 0 "ready" nil "started" nil "state" state)))))))
+
 (defun converge-containerd-containers (runtime pod)
   "Converge each declared container while retaining its unchanged sandbox and siblings."
   (let* ((uid (pod-uid pod)) (socket (containerd-runtime-socket-path runtime))
@@ -384,6 +426,7 @@
     (when sandbox (refresh-pod-projected-volumes runtime pod))
     (incorporate-container-log-history runtime uid state)
     (remember-init-container-declarations state pod)
+    (remember-pod-ephemeral-declarations state pod)
     (setf (gethash "resourceVersion" state) (pod-resource-version pod)
           (gethash "specFingerprint" state) (pod-runtime-spec-fingerprint pod))
     (when (and sandbox (/= gr8s.cri.v1::+podsandboxstate-sandbox_ready+ (cri-pod-sandbox-info-state sandbox)))
@@ -407,13 +450,16 @@
                           (containerd-containers runtime sandbox)))
            (current (containerd-stop-unknown-attempts runtime (current-container-infos infos state)))
            (now (funcall *container-lifecycle-clock*))
-           (waiting (make-hash-table :test #'equal)) (restarting nil) (created-names nil))
+           (waiting (make-hash-table :test #'equal)) (restarting nil) (created-names nil)
+           (config-errors nil))
       (remember-container-lifecycle-statuses state
         (map 'vector (lambda (info) (container-lifecycle-status info state)) current))
       (save-container-lifecycle-state runtime uid state)
-      (loop for spec across (next-pod-container-specs pod current state)
+      (loop for spec across (next-pod-container-specs pod current state runtime)
             for name = (container-spec-name spec)
             for info = (find name current :key #'cri-container-info-name :test #'equal)
+            ;; A running postStart hook holds back the next container, as in a kubelet.
+            until (pod-post-start-pending-p runtime uid)
             do (cond
                  ((null info)
                   (let ((entry (gethash name (gethash "containers" state))))
@@ -426,29 +472,50 @@
                       (t
                        (let ((attempt (max (if entry (gethash "nextAttempt" entry 0) 0)
                                            (1+ (known-container-attempt entry)))))
-                         (containerd-create-container runtime pod (cri-pod-sandbox-info-id sandbox) config spec :attempt attempt)
-                         (setf entry (or entry (core-object))
-                               (gethash "highestKnownAttempt" entry) attempt
-                               (gethash name (gethash "containers" state)) entry)
-                         (save-container-lifecycle-state runtime uid state)
-                         (push name created-names))))))
+                         (handler-case
+                             (progn
+                               (containerd-create-container runtime pod (cri-pod-sandbox-info-id sandbox) config spec :attempt attempt)
+                               (setf entry (or entry (core-object))
+                                     (gethash "highestKnownAttempt" entry) attempt
+                                     (gethash name (gethash "containers" state)) entry)
+                               (record-container-applied-spec state name (pod-runtime-container-object pod spec))
+                               (save-container-lifecycle-state runtime uid state)
+                               (push name created-names))
+                           ;; No attempt was consumed: a later pass retries, as siblings run on.
+                           (container-image-pending () nil)
+                           (container-config-error (condition)
+                             (push (list spec (runtime-error-message condition) (container-config-error-reason condition))
+                                   config-errors))))))))
                  ((= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_created+)
                   ;; An interrupted or ambiguous StartContainer must reuse the
                   ;; already created attempt instead of allocating another.
-                  (cri-start-container socket (cri-container-info-id info)))
+                  (cri-start-container socket (cri-container-info-id info))
+                  (record-container-lifecycle-event runtime uid name (cri-container-info-attempt info)
+                                                    "Started" (format nil "Started container ~A" name))
+                  (start-container-post-start-hook runtime pod spec (cri-container-info-id info)
+                                                   (cri-pod-sandbox-info-id sandbox)))
                  ((container-restart-eligible-p pod info state)
                   (let ((entry (prepare-container-restart state info now)))
                     (save-container-lifecycle-state runtime uid state)
                     (setf restarting t)
                     (if (< now (gethash "nextStart" entry))
                         (setf (gethash name waiting) entry)
-                        (progn
-                          (containerd-create-container runtime pod (cri-pod-sandbox-info-id sandbox) config spec
-                                                       :attempt (gethash "nextAttempt" entry))
-                          (setf (gethash "highestKnownAttempt" entry) (gethash "nextAttempt" entry))
-                          (save-container-lifecycle-state runtime uid state)
-                          (push name created-names)))))))
+                        (handler-case
+                            (progn
+                              (containerd-create-container runtime pod (cri-pod-sandbox-info-id sandbox) config spec
+                                                           :attempt (gethash "nextAttempt" entry))
+                              (setf (gethash "highestKnownAttempt" entry) (gethash "nextAttempt" entry))
+                              (record-container-applied-spec state name (pod-runtime-container-object pod spec))
+                              (save-container-lifecycle-state runtime uid state)
+                              (push name created-names))
+                          (container-image-pending () nil)
+                          (container-config-error (condition)
+                            (push (list spec (runtime-error-message condition) (container-config-error-reason condition))
+                                  config-errors))))))))
       (containerd-prune-old-attempts runtime infos created-names)
+      (when (and (pod-sidecar-names pod)
+                 (pod-applications-finished-p pod (container-lifecycle-statuses current state)))
+        (start-finished-pod-sidecar-shutdown runtime pod sandbox))
       (let* ((observed (runtime-observe runtime uid))
              (statuses (container-lifecycle-all-statuses observed)))
         (remember-container-lifecycle-statuses state (container-lifecycle-all-statuses observed))
@@ -459,6 +526,10 @@
                 (setf (gethash "state" status) (core-object "waiting" (core-object "reason" "CrashLoopBackOff"))
                       (gethash "lastState" status) (core-object "terminated" (copy-core-object (gethash "lastTermination" entry)))
                       (gethash "ready" status) nil (gethash "started" status) nil))
+        (loop for (spec message reason) in config-errors
+              do (report-container-config-error observed spec message reason)
+                 (record-container-lifecycle-event runtime uid (container-spec-name spec) reason "Failed"
+                                                   (format nil "Error: ~A: ~A" reason message) "Warning"))
         (when (and restarting (pod-initialization-complete-p pod (runtime-pod-status observed)))
           (setf (runtime-pod-phase observed) "Running"))
         ;; An existing sandbox's creation revision may be older than a metadata

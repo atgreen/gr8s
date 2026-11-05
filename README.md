@@ -624,6 +624,16 @@ Server-side apply and finalizer processing remain unsupported.
 Templates have a 2 MiB serialized storage limit so admitted objects can be read
 back by the durable JSON loader.
 
+`apps/v1` StatefulSets have `status` and `scale` subresources and a controller with
+stable ordinal names and hostnames, `OrderedReady` and `Parallel` Pod management,
+`spec.ordinals`, rolling updates in reverse ordinal order bounded by a partition,
+`OnDelete`, and ControllerRevision history, so a template returning to an earlier
+form rolls back to that revision. Each `volumeClaimTemplates` entry becomes a real
+PersistentVolumeClaim per ordinal that binds through the storage controller, so a
+Pod waits Pending until a matching static PersistentVolume exists, because gr8s has
+no dynamic provisioner. `persistentVolumeClaimRetentionPolicy` is honored in both
+directions. A rolling update's `maxUnavailable` above 1 is refused.
+
 `policy/v1` PodDisruptionBudgets have a `status` subresource and a disruption
 controller that computes status from observed Pod readiness with upstream's
 arithmetic. A selected Pod with a controller of unknown scale fails safe to no

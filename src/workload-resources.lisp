@@ -16,7 +16,7 @@
 
 (defun workload-resource-p (resource)
   "Recognize implemented controller collections with status and generation."
-  (member resource '("deployments" "replicasets" "daemonsets" "replicationcontrollers") :test #'equal))
+  (member resource '("deployments" "replicasets" "daemonsets" "statefulsets" "replicationcontrollers") :test #'equal))
 
 (defun workload-schema-name (resource suffix)
   "Name RESOURCE's pinned structural definition, with SUFFIX such as Status, in its API group."
@@ -250,6 +250,7 @@ to reject."
                (when (gethash cname seen) (core-resource-error 422 "Invalid" "Duplicate container name"))
                (setf (gethash cname seen) t)))
     (when (equal resource "daemonsets") (normalize-daemonset-strategy spec))
+    (when (equal resource "statefulsets") (normalize-statefulset-spec object namespace))
     (when (member resource '("daemonsets" "replicationcontrollers") :test #'equal)
       ;; These pass straight to Pod creation: an unrunnable template is refused now.
       (let ((pod (workload-template-pod-object object)))
@@ -290,6 +291,7 @@ to reject."
   (when (and existing (equal resource "controllerrevisions"))
     (unless (core-json-equal-p (gethash "data" existing) (gethash "data" object))
       (core-resource-error 422 "Invalid" "ControllerRevision data is immutable")))
+  (when (and existing (equal resource "statefulsets")) (validate-statefulset-update existing object))
   (when (workload-resource-p resource)
     ;; Only a ReplicationController's map selector may change after creation.
     (when (and existing (not (equal resource "replicationcontrollers"))

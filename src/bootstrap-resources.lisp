@@ -109,6 +109,42 @@
          (when hostnames
            (bootstrap-string-array hostnames "spec.hostnames")))))))
 
+(defun validate-cert-manager-resource (resource object)
+  "Validate a cert-manager.io/v1 object against the subset gr8s implements. Fails
+   closed (422) on unsupported issuer types or missing required fields."
+  (let ((spec (gethash "spec" object)))
+    (unless (hash-table-p spec)
+      (core-resource-error 422 "Invalid" "~A spec must be an object"
+                           (core-resource-kind resource)))
+    (cond
+      ((member resource '("issuers" "clusterissuers") :test #'equal)
+       (let ((configured (loop for key in '("selfSigned" "ca" "acme" "vault" "venafi")
+                               when (nth-value 1 (gethash key spec)) collect key)))
+         (unless (= 1 (length configured))
+           (core-resource-error 422 "Invalid" "Issuer spec must configure exactly one issuer type"))
+         (let ((type (first configured)))
+           (cond
+             ((equal type "selfSigned")
+              (require-object (gethash "selfSigned" spec) "spec.selfSigned"))
+             ((equal type "ca")
+              (let ((ca (require-object (gethash "ca" spec) "spec.ca")))
+                (require-nonempty-string (gethash "secretName" ca) "spec.ca.secretName")))
+             (t (core-resource-error 422 "Invalid" "Issuer type ~A is not implemented" type))))))
+      ((equal resource "certificates")
+       (require-nonempty-string (gethash "secretName" spec) "spec.secretName")
+       (let ((ref (require-object (gethash "issuerRef" spec) "spec.issuerRef")))
+         (require-nonempty-string (gethash "name" ref) "spec.issuerRef.name"))
+       (let ((dns-names (gethash "dnsNames" spec))
+             (common-name (gethash "commonName" spec)))
+         (when dns-names (bootstrap-string-array dns-names "spec.dnsNames"))
+         (unless (or (and dns-names (plusp (length dns-names)))
+                     (and (stringp common-name) (plusp (length common-name))))
+           (core-resource-error 422 "Invalid"
+                                "Certificate requires spec.commonName or a nonempty spec.dnsNames"))))
+      ((equal resource "certificaterequests")
+       (let ((ref (require-object (gethash "issuerRef" spec) "spec.issuerRef")))
+         (require-nonempty-string (gethash "name" ref) "spec.issuerRef.name"))))))
+
 (defun normalize-bootstrap-resource (resource input namespace name &optional store)
   "Copy, validate and default an implemented bootstrap API object."
   (when (workload-resource-p resource)
@@ -132,6 +168,9 @@
                        ((equal resource "gatewayclasses") '("spec" "status"))
                        ((member resource '("gateways" "httproutes"
                                            "tcproutes" "tlsroutes" "grpcroutes") :test #'equal)
+                        '("spec" "status"))
+                       ((member resource '("issuers" "clusterissuers"
+                                           "certificates" "certificaterequests") :test #'equal)
                         '("spec" "status"))
                        (t '("roleRef" "subjects")))))
     (unless (and (equal version (gethash "apiVersion" object version))
@@ -173,6 +212,9 @@
       ((member resource '("gatewayclasses" "gateways" "httproutes"
                           "tcproutes" "tlsroutes" "grpcroutes") :test #'equal)
        (validate-gateway-resource resource object))
+      ((member resource '("issuers" "clusterissuers" "certificates" "certificaterequests")
+               :test #'equal)
+       (validate-cert-manager-resource resource object))
       (t (validate-rbac-binding object (equal resource "clusterrolebindings"))))
     object))
 
@@ -202,7 +244,7 @@
                                 "verbs" (if (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource)
                                                 (policy-resource-p resource) (networking-resource-p resource)
                                                 (admission-config-resource-p resource)
-                                                (member resource '("services" "networkpolicies" "podtemplates" "events" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "controllerrevisions" "customresourcedefinitions") :test #'equal))
+                                                (member resource '("services" "networkpolicies" "podtemplates" "events" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions" "customresourcedefinitions") :test #'equal))
                                             #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
                                             #("create" "delete" "get" "list" "patch" "update" "watch"))))
    'vector))
@@ -239,9 +281,17 @@
                   (when (node-record-annotations node)
                     (setf (gethash "annotations" metadata) (copy-core-object (node-record-annotations node))))
                   metadata)
-     "spec" (core-object "unschedulable" nil "podCIDR" (node-record-pod-cidr node)
-                         "podCIDRs" (vector (node-record-pod-cidr node)))
-     "status" (core-object
+     "spec" (let ((spec (core-object "unschedulable" (not (null (node-record-unschedulable node))))))
+              (when (plusp (length (node-record-pod-cidr node)))
+                (setf (gethash "podCIDR" spec) (node-record-pod-cidr node)
+                      (gethash "podCIDRs" spec) (vector (node-record-pod-cidr node))))
+              (when (plusp (length (node-record-taints node)))
+                (setf (gethash "taints" spec) (copy-core-object (node-record-taints node))))
+              spec)
+     "status" (or
+               (and (node-record-api-only node)
+                    (copy-core-object (or (node-record-api-status node) (core-object))))
+               (core-object
                "conditions" (vector (core-object "type" "Ready"
                                                   "status" (if (node-record-ready-p node) "True" "False")
                                                   "reason" (if (node-record-ready-p node) "AgentReady" "AgentNotReady")
@@ -251,7 +301,7 @@
                "capacity" (node-resource-list node)
                "allocatable" (node-resource-list node)
                "nodeInfo" (core-object "operatingSystem" "linux" "architecture" (native-node-architecture)
-                                        "kubeletVersion" "v1.36.0-gr8s.0")))))
+                                        "kubeletVersion" "v1.36.0-gr8s.0"))))))
 
 (defun node-write-input (node method)
   "Return the requested Node object from a typed or JSON PUT, or a patch applied to NODE's view."
@@ -278,11 +328,7 @@
       (core-resource-error 400 "BadRequest" "metadata.name does not match the request name"))
     (when (and (gethash "uid" metadata) (not (equal (node-record-id node) (gethash "uid" metadata))))
       (core-resource-error 409 "Conflict" "metadata.uid does not match the stored Node"))
-    (when (eq t (gethash "unschedulable" spec))
-      (core-resource-error 422 "Invalid" "gr8s does not support cordoning: spec.unschedulable cannot be set"))
-    (let ((taints (gethash "taints" spec)))
-      (when (and taints (not (eq taints 'null)) (plusp (length taints)))
-        (core-resource-error 422 "Invalid" "gr8s does not enforce taints: spec.taints cannot be set")))
+    (validate-node-taints spec)
     (when (and (gethash "podCIDR" spec) (not (equal (gethash "podCIDR" spec) (node-record-pod-cidr node))))
       (core-resource-error 422 "Invalid" "spec.podCIDR is immutable"))
     (when (member labels '(nil null)) (setf labels (core-object)))
@@ -294,6 +340,23 @@
              builtin)
     (maphash (lambda (key value) (unless (nth-value 1 (gethash key builtin)) (setf (gethash key custom) value))) labels)
     (values custom annotations)))
+
+(defun node-write-taints (input current)
+  "Return INPUT's taints as stored, keeping the time a surviving taint was added."
+  (let* ((spec (gethash "spec" input (core-object)))
+         (requested (let ((value (gethash "taints" spec))) (if (member value '(nil null)) #() value))))
+    (map 'vector
+         (lambda (taint)
+           (let ((copy (copy-core-object taint))
+                 (old (find-if (lambda (existing)
+                                 (and (equal (gethash "key" existing) (gethash "key" taint))
+                                      (equal (gethash "effect" existing) (gethash "effect" taint))))
+                               (node-record-taints current))))
+             (when (and old (gethash "timeAdded" old)) (setf (gethash "timeAdded" copy) (gethash "timeAdded" old)))
+             (when (and (equal "NoExecute" (gethash "effect" copy)) (not (gethash "timeAdded" copy)))
+               (setf (gethash "timeAdded" copy) (current-timestamp)))
+             copy))
+         requested)))
 
 (defun write-node-response (store name method)
   "Apply a Node update or patch to its durable labels and annotations."
@@ -312,10 +375,15 @@
               (core-resource-error 409 "Conflict" "The Node was modified; apply your changes to the latest version"))
             (let ((updated (copy-node-record current)))
               (setf (node-record-labels updated) (copy-core-object labels)
-                    (node-record-annotations updated) (copy-core-object annotations))
+                    (node-record-annotations updated) (copy-core-object annotations)
+                    (node-record-taints updated) (node-write-taints input current)
+                    (node-record-unschedulable updated)
+                    (eq t (gethash "unschedulable" (gethash "spec" input (core-object)))))
               (cond
                 ((and (workload-equal-p labels (or (node-record-labels current) (core-object)))
-                      (workload-equal-p annotations (or (node-record-annotations current) (core-object))))
+                      (workload-equal-p annotations (or (node-record-annotations current) (core-object)))
+                      (workload-equal-p (node-record-taints updated) (node-record-taints current))
+                      (eq (node-record-unschedulable updated) (node-record-unschedulable current)))
                  current)
                 (dry-run updated)
                 (t
@@ -327,6 +395,8 @@
                  ;; Other holders keep this record, as with readiness updates.
                  (setf (node-record-labels current) (node-record-labels updated)
                        (node-record-annotations current) (node-record-annotations updated)
+                       (node-record-taints current) (node-record-taints updated)
+                       (node-record-unschedulable current) (node-record-unschedulable updated)
                        (node-record-resource-version current) (node-record-resource-version updated))
                  current))))))))))
 

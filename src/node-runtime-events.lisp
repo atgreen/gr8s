@@ -9,14 +9,21 @@
 
 (in-package #:gr8s)
 
+(defparameter +container-lifecycle-event-reasons+
+  '("Created" "Started" "Killing" "Failed" "FailedPostStartHook" "FailedPreStopHook")
+  "The container occurrences a node reports besides its probes' results.")
+
 (defun record-node-runtime-events (store pod node-name events)
   "Publish bounded same-Pod cumulative pages; ignore malformed or expired records."
   (when (and (vectorp events) (not (stringp events)))
     (loop for event across events for index below 4096
           when (and (hash-table-p event) (stringp (gethash "id" event)) (<= 1 (length (gethash "id" event)) 128)
-                    (member (gethash "kind" event) '("startupProbe" "readinessProbe" "livenessProbe") :test #'equal)
-                    (member (gethash "reason" event) '("Unhealthy" "ProbeWarning") :test #'equal)
-                    (find (gethash "container" event) (pod-containers pod) :test #'equal :key #'container-spec-name)
+                    (member (gethash "kind" event) '("startupProbe" "readinessProbe" "livenessProbe" "lifecycle") :test #'equal)
+                    (member (gethash "reason" event) (if (equal "lifecycle" (gethash "kind" event))
+                                                         +container-lifecycle-event-reasons+
+                                                         '("Unhealthy" "ProbeWarning"))
+                            :test #'equal)
+                    (find (gethash "container" event) (pod-all-containers pod) :test #'equal :key #'container-spec-name)
                     (typep (gethash "count" event) '(integer 1 2147483647))
                     (stringp (gethash "message" event))
                     (<= (length (trivial-utf-8:string-to-utf-8-bytes (gethash "message" event))) 1024)
@@ -45,7 +52,8 @@
                                           "involvedObject" (core-object "apiVersion" "v1" "kind" "Pod" "namespace" (pod-namespace pod)
                                                                         "name" (pod-name pod) "uid" (pod-uid pod)
                                                                         "fieldPath" (format nil "spec.containers{~A}" (gethash "container" event)))
-                                          "reason" (gethash "reason" event) "message" (gethash "message" event) "type" "Warning"
+                                          "reason" (gethash "reason" event) "message" (gethash "message" event)
+                                          "type" (if (equal "Normal" (gethash "type" event)) "Normal" "Warning")
                                           "count" (gethash "count" event) "firstTimestamp" (gethash "firstTimestamp" event)
                                           "lastTimestamp" (gethash "lastTimestamp" event)
                                           "source" (core-object "component" "kubelet" "host" node-name)

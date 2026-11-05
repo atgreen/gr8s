@@ -134,7 +134,8 @@
   (let* ((path (merge-pathnames "network/pool.json"
                                 (uiop:ensure-directory-pathname state-directory)))
          (stored (when (probe-file path) (com.inuoe.jzon:parse path)))
-         (nodes (list-nodes store))
+         ;; A Node created through the API runs no Pods and holds no block.
+         (nodes (remove-if #'node-record-api-only (list-nodes store)))
          (legacy (and (not stored) (legacy-node-pool-config nodes)))
          (base (or stored legacy
                    (make-node-pool-config +default-cluster-pod-cidr+ +default-node-pod-prefix+))))

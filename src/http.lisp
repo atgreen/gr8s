@@ -102,7 +102,7 @@
                                     "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                        (event-api-group) (workload-api-group) (batch-api-group) (budget-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group) (networking-api-group)
-                       (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group))))
+                       (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group) (cert-manager-api-group))))
     (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
@@ -119,6 +119,10 @@
                    "shortNames" #("po"))
       (json-object "name" "pods/status" "singularName" "" "namespaced" t "kind" "Pod"
                    "verbs" #("get" "patch" "update"))
+      (json-object "name" "pods/ephemeralcontainers" "singularName" "" "namespaced" t "kind" "Pod"
+                   "verbs" #("get" "patch" "update"))
+      (json-object "name" "pods/resize" "singularName" "" "namespaced" t "kind" "Pod"
+                   "verbs" #("get" "patch" "update"))
       (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
       (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("create"))
       (json-object "name" "pods/eviction" "singularName" "" "namespaced" t "kind" "Eviction"
@@ -126,7 +130,7 @@
       (json-object "name" "pods/proxy" "singularName" "" "namespaced" t "kind" "PodProxyOptions"
                    "verbs" #("get" "create" "update" "patch" "delete"))
       (json-object "name" "nodes" "singularName" "node" "namespaced" nil "kind" "Node"
-                   "verbs" #("get" "list" "patch" "update") "shortNames" #("no"))
+                   "verbs" #("create" "delete" "get" "list" "patch" "update") "shortNames" #("no"))
       (json-object "name" "replicationcontrollers/status" "singularName" "" "namespaced" t
                    "kind" "ReplicationController" "verbs" #("get" "patch" "update"))
       (json-object "name" "replicationcontrollers/scale" "singularName" "" "namespaced" t
@@ -353,7 +357,10 @@
                          (let ((metadata (gethash "metadata" raw))) (and (hash-table-p metadata) (gethash "name" metadata)))
                          raw nil)
       (let* ((input (request-pod-in-namespace admitted namespace :allow-generate-name t))
-             (final (admit-pod-result store attributes (admit-in-cluster-pod store input))))
+             (final (progn
+                      (when (plusp (length (pod-ephemeral-containers input)))
+                        (invalid-pod "spec.ephemeralContainers: Forbidden: cannot be set on create"))
+                      (admit-pod-result store attributes (admit-in-cluster-pod store input)))))
         (if (core-resource-dry-run-p)
             (progn
               (with-store-lock (store)
@@ -387,7 +394,9 @@
      (json-object "apiVersion" "v1" "kind" "PodList"
                   "metadata" (json-object "resourceVersion" (write-to-string revision))
                   "items" (coerce
-                           (loop for pod in (list-pods store namespace)
+                           ;; In key order, as etcd returns a list. Clients index into it.
+                           (loop for pod in (sort (list-pods store namespace) #'string<
+                                                  :key (lambda (pod) (format nil "~A/~A" (pod-namespace pod) (pod-name pod))))
                                  for object = (pod-list-observed-object store reconciler pod)
                                  when (and object (funcall labels object) (funcall fields object))
                                    collect object) 'vector)))))
@@ -397,8 +406,24 @@
     (json-response
      (pod-response-object pod (reconcile-pod reconciler namespace name)))))
 
+(defun pod-dry-run-object (store replacement existing)
+  "Return what a Pod write would store, with EXISTING's identity, having stored nothing."
+  (let* ((object (copy-json-object (pod-to-object replacement)))
+         (metadata (gethash "metadata" object)))
+    (when existing
+      (let ((old (gethash "metadata" (pod-to-object existing))))
+        (dolist (field '("uid" "creationTimestamp" "resourceVersion" "generation"))
+          (setf (gethash field metadata) (gethash field old)))))
+    (setf (gethash "status" object)
+          (or (and existing (copy-json-object (or (pod-observed-status store existing) (pod-status "Pending"))))
+              (pod-status "Pending")))
+    object))
+
 (defun apply-pod-response (store reconciler name &optional (namespace "default"))
-  (let* ((patch (request-json-object))
+  (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
+         (structured (member content-type '("application/json-patch+json" "application/strategic-merge-patch+json")
+                             :test #'equal))
+         (patch (unless structured (request-json-object)))
          (existing (handler-case (get-pod store namespace name)
                      (kubernetes-error (error)
                        (if (= 404 (kubernetes-error-status-code error))
@@ -406,15 +431,18 @@
                            (error error))))))
     (multiple-value-bind (admitted attributes)
         (admit-pod-input store (if existing "UPDATE" "CREATE") namespace name
-                         (if existing
-                             (merge-json-object
-                              (copy-json-object (pod-to-object existing)) patch)
-                             patch)
+                         (cond ((and existing structured) (pod-patched-object (pod-to-object existing) content-type))
+                               (existing (merge-json-object (copy-json-object (pod-to-object existing)) patch))
+                               (structured (core-resource-error 404 "NotFound" "pods ~S not found" name))
+                               (t patch))
                          existing)
       (let ((replacement (request-pod-in-namespace admitted namespace)))
         (unless (string= name (pod-name replacement))
           (invalid-pod "request name does not match metadata.name"))
         (admit-pod-result store attributes replacement)
+        (when (core-resource-dry-run-p)
+          (return-from apply-pod-response
+            (json-response (pod-dry-run-object store replacement existing) (if existing 200 201))))
         (let ((pod (if existing
                        (update-pod store replacement
                                    (pod-resource-version existing))
@@ -432,6 +460,9 @@
         (unless (string= name (pod-name replacement))
           (invalid-pod "request name does not match metadata.name"))
         (admit-pod-result store attributes replacement)
+        (when (core-resource-dry-run-p)
+          (return-from replace-pod-response
+            (json-response (pod-dry-run-object store replacement (get-pod store namespace name)))))
         ;; An omitted revision is an unconditional update.
         (let ((pod (update-pod store replacement
                                (or (pod-resource-version replacement)
@@ -1048,6 +1079,14 @@ its clients treat any other multi-byte frame as an error message."
        (replace-pod-response store reconciler (first parts) namespace))
       ((and (= 1 (length parts)) (eq method :delete))
        (delete-pod-response store reconciler (first parts) namespace))
+      ((and (= 2 (length parts)) (string= "resize" (second parts)) (eq method :get))
+       (get-pod-response store reconciler (first parts) namespace))
+      ((and (= 2 (length parts)) (string= "resize" (second parts)) (member method '(:put :patch)))
+       (write-pod-resize-response store reconciler (first parts) namespace method))
+      ((and (= 2 (length parts)) (string= "ephemeralcontainers" (second parts)) (eq method :get))
+       (get-pod-response store reconciler (first parts) namespace))
+      ((and (= 2 (length parts)) (string= "ephemeralcontainers" (second parts)) (member method '(:put :patch)))
+       (write-pod-ephemeral-containers-response store reconciler (first parts) namespace method))
       ((and (= 2 (length parts)) (string= "log" (second parts)) (eq method :get))
        (pod-logs-response store reconciler (first parts) namespace))
       ((and (= 2 (length parts)) (string= "exec" (second parts)) (member method '(:get :post)))
@@ -1131,6 +1170,8 @@ than wait for the next, which truncates any body that spans records in flight."
           ((string= path "/apis/rbac.authorization.k8s.io/v1") (rbac-resources-response))
           ((string= path "/apis/gateway.networking.k8s.io") (json-response (gateway-api-group)))
           ((string= path "/apis/gateway.networking.k8s.io/v1") (gateway-discovery-response))
+          ((string= path "/apis/cert-manager.io") (json-response (cert-manager-api-group)))
+          ((string= path "/apis/cert-manager.io/v1") (cert-manager-discovery-response))
           ((string= path "/apis/apps") (json-response (workload-api-group)))
           ((string= path "/apis/batch") (json-response (batch-api-group)))
           ((string= path "/apis/batch/v1") (batch-resources-response))
@@ -1157,6 +1198,10 @@ than wait for the next, which truncates any body that spans records in flight."
           ((and (member method '(:put :patch)) (uiop:string-prefix-p "/api/v1/nodes/" path)
                 (dns-subdomain-p (subseq path (length "/api/v1/nodes/"))))
            (write-node-response store (subseq path (length "/api/v1/nodes/")) method))
+          ((and (eq method :post) (string= path "/api/v1/nodes")) (create-node-response store))
+          ((and (eq method :delete) (uiop:string-prefix-p "/api/v1/nodes/" path)
+                (dns-subdomain-p (subseq path (length "/api/v1/nodes/"))))
+           (delete-node-response store (subseq path (length "/api/v1/nodes/"))))
           ((crd-special-route store path) (dispatch-crd-request store path method))
           ((workload-subresource-route path) (dispatch-workload-subresource store path method))
           ((core-resource-route path)

@@ -12,6 +12,22 @@
   (:report (lambda (condition stream)
              (write-string (runtime-error-message condition) stream))))
 
+(define-condition container-config-error (runtime-error) ()
+  (:documentation "Report a container whose configuration cannot be generated yet, which later attempts may resolve."))
+
+(defun container-config-error (control &rest arguments)
+  "Signal a CONTAINER-CONFIG-ERROR with a formatted message."
+  (error 'container-config-error :message (apply #'format nil control arguments)))
+
+(define-condition container-image-pending (runtime-error) ()
+  (:documentation "Report that a container's image is still being pulled, so its creation must wait."))
+
+(define-condition container-image-pull-error (container-config-error) ()
+  (:documentation "Report that a container's image could not be pulled; a later pass retries it."))
+
+(defparameter +gr8s-termination-file-label+ "io.gr8s.termination-file")
+(defparameter +gr8s-termination-policy-label+ "io.gr8s.termination-policy")
+
 (defstruct runtime-pod
   uid
   resource-version
@@ -52,6 +68,13 @@
     (remhash "terminationGracePeriodSeconds" spec)
     ;; A lowered active deadline changes when the Pod stops, never what runs.
     (remhash "activeDeadlineSeconds" spec)
+    ;; Adding an ephemeral container starts it beside the running workload.
+    (remhash "ephemeralContainers" spec)
+    ;; Each of these changes one container in place, or restarts just that one.
+    (remhash "tolerations" spec)
+    (dolist (field '("containers" "initContainers"))
+      (loop for container across (gethash field spec #())
+            do (dolist (key '("image" "resources" "resizePolicy")) (remhash key container))))
     (octets-to-hex (ironclad:digest-sequence :sha256
                   (trivial-utf-8:string-to-utf-8-bytes
                    (canonical-workload-json spec))))))

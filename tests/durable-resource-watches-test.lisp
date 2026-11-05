@@ -67,6 +67,8 @@
            (setf (gethash "spec" object) (gethash "spec" (workload-fixture (gr8s::core-resource-kind resource) name))))
           ((equal resource "replicationcontrollers")
            (setf (gethash "spec" object) (gethash "spec" (rc-fixture name))))
+          ((equal resource "statefulsets")
+           (setf (gethash "spec" object) (gethash "spec" (stateful-fixture name))))
           ((equal resource "daemonsets")
            (setf (gethash "spec" object) (gethash "spec" (daemonset-fixture name))))
           ((equal resource "controllerrevisions")
@@ -98,7 +100,18 @@
            (setf (gethash "spec" object)
                  (gr8s::core-object "hostnames" (vector "watched.example.com")
                                     "rules" (vector (gr8s::core-object "backendRefs"
-                                                                       (vector (gr8s::core-object "name" "svc" "port" 8443))))))))
+                                                                       (vector (gr8s::core-object "name" "svc" "port" 8443)))))))
+          ((member resource '("issuers" "clusterissuers") :test #'equal)
+           (setf (gethash "spec" object) (gr8s::core-object "selfSigned" (gr8s::core-object))))
+          ((equal resource "certificates")
+           (setf (gethash "spec" object)
+                 (gr8s::core-object "secretName" "watched-tls"
+                                    "issuerRef" (gr8s::core-object "name" "watched" "kind" "ClusterIssuer")
+                                    "dnsNames" (vector "watched.example.com"))))
+          ((equal resource "certificaterequests")
+           (setf (gethash "spec" object)
+                 (gr8s::core-object "issuerRef" (gr8s::core-object "name" "watched")
+                                    "request" "Zm9v"))))
     object))
 
 (test durable-resources-stream-real-http-selector-transitions

@@ -33,6 +33,7 @@
     ("deployments" "Deployment" "apps/v1" t)
     ("replicasets" "ReplicaSet" "apps/v1" t)
     ("daemonsets" "DaemonSet" "apps/v1" t)
+    ("statefulsets" "StatefulSet" "apps/v1" t)
     ("controllerrevisions" "ControllerRevision" "apps/v1" t)
     ("jobs" "Job" "batch/v1" t)
     ("poddisruptionbudgets" "PodDisruptionBudget" "policy/v1" t)
@@ -49,7 +50,11 @@
     ("httproutes" "HTTPRoute" "gateway.networking.k8s.io/v1" t)
     ("tcproutes" "TCPRoute" "gateway.networking.k8s.io/v1" t)
     ("tlsroutes" "TLSRoute" "gateway.networking.k8s.io/v1" t)
-    ("grpcroutes" "GRPCRoute" "gateway.networking.k8s.io/v1" t)))
+    ("grpcroutes" "GRPCRoute" "gateway.networking.k8s.io/v1" t)
+    ("issuers" "Issuer" "cert-manager.io/v1" t)
+    ("clusterissuers" "ClusterIssuer" "cert-manager.io/v1" nil)
+    ("certificates" "Certificate" "cert-manager.io/v1" t)
+    ("certificaterequests" "CertificateRequest" "cert-manager.io/v1" t)))
 
 (defun stored-resource-type (resource)
   "Return the descriptor for a durable Kubernetes resource collection."

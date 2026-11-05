@@ -4,12 +4,16 @@
   socket-path
   log-root
   host-network
+  ;; The node's own address once an agent knows it; hostNetwork Pods share it.
+  host-address
   dns-servers
   dns-searches
   dns-options
   resource-store
   probes
   (lifecycle-lock (bt:make-lock "native lifecycle checkpoint writes"))
+  (hooks (make-container-hook-manager))
+  (images (make-image-pull-manager))
   (deletions (make-deletion-controller)))
 
 (defun make-containerd-runtime
@@ -101,8 +105,9 @@
          (when finished (setf (gethash "finishedAt" terminated) finished))
          (when (cri-container-info-reason info)
            (setf (gethash "reason" terminated) (cri-container-info-reason info)))
-         (when (cri-container-info-message info)
-           (setf (gethash "message" terminated) (cri-container-info-message info)))
+         (let ((message (or (container-termination-message info) (cri-container-info-message info))))
+           (when (and message (plusp (length message)))
+             (setf (gethash "message" terminated) message)))
          (setf (gethash "terminated" state) terminated)))
       (t (setf (gethash "waiting" state)
                (core-object "reason" (if (= (cri-container-info-state info)
@@ -126,10 +131,12 @@
             (state (load-container-lifecycle-state runtime uid))
             (checkpoint-owned-p (plusp (hash-table-count (gethash "containers" state))))
             (history (when (or sandbox checkpoint-owned-p) (incorporate-container-log-history runtime uid state)))
-            (statuses (container-lifecycle-statuses details (or history state))))
+            (all-statuses (container-lifecycle-statuses (mask-post-start-containers runtime details) (or history state)))
+            (statuses (separate-ephemeral-statuses all-statuses state))
+            (ephemeral (nth-value 1 (separate-ephemeral-statuses all-statuses state))))
        (when (or sandbox (and checkpoint-owned-p (plusp (length statuses))))
-         (apply-container-probe-observation runtime
-          (apply-init-container-observation
+         (apply-init-container-observation
+          (apply-container-probe-observation runtime
           (make-runtime-pod
           :uid uid
           :resource-version
@@ -139,18 +146,16 @@
               (gethash "resourceVersion" state ""))
           :spec-fingerprint (or (and sandbox (cdr (assoc +gr8s-spec-fingerprint-label+ (cri-pod-sandbox-info-labels sandbox) :test #'string=)))
                                 (gethash "specFingerprint" state))
-          :pod-ip (cond ((and sandbox (assoc +gr8s-host-network-label+ (cri-pod-sandbox-info-labels sandbox) :test #'string=))
-                         (node-primary-ipv4))
-                        (sandbox (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime) (cri-pod-sandbox-info-id sandbox)))
-                        (t (gethash "podIP" state "")))
+          :pod-ip (cond ((null sandbox) (gethash "podIP" state ""))
+                        ((assoc +gr8s-host-network-label+ (cri-pod-sandbox-info-labels sandbox) :test #'string=)
+                         (containerd-node-address runtime))
+                        (t (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime) (cri-pod-sandbox-info-id sandbox))))
           :phase (container-lifecycle-phase statuses (and sandbox (= gr8s.cri.v1::+podsandboxstate-sandbox_ready+
                                                                          (cri-pod-sandbox-info-state sandbox))))
           :container-details details
-          :status (core-object "containerStatuses" statuses)) state)))))))
-
-(defun containerd-pod-host-network-p (runtime pod)
-  "Return whether POD's sandbox uses the node's network namespace."
-  (or (containerd-runtime-host-network runtime) (pod-host-network-p pod)))
+          :status (let ((status (core-object "containerStatuses" statuses)))
+                    (when (plusp (length ephemeral)) (setf (gethash "ephemeralContainerStatuses" status) ephemeral))
+                    status))) state))))))
 
 (defun containerd-replace-uid (runtime uid)
   "Remove UID's sandbox for recreation under the same Pod, keeping its volumes."
@@ -196,6 +201,7 @@
 (defmethod runtime-terminate-pod ((runtime containerd-runtime) pod deadline)
   "Carry out one cancellable native Pod shutdown job."
   (stop-container-probes runtime (pod-uid pod))
+  (stop-pod-containers-in-order runtime pod deadline)
   (when (pod-finalizers-present-p pod)
     (capture-containerd-finalized-pod runtime pod deadline))
   (containerd-delete-uid runtime (pod-uid pod) deadline :preserve-lifecycle (pod-finalizers-present-p pod))
@@ -211,16 +217,65 @@
   (stop-container-probes runtime)
   (stop-runtime-deletion-controller (containerd-runtime-deletions runtime)))
 
+(defun containerd-termination-file (runtime pod spec attempt mounts)
+  "Create ATTEMPT's world-writable termination message file; return it with its policy.
+A container running as any user can write here, and a user mount at the path takes priority."
+  (let* ((object (pod-runtime-container-object pod spec))
+         (path (gethash "terminationMessagePath" object)))
+    (unless (or (null path)
+                (find path mounts :test #'equal
+                      :key (lambda (mount) (slot-value mount 'gr8s.cri.v1::container-path))))
+      (let ((file (merge-pathnames (format nil "termination/~A.~D" (container-spec-name spec) attempt)
+                                   (containerd-pod-log-directory runtime (pod-uid pod)))))
+        (write-projected-volume-file file (make-array 0 :element-type '(unsigned-byte 8)) #o666 nil)
+        (cons file (gethash "terminationMessagePolicy" object "File"))))))
+
+(defun read-termination-message-file (path)
+  "Return at most the 4096 bytes Kubernetes keeps from the message file at PATH, or NIL."
+  (ignore-errors
+   (with-open-file (in path :element-type '(unsigned-byte 8))
+     (let* ((buffer (make-array (min 4096 (file-length in)) :element-type '(unsigned-byte 8)))
+            (count (read-sequence buffer in)))
+       (when (plusp count)
+         (sb-ext:octets-to-string buffer :end count :external-format '(:utf-8 :replacement #\?)))))))
+
+(defun read-termination-log-tail (path)
+  "Return the end of the CRI log at PATH, as FallbackToLogsOnError reports: 80 lines, 2048 bytes."
+  (ignore-errors
+   (when (and path (probe-file path))
+     (let* ((text (format-pod-logs (uiop:read-file-string path) :tail-lines 80))
+            (bytes (trivial-utf-8:string-to-utf-8-bytes text))
+            (start (max 0 (- (length bytes) 2048))))
+       (when (plusp (length bytes))
+         (sb-ext:octets-to-string (coerce bytes '(vector (unsigned-byte 8))) :start start
+                                  :external-format '(:utf-8 :replacement #\?)))))))
+
+(defun container-termination-message (info)
+  "Return the message an exited attempt left, honoring its termination message policy."
+  (let* ((labels (cri-container-info-labels info))
+         (file (cdr (assoc +gr8s-termination-file-label+ labels :test #'equal)))
+         (policy (cdr (assoc +gr8s-termination-policy-label+ labels :test #'equal))))
+    (when file
+      (or (read-termination-message-file file)
+          (when (and (equal policy "FallbackToLogsOnError")
+                     (not (zerop (cri-container-info-exit-code info))))
+            (read-termination-log-tail (cri-container-info-log-path info)))))))
+
 (defun containerd-create-container (runtime pod sandbox-id sandbox-config spec &key (attempt 0))
   (let ((socket (containerd-runtime-socket-path runtime)))
     (let ((policy (gethash "imagePullPolicy" (pod-runtime-container-object pod spec)
                            (if (or (uiop:string-suffix-p (container-spec-image spec) ":latest")
                                    (not (find #\: (car (last (uiop:split-string (container-spec-image spec) :separator '(#\/)))))))
                                "Always" "IfNotPresent"))))
-      (when (or (equal policy "Always")
-                (and (equal policy "IfNotPresent") (not (cri-image-present-p socket (container-spec-image spec)))))
-        (cri-pull-image socket (container-spec-image spec))))
+      (ensure-container-image runtime (container-spec-image spec) policy))
     (let* ((environment (containerd-pod-environment runtime pod spec sandbox-id))
+           (mounts (containerd-container-mounts runtime pod spec sandbox-id environment))
+           (security (containerd-pod-security-context pod spec))
+           (termination (containerd-termination-file runtime pod spec attempt mounts))
+           (termination-labels
+             (when termination
+               (list (cons +gr8s-termination-file-label+ (namestring (car termination)))
+                     (cons +gr8s-termination-policy-label+ (cdr termination)))))
            (container-id
             (cri-create-container
              socket sandbox-id sandbox-config
@@ -229,14 +284,30 @@
              :command (expand-container-command (container-spec-command spec) environment)
              :args (expand-container-command (container-spec-args spec) environment)
              :env environment
-             :mounts (containerd-container-mounts runtime pod spec sandbox-id environment)
-             :security-context (containerd-pod-security-context pod spec)
+             :mounts (if termination
+                         (append mounts
+                                 (list (make-instance
+                                        'gr8s.cri.v1::mount
+                                        :container-path (gethash "terminationMessagePath" (pod-runtime-container-object pod spec))
+                                        :host-path (namestring (car termination)))))
+                         mounts)
+             :security-context security
              :resources (cri-linux-container-resources (pod-runtime-container-object pod spec))
              :working-directory (gethash "workingDir" (pod-runtime-container-object pod spec))
+             :stdin (gethash "stdin" (pod-runtime-container-object pod spec))
+             :stdin-once (gethash "stdinOnce" (pod-runtime-container-object pod spec))
+             :tty (gethash "tty" (pod-runtime-container-object pod spec))
              :uid (pod-uid pod)
              :attempt attempt
+             :labels termination-labels
              :log-path (container-attempt-log-path (container-spec-name spec) attempt))))
-      (cri-start-container socket container-id))))
+      (record-container-lifecycle-event runtime (pod-uid pod) (container-spec-name spec) attempt
+                                        "Created" (format nil "Created container ~A" (container-spec-name spec)))
+      (cri-start-container socket container-id)
+      (record-container-lifecycle-event runtime (pod-uid pod) (container-spec-name spec) attempt
+                                        "Started" (format nil "Started container ~A" (container-spec-name spec)))
+      (start-container-post-start-hook runtime pod spec container-id sandbox-id)
+      container-id)))
 
 (defmethod runtime-ensure ((runtime containerd-runtime) pod)
   "Converge native containers without destroying an unchanged sandbox or healthy siblings."
@@ -247,6 +318,8 @@
   (checkpoint-container-lifecycle-observation runtime (pod-uid pod) observed)
   ;; A healthy Pod converges no further, so this is where live volumes must update.
   (refresh-pod-projected-volumes runtime pod)
+  (when (reconcile-container-updates runtime pod observed)
+    (setf observed (or (runtime-observe runtime (pod-uid pod)) observed)))
   (setf observed (reconcile-container-probes runtime pod observed))
   (if (or (native-container-progress-required-p pod observed)
           (container-probe-restart-required-p runtime pod observed))
