@@ -267,3 +267,133 @@
         (dotimes (iteration 20)
           (gr8s::reconcile-pod reconciler "default" "hello"))
         (is (= revision (slot-value (gr8s::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision)))))))
+
+;; podster-uqb.114: cancelling a creation interrupted its thread with an ERROR. If the
+;; thread was already signalling, with the handler that expects the cancellation
+;; unbound for a handler test or a handler function, that ERROR found no handler.
+(defstruct (blocking-create-runtime (:include gr8s::fake-runtime)
+                                    (:constructor make-blocking-create-runtime (create)))
+  "Run CREATE in place of the fake backend's creation."
+  create)
+
+(defmethod gr8s:runtime-ensure ((runtime blocking-create-runtime) pod)
+  (declare (ignore pod))
+  (funcall (blocking-create-runtime-create runtime)))
+
+(defun superseded-reconcile-pod (reconciler)
+  "Reconcile the test Pod, answering :SUPERSEDED when cancellation reaches the caller."
+  (handler-case (gr8s::reconcile-pod reconciler "default" "hello")
+    (gr8s::pod-reconciliation-superseded () :superseded)))
+
+(test cancelling-creation-during-a-signal-still-supersedes-it
+  (with-temporary-store (store path)
+    (create-pod store (parse-pod *valid-pod-json*))
+    (let* ((signalling (bt:make-semaphore))
+           (cleaned-up nil)
+           (reconciler (make-reconciler store (make-blocking-create-runtime
+                                               (lambda ()
+                                                 (unwind-protect (error "read failed")
+                                                   (setf cleaned-up t))))))
+           (thread (bt:make-thread
+                    (lambda ()
+                      ;; The read error's handler runs outside the caller's handler for
+                      ;; the cancellation, which is unbound while it runs.
+                      (handler-bind ((error (lambda (condition)
+                                              (declare (ignore condition))
+                                              (bt:signal-semaphore signalling)
+                                              (sleep 3600))))
+                        (superseded-reconcile-pod reconciler)))
+                    :name "gr8s cancelled creation test")))
+      (is-true (bt:wait-on-semaphore signalling :timeout 10))
+      (gr8s::prioritize-reconciler-deletions reconciler '("other-uid"))
+      (is (eq :superseded (bt:join-thread thread)))
+      (is-true cleaned-up)
+      (is (null (gr8s::reconciler-active-convergence reconciler))))))
+
+(test cancelling-creation-passes-handlers-that-recover-from-errors
+  (with-temporary-store (store path)
+    (create-pod store (parse-pod *valid-pod-json*))
+    (let* ((blocked (bt:make-semaphore))
+           (swallowed nil)
+           (reconciler (make-reconciler store (make-blocking-create-runtime
+                                               (lambda ()
+                                                 (handler-case (progn (bt:signal-semaphore blocked) (sleep 3600))
+                                                   (serious-condition () (setf swallowed t)))))))
+           (thread (bt:make-thread (lambda () (superseded-reconcile-pod reconciler)))))
+      (is-true (bt:wait-on-semaphore blocked :timeout 10))
+      (gr8s::prioritize-reconciler-deletions reconciler '("other-uid"))
+      (is (eq :superseded (bt:join-thread thread)))
+      (is-false swallowed))))
+
+(test a-late-creation-cancellation-is-ignored
+  (let* ((left (bt:make-semaphore))
+         (received (bt:make-semaphore))
+         (reconciler (make-reconciler nil (make-fake-runtime)))
+         (thread nil))
+    (setf thread (bt:make-thread
+                  (lambda ()
+                    ;; The operation's catch has gone, as after its creation finished.
+                    (bt:signal-semaphore left)
+                    (bt:wait-on-semaphore received)
+                    :finished)))
+    (setf (gr8s::reconciler-active-convergence reconciler)
+          (gr8s::make-running-pod-convergence :thread thread :uid "finished-uid"))
+    (bt:wait-on-semaphore left)
+    (gr8s::cancel-running-pod-convergence reconciler)
+    (bt:signal-semaphore received)
+    (is (eq :finished (bt:join-thread thread)))))
+
+;; podster-uqb.123: a deletion that never finishes stops every later creation on the
+;; node without any other report.
+(test creation-held-by-an-unfinished-deletion-is-reported
+  (with-temporary-store (store path)
+    (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
+           (deleting (let ((input (com.inuoe.jzon:parse *valid-pod-json*)))
+                       (setf (gethash "name" (gethash "metadata" input)) "deleting")
+                       (create-pod store (parse-pod input))))
+           (reconciler (make-reconciler store (make-fake-runtime)))
+           (dumps 0)
+           (output (make-string-output-stream)))
+      (declare (ignore pod))
+      (gr8s::prioritize-reconciler-deletions reconciler (list (pod-uid deleting)))
+      (let ((gr8s::*held-creation-report-seconds* 0)
+            (gr8s::*held-creation-dump* (lambda () (incf dumps)))
+            (*error-output* output))
+        (is (eq :superseded (superseded-reconcile-pod reconciler)))
+        (is (eq :superseded (superseded-reconcile-pod reconciler))))
+      (let ((text (get-output-stream-string output)))
+        (is (search (format nil "unfinished deletions of ~A" (pod-uid deleting)) text))
+        (is (= 2 (count #\Newline text))))
+      (is (= 1 dumps))
+      (gr8s::finish-reconciler-urgent-deletion reconciler (pod-uid deleting))
+      (is (null (gr8s::reconciler-urgent-since reconciler)))
+      (is (equal "Running" (gethash "phase" (gr8s::reconcile-pod reconciler "default" "hello")))))))
+
+;; podster-uqb.123: cancelling StartContainer halfway left a running task that CRI
+;; reported as exited, so the Pod's deletion, and every creation after it, never ended.
+(test cancelling-creation-lets-a-deferred-step-finish-first
+  (with-temporary-store (store path)
+    (create-pod store (parse-pod *valid-pod-json*))
+    (let* ((entered (bt:make-semaphore))
+           (release (bt:make-semaphore))
+           (finished nil)
+           (after nil)
+           (reconciler (make-reconciler store (make-blocking-create-runtime
+                                               (lambda ()
+                                                 (gr8s::with-running-pod-cancellation-deferred
+                                                   (bt:signal-semaphore entered)
+                                                   (bt:wait-on-semaphore release)
+                                                   (setf finished t))
+                                                 (setf after t)))))
+           (thread (bt:make-thread (lambda () (superseded-reconcile-pod reconciler)))))
+      (is-true (bt:wait-on-semaphore entered :timeout 10))
+      (gr8s::prioritize-reconciler-deletions reconciler '("other-uid"))
+      (sleep 0.2)
+      (is (bt:thread-alive-p thread))
+      (bt:signal-semaphore release)
+      (is (eq :superseded (bt:join-thread thread)))
+      (is-true finished)
+      (is-false after))))
+
+(test a-deferred-step-outside-creation-runs-normally
+  (is (eq :done (gr8s::with-running-pod-cancellation-deferred :done))))

@@ -591,7 +591,8 @@ handler and never gets here. A busy host makes this race likely."
   #+sbcl
   (progn
     (sb-sys:enable-interrupt sb-unix:sigint #'request-shutdown)
-    (sb-sys:enable-interrupt sb-unix:sigterm #'request-shutdown)))
+    (sb-sys:enable-interrupt sb-unix:sigterm #'request-shutdown)
+    (sb-sys:enable-interrupt sb-unix:sigusr1 #'dump-thread-backtraces)))
 
 (defstruct reconciliation-worker
   reconciler

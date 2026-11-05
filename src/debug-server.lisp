@@ -111,6 +111,22 @@ Errors come back as text with a backtrace, so a client never lands in a debugger
         (format t "=== ~A~%~A~%" name (debug-thread-backtrace thread seconds)))))
   (values))
 
+(defun dump-thread-backtraces (&rest ignored)
+  "Print every thread's backtrace to standard error, from a thread of its own.
+SIGUSR1 asks for this, so a process that has stopped making progress can be read
+before it is killed (podster-uqb.123). The signal can land in any thread, perhaps
+one holding a lock, so the handler only starts the reporter."
+  (declare (ignore ignored))
+  (let ((output *error-output*))
+    (bt:make-thread
+     (lambda ()
+       (let ((*standard-output* output))
+         (format output "gr8s thread dump requested at ~A~%" (current-timestamp))
+         (ignore-errors (debug-backtraces "" 2))
+         (format output "gr8s thread dump finished~%")
+         (finish-output output)))
+     :name "gr8s thread dump")))
+
 (defun debug-pod (namespace name)
   "Print a Pod's stored object with its observed, published and finalization state."
   (let* ((store *debug-store*)

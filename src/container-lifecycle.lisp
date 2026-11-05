@@ -514,7 +514,8 @@ A first attempt never ran, so it leaves no trace and is made again as attempt ze
                  ((= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_created+)
                   ;; An interrupted or ambiguous StartContainer must reuse the
                   ;; already created attempt instead of allocating another.
-                  (cri-start-container socket (cri-container-info-id info))
+                  (with-running-pod-cancellation-deferred
+                    (cri-start-container socket (cri-container-info-id info)))
                   (record-container-lifecycle-event runtime uid name (cri-container-info-attempt info)
                                                     "Started" (format nil "Started container ~A" name))
                   (start-container-post-start-hook runtime pod spec (cri-container-info-id info)

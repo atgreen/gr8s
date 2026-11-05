@@ -9,8 +9,27 @@
 
 (in-package #:gr8s)
 
-(define-condition container-probe-stopped (serious-condition) ()
-  (:documentation "Unwind an owned probe operation without converting cancellation to Failure."))
+(defvar *container-probe-stop-owner* nil
+  "The probe worker or stop job whose catch this thread is inside, bound only within that catch.")
+
+(defmacro with-container-probe-stop ((owner) &body body)
+  "Run BODY until STOP-CONTAINER-PROBE-THREAD throws out of it for OWNER, then return NIL.
+Cancellation unwinds an owned probe operation without being converted to Failure."
+  (let ((tag (gensym "OWNER")))
+    `(let ((,tag ,owner))
+       (catch ,tag
+         (let ((*container-probe-stop-owner* ,tag))
+           ,@body)))))
+
+(defun stop-container-probe-thread (thread owner)
+  "Unwind THREAD out of its WITH-CONTAINER-PROBE-STOP for OWNER. One that has left it ignores this.
+Throw instead of signalling: the target may be inside %SIGNAL for another error, where SBCL
+has rebound the handler clusters and an ERROR finds no handler and kills the thread
+(podster-uqb.114). A throw also passes the handlers that record probe failures."
+  (ignore-errors
+    (bt:interrupt-thread thread (lambda ()
+                                 (when (eq *container-probe-stop-owner* owner)
+                                   (throw owner nil))))))
 
 (defstruct container-probe-manager
   "Own probe targets and stop jobs for one native runtime."
@@ -138,21 +157,19 @@
 
 (defun run-container-probe-worker (manager runtime target worker)
   "Keep an exact-attempt probe alive until ownership or runtime shutdown ends."
-  (handler-case
-      (unwind-protect
-           (progn
-             (bt:with-lock-held ((container-probe-manager-lock manager))
-               (setf (container-probe-worker-started-p worker) t))
-             (loop while (bt:with-lock-held ((container-probe-manager-lock manager)) (current-probe-target-p manager target))
-                   do (handler-case (step-container-probe manager runtime target worker)
-                        (container-probe-stopped (condition) (error condition))
-                        (serious-condition (condition)
-                          (format *error-output* "gr8s probe worker ~A/~A ~A failed: ~A~%"
-                                  (container-probe-target-uid target) (container-probe-target-name target)
-                                  (container-probe-worker-kind worker) condition)))
-                      (sleep .05)))
-        (setf (container-probe-worker-finished-p worker) t))
-    (container-probe-stopped () nil)))
+  (unwind-protect
+       (with-container-probe-stop (worker)
+         (bt:with-lock-held ((container-probe-manager-lock manager))
+           (setf (container-probe-worker-started-p worker) t))
+         (loop while (bt:with-lock-held ((container-probe-manager-lock manager)) (current-probe-target-p manager target))
+               do (handler-case (step-container-probe manager runtime target worker)
+                    (serious-condition (condition)
+                      (format *error-output* "gr8s probe worker ~A/~A ~A failed: ~A~%"
+                              (container-probe-target-uid target) (container-probe-target-name target)
+                              (container-probe-worker-kind worker) condition)))
+                  (sleep .05)))
+    (setf (container-probe-worker-finished-p worker) t))
+  nil)
 
 (defun stop-container-probe-target (target)
   "Join already-retired probe workers; cancellation bypasses recoverable probe failures."
@@ -160,8 +177,7 @@
     (let ((thread (container-probe-worker-thread worker)))
       (when (and thread (not (eq thread (bt:current-thread))))
         (when (and (container-probe-worker-started-p worker) (bt:thread-alive-p thread))
-          (ignore-errors (bt:interrupt-thread thread
-                            (lambda () (unless (container-probe-worker-finished-p worker) (error 'container-probe-stopped))))))
+          (stop-container-probe-thread thread worker))
         (bt:join-thread thread))))
   nil)
 
@@ -347,24 +363,25 @@
 
 (defun run-container-probe-stop (runtime manager job)
   "Stop a failed exact attempt outside reconciliation, retaining its actual terminal status."
-  (handler-case
-      (unwind-protect
-           (progn
-             (bt:with-lock-held ((container-probe-manager-lock manager))
-               (when (container-probe-stop-job-cancelled-p job) (return-from run-container-probe-stop nil))
-               (setf (container-probe-stop-job-started-p job) t))
-             (let ((pod (container-probe-stop-job-pod job)))
-               (when pod
-                 (run-container-pre-stop-hook
-                  runtime pod
-                  (cri-container-status (containerd-runtime-socket-path runtime) (container-probe-stop-job-id job))
-                  (container-probe-stop-job-deadline job)
-                  (containerd-pod-sandbox-address runtime pod))))
-             (cri-stop-container (containerd-runtime-socket-path runtime) (container-probe-stop-job-id job)
-                                 :grace-period (max 0 (ceiling (- (container-probe-stop-job-deadline job) (funcall (container-probe-manager-clock manager)))))))
-        (setf (container-probe-stop-job-finished-p job) t))
-    (container-probe-stopped () nil)
-    (serious-condition (condition) (setf (container-probe-stop-job-failure job) condition))))
+  (unwind-protect
+       (with-container-probe-stop (job)
+         (handler-case
+             (progn
+               (bt:with-lock-held ((container-probe-manager-lock manager))
+                 (when (container-probe-stop-job-cancelled-p job) (return-from run-container-probe-stop nil))
+                 (setf (container-probe-stop-job-started-p job) t))
+               (let ((pod (container-probe-stop-job-pod job)))
+                 (when pod
+                   (run-container-pre-stop-hook
+                    runtime pod
+                    (cri-container-status (containerd-runtime-socket-path runtime) (container-probe-stop-job-id job))
+                    (container-probe-stop-job-deadline job)
+                    (containerd-pod-sandbox-address runtime pod))))
+               (cri-stop-container (containerd-runtime-socket-path runtime) (container-probe-stop-job-id job)
+                                   :grace-period (max 0 (ceiling (- (container-probe-stop-job-deadline job) (funcall (container-probe-manager-clock manager)))))))
+           (serious-condition (condition) (setf (container-probe-stop-job-failure job) condition))))
+    (setf (container-probe-stop-job-finished-p job) t))
+  nil)
 
 (defun ensure-container-probe-stops (runtime pod observed manager state)
   "Resume durable failed-probe stops, including after an agent restart."
@@ -464,7 +481,7 @@
             (let ((thread (container-probe-stop-job-thread job)))
               (when thread
                 (when (and (container-probe-stop-job-started-p job) (bt:thread-alive-p thread))
-                  (ignore-errors (bt:interrupt-thread thread (lambda () (unless (container-probe-stop-job-finished-p job) (error 'container-probe-stopped))))))
+                  (stop-container-probe-thread thread job))
                 (bt:join-thread thread)))))
         (unless uid
           (preserve-stopped-container-probe-events runtime manager)

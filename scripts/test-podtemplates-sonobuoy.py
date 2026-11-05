@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -116,6 +117,13 @@ def main():
         return [line for line in subprocess.check_output(["ps", "-eo", "comm=,args="], text=True).splitlines()
                 if line.startswith("containerd-shim") and str(state) in line]
 
+    def dump_threads(reason):
+        """Have gr8s print every thread's stack into its log once per REASON, before anything kills it."""
+        if process.poll() is None and reason not in report.setdefault("threadDumps", []):
+            report["threadDumps"].append(reason)
+            process.send_signal(signal.SIGUSR1)
+            time.sleep(10)
+
     def logs_for(pod, container):
         """Read the real CRI log directly, avoiding API operation queues during image pulls."""
         path = Path("/var/log/gr8s/pods") / pod["metadata"]["uid"] / (container + ".log")
@@ -205,6 +213,7 @@ def main():
                 pods = json.loads(request("/api/v1/pods")[1]).get("items", [])
             except OSError as error:
                 report.setdefault("observationErrors", []).append(str(error))
+                dump_threads("observation failed")
                 continue
             aggregator = next((pod for pod in pods if pod["metadata"]["name"] == "sonobuoy"), None)
             if aggregator:
@@ -216,6 +225,7 @@ def main():
                     break
             time.sleep(1)
         else:
+            dump_threads("integration timeout")
             raise RuntimeError("Upstream cases did not complete within the integration timeout")
         report["podsAtCompletion"] = pods
         for pod in pods:
@@ -264,6 +274,7 @@ def main():
                         break
                     time.sleep(.2)
                 else:
+                    dump_threads("owned runtime deletion did not finish")
                     raise RuntimeError("Owned runtime deletion did not finish")
         except Exception as error:
             report["cleanupError"] = str(error)
@@ -271,6 +282,7 @@ def main():
         try:
             process.wait(timeout=20)
         except subprocess.TimeoutExpired:
+            dump_threads("shutdown timed out")
             process.kill()
             process.wait()
             report["forcedShutdown"] = True
