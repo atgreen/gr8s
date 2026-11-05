@@ -84,3 +84,22 @@
   (is (null (gr8s::load-cron-zone "Etc/UTC")))
   (dolist (name '("bad-time-zone" "Local" "../../etc/passwd" "/etc/passwd" "Not/AZone"))
     (signals gr8s::invalid-cron-schedule (gr8s::load-cron-zone name))))
+
+(test slim-time-zone-rules-expand-into-future-offset-changes
+  (multiple-value-bind (transitions offsets)
+      (gr8s::extend-zone-transitions (vector) (vector) "EST5EDT,M3.2.0,M11.1.0" (cron-at 2026 11 4 12 0))
+    (let ((zone (gr8s::make-cron-zone :transitions transitions :offsets offsets :initial -18000)))
+      ;; US rules: 2026 changes on March 8 and November 1, at 02:00 local.
+      (is (= -18000 (gr8s::cron-zone-offset zone (cron-at 2027 1 15 12 0))))
+      (is (= -18000 (gr8s::cron-zone-offset zone (1- (cron-at 2027 3 14 7 0)))))
+      (is (= -14400 (gr8s::cron-zone-offset zone (cron-at 2027 3 14 7 0))))
+      (is (= -14400 (gr8s::cron-zone-offset zone (1- (cron-at 2027 11 7 6 0)))))
+      (is (= -18000 (gr8s::cron-zone-offset zone (cron-at 2027 11 7 6 0))))))
+  ;; A southern zone with a named offset, a last-week rule and explicit change times.
+  (multiple-value-bind (transitions offsets)
+      (gr8s::extend-zone-transitions (vector) (vector) "<+1030>-10:30<+11>-11,M10.1.0,M4.1.0" (cron-at 2026 11 4 12 0))
+    (let ((zone (gr8s::make-cron-zone :transitions transitions :offsets offsets :initial 37800)))
+      (is (= 39600 (gr8s::cron-zone-offset zone (cron-at 2027 1 15 12 0))))
+      (is (= 37800 (gr8s::cron-zone-offset zone (cron-at 2027 7 15 12 0))))))
+  (signals gr8s::invalid-cron-schedule
+    (gr8s::extend-zone-transitions (vector) (vector) "EST5EDT,J60,J300" (cron-at 2026 11 4 12 0))))

@@ -130,8 +130,11 @@ list as 'nothing is running': Sonobuoy's worker takes it to mean all containers 
                            (format nil "containers with incomplete status: [~{~A~^ ~}]" incomplete))))
             (condition "ContainersReady" readiness reason message)
             (condition "Ready" readiness reason message)
-            (when (pod-resize-in-progress-p pod status)
-              (condition "PodResizeInProgress" "True")))
+            (let ((pending (find-pod-condition incoming "PodResizePending")))
+              (cond (pending
+                     (condition "PodResizePending" "True" (gethash "reason" pending) (gethash "message" pending)))
+                    ((pod-resize-in-progress-p pod status)
+                     (condition "PodResizeInProgress" "True")))))
           (setf conditions (coerce (nreverse conditions) 'vector)
                 (gethash "conditions" status) conditions)
           (when (and (current-status-pod-p store pod) (not (equalp conditions history)))

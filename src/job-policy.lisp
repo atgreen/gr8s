@@ -131,6 +131,11 @@
           (return (values nil :invalid)))
         (push (cons (first numbers) (car (last numbers))) intervals)))))
 
+(defun job-indexes-below (intervals limit)
+  "Return INTERVALS without the indexes at or past LIMIT, which a scaled-down Job no longer has."
+  (loop for (first . last) in intervals
+        when (< first limit) collect (cons first (min last (1- limit)))))
+
 (defun format-job-indexes (intervals)
   "Write INTERVALS as Kubernetes does: two adjacent indexes stay comma separated."
   (format nil "~{~A~^,~}"

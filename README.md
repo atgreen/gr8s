@@ -776,8 +776,9 @@ ReplicationControllers expose the same controller, `scale` and `status` through
 deletion policy. DaemonSets run one Pod on every node their template selects,
 following node labels written through the Node API, and record `apps/v1`
 ControllerRevisions whose data is the JSON a typed client marshals for the
-template. RollingUpdate replaces Pods within `maxUnavailable`; `maxSurge` is
-refused because surge is not implemented. OnDelete leaves running Pods alone.
+template. RollingUpdate replaces Pods within `maxUnavailable`, or with `maxSurge`
+starts each replacement before removing what it replaces. OnDelete leaves running
+Pods alone.
 A Node's labels, annotations, taints and `spec.unschedulable` can be written: the
 scheduler enforces taints and cordoning, and a control-plane pass evicts Pods that
 do not tolerate a NoExecute taint. A Node created through the API has no agent, so
