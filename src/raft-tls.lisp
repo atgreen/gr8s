@@ -15,8 +15,15 @@
 (in-package #:gr8s)
 
 (defstruct raft-credentials
-  "A member's TLS identity: file paths, the CA certificate and, on voters, the issuing PKI."
-  ca-path certificate-path key-path ca pki)
+  "A member's TLS identity: file paths, the CA certificate and, on voters, the issuing PKI.
+NODE-PKI is the control plane's own, whose CA is shared with voters it enrolls."
+  ca-path certificate-path key-path ca pki node-pki)
+
+(defparameter +raft-certificate-renewal-seconds+ (* 30 24 60 60)
+  "How long before a member certificate expires its member starts trying to renew it.")
+
+(defparameter +raft-renewal-check-seconds+ 3600
+  "How often a member checks its certificate, so a failed renewal is soon tried again.")
 
 (defun raft-tls-root (pki)
   "Return the Raft credentials directory within control-plane PKI's own."
@@ -86,6 +93,7 @@
   "Issue a certificate to a new member presenting a Raft join token and return its credentials."
   (let* ((credentials (raft-member-credentials member))
          (pki (and credentials (raft-credentials-pki credentials)))
+         (node-pki (and credentials (raft-credentials-node-pki credentials)))
          (id (gr8s.node.v1::member-id request))
          (voter (not (string-equal "witness" (gr8s.node.v1::role request)))))
     (unless pki (pki-fail "enrollment-disabled" "This Raft member can't enroll others"))
@@ -103,10 +111,34 @@
                        :ca-certificate (uiop:read-file-string (cluster-pki-ca-certificate-path pki))
                        :ca-private-key (if voter
                                            (uiop:read-file-string (cluster-pki-ca-private-key-path pki))
-                                           ""))))))
+                                           "")
+                       :node-ca-certificate
+                       (if (and voter node-pki)
+                           (uiop:read-file-string (cluster-pki-ca-certificate-path node-pki))
+                           "")
+                       :node-ca-private-key
+                       (if (and voter node-pki)
+                           (uiop:read-file-string (cluster-pki-ca-private-key-path node-pki))
+                           ""))))))
 
-(defun enroll-raft-member (root member-id host port &key node-name token ca-pin (role :voter))
-  "Obtain MEMBER-ID's credentials from the member at HOST:PORT and store them under ROOT."
+(defun install-shared-node-ca (node-root certificate-pem key-pem)
+  "Store the cluster's node CA under NODE-ROOT, refusing to replace a different complete one,
+because certificates it has already issued would stop working."
+  (let ((certificate-path (raft-ca-certificate-path node-root))
+        (key-path (raft-ca-key-path node-root))
+        (incoming (pure-tls:certificate-fingerprint (certificate-from-pem certificate-pem))))
+    (unless (and (probe-file certificate-path) (probe-file key-path)
+                 (equalp incoming (pure-tls:certificate-fingerprint
+                                   (first (pure-tls:load-certificate-chain certificate-path)))))
+      (when (and (probe-file certificate-path) (probe-file key-path))
+        (pki-fail "node-ca-conflict"
+                  "~A already has a different cluster CA; join with a new state directory" node-root))
+      (write-private-text-atomically key-path key-pem)
+      (write-private-text-atomically certificate-path certificate-pem))))
+
+(defun enroll-raft-member (root member-id host port &key node-name token ca-pin (role :voter) node-root)
+  "Obtain MEMBER-ID's credentials from the member at HOST:PORT and store them under ROOT.
+A voter given NODE-ROOT also stores the cluster's shared node CA there."
   (ensure-valid-node-name member-id)
   (unless (and token ca-pin)
     (pki-fail "missing-enrollment" "Joining a Raft cluster requires a join token and a CA pin"))
@@ -126,6 +158,9 @@
                 (ca-pem (gr8s.node.v1::ca-certificate response))
                 (key-pem (gr8s.node.v1::ca-private-key response)))
            (verify-enrollment-ca-pin ca-pem ca-pin)
+           (when (and node-root (plusp (length (gr8s.node.v1::node-ca-certificate response))))
+             (install-shared-node-ca node-root (gr8s.node.v1::node-ca-certificate response)
+                                     (gr8s.node.v1::node-ca-private-key response)))
            (write-private-text-atomically (raft-ca-certificate-path root) ca-pem)
            (when (plusp (length key-pem))
              (write-private-text-atomically (raft-ca-key-path root) key-pem))
@@ -139,6 +174,91 @@
   (unless (probe-file (raft-member-certificate-path root))
     (apply #'enroll-raft-member root member-id host port enrollment))
   (load-raft-credentials root))
+
+(defun ensure-joining-control-plane-pki (node-root member-id host port &key node-name token ca-pin)
+  "Enroll a joining control plane if needed, then return its PKI, which uses the cluster's node CA.
+This must come first, or the control plane would create a node CA of its own."
+  (ensure-raft-joiner-credentials (merge-pathnames "raft/" node-root) member-id host port
+                                  :node-name node-name :token token :ca-pin ca-pin :node-root node-root)
+  (ensure-cluster-pki node-root))
+
+(defun raft-certificate-not-after (credentials)
+  "Return when the member certificate currently on disk expires, as a universal time."
+  (pure-tls::x509-certificate-validity-not-after
+   (first (pure-tls:load-certificate-chain (raft-credentials-certificate-path credentials)))))
+
+(defun raft-certificate-expiring-p (credentials now)
+  "Return whether the member certificate is within its renewal period at universal time NOW."
+  (< (- (raft-certificate-not-after credentials) now) +raft-certificate-renewal-seconds+))
+
+(defun raft-member-handle-renew (member request context)
+  "Issue a new certificate to the current member authenticated on CONTEXT's connection."
+  (let* ((credentials (raft-member-credentials member))
+         (pki (and credentials (raft-credentials-pki credentials))))
+    (unless pki (pki-fail "renewal-disabled" "This Raft member can't renew others"))
+    (let ((id (authenticate-raft-peer credentials context)))
+      ;; A valid certificate alone isn't enough: a removed member's must run out.
+      (unless (assoc id (bt:with-lock-held ((raft-member-lock member))
+                          (raft-current-config (raft-member-node member)))
+                     :test #'equal)
+        (pki-fail "unknown-member" "~A isn't a member of this Raft cluster" id))
+      (bt:with-lock-held ((cluster-pki-lock pki))
+        (make-instance 'gr8s.node.v1::renew-member-response
+                       :certificate (issue-raft-member-certificate
+                                     pki id (gr8s.node.v1::certificate-request request)))))))
+
+(defun request-raft-certificate-from-peers (member csr)
+  "Return a new certificate chain from the first peer able to issue one, or signal why none did."
+  (let* ((credentials (raft-member-credentials member))
+         (node (raft-member-node member))
+         (peers (bt:with-lock-held ((raft-member-lock member))
+                  (loop for id being the hash-keys of (raft-node-peer-addresses node) using (hash-value address)
+                        unless (equal id (raft-node-id node)) collect address)))
+         (failure "this member knows no peers"))
+    (dolist (address peers (pki-fail "renewal-failed" "No Raft member could renew this certificate: ~A" failure))
+      (handler-case
+          (let ((channel (make-raft-channel credentials (first address) (second address) 10)))
+            (unwind-protect
+                 (return (gr8s.node.v1::certificate
+                          (gr8s.node.v1::raft-transport-renew-member
+                           (gr8s.node.v1::make-raft-transport-stub channel)
+                           (make-instance 'gr8s.node.v1::renew-member-request :certificate-request csr)
+                           :timeout 10)))
+              (ignore-errors (ag-grpc:channel-close channel))))
+        ((or error sb-ext:timeout) (condition) (setf failure (princ-to-string condition)))))))
+
+(defun renew-raft-member-certificate (member)
+  "Replace MEMBER's certificate, keeping its key. New connections present it, and an old
+one fails once its certificate expires and is then opened again with the new one."
+  (let* ((credentials (raft-member-credentials member))
+         (pki (raft-credentials-pki credentials))
+         (id (raft-node-id (raft-member-node member)))
+         (csr (generate-node-key-and-csr id (raft-credentials-key-path credentials)))
+         ;; A voter holds the CA, so it can renew itself even after being offline past expiry.
+         (chain (if pki
+                    (bt:with-lock-held ((cluster-pki-lock pki))
+                      (issue-raft-member-certificate pki id csr))
+                    (request-raft-certificate-from-peers member csr))))
+    (verify-node-server-certificate (certificate-from-pem chain) (raft-credentials-ca credentials))
+    (write-private-text-atomically (raft-credentials-certificate-path credentials) chain)))
+
+(defun raft-member-renew-if-needed (member &optional (now (get-universal-time)))
+  "Renew MEMBER's certificate if it's due. A failure is reported and retried by the next check."
+  (let ((credentials (raft-member-credentials member)))
+    (when (raft-certificate-expiring-p credentials now)
+      (handler-case (renew-raft-member-certificate member)
+        ((or error sb-ext:timeout) (condition)
+          (format *error-output* "gr8s Raft member ~A certificate expires in ~D days and couldn't be renewed: ~A~%"
+                  (raft-node-id (raft-member-node member))
+                  (floor (- (raft-certificate-not-after credentials) now) 86400) condition))))))
+
+(defun raft-renewal-loop (member)
+  "Check MEMBER's certificate now and then periodically, until the member stops."
+  (loop while (raft-member-running member) do
+    (raft-member-renew-if-needed member)
+    (loop repeat +raft-renewal-check-seconds+
+          while (raft-member-running member)
+          do (sleep 1))))
 
 (defun raft-server-tls-options (credentials)
   "Return server options for CREDENTIALS. Clients without a certificate may connect only to enroll."

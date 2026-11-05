@@ -38,7 +38,8 @@
                (if init
                    (ensure-raft-founder-credentials root id)
                    (ensure-raft-joiner-credentials root id join-host join-port
-                                                   :node-name node-name :token token :ca-pin ca-pin)))))
+                                                   :node-name node-name :token token :ca-pin ca-pin
+                                                   :node-root (cluster-pki-root pki))))))
          (apply-fn (lambda (command)
                      (when (consp command)
                        (case (car command)
@@ -52,6 +53,7 @@
                                        (install-pod-state-blob store (second command))))
                          (:node-state (unless (raft-leader-p (raft-member-node member))
                                         (install-node-state-blob store (second command)))))))))
+    (when credentials (setf (raft-credentials-node-pki credentials) pki))
     (setf member (start-raft-member id :host host :port port :apply-fn apply-fn :credentials credentials))
     (cond
       (init

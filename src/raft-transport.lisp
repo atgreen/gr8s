@@ -61,7 +61,7 @@
   (lock (bt:make-lock "gr8s raft node"))
   grpc-server (host "127.0.0.1") (port 0)
   (links (make-hash-table :test 'equal))      ; peer-id -> raft-peer-link
-  (running nil) server-thread tick-thread
+  (running nil) server-thread tick-thread renewal-thread
   ;; Optional leader-side Join handler (podster-c2d.10), a function of the
   ;; decoded JoinRequest returning a JoinResponse. Set by the cluster layer; when
   ;; unset the member rejects joins (accepted=false, no leader hint).
@@ -151,7 +151,9 @@
                            (make-instance 'gr8s.node.v1::join-response :accepted nil))))
      :enroll-member-handler (lambda (request context)
                               (declare (ignore context))
-                              (raft-member-handle-enroll member request)))
+                              (raft-member-handle-enroll member request))
+     :renew-member-handler (lambda (request context)
+                             (raft-member-handle-renew member request context)))
     (setf (raft-member-server-thread member)
           (bt:make-thread (lambda () (ag-grpc:server-start server))
                           :name (format nil "gr8s raft server ~A" id)))
@@ -178,6 +180,10 @@
 
 (defun raft-member-start (member &key (tick-seconds 0.05))
   "Begin driving the election/heartbeat clock (call after peers are set)."
+  (when (raft-member-credentials member)
+    (setf (raft-member-renewal-thread member)
+          (bt:make-thread (lambda () (raft-renewal-loop member))
+                          :name (format nil "gr8s raft renewal ~A" (raft-node-id (raft-member-node member))))))
   (setf (raft-member-tick-thread member)
         (bt:make-thread (lambda () (raft-member-tick-loop member tick-seconds))
                         :name (format nil "gr8s raft tick ~A" (raft-node-id (raft-member-node member))))))
@@ -194,6 +200,8 @@
   (setf (raft-member-running member) nil)
   (when (and (raft-member-tick-thread member) (bt:thread-alive-p (raft-member-tick-thread member)))
     (ignore-errors (bt:join-thread (raft-member-tick-thread member))))
+  (when (and (raft-member-renewal-thread member) (bt:thread-alive-p (raft-member-renewal-thread member)))
+    (ignore-errors (bt:join-thread (raft-member-renewal-thread member))))
   (maphash (lambda (id link) (declare (ignore id))
              (when (and (raft-peer-link-thread link) (bt:thread-alive-p (raft-peer-link-thread link)))
                (ignore-errors (bt:join-thread (raft-peer-link-thread link))))

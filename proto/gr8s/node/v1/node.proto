@@ -272,6 +272,16 @@ service RaftTransport {
   // Exchange a one-time Raft join token for a member certificate. This is the only
   // call that doesn't need one, and the caller must first check the CA it pinned.
   rpc EnrollMember(EnrollMemberRequest) returns (EnrollMemberResponse);
+  // Exchange a member's still-valid certificate for a new one with the same name.
+  rpc RenewMember(RenewMemberRequest) returns (RenewMemberResponse);
+}
+
+message RenewMemberRequest {
+  bytes certificate_request = 1;
+}
+
+message RenewMemberResponse {
+  string certificate = 1;      // PEM chain for the member
 }
 
 message EnrollMemberRequest {
@@ -286,6 +296,9 @@ message EnrollMemberResponse {
   string certificate = 1;      // PEM chain for the member
   string ca_certificate = 2;
   string ca_private_key = 3;   // voters only, so they can admit members after a failover
+  // Voters only, so agents and API clients keep working when another member takes over.
+  string node_ca_certificate = 4;
+  string node_ca_private_key = 5;
 }
 
 message RaftEnvelope {
