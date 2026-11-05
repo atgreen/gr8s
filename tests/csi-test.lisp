@@ -82,6 +82,15 @@
                                                               "source" (gr8s::core-object "persistentVolumeName" "pv"))
                                     "status" (gr8s::core-object "attached" t))))
       (is (null (gethash "status" (gr8s::create-core-resource store "volumeattachments" input nil))))
+      ;; external-attacher adds its finalizer repeatedly before any status exists.
+      (dotimes (attempt 2)
+        (gr8s::update-core-resource store "volumeattachments" nil "a1"
+                                    (lambda (old)
+                                      (let ((copy (gr8s::copy-core-object old)))
+                                        (setf (gethash "labels" (gethash "metadata" copy))
+                                              (gr8s::core-object "attempt" (write-to-string attempt)))
+                                        copy))))
+      (is (null (gethash "status" (gr8s::get-core-resource store "volumeattachments" nil "a1"))))
       (signals kubernetes-error
         (gr8s::update-core-resource store "volumeattachments" nil "a1"
                                     (lambda (old)

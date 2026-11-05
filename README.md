@@ -636,9 +636,9 @@ stable ordinal names and hostnames, `OrderedReady` and `Parallel` Pod management
 `spec.ordinals`, rolling updates in reverse ordinal order bounded by a partition,
 `OnDelete`, and ControllerRevision history, so a template returning to an earlier
 form rolls back to that revision. Each `volumeClaimTemplates` entry becomes a real
-PersistentVolumeClaim per ordinal that binds through the storage controller, so a
-Pod waits Pending until a matching static PersistentVolume exists, because gr8s has
-no dynamic provisioner. `persistentVolumeClaimRetentionPolicy` is honored in both
+PersistentVolumeClaim per ordinal that binds through the storage controller, using
+the default `local-path` class unless a template names another.
+`persistentVolumeClaimRetentionPolicy` is honored in both
 directions. A rolling update's `maxUnavailable` above 1 is refused.
 
 `policy/v1` PodDisruptionBudgets have a `status` subresource and a disruption
@@ -685,10 +685,13 @@ it can never run a Pod and keeps whatever status was written; an agent's own Nod
 cannot be deleted through the API.
 
 PersistentVolume, PersistentVolumeClaim and StorageClass APIs now support durable
-CRUD, typed protobuf, status subresources and resumable JSON watches. Static
-filesystem hostPath/local volumes bind to matching claims and mount real backing
-storage into native Pods. See [persistent storage](docs/persistent-storage.md)
-for supported behavior, protection, Retain reclamation and remaining extensions.
+CRUD, typed protobuf, status subresources and resumable JSON watches. A default
+`local-path` class and a `gr8s.io/nfs` provisioner create volumes on demand with no
+helper Pod, static NFS, `local` and `hostPath` volumes mount into native Pods, and
+CSI drivers can be installed with their usual sidecars. The dynamic, NFS and CSI
+paths have unit tests but haven't yet run against real NFS mounts or real drivers.
+See [persistent storage](docs/persistent-storage.md) for supported behavior,
+protection, reclamation and remaining extensions.
 
 CRDs in `apiextensions.k8s.io/v1` now establish real schema-backed custom APIs.
 Custom resources support durable JSON CRUD/status/watch, per-version discovery

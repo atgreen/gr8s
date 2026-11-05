@@ -584,3 +584,65 @@
     (is (= (* 32 1024 1024)
            (gr8s::pod-memory-volume-bytes (empty-dir-test-pod "{\"medium\":\"Memory\"}" limits) (gr8s::core-object)))))
   (is (null (gr8s::pod-memory-volume-bytes (empty-dir-test-pod "{\"medium\":\"Memory\"}") (gr8s::core-object)))))
+
+;;; Across the real node protocol
+
+(test released-volumes-are-reclaimed-through-the-remote-agent
+  (with-temporary-store (store path)
+    (gr8s:register-node
+     store (gr8s:make-node-record :id "node-remote" :name "worker-a" :pod-cidr "10.88.1.0/24"))
+    (let* ((server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0))
+           (node-runtime (gr8s::make-node-runtime (merge-pathnames "worker-a/runtime/" path)
+                                                  (make-fake-runtime) nil))
+           (control (gr8s::make-node-session-control))
+           (agent-thread nil)
+           (root (merge-pathnames "volumes/" path)))
+      (unwind-protect
+           (progn
+             (gr8s::start-node-runtime node-runtime)
+             (setf agent-thread
+                   (bt:make-thread
+                    (lambda ()
+                      (gr8s:run-node-session
+                       "127.0.0.1" (gr8s:node-grpc-server-port server)
+                       "worker-a" (merge-pathnames "worker-a/identity.json" path)
+                       (lambda (snapshot) (gr8s::reconcile-node-snapshot node-runtime snapshot))
+                       :operation-handler
+                       (lambda (variant payload emit)
+                         (gr8s::dispatch-node-operation node-runtime variant payload emit))
+                       :status-provider
+                       (lambda ()
+                         (make-instance
+                          'gr8s.node.v1::node-status
+                          :csi-drivers (list (make-instance 'gr8s.node.v1::csi-driver-registration
+                                                            :name "csi.example.test" :node-id "n1"))))
+                       :reconnect-delay 0.01
+                       :control control))
+                    :name "gr8s remote reclaim test agent"))
+             (is-true (wait-until (lambda () (gr8s:node-record-ready-p (gr8s:get-node store "worker-a")))
+                                  :timeout 5))
+             ;; The agent's driver report arrives through its status messages.
+             (is-true (wait-until
+                       (lambda ()
+                         (handler-case (gr8s::get-core-resource store "csinodes" nil "worker-a")
+                           (kubernetes-error () nil)))
+                       :timeout 10))
+             (gr8s::create-core-resource store "storageclasses" (local-path-class root) nil)
+             (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "claim" :class "fast") "default")
+             (gr8s:schedule-pod store (create-pod store (storage-test-pod "consumer" "claim")))
+             (gr8s::reconcile-storage-bindings store)
+             (let* ((name (claim-volume-name store "claim"))
+                    (backing (format nil "~A~A/" (namestring root) name))
+                    (attempts (make-hash-table :test #'equal)))
+               (ensure-directories-exist (format nil "~Ainner/" backing))
+               (gr8s::remove-pod store "default" "consumer")
+               (gr8s::delete-core-resource store "persistentvolumeclaims" "default" "claim")
+               (gr8s::reconcile-storage-bindings store)
+               (is-true (gr8s::storage-volume-reclaimable-p (gr8s::get-core-resource store "persistentvolumes" nil name)))
+               (gr8s::reclaim-released-volumes store server attempts)
+               (is (null (probe-file backing)))
+               (signals kubernetes-error (gr8s::get-core-resource store "persistentvolumes" nil name))))
+        (gr8s::cancel-node-session control)
+        (when agent-thread (ignore-errors (bt:join-thread agent-thread)))
+        (gr8s::stop-node-runtime node-runtime)
+        (gr8s:stop-node-grpc-server server)))))

@@ -1,52 +1,200 @@
 # Persistent storage
 
-PV and PVC `v1` and StorageClass `storage.k8s.io/v1` APIs support durable CRUD,
+## What works out of the box
+
+| Volume | How to use it | Sharing | Reclaim |
+|---|---|---|---|
+| Node-local directory | Default class `local-path`, or a class using `gr8s.io/local-path` | One node | `Delete` or `Retain` |
+| NFS, dynamic | A class using `gr8s.io/nfs` | Many nodes | `Delete` or `Retain`, or `onDelete: archive` |
+| NFS, static | A PV or Pod with an `nfs` source | Many nodes | `Retain` |
+| `local` and `hostPath` | A PV or Pod with that source | One node | `Retain` |
+| `emptyDir` | A Pod volume, on disk or `medium: Memory` | One Pod | Removed with the Pod |
+| Generic ephemeral | A Pod `ephemeral` volume using any dynamic class | One Pod | Removed with the Pod |
+| CSI | A driver you install, as a PV or an inline Pod volume | Set by the driver | Set by the driver |
+
+No helper Pod, image or NFS client package is needed for the built-in kinds.
+
+PV and PVC `v1` and the `storage.k8s.io/v1` StorageClass, CSIDriver, CSINode,
+VolumeAttachment and CSIStorageCapacity APIs support durable CRUD,
 JSON/merge/strategic patches, optimistic resource versions, selectors, paginated
-lists, JSON watches and typed Kubernetes protobuf requests. PVs and StorageClasses
-are cluster scoped; PVCs are namespace scoped. PV/PVC status subresources preserve
-specification fields. Ordinary writes preserve controller-owned status.
+lists, JSON watches and typed Kubernetes protobuf requests. PV, PVC and
+VolumeAttachment status subresources preserve specification fields.
 
-The controller binds administrator-provided static PVs to matching claims. Capacity, access modes, class, selector, node affinity,
-claim identity and reservations constrain selection. Binding commits both objects
-atomically and persists the exact claim UID. `WaitForFirstConsumer` classes defer
-allocation until a consumer has a compatible assigned node. Class topology and
-PV node affinity constrain scheduling. RWO consumers must use the same node.
+## Node-local volumes
 
-Native consumers receive the actual backing path through CRI bind mounts.
-`local` sources require node affinity and an existing directory. `hostPath` type
-checks run on the real node; directories/files are created only for the explicit
-`DirectoryOrCreate`/`FileOrCreate` types. Direct Pod `hostPath` sources are also
-supported. Pod PVC source `readOnly` and container `volumeMount.readOnly` produce read-only
-mounts. Access modes constrain binding without changing these mount flags. A control
-plane restart preserves healthy native consumers and existing backing data.
+`gr8s serve` creates the default `local-path` class once, using
+`WaitForFirstConsumer` and `Delete`. Deleting the class is respected on later
+starts. `--local-storage-path DIR` sets its directory, which defaults to
+`/var/lib/gr8s/storage`, and a class can set its own with the `path` parameter.
 
-PVC protection retains a deleting claim while nonterminal Pods reference it.
-PV protection retains a deleting volume while its exact claimant exists. Retain
-leaves the backing data and old claim UID intact after claim deletion; creating
-a new claim with the same name cannot take ownership. An administrator must
-explicitly clear the old PV claim reference before reuse. Additional user
-finalizers remain in effect.
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast
+provisioner: gr8s.io/local-path
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+parameters:
+  path: /mnt/ssd/volumes
+```
 
-CSI drivers, dynamic provisioners, raw block devices, `ReadWriteOncePod`, volume
-mount options, snapshots/clones and automatic expansion are not implemented.
-Static reservations for these sources and modes can become Bound when their
-capacity, class, mode and exact claim UID match. Binding reserves storage; it
-does not assert that a node mounted it. The native mount path rejects unavailable
-plugins or modes and never reports a successful mount for them. Unprovisioned
-claims remain Pending. A Delete or Recycle reclaim policy without a backend deleter becomes
-Failed with `ReclaimUnsupported`; backing data is retained. Storing a
-StorageClass does not install a provisioner. Server-side apply and `subPath`
-mounts remain unsupported.
+A claim gets a `pvc-<uid>` directory on the node its first consumer is scheduled
+to, and its Pods stay on that node. The agent creates the directory with mode
+`0777`, so a workload can run as any user. `ReadWriteMany` and `ReadOnlyMany`
+claims stay Pending, because one node's directory can't serve other nodes.
 
-Run the native smoke as root in a disposable Linux node with kubectl available:
+## NFS
+
+An existing share can be used directly from a PV or a Pod:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: media
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes: [ReadWriteMany]
+  mountOptions: [nconnect=4, noatime]
+  nfs:
+    server: nas.example.test
+    path: /export/media
+```
+
+For a directory per claim, use a dynamic class. `server` and `share` are required,
+and `onDelete` is `delete` (the default), `retain` or `archive`, which renames the
+directory to `archived-<name>`:
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: shared
+provisioner: gr8s.io/nfs
+allowVolumeExpansion: true
+mountOptions: [hard, nconnect=4]
+parameters:
+  server: nas.example.test
+  share: /export/k8s
+  onDelete: delete
+```
+
+The agent mounts through `mount(2)`, so hosts need the kernel NFS client but not
+`mount.nfs` or `nfs-common`:
+
+- **Versions:** it tries NFSv4.2, 4.1 and 4.0 unless `vers` or `nfsvers` is set.
+- **NFSv3:** this defaults to `nolock`, because `rpc.statd` isn't assumed. Add the
+  `lock` option only if the host runs it. NFSv4 has no such limit.
+- **Server names:** these are resolved by the host, so a cluster Service name or
+  ClusterIP won't work as a server.
+- **Mount options:** unknown options are rejected when the object is created.
+  `nosuid` and `nodev` are always set.
+- **Dead servers:** each mount call waits up to five seconds and then keeps going in
+  the background, so a dead server holds up only the Pods that use it. On Pod
+  deletion, a blocked unmount is forced and detached.
+
+Each Pod gets its own mount, removed when the Pod ends.
+
+## Reclaim
+
+A provisioned volume is released when its claim is deleted and no running Pod uses
+it. With `Delete`, the control plane asks an agent to remove the directory, then
+deletes the PV. It retries every 30 seconds until that works, for example while
+the volume's node is down. Removal never follows symbolic links or crosses into
+another filesystem, and only touches a `pvc-*` directory matching the PV's name.
+
+`Retain` keeps the data and the old claim UID, so a new claim with the same name
+can't take it over. An administrator must clear the PV's `claimRef` to reuse it.
+A static PV with `Delete` or `Recycle` becomes `Failed` with `ReclaimUnsupported`,
+and its data is kept.
+
+## Expansion and capacity
+
+A bound claim can grow only if its class sets `allowVolumeExpansion`, and it can
+never shrink. For the built-in provisioners, growth updates the recorded capacity.
+
+**Capacity isn't enforced for `local-path` or NFS:** a volume can outgrow its
+request until the disk or share is full. k3s's local-path provisioner has the same
+limit. Treat these sizes as requests rather than quotas.
+
+## emptyDir and generic ephemeral volumes
+
+A disk-backed `emptyDir` may set `sizeLimit`. The node measures usage every ten
+seconds and evicts a Pod that exceeds it. A `medium: Memory` volume is a tmpfs
+sized by the smaller of `sizeLimit` and the Pod's total memory limit.
+
+A generic ephemeral volume is a PV-backed scratch space. gr8s creates a claim called
+`<pod>-<volume>`, owned by the Pod, and it's deleted with the Pod, which also
+reclaims its volume under a `Delete` class. An existing claim with that name is
+never adopted: the Pod fails to start with an error instead.
+
+## CSI
+
+Install a driver with its usual manifests, using its sidecars. gr8s plays the
+kubelet's part and the Kubernetes controllers' part:
+
+- **Registration:** the agent watches `/var/lib/kubelet/plugins_registry`, which
+  `node-driver-registrar` uses, and publishes a CSINode object for each node.
+- **Provisioning:** claims of a class with a third-party provisioner get the
+  annotations `external-provisioner` watches for, including the selected node for
+  `WaitForFirstConsumer`. It creates the PV, which then binds as normal.
+- **Attaching:** gr8s creates a VolumeAttachment for `external-attacher` and waits
+  for `status.attached`. A CSIDriver with `attachRequired: false` skips this, and
+  as in Kubernetes, a driver with no CSIDriver object is assumed to need it.
+- **Mounting:** the agent calls `NodeStageVolume` and `NodePublishVolume` at the
+  kubelet's own paths, then unpublishes when the Pod ends. It unstages when the last
+  Pod on the node stops using the volume.
+- **Inline volumes:** a Pod `csi` volume needs a CSIDriver listing `Ephemeral`.
+
+`mountPropagation` is supported on volume mounts, and `Bidirectional` needs a
+privileged container, as upstream requires. `/var/lib/kubelet` must be on a shared
+mount, which is the systemd default. Leases are served for sidecar leader election.
+
+Not implemented yet: `NodeExpandVolume`, volume stats, raw block volumes, `fsGroup`
+delegation, service account tokens for drivers and Node topology labels. Snapshot
+and clone data sources are passed through to `external-provisioner`, but gr8s
+doesn't serve the snapshot APIs, which come from a driver's own CRDs.
+
+## Binding and protection
+
+The controller matches capacity, access modes, class, selector, node affinity and
+claim identity, preferring an existing PV over provisioning. Binding commits both
+objects atomically and persists the exact claim UID. `WaitForFirstConsumer` waits
+for a consumer on a compatible node, and class topology and PV node affinity
+constrain scheduling. `ReadWriteOnce` consumers must share a node, and
+`ReadWriteOncePod` allows one consumer.
+
+Binding reserves storage; it doesn't assert that a node mounted it. Sources the
+agent can't mount can still bind, and then the Pod reports the mount failure. Read
+`Bound` with that in mind for raw block volumes and other unsupported PV sources.
+
+A static `hostPath` PV without node affinity has one directory per node. A
+replacement Pod on another node sees a different directory, and with
+`DirectoryOrCreate` that directory is silently empty, so set node affinity.
+
+PVC protection retains a deleting claim while nonterminal Pods reference it, and PV
+protection retains a deleting volume while its exact claimant exists. Additional
+user finalizers remain in effect. `subPath` and `subPathExpr` mounts are supported.
+
+## Testing
+
+Run these as root on a disposable Linux node with kubectl, as described in
+`AGENTS.md`:
 
 ```sh
 python3 scripts/test-storage-native.py --executable /path/to/gr8s.bin
+python3 scripts/test-storage-dynamic-native.py --executable /path/to/gr8s.bin \
+  --nfs-server 192.0.2.5 --nfs-share /export/k8s
 ```
 
-The 2026-11-04 VM run passed real local PV/PVC and direct hostPath writes,
-read-only enforcement, restart preservation without restarting the consumer,
-claim protection, Retain UID ownership, explicit reclamation and clean native
-exit with zero owned shims. Its isolated state directory was
-`/tmp/gr8s-storage-native-mfmh70zs`. The host suite passed 1,993 checks with five
-optional integration skips (1,998 total).
+The first passed on a VM on 2026-11-04: real local PV/PVC and direct hostPath writes,
+read-only enforcement, restart preservation without restarting the consumer, claim
+protection, Retain UID ownership, explicit reclamation and clean native exit.
+
+**The dynamic, NFS and CSI paths have unit tests only so far.** They run through
+injected mount calls and a fake driver, and haven't yet been run against a real
+kernel NFS mount, a real CSI driver or real sidecars. The second script above covers
+the NFS and local-path half. Its `--nfs-*` options are optional, and it needs a
+share the node can write to.

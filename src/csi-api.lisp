@@ -65,8 +65,8 @@
                                 '("persistentVolumeName" "inlineVolumeSpec")))
            (core-resource-error 422 "Invalid" "spec.source requires exactly one volume source"))))
      (unless *storage-status-write*
-       (if existing
-           (setf (gethash "status" object) (copy-core-object (gethash "status" existing (core-object))))
+       (if (and existing (gethash "status" existing))
+           (setf (gethash "status" object) (copy-core-object (gethash "status" existing)))
            (remhash "status" object))))
     ((equal resource "csistoragecapacities")
      (require-nonempty-string (gethash "storageClassName" object) "storageClassName"))))
