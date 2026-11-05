@@ -56,15 +56,26 @@
           (list (raft-member-host member) (raft-member-port member))))
   (raft-cluster-install-join-handler member :pki pki))
 
-(defun raft-cluster-init (member &key (role :voter) pki)
+(defun raft-cluster-init (member &key (role :voter) pki api-url)
   "Form a brand-new cluster from MEMBER alone: it is the sole voter and, once
    RAFT-MEMBER-START drives its clock, elects itself leader. It also answers Join
    RPCs (authenticating with PKI when given) so other members can be admitted;
-   additional members are brought in with RAFT-CLUSTER-JOIN or -ADD-MEMBER."
+   additional members are brought in with RAFT-CLUSTER-JOIN or -ADD-MEMBER.
+   API-URL is this member's HTTP API base URL, replicated for leader redirects."
   (bt:with-lock-held ((raft-member-lock member))
     (raft-member-enable-dynamic-membership member :pki pki)
-    (raft-configure (raft-member-node member)
-                    (list (cons (raft-node-id (raft-member-node member)) role)))))
+    (let ((node (raft-member-node member)))
+      (when api-url (setf (gethash (raft-node-id node) (raft-node-api-urls node)) api-url))
+      (raft-configure node (list (cons (raft-node-id node) role))))))
+
+(defun raft-member-leader-api-url (member)
+  "The HTTP API base URL of the current Raft leader, as this member knows it, or
+   NIL (including when this member is itself the leader)."
+  (bt:with-lock-held ((raft-member-lock member))
+    (let* ((node (raft-member-node member))
+           (leader (raft-node-leader-id node)))
+      (when (and leader (not (equal leader (raft-node-id node))))
+        (gethash leader (raft-node-api-urls node))))))
 
 (defun raft-cluster-prepare-joiner (member seed-addresses &key pki)
   "Prepare a fresh MEMBER to join an existing cluster. SEED-ADDRESSES is an alist
@@ -121,7 +132,8 @@
          (port (gr8s.node.v1::port request))
          (role (if (string-equal "witness" (gr8s.node.v1::role request)) :witness :voter))
          (node-name (gr8s.node.v1::node-name request))
-         (token (gr8s.node.v1::join-token request)))
+         (token (gr8s.node.v1::join-token request))
+         (api-url (gr8s.node.v1::api-url request)))
     ;; Authenticate with the cluster join token (same flow as node enrollment).
     (when pki
       (validate-token pki token node-name))
@@ -136,7 +148,8 @@
                            :leader-host (if addr (first addr) "")
                            :leader-port (if addr (second addr) 0)))
           (progn
-            (raft-propose-config node :add id :role role :address (list host port))
+            (raft-propose-config node :add id :role role :address (list host port)
+                                      :api-url (and (plusp (length api-url)) api-url))
             (make-instance 'gr8s.node.v1::join-response
                            :accepted t
                            :leader-id (raft-node-id node)
@@ -149,7 +162,7 @@
                                :id mid :host (first addr) :port (second addr)
                                :role (string-downcase (symbol-name (raft-member-role node mid))))))
 
-(defun raft-cluster-call-join (member host port &key node-name token (role :voter) (timeout 5))
+(defun raft-cluster-call-join (member host port &key node-name token (role :voter) api-url (timeout 5))
   "Dial HOST:PORT and send one Join request for MEMBER. Returns the JoinResponse."
   (let ((channel (ag-grpc:make-channel host port :timeout timeout
                                        :tls (raft-member-tls member) :tls-verify nil
@@ -163,11 +176,12 @@
                                         :port (raft-member-port member)
                                         :role (string-downcase (symbol-name role))
                                         :node-name (or node-name "")
-                                        :join-token (or token ""))))
+                                        :join-token (or token "")
+                                        :api-url (or api-url ""))))
            (values (gr8s.node.v1::raft-transport-join stub request :timeout timeout)))
       (ignore-errors (ag-grpc:channel-close channel)))))
 
-(defun raft-cluster-join (member host port &key node-name token (role :voter) pki
+(defun raft-cluster-join (member host port &key node-name token (role :voter) pki api-url
                                                 (max-redirects 3) (timeout 5))
   "Join an existing cluster through its Join RPC at HOST:PORT (any member;
    followers redirect to the leader). MEMBER's gRPC server must already be
@@ -181,7 +195,8 @@
   (loop with h = host and p = port
         for attempt from 0 to max-redirects
         for response = (raft-cluster-call-join member h p :node-name node-name
-                                                          :token token :role role :timeout timeout)
+                                                          :token token :role role
+                                                          :api-url api-url :timeout timeout)
         do (cond
              ((gr8s.node.v1::accepted response)
               (raft-cluster-prepare-joiner

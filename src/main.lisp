@@ -637,7 +637,8 @@ handler and never gets here. A busy host makes this race likely."
                           (start-server
                            :address address :port port
                            :store store :runtime runtime
-                           :reconciler reconciler))
+                           :reconciler reconciler
+                           :leader-status-fn (when ha (lambda () (ha-control-plane-leader-status ha)))))
                     (setf worker (start-reconciliation-worker reconciler
                                   :leader-gate (when ha (lambda () (ha-control-plane-leader-p ha)))
                                   :before-reconcile (lambda ()
@@ -694,6 +695,7 @@ handler and never gets here. A busy host makes this race likely."
          :join-host join-host :join-port join-port
          :node-name (getf options :raft-node-name)
          :token (getf options :raft-token)
+         :api-url (format nil "http://~A:~D" (getf options :listen) (getf options :port))
          :pki pki)))))
 
 (defun print-help ()

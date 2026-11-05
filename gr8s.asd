@@ -201,6 +201,7 @@
                              (:file "ha-leader-gate-test")
                              (:file "ha-store-test")
                              (:file "ha-control-plane-test")
+                             (:file "ha-redirect-http-test")
                              (:file "raft-store-test")
                              (:file "raft-plane-test")
                              (:file "raft-membership-test")

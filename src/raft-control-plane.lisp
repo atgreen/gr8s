@@ -24,7 +24,7 @@
 
 (defun start-ha-control-plane (store &key id (host "127.0.0.1") (port 0)
                                           init join-host join-port
-                                          node-name token pki)
+                                          node-name token pki api-url)
   "Start the control plane's Raft member bound to STORE and either found a new
    cluster (INIT) or join an existing one (JOIN-HOST/JOIN-PORT). Routes STORE's
    durable writes through the member and returns an HA-CONTROL-PLANE. Signals an
@@ -36,13 +36,13 @@
                                (install-core-state-blob store (second command)))))))
     (cond
       (init
-       (raft-cluster-init member :pki pki)
+       (raft-cluster-init member :pki pki :api-url api-url)
        (raft-member-start member))
       (join-host
        ;; The member's server is already accepting appends; join (as a learner)
        ;; before driving the clock so it never self-elects a rival term.
        (unless (raft-cluster-join member join-host join-port
-                                  :node-name node-name :token token :pki pki)
+                                  :node-name node-name :token token :pki pki :api-url api-url)
          (stop-raft-member member)
          (error "control plane ~A could not join the cluster at ~A:~D" id join-host join-port))
        (raft-member-start member))
@@ -65,6 +65,13 @@
 (defun ha-control-plane-leader-p (hcp)
   "True when this control-plane member currently holds Raft leadership."
   (and hcp (raft-member-leader-p (ha-control-plane-member hcp))))
+
+(defun ha-control-plane-leader-status (hcp)
+  "Return (values self-leader-p leader-api-url) for the HTTP leader-aware layer."
+  (if hcp
+      (values (raft-member-leader-p (ha-control-plane-member hcp))
+              (raft-member-leader-api-url (ha-control-plane-member hcp)))
+      (values t nil)))
 
 (defun stop-ha-control-plane (hcp)
   (when hcp

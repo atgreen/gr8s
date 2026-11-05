@@ -54,6 +54,9 @@
   ;; config command so every member learns where to reach a joiner; ON-CONFIGURED
   ;; (if set) runs after a membership change so the transport can reconcile links.
   (peer-addresses (make-hash-table :test 'equal))
+  ;; id -> HTTP API base URL, replicated in the config so every member can
+  ;; redirect a write to the leader's API (podster-c2d.7.3).
+  (api-urls (make-hash-table :test 'equal))
   on-configured
   ;; leader volatile
   (next-index (make-hash-table :test 'equal))
@@ -307,7 +310,8 @@
                         ;; user state machine. Every member applies it in log
                         ;; order, so all converge on the same membership.
                         (progn (raft-adopt-config node (getf (cdr command) :members)
-                                                  (getf (cdr command) :addresses))
+                                                  (getf (cdr command) :addresses)
+                                                  (getf (cdr command) :api-urls))
                                :configured)
                         (and (raft-node-apply-fn node) (funcall (raft-node-apply-fn node) command))))
                   (callback (gethash index (raft-node-pending node))))
@@ -336,12 +340,15 @@
 ;;; ---------------------------------------------------------------------------
 ;;; Membership change (single-member, effective on commit).
 
-(defun raft-adopt-config (node members &optional addresses)
+(defun raft-adopt-config (node members &optional addresses api-urls)
   "Adopt a committed membership MEMBERS (alist id->role). Every member runs this
    in log order, so all converge. A member that finds itself gone steps down.
-   ADDRESSES (alist id->(host port)) teaches the transport where to reach peers."
+   ADDRESSES (alist id->(host port)) teaches the transport where to reach peers;
+   API-URLS (alist id->url) teaches the HTTP layer where to redirect writes."
   (dolist (a addresses)
     (setf (gethash (car a) (raft-node-peer-addresses node)) (cdr a)))
+  (dolist (a api-urls)
+    (when (cdr a) (setf (gethash (car a) (raft-node-api-urls node)) (cdr a))))
   (let ((old-peers (raft-node-peers node))
         (leading (eq (raft-node-role node) :leader)))
     (raft-configure node members)
@@ -360,7 +367,7 @@
   (when (raft-node-on-configured node)
     (funcall (raft-node-on-configured node) node)))
 
-(defun raft-propose-config (node &key add remove (role :voter) address callback)
+(defun raft-propose-config (node &key add remove (role :voter) address api-url callback)
   "Leader-only single-member change. ADD = a member id to add with ROLE (:voter
    or :witness) and ADDRESS = its (host port) so every member can reach it;
    REMOVE = a member id to drop (not self). Only one change may be in flight. The
@@ -377,6 +384,7 @@
          (add (setf members (cons (cons add role)
                                   (remove add members :key #'car :test #'equal)))
               (when address (setf (gethash add (raft-node-peer-addresses node)) address))
+              (when api-url (setf (gethash add (raft-node-api-urls node)) api-url))
               ;; Replicate to the joiner now (not yet quorum) so it receives the
               ;; config entry that promotes it. The transport needs its link before
               ;; the append goes out, so reconcile immediately.
@@ -386,16 +394,22 @@
               (when (raft-node-on-configured node)
                 (funcall (raft-node-on-configured node) node)))
          (remove (setf members (remove remove members :key #'car :test #'equal))))
-       ;; Carry the whole address book so a just-joined member (and every other)
-       ;; learns where to reach each peer when this entry commits.
+       ;; Carry the whole address book (and API URLs) so a just-joined member
+       ;; (and every other) learns where to reach each peer when this commits.
        (raft-propose node (list :raft-config :members members
-                                :addresses (raft-config-addresses node))
+                                :addresses (raft-config-addresses node)
+                                :api-urls (raft-config-api-urls node))
                      callback)))))
 
 (defun raft-config-addresses (node)
   "The current member address book as an alist id->(host port) for a config entry."
   (loop for id being the hash-keys of (raft-node-peer-addresses node) using (hash-value addr)
         collect (cons id addr)))
+
+(defun raft-config-api-urls (node)
+  "The current member API-URL book as an alist id->url for a config entry."
+  (loop for id being the hash-keys of (raft-node-api-urls node) using (hash-value url)
+        collect (cons id url)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Message handling.

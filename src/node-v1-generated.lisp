@@ -2714,7 +2714,9 @@
            (NODE-NAME :INITARG :NODE-NAME :ACCESSOR GR8S.NODE.V1::NODE-NAME
             :INITFORM "" :TYPE STRING)
            (JOIN-TOKEN :INITARG :JOIN-TOKEN :ACCESSOR GR8S.NODE.V1::JOIN-TOKEN
-            :INITFORM "" :TYPE STRING))
+            :INITFORM "" :TYPE STRING)
+           (API-URL :INITARG :API-URL :ACCESSOR GR8S.NODE.V1::API-URL :INITFORM
+            "" :TYPE STRING))
           (:DOCUMENTATION "Proto message: JoinRequest"))
 
 
@@ -2750,6 +2752,11 @@
     (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'JOIN-TOKEN)))
       (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
         (AG-PROTO::WRITE-FIELD-TAG 6 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'API-URL)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 7 2 AG-PROTO::BUFFER)
         (AG-PROTO::WRITE-LENGTH-DELIMITED
          (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
     AG-PROTO::BUFFER))
@@ -2789,6 +2796,11 @@
                             AG-PROTO::BUFFER))))
                  (6
                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'JOIN-TOKEN)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (7
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'API-URL)
                           (AG-PROTO::UTF8-TO-STRING
                            (AG-PROTO::READ-LENGTH-DELIMITED
                             AG-PROTO::BUFFER))))

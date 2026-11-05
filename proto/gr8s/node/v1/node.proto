@@ -278,6 +278,7 @@ message JoinRequest {
   string role = 4;        // "voter" | "witness"
   string node_name = 5;   // the name the join token is bound to
   string join_token = 6;
+  string api_url = 7;     // the joiner's HTTP API base URL, for leader-aware redirects
 }
 
 message JoinResponse {
