@@ -120,13 +120,15 @@
 (defun raft-cluster-install-join-handler (member &key pki)
   "Make MEMBER answer Join RPCs (leader-side admission). A follower replies with
    the current leader's address so the joiner can retry there; the leader
-   validates the join token (when PKI is given), proposes the add, and returns
-   the member address book. Reuses the same token issuance as node enrollment."
+   authenticates the joiner, proposes the add, and returns the member address book.
+   A member using TLS requires the joiner's certificate; otherwise PKI, when given,
+   validates a join token."
   (setf (raft-member-join-handler member)
-        (lambda (request) (raft-member-handle-join member request :pki pki))))
+        (lambda (request context) (raft-member-handle-join member request context :pki pki))))
 
-(defun raft-member-handle-join (member request &key pki)
+(defun raft-member-handle-join (member request context &key pki)
   (let* ((node (raft-member-node member))
+         (credentials (raft-member-credentials member))
          (id (gr8s.node.v1::member-id request))
          (host (gr8s.node.v1::host request))
          (port (gr8s.node.v1::port request))
@@ -134,9 +136,11 @@
          (node-name (gr8s.node.v1::node-name request))
          (token (gr8s.node.v1::join-token request))
          (api-url (gr8s.node.v1::api-url request)))
-    ;; Authenticate with the cluster join token (same flow as node enrollment).
-    (when pki
-      (validate-token pki token node-name))
+    (cond
+      (credentials
+       (unless (equal id (authenticate-raft-peer credentials context))
+         (pki-fail "member-identity-mismatch" "Raft join for ~A used another member's certificate" id)))
+      (pki (validate-token pki token node-name)))
     (bt:with-lock-held ((raft-member-lock member))
       (if (not (raft-leader-p node))
           ;; Redirect: point the joiner at the leader we last heard from.
@@ -164,10 +168,7 @@
 
 (defun raft-cluster-call-join (member host port &key node-name token (role :voter) api-url (timeout 5))
   "Dial HOST:PORT and send one Join request for MEMBER. Returns the JoinResponse."
-  (let ((channel (ag-grpc:make-channel host port :timeout timeout
-                                       :tls (raft-member-tls member) :tls-verify nil
-                                       :tls-client-certificate (raft-member-tls-certificate member)
-                                       :tls-client-key (raft-member-tls-key member))))
+  (let ((channel (make-raft-channel (raft-member-credentials member) host port timeout)))
     (unwind-protect
          (let* ((stub (gr8s.node.v1::make-raft-transport-stub channel))
                 (request (make-instance 'gr8s.node.v1::join-request

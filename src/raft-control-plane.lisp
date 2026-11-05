@@ -24,12 +24,21 @@
 
 (defun start-ha-control-plane (store &key id (host "127.0.0.1") (port 0)
                                           init join-host join-port
-                                          node-name token pki api-url)
+                                          node-name token ca-pin pki api-url)
   "Start the control plane's Raft member bound to STORE and either found a new
    cluster (INIT) or join an existing one (JOIN-HOST/JOIN-PORT). Routes STORE's
    durable writes through the member and returns an HA-CONTROL-PLANE. Signals an
-   error if a join does not succeed."
+   error if a join does not succeed. With PKI, which 'gr8s serve' always supplies,
+   members use mutual TLS under its Raft directory; a joiner enrolls with TOKEN,
+   trusting CA-PIN. Without it they use plain gRPC, which only in-process tests do."
   (let* ((member nil)
+         (credentials
+           (when pki
+             (let ((root (raft-tls-root pki)))
+               (if init
+                   (ensure-raft-founder-credentials root id)
+                   (ensure-raft-joiner-credentials root id join-host join-port
+                                                   :node-name node-name :token token :ca-pin ca-pin)))))
          (apply-fn (lambda (command)
                      (when (consp command)
                        (case (car command)
@@ -43,16 +52,16 @@
                                        (install-pod-state-blob store (second command))))
                          (:node-state (unless (raft-leader-p (raft-member-node member))
                                         (install-node-state-blob store (second command)))))))))
-    (setf member (start-raft-member id :host host :port port :apply-fn apply-fn))
+    (setf member (start-raft-member id :host host :port port :apply-fn apply-fn :credentials credentials))
     (cond
       (init
-       (raft-cluster-init member :pki pki :api-url api-url)
+       (raft-cluster-init member :api-url api-url)
        (raft-member-start member))
       (join-host
        ;; The member's server is already accepting appends; join (as a learner)
        ;; before driving the clock so it never self-elects a rival term.
        (unless (raft-cluster-join member join-host join-port
-                                  :node-name node-name :token token :pki pki :api-url api-url)
+                                  :node-name node-name :token token :api-url api-url)
          (stop-raft-member member)
          (error "control plane ~A could not join the cluster at ~A:~D" id join-host join-port))
        (raft-member-start member))
