@@ -45,6 +45,13 @@
            :name (format nil "image pull ~A" image)))
     job))
 
+(defun default-image-pull-policy (image)
+  "Return the pull policy Kubernetes defaults to for IMAGE: Always for an untagged or latest image."
+  (if (or (uiop:string-suffix-p image ":latest")
+          (and (not (find #\@ image))
+               (not (find #\: (car (last (uiop:split-string image :separator '(#\/))))))))
+      "Always" "IfNotPresent"))
+
 (defun ensure-container-image (runtime image policy)
   "Return once IMAGE may be used under pull POLICY, or signal why its container must wait."
   (let ((socket (containerd-runtime-socket-path runtime)))
@@ -52,7 +59,7 @@
               (and (equal policy "IfNotPresent") (cri-image-present-p socket image)))
       (when (and (equal policy "Never") (not (cri-image-present-p socket image)))
         (error 'container-config-error
-               :message (format nil "Container image ~S is not present with pull policy of Never" image)))
+               :message (format nil "Image ~S is not present with pull policy of Never" image)))
       (return-from ensure-container-image t))
     (let ((manager (containerd-runtime-images runtime)) (now (funcall *container-lifecycle-clock*)))
       (bt:with-lock-held ((image-pull-manager-lock manager))

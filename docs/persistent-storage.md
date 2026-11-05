@@ -11,6 +11,7 @@
 | `emptyDir` | A Pod volume, on disk or `medium: Memory` | One Pod | Removed with the Pod |
 | Generic ephemeral | A Pod `ephemeral` volume using any dynamic class | One Pod | Removed with the Pod |
 | CSI | A driver you install, as a PV or an inline Pod volume | Set by the driver | Set by the driver |
+| OCI image | A Pod `image` volume | One Pod, read-only | Unmounted with the Pod |
 
 No helper Pod, image or NFS client package is needed for the built-in kinds.
 
@@ -155,6 +156,29 @@ A generic ephemeral volume is a PV-backed scratch space. gr8s creates a claim ca
 reclaims its volume under a `Delete` class. An existing claim with that name is
 never adopted: the Pod fails to start with an error instead.
 
+## OCI image volumes
+
+A Pod can mount the contents of a container image read-only, which suits models,
+datasets and config that ship separately from the application:
+
+```yaml
+volumes:
+- name: model
+  image:
+    reference: registry.example.test/models/small:v2
+    pullPolicy: IfNotPresent
+```
+
+- **Pull policy:** as for a container image, this defaults to `Always` for an
+  untagged or `:latest` image and `IfNotPresent` otherwise.
+- **Pulling:** the image is pulled only if a container mounts the volume. Until it
+  arrives the container waits, and a failed pull is reported as `ErrImagePull` and
+  retried, without using up a restart.
+- **`subPath` and `subPathExpr`:** these select a directory inside the image. The
+  container fails to start if it isn't there.
+- **Private registries:** `imagePullSecrets` isn't supported yet, for containers or
+  for these volumes, so the node must be able to pull without it.
+
 ## CSI
 
 Install a driver with its usual manifests, using its sidecars. gr8s plays the
@@ -218,8 +242,9 @@ The first passed on a VM on 2026-11-04: real local PV/PVC and direct hostPath wr
 read-only enforcement, restart preservation without restarting the consumer, claim
 protection, Retain UID ownership, explicit reclamation and clean native exit.
 
-**The dynamic, NFS and CSI paths have unit tests only so far.** They run through
-injected mount calls and a fake driver, and haven't yet been run against a real
-kernel NFS mount, a real CSI driver or real sidecars. The second script above covers
-the NFS and local-path half. Its `--nfs-*` options are optional, and it needs a
-share the node can write to.
+**The dynamic, NFS, CSI and image volume paths have unit tests only so far.** They
+run through injected mount and image calls and a fake driver, and haven't yet been
+run against a real kernel NFS mount, a real CSI driver, real sidecars or containerd's
+image mounts. The second script above covers the NFS and local-path half. Its
+`--nfs-*` options are optional, and it needs a share the node can write to. For image
+volumes, run the upstream `ImageVolume` spec with `scripts/test-podtemplates-sonobuoy.py`.
