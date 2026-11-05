@@ -60,10 +60,11 @@
                        :local-storage-path +default-local-storage-path+)))
     (loop while arguments
           for option = (first arguments)
-          do (if (member option '("--disable-agent" "--raft-init") :test #'string=)
+          do (if (member option '("--disable-agent" "--raft-init" "--containerd-no-sync") :test #'string=)
                  (progn
                    (cond ((string= option "--disable-agent") (setf (getf options :disable-agent) t))
-                         ((string= option "--raft-init") (setf (getf options :raft-init) t)))
+                         ((string= option "--raft-init") (setf (getf options :raft-init) t))
+                         ((string= option "--containerd-no-sync") (setf (getf options :containerd-no-sync) t)))
                    (setf arguments (rest arguments)))
                  (let ((value (option-value arguments option)))
                    (cond
@@ -369,6 +370,7 @@
                    :state-directory state-directory
                    :executable (getf options :containerd-executable)
                    :oci-runtime (getf options :containerd-oci-runtime)
+                   :metadata-no-sync (getf options :containerd-no-sync)
                    :runtime-assets *embedded-runtime-assets*
                    :cni-bin-directory
                    (uiop:pathname-directory-pathname
@@ -734,7 +736,7 @@ handler and never gets here. A busy host makes this race likely."
 
 (defun print-help ()
   (format t
-          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE] [--local-storage-path DIR]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s witness --join HOST:PORT --node-name NAME [--token TOKEN] [--listen IPV4] [--port PORT] [--state-directory DIR]~%  gr8s kubeconfig [--output FILE] [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%  gr8s version~%"))
+          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--containerd-no-sync] [--kubeconfig FILE] [--local-storage-path DIR]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s witness --join HOST:PORT --node-name NAME [--token TOKEN] [--listen IPV4] [--port PORT] [--state-directory DIR]~%  gr8s kubeconfig [--output FILE] [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%  gr8s version~%"))
 
 (defun print-gr8s-banner (role)
   "Print a startup banner (Spring-Boot style) naming the role gr8s is starting."

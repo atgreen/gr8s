@@ -70,6 +70,8 @@ def main():
     parser.add_argument("--api-port", type=int, default=18190)
     parser.add_argument("--node-port", type=int, default=17447)
     parser.add_argument("--timeout", type=int, default=1200)
+    parser.add_argument("--containerd-no-sync", action="store_true",
+                        help="Skip fsync on containerd metadata commits; for disposable VMs whose disk flushes are slow")
     parser.add_argument("--certified-conformance", action="store_true",
                         help="Run the entire upstream certified selection instead of the five focused specs")
     parser.add_argument("--focus", default=FOCUS, help="Upstream regex for a supplemental focused run")
@@ -93,12 +95,12 @@ def main():
               "mode": "certified-conformance" if args.certified_conformance else "focused",
               "isCertificationResult": False, "nativeSHA256": hashlib.sha256(args.gr8s.read_bytes()).hexdigest(),
               "stateDirectory": str(state), "reusedState": args.state_directory is not None,
-              "debugServer": args.debug_slynk_port is not None}
+              "debugServer": args.debug_slynk_port is not None, "containerdNoSync": args.containerd_no_sync}
     native_log = (root / "gr8s.log").open("w")
     debug_arguments = ["--debug-slynk-port", str(args.debug_slynk_port)] if args.debug_slynk_port else []
     process = subprocess.Popen([str(args.gr8s), "serve", "--runtime", "containerd", "--state-directory", str(state),
                                 "--port", str(args.api_port), "--node-port", str(args.node_port), "--kubeconfig", str(root / "kubeconfig"),
-                                *debug_arguments],
+                                *debug_arguments, *(["--containerd-no-sync"] if args.containerd_no_sync else [])],
                                stdout=native_log, stderr=subprocess.STDOUT)
 
     def request(path, method="GET"):
