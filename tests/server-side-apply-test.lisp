@@ -325,3 +325,26 @@
                       :key (lambda (parameter) (gethash "name" parameter))))))))
     ;; Paths that discovery does not back are still absent.
     (crd-api-request 404 "/openapi/v3/apis/none.example.com/v1")))
+
+(defparameter *field-validation-spec-schema*
+  "{\"type\":\"object\",\"properties\":{\"spec\":{\"type\":\"object\",\"x-kubernetes-preserve-unknown-fields\":true,\"properties\":{
+     \"foo\":{\"type\":\"string\"},
+     \"cronSpec\":{\"type\":\"string\",\"pattern\":\"^(\\\\d+|\\\\*)(/\\\\d+)?(\\\\s+(\\\\d+|\\\\*)(/\\\\d+)?){4}$\"},
+     \"ports\":{\"type\":\"array\",\"x-kubernetes-list-map-keys\":[\"containerPort\",\"protocol\"],\"x-kubernetes-list-type\":\"map\",
+       \"items\":{\"type\":\"object\",\"required\":[\"containerPort\",\"protocol\"],\"properties\":{
+         \"containerPort\":{\"format\":\"int32\",\"type\":\"integer\"},\"hostIP\":{\"type\":\"string\"},
+         \"hostPort\":{\"format\":\"int32\",\"type\":\"integer\"},\"name\":{\"type\":\"string\"},\"protocol\":{\"type\":\"string\"}}}}}}}}"
+  "The schema of upstream's field validation specs.")
+
+(test upstream-field-validation-flow-against-its-own-schema
+  (with-crd-api (store path)
+    (values store path)
+    (install-apply-crd *field-validation-spec-schema*)
+    ;; The instance upstream creates and deletes to prime its watch cache.
+    (let ((collection "/apis/mygroup.example.com/v1/foos"))
+      (crd-api-request 201 collection :method :post
+        :text "{\"apiVersion\":\"mygroup.example.com/v1\",\"kind\":\"Foo\",\"metadata\":{\"namespace\":\"\",\"name\":\"setup-instance\"},\"alpha\":\"foo_123\",\"beta\":10,\"gamma\":\"bar\",\"delta\":\"hello\",\"epsilon\":\"foobar\",\"spec\":{}}")
+      (crd-api-request 200 (concatenate 'string collection "/setup-instance") :method :delete))
+    (let* ((item "/apis/mygroup.example.com/v1/foos/mytest")
+           (created (apply-request 201 item (format nil "~%apiVersion: mygroup.example.com/v1~%kind: Foo~%metadata:~%  name: mytest~%spec:~%  foo: foo1~%  cronSpec: \"* * * * */5\"~%  ports:~%  - name: x~%    containerPort: 80~%    protocol: TCP"))))
+      (is (= 80 (gethash "containerPort" (aref (gethash "ports" (applied-spec created)) 0)))))))
