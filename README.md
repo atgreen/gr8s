@@ -593,8 +593,15 @@ exact-container restart, preserving healthy siblings. Probe-specific termination
 grace and actual failure Events survive node process restarts. Ordinary init
 containers execute in declaration order; applications wait for real zero exits.
 Failed initialization obeys the Pod restart policy, and native restart retains
-actual attempts and retry history. Restartable init sidecars and readiness gates
-remain unsupported.
+actual attempts and retry history. Restartable init sidecars start before later
+containers, restart whatever the Pod's policy, and stop last in reverse order.
+postStart and preStop hooks run against the exact attempt, and termination messages
+come from a per-attempt file with optional log fallback. A container whose
+configuration cannot be generated reports `CreateContainerConfigError` while its
+siblings run; image pulls run in the background and failures report `ErrImagePull`.
+Ephemeral containers are added through `pods/ephemeralcontainers`, and `pods/resize`
+changes CPU and memory in place, or restarts that container under a RestartContainer
+policy. Readiness gates and a Pod's own `resources` remain unsupported.
 
 All ten unchanged upstream probe conformance cases pass in the
 [focused result](docs/container-probes-upstream-2026-11-04.json). The
@@ -671,8 +678,11 @@ following node labels written through the Node API, and record `apps/v1`
 ControllerRevisions whose data is the JSON a typed client marshals for the
 template. RollingUpdate replaces Pods within `maxUnavailable`; `maxSurge` is
 refused because surge is not implemented. OnDelete leaves running Pods alone.
-Only `metadata.labels` and `metadata.annotations` of a Node can be written: taints
-and `spec.unschedulable` are refused because nothing would enforce them.
+A Node's labels, annotations, taints and `spec.unschedulable` can be written: the
+scheduler enforces taints and cordoning, and a control-plane pass evicts Pods that
+do not tolerate a NoExecute taint. A Node created through the API has no agent, so
+it can never run a Pod and keeps whatever status was written; an agent's own Node
+cannot be deleted through the API.
 
 PersistentVolume, PersistentVolumeClaim and StorageClass APIs now support durable
 CRUD, typed protobuf, status subresources and resumable JSON watches. Static

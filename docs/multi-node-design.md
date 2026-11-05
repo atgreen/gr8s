@@ -83,8 +83,8 @@ non-terminal Pods. The assignment is persisted with the Pod and is not changed
 merely because another node becomes less loaded.
 
 If no node is Ready, the Pod remains Pending. Loss of a node marks its Pods
-Unknown. Automatic eviction, timeout-based replacement, affinity,
-anti-affinity, taints, resource scoring, and preemption are deferred.
+Unknown. Automatic eviction on node loss, timeout-based replacement, Pod affinity
+and anti-affinity, and resource scoring are deferred.
 
 ## Node networking
 
