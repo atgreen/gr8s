@@ -324,6 +324,14 @@
      (reconciler-runtime reconciler) uid container command
      :stdin stdin :stdout stdout :stderr stderr :tty tty)))
 
+(defun reconciler-start-attach-session (reconciler uid container &key stdin stdout stderr tty)
+  (runtime-start-attach-session (reconciler-runtime reconciler) uid container
+                                :stdin stdin :stdout stdout :stderr stderr :tty tty))
+
+(defun reconciler-attach-url (reconciler uid container &key stdin stdout stderr tty)
+  (runtime-attach-url (reconciler-runtime reconciler) uid container
+                      :stdin stdin :stdout stdout :stderr stderr :tty tty))
+
 (defun reconciler-send-exec-session-input
     (reconciler session channel data &key rows columns eof)
   (runtime-send-exec-session-input
