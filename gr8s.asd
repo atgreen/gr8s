@@ -202,6 +202,7 @@
                              (:file "ha-store-test")
                              (:file "ha-control-plane-test")
                              (:file "ha-redirect-http-test")
+                             (:file "agent-failover-test")
                              (:file "raft-store-test")
                              (:file "raft-plane-test")
                              (:file "raft-membership-test")

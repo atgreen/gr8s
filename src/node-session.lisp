@@ -1214,31 +1214,43 @@
       (ignore-errors (ag-grpc:channel-close channel)))))))
 
 (defun run-node-session (host port node-name identity-path apply-snapshot
-                         &key max-sessions (reconnect-delay 1)
+                         &key max-sessions (reconnect-delay 1) endpoints
                            operation-handler underlay-address status-provider snapshot-observer
                            ca-certificate-path certificate-path private-key-path
                            control
                            (stop-predicate (constantly nil)))
-  (let ((completed 0)
-        (control (or control (make-node-session-control))))
+  "Maintain the agent's session to the control plane, reconnecting on loss. With
+   ENDPOINTS (a list of (host port)) the agent rotates through the control-plane
+   members on each reconnect, so it finds the new leader after an HA failover
+   (podster-c2d.7.4); without it, it reconnects to HOST:PORT as before."
+  (let* ((completed 0)
+         (control (or control (make-node-session-control)))
+         (targets (or endpoints (list (list host port))))
+         (attempt 0))
     (loop until (or (node-session-cancelled-p control)
                     (funcall stop-predicate))
-          do (handler-case
-          (progn
-            (run-one-node-session host port node-name identity-path
-                                  apply-snapshot operation-handler
-                                  (not (null max-sessions)) control stop-predicate underlay-address status-provider
-                                  ca-certificate-path certificate-path private-key-path snapshot-observer)
-            (incf completed)
-            (when (and max-sessions (>= completed max-sessions))
-              (return completed)))
-        (error (condition)
-          (when max-sessions
-            (error condition))
-          (unless (or (node-session-cancelled-p control)
-                      (typep condition 'node-session-interrupted))
-            (format *error-output* "gr8s node session ended: ~A; reconnecting~%" condition))))
-             (unless (or (node-session-cancelled-p control)
-                         (funcall stop-predicate))
-               (sleep reconnect-delay)))
+          do (destructuring-bind (try-host try-port)
+                 (nth (mod attempt (length targets)) targets)
+               (handler-case
+                   (progn
+                     (run-one-node-session try-host try-port node-name identity-path
+                                           apply-snapshot operation-handler
+                                           (not (null max-sessions)) control stop-predicate
+                                           underlay-address status-provider
+                                           ca-certificate-path certificate-path private-key-path
+                                           snapshot-observer)
+                     (incf completed)
+                     (when (and max-sessions (>= completed max-sessions))
+                       (return completed)))
+                 (error (condition)
+                   (when max-sessions
+                     (error condition))
+                   (unless (or (node-session-cancelled-p control)
+                               (typep condition 'node-session-interrupted))
+                     (format *error-output* "gr8s node session to ~A:~A ended: ~A; reconnecting~%"
+                             try-host try-port condition))))
+               (incf attempt)
+               (unless (or (node-session-cancelled-p control)
+                           (funcall stop-predicate))
+                 (sleep reconnect-delay))))
     completed))

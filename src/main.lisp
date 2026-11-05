@@ -392,6 +392,15 @@
                    (uiop:ensure-directory-pathname
                     (getf options :state-directory))))
 
+(defun parse-agent-servers (server)
+  "Parse --server into a list of (host port). Accepts a comma-separated list of
+   HOST:PORT so an agent can fail over across HA control-plane members."
+  (loop for spec in (uiop:split-string server :separator '(#\,))
+        for trimmed = (string-trim '(#\Space) spec)
+        unless (zerop (length trimmed))
+          collect (multiple-value-bind (host port) (parse-agent-server trimmed)
+                    (list host port))))
+
 (defun agent (options &key control
                             (stop-predicate (lambda () *shutdown-requested*)))
   (multiple-value-bind (host port) (parse-agent-server (getf options :server))
@@ -418,6 +427,7 @@
                 host port node-name identity
                 (lambda (snapshot)
                   (reconcile-node-snapshot node-runtime snapshot))
+                :endpoints (parse-agent-servers (getf options :server))
                 :snapshot-observer (lambda (snapshot) (receive-node-snapshot-intent node-runtime snapshot))
                 :operation-handler
                 (lambda (variant payload emit)
