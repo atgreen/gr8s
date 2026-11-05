@@ -117,13 +117,16 @@
                  (setf (gethash key (pod-store-resources store)) object)))))
   store)
 
+(defparameter +template-history-recent-limit+ 512
+  "Newest journal entries kept separately, so that an idle watch reads few of them.")
+
 (defun commit-core-resources (store resources revision
                               &key (workload-deletions (pod-store-workload-deletions store))
                                 (job-controller-states (pod-store-job-controller-states store)))
   "Atomically commit API status, Job retry state and durable deletion/history indexes before publishing memory."
   ;; Write the complete new state before publishing it in memory. A failed
   ;; atomic write leaves both the old disk state and the old index intact.
-  (multiple-value-bind (history floor) (next-template-history store resources revision)
+  (multiple-value-bind (history floor added) (next-template-history store resources revision)
    (let ((token-key (or (pod-store-template-token-key store) (secure-random-octets 32)))
          (event-expirations (next-event-expirations store resources)))
     (write-private-text-atomically
@@ -145,6 +148,11 @@
         (pod-store-job-controller-states store) job-controller-states
         (pod-store-resource-revision store) revision
         (pod-store-template-history store) history
+        (pod-store-template-history-recent store)
+        (let ((recent (append added (pod-store-template-history-recent store))))
+          (if (nthcdr +template-history-recent-limit+ recent)
+              (subseq recent 0 +template-history-recent-limit+)
+              recent))
         (pod-store-template-history-floor store) floor
         (pod-store-template-token-key store) token-key
         (pod-store-event-expirations store) event-expirations))))

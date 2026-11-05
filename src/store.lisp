@@ -18,6 +18,8 @@
   (resources (make-hash-table :test #'equal))
   (resource-revision 0)
   template-history
+  (template-history-recent nil)
+  (template-history-maintained-at 0)
   (template-history-floor 0)
   (resource-history-start 0)
   template-token-key

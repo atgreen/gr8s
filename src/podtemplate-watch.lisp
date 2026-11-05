@@ -15,20 +15,33 @@
                (and (hash-table-p object)
                     (or (null namespace) (equal namespace (gethash "namespace" (gethash "metadata" object))))
                     (funcall label-test object) (funcall field-test object))))
-      (with-store-lock (store)
-        (compact-template-history-unlocked store)
-        (template-index-at-revision-unlocked store revision resource)
+      (template-watch-maintenance store)
+      ;; Commits replace the revision in one word, so an idle watch can skip the
+      ;; lock that every writer needs; a hundred such watches poll twenty times a second.
+      (when (eql revision (pod-store-resource-revision store))
+        (return-from template-watch-events (values nil revision)))
+      (multiple-value-bind (entries watermark)
+          (with-store-lock (store)
+            (check-template-revision-unlocked store revision resource)
+            (values (template-history-after store revision) (pod-store-resource-revision store)))
         (values
-         (loop for entry in (pod-store-template-history store)
-               when (and (equal resource (gethash "resource" entry "podtemplates"))
-                         (> (gethash "revision" entry) revision))
+         (loop for entry in entries
+               when (equal resource (gethash "resource" entry "podtemplates"))
                  append (let* ((old (gethash "old" entry)) (new (gethash "new" entry))
                                (before (matches old)) (after (matches new)))
                           (when (or before after)
                             (let ((object (copy-core-object (if after new old))))
                               (setf (gethash "resourceVersion" (gethash "metadata" object)) (write-to-string (gethash "revision" entry)))
                               (list (core-object "type" (cond ((and before after) "MODIFIED") (after "ADDED") (t "DELETED")) "object" object))))))
-         (pod-store-resource-revision store))))))
+         watermark)))))
+
+(defun template-watch-maintenance (store)
+  "Let open watches expire Events and journal entries, at most once an interval."
+  (let ((now (get-internal-real-time)))
+    (when (>= (- now (pod-store-template-history-maintained-at store)) +template-watch-maintenance-interval+)
+      (with-store-lock (store)
+        (setf (pod-store-template-history-maintained-at store) now)
+        (compact-template-history-unlocked store)))))
 
 (defun podtemplate-watch-response (store namespace &optional (resource "podtemplates")
                                    &key page-reader event-reader
