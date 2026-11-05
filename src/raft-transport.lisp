@@ -62,6 +62,10 @@
   grpc-server (host "127.0.0.1") (port 0)
   (links (make-hash-table :test 'equal))      ; peer-id -> raft-peer-link
   (running nil) server-thread tick-thread
+  ;; Optional leader-side Join handler (podster-c2d.10), a function of the
+  ;; decoded JoinRequest returning a JoinResponse. Set by the cluster layer; when
+  ;; unset the member rejects joins (accepted=false, no leader hint).
+  (join-handler nil)
   (tls nil) tls-certificate tls-key)
 
 (defun raft-link-enqueue (link octets)
@@ -141,7 +145,13 @@
                         (let ((msg (octets->raft-message (gr8s.node.v1::payload request))))
                           (bt:with-lock-held ((raft-member-lock member))
                             (raft-handle-message (raft-member-node member) msg)))
-                        (make-instance 'gr8s.node.v1::raft-ack)))
+                        (make-instance 'gr8s.node.v1::raft-ack))
+     :join-handler (lambda (request context)
+                     (declare (ignore context))
+                     (let ((handler (raft-member-join-handler member)))
+                       (if handler
+                           (funcall handler request)
+                           (make-instance 'gr8s.node.v1::join-response :accepted nil)))))
     (setf (raft-member-server-thread member)
           (bt:make-thread (lambda () (ag-grpc:server-start server))
                           :name (format nil "gr8s raft server ~A" id)))

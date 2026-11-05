@@ -45,25 +45,28 @@
           unless (equal id self)
             do (raft-member-open-link member id (first addr) (second addr)))))
 
-(defun raft-member-enable-dynamic-membership (member)
-  "Point the core's config-change callback at link reconciliation and record
-   self in the address book. Caller holds the member lock."
+(defun raft-member-enable-dynamic-membership (member &key pki)
+  "Point the core's config-change callback at link reconciliation, record self in
+   the address book, and install the Join handler so this member can admit (or
+   redirect) joiners once it becomes leader. Caller holds the member lock."
   (let ((node (raft-member-node member)))
     (setf (raft-node-on-configured node)
           (lambda (n) (declare (ignore n)) (raft-member-reconcile-links member))
           (gethash (raft-node-id node) (raft-node-peer-addresses node))
-          (list (raft-member-host member) (raft-member-port member)))))
+          (list (raft-member-host member) (raft-member-port member))))
+  (raft-cluster-install-join-handler member :pki pki))
 
-(defun raft-cluster-init (member &key (role :voter))
+(defun raft-cluster-init (member &key (role :voter) pki)
   "Form a brand-new cluster from MEMBER alone: it is the sole voter and, once
-   RAFT-MEMBER-START drives its clock, elects itself leader. Additional members
-   are brought in later with RAFT-CLUSTER-ADD-MEMBER."
+   RAFT-MEMBER-START drives its clock, elects itself leader. It also answers Join
+   RPCs (authenticating with PKI when given) so other members can be admitted;
+   additional members are brought in with RAFT-CLUSTER-JOIN or -ADD-MEMBER."
   (bt:with-lock-held ((raft-member-lock member))
-    (raft-member-enable-dynamic-membership member)
+    (raft-member-enable-dynamic-membership member :pki pki)
     (raft-configure (raft-member-node member)
                     (list (cons (raft-node-id (raft-member-node member)) role)))))
 
-(defun raft-cluster-prepare-joiner (member seed-addresses)
+(defun raft-cluster-prepare-joiner (member seed-addresses &key pki)
   "Prepare a fresh MEMBER to join an existing cluster. SEED-ADDRESSES is an alist
    id->(host port) for the members it already knows (at least the leader), learned
    out of band through the join/token handshake. The joiner starts as a LEARNER so
@@ -71,7 +74,7 @@
    the committed config promotes it to its real role. Links to the seeds are
    opened now so it can reply to the leader's first append before the add commits."
   (bt:with-lock-held ((raft-member-lock member))
-    (raft-member-enable-dynamic-membership member)
+    (raft-member-enable-dynamic-membership member :pki pki)
     (let ((node (raft-member-node member)))
       (setf (raft-node-self-role node) :learner
             (raft-node-removed node) nil)
@@ -99,6 +102,100 @@
   "The current membership as an alist id->role, from this member's view."
   (bt:with-lock-held ((raft-member-lock member))
     (raft-current-config (raft-member-node member))))
+
+;;; ---------------------------------------------------------------------------
+;;; Join handshake (podster-c2d.10): the network front for the add-member flow.
+
+(defun raft-cluster-install-join-handler (member &key pki)
+  "Make MEMBER answer Join RPCs (leader-side admission). A follower replies with
+   the current leader's address so the joiner can retry there; the leader
+   validates the join token (when PKI is given), proposes the add, and returns
+   the member address book. Reuses the same token issuance as node enrollment."
+  (setf (raft-member-join-handler member)
+        (lambda (request) (raft-member-handle-join member request :pki pki))))
+
+(defun raft-member-handle-join (member request &key pki)
+  (let* ((node (raft-member-node member))
+         (id (gr8s.node.v1::member-id request))
+         (host (gr8s.node.v1::host request))
+         (port (gr8s.node.v1::port request))
+         (role (if (string-equal "witness" (gr8s.node.v1::role request)) :witness :voter))
+         (node-name (gr8s.node.v1::node-name request))
+         (token (gr8s.node.v1::join-token request)))
+    ;; Authenticate with the cluster join token (same flow as node enrollment).
+    (when pki
+      (validate-token pki token node-name))
+    (bt:with-lock-held ((raft-member-lock member))
+      (if (not (raft-leader-p node))
+          ;; Redirect: point the joiner at the leader we last heard from.
+          (let* ((leader (raft-node-leader-id node))
+                 (addr (and leader (gethash leader (raft-node-peer-addresses node)))))
+            (make-instance 'gr8s.node.v1::join-response
+                           :accepted nil
+                           :leader-id (or leader "")
+                           :leader-host (if addr (first addr) "")
+                           :leader-port (if addr (second addr) 0)))
+          (progn
+            (raft-propose-config node :add id :role role :address (list host port))
+            (make-instance 'gr8s.node.v1::join-response
+                           :accepted t
+                           :leader-id (raft-node-id node)
+                           :members (raft-cluster-address-book-members node)))))))
+
+(defun raft-cluster-address-book-members (node)
+  "The current address book as a list of RaftMember proto messages."
+  (loop for mid being the hash-keys of (raft-node-peer-addresses node) using (hash-value addr)
+        collect (make-instance 'gr8s.node.v1::raft-member
+                               :id mid :host (first addr) :port (second addr)
+                               :role (string-downcase (symbol-name (raft-member-role node mid))))))
+
+(defun raft-cluster-call-join (member host port &key node-name token (role :voter) (timeout 5))
+  "Dial HOST:PORT and send one Join request for MEMBER. Returns the JoinResponse."
+  (let ((channel (ag-grpc:make-channel host port :timeout timeout
+                                       :tls (raft-member-tls member) :tls-verify nil
+                                       :tls-client-certificate (raft-member-tls-certificate member)
+                                       :tls-client-key (raft-member-tls-key member))))
+    (unwind-protect
+         (let* ((stub (gr8s.node.v1::make-raft-transport-stub channel))
+                (request (make-instance 'gr8s.node.v1::join-request
+                                        :member-id (raft-node-id (raft-member-node member))
+                                        :host (raft-member-host member)
+                                        :port (raft-member-port member)
+                                        :role (string-downcase (symbol-name role))
+                                        :node-name (or node-name "")
+                                        :join-token (or token ""))))
+           (values (gr8s.node.v1::raft-transport-join stub request :timeout timeout)))
+      (ignore-errors (ag-grpc:channel-close channel)))))
+
+(defun raft-cluster-join (member host port &key node-name token (role :voter) pki
+                                                (max-redirects 3) (timeout 5))
+  "Join an existing cluster through its Join RPC at HOST:PORT (any member;
+   followers redirect to the leader). MEMBER's gRPC server must already be
+   running. On success, seeds the address book from the response so MEMBER can
+   reach every peer, and returns T. Returns (values nil reason) otherwise."
+  ;; Stay inert (a learner) through the round-trip so we never self-elect a
+  ;; rival single-node term before the leader admits us.
+  (bt:with-lock-held ((raft-member-lock member))
+    (raft-member-enable-dynamic-membership member :pki pki)
+    (setf (raft-node-self-role (raft-member-node member)) :learner))
+  (loop with h = host and p = port
+        for attempt from 0 to max-redirects
+        for response = (raft-cluster-call-join member h p :node-name node-name
+                                                          :token token :role role :timeout timeout)
+        do (cond
+             ((gr8s.node.v1::accepted response)
+              (raft-cluster-prepare-joiner
+               member
+               (loop for m in (gr8s.node.v1::members response)
+                     collect (cons (gr8s.node.v1::id m)
+                                   (list (gr8s.node.v1::host m) (gr8s.node.v1::port m))))
+               :pki pki)
+              (return t))
+             ((and (plusp (length (gr8s.node.v1::leader-host response)))
+                   (< attempt max-redirects))
+              (setf h (gr8s.node.v1::leader-host response)
+                    p (gr8s.node.v1::leader-port response)))
+             (t (return (values nil :no-leader))))))
 
 (defun raft-member-propose-sync (member command &key (timeout 5))
   "Propose COMMAND on the leader and block until it commits, returning the

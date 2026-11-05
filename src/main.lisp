@@ -194,6 +194,62 @@
     (unless (getf options :node-name) (error "join-token requires --node-name"))
     options))
 
+(defun parse-witness-options (arguments)
+  "Options for 'gr8s witness': a headless Raft voting member (a quorum
+   tie-breaker) that joins an existing cluster and holds no application state."
+  (let ((options (list :command :witness
+                       :listen "127.0.0.1" :port 0
+                       :state-directory (namestring (default-state-directory)))))
+    (loop while arguments
+          for option = (first arguments)
+          for value = (option-value arguments option)
+          do (cond
+               ((string= option "--join") (setf (getf options :join) value))
+               ((string= option "--node-name")
+                (setf (getf options :node-name) (ensure-valid-node-name value)))
+               ((string= option "--member-id") (setf (getf options :member-id) value))
+               ((string= option "--token") (setf (getf options :token) value))
+               ((string= option "--ca-pin") (setf (getf options :ca-pin) value))
+               ((string= option "--listen") (setf (getf options :listen) value))
+               ((string= option "--port") (setf (getf options :port) (parse-port value)))
+               ((string= option "--state-directory") (setf (getf options :state-directory) value))
+               (t (error "unknown witness option: ~A" option)))
+             (setf arguments (cddr arguments)))
+    (unless (getf options :join) (error "witness requires --join HOST:PORT"))
+    (unless (getf options :member-id)
+      (setf (getf options :member-id)
+            (or (getf options :node-name)
+                (error "witness requires --node-name or --member-id"))))
+    options))
+
+(defun run-witness (options &key (stop-predicate (lambda () *shutdown-requested*)))
+  "Start a headless witness member, join the cluster at --join, and run until
+   shutdown. The witness persists its Raft WAL under the state directory, votes
+   and counts toward quorum, but never leads and serves no state machine."
+  (multiple-value-bind (host port) (parse-agent-server (getf options :join))
+    (let* ((state (uiop:ensure-directory-pathname (getf options :state-directory)))
+           (storage (open-file-raft-storage (merge-pathnames "raft/witness.log" state)))
+           (member (start-raft-member (getf options :member-id)
+                                      :host (getf options :listen)
+                                      :port (getf options :port)
+                                      :apply-fn (lambda (command) (declare (ignore command)) nil)
+                                      :storage storage)))
+      (unwind-protect
+           (progn
+             (raft-member-start member)
+             (unless (raft-cluster-join member host port
+                                        :role :witness
+                                        :node-name (getf options :node-name)
+                                        :token (getf options :token))
+               (error "witness ~A could not join the cluster at ~A:~D"
+                      (getf options :member-id) host port))
+             (format t "gr8s witness ~A joined the cluster via ~A:~D; holding quorum.~%"
+                     (getf options :member-id) host port)
+             (finish-output)
+             (loop until (funcall stop-predicate) do (sleep 0.2)))
+        (ignore-errors (stop-raft-member member)))
+      0)))
+
 (defun print-node-join-token (options &optional (output *standard-output*))
   (let* ((state (uiop:ensure-directory-pathname (getf options :state-directory)))
          (root (merge-pathnames "pki/" state)))
@@ -241,6 +297,8 @@
      (parse-agent-options (rest arguments)))
     ((string= "join-token" (first arguments))
      (parse-join-token-options (rest arguments)))
+    ((string= "witness" (first arguments))
+     (parse-witness-options (rest arguments)))
     ((string= "kubeconfig" (first arguments))
      (parse-kubeconfig-options (rest arguments)))
     ((string= "runtime-assets" (first arguments))
@@ -600,7 +658,7 @@ handler and never gets here. A busy host makes this race likely."
 
 (defun print-help ()
   (format t
-          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%"))
+          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s witness --join HOST:PORT --node-name NAME [--token TOKEN] [--listen IPV4] [--port PORT] [--state-directory DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%"))
 
 (defun print-gr8s-banner (role)
   "Print a startup banner (Spring-Boot style) naming the role gr8s is starting."
@@ -623,8 +681,11 @@ handler and never gets here. A busy host makes this race likely."
       (funcall cni-entry)
       (handler-case
           (let ((options (parse-cli-options arguments)))
-            (when (member (getf options :command) '(:serve :agent))
-              (print-gr8s-banner (if (eq (getf options :command) :serve) "control plane" "node agent"))
+            (when (member (getf options :command) '(:serve :agent :witness))
+              (print-gr8s-banner (case (getf options :command)
+                                   (:serve "control plane")
+                                   (:agent "node agent")
+                                   (:witness "witness arbiter")))
               (install-stale-timeout-guard))
             (case (getf options :command)
               (:help (print-help) 0)
@@ -644,7 +705,11 @@ handler and never gets here. A busy host makes this race likely."
               (:agent
                (setf *shutdown-requested* nil)
                (install-shutdown-handlers)
-               (agent options))))
+               (agent options))
+              (:witness
+               (setf *shutdown-requested* nil)
+               (install-shutdown-handlers)
+               (run-witness options))))
         (error (error)
           (format *error-output* "gr8s: ~A~%" error)
           2))))
