@@ -17,6 +17,7 @@
 (defpackage #:gr8s
   (:use #:cl)
   (:export
+   #:+gr8s-version+
    #:+node-protocol-version+
    #:container-spec-args
    #:container-spec-command

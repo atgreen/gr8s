@@ -15,7 +15,8 @@
   :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cl-cancel"
                "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
                "pure-tls/acme" "drakma"
-               "sb-posix" "slynk" "trivial-utf-8" "usocket" "whistler/loader")
+               "sb-posix" "slynk" "trivial-utf-8" "usocket" "version-string"
+               "whistler/loader")
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
                (:static-file "schema/crd-v1.json")
@@ -33,6 +34,7 @@
                (:module "src"
                 :serial t
                 :components ((:file "package")
+                             (:file "version")
                              (:file "grpc-close-compat")
                              (:file "cri-v1-generated")
                              (:file "csi-v1-generated")

@@ -311,6 +311,8 @@
     ((or (null arguments)
          (member (first arguments) '("help" "--help" "-h") :test #'string=))
      (list :command :help))
+    ((member (first arguments) '("version" "--version" "-v") :test #'string=)
+     (list :command :version))
     ((string= "serve" (first arguments))
      (parse-serve-options (rest arguments)))
     ((string= "agent" (first arguments))
@@ -724,7 +726,7 @@ handler and never gets here. A busy host makes this race likely."
 
 (defun print-help ()
   (format t
-          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE] [--local-storage-path DIR]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s witness --join HOST:PORT --node-name NAME [--token TOKEN] [--listen IPV4] [--port PORT] [--state-directory DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%"))
+          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE] [--local-storage-path DIR]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s witness --join HOST:PORT --node-name NAME [--token TOKEN] [--listen IPV4] [--port PORT] [--state-directory DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%  gr8s version~%"))
 
 (defun print-gr8s-banner (role)
   "Print a startup banner (Spring-Boot style) naming the role gr8s is starting."
@@ -738,7 +740,7 @@ handler and never gets here. A busy host makes this race likely."
                   "   |___/"))
     (write-line line))
   (terpri)
-  (format t "   gr8s · a Kubernetes-compatible control plane in Common Lisp~%")
+  (format t "   gr8s ~A · a Kubernetes-compatible control plane in Common Lisp~%" +gr8s-version+)
   (format t "   Kubernetes API v1.36 · ~A · no Envoy, no kube-proxy, no etcd~%~%" role)
   (finish-output))
 
@@ -755,6 +757,7 @@ handler and never gets here. A busy host makes this race likely."
               (install-stale-timeout-guard))
             (case (getf options :command)
               (:help (print-help) 0)
+              (:version (format t "gr8s ~A~%" +gr8s-version+) 0)
               (:kubeconfig
                (write-kubeconfig (getf options :output) (getf options :server))
                0)
