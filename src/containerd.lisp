@@ -441,6 +441,15 @@ A container running as any user can write here, and a user mount at the path tak
                        (cri-container-summary-id container)
                        :stdin stdin :stdout stdout :stderr stderr :tty tty)))))
 
+(defmethod runtime-port-forward-url ((runtime containerd-runtime) uid port)
+  (call-containerd-runtime
+   (lambda ()
+     (let ((sandbox (containerd-owned-sandbox runtime uid)))
+       (unless sandbox
+         (error 'runtime-error :message "The Pod has no sandbox on this node"))
+       (cri-port-forward-url (containerd-runtime-socket-path runtime)
+                             (cri-pod-sandbox-info-id sandbox) port)))))
+
 (defmethod runtime-container-metrics ((runtime containerd-runtime))
   (call-containerd-runtime
    (lambda () (cri-container-metrics (containerd-runtime-socket-path runtime)))))

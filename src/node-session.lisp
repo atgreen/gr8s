@@ -150,6 +150,18 @@
              (pending-node-operation-finished operation)
              (pending-node-operation-lock operation)))))))
 
+(defun take-next-node-operation-message (operation)
+  "Wait for OPERATION's next message and remove it, returning it, or (values NIL T) at the end.
+What was consumed isn't kept, for streams too long to hold in memory."
+  (bt:with-lock-held ((pending-node-operation-lock operation))
+    (loop
+      (when (pending-node-operation-stream-messages operation)
+        (return (values (pop (pending-node-operation-stream-messages operation)) nil)))
+      (when (pending-node-operation-done-p operation)
+        (return (values nil t)))
+      (bt:condition-wait (pending-node-operation-finished operation)
+                         (pending-node-operation-lock operation)))))
+
 (defun wait-for-node-operation (server operation &key (timeout 10))
   (let ((deadline (+ (get-internal-real-time)
                      (* timeout internal-time-units-per-second))))
@@ -729,7 +741,13 @@
              (:constructor make-agent-node-session (stream)))
   stream
   (sequence 0)
-  (send-lock (bt:make-lock "gr8s agent node session send")))
+  (send-lock (bt:make-lock "gr8s agent node session send"))
+  ;; The thread reading this session, once other threads may be sending on it.
+  ;; It alone sees the window updates a full send waits for, so it never sends itself.
+  owner
+  (outbox nil)
+  (outbox-lock (bt:make-lock "gr8s agent node session outbox"))
+  (outbox-changed (bt:make-condition-variable :name "gr8s agent node session outbox")))
 
 (defun accept-agent-server-hello (identity identity-path hello)
   (let ((node-id (slot-value hello 'gr8s.node.v1::node-id))
@@ -748,12 +766,44 @@
           (gethash "assignedPodCIDR" identity) cidr)
     (persist-agent-identity identity-path identity)))
 
-(defun send-agent-session-envelope (session variant payload)
+(defun write-agent-session-envelope (session variant payload)
   (bt:with-lock-held ((agent-node-session-send-lock session))
     (ag-grpc:stream-send
      (agent-node-session-stream session)
      (make-agent-envelope
       variant payload :sequence (incf (agent-node-session-sequence session))))))
+
+(defun send-agent-session-envelope (session variant payload)
+  "Send on SESSION, leaving it to the outbox if this thread is the one that must keep reading."
+  (if (eq (bt:current-thread) (agent-node-session-owner session))
+      (bt:with-lock-held ((agent-node-session-outbox-lock session))
+        (setf (agent-node-session-outbox session)
+              (nconc (agent-node-session-outbox session) (list (cons variant payload))))
+        (bt:condition-notify (agent-node-session-outbox-changed session)))
+      (write-agent-session-envelope session variant payload)))
+
+(defun run-agent-session-outbox (session finished-p finish-session)
+  "Send what the session's reading thread has left, in order, until the session finishes."
+  (handler-case
+      (loop
+        (let ((entry (bt:with-lock-held ((agent-node-session-outbox-lock session))
+                       (loop until (or (agent-node-session-outbox session) (funcall finished-p))
+                             do (bt:condition-wait (agent-node-session-outbox-changed session)
+                                                   (agent-node-session-outbox-lock session) :timeout 0.2))
+                       (pop (agent-node-session-outbox session)))))
+          (unless entry (return))
+          (write-agent-session-envelope session (car entry) (cdr entry))))
+    (error (condition)
+      (format *error-output* "gr8s node session send failed: ~A~%" condition)
+      (funcall finish-session))))
+
+(defun wake-agent-session-senders (channel)
+  "End CHANNEL's connection for senders waiting on its flow control, which nothing else wakes."
+  (let ((connection (ag-grpc:channel-connection channel)))
+    (when connection
+      (setf (ag-http2:connection-state connection) :closed)
+      (bt2:with-lock-held ((ag-http2::connection-flow-control-lock connection))
+        (bt2:condition-broadcast (ag-http2::connection-flow-control-cv connection))))))
 
 (defun validate-node-snapshot-identity (identity snapshot)
   "Reject another node allocation before an arrival observer can persist any deletion intent."
@@ -1082,6 +1132,7 @@
          (monitor-thread nil)
          (status-thread nil)
          (watchdog-thread nil)
+         (outbox-thread nil)
          (snapshot-worker nil)
          (heartbeat-interval 1)
          (operation-session-p nil)
@@ -1117,7 +1168,8 @@
                      (setf session-finished-p t
                            close-p t)))
                  (when close-p
-                   (ignore-errors (ag-grpc:channel-close channel))))))
+                   (ignore-errors (ag-grpc:channel-close channel))
+                   (ignore-errors (wake-agent-session-senders channel))))))
     (cl-cancel:with-cancellable
         (session-context (node-session-control-context control))
       (declare (ignore session-context))
@@ -1142,6 +1194,14 @@
            ;; Cancellation must also cover a peer that stalls before its
            ;; ServerHello, not only sessions that finished the handshake.
            (unless one-shot-p
+             ;; From here this thread reads, and a sender short of flow-control window
+             ;; waits for what it reads. A sender reading too would race it for frames.
+             (setf (ag-http2:connection-reader-thread-active-p (ag-grpc:channel-connection channel)) t
+                   (agent-node-session-owner session) session-thread
+                   outbox-thread
+                   (bt:make-thread
+                    (lambda () (run-agent-session-outbox session #'finished-p #'finish-session))
+                    :name "gr8s agent session outbox"))
              (setf monitor-thread
                    (bt:make-thread
                     (lambda ()
@@ -1213,6 +1273,8 @@
           (funcall operation-handler :session-closed nil nil)))
       (when monitor-thread
         (ignore-errors (bt:join-thread monitor-thread)))
+      (when outbox-thread
+        (ignore-errors (bt:join-thread outbox-thread)))
       ;; The status thread is not joined: a provider blocked on a runtime lock
       ;; must not hold up the replacement session. It exits once it returns.
       (when watchdog-thread

@@ -100,7 +100,13 @@
          (verb (case method (:get (cond (watch "watch") (name "get") (resource "list") (t "get")))
                             (:post "create") (:put "update") (:patch "patch")
                             (:delete (if name "delete" "deletecollection"))
-                            (:head "get") (t ""))))
+                            (:head "get") (t "")))
+         ;; A WebSocket upgrade is a GET, but it opens a way into the Pod rather than reading
+         ;; anything, so as upstream has since v1.35, read access isn't enough for one.
+         (verb (if (and (equal group "") (equal resource "pods") (eq method :get)
+                        (member (third resource-parts) '("exec" "attach" "portforward") :test #'equal))
+                   "create"
+                   verb)))
     (values verb group
             (when resource (if (third resource-parts) (format nil "~A/~A" resource (third resource-parts)) resource))
             name namespace)))

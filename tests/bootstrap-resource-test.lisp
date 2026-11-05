@@ -152,5 +152,5 @@
             for slash = (position #\/ name)
             when slash
               do (is (discovery-entry document (subseq name 0 slash)) "~A has no parent" name))
-      (dolist (name '("nodes/status" "namespaces/status" "namespaces/finalize" "pods/attach" "pods/exec" "serviceaccounts/token"))
+      (dolist (name '("nodes/status" "namespaces/status" "namespaces/finalize" "pods/attach" "pods/exec" "pods/portforward" "serviceaccounts/token"))
         (is (discovery-entry document name) "~A is served but not discoverable" name)))))

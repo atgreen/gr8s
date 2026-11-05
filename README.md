@@ -732,6 +732,13 @@ matched as the kubelet matches them apart from `[...]` patterns in host names. T
 no node-wide credential file or credential provider plugin. An image already on a node
 isn't checked against a Pod's credentials, so any Pod there can use it with
 `IfNotPresent`; upstream's kubelet has checked this by default since v1.35.
+`kubectl port-forward` works over its WebSocket tunnel and over plain SPDY, for Pods on
+any node. containerd reaches the port inside the Pod's network namespace, so a server
+listening only on the Pod's localhost works. Each forwarded connection is one operation
+on the node's session, with a 1 MiB window each way, so a slow client or Pod pauses its
+own connection instead of filling memory. It can still hold up the other connections
+of the same `kubectl`, as upstream's can. As with `exec` and `attach`, it takes the
+`create` verb on the subresource, even through a WebSocket's GET.
 Ephemeral containers are added through `pods/ephemeralcontainers`, and `pods/resize`
 changes CPU and memory in place, or restarts that container under a RestartContainer
 policy. Readiness gates and a Pod's own `resources` remain unsupported.

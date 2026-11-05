@@ -128,6 +128,7 @@
       (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
       (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "PodExecOptions" "verbs" #("create" "get"))
       (json-object "name" "pods/attach" "singularName" "" "namespaced" t "kind" "PodAttachOptions" "verbs" #("create" "get"))
+      (json-object "name" "pods/portforward" "singularName" "" "namespaced" t "kind" "PodPortForwardOptions" "verbs" #("create" "get"))
       (json-object "name" "pods/eviction" "singularName" "" "namespaced" t "kind" "Eviction"
                    "group" "policy" "version" "v1" "verbs" #("create"))
       (json-object "name" "pods/proxy" "singularName" "" "namespaced" t "kind" "PodProxyOptions"
@@ -1172,6 +1173,8 @@ its clients treat any other multi-byte frame as an error message."
        (pod-eviction-response store reconciler (first parts) namespace))
       ((and (= 2 (length parts)) (string= "attach" (second parts)) (member method '(:get :post)))
        (pod-attach-response store reconciler (first parts) namespace))
+      ((and (= 2 (length parts)) (string= "portforward" (second parts)) (member method '(:get :post)))
+       (pod-port-forward-response store reconciler (first parts) namespace))
       (t (status-response "Failure" "NotFound"
                           (format nil "No route for ~A ~A" method path) 404)))))
 
