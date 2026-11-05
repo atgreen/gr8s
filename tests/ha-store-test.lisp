@@ -27,17 +27,19 @@
   "A member whose state machine installs replicated core-state blobs on STORE."
   (gr8s::start-raft-member
    id :apply-fn (lambda (command)
-                  (when (and (consp command) (eq (car command) :core-state))
-                    (gr8s::install-core-state-blob store (second command))))))
+                  (when (consp command)
+                    (case (car command)
+                      (:core-state (gr8s::install-core-state-blob store (second command)))
+                      (:pod-state (gr8s::install-pod-state-blob store (second command))))))))
 
 (defun wire-ha-store (store member)
   "Make STORE's durable writes replicate through MEMBER's Raft log."
   (setf (gr8s::pod-store-consensus-commit-fn store)
-        (lambda (json)
+        (lambda (tag json)
           (multiple-value-bind (result committed)
-              (gr8s::raft-member-propose-sync member (list :core-state json) :timeout 10)
+              (gr8s::raft-member-propose-sync member (list tag json) :timeout 10)
             (declare (ignore result))
-            (unless committed (error "core write did not commit (not leader)"))))))
+            (unless (eq committed t) (error "core write did not commit (not leader)"))))))
 
 (defun store-of-member (member a sa b sb c sc)
   (cond ((eq member a) sa) ((eq member b) sb) ((eq member c) sc)))

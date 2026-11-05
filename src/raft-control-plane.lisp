@@ -29,11 +29,19 @@
    cluster (INIT) or join an existing one (JOIN-HOST/JOIN-PORT). Routes STORE's
    durable writes through the member and returns an HA-CONTROL-PLANE. Signals an
    error if a join does not succeed."
-  (let ((member (start-raft-member
-                 id :host host :port port
-                 :apply-fn (lambda (command)
-                             (when (and (consp command) (eq (car command) :core-state))
-                               (install-core-state-blob store (second command)))))))
+  (let* ((member nil)
+         (apply-fn (lambda (command)
+                     (when (consp command)
+                       (case (car command)
+                         (:core-state (install-core-state-blob store (second command)))
+                         ;; The leader already applied the Pod write locally before
+                         ;; proposing; only followers install it (podster-8ia.2).
+                         ;; apply-fn runs under the member lock, so use the
+                         ;; lock-free role predicate, not raft-member-leader-p
+                         ;; (which would re-acquire the lock and deadlock).
+                         (:pod-state (unless (raft-leader-p (raft-member-node member))
+                                       (install-pod-state-blob store (second command)))))))))
+    (setf member (start-raft-member id :host host :port port :apply-fn apply-fn))
     (cond
       (init
        (raft-cluster-init member :pki pki :api-url api-url)
@@ -49,11 +57,12 @@
       (t (stop-raft-member member)
          (error "start-ha-control-plane requires :init or :join-host")))
     ;; Durable writes now go through Raft: the leader proposes and commits; a
-    ;; follower's propose returns :not-leader, surfaced to the HTTP layer.
+    ;; follower's propose returns :not-leader, surfaced to the HTTP layer. TAG is
+    ;; :core-state or :pod-state; the proposed command installs on every replica.
     (setf (pod-store-consensus-commit-fn store)
-          (lambda (json)
+          (lambda (tag json)
             (multiple-value-bind (result committed)
-                (raft-member-propose-sync member (list :core-state json) :timeout 10)
+                (raft-member-propose-sync member (list tag json) :timeout 10)
               (declare (ignore result))
               ;; PROPOSE-SYNC returns T only on commit; a reason keyword
               ;; (:not-leader / :timeout) otherwise -- both truthy, so test for T.
