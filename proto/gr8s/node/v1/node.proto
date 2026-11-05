@@ -242,3 +242,18 @@ message CniResponse {
   string error_message = 5;
   string error_details = 6;
 }
+
+// Raft consensus transport between HA control-plane members (podster-c2d.3).
+// A single one-way delivery carrying one serialized Raft message; replies flow
+// as their own Deliver calls, matching the core's fire-and-forget send model.
+service RaftTransport {
+  rpc Deliver(RaftEnvelope) returns (RaftAck);
+}
+
+message RaftEnvelope {
+  uint32 protocol_version = 1;
+  bytes payload = 2;
+}
+
+message RaftAck {
+}
