@@ -442,6 +442,11 @@ handler and never gets here. A busy host makes this race likely."
   reconciler
   observer
   before-reconcile
+  ;; HA (podster-c2d.7): a nullary predicate that is true when this control
+  ;; plane may act as the cluster leader. When set and false, the pass is
+  ;; skipped so controllers only drive reconciliation on the Raft leader; NIL
+  ;; (the default) always runs, keeping the single-node path unchanged.
+  leader-gate
   thread
   (stop-requested nil)
   (interval 1.0)
@@ -456,7 +461,10 @@ handler and never gets here. A busy host makes this race likely."
 (defun reconciliation-worker-loop (worker)
   (loop until (reconciliation-worker-stopping-p worker)
         do (handler-case
-               (progn
+               ;; Only drive controllers when we hold leadership; a follower
+               ;; reconciles nothing and simply waits to be promoted.
+               (when (let ((gate (reconciliation-worker-leader-gate worker)))
+                       (or (null gate) (funcall gate)))
                  (when (reconciliation-worker-before-reconcile worker)
                    (funcall (reconciliation-worker-before-reconcile worker)))
                  (reconcile-all (reconciliation-worker-reconciler worker)
@@ -471,10 +479,11 @@ handler and never gets here. A busy host makes this race likely."
                 (reconciliation-worker-lock worker)
                 :timeout (reconciliation-worker-interval worker))))))
 
-(defun start-reconciliation-worker (reconciler &key (interval 1.0) observer before-reconcile)
+(defun start-reconciliation-worker (reconciler &key (interval 1.0) observer before-reconcile
+                                                     leader-gate)
   (let ((worker (make-reconciliation-worker
                  :reconciler reconciler :interval interval :observer observer
-                 :before-reconcile before-reconcile)))
+                 :before-reconcile before-reconcile :leader-gate leader-gate)))
     (setf (reconciliation-worker-thread worker)
           (bt:make-thread
            (lambda () (reconciliation-worker-loop worker))
