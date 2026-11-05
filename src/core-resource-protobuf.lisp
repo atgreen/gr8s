@@ -143,6 +143,11 @@
             (return-from decode-core-resource-protobuf (decode-crd-protobuf raw)))
           (when (typed-api-kind-p kind)
             (return-from decode-core-resource-protobuf (decode-typed-api-protobuf raw kind version)))
+          (when (equal kind "Binding")
+            (let ((object (template-protobuf-message "k8s.io.api.core.v1.Binding" raw))
+                  (metadata (core-protobuf-value (core-protobuf-fields raw) 1)))
+              (setf (gethash "metadata" object) (if metadata (core-protobuf-metadata metadata) (core-object)))
+              (return-from decode-core-resource-protobuf object)))
           (when (equal kind "HorizontalPodAutoscaler")
             (let ((object (template-protobuf-message
                            (format nil "k8s.io.api.autoscaling.~A.HorizontalPodAutoscaler"

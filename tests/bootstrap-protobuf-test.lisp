@@ -165,3 +165,16 @@
       (check-core-status 422 collection :method :post :object object))))
 
 (in-suite gr8s)
+
+(test a-binding-can-arrive-in-protobuf-as-client-go-sends-it
+  (with-core-api (store path)
+    (values path)
+    (gr8s:register-node store (gr8s:make-node-record :id "bind-pb-id" :name "bind-pb" :pod-cidr "10.88.41.0/24"))
+    (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
+           (input (core-test-protobuf-envelope
+                   "Binding"
+                   (list (list 1 (core-test-protobuf (list (list 1 (pod-name pod)))))
+                         (list 2 (core-test-protobuf '((1 "Node") (3 "bind-pb"))))))))
+      (check-core-status 201 (format nil "/api/v1/namespaces/default/pods/~A/binding" (pod-name pod))
+                         :method :post :content-type "application/vnd.kubernetes.protobuf" :octets input)
+      (is (equal "bind-pb" (gr8s::pod-node-name (gr8s:get-pod store "default" (pod-name pod))))))))

@@ -126,6 +126,8 @@
       (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
       (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "PodExecOptions" "verbs" #("create" "get"))
       (json-object "name" "pods/attach" "singularName" "" "namespaced" t "kind" "PodAttachOptions" "verbs" #("create" "get"))
+      (json-object "name" "pods/binding" "singularName" "" "namespaced" t "kind" "Binding" "verbs" #("create"))
+      (resource-discovery-entry "componentstatuses" "componentstatus" nil "ComponentStatus" #("get" "list"))
       (json-object "name" "pods/portforward" "singularName" "" "namespaced" t "kind" "PodPortForwardOptions" "verbs" #("create" "get"))
       (json-object "name" "pods/eviction" "singularName" "" "namespaced" t "kind" "Eviction"
                    "group" "policy" "version" "v1" "verbs" #("create"))
@@ -1174,6 +1176,8 @@ its clients treat any other multi-byte frame as an error message."
        (pod-attach-response store reconciler (first parts) namespace))
       ((and (= 2 (length parts)) (string= "portforward" (second parts)) (member method '(:get :post)))
        (pod-port-forward-response store reconciler (first parts) namespace))
+            ((and (= 2 (length parts)) (string= "binding" (second parts)) (eq method :post))
+       (pod-binding-response store (first parts) namespace))
       (t (status-response "Failure" "NotFound"
                           (format nil "No route for ~A ~A" method path) 404)))))
 
@@ -1188,7 +1192,8 @@ than wait for the next, which truncates any body that spans records in flight."
         (setf buffer (let ((larger (make-array (* 2 (length buffer)) :element-type '(unsigned-byte 8))))
                        (replace larger buffer))))
       (let ((next (read-sequence buffer stream :start filled)))
-        (when (= next filled)
+        ;; A chunked stream past its last chunk answers 0 whatever START was.
+        (when (<= next filled)
           (when content-length
             (core-resource-error 400 "BadRequest" "Request body ended after ~D of ~D octets" filled content-length))
           (return))
@@ -1204,8 +1209,13 @@ than wait for the next, which truncates any body that spans records in flight."
     (when (and (or chunked (and content-length (plusp content-length)))
                (not form)
                (not (uiop:string-prefix-p "multipart/form-data" (or (hunchentoot:header-in :content-type request) ""))))
-      (setf (slot-value request 'hunchentoot::raw-post-data)
-            (read-complete-body (hunchentoot::content-stream request) (unless chunked content-length))))))
+      (let ((stream (hunchentoot::content-stream request)))
+        ;; Otherwise the last chunk doesn't end the read, which then waits for the
+        ;; connection's timeout and fails the request: kubectl chunks a body from stdin.
+        (when (and chunked (typep stream 'chunga:chunked-input-stream))
+          (setf (chunga:chunked-input-stream-eof-after-last-chunk stream) t))
+        (setf (slot-value request 'hunchentoot::raw-post-data)
+              (read-complete-body stream (unless chunked content-length)))))))
 
 (defun request-media-type ()
   "Return the request's media type without parameters, or an empty string when it has none."
@@ -1251,6 +1261,8 @@ than wait for the next, which truncates any body that spans records in flight."
            (concatenate 'string (runtime-network-metrics runtime) (gateway-metrics-text) (volume-reclaim-metrics-text)
                         (if store (flowcontrol-metrics-text store) "")))
           ((string= path "/version") (version-response))
+          ((nth-value 1 (component-status-route path))
+           (component-status-response (component-status-route path) method))
           ((string= path "/api")
            (if (aggregated-discovery-requested-p)
                (aggregated-discovery-response store runtime reconciler "/api")
