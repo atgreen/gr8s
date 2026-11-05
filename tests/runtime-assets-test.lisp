@@ -168,6 +168,23 @@
   (is (equal "gr8s.bin" (cni-link-target-with-preparer (constantly nil))))
   (is (equal "gr8s.bin" (cni-link-target-with-preparer nil))))
 
+(test prepared-plugin-image-is-at-its-final-path
+  (let* ((directory (merge-pathnames (format nil "gr8s-cni-image-~36R/" (random (expt 36 8)))
+                                     (uiop:temporary-directory)))
+         (writer (merge-pathnames "writer" directory)))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist writer)
+           ;; Stands in for the native image: it writes a runnable file to the path it's given.
+           (with-open-file (stream writer :direction :output)
+             (format stream "#!/bin/sh~%printf '#!/bin/sh\\nexit 0\\n' > \"$2\"~%chmod 755 \"$2\"~%"))
+           (sb-posix:chmod (namestring writer) #o755)
+           (let ((image (gr8s::prepare-cni-plugin-image directory writer)))
+             (is (equal "gr8s" (file-namestring image)))
+             (is-true (probe-file image))
+             (is-false (probe-file (concatenate 'string image ".pending")))))
+      (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
+
 (test failed-plugin-image-falls-back
   (let ((directory (merge-pathnames (format nil "gr8s-cni-image-~36R/" (random (expt 36 8)))
                                     (uiop:temporary-directory)))

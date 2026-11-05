@@ -141,7 +141,8 @@ runtime assets each time, which takes about 0.67s and 185MB on a test VM."
                                                :environment (cons "CNI_COMMAND=VERSION"
                                                                   (sb-ext:posix-environ))
                                                :input nil :output nil :error nil))))
-          (rename-file pending path)
+          ;; Not RENAME-FILE: it would merge the new name with the old file's type.
+          (sb-posix:rename pending path)
           path))
     (error (condition)
       (format *error-output* "gr8s: using the compressed image as the CNI plugin: ~A~%" condition)
