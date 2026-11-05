@@ -45,12 +45,15 @@
 
 (defun rsim-run (sim ticks) (dotimes (i ticks) (rsim-tick sim)))
 
-(defun make-rsim (ids timeouts)
+(defun make-rsim (ids timeouts
+                  &key (state-factory (lambda () (make-hash-table :test 'equal)))
+                       (apply-maker (lambda (state) (lambda (command) (raft-kv-apply state command)))))
   "IDS is a list of member ids; TIMEOUTS an alist id->election-timeout (distinct,
-   to make elections deterministic). Each node gets its own KV state machine."
+   to make elections deterministic). Each node gets its own state machine built
+   from STATE-FACTORY + APPLY-MAKER (default: a KV hash)."
   (let ((sim (%make-rsim)))
     (dolist (id ids)
-      (let* ((kv (make-hash-table :test 'equal))
+      (let* ((state (funcall state-factory))
              (to (cdr (assoc id timeouts :test #'equal)))
              (node (gr8s::make-raft-node
                     :id id :peers (remove id ids :test #'equal)
@@ -59,10 +62,10 @@
                     :send-fn (lambda (dest message)
                                (setf (rsim-queue sim)
                                      (nconc (rsim-queue sim) (list (cons dest message)))))
-                    :apply-fn (let ((k kv)) (lambda (command) (raft-kv-apply k command))))))
+                    :apply-fn (funcall apply-maker state))))
         (gr8s::raft-reset-election-timer node)
         (push (cons id node) (rsim-nodes sim))
-        (push (cons id kv) (rsim-kvs sim))))
+        (push (cons id state) (rsim-kvs sim))))
     sim))
 
 (defun rsim-leaders (sim)
