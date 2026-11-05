@@ -66,6 +66,18 @@
       (is (equal "hello projection"
                  (gethash "message" (gethash "data" (gr8s::get-core-resource agent-store "configmaps" "sonobuoy" "settings"))))))))
 
+(test one-pods-missing-reference-does-not-stop-the-nodes-snapshot
+  (with-temporary-store (store directory)
+    (create-volume-test-data store "sonobuoy")
+    (let ((missing (create-pod store (volume-test-pod-named "projection-missing")))
+          (present (create-pod store (volume-test-pod))))
+      (gr8s::persist-pod-assignment store missing "node-a")
+      (gr8s::persist-pod-assignment store present "node-a")
+      ;; A namespace being torn down deletes its Secrets before its Pods.
+      (gr8s::delete-core-resource store "secrets" "sonobuoy" "credentials")
+      (is (= 1 (length (slot-value (gr8s::pod-assignment missing store) 'gr8s.node.v1::resource-objects-json))))
+      (is (= 2 (length (slot-value (gr8s::node-desired-state-snapshot store "node-a") 'gr8s.node.v1::pods)))))))
+
 (test projected-files-and-emptydir-have-real-mount-content
   (with-temporary-store (store directory)
     (create-volume-test-data store "sonobuoy")
