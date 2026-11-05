@@ -242,6 +242,7 @@
                (validate-crd-structural-node (crd-schema version) "openAPIV3Schema" t)
                (unless (equal "object" (gethash "type" (crd-schema version))) (crd-schema-error "openAPIV3Schema" "root must have object type"))
                (validate-crd-selectable-fields version)
+               (crd-check-schema-rules (crd-schema version) "openAPIV3Schema" t)
                (when (gethash "subresources" version)
                  (let ((subresources (require-object (gethash "subresources" version) "subresources")))
                    (reject-unsupported-fields subresources '("status") "CRD subresources")
@@ -330,6 +331,13 @@
             (setf object (crd-prepare-value object (crd-schema version) t))
             (when *crd-pruned-fields* (crd-report-pruned-fields *crd-pruned-fields*)))
           (crd-validate-value object (crd-schema version) "resource")))
+    ;; Rules read the object as the client wrote it, against the old object at the same version.
+    (crd-enforce-validation-rules
+     (crd-schema version) object
+     (and existing
+          (let ((*crd-apply-defaults* t))
+            (crd-prepare-value (crd-object-at-version definition existing version-name) (crd-schema version) t)))
+     (gethash "kind" names) (gethash "name" metadata))
     (setf object (crd-object-at-version definition object storage-name)
           metadata (gethash "metadata" object))
     (remhash "deletionTimestamp" metadata)

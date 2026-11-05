@@ -2,9 +2,8 @@
 ;;;; SPDX-License-Identifier: MIT
 ;;;;
 ;;;; Purpose:
-;;;; Admit structural custom-resource schemas and enforce their supported JSON
-;;;; validation constraints, recursive defaulting and unknown-field pruning.
-;;;; Unsupported executable validation is rejected instead of silently ignored.
+;;;; Admit structural custom-resource schemas and enforce their JSON validation
+;;;; constraints, recursive defaulting and unknown-field pruning.
 
 (in-package #:gr8s)
 
@@ -39,44 +38,6 @@
     (crd-schema-error path "requires a unique array of strings"))
   value)
 
-(defun crd-regexp (pattern)
-  "Translate an explicitly supported RE2 subset without Perl-only semantics."
-  (unless (and (stringp pattern) (not (search "(?" pattern)) (not (search "[:" pattern))
-               (not (some (lambda (extension) (search extension pattern)) '("++" "*+" "?+" "}+"))))
-    (crd-schema-error "pattern" "unsupported regular expression extension"))
-  (let ((inside nil))
-    (with-output-to-string (out)
-      (loop for index from 0 below (length pattern) for character = (char pattern index)
-            do (cond
-                 ((char= character #\\)
-                  (incf index)
-                  (unless (< index (length pattern)) (crd-schema-error "pattern" "trailing regular expression escape"))
-                  (let* ((escape (char pattern index))
-                         (class (cdr (assoc escape '((#\d . "0-9") (#\w . "A-Za-z0-9_") (#\s . "\\t\\n\\f\\r "))))))
-                    (cond
-                      (class (format out (if inside "~A" "[~A]") class))
-                      ((find escape "DWS")
-                       (when inside (crd-schema-error "pattern" "negated shorthand classes inside character sets are unsupported"))
-                       (format out "[^~A]" (case escape (#\D "0-9") (#\W "A-Za-z0-9_") (#\S "\\t\\n\\f\\r "))))
-                      ((find escape "tnrfav")
-                       (write-char (code-char (cdr (assoc escape '((#\t . 9) (#\n . 10) (#\r . 13) (#\f . 12) (#\a . 7) (#\v . 11))))) out))
-                      ((or (not (alphanumericp escape)) (and (not inside) (find escape "Az")))
-                       (write-char #\\ out) (write-char escape out))
-                      (t (crd-schema-error "pattern" "unsupported RE2 escape ~A" escape)))))
-                 ((and (not inside) (char= character #\$)) (write-string "\\z" out))
-                 ((and (not inside) (char= character #\{))
-                  (let ((end (position #\} pattern :start (1+ index))))
-                    (when end
-                      (let ((counts (subseq pattern (1+ index) end)))
-                        (when (and (plusp (length counts)) (every (lambda (char) (or (digit-char-p char) (char= char #\,))) counts))
-                          (dolist (count (uiop:split-string counts :separator '(#\,)))
-                            (when (and (plusp (length count)) (> (parse-integer count) 1000))
-                              (crd-schema-error "pattern" "RE2 repeat counts exceed 1000")))))))
-                  (write-char character out))
-                 (t (when (char= character #\[) (setf inside t))
-                    (when (char= character #\]) (setf inside nil))
-                    (write-char character out)))))))
-
 (defun validate-crd-schema (schema &optional (path "openAPIV3Schema") (depth 0) branch)
   "Reject nonstructural schemas and every unsupported validation extension."
   (when (> depth 64) (crd-schema-error path "schema nesting exceeds 64"))
@@ -91,7 +52,7 @@
                             "minProperties" "maxProperties" "allOf" "anyOf" "oneOf" "not"
                             "x-kubernetes-preserve-unknown-fields" "x-kubernetes-embedded-resource"
                             "x-kubernetes-int-or-string" "x-kubernetes-list-type" "x-kubernetes-list-map-keys"
-                            "x-kubernetes-map-type") :test #'equal)
+                            "x-kubernetes-map-type" "x-kubernetes-validations") :test #'equal)
        (crd-schema-error path "unsupported schema keyword ~A" key))) schema)
   (let ((type (gethash "type" schema)) (properties (gethash "properties" schema))
         (int-string (eq t (gethash "x-kubernetes-int-or-string" schema))))
@@ -118,11 +79,12 @@
         (unless (typep (gethash field schema) '(integer 0 *)) (crd-schema-error path "~A requires a nonnegative integer" field))))
     (when (gethash "pattern" schema)
       (let ((pattern (gethash "pattern" schema)))
-        (unless (ignore-errors (cl-ppcre:create-scanner (crd-regexp pattern)))
-          (crd-schema-error path "invalid regular expression"))))
-    (when (gethash "format" schema)
-      (unless (member (gethash "format" schema) '("" "int32" "int64" "float" "double" "byte" "date-time" "date") :test #'equal)
-        (crd-schema-error path "unsupported validation format ~A" (gethash "format" schema))))
+        (unless (stringp pattern) (crd-schema-error path "pattern must be a string"))
+        (handler-case (re2-compiled pattern)
+          (re2-syntax-error (condition)
+            (crd-schema-error path "must be a valid regular expression, but isn't: ~A" (re2-syntax-error-message condition))))))
+    (when (and (nth-value 1 (gethash "format" schema)) (not (stringp (gethash "format" schema))))
+      (crd-schema-error path "format must be a string"))
     (when (gethash "enum" schema)
       (unless (and (crd-array-p (gethash "enum" schema)) (plusp (length (gethash "enum" schema))))
         (crd-schema-error path "enum requires a nonempty array")))
@@ -207,12 +169,9 @@
   (when (stringp value)
     (when (and (gethash "minLength" schema) (< (length value) (gethash "minLength" schema))) (crd-schema-error path "below minLength"))
     (when (and (gethash "maxLength" schema) (> (length value) (gethash "maxLength" schema))) (crd-schema-error path "above maxLength"))
-    (when (and (gethash "pattern" schema) (not (cl-ppcre:scan (crd-regexp (gethash "pattern" schema)) value))) (crd-schema-error path "does not match pattern"))
-    (when (equal "byte" (gethash "format" schema)) (core-base64-bytes value path))
-    (when (equal "date-time" (gethash "format" schema)) (normalize-event-time value))
-    (when (equal "date" (gethash "format" schema))
-      (unless (cl-ppcre:scan "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" value) (crd-schema-error path "invalid date"))
-      (normalize-event-time (concatenate 'string value "T00:00:00Z"))))
+    (when (and (gethash "pattern" schema) (not (re2-match-p (re2-compiled (gethash "pattern" schema)) value)))
+      (crd-schema-error path "should match '~A'" (gethash "pattern" schema)))
+    (crd-check-string-format (gethash "format" schema) value path))
   (when (hash-table-p value)
     (when (gethash "x-kubernetes-embedded-resource" schema)
       (dolist (field '("apiVersion" "kind"))

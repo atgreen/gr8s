@@ -20,6 +20,18 @@
   (:report (lambda (condition stream) (write-string (cel-error-message condition) stream)))
   (:documentation "A runtime CEL error, which logical operators may absorb."))
 
+(define-condition cel-cost-exceeded (cel-evaluation-error) ()
+  (:documentation "An expression ran out of cost budget, which nothing absorbs."))
+
+;;; Values beyond JSON's. JSON strings, numbers, booleans, null, vectors and hash
+;;; tables stand for themselves; bytes are octet vectors.
+
+(defstruct cel-uint "A CEL uint, kept apart from JSON's int." (value 0))
+(defstruct cel-timestamp "Nanoseconds since the Unix epoch." (nanos 0))
+(defstruct cel-duration "A signed count of nanoseconds." (nanos 0))
+(defstruct cel-optional "A value that may be absent." (value nil) (present nil))
+(defstruct cel-opaque "A library object such as a quantity, URL or authorizer." (kind nil) (value nil))
+
 (defparameter +cel-maximum-expression-length+ 100000
   "Largest expression accepted, matching the upstream parser's code point limit.")
 
@@ -27,13 +39,19 @@
   "Deepest accepted expression nesting, bounding parser and evaluator recursion.")
 
 (defparameter +cel-evaluation-budget+ 1000000
-  "Evaluation steps one expression may use before it fails instead of running on.")
+  "Cost one expression may use before it fails instead of running on, upstream's PerCallLimit.")
 
 (defvar *cel-remaining-steps* 0
-  "Steps left for the expression being evaluated.")
+  "Cost left for the expression being evaluated.")
 
 (defvar *cel-declared-variables* '("object" "oldObject" "request")
   "Variables the environment of the expression being compiled declares.")
+
+(defvar *cel-functions* (make-hash-table :test #'equal)
+  "Overloads of the library functions, by name.")
+
+(defvar *cel-request-resource* nil
+  "Attributes of the request's resource, which authorizer.requestResource starts from.")
 
 (defvar *cel-construction-types* nil
   "Root type names the expression being compiled may construct, as Object or JSONPatch.")
@@ -119,7 +137,7 @@
      cursor)))
 
 (defun cel-read-number (text position)
-  "Read an int or double literal at POSITION, refusing the unsupported uint form."
+  "Read an int, uint or double literal at POSITION."
   (let ((cursor position) (size (length text)) (double nil))
     (flet ((digits ()
              (loop while (and (< cursor size) (digit-char-p (char text cursor))) do (incf cursor))))
@@ -128,10 +146,11 @@
         (setf cursor (+ position 2))
         (loop while (and (< cursor size) (digit-char-p (char text cursor) 16)) do (incf cursor))
         (when (= cursor (+ position 2)) (cel-syntax-error position "invalid hexadecimal literal"))
-        (when (and (< cursor size) (char-equal (char text cursor) #\u))
-          (cel-check-error "uint literals are not supported"))
-        (return-from cel-read-number
-          (values (parse-integer text :start (+ position 2) :end cursor :radix 16) cursor :int)))
+        (let ((value (parse-integer text :start (+ position 2) :end cursor :radix 16)))
+          (return-from cel-read-number
+            (if (and (< cursor size) (char-equal (char text cursor) #\u))
+                (values value (1+ cursor) :uint)
+                (values value cursor :int)))))
       (digits)
       (when (and (< (1+ cursor) size) (char= (char text cursor) #\.) (digit-char-p (char text (1+ cursor))))
         (setf double t) (incf cursor) (digits))
@@ -143,7 +162,8 @@
               (progn (setf double t) (digits))
               (setf cursor mark))))
       (when (and (not double) (< cursor size) (char-equal (char text cursor) #\u))
-        (cel-check-error "uint literals are not supported"))
+        (return-from cel-read-number
+          (values (parse-integer text :start position :end cursor) (1+ cursor) :uint)))
       (if double
           (let ((value (let ((*read-default-float-format* 'double-float) (*read-eval* nil))
                          (handler-case (read-from-string (subseq text position cursor))
@@ -168,7 +188,9 @@
                       (token :string value cursor) (setf cursor next)))
                    ((and (char-equal character #\b) (< (1+ cursor) size)
                          (member (char text (1+ cursor)) '(#\' #\")))
-                    (cel-check-error "bytes literals are not supported"))
+                    (multiple-value-bind (value next) (cel-read-string text (1+ cursor))
+                      (token :bytes (trivial-utf-8:string-to-utf-8-bytes value) cursor)
+                      (setf cursor next)))
                    ((or (digit-char-p character)
                         (and (char= character #\.) (< (1+ cursor) size) (digit-char-p (char text (1+ cursor)))))
                     (if (char= character #\.)
@@ -313,15 +335,42 @@
   "Expand comprehension macros, leaving ordinary method calls alone."
   (let ((count (length arguments)))
     (cond
-      ((and (member name '("all" "exists" "exists_one" "filter") :test #'equal) (= count 2))
-       (list :comprehension (intern (string-upcase name) :keyword) target
-             (cel-comprehension-variable parser (first arguments)) (second arguments) nil))
+      ((and (equal '(:ident "cel") target) (equal name "bind"))
+       (unless (= count 3) (cel-syntax-error (third (cel-peek parser)) "cel.bind requires three arguments"))
+       (list :bind (cel-comprehension-variable parser (first arguments)) (second arguments) (third arguments)))
+      ;; A dotted library function reads as a method call on its container's name.
+      ((and (eq :ident (first target))
+            (gethash (format nil "~A.~A" (second target) name) *cel-functions*))
+       (list :call (format nil "~A.~A" (second target) name) nil arguments))
+      ((and (member name '("all" "exists" "exists_one" "existsOne" "filter") :test #'equal) (= count 2))
+       (list :comprehension (cel-comprehension-kind name) target
+             (cel-comprehension-variable parser (first arguments)) (second arguments) nil nil))
+      ((and (member name '("all" "exists" "exists_one" "existsOne") :test #'equal) (= count 3))
+       (list :comprehension (cel-comprehension-kind name) target
+             (cel-comprehension-variable parser (first arguments)) (third arguments) nil
+             (cel-comprehension-variable parser (second arguments))))
       ((and (equal name "map") (= count 2))
-       (list :comprehension :map target (cel-comprehension-variable parser (first arguments)) (second arguments) nil))
+       (list :comprehension :map target (cel-comprehension-variable parser (first arguments)) (second arguments) nil nil))
       ((and (equal name "map") (= count 3))
        (list :comprehension :map target (cel-comprehension-variable parser (first arguments))
-             (third arguments) (second arguments)))
+             (third arguments) (second arguments) nil))
+      ((and (member name '("transformList" "transformMap") :test #'equal) (= count 3))
+       (list :comprehension (if (equal name "transformList") :transform-list :transform-map) target
+             (cel-comprehension-variable parser (first arguments)) (third arguments) nil
+             (cel-comprehension-variable parser (second arguments))))
+      ((and (member name '("transformList" "transformMap") :test #'equal) (= count 4))
+       (list :comprehension (if (equal name "transformList") :transform-list :transform-map) target
+             (cel-comprehension-variable parser (first arguments)) (fourth arguments) (third arguments)
+             (cel-comprehension-variable parser (second arguments))))
+      ((and (member name '("optMap" "optFlatMap") :test #'equal) (= count 2))
+       (list :opt-map (equal name "optFlatMap") target
+             (cel-comprehension-variable parser (first arguments)) (second arguments)))
       (t (list :call name target arguments)))))
+
+(defun cel-comprehension-kind (name)
+  "Map a comprehension macro's name to its node kind."
+  (cond ((equal name "all") :all) ((equal name "exists") :exists)
+        ((equal name "filter") :filter) (t :exists_one)))
 
 (defun cel-construction-root (node)
   "Return the root name of a dotted type name such as Object.spec, or NIL for any other NODE."
@@ -348,14 +397,16 @@
     (loop
       (cond
         ((cel-accept parser ".")
-         (let ((name (cel-next-identifier parser)))
-           (setf node (if (cel-accept parser "(")
-                          (cel-expand-method parser node name (cel-parse-arguments parser))
-                          (list :select node name)))))
+         (if (cel-accept parser "?")
+             (setf node (list :opt-select node (cel-next-identifier parser)))
+             (let ((name (cel-next-identifier parser)))
+               (setf node (if (cel-accept parser "(")
+                              (cel-expand-method parser node name (cel-parse-arguments parser))
+                              (list :select node name))))))
         ((cel-accept parser "[")
-         (let ((index (cel-parse-expression parser)))
+         (let* ((optional (cel-accept parser "?")) (index (cel-parse-expression parser)))
            (cel-expect parser "]")
-           (setf node (list :index node index))))
+           (setf node (list (if optional :opt-index :index) node index))))
         ((cel-operator-p parser "{")
          (unless (member (cel-construction-root node) *cel-construction-types* :test #'equal)
            (cel-check-error "message construction is not supported"))
@@ -367,11 +418,13 @@
   "Parse Primary: literals, identifiers, global calls, groups, lists and maps."
   (let* ((token (cel-peek parser)) (type (first token)) (value (second token)))
     (case type
-      ((:int :double :string :bool :null)
+      ((:int :uint :double :string :bytes :bool :null)
        (incf (cel-parser-position parser))
        (when (and (eq type :int) (> value 9223372036854775808))
          (cel-syntax-error (third token) "integer literal is out of range"))
-       (list :lit value type))
+       (when (and (eq type :uint) (> value 18446744073709551615))
+         (cel-syntax-error (third token) "integer literal is out of range"))
+       (list :lit (if (eq type :uint) (make-cel-uint :value value) value) type))
       (:identifier
        ;; Reserved words remain legal after a dot, as in object.metadata.namespace.
        (when (member value +cel-reserved-words+ :test #'equal)
@@ -406,7 +459,8 @@
   (let ((elements nil))
     (loop
       (when (cel-accept parser closer) (return))
-      (push (cel-parse-expression parser) elements)
+      (let ((optional (cel-accept parser "?")) (element (cel-parse-expression parser)))
+        (push (if optional (list :opt-element element) element) elements))
       (unless (cel-accept parser ",")
         (cel-expect parser closer)
         (return)))
@@ -417,154 +471,289 @@
   (let ((pairs nil))
     (loop
       (when (cel-accept parser "}") (return))
-      (let ((key (cel-parse-expression parser)))
+      (let* ((optional (cel-accept parser "?")) (key (cel-parse-expression parser)))
         (cel-expect parser ":")
-        (push (cons key (cel-parse-expression parser)) pairs))
+        (let ((value (cel-parse-expression parser)))
+          (push (cons (if optional (list :opt-element key) key) value) pairs)))
       (unless (cel-accept parser ",")
         (cel-expect parser "}")
         (return)))
     (nreverse pairs)))
 
-;;; Static checks. Types are :int :double :string :bool :null :list :map or :dyn.
+;;; Static checks. A type is a keyword (:int :uint :double :string :bytes :bool :null
+;;; :timestamp :duration :dyn and :list :map :object) or a list refining one with what
+;;; a schema says: (:string MAX), (:bytes MAX), (:list ELEMENT MAX), (:map KEY VALUE MAX),
+;;; (:object FIELD-FUNCTION), (:optional INNER) and (:opaque KIND).
 
 (defparameter +cel-admission-request-fields+
   '("kind" "resource" "subResource" "requestKind" "requestResource" "requestSubResource"
-    "name" "namespace" "operation" "userInfo" "dryRun" "options")
+    "name" "namespace" "operation" "userInfo" "dryRun" "options" "uid")
   "Fields the upstream admission environment declares on the request variable.")
+
+(defvar *cel-variable-types* nil
+  "Alist from declared variable name to a static type more precise than dyn.")
+
+(defvar *cel-node-types* nil
+  "Table from checked node to its static type, which cost estimation reads.")
+
+(defun cel-type-head (type)
+  "Return the keyword naming TYPE, without what a schema refines it with."
+  (if (consp type) (first type) type))
 
 (defun cel-compatible-p (type &rest accepted)
   "Test a static TYPE against ACCEPTED, where dyn is compatible with everything."
-  (or (eq type :dyn) (member type accepted)))
+  (let ((head (cel-type-head type)))
+    (or (eq head :dyn) (member head accepted))))
+
+(defun cel-list-element (type)
+  "Return the element type of a list TYPE, or dyn."
+  (if (and (consp type) (eq :list (first type))) (second type) :dyn))
+
+(defun cel-map-value (type)
+  "Return the value type of a map TYPE, or dyn."
+  (if (and (consp type) (eq :map (first type))) (third type) :dyn))
+
+(defun cel-map-key (type)
+  "Return the key type of a map TYPE, or dyn."
+  (if (and (consp type) (eq :map (first type))) (second type) :dyn))
+
+(defun cel-type-name (type)
+  "Print TYPE as a check error names it."
+  (case (cel-type-head type)
+    (:list (format nil "list(~A)" (cel-type-name (cel-list-element type))))
+    (:map (format nil "map(~A, ~A)" (cel-type-name (cel-map-key type)) (cel-type-name (cel-map-value type))))
+    (:optional (format nil "optional(~A)" (cel-type-name (second type))))
+    (:opaque (string-downcase (second type)))
+    (t (string-downcase (cel-type-head type)))))
 
 (defun cel-overload-error (name types)
   "Report that no overload of NAME accepts TYPES."
-  (cel-check-error "found no matching overload for '~A' applied to (~{~(~A~)~^, ~})" name types))
+  (cel-check-error "found no matching overload for '~A' applied to (~{~A~^, ~})" name (mapcar #'cel-type-name types)))
+
+(defun cel-same-head-p (left right)
+  "Test whether two static types share a head, or one of them is dyn."
+  (let ((a (cel-type-head left)) (b (cel-type-head right)))
+    (or (eq a b) (eq a :dyn) (eq b :dyn))))
 
 (defun cel-check-call (name target arguments scope)
   "Return the result type of a call, refusing mistyped and unsupported functions."
-  (let* ((types (mapcar (lambda (argument) (cel-check argument scope)) arguments))
-         (self (and target (cel-check target scope)))
+  (let* ((full-types (mapcar (lambda (argument) (cel-check argument scope)) arguments))
+         (types (mapcar #'cel-type-head full-types))
+         (receiver (and target (cel-check target scope)))
+         (self (cel-type-head receiver))
          (first-type (first types)) (second-type (second types)) (count (length types)))
     (flet ((operands (&rest accepted)
              (unless (and (= 2 count) (apply #'cel-compatible-p first-type accepted)
                           (apply #'cel-compatible-p second-type accepted))
-               (cel-overload-error name types)))
-           (method-on (receiver &rest parameters)
-             (unless (and target (cel-compatible-p self receiver) (= count (length parameters))
-                          (every #'cel-compatible-p types parameters))
-               (cel-overload-error name (if target (cons self types) types)))))
+               (cel-overload-error name full-types)))
+           (arithmetic-result ()
+             (if (eq first-type :dyn) (second full-types) (first full-types))))
       (cond
         ((and (null target) (member name '("_==_" "_!=_") :test #'equal))
          (unless (or (eq first-type second-type) (member first-type '(:dyn :null)) (member second-type '(:dyn :null))
-                     (and (member first-type '(:int :double)) (member second-type '(:int :double))))
-           (cel-overload-error name types))
+                     (and (member first-type '(:int :uint :double)) (member second-type '(:int :uint :double)))
+                     (and (member first-type '(:map :object)) (member second-type '(:map :object))))
+           (cel-overload-error name full-types))
          :bool)
         ((and (null target) (member name '("_<_" "_<=_" "_>_" "_>=_") :test #'equal))
-         (unless (or (and (cel-compatible-p first-type :int :double) (cel-compatible-p second-type :int :double))
-                     (and (cel-compatible-p first-type :string) (cel-compatible-p second-type :string))
-                     (and (cel-compatible-p first-type :bool) (cel-compatible-p second-type :bool)))
-           (cel-overload-error name types))
+         (unless (or (and (cel-compatible-p first-type :int :uint :double) (cel-compatible-p second-type :int :uint :double))
+                     (some (lambda (kind) (and (cel-compatible-p first-type kind) (cel-compatible-p second-type kind)))
+                           '(:string :bool :bytes :timestamp :duration)))
+           (cel-overload-error name full-types))
          :bool)
         ((and (null target) (equal name "_in_"))
-         (unless (cel-compatible-p second-type :list :map) (cel-overload-error name types))
+         (unless (cel-compatible-p second-type :list :map) (cel-overload-error name full-types))
          :bool)
         ((and (null target) (equal name "_+_"))
-         (unless (or (eq first-type second-type) (eq first-type :dyn) (eq second-type :dyn))
-           (cel-overload-error name types))
-         (operands :int :double :string :list)
-         (if (eq first-type :dyn) second-type first-type))
-        ((and (null target) (member name '("_-_" "_*_" "_/_") :test #'equal))
-         (unless (or (eq first-type second-type) (eq first-type :dyn) (eq second-type :dyn))
-           (cel-overload-error name types))
-         (operands :int :double)
-         (if (eq first-type :dyn) second-type first-type))
-        ((and (null target) (equal name "_%_")) (operands :int) :int)
+         (cond
+           ((and (cel-compatible-p first-type :timestamp) (cel-compatible-p second-type :duration)
+                 (not (and (eq first-type :dyn) (eq second-type :dyn))))
+            :timestamp)
+           ((and (cel-compatible-p first-type :duration) (cel-compatible-p second-type :timestamp)
+                 (not (and (eq first-type :dyn) (eq second-type :dyn))))
+            (if (eq first-type :duration)
+                (if (eq second-type :dyn) :dyn :timestamp)
+                :timestamp))
+           (t
+            (unless (cel-same-head-p first-type second-type) (cel-overload-error name full-types))
+            (operands :int :uint :double :string :bytes :list :duration)
+            (arithmetic-result))))
+        ((and (null target) (equal name "_-_"))
+         (cond
+           ((and (eq first-type :timestamp) (cel-compatible-p second-type :timestamp :duration))
+            (if (eq second-type :timestamp) :duration (if (eq second-type :dyn) :dyn :timestamp)))
+           (t
+            (unless (cel-same-head-p first-type second-type) (cel-overload-error name full-types))
+            (operands :int :uint :double :duration)
+            (arithmetic-result))))
+        ((and (null target) (member name '("_*_" "_/_") :test #'equal))
+         (unless (cel-same-head-p first-type second-type) (cel-overload-error name full-types))
+         (operands :int :uint :double)
+         (arithmetic-result))
+        ((and (null target) (equal name "_%_"))
+         (unless (cel-same-head-p first-type second-type) (cel-overload-error name full-types))
+         (operands :int :uint)
+         (arithmetic-result))
         ((and (null target) (equal name "-_"))
-         (unless (cel-compatible-p first-type :int :double) (cel-overload-error name types))
+         (unless (cel-compatible-p first-type :int :double :duration) (cel-overload-error name full-types))
          first-type)
         ((and (null target) (equal name "!_"))
-         (unless (cel-compatible-p first-type :bool) (cel-overload-error name types))
-         :bool)
-        ((equal name "size")
-         (let ((operand (if target self first-type)))
-           (unless (and (= count (if target 0 1)) (cel-compatible-p operand :string :list :map))
-             (cel-overload-error name types)))
-         :int)
-        ((member name '("startsWith" "endsWith" "contains") :test #'equal) (method-on :string :string) :bool)
-        ((member name '("lowerAscii" "upperAscii" "trim") :test #'equal) (method-on :string) :string)
-        ((equal name "split") (method-on :string :string) :list)
-        ((equal name "replace") (method-on :string :string :string) :string)
-        ((equal name "join")
-         (unless (and target (cel-compatible-p self :list) (<= count 1) (every (lambda (type) (cel-compatible-p type :string)) types))
-           (cel-overload-error name types))
-         :string)
-        ((and (null target) (= 1 count) (equal name "int"))
-         (unless (cel-compatible-p first-type :int :double :string) (cel-overload-error name types))
-         :int)
-        ((and (null target) (= 1 count) (equal name "double"))
-         (unless (cel-compatible-p first-type :int :double :string) (cel-overload-error name types))
-         :double)
-        ((and (null target) (= 1 count) (equal name "string"))
-         (unless (cel-compatible-p first-type :int :bool :string) (cel-overload-error name types))
-         :string)
-        ((and (null target) (= 1 count) (equal name "bool"))
-         (unless (cel-compatible-p first-type :bool :string) (cel-overload-error name types))
+         (unless (cel-compatible-p first-type :bool) (cel-overload-error name full-types))
          :bool)
         ((and (null target) (= 1 count) (equal name "dyn")) :dyn)
-        ((equal name "matches")
-         (cel-check-error "matches is not supported: its RE2 semantics cannot be guaranteed here"))
-        (t (cel-check-error "undeclared reference to '~A', or a function gr8s does not support" name))))))
+        (t (cel-check-library-call name receiver full-types))))))
+
+(defun cel-select-type (operand field node-name)
+  "Return the type of selecting FIELD from an OPERAND type, or signal it does not exist."
+  (let ((head (cel-type-head operand)))
+    (case head
+      (:dyn :dyn)
+      (:map (cel-map-value operand))
+      (:opaque
+       (if (and (eq :authorizer (second operand)) (equal field "requestResource"))
+           (list :opaque :resource-check)
+           (cel-check-error "type '~A' does not support field selection~@[: ~A~]" (cel-type-name operand) node-name)))
+      (:object
+       (or (and (consp operand) (funcall (second operand) field))
+           (if (consp operand)
+               (cel-check-error "undefined field '~A'" field)
+               :dyn)))
+      (t (cel-check-error "type '~A' does not support field selection~@[: ~A~]" (cel-type-name operand) node-name)))))
 
 (defun cel-check (node scope)
-  "Return NODE's static type, where SCOPE lists macro variables in force."
+  "Return NODE's static type, where SCOPE is an alist of macro variables in force."
+  (let ((type (cel-check-node node scope)))
+    (when *cel-node-types* (setf (gethash node *cel-node-types*) type))
+    type))
+
+(defun cel-check-comprehension (node scope)
+  "Check a comprehension macro and return its result type."
+  (destructuring-bind (kind iterable variable body predicate second-variable) (rest node)
+    (let* ((source (cel-check iterable scope)))
+      (unless (cel-compatible-p source :list :map)
+        (cel-check-error "expression of type '~A' cannot be range of a comprehension" (cel-type-name source)))
+      (when second-variable
+        (when (equal variable second-variable)
+          (cel-check-error "duplicate variable name: ~A" variable)))
+      (let* ((list-source (eq :list (cel-type-head source)))
+             (first-type (cond ((and second-variable list-source) :int)
+                               (list-source (cel-list-element source))
+                               ((consp source) (cel-map-key source))
+                               (t :dyn)))
+             (second-type (when second-variable
+                            (if list-source (cel-list-element source) (cel-map-value source))))
+             (inner (append (when second-variable (list (cons second-variable second-type)))
+                            (list (cons variable first-type)) scope))
+             (type (cel-check body inner)))
+        (when predicate
+          (unless (cel-compatible-p (cel-check predicate inner) :bool)
+            (cel-check-error "comprehension filter must be bool")))
+        (ecase kind
+          ((:all :exists :exists_one :filter)
+           (unless (cel-compatible-p type :bool)
+             (cel-check-error "comprehension predicate must be bool"))
+           (if (eq kind :filter)
+               (list :list (cel-list-element source) (and (consp source) (eq :list (first source)) (third source)))
+               :bool))
+          (:map (list :list type nil))
+          (:transform-list (list :list type nil))
+          (:transform-map (list :map first-type type nil)))))))
+
+(defun cel-check-node (node scope)
+  "Compute NODE's static type."
   (ecase (first node)
     (:lit
      (when (and (eq :int (third node)) (not (typep (second node) '(signed-byte 64))))
        (cel-check-error "integer literal is out of range"))
-     (third node))
+     (case (third node)
+       (:string (list :string (length (second node))))
+       (:bytes (list :bytes (length (second node))))
+       (t (third node))))
     (:ident
-     (let ((name (second node)))
-       (cond ((member name scope :test #'equal) :dyn)
+     (let* ((name (second node)) (local (assoc name scope :test #'equal)))
+       (cond (local (cdr local))
+             ((assoc name *cel-variable-types* :test #'equal)
+              (cdr (assoc name *cel-variable-types* :test #'equal)))
              ((member name *cel-declared-variables* :test #'equal) :dyn)
-             ((equal name "authorizer") (cel-check-error "the authorizer variable is not supported"))
              (t (cel-check-error "undeclared reference to '~A'" name)))))
     (:select
      (destructuring-bind (operand field) (rest node)
-       (when (and (equal '(:ident "request") operand) (not (member "request" scope :test #'equal))
+       (when (and (equal '(:ident "request") operand) (not (assoc "request" scope :test #'equal))
                   (not (member field +cel-admission-request-fields+ :test #'equal)))
          (cel-check-error "undefined field '~A' on request" field))
-       (unless (cel-compatible-p (cel-check operand scope) :map)
-         (cel-check-error "type does not support field selection: ~A" field))
-       :dyn))
+       (let ((type (cel-check operand scope)))
+         (if (eq :optional (cel-type-head type))
+             (list :optional (cel-select-type (second type) field field))
+             (cel-select-type type field field)))))
+    (:opt-select
+     (destructuring-bind (operand field) (rest node)
+       (let* ((type (cel-check operand scope))
+              (inner (if (eq :optional (cel-type-head type)) (second type) type)))
+         (list :optional (cel-select-type inner field field)))))
+    (:opt-index
+     (destructuring-bind (operand index) (rest node)
+       (let* ((type (cel-check operand scope)) (inner (if (eq :optional (cel-type-head type)) (second type) type)))
+         (cel-check index scope)
+         (list :optional (case (cel-type-head inner)
+                           (:list (cel-list-element inner))
+                           (:map (cel-map-value inner))
+                           (t :dyn))))))
     (:has
-     (unless (cel-compatible-p (cel-check (second node) scope) :map)
-       (cel-check-error "has() requires a map operand"))
-     :bool)
+     (let ((type (cel-check (second node) scope)))
+       (unless (cel-compatible-p type :map :object :optional)
+         (cel-check-error "invalid argument to has() macro"))
+       (when (and (eq :object (cel-type-head type)) (consp type))
+         (cel-select-type type (third node) nil))
+       :bool))
     (:index
-     (let ((operand (cel-check (second node) scope)) (index (cel-check (third node) scope)))
-       (unless (or (eq operand :dyn)
-                   (and (eq operand :list) (cel-compatible-p index :int))
-                   (and (eq operand :map) (cel-compatible-p index :string)))
+     (let* ((operand (cel-check (second node) scope)) (index (cel-check (third node) scope))
+            (optional (eq :optional (cel-type-head operand)))
+            (inner (if optional (second operand) operand))
+            (head (cel-type-head inner)))
+       (unless (or (eq head :dyn)
+                   (and (eq head :list) (cel-compatible-p index :int :uint))
+                   (eq head :map))
          (cel-overload-error "_[_]" (list operand index)))
-       :dyn))
+       (let ((result (case head
+                       (:list (cel-list-element inner))
+                       (:map (cel-map-value inner))
+                       (t :dyn))))
+         (if optional (list :optional result) result))))
     (:call (destructuring-bind (name target arguments) (rest node)
              (cel-check-call name target arguments scope)))
-    (:list (dolist (item (second node)) (cel-check item scope)) :list)
+    (:list
+     (let ((element nil) (dynamic nil))
+       (dolist (item (second node))
+         (let* ((optional (eq :opt-element (first item)))
+                (type (cel-check (if optional (second item) item) scope))
+                (type (if optional (if (eq :optional (cel-type-head type)) (second type) :dyn) type)))
+           (cond ((null element) (setf element type))
+                 ((member :dyn (list (cel-type-head element) (cel-type-head type))) (setf dynamic t))
+                 ((not (equal (cel-type-head element) (cel-type-head type)))
+                  (cel-check-error "expected type '~A' but found '~A'" (cel-type-name element) (cel-type-name type))))))
+       (list :list (if (or dynamic (null element)) :dyn element) (length (second node)))))
     (:construct
      (dolist (field (second node)) (cel-check (cdr field) scope))
      :map)
     (:map
-     (dolist (pair (second node))
-       (unless (cel-compatible-p (cel-check (car pair) scope) :string)
-         (cel-check-error "map literals support only string keys"))
-       (cel-check (cdr pair) scope))
-     :map)
+     (let ((value-type nil) (dynamic nil))
+       (dolist (pair (second node))
+         (let* ((optional (eq :opt-element (first (car pair))))
+                (key (cel-check (if optional (second (car pair)) (car pair)) scope)))
+           (unless (cel-compatible-p key :string :int :uint :bool)
+             (cel-check-error "unsupported map key type '~A'" (cel-type-name key)))
+           (let ((type (cel-check (cdr pair) scope)))
+             (cond ((null value-type) (setf value-type type))
+                   ((member :dyn (list (cel-type-head value-type) (cel-type-head type))) (setf dynamic t))
+                   ((not (equal (cel-type-head value-type) (cel-type-head type)))
+                    (cel-check-error "expected type '~A' but found '~A'" (cel-type-name value-type) (cel-type-name type)))))))
+       (list :map :dyn (if (or dynamic (null value-type)) :dyn value-type) (length (second node)))))
     (:cond
      (destructuring-bind (condition then else) (rest node)
        (unless (cel-compatible-p (cel-check condition scope) :bool)
          (cel-overload-error "_?_:_" (list (cel-check condition scope))))
        (let ((left (cel-check then scope)) (right (cel-check else scope)))
-         (cond ((eq left right) left)
+         (cond ((eq (cel-type-head left) (cel-type-head right)) left)
                ((or (eq left :dyn) (eq right :dyn) (eq left :null) (eq right :null)) :dyn)
                (t (cel-overload-error "_?_:_" (list left right)))))))
     ((:and :or)
@@ -572,20 +761,16 @@
        (unless (and (cel-compatible-p left :bool) (cel-compatible-p right :bool))
          (cel-overload-error (if (eq :and (first node)) "_&&_" "_||_") (list left right)))
        :bool))
-    (:comprehension
-     (destructuring-bind (kind iterable variable body predicate) (rest node)
-       (unless (cel-compatible-p (cel-check iterable scope) :list :map)
-         (cel-check-error "expression of this type cannot be iterated"))
-       (let* ((inner (cons variable scope)) (type (cel-check body inner)))
-         (when predicate
-           (unless (cel-compatible-p (cel-check predicate inner) :bool)
-             (cel-check-error "map() predicate must be bool")))
-         (ecase kind
-           ((:all :exists :exists_one :filter)
-            (unless (cel-compatible-p type :bool)
-              (cel-check-error "comprehension predicate must be bool"))
-            (if (eq kind :filter) :list :bool))
-           (:map :list)))))))
+    (:bind
+     (destructuring-bind (variable init body) (rest node)
+       (cel-check body (acons variable (cel-check init scope) scope))))
+    (:opt-map
+     (destructuring-bind (flat target variable body) (rest node)
+       (let* ((type (cel-check target scope))
+              (inner (if (eq :optional (cel-type-head type)) (second type) :dyn))
+              (result (cel-check body (acons variable inner scope))))
+         (if flat result (list :optional result)))))
+    (:comprehension (cel-check-comprehension node scope))))
 
 (defun compile-cel-expression (expression)
   "Parse and check EXPRESSION, returning its program and static result type."
@@ -601,15 +786,128 @@
 (defun compile-cel-condition (expression)
   "Parse and check EXPRESSION, which must have the static result type bool."
   (multiple-value-bind (node type) (compile-cel-expression expression)
-    (unless (eq type :bool)
-      (cel-check-error "must evaluate to bool, found ~(~A~)" type))
+    (unless (eq (cel-type-head type) :bool)
+      (cel-check-error "must evaluate to bool, found ~A" (cel-type-name type)))
     node))
+
+(defun cel-references-variable-p (node name)
+  "Test whether the tree NODE reads the variable NAME."
+  (cond ((atom node) nil)
+        ((and (eq :ident (first node)) (equal name (second node))) t)
+        (t (loop for rest = node then (cdr rest)
+                 while (consp rest)
+                 thereis (cel-references-variable-p (car rest) name)))))
+
+;;; Cost estimation, after cel-go's checker. Sizes and costs saturate well above any limit.
+
+(defparameter +cel-unknown-size+ (expt 2 63) "Size of a value nothing bounds.")
+(defparameter +cel-traversal-factor+ 1/10 "Cost per character to traverse a string.")
+(defparameter +cel-regex-factor+ 1/4 "Cost per character of a regex pattern per unit of text.")
+
+(defun cel-type-size (type)
+  "Return the largest size TYPE can have, one for a scalar."
+  (case (cel-type-head type)
+    (:string (if (and (consp type) (second type)) (second type) +cel-unknown-size+))
+    (:bytes (if (and (consp type) (second type)) (second type) +cel-unknown-size+))
+    (:list (if (and (consp type) (third type)) (third type) +cel-unknown-size+))
+    (:map (if (and (consp type) (fourth type)) (fourth type) +cel-unknown-size+))
+    (:object +cel-unknown-size+)
+    (:dyn +cel-unknown-size+)
+    (t 1)))
+
+(defun cel-saturate (value)
+  "Keep estimates in a range where repeated multiplication stays cheap."
+  (min value (expt 2 80)))
+
+(defun cel-node-size (node)
+  "Return the estimated size of NODE's value."
+  (cel-type-size (or (and *cel-node-types* (gethash node *cel-node-types*)) :dyn)))
+
+(defun cel-estimate-call (node)
+  "Estimate one call node's largest cost, with its operands."
+  (destructuring-bind (name target arguments) (rest node)
+    (let* ((operand-cost (+ (if target (cel-estimate target) 0)
+                            (loop for argument in arguments sum (cel-estimate argument))))
+           (subject (or target (first arguments)))
+           (subject-size (if subject (cel-node-size subject) 1)))
+      (flet ((traversal (size) (ceiling (* size +cel-traversal-factor+))))
+        (+ operand-cost
+           (cond
+             ((member name '("_==_" "_!=_" "_<_" "_<=_" "_>_" "_>=_") :test #'equal)
+              (traversal (min (cel-node-size (first arguments)) (cel-node-size (second arguments)))))
+             ((equal name "_in_") (cel-node-size (second arguments)))
+             ((equal name "_+_")
+              (if (member (cel-type-head (gethash (first arguments) *cel-node-types*)) '(:string :bytes))
+                  (traversal (+ (cel-node-size (first arguments)) (cel-node-size (second arguments))))
+                  1))
+             ((member name '("startsWith" "endsWith") :test #'equal) (traversal (cel-node-size (first arguments))))
+             ((equal name "contains")
+              (* (traversal subject-size) (traversal (cel-node-size (first arguments)))))
+             ((member name '("matches" "find" "findAll") :test #'equal)
+              (* (ceiling (* (1+ subject-size) +cel-traversal-factor+))
+                 (max 1 (ceiling (* (cel-node-size (if target (first arguments) (second arguments))) +cel-regex-factor+)))))
+             ((member name '("isSorted" "sum" "max" "min" "indexOf" "lastIndexOf") :test #'equal)
+              (if (and target (eq :string (cel-type-head (gethash target *cel-node-types*))))
+                  (* (traversal subject-size) (traversal (cel-node-size (first arguments))))
+                  (let ((element (cel-list-element (or (and target (gethash target *cel-node-types*)) :dyn))))
+                    (* subject-size (max 1 (traversal (cel-type-size element)))))))
+             ((member name '("lowerAscii" "upperAscii" "substring" "trim" "url" "jsonpatch.escapeKey" "cidr" "isIP"
+                             "isCIDR" "ip" "quantity" "isQuantity" "semver" "isSemver" "isURL" "format")
+                      :test #'equal)
+              (traversal subject-size))
+             ((member name '("replace" "split") :test #'equal) (traversal (* 2 subject-size)))
+             ((equal name "join") (traversal subject-size))
+             ((equal name "check") 350000)
+             ((equal name "validate") (traversal (* 16 subject-size)))
+             (t 1)))))))
+
+(defun cel-estimate (node)
+  "Estimate NODE's largest cost, as cel-go's checker does for a checked expression."
+  (cel-saturate
+   (ecase (first node)
+     (:lit 0)
+     (:ident 1)
+     ((:select :opt-select) (+ 1 (cel-estimate (second node))))
+     (:has (cel-estimate (second node)))
+     ((:index :opt-index) (+ 1 (cel-estimate (second node)) (cel-estimate (third node))))
+     (:call (cel-estimate-call node))
+     (:list (+ 10 (loop for item in (second node)
+                        sum (cel-estimate (if (eq :opt-element (first item)) (second item) item)))))
+     (:construct (+ 40 (loop for field in (second node) sum (cel-estimate (cdr field)))))
+     (:map (+ 30 (loop for pair in (second node)
+                       sum (+ (cel-estimate (if (eq :opt-element (first (car pair))) (second (car pair)) (car pair)))
+                              (cel-estimate (cdr pair))))))
+     (:cond (+ (cel-estimate (second node)) (max (cel-estimate (third node)) (cel-estimate (fourth node)))))
+     ((:and :or) (+ (cel-estimate (second node)) (cel-estimate (third node))))
+     (:bind (+ (cel-estimate (third node)) (cel-estimate (fourth node))))
+     (:opt-map (+ 2 (cel-estimate (third node)) (cel-estimate (fifth node))))
+     (:comprehension
+      (destructuring-bind (kind iterable variable body predicate second-variable) (rest node)
+        (declare (ignore variable second-variable))
+        (let* ((range (cel-estimate iterable))
+               (count (cel-node-size iterable))
+               (body-cost (+ (cel-estimate body) (if predicate (cel-estimate predicate) 0)))
+               (loop-cost (ecase kind
+                            ((:all :exists) (+ 3 body-cost))
+                            (:exists_one (+ 3 body-cost))
+                            (:filter (+ 12 body-cost))
+                            ((:map :transform-list) (+ 12 body-cost))
+                            (:transform-map (+ 32 body-cost)))))
+          (+ range 1 (* count loop-cost))))))))
+
+(defun cel-estimated-cost (node)
+  "Return the largest cost a checked program NODE can run up."
+  (cel-estimate node))
 
 ;;; Evaluation
 
+(defun cel-bytes-p (value)
+  "Recognize CEL bytes, which are octet vectors unlike the general vectors of a JSON list."
+  (typep value '(array (unsigned-byte 8) (*))))
+
 (defun cel-list-p (value)
   "Recognize a CEL list, which JSON decoding represents as a non-string vector."
-  (and (vectorp value) (not (stringp value))))
+  (and (vectorp value) (not (stringp value)) (not (cel-bytes-p value))))
 
 (defun cel-bool-p (value)
   "Recognize a CEL bool, which JSON decoding represents as T or NIL."
@@ -620,30 +918,68 @@
   (unless (typep value '(signed-byte 64)) (cel-fail "integer overflow"))
   value)
 
+(defun cel-uint64 (value)
+  "Wrap VALUE as a uint when it fits, or fail as CEL does on overflow."
+  (unless (typep value '(unsigned-byte 64)) (cel-fail "unsigned integer overflow"))
+  (make-cel-uint :value value))
+
+(defun cel-charge (cost)
+  "Charge COST against the expression's budget, stopping it when that runs out."
+  (when (minusp (decf *cel-remaining-steps* cost))
+    (error 'cel-cost-exceeded :message "operation cancelled: actual cost limit exceeded")))
+
+(defun cel-numeric-value (value)
+  "Return the real number VALUE denotes, or NIL."
+  (cond ((realp value) value)
+        ((cel-uint-p value) (cel-uint-value value))))
+
 (defun cel-equal (left right)
   "Apply CEL heterogeneous equality."
-  (cond ((and (numberp left) (numberp right)) (= left right))
-        ((and (stringp left) (stringp right)) (string= left right))
-        ((and (cel-list-p left) (cel-list-p right))
-         (and (= (length left) (length right)) (every #'cel-equal left right)))
-        ((and (hash-table-p left) (hash-table-p right))
-         (and (= (hash-table-count left) (hash-table-count right))
-              (loop for key being the hash-keys of left using (hash-value value)
-                    always (multiple-value-bind (other present) (gethash key right)
-                             (and present (cel-equal value other))))))
-        ((and (cel-bool-p left) (cel-bool-p right)) (eq left right))
-        ((and (eq left 'null) (eq right 'null)) t)
-        (t nil)))
+  (let ((a (cel-numeric-value left)) (b (cel-numeric-value right)))
+    (cond ((and a b) (= a b))
+          ((and (stringp left) (stringp right)) (string= left right))
+          ((and (cel-bytes-p left) (cel-bytes-p right)) (equalp left right))
+          ((and (cel-list-p left) (cel-list-p right))
+           (and (= (length left) (length right)) (every #'cel-equal left right)))
+          ((and (hash-table-p left) (hash-table-p right))
+           (and (= (hash-table-count left) (hash-table-count right))
+                (loop for key being the hash-keys of left using (hash-value value)
+                      always (multiple-value-bind (other present) (gethash key right)
+                               (and present (cel-equal value other))))))
+          ((and (cel-bool-p left) (cel-bool-p right)) (eq left right))
+          ((and (eq left 'null) (eq right 'null)) t)
+          ((and (cel-timestamp-p left) (cel-timestamp-p right)) (= (cel-timestamp-nanos left) (cel-timestamp-nanos right)))
+          ((and (cel-duration-p left) (cel-duration-p right)) (= (cel-duration-nanos left) (cel-duration-nanos right)))
+          ((and (cel-optional-p left) (cel-optional-p right))
+           (and (eq (cel-optional-present left) (cel-optional-present right))
+                (or (not (cel-optional-present left)) (cel-equal (cel-optional-value left) (cel-optional-value right)))))
+          ((and (cel-opaque-p left) (cel-opaque-p right)) (cel-opaque-equal left right))
+          (t nil))))
+
+(defun cel-compare-values (left right name)
+  "Return -1, 0 or 1 for two values with an ordering, or fail the NAME overload."
+  (let ((a (cel-numeric-value left)) (b (cel-numeric-value right)))
+    (cond ((and a b) (cond ((< a b) -1) ((> a b) 1) (t 0)))
+          ((and (stringp left) (stringp right))
+           (cond ((string< left right) -1) ((string> left right) 1) (t 0)))
+          ((and (cel-bytes-p left) (cel-bytes-p right))
+           (let ((mismatch (mismatch left right)))
+             (cond ((null mismatch) 0)
+                   ((>= mismatch (length left)) -1)
+                   ((>= mismatch (length right)) 1)
+                   ((< (aref left mismatch) (aref right mismatch)) -1)
+                   (t 1))))
+          ((and (cel-bool-p left) (cel-bool-p right))
+           (cond ((eq left right) 0) (left 1) (t -1)))
+          ((and (cel-timestamp-p left) (cel-timestamp-p right))
+           (signum (- (cel-timestamp-nanos left) (cel-timestamp-nanos right))))
+          ((and (cel-duration-p left) (cel-duration-p right))
+           (signum (- (cel-duration-nanos left) (cel-duration-nanos right))))
+          (t (cel-fail "no such overload: ~A" name)))))
 
 (defun cel-compare (name left right)
   "Evaluate an ordering operator, failing on values with no ordering overload."
-  (let ((order
-          (cond ((and (realp left) (realp right)) (cond ((< left right) -1) ((> left right) 1) (t 0)))
-                ((and (stringp left) (stringp right))
-                 (cond ((string< left right) -1) ((string> left right) 1) (t 0)))
-                ((and (cel-bool-p left) (cel-bool-p right))
-                 (cond ((eq left right) 0) (left 1) (t -1)))
-                (t (cel-fail "no such overload: ~A" name)))))
+  (let ((order (cel-compare-values left right name)))
     (cond ((equal name "_<_") (< order 0)) ((equal name "_<=_") (<= order 0))
           ((equal name "_>_") (> order 0)) (t (>= order 0)))))
 
@@ -657,13 +993,33 @@
             ((zerop right) (cel-fail "division by zero"))
             ((equal name "_/_") (truncate left right))
             (t (rem left right)))))
+    ((and (cel-uint-p left) (cel-uint-p right))
+     (let ((a (cel-uint-value left)) (b (cel-uint-value right)))
+       (cel-uint64
+        (cond ((equal name "_+_") (+ a b)) ((equal name "_-_") (- a b))
+              ((equal name "_*_") (* a b))
+              ((zerop b) (cel-fail "division by zero"))
+              ((equal name "_/_") (truncate a b))
+              (t (rem a b))))))
     ((and (floatp left) (floatp right) (not (equal name "_%_")))
      (handler-case
          (cond ((equal name "_+_") (+ left right)) ((equal name "_-_") (- left right))
                ((equal name "_*_") (* left right)) (t (/ left right)))
        (arithmetic-error () (cel-fail "floating-point result is out of range"))))
     ((and (equal name "_+_") (stringp left) (stringp right)) (concatenate 'string left right))
+    ((and (equal name "_+_") (cel-bytes-p left) (cel-bytes-p right))
+     (concatenate '(vector (unsigned-byte 8)) left right))
     ((and (equal name "_+_") (cel-list-p left) (cel-list-p right)) (concatenate 'vector left right))
+    ((and (cel-timestamp-p left) (cel-duration-p right) (member name '("_+_" "_-_") :test #'equal))
+     (cel-checked-timestamp
+      (funcall (if (equal name "_+_") #'+ #'-) (cel-timestamp-nanos left) (cel-duration-nanos right))))
+    ((and (equal name "_+_") (cel-duration-p left) (cel-timestamp-p right))
+     (cel-checked-timestamp (+ (cel-duration-nanos left) (cel-timestamp-nanos right))))
+    ((and (cel-timestamp-p left) (cel-timestamp-p right) (equal name "_-_"))
+     (cel-checked-duration (- (cel-timestamp-nanos left) (cel-timestamp-nanos right))))
+    ((and (cel-duration-p left) (cel-duration-p right) (member name '("_+_" "_-_") :test #'equal))
+     (cel-checked-duration
+      (funcall (if (equal name "_+_") #'+ #'-) (cel-duration-nanos left) (cel-duration-nanos right))))
     (t (cel-fail "no such overload: ~A" name))))
 
 (defun cel-require-string (value name)
@@ -671,74 +1027,44 @@
   (unless (stringp value) (cel-fail "no such overload: ~A" name))
   value)
 
-(defun cel-split (text separator)
-  "Split TEXT on a nonempty SEPARATOR, as a vector of strings."
-  (when (zerop (length separator)) (cel-fail "split requires a nonempty separator"))
-  (coerce (loop with start = 0
-                for found = (search separator text :start2 start)
-                collect (subseq text start found)
-                while found
-                do (setf start (+ found (length separator))))
-          'vector))
+(defun cel-value-size (value)
+  "Return the size cost tracking uses: length of a string, bytes, list or map, else one."
+  (cond ((stringp value) (length value))
+        ((cel-bytes-p value) (length value))
+        ((cel-list-p value) (length value))
+        ((hash-table-p value) (hash-table-count value))
+        (t 1)))
 
-(defun cel-replace (text old new)
-  "Replace every occurrence of a nonempty OLD in TEXT with NEW."
-  (when (zerop (length old)) (cel-fail "replace requires a nonempty search string"))
-  (with-output-to-string (out)
-    (loop with start = 0
-          for found = (search old text :start2 start)
-          do (write-string text out :start start :end found)
-          while found
-          do (write-string new out)
-             (setf start (+ found (length old))))))
-
-(defun cel-ascii-case (text upcase)
-  "Change the case of only the ASCII letters in TEXT."
-  (map 'string (lambda (character)
-                 (if (< (char-code character) 128)
-                     (if upcase (char-upcase character) (char-downcase character))
-                     character))
-       text))
-
-(defun cel-convert (name value)
-  "Evaluate the int, double, string, bool and dyn conversions."
-  (cond
-    ((equal name "dyn") value)
-    ((equal name "int")
-     (cond ((integerp value) value)
-           ((floatp value)
-            (handler-case (cel-int64 (truncate value))
-              (arithmetic-error () (cel-fail "integer overflow"))))
-           ((and (stringp value) (plusp (length value))
-                 (every #'digit-char-p (string-left-trim "-" value))
-                 (<= (count #\- value) 1) (> (length value) (count #\- value)))
-            (cel-int64 (parse-integer value)))
-           (t (cel-fail "type conversion error to int"))))
-    ((equal name "double")
-     (cond ((floatp value) value)
-           ((integerp value) (coerce value 'double-float))
-           ((stringp value)
-            (handler-case (multiple-value-bind (number next type)
-                              (cel-read-number value 0)
-                            (declare (ignore type))
-                            (unless (= next (length value)) (error "trailing text"))
-                            (coerce number 'double-float))
-              (error () (cel-fail "type conversion error to double"))))
-           (t (cel-fail "type conversion error to double"))))
-    ((equal name "string")
-     (cond ((stringp value) value)
-           ((integerp value) (write-to-string value :base 10 :radix nil))
-           ((eq value t) "true")
-           ((null value) "false")
-           (t (cel-fail "type conversion error to string"))))
-    (t
-     (cond ((cel-bool-p value) value)
-           ((member value '("1" "t" "T" "true" "TRUE" "True") :test #'equal) t)
-           ((member value '("0" "f" "F" "false" "FALSE" "False") :test #'equal) nil)
-           (t (cel-fail "type conversion error to bool"))))))
+(defun cel-charge-call (name target arguments)
+  "Charge one evaluated call, as cel-go's runtime cost tracker does."
+  (flet ((traversal (size) (ceiling (* size +cel-traversal-factor+))))
+    (let ((subject (if target (first target) (first arguments))))
+      (cel-charge
+       (cond
+         ((member name '("_==_" "_!=_" "_<_" "_<=_" "_>_" "_>=_") :test #'equal)
+          (max 1 (traversal (min (cel-value-size (first arguments)) (cel-value-size (second arguments))))))
+         ((equal name "_in_") (max 1 (cel-value-size (second arguments))))
+         ((and (equal name "_+_") (or (stringp (first arguments)) (cel-bytes-p (first arguments))))
+          (max 1 (traversal (+ (cel-value-size (first arguments)) (cel-value-size (second arguments))))))
+         ((member name '("startsWith" "endsWith") :test #'equal)
+          (max 1 (traversal (cel-value-size (first arguments)))))
+         ((equal name "contains")
+          (max 1 (* (traversal (cel-value-size subject)) (traversal (cel-value-size (first arguments))))))
+         ((member name '("matches" "find" "findAll") :test #'equal)
+          (max 1 (* (ceiling (* (1+ (cel-value-size subject)) +cel-traversal-factor+))
+                    (ceiling (* (cel-value-size (if target (first arguments) (second arguments))) +cel-regex-factor+)))))
+         ((member name '("isSorted" "sum" "max" "min" "indexOf" "lastIndexOf") :test #'equal)
+          (max 1 (cel-value-size subject)))
+         ((member name '("lowerAscii" "upperAscii" "substring" "trim" "url" "jsonpatch.escapeKey" "replace" "split"
+                         "join" "cidr" "isIP" "isCIDR" "ip" "quantity" "isQuantity" "semver" "isSemver" "isURL")
+                  :test #'equal)
+          (max 1 (traversal (cel-value-size subject))))
+         ((equal name "check") 350000)
+         (t 1))))))
 
 (defun cel-apply (name target arguments)
   "Apply an evaluated function to evaluated TARGET and ARGUMENTS."
+  (cel-charge-call name target arguments)
   (let ((first-argument (first arguments)) (second-argument (second arguments)))
     (cond
       ((equal name "_==_") (cel-equal first-argument second-argument))
@@ -750,6 +1076,7 @@
       ((equal name "-_")
        (cond ((integerp first-argument) (cel-int64 (- first-argument)))
              ((floatp first-argument) (- first-argument))
+             ((cel-duration-p first-argument) (cel-checked-duration (- (cel-duration-nanos first-argument))))
              (t (cel-fail "no such overload: -_"))))
       ((equal name "!_")
        (unless (cel-bool-p first-argument) (cel-fail "no such overload: !_"))
@@ -758,45 +1085,15 @@
        (cond ((cel-list-p second-argument)
               (and (find first-argument second-argument :test #'cel-equal) t))
              ((hash-table-p second-argument)
-              (and (stringp first-argument) (nth-value 1 (gethash first-argument second-argument))))
+              (and (nth-value 1 (gethash (cel-map-key-string first-argument) second-argument)) t))
              (t (cel-fail "no such overload: _in_"))))
-      ((equal name "size")
-       (let ((operand (if target (first target) first-argument)))
-         (cond ((stringp operand) (length operand))
-               ((cel-list-p operand) (length operand))
-               ((hash-table-p operand) (hash-table-count operand))
-               (t (cel-fail "no such overload: size")))))
-      ((member name '("int" "double" "string" "bool" "dyn") :test #'equal) (cel-convert name first-argument))
-      ((equal name "join")
-       (let ((items (first target)) (separator (if arguments (cel-require-string first-argument name) "")))
-         (unless (and (cel-list-p items) (every #'stringp items)) (cel-fail "no such overload: join"))
-         (with-output-to-string (out)
-           (loop for item across items for index from 0
-                 do (when (plusp index) (write-string separator out))
-                    (write-string item out)))))
-      (t
-       (let ((text (cel-require-string (first target) name)))
-         (cond
-           ((equal name "startsWith")
-            (let ((prefix (cel-require-string first-argument name)))
-              (and (>= (length text) (length prefix)) (string= prefix text :end2 (length prefix)))))
-           ((equal name "endsWith")
-            (let ((suffix (cel-require-string first-argument name)))
-              (and (>= (length text) (length suffix))
-                   (string= suffix text :start2 (- (length text) (length suffix))))))
-           ((equal name "contains") (and (search (cel-require-string first-argument name) text) t))
-           ((equal name "lowerAscii") (cel-ascii-case text nil))
-           ((equal name "upperAscii") (cel-ascii-case text t))
-           ((equal name "trim")
-            (string-trim '(#\Space #\Tab #\Newline #\Return #\Page) text))
-           ((equal name "split") (cel-split text (cel-require-string first-argument name)))
-           ((equal name "replace")
-            (cel-replace text (cel-require-string first-argument name) (cel-require-string second-argument name)))
-           (t (cel-fail "no such function: ~A" name))))))))
+      ((equal name "dyn") first-argument)
+      (t (cel-apply-library-call name target arguments)))))
 
 (defun cel-capture (node bindings)
   "Evaluate NODE, returning its value and any error instead of unwinding."
   (handler-case (values (cel-evaluate node bindings) nil)
+    (cel-cost-exceeded (condition) (error condition))
     (cel-evaluation-error (condition) (values nil condition))))
 
 (defun cel-logical (absorbing left right bindings name)
@@ -812,18 +1109,34 @@
                 (right-error (error right-error))
                 (t (not absorbing)))))))
 
-(defun cel-iteration-items (value)
-  "List a comprehension's iteration values: list elements or map keys."
-  (cond ((cel-list-p value) (coerce value 'list))
-        ((hash-table-p value) (loop for key being the hash-keys of value collect key))
+(defun cel-iteration-entries (value two-variables)
+  "List a comprehension's iterations as bindings of its one or two variables."
+  (cond ((cel-list-p value)
+         (if two-variables
+             (loop for item across value for index from 0 collect (cons index item))
+             (coerce value 'list)))
+        ((hash-table-p value)
+         (if two-variables
+             (loop for key being the hash-keys of value using (hash-value item) collect (cons key item))
+             (loop for key being the hash-keys of value collect key)))
         (t (cel-fail "expression of this type cannot be iterated"))))
 
-(defun cel-comprehend (kind items variable body predicate bindings)
+(defun cel-comprehend (kind items variable body predicate second-variable bindings)
   "Evaluate a comprehension macro with its documented error absorption."
-  (flet ((truth (item)
-           (let ((value (cel-evaluate body (acons variable item bindings))))
-             (unless (cel-bool-p value) (cel-fail "comprehension predicate must be bool"))
-             value)))
+  (labels ((scope (item)
+             (if second-variable
+                 (acons variable (car item) (acons second-variable (cdr item) bindings))
+                 (acons variable item bindings)))
+           (truth (item)
+             (cel-charge 3)
+             (let ((value (cel-evaluate body (scope item))))
+               (unless (cel-bool-p value) (cel-fail "comprehension predicate must be bool"))
+               value))
+           (kept (item)
+             (or (null predicate)
+                 (let ((keep (cel-evaluate predicate (scope item))))
+                   (unless (cel-bool-p keep) (cel-fail "comprehension filter must be bool"))
+                   keep))))
     (ecase kind
       ((:all :exists)
        (let ((absorbing (if (eq kind :all) nil t)) (pending nil))
@@ -831,6 +1144,7 @@
            (handler-case
                (when (eq (truth item) absorbing)
                  (return-from cel-comprehend absorbing))
+             (cel-cost-exceeded (condition) (error condition))
              (cel-evaluation-error (condition) (setf pending (or pending condition)))))
          (when pending (error pending))
          (not absorbing)))
@@ -838,18 +1152,42 @@
       (:filter (coerce (remove-if-not #'truth items) 'vector))
       (:map
        (coerce (loop for item in items
-                     for scope = (acons variable item bindings)
-                     when (or (null predicate)
-                              (let ((keep (cel-evaluate predicate scope)))
-                                (unless (cel-bool-p keep) (cel-fail "map() predicate must be bool"))
-                                keep))
-                       collect (cel-evaluate body scope))
-               'vector)))))
+                     do (cel-charge 3)
+                     when (kept item) collect (cel-evaluate body (scope item)))
+               'vector))
+      (:transform-list
+       (coerce (loop for item in items
+                     do (cel-charge 3)
+                     when (kept item) collect (cel-evaluate body (scope item)))
+               'vector))
+      (:transform-map
+       (let ((result (make-hash-table :test #'equal)))
+         (dolist (item items result)
+           (cel-charge 3)
+           (when (kept item)
+             (setf (gethash (cel-map-key-string (car item)) result) (cel-evaluate body (scope item))))))))))
+
+(defun cel-field-value (operand field)
+  "Read FIELD of a map or object, accepting its escaped CEL spelling; returns value and presence."
+  (multiple-value-bind (value present) (gethash field operand)
+    (if present
+        (values value t)
+        (if (search "__" field)
+            (gethash (cel-unescape-field field) operand)
+            (values nil nil)))))
+
+(defun cel-map-key-string (key)
+  "Spell a map key, keeping the JSON string keys of objects and printing other scalar keys."
+  (cond ((stringp key) key)
+        ((integerp key) (format nil "~D" key))
+        ((cel-uint-p key) (format nil "~D" (cel-uint-value key)))
+        ((eq key t) "true")
+        ((null key) "false")
+        (t (cel-fail "unsupported map key"))))
 
 (defun cel-evaluate (node bindings)
   "Evaluate NODE, where BINDINGS is an alist of variables to their values."
-  (when (minusp (decf *cel-remaining-steps*))
-    (cel-fail "expression evaluation exceeded its ~D step budget" +cel-evaluation-budget+))
+  (unless (eq :lit (first node)) (cel-charge 1))
   (ecase (first node)
     (:lit (second node))
     (:ident
@@ -858,59 +1196,127 @@
        (cdr binding)))
     (:select
      (let ((operand (cel-evaluate (second node) bindings)))
-       (unless (hash-table-p operand) (cel-fail "no such overload: selecting ~A" (third node)))
-       (multiple-value-bind (value present) (gethash (third node) operand)
-         (unless present (cel-fail "no such key: ~A" (third node)))
-         value)))
+       (cond
+         ((cel-optional-p operand) (cel-select-optional operand (third node)))
+         ((and (cel-opaque-p operand) (eq :authorizer (cel-opaque-kind operand)) (equal "requestResource" (third node)))
+          (cel-opaque :resource-check (append *cel-request-resource* (cel-opaque-value operand))))
+         (t
+          (unless (hash-table-p operand) (cel-fail "no such overload: selecting ~A" (third node)))
+          (multiple-value-bind (value present) (cel-field-value operand (third node))
+            (unless present (cel-fail "no such key: ~A" (third node)))
+            value)))))
+    (:opt-select
+     (cel-select-optional (cel-evaluate (second node) bindings) (third node)))
     (:has
      (let ((operand (cel-evaluate (second node) bindings)))
-       (unless (hash-table-p operand) (cel-fail "no such overload: has(~A)" (third node)))
-       (and (nth-value 1 (gethash (third node) operand)) t)))
+       (cond
+         ((cel-optional-p operand)
+          (cel-optional-present (cel-select-optional operand (third node))))
+         ((hash-table-p operand) (and (nth-value 1 (cel-field-value operand (third node))) t))
+         (t (cel-fail "no such overload: has(~A)" (third node))))))
     (:index
      (let ((operand (cel-evaluate (second node) bindings)) (index (cel-evaluate (third node) bindings)))
-       (cond ((and (cel-list-p operand) (integerp index))
-              (unless (< -1 index (length operand)) (cel-fail "index out of bounds: ~D" index))
-              (aref operand index))
-             ((and (hash-table-p operand) (stringp index))
-              (multiple-value-bind (value present) (gethash index operand)
-                (unless present (cel-fail "no such key: ~A" index))
-                value))
-             (t (cel-fail "no such overload: _[_]")))))
+       (when (cel-optional-p operand)
+         (return-from cel-evaluate (cel-index-optional operand index)))
+       (let ((position (cel-numeric-value index)))
+         (cond ((and (cel-list-p operand) position (= position (truncate position)))
+                (let ((position (truncate position)))
+                  (unless (< -1 position (length operand)) (cel-fail "index out of bounds: ~D" position))
+                  (aref operand position)))
+               ((hash-table-p operand)
+                (multiple-value-bind (value present) (gethash (cel-map-key-string index) operand)
+                  (unless present (cel-fail "no such key: ~A" index))
+                  value))
+               (t (cel-fail "no such overload: _[_]"))))))
+    (:opt-index
+     (cel-index-optional (cel-evaluate (second node) bindings) (cel-evaluate (third node) bindings)))
     (:call
      (destructuring-bind (name target arguments) (rest node)
        (cel-apply name
                   (and target (list (cel-evaluate target bindings)))
                   (mapcar (lambda (argument) (cel-evaluate argument bindings)) arguments))))
-    (:list (map 'vector (lambda (item) (cel-evaluate item bindings)) (second node)))
+    (:list
+     (cel-charge 10)
+     (let ((items nil))
+       (dolist (item (second node))
+         (if (eq :opt-element (first item))
+             (let ((value (cel-evaluate (second item) bindings)))
+               (unless (cel-optional-p value) (cel-fail "optional list element requires an optional value"))
+               (when (cel-optional-present value) (push (cel-optional-value value) items)))
+             (push (cel-evaluate item bindings) items)))
+       (coerce (nreverse items) 'vector)))
     (:construct
+     (cel-charge 40)
      (let ((object (make-hash-table :test #'equal)))
        (dolist (field (second node) object)
          (setf (gethash (car field) object) (cel-evaluate (cdr field) bindings)))))
     (:map
+     (cel-charge 30)
      (let ((object (make-hash-table :test #'equal)))
        (dolist (pair (second node) object)
-         (let ((key (cel-evaluate (car pair) bindings)))
-           (unless (stringp key) (cel-fail "map literals support only string keys"))
+         (let* ((optional (eq :opt-element (first (car pair))))
+                (key (cel-map-key-string (cel-evaluate (if optional (second (car pair)) (car pair)) bindings)))
+                (value (cel-evaluate (cdr pair) bindings)))
            (when (nth-value 1 (gethash key object)) (cel-fail "repeated map key: ~A" key))
-           (setf (gethash key object) (cel-evaluate (cdr pair) bindings))))))
+           (if optional
+               (progn
+                 (unless (cel-optional-p value) (cel-fail "optional map entry requires an optional value"))
+                 (when (cel-optional-present value) (setf (gethash key object) (cel-optional-value value))))
+               (setf (gethash key object) value))))))
     (:cond
      (let ((condition (cel-evaluate (second node) bindings)))
        (unless (cel-bool-p condition) (cel-fail "no such overload: _?_:_"))
        (cel-evaluate (if condition (third node) (fourth node)) bindings)))
     (:and (cel-logical nil (second node) (third node) bindings "_&&_"))
     (:or (cel-logical t (second node) (third node) bindings "_||_"))
+    (:bind
+     (destructuring-bind (variable init body) (rest node)
+       (cel-evaluate body (acons variable (cel-evaluate init bindings) bindings))))
+    (:opt-map
+     (destructuring-bind (flat target variable body) (rest node)
+       (let ((optional (cel-evaluate target bindings)))
+         (unless (cel-optional-p optional) (cel-fail "no such overload: optMap"))
+         (if (cel-optional-present optional)
+             (let ((value (cel-evaluate body (acons variable (cel-optional-value optional) bindings))))
+               (if flat value (make-cel-optional :value value :present t)))
+             optional))))
     (:comprehension
-     (destructuring-bind (kind iterable variable body predicate) (rest node)
-       (cel-comprehend kind (cel-iteration-items (cel-evaluate iterable bindings))
-                       variable body predicate bindings)))))
+     (destructuring-bind (kind iterable variable body predicate second-variable) (rest node)
+       (cel-comprehend kind
+                       (cel-iteration-entries (cel-evaluate iterable bindings) second-variable)
+                       variable body predicate second-variable bindings)))))
+
+(defun cel-select-optional (operand field)
+  "Select FIELD from a possibly optional OPERAND, giving an optional."
+  (let ((inner (if (cel-optional-p operand) (cel-optional-value operand) operand))
+        (live (or (not (cel-optional-p operand)) (cel-optional-present operand))))
+    (if (and live (hash-table-p inner))
+        (multiple-value-bind (value present) (cel-field-value inner field)
+          (make-cel-optional :value value :present (and present t)))
+        (make-cel-optional))))
+
+(defun cel-index-optional (operand index)
+  "Index a possibly optional OPERAND, giving an optional that is empty when out of range."
+  (let ((inner (if (cel-optional-p operand) (cel-optional-value operand) operand))
+        (live (or (not (cel-optional-p operand)) (cel-optional-present operand))))
+    (cond ((not live) (make-cel-optional))
+          ((cel-list-p inner)
+           (let ((position (cel-numeric-value index)))
+             (if (and position (< -1 position (length inner)))
+                 (make-cel-optional :value (aref inner (truncate position)) :present t)
+                 (make-cel-optional))))
+          ((hash-table-p inner)
+           (multiple-value-bind (value present) (gethash (cel-map-key-string index) inner)
+             (make-cel-optional :value value :present (and present t))))
+          (t (make-cel-optional)))))
 
 (defun evaluate-cel-value (program bindings)
-  "Run a compiled PROGRAM under a fresh step budget, returning its value of any type."
+  "Run a compiled PROGRAM under a fresh budget, returning its value of any type."
   (let ((*cel-remaining-steps* +cel-evaluation-budget+))
     (cel-evaluate program bindings)))
 
 (defun evaluate-cel-condition (program bindings)
-  "Run a compiled PROGRAM under a fresh step budget, signaling on any runtime error."
+  "Run a compiled PROGRAM under a fresh budget, signaling on any runtime error."
   (let* ((*cel-remaining-steps* +cel-evaluation-budget+)
          (value (cel-evaluate program bindings)))
     (unless (cel-bool-p value) (cel-fail "expression did not evaluate to bool"))
