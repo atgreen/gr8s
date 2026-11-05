@@ -87,7 +87,7 @@ program is missing.  Used for optional host tools like firewall-cmd."
 ;;; The command.
 
 (defun run-doctor (&key (cluster-pod-cidr +default-cluster-pod-cidr+)
-                        (state-directory "/var/lib/gr8s")
+                        (state-directory (namestring (default-state-directory)))
                         (firewall #'doctor-firewall-state))
   "Run every environment check and return the number of FAILs."
   (let ((fails 0))
@@ -124,16 +124,25 @@ program is missing.  Used for optional host tools like firewall-cmd."
                     "gr8s enables net.ipv4.ip_forward at startup; set it to 1 to avoid surprises"))
         (error (c) (note :warn "ip_forward" (format nil "could not read: ~A" c))))
 
-      ;; Pod-pool route overlap (the validate-pod-pool-host-routes trap).
-      (handler-case
-          (progn
-            (validate-pod-pool-host-routes cluster-pod-cidr
-                                           (uiop:ensure-directory-pathname state-directory))
-            (note :ok "pod-pool routes" (format nil "no host route overlaps ~A" cluster-pod-cidr)))
-        (cni-error (c)
-          (note :fail "pod-pool routes" (princ-to-string c)
-                "remove the conflicting interface/route (e.g. a stale gr8s0: sudo ip link del gr8s0)"))
-        (error (c) (note :warn "pod-pool routes" (format nil "could not check: ~A" c))))
+      ;; Pod-pool route overlap (the validate-pod-pool-host-routes trap).  A
+      ;; FAIL here names the state dir we checked: the usual cause is that the
+      ;; overlapping route belongs to a live Pod owned by an agent whose state
+      ;; dir is not this one, so re-run against that agent before touching any
+      ;; route.
+      (let ((directory (uiop:ensure-directory-pathname state-directory)))
+        (handler-case
+            (progn
+              (validate-pod-pool-host-routes cluster-pod-cidr directory)
+              (note :ok "pod-pool routes"
+                    (format nil "no host route overlaps ~A (state dir ~A)"
+                            cluster-pod-cidr directory)))
+          (cni-error (c)
+            (note :fail "pod-pool routes"
+                  (format nil "~A (checked state dir ~A)" c directory)
+                  (format nil "if the route is a live Pod owned by another agent, re-run with ~
+                               --state-directory pointing at that agent; otherwise remove the ~
+                               genuinely stale route (sudo ip route del <cidr>)")))
+          (error (c) (note :warn "pod-pool routes" (format nil "could not check: ~A" c)))))
 
       ;; Host firewall vs the gateway DNS (169.254.1.1:53) — podster-sp5.
       (handler-case
