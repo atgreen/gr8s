@@ -275,17 +275,30 @@ Around the datastore:
   the new leader.
 - **Membership is dynamic** — single-member, effective-on-commit changes grow or
   shrink the cluster; a **witness** votes for quorum but never leads, so a
-  two-node + witness topology survives one node loss. New members join through a
-  token-authenticated `Join` RPC (a follower redirects to the leader).
+  two-node + witness topology survives one node loss. New members enroll with a
+  one-time token, then join with the certificate they receive (a follower
+  redirects to the leader).
+- **Members use mutual TLS** — replication carries every Secret, so each member
+  needs a certificate from the cluster's own Raft CA, and a message must come from
+  the member it names. Worker certificates and tokens aren't accepted, because
+  they come from a separate CA and token store. A joiner checks the CA against its
+  pin before sending anything. Voters hold the CA key so they can admit replacements
+  after a failover; witnesses don't, but their log does hold replicated state, which
+  is why it's created with mode `0600`. Member certificates last a year and aren't
+  renewed yet.
 
 Three commands and a flag surface it:
 
 ```sh
-# Found a cluster, then have other control planes join it.
-gr8s serve --raft-init  --raft-id cp1 --raft-port 7000 ...
-gr8s serve --raft-join 10.0.0.1:7000 --raft-id cp2 --raft-port 7000 ...
+# Found a cluster.
+gr8s serve --raft-init --raft-id cp1 --raft-port 7000 ...
+# On cp1, create a token for each new member. This prints its token and caPin.
+gr8s join-token --role control-plane --node-name cp2
+# Join through the member that created the token.
+gr8s serve --raft-join 10.0.0.1:7000 --raft-id cp2 --raft-port 7000 \
+  --raft-node-name cp2 --raft-token "$TOKEN" --raft-ca-pin "$CA_PIN" ...
 # A headless quorum tie-breaker (no API, no workloads).
-gr8s witness --join 10.0.0.1:7000 --node-name arb --token "$TOKEN"
+gr8s witness --join 10.0.0.1:7000 --node-name arb --token "$TOKEN" --ca-pin "$CA_PIN"
 ```
 
 This is opt-in: with no `--raft-*` flag, `gr8s serve` runs exactly as the

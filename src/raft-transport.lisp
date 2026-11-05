@@ -18,8 +18,8 @@
 ;;;; Wire format: one Raft message per Deliver call, the message plist encoded as
 ;;;; a readable Lisp form (entries flattened to (index term command) triples) and
 ;;;; read back with *read-eval* bound off. Members are mutually authenticated
-;;;; peers (cluster TLS in production), so the trust boundary is the cluster; a
-;;;; binary codec is a later hardening.
+;;;; peers (see raft-tls.lisp), and a message is authenticated before it's read, so
+;;;; the trust boundary is the cluster; a binary codec is a later hardening.
 
 (in-package #:gr8s)
 
@@ -66,7 +66,8 @@
   ;; decoded JoinRequest returning a JoinResponse. Set by the cluster layer; when
   ;; unset the member rejects joins (accepted=false, no leader hint).
   (join-handler nil)
-  (tls nil) tls-certificate tls-key)
+  ;; This member's RAFT-CREDENTIALS. Only in-process tests run without any.
+  credentials)
 
 (defun raft-link-enqueue (link octets)
   (bt:with-lock-held ((raft-peer-link-lock link))
@@ -80,13 +81,12 @@
   "Lazily open and cache a channel+stub to this peer, or NIL if unreachable."
   (or (raft-peer-link-stub link)
       (handler-case
-          (let ((channel (ag-grpc:make-channel (raft-peer-link-host link) (raft-peer-link-port link)
-                                               :timeout 2 :tls (raft-member-tls member) :tls-verify nil
-                                               :tls-client-certificate (raft-member-tls-certificate member)
-                                               :tls-client-key (raft-member-tls-key member))))
+          (let ((channel (make-raft-channel (raft-member-credentials member)
+                                            (raft-peer-link-host link) (raft-peer-link-port link) 2)))
             (setf (raft-peer-link-channel link) channel
                   (raft-peer-link-stub link) (gr8s.node.v1::make-raft-transport-stub channel)))
-        (error () nil))))
+        ;; A stalled TLS handshake is a timeout, and it must not end this link's thread.
+        ((or error sb-ext:timeout) () nil))))
 
 (defun raft-link-sender-loop (member link)
   (loop while (raft-member-running member) do
@@ -119,13 +119,12 @@
                                   ;; election timeout ~1-2s at a 50ms tick; well above gRPC call latency
                                   (timeout-fn (lambda () (+ 20 (random 20))))
                                   (heartbeat-ticks 2)
-                                  tls tls-certificate tls-key (tls-server-options nil))
+                                  credentials)
   "Create a member: a raft-node whose SEND-FN enqueues to per-peer outboxes, a
    RaftTransport gRPC server, and the delivery machinery. Peers are set with
    RAFT-MEMBER-SET-PEERS (so a fresh member cannot self-elect before it knows
    them); ticking starts with RAFT-MEMBER-START."
-  (let* ((member (make-raft-member :host host :port port :tls tls
-                                   :tls-certificate tls-certificate :tls-key tls-key))
+  (let* ((member (make-raft-member :host host :port port :credentials credentials))
          (node (make-raft-node
                 :id id :peers nil
                 :heartbeat-timeout heartbeat-ticks :timeout-fn timeout-fn
@@ -134,24 +133,25 @@
                 :send-fn (lambda (to msg)
                            (let ((link (gethash to (raft-member-links member))))
                              (when link (raft-link-enqueue link (raft-message->octets msg)))))))
-         (server (apply #'ag-grpc:make-grpc-server port :host host tls-server-options)))
+         (server (apply #'ag-grpc:make-grpc-server port :host host (raft-server-tls-options credentials))))
     (setf (raft-member-node member) node
           (raft-member-grpc-server member) server
           (raft-member-running member) t)
     (gr8s.node.v1::register-raft-transport-service
      server
      :deliver-handler (lambda (request context)
-                        (declare (ignore context))
-                        (let ((msg (octets->raft-message (gr8s.node.v1::payload request))))
+                        (let ((msg (authenticated-raft-message credentials request context)))
                           (bt:with-lock-held ((raft-member-lock member))
                             (raft-handle-message (raft-member-node member) msg)))
                         (make-instance 'gr8s.node.v1::raft-ack))
      :join-handler (lambda (request context)
-                     (declare (ignore context))
                      (let ((handler (raft-member-join-handler member)))
                        (if handler
-                           (funcall handler request)
-                           (make-instance 'gr8s.node.v1::join-response :accepted nil)))))
+                           (funcall handler request context)
+                           (make-instance 'gr8s.node.v1::join-response :accepted nil))))
+     :enroll-member-handler (lambda (request context)
+                              (declare (ignore context))
+                              (raft-member-handle-enroll member request)))
     (setf (raft-member-server-thread member)
           (bt:make-thread (lambda () (ag-grpc:server-start server))
                           :name (format nil "gr8s raft server ~A" id)))
