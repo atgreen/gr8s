@@ -1222,7 +1222,7 @@ than wait for the next, which truncates any body that spans records in flight."
       (let ((path (progn (read-request-body request) (request-route-path (hunchentoot:script-name request))))
             (method (hunchentoot:request-method request))
             (*crd-field-validation* (crd-request-field-validation)))
-        (unless *authenticated-api-identity*
+        (when (and store (not *authenticated-api-identity*))
           (flowcontrol-note-request store (request-api-identity) path method))
         (multiple-value-bind (*table-request* *table-api-version*) (negotiate-table-request)
           (route-http-request store runtime reconciler path method)))
@@ -1242,7 +1242,7 @@ than wait for the next, which truncates any body that spans records in flight."
            (openapi-v3-complete-response store runtime reconciler path))
           ((string= path "/metrics")
            (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
-           (concatenate 'string (runtime-network-metrics runtime) (gateway-metrics-text) (flowcontrol-metrics-text store)))
+           (concatenate 'string (runtime-network-metrics runtime) (gateway-metrics-text) (if store (flowcontrol-metrics-text store) "")))
           ((string= path "/version") (version-response))
           ((string= path "/api")
            (if (aggregated-discovery-requested-p)
