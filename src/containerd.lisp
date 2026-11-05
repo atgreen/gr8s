@@ -441,6 +441,10 @@ A container running as any user can write here, and a user mount at the path tak
                        (cri-container-summary-id container)
                        :stdin stdin :stdout stdout :stderr stderr :tty tty)))))
 
+(defmethod runtime-container-metrics ((runtime containerd-runtime))
+  (call-containerd-runtime
+   (lambda () (cri-container-metrics (containerd-runtime-socket-path runtime)))))
+
 (defmethod runtime-exec-sync
     ((runtime containerd-runtime) uid container-name command &key (timeout 30))
   (call-containerd-runtime
