@@ -286,9 +286,11 @@
                              (:file "workloads-test")
                              (:file "disruption-budget-test")
                              (:file "statefulset-test")
-                             (:file "rc-daemonset-test"))))
+                             (:file "rc-daemonset-test")
+                             (:file "suite-watchdog"))))
   :perform (test-op (operation component)
              (declare (ignore operation component))
+             (uiop:symbol-call :gr8s/tests :start-suite-watchdog)
              (unless (uiop:symbol-call
                       :fiveam :run!
                       (find-symbol "GR8S" "GR8S/TESTS"))

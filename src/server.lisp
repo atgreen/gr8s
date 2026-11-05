@@ -49,5 +49,22 @@
                     :runtime actual-runtime
                     :reconciler actual-reconciler))))
 
+(defmethod hunchentoot:stop :around ((acceptor gr8s-acceptor) &key soft)
+  "Keep waking the listener: STOP has one wake attempt and then an unbounded join."
+  ;; The single dummy connection swallows its own errors, and the host suite
+  ;; intermittently hung here with the listener never exiting (podster-uqb.82).
+  (declare (ignorable soft))
+  (let ((stopped nil))
+    (bt:make-thread
+     (lambda ()
+       (loop until stopped
+             do (sleep 0.5)
+                (unless stopped
+                  (ignore-errors (hunchentoot::wake-acceptor-for-shutdown acceptor)))))
+     :name "gr8s server stop waker")
+    ;; The waker notices within half a second; STOP need not wait for it.
+    (unwind-protect (call-next-method)
+      (setf stopped t))))
+
 (defun stop-server (server)
   (hunchentoot:stop server))
