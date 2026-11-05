@@ -164,6 +164,28 @@
        (uiop:pathname-directory-pathname path)
        :validate t :if-does-not-exist :ignore))))
 
+(test kubeconfig-without-output-prints-to-stdout
+  (let ((options (gr8s::parse-cli-options '("kubeconfig" "--server" "http://127.0.0.1:18080"))))
+    (is (null (getf options :output)))
+    (let ((text (with-output-to-string (stream)
+                  (gr8s::print-kubeconfig stream (getf options :server)))))
+      (is (search "server: http://127.0.0.1:18080" text))
+      (is (search "current-context: gr8s" text)))))
+
+(test serve-defaults-its-kubeconfig-into-the-state-directory
+  (let* ((directory (merge-pathnames (format nil "gr8s-kubeconfig-~36R/" (random (expt 36 8)))
+                                     (uiop:temporary-directory)))
+         (options (gr8s::parse-cli-options (list "serve" "--state-directory" (namestring directory))))
+         (path (gr8s::default-kubeconfig-path options)))
+    (unwind-protect
+         (progn
+           (is (null (getf options :kubeconfig)))
+           (is (equal (merge-pathnames "kubeconfig" directory) path))
+           (gr8s:write-kubeconfig path "http://127.0.0.1:18080" :private t)
+           (is (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat path)))))
+           (is (search "server: http://127.0.0.1:18080" (uiop:read-file-string path))))
+      (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
+
 (test server-api-refuses-non-loopback-listeners
   (signals error
     (start-server :address "0.0.0.0" :port 18080)))

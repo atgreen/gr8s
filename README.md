@@ -13,8 +13,23 @@ rather than shelling out to a container CLI), but almost everything above and
 around that boundary is Lisp. The control plane schedules Pods and publishes
 desired state; the agent owns the node runtime and reports observed status.
 
-## What makes gr8s unusual
+## What's special about gr8s
 
+gr8s is a clean-slate, modern implementation of Kubernetes. Kubernetes grew up
+before eBPF, and the ecosystem spent a decade bolting modern primitives onto it:
+eBPF dataplanes replacing kube-proxy/iptables, consensus behind a separate etcd,
+gateways behind proxy sidecars. gr8s starts from where the ecosystem landed and
+makes those primitives **foundational** rather than retrofitted — the dataplane
+*is* eBPF, the datastore *is* a built-in Raft, the gateway *is* the node agent —
+and it does it in one language and one static binary, with no kube-proxy, no
+iptables, no Envoy, no etcd, and no C toolchain anywhere in the build.
+
+- **eBPF is the dataplane, not an add-on.** Whistler compiles eBPF *directly from
+  Lisp* — no LLVM, no clang, no `.c`, no hand-written ELF. The CNI anti-spoof
+  egress guard, the NetworkPolicy firewall, the ClusterIP service load balancer,
+  and the Gateway's inbound `sk_lookup` steering are all Lisp→eBPF, loaded through
+  a Lisp BPF loader and a Lisp rtnetlink stack. There is no kube-proxy and no
+  iptables; packet handling lives in the kernel, programmed from Lisp.
 - **One static image, every role.** `gr8s serve` is the control plane *and* a
   node; the same binary is the standalone agent and the CNI plugin. It embeds
   statically linked containerd 2.4.2, `containerd-shim-runc-v2`, runc 1.5.2, and
@@ -22,11 +37,6 @@ desired state; the agent owns the node runtime and reports observed status.
   no host glibc, no separate CNI helper binary. At startup it mounts a private
   `tmpfs` and BPF filesystem, materializes the payload, and runs its own
   containerd.
-- **The dataplane is compiled from Common Lisp.** Whistler compiles eBPF
-  *directly from Lisp* — no LLVM, no clang, no `.c`, no hand-written ELF. The CNI
-  anti-spoof egress guard, the NetworkPolicy firewall, the ClusterIP service load
-  balancer, and the Gateway's inbound steering are all Lisp→eBPF, loaded through
-  a Lisp BPF loader and a Lisp rtnetlink stack.
 - **Gateway API with no proxy sidecar.** HTTPRoutes are *JIT-compiled*: SBCL
   turns the routing table into a native dispatch function with route constants
   inlined and Gateway-API precedence baked into the branch order, recompiled on
@@ -37,6 +47,12 @@ desired state; the agent owns the node runtime and reports observed status.
   maps enforced at the Pod's host veth — default-deny egress proven on a real Pod
   in the smoke test, with no per-change recompile. See
   [NetworkPolicy](#networkpolicy-compiled-ebpf-firewall).
+- **Multi-master HA on a Raft written from scratch in Lisp.** No etcd, no
+  external database: the control plane replicates its desired state over a
+  pure-Common-Lisp Raft that speaks ag-gRPC. A three-member (or two-member +
+  witness) cluster survives the loss of its leader with no loss of committed
+  state — proven end to end over HTTP in a smoke test that kills the leader. See
+  [High availability](#high-availability-pure-lisp-raft).
 - **Lisp all the way down.** API server (Hunchentoot), JSON (jzon), CRI client
   (ag-gRPC over a Unix socket), TLS + ACME (pure-tls), the scheduler, the
   controllers, IPAM, rtnetlink, DNS, and the eBPF compiler — one language, one
@@ -51,11 +67,13 @@ desired state; the agent owns the node runtime and reports observed status.
 - [Kubernetes surface](#kubernetes-surface)
 - [Gateway API (no Envoy)](#gateway-api-no-envoy)
 - [NetworkPolicy (compiled eBPF firewall)](#networkpolicy-compiled-ebpf-firewall)
+- [High availability (pure-Lisp Raft)](#high-availability-pure-lisp-raft)
 - [Runtime architecture](#runtime-architecture)
 - [Requirements](#requirements)
 - [Build and run](#build-and-run-the-self-contained-server)
 - [Test](#test)
 - [Native executable](#native-executable)
+- [Versioning](#versioning)
 
 ## How it fits together
 
@@ -226,14 +244,76 @@ enforcement on a live Pod; detach-on-removal is covered by unit tests.
 Ingress-direction enforcement, connection tracking for reply traffic, namespace
 selectors and `ipBlock.except` are tracked for completeness.
 
+## High availability (pure-Lisp Raft)
+
+The control plane can run multi-master on a Raft consensus layer written from
+scratch in Common Lisp — no etcd, no external database. Members talk over the
+same ag-gRPC transport as everything else. The Raft core (leader election, log
+replication, the §5.4.2 commit rule, apply-once-in-order) runs under a
+deterministic in-process simulator for failover/partition tests *and* under real
+gRPC, from one implementation. The log is a durable write-ahead log with
+snapshot/compaction and crash recovery.
+
+gr8s splits state along a **consistency plane**: durable desired state (the
+stored API resources) is proposed through Raft so every member converges, while
+observed status, endpoint telemetry, node heartbeats/leases, and self-expiring
+Events stay off the log — each member keeps its own and agents re-report after a
+failover. What is replicated, and verified to survive a leader kill with its
+identity intact: core API resources (including controller-written status, Job
+accounting, EndpointSlices, CSR/certificate issuance state), **Pods**, and a
+Node's assigned PodCIDR. Events are deliberately local.
+
+Around the datastore:
+
+- **Controllers are leader-gated** — reconciliation runs only on the leader; a
+  follower idles until promoted.
+- **Leader-aware HTTP** — a follower answers a mutating API request with a 307 to
+  the current leader (preserving path and query), or 503 when no leader is known;
+  reads are served locally.
+- **Agents reconnect across failover** — given more than one control-plane
+  endpoint, a node agent rotates through them on reconnect and resumes against
+  the new leader.
+- **Membership is dynamic** — single-member, effective-on-commit changes grow or
+  shrink the cluster; a **witness** votes for quorum but never leads, so a
+  two-node + witness topology survives one node loss. New members join through a
+  token-authenticated `Join` RPC (a follower redirects to the leader).
+
+Three commands and a flag surface it:
+
+```sh
+# Found a cluster, then have other control planes join it.
+gr8s serve --raft-init  --raft-id cp1 --raft-port 7000 ...
+gr8s serve --raft-join 10.0.0.1:7000 --raft-id cp2 --raft-port 7000 ...
+# A headless quorum tie-breaker (no API, no workloads).
+gr8s witness --join 10.0.0.1:7000 --node-name arb --token "$TOKEN"
+```
+
+This is opt-in: with no `--raft-*` flag, `gr8s serve` runs exactly as the
+single-node path always has — no Raft member starts. An HA acceptance smoke test
+stands up a three-member cluster over HTTP, creates a resource through the
+leader, kills the leader, and requires the survivors to keep serving the
+committed data and accept new writes.
+
+Honest about scope: gr8s has not passed Kubernetes conformance, and HA does not
+change that. Pod desired state uses a leader-applies-then-replicate model (so a
+multi-step controller transaction sees its own writes), which leaves a narrow
+window on a leader crash mid-commit; and replication currently ships the whole
+resource index per write rather than per-key deltas. Both are tracked as
+refinements, not correctness gaps — no *committed* desired state is lost on
+failover.
+
 ## Runtime architecture
 
-The executable has three entry paths:
+The executable has these entry paths:
 
-- `gr8s serve` runs the HTTP control plane and a loopback gRPC node endpoint;
+- `gr8s serve` runs the HTTP control plane and a loopback gRPC node endpoint, and
+  optionally joins a Raft cluster with `--raft-init`/`--raft-join` (see
+  [High availability](#high-availability-pure-lisp-raft));
 - `gr8s agent` enrolls with a one-time token, persists its node key and
   certificate, and maintains the revisioned desired-state session;
-- a CNI invocation is selected automatically when `CNI_COMMAND` is present.
+- `gr8s witness` runs a headless Raft voting member (a quorum tie-breaker);
+- `gr8s version` prints the version; a CNI invocation is selected automatically
+  when `CNI_COMMAND` is present.
 
 `serve` starts a local agent named `gr8s-local` by default. That agent crosses
 the same ag-gRPC boundary as a separately launched agent; `--disable-agent`
@@ -360,6 +440,10 @@ sudo build/gr8s serve \
   --state-directory /tmp/gr8s-state \
   --kubeconfig /tmp/gr8s.kubeconfig
 ```
+
+Without `--kubeconfig`, `serve` writes an owner-only `kubeconfig` file in the
+state directory and prints its path. `gr8s kubeconfig [--server URL]` prints a
+kubeconfig to standard output, or writes it with `--output FILE`.
 
 No system containerd or host glibc is used by the embedded runtime
 payload. Root is still required for the Linux facilities used by containers:
@@ -866,3 +950,22 @@ deletion of a workload or Pod waits for `blockOwnerDeletion` dependents and only
 detaches a dependent that another owner still holds. A Pod held this way starts
 terminating when the hold ends, so it shows no `deletionTimestamp` meanwhile.
 Foreground deletion of other kinds and finalizer controllers remain unsupported.
+
+## Versioning
+
+gr8s versions itself as the **Kubernetes API version it implements plus a gr8s
+release suffix**, following the k3s/k0s convention (k3s's `v1.31.4+k3s1`). The
+ASDF `:version` in `gr8s.asd` is the Kubernetes API version (`1.36.0`) and the
+single source of truth for the `/version` endpoint's `major`/`minor`, a Node's
+`kubeletVersion`, and the startup banner. The release suffix lives in a git tag
+(`v1.36.0-gr8s.0`), surfaced through the `version-string` library as
+`+gr8s-version+` and reported by `gr8s version`:
+
+- a tagged release prints the tag verbatim (`v1.36.0-gr8s.0`, `+dirty` if the
+  tree has uncommitted changes);
+- an untagged build prints the base version with the commit (`v1.36.0-g1a2b3c4`);
+- the native binary bakes the string in at build time.
+
+Cutting a release is therefore just a tag — `git tag v1.36.0-gr8s.1` — and the
+binary, `/version`, `kubeletVersion`, and banner all report it with no code
+change.
