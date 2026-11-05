@@ -119,6 +119,12 @@
 
 (defun self-subject-rules-status (store identity namespace)
   "List the rules IDENTITY's live bindings grant in NAMESPACE."
+  ;; As SERVICE-ACCOUNT-AUTHORIZED-P, which honors this group without any binding.
+  (when (find "system:masters" (api-identity-groups identity) :test #'equal)
+    (return-from self-subject-rules-status
+      (core-object "resourceRules" (vector (core-object "verbs" #("*") "apiGroups" #("*") "resources" #("*")))
+                   "nonResourceRules" (vector (core-object "verbs" #("*") "nonResourceURLs" #("*")))
+                   "incomplete" nil)))
   (let ((resource-rules nil) (non-resource-rules nil))
     (dolist (binding (append (list-core-resources store "clusterrolebindings")
                              (when namespace (list-core-resources store "rolebindings" namespace))))
@@ -181,6 +187,8 @@
                    (equal kind (gethash "kind" review kind)))
         (core-resource-error 400 "BadRequest" "Expected ~A" kind))
       (setf (gethash "apiVersion" review) (auth-review-kind-version kind) (gethash "kind" review) kind)
+      ;; Clients send an empty status, whose required lists Go renders as null. The server fills it in.
+      (remhash "status" review)
       (validate-template-shape review schema kind)
       (let ((spec (let ((value (gethash "spec" review))) (if (hash-table-p value) value (core-object)))))
         (setf (gethash "spec" review) spec)

@@ -23,8 +23,11 @@
    (stream :initarg :stream :accessor file-raft-storage-stream)))
 
 (defun open-file-raft-storage (path)
-  "Open (creating) an append-only Raft WAL at PATH for continued writes."
+  "Open (creating) an append-only Raft WAL at PATH for continued writes.
+It holds replicated state including Secrets, so only its owner may read it."
   (ensure-directories-exist path)
+  (sb-posix:close (sb-posix:open (namestring path) (logior sb-posix:o-wronly sb-posix:o-creat) #o600))
+  (sb-posix:chmod (namestring path) #o600)
   (make-instance 'file-raft-storage
                  :path path
                  :stream (open path :direction :output :element-type 'character
