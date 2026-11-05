@@ -96,6 +96,7 @@
                              (:file "pod-admission-policy")
                              (:file "resource-quota")
                              (:file "pod-resource-fit")
+                             (:file "pod-affinity")
                              (:file "node-taints")
                              (:file "pod-node-admission")
                              (:file "endpointslice-api")
