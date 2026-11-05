@@ -74,6 +74,13 @@
     (core-object "version" version "freshness" "Current"
                  "resources" (aggregated-version-resources resources group version))))
 
+(defun aggregated-external-version-entry (store group version)
+  "Describe an external version from its server's last good document, or NIL before it has passed."
+  (let ((document (aggregated-version-document store group version)))
+    (when document
+      (core-object "version" version "freshness" "Current"
+                   "resources" (aggregated-version-resources (gethash "resources" document #()) group version)))))
+
 (defun aggregated-discovery-response (store runtime reconciler root)
   "Answer the aggregated document for the legacy /api or named /apis root."
   (let* ((groups (if (string= root "/api")
@@ -84,17 +91,21 @@
                                           (map 'list (lambda (version) (gethash "version" version)) (gethash "versions" group))))
                             (gethash "groups" document)))))
          (items (loop for (group . versions) in groups
-                      collect (core-object
-                               "metadata" (if (string= root "/api") (core-object) (core-object "name" group))
-                               "versions"
-                               (coerce (loop for version in versions
-                                             collect (aggregated-version-entry
-                                                      store runtime reconciler
-                                                      (if (string= root "/api")
-                                                          (format nil "/api/~A" version)
-                                                          (format nil "/apis/~A/~A" group version))
-                                                      group version))
-                                       'vector))))
+                      for entries = (loop for version in versions
+                                          for entry = (if (and (string/= root "/api")
+                                                               (aggregated-apiservice store group version))
+                                                          (aggregated-external-version-entry store group version)
+                                                          (aggregated-version-entry
+                                                           store runtime reconciler
+                                                           (if (string= root "/api")
+                                                               (format nil "/api/~A" version)
+                                                               (format nil "/apis/~A/~A" group version))
+                                                           group version))
+                                          when entry collect entry)
+                      when entries
+                        collect (core-object
+                                 "metadata" (if (string= root "/api") (core-object) (core-object "name" group))
+                                 "versions" (coerce entries 'vector))))
          (body (com.inuoe.jzon:stringify
                 (core-object "apiVersion" "apidiscovery.k8s.io/v2" "kind" "APIGroupDiscoveryList"
                              "metadata" (core-object) "items" (coerce items 'vector)))))

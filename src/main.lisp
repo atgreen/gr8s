@@ -321,6 +321,30 @@
              (setf arguments (cddr arguments)))
     options))
 
+(defun parse-doctor-options (arguments)
+  "Parse `gr8s doctor' options: --state-directory/--cluster-pod-cidr VALUE, or a
+bare positional state directory for backward compatibility.  A missing
+:state-directory leaves run-doctor to use the shared default-state-directory."
+  (let ((options (list :command :doctor))
+        (positional-seen nil))
+    (loop while arguments
+          for option = (first arguments)
+          do (cond
+               ((string= option "--state-directory")
+                (setf (getf options :state-directory) (option-value arguments option)
+                      arguments (cddr arguments)))
+               ((string= option "--cluster-pod-cidr")
+                (setf (getf options :cluster-pod-cidr) (option-value arguments option)
+                      arguments (cddr arguments)))
+               ((and (not positional-seen)
+                     (plusp (length option))
+                     (char/= (char option 0) #\-))
+                (setf (getf options :state-directory) option
+                      positional-seen t
+                      arguments (rest arguments)))
+               (t (error "unknown doctor option: ~A" option))))
+    options))
+
 (defun parse-cli-options (arguments)
   (cond
     ((or (null arguments)
@@ -343,7 +367,7 @@
        (error "runtime-assets takes no arguments"))
      (list :command :runtime-assets))
     ((string= "doctor" (first arguments))
-     (list :command :doctor :state-directory (second arguments)))
+     (parse-doctor-options (rest arguments)))
     (t (error "unknown command: ~A" (first arguments)))))
 
 (defun print-runtime-assets ()
@@ -388,6 +412,17 @@
                    :oci-runtime (getf options :containerd-oci-runtime)
                    :metadata-no-sync (getf options :containerd-no-sync)
                    :runtime-assets *embedded-runtime-assets*
+                   :extra-runtime-handlers
+                   ;; Runtime addons are a node-level resource at the node's
+                   ;; state root. serve runs its local agent (and thus
+                   ;; containerd) under <state>/agent/, so it passes
+                   ;; :runtime-addons-directory to point back at <state>, where
+                   ;; the operator installed them. A standalone `gr8s agent`
+                   ;; falls back to its own --state-directory.
+                   (load-installed-runtime-addons
+                    (uiop:ensure-directory-pathname
+                     (or (getf options :runtime-addons-directory)
+                         (getf options :state-directory))))
                    :cni-bin-directory
                    (uiop:pathname-directory-pathname
                     (pathname (getf options :containerd-executable))))))
@@ -496,7 +531,12 @@
           (getf options :token) token
           (getf options :ca-pin) (cluster-pki-ca-fingerprint pki)
           (getf options :node-name) node-name
-          (getf options :state-directory) (namestring directory))
+          (getf options :state-directory) (namestring directory)
+          ;; Containerd runs under <node-state>/agent/, but runtime addons live
+          ;; at the node state root the operator manages, so look for them in the
+          ;; parent of this agent directory.
+          (getf options :runtime-addons-directory)
+          (namestring (uiop:pathname-parent-directory-pathname directory)))
     (setf (local-node-agent-thread worker)
           (bt:make-thread
            (lambda ()
@@ -637,6 +677,7 @@ handler and never gets here. A busy host makes this race likely."
          (api-server nil)
          (debug-port nil)
          (service-network-created nil)
+         (aggregator nil)
          (worker nil)
          (node-server nil)
          (ha nil)
@@ -668,6 +709,8 @@ handler and never gets here. A busy host makes this race likely."
                     (when (and local-agent (equal "containerd" (getf options :runtime))
                                (equal "managed" (getf options :containerd-mode)))
                       (ensure-native-bootstrap-namespaces store)
+                      (ensure-extension-apiserver-authentication store pki)
+                      (setf aggregator (start-api-aggregator store pki))
                       (ensure-native-api-service store)
                       (setf service-network-created (ensure-in-cluster-network pki))
                       (setf api-server (start-in-cluster-api store runtime reconciler pki))
@@ -719,6 +762,7 @@ handler and never gets here. A busy host makes this race likely."
                     (finish-output)
                     (loop until *shutdown-requested* do (sleep 0.1)))
                (when debug-port (stop-debug-server debug-port))
+               (when aggregator (stop-api-aggregator aggregator))
                (when worker (stop-reconciliation-worker worker))
                (when runtime (stop-runtime-deletions runtime))
                (when server (stop-server server))
@@ -812,8 +856,11 @@ handler and never gets here. A busy host makes this race likely."
                0)
               (:doctor
                (if (plusp (apply #'run-doctor
-                                 (when (getf options :state-directory)
-                                   (list :state-directory (getf options :state-directory)))))
+                                 (append
+                                  (when (getf options :state-directory)
+                                    (list :state-directory (getf options :state-directory)))
+                                  (when (getf options :cluster-pod-cidr)
+                                    (list :cluster-pod-cidr (getf options :cluster-pod-cidr))))))
                    1 0))
               (:serve (serve options))
               (:agent

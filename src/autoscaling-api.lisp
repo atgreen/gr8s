@@ -3,9 +3,9 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Serve HorizontalPodAutoscalers in autoscaling/v1 and v2 from one stored v2
-;;;; form, and describe the built-in API versions as read-only APIServices.
-;;;; Aggregation of external API servers is not implemented, which is why
-;;;; APIServices cannot be written. The controller is in hpa-controller.lisp.
+;;;; form, and describe the built-in API versions as read-only APIServices next
+;;;; to the registered ones, which api-aggregation.lisp serves. The controller is
+;;;; in hpa-controller.lisp.
 
 (in-package #:gr8s)
 
@@ -162,20 +162,28 @@
                "preferredVersion" (core-object "groupVersion" "apiregistration.k8s.io/v1" "version" "v1")))
 
 (defun apiservice-discovery-response ()
-  "Advertise APIServices as read-only, since nothing can be registered."
+  "Advertise APIServices and their status subresource."
   (json-response
    (core-object "apiVersion" "v1" "kind" "APIResourceList" "groupVersion" "apiregistration.k8s.io/v1"
-                "resources" (vector (resource-discovery-entry "apiservices" "apiservice" nil "APIService" #("get" "list" "watch"))))))
+                "resources" (concatenate
+                             'vector
+                             (vector (resource-discovery-entry
+                                      "apiservices" "apiservice" nil "APIService"
+                                      #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")))
+                             (typed-status-discovery "apiregistration.k8s.io/v1")))))
 
 (defun local-apiservices (store)
   "Describe each API version this server serves itself as an available local APIService."
-  (let* ((groups (gethash "groups" (com.inuoe.jzon:parse (api-groups-response store))))
+  (let* ((groups (if store
+                     (gethash "groups" (com.inuoe.jzon:parse (api-groups-response store)))
+                     (builtin-api-groups)))
          (versions (cons (cons "" "v1")
                          (loop for group across groups
                                append (loop for version across (gethash "versions" group)
                                             collect (cons (gethash "name" group) (gethash "version" version)))))))
     (loop for (group . version) in versions
           for name = (if (equal group "") version (format nil "~A.~A" version group))
+          unless (and store (stored-apiservice store name))
           collect (core-object "apiVersion" "apiregistration.k8s.io/v1" "kind" "APIService"
                                "metadata" (core-object "name" name)
                                "spec" (core-object "group" group "version" version
@@ -185,14 +193,17 @@
                                                                           "message" "Local APIServices are always available")))))))
 
 (defun apiservice-selection (store labels fields revision)
-  "Return the selected local APIServices, keyed by name, stamped with REVISION."
+  "Return the selected APIServices, keyed by name, the local ones stamped with REVISION."
   (let ((label-test (core-selector-predicate labels))
         (field-test (core-selector-predicate fields :fields t :field-paths '("metadata.name")))
         (selection (make-hash-table :test #'equal)))
     (dolist (service (local-apiservices store) selection)
       (when (and (funcall label-test service) (funcall field-test service))
         (setf (gethash "resourceVersion" (gethash "metadata" service)) (write-to-string revision)
-              (gethash (gethash "name" (gethash "metadata" service)) selection) service)))))
+              (gethash (gethash "name" (gethash "metadata" service)) selection) service)))
+    (dolist (service (stored-apiservices store) selection)
+      (when (and (funcall label-test service) (funcall field-test service))
+        (setf (gethash (gethash "name" (gethash "metadata" service)) selection) service)))))
 
 (defun apiservice-list (selection revision)
   "List an APIService SELECTION in name order."
@@ -203,40 +214,50 @@
                                'vector)))
 
 (defun apiservice-watch-response (store)
-  "Watch local APIServices, which change only when a CRD's served versions do."
+  "Watch APIServices. Local ones change only when a CRD's served versions do."
   (let ((known nil))
-    (podtemplate-watch-response
-     store nil "apiservices"
-     :page-reader
-     (lambda (labels fields resource-version match)
-       (declare (ignore match))
-       ;; Nothing records past APIServices, so a resume across a CRD change must relist.
-       (unless (member resource-version '(nil "" "0") :test #'equal)
-         (when (template-watch-events store nil "" "" (parse-integer resource-version) :resource "customresourcedefinitions")
-           (core-resource-error 410 "Expired" "APIServices changed after resourceVersion ~A" resource-version)))
-       (let ((revision (pod-store-resource-revision store)))
-         (setf known (apiservice-selection store labels fields revision))
-         (apiservice-list known revision)))
-     :event-reader
-     (lambda (labels fields revision)
-       (multiple-value-bind (changes watermark)
-           (template-watch-events store nil "" "" revision :resource "customresourcedefinitions")
-         (let ((events nil))
-           (when changes
-             (let ((current (apiservice-selection store labels fields watermark)))
-               (flet ((event (type service) (push (core-object "type" type "object" service) events)))
-                 (maphash (lambda (name service)
-                            (unless (gethash name known) (event "ADDED" service)))
-                          current)
-                 (maphash (lambda (name service)
-                            (unless (gethash name current)
-                              (let ((final (copy-core-object service)))
-                                (setf (gethash "resourceVersion" (gethash "metadata" final)) (write-to-string watermark))
-                                (event "DELETED" final))))
-                          known))
-               (setf known current)))
-           (values events watermark))))
-     :bookmark-kind "APIService" :bookmark-api-version "apiregistration.k8s.io/v1")))
+    (flet ((changes-after (revision)
+             (multiple-value-bind (definitions watermark)
+                 (template-watch-events store nil "" "" revision :resource "customresourcedefinitions")
+               (multiple-value-bind (registered registered-watermark)
+                   (template-watch-events store nil "" "" revision :resource "apiservices")
+                 (values (or definitions registered) (max watermark registered-watermark))))))
+      (podtemplate-watch-response
+       store nil "apiservices"
+       :page-reader
+       (lambda (labels fields resource-version match)
+         (declare (ignore match))
+         ;; Nothing records past APIServices, so a resume across a change must relist.
+         (unless (member resource-version '(nil "" "0") :test #'equal)
+           (when (changes-after (parse-integer resource-version))
+             (core-resource-error 410 "Expired" "APIServices changed after resourceVersion ~A" resource-version)))
+         (let ((revision (pod-store-resource-revision store)))
+           (setf known (apiservice-selection store labels fields revision))
+           (apiservice-list known revision)))
+       :event-reader
+       (lambda (labels fields revision)
+         (multiple-value-bind (changes watermark) (changes-after revision)
+           (let ((events nil))
+             (when changes
+               (let ((current (apiservice-selection store labels fields watermark)))
+                 (flet ((event (type service) (push (core-object "type" type "object" service) events))
+                        (version-of (service) (gethash "resourceVersion" (gethash "metadata" service)))
+                        (stored-p (service) (gethash "uid" (gethash "metadata" service))))
+                   (maphash (lambda (name service)
+                              (let ((before (gethash name known)))
+                                (cond ((null before) (event "ADDED" service))
+                                      ((and (stored-p service) (not (equal (version-of before) (version-of service))))
+                                       (event "MODIFIED" service)))))
+                            current)
+                   (maphash (lambda (name service)
+                              (unless (gethash name current)
+                                (let ((final (copy-core-object service)))
+                                  (setf (gethash "resourceVersion" (gethash "metadata" final)) (write-to-string watermark))
+                                  (event "DELETED" final))))
+                            known))
+                 (setf known current)))
+             (values events watermark))))
+       :bookmark-kind "APIService" :bookmark-api-version "apiregistration.k8s.io/v1"))))
 
 (defun apiservice-route (path)
   "Recognize the APIService collection and items, returning the name if any and T."
@@ -245,14 +266,23 @@
           ((uiop:string-prefix-p (concatenate 'string prefix "/") path)
            (values (subseq path (1+ (length prefix))) t)))))
 
+(defun builtin-apiservice-p (store name)
+  "Report whether NAME is a version this server describes itself rather than a stored object."
+  (and name (not (stored-apiservice store name))
+       (find name (local-apiservices store) :key #'apiservice-object-name :test #'equal)))
+
+(defun apiservice-by-name (store name)
+  "Return the stored or local APIService called NAME, or signal NotFound."
+  (or (stored-apiservice store name)
+      (find name (local-apiservices store) :key #'apiservice-object-name :test #'equal)
+      (core-resource-error 404 "NotFound" "apiservices.apiregistration.k8s.io ~S not found" name)))
+
 (defun apiservice-response (store name method)
-  "Serve reads of local APIServices and refuse registration, which needs an aggregator."
+  "Serve reads of every APIService, and refuse writes to a version this server describes itself."
   (unless (eq method :get)
-    (core-resource-error 405 "MethodNotAllowed" "API aggregation is not implemented, so APIServices are read-only"))
+    (core-resource-error 405 "MethodNotAllowed" "Local APIService ~A describes this server and can't be changed" name))
   (cond
-    (name (json-response (or (find name (local-apiservices store) :test #'equal
-                                   :key (lambda (service) (gethash "name" (gethash "metadata" service))))
-                             (core-resource-error 404 "NotFound" "apiservices.apiregistration.k8s.io ~S not found" name))))
+    (name (json-response (apiservice-by-name store name)))
     ((true-parameter-p (hunchentoot:parameter "watch")) (apiservice-watch-response store))
     (t (let ((revision (pod-store-resource-revision store)))
          (json-response (apiservice-list (apiservice-selection store (hunchentoot:parameter "labelSelector")

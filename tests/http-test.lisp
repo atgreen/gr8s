@@ -881,3 +881,104 @@
              (is (eql 0 (search "v1.36" (gethash "gitVersion" version)))
                  "gitVersion is the Kubernetes API version with our suffix")))
       (stop-server server))))
+
+(test stopping-an-exec-input-reader-while-it-is-signalling-unwinds-it
+  ;; podster-uqb.106: an error signalled from the interrupt landed while the thread was
+  ;; already in SIGNAL for a stream error, found no handler, and aborted the image.
+  (let* ((signalling nil) (handled nil) (unwound nil) (escaped nil)
+         (reader
+           (bt:make-thread
+            (lambda ()
+              (handler-case
+                  (progn
+                    (gr8s::with-exec-input-reader-stop
+                     (handler-case
+                         (handler-bind ((error (lambda (condition)
+                                                 (declare (ignore condition))
+                                                 ;; Wait inside the handler test, where the interrupt lands.
+                                                 (setf signalling t)
+                                                 (loop repeat 500 do (sleep 0.01)))))
+                           (error "stream closed"))
+                       (error () (setf handled t))))
+                    (setf unwound t))
+                (serious-condition (condition) (setf escaped condition))))
+            :name "gr8s test exec input")))
+    (is-true (wait-until (lambda () signalling) :timeout 5))
+    (gr8s::stop-exec-input-reader reader)
+    (bt:join-thread reader)
+    (is-true unwound)
+    (is-false handled)
+    (is (null escaped))))
+
+(test a-late-stop-of-an-exec-input-reader-does-nothing
+  (let* ((release nil) (finished nil)
+         (reader
+           (bt:make-thread
+            (lambda ()
+              (gr8s::with-exec-input-reader-stop nil)
+              (loop until release do (sleep 0.01))
+              (setf finished t))
+            :name "gr8s test exec input done")))
+    (gr8s::stop-exec-input-reader reader)
+    (setf release t)
+    (bt:join-thread reader)
+    (is-true finished)))
+
+(defun connected-test-sockets (listener)
+  "Return a new connection to LISTENER and its accepted other end."
+  (let* ((near (usocket:socket-connect "127.0.0.1" (usocket:get-local-port listener)
+                                       :element-type '(unsigned-byte 8)))
+         (far (usocket:socket-accept listener :element-type '(unsigned-byte 8))))
+    (values near far)))
+
+(test a-finished-exec-relay-does-not-touch-a-connection-that-reuses-its-descriptor
+  ;; podster-uqb.106: connections elsewhere in the process died with END-OF-FILE or
+  ;; BROKEN-PIPE. A socket's numeric descriptor survives closing its stream, so a late
+  ;; shutdown from the relay's other thread reached whoever had that number by then.
+  (let ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :backlog 64
+                                                        :element-type '(unsigned-byte 8)))
+        (spares nil))
+    (unwind-protect
+         (multiple-value-bind (runtime runtime-far) (connected-test-sockets listener)
+           (multiple-value-bind (client client-far) (connected-test-sockets listener)
+             (let* ((descriptor (sb-bsd-sockets:socket-file-descriptor (usocket:socket runtime)))
+                    (relay (bt:make-thread
+                            (lambda ()
+                              (gr8s::relay-runtime-stream (usocket:socket-stream client)
+                                                          (usocket:socket-stream runtime) runtime))
+                            :name "gr8s test exec relay")))
+               ;; The runtime ends the stream, so the relay closes its side.
+               (usocket:socket-close runtime-far)
+               (bt:join-thread relay)
+               ;; Take that descriptor number for a new, unrelated connection.
+               (multiple-value-bind (fresh fresh-far)
+                   (loop
+                     (multiple-value-bind (near far) (connected-test-sockets listener)
+                       (when (= descriptor (sb-bsd-sockets:socket-file-descriptor (usocket:socket near)))
+                         (return (values near far)))
+                       (push near spares)
+                       (push far spares)
+                       (when (> (length spares) 200) (error "descriptor ~D never came back" descriptor))))
+                 (unwind-protect
+                      (progn
+                        ;; The client leaves, ending the relay's other thread.
+                        (usocket:socket-close client-far)
+                        (is-true (wait-until
+                                  (lambda ()
+                                    (notany (lambda (thread)
+                                              (equal "gr8s exec client-to-runtime" (bt:thread-name thread)))
+                                            (bt:all-threads)))
+                                  :timeout 5))
+                        (let ((out (usocket:socket-stream fresh-far)))
+                          (write-byte 42 out)
+                          (finish-output out))
+                        (is (eql 42 (read-byte (usocket:socket-stream fresh) nil nil)))
+                        (let ((out (usocket:socket-stream fresh)))
+                          (write-byte 43 out)
+                          (finish-output out))
+                        (is (eql 43 (read-byte (usocket:socket-stream fresh-far) nil nil))))
+                   (usocket:socket-close fresh)
+                   (usocket:socket-close fresh-far))))
+             (ignore-errors (usocket:socket-close client))))
+      (dolist (socket spares) (ignore-errors (usocket:socket-close socket)))
+      (usocket:socket-close listener))))

@@ -454,7 +454,11 @@ the node from starting."
     (index-pod store pod))
   pod)
 
-(defun remove-unassigned-pods (node-runtime assignments)
+(defun remove-unassigned-pods (node-runtime assignments
+                               &key (on-failure (lambda (pod condition)
+                                                  (declare (ignore pod))
+                                                  (error condition))))
+  "Withdraw each local Pod the server no longer assigns. ON-FAILURE takes the Pod and the condition."
   (let ((assigned-uids (make-hash-table :test #'equal)))
     (dolist (assignment assignments)
       (setf (gethash (slot-value assignment 'gr8s.node.v1::uid)
@@ -462,19 +466,40 @@ the node from starting."
             t))
     (dolist (pod (list-pods (node-runtime-store node-runtime)))
       (unless (gethash (pod-uid pod) assigned-uids)
-        ;; Serialize with the background reconciler and persist deletion intent
-        ;; before CRI calls. A transient removal failure must never turn into
-        ;; runtime-ensure recreating an assignment the server has withdrawn.
-        (when (pod-finalizers-present-p pod)
-          (let ((store (node-runtime-store node-runtime)))
-            (with-store-lock (store)
-              (let ((current (gethash (pod-key (pod-namespace pod) (pod-name pod)) (pod-store-pods store))))
-                (when (and current (equal (pod-uid current) (pod-uid pod)))
-                  (let ((copy (copy-core-object (pod-to-object current))))
-                    (setf (gethash "finalizers" (gethash "metadata" copy)) #())
-                    (update-pod-unlocked store (parse-pod copy) (pod-resource-version current))))))))
-        (delete-reconciled-pod (node-runtime-reconciler node-runtime)
-                               (pod-namespace pod) (pod-name pod) :uid (pod-uid pod) :grace-period 0)))))
+        (handler-case
+            (progn
+              ;; Serialize with the background reconciler and persist deletion intent
+              ;; before CRI calls. A transient removal failure must never turn into
+              ;; runtime-ensure recreating an assignment the server has withdrawn.
+              (when (pod-finalizers-present-p pod)
+                (let ((store (node-runtime-store node-runtime)))
+                  (with-store-lock (store)
+                    (let ((current (gethash (pod-key (pod-namespace pod) (pod-name pod)) (pod-store-pods store))))
+                      (when (and current (equal (pod-uid current) (pod-uid pod)))
+                        (let ((copy (copy-core-object (pod-to-object current))))
+                          (setf (gethash "finalizers" (gethash "metadata" copy)) #())
+                          (update-pod-unlocked store (parse-pod copy) (pod-resource-version current))))))))
+              (delete-reconciled-pod (node-runtime-reconciler node-runtime)
+                                     (pod-namespace pod) (pod-name pod) :uid (pod-uid pod) :grace-period 0))
+          (error (condition) (funcall on-failure pod condition)))))))
+
+(defun withdrawal-durable-p (node-runtime pod)
+  "True once POD's deletion can't be lost: its local record is gone or says it is deleting."
+  (let* ((store (node-runtime-store node-runtime))
+         (current (with-store-lock (store)
+                    (gethash (pod-key (pod-namespace pod) (pod-name pod)) (pod-store-pods store)))))
+    (or (null current)
+        (not (equal (pod-uid current) (pod-uid pod)))
+        (deletion-requested-p current))))
+
+(defun parse-node-assignment (assignment)
+  "Return ASSIGNMENT's Pod, or NIL after logging one this agent can't read. Its UID stays assigned."
+  (handler-case (assignment-pod assignment)
+    (error (condition)
+      (format *error-output* "gr8s Pod ~A/~A assignment rejected: ~A~%"
+              (slot-value assignment 'gr8s.node.v1::namespace)
+              (slot-value assignment 'gr8s.node.v1::name) condition)
+      nil)))
 
 (defun pod-observed-status-message (pod status &optional events runtime-deleted)
   "Encode real observations, private Event transport and independent physical cleanup acknowledgement."
@@ -575,16 +600,22 @@ the node from starting."
 
 (defun receive-node-snapshot-intent (node-runtime snapshot)
   "Persist exact urgent deletion intent before cancelling creation or waiting for runtime I/O."
-  ;; Parse and validate every assignment before changing any local intent.
-  (let ((pods (mapcar #'assignment-pod (slot-value snapshot 'gr8s.node.v1::pods)))
-        (revision (slot-value snapshot 'gr8s.node.v1::revision))
-        (urgent nil))
+  ;; Parse every assignment before changing any local intent. One that can't
+  ;; be read stays assigned, so its running Pod isn't mistaken for a withdrawn one.
+  (let* ((assignments (slot-value snapshot 'gr8s.node.v1::pods))
+         (pods (remove nil (mapcar #'parse-node-assignment assignments)))
+         (revision (slot-value snapshot 'gr8s.node.v1::revision))
+         (urgent nil))
     (bt:with-lock-held ((node-runtime-arrival-lock node-runtime))
       (when (< revision (node-runtime-received-revision node-runtime))
         (return-from receive-node-snapshot-intent nil))
       (dolist (existing (list-pods (node-runtime-store node-runtime)))
         (let ((assigned (find (pod-uid existing) pods :key #'pod-uid :test #'equal)))
-          (when (or (null assigned) (deletion-requested-p assigned))
+          (when (if assigned
+                    (deletion-requested-p assigned)
+                    (not (find (pod-uid existing) assignments
+                               :key (lambda (assignment) (slot-value assignment 'gr8s.node.v1::uid))
+                               :test #'equal)))
             (handler-case
                 (let ((projected
                         (if assigned
@@ -660,14 +691,26 @@ snapshot application."
   (bt:with-lock-held ((node-runtime-apply-lock node-runtime))
     (ensure-node-snapshot-current node-runtime snapshot)
     (apply-node-runtime-network node-runtime snapshot)
-    (let ((assignments (slot-value snapshot 'gr8s.node.v1::pods)))
+    (let ((assignments (slot-value snapshot 'gr8s.node.v1::pods))
+          (failed nil))
       (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
         (clrhash (node-runtime-assigned-versions node-runtime))
         (dolist (assignment assignments)
           (setf (gethash (slot-value assignment 'gr8s.node.v1::uid)
                          (node-runtime-assigned-versions node-runtime))
                 (slot-value assignment 'gr8s.node.v1::resource-version))))
-      (remove-unassigned-pods node-runtime assignments)
+      (remove-unassigned-pods
+       node-runtime assignments
+       :on-failure
+       (lambda (pod condition)
+         ;; Deletion intent is durable, so the reconciliation worker keeps retrying
+         ;; this Pod. Only a lost intent has to hold back the acknowledgement.
+         (unless (and (typep condition 'kubernetes-error)
+                      (member (kubernetes-error-status-code condition) '(404 409)))
+           (format *error-output* "gr8s Pod ~A/~A removal failed: ~A~%"
+                   (pod-namespace pod) (pod-name pod) condition))
+         (unless (withdrawal-durable-p node-runtime pod)
+           (push pod failed))))
       (install-assigned-resource-objects
        (node-runtime-store node-runtime) assignments
        (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json))
@@ -704,23 +747,35 @@ snapshot application."
             (converge-gateway-l4-listeners (node-runtime-gateway-controller node-runtime)))
         (error (condition)
           (format *error-output* "gr8s: Gateway convergence failed: ~A~%" condition)))
-      (loop for assignment in
-              (stable-sort (copy-list assignments)
-                           (lambda (left right)
-                             (and (deletion-requested-p (assignment-pod left))
-                                  (not (deletion-requested-p (assignment-pod right))))))
-            for pod = (progn
-                        (ensure-node-snapshot-current node-runtime snapshot)
-                        (put-assigned-pod (node-runtime-store node-runtime)
-                                          (assignment-pod assignment)))
-            for status = (progn
-                           (ensure-node-snapshot-current node-runtime snapshot)
-                           (reconcile-pod (node-runtime-reconciler node-runtime)
-                                          (pod-namespace pod) (pod-name pod)))
-            collect (cache-node-observation node-runtime pod status)
-              into statuses
-            finally (ensure-node-snapshot-current node-runtime snapshot)
-                    (return statuses)))))
+      (let* ((parsed (mapcar #'parse-node-assignment assignments))
+             (statuses
+               (loop for pod in (stable-sort (remove nil parsed)
+                                             (lambda (left right)
+                                               (and (deletion-requested-p left)
+                                                    (not (deletion-requested-p right)))))
+                     for status = (handler-case
+                                      (progn
+                                        (ensure-node-snapshot-current node-runtime snapshot)
+                                        (put-assigned-pod (node-runtime-store node-runtime) pod)
+                                        (ensure-node-snapshot-current node-runtime snapshot)
+                                        (cache-node-observation
+                                         node-runtime pod
+                                         (reconcile-pod (node-runtime-reconciler node-runtime)
+                                                        (pod-namespace pod) (pod-name pod))))
+                                    ;; The next Pod still has to run. Cancellation and
+                                    ;; supersession aren't errors, so they still unwind this.
+                                    (error (condition)
+                                      (format *error-output* "gr8s Pod ~A/~A assignment failed: ~A~%"
+                                              (pod-namespace pod) (pod-name pod) condition)
+                                      (push pod failed)
+                                      nil))
+                     when status collect status)))
+        (ensure-node-snapshot-current node-runtime snapshot)
+        (when (or failed (member nil parsed))
+          (error 'node-snapshot-incomplete
+                 :message (format nil "~D Pod assignment~:P not applied"
+                                  (+ (length failed) (count nil parsed)))))
+        statuses))))
 
 (defun node-operation-response (request status &key (exit-code 0) (message ""))
   (make-instance
@@ -1098,14 +1153,25 @@ that reconnects or restarts gets the answer without a second deletion racing the
                  (find-node-exec-operation
                   node-runtime
                   (slot-value payload 'gr8s.node.v1::operation-id))))
+           ;; One operation's input, which can arrive after it ended, is only that
+           ;; operation's problem: the session carries every other Pod's traffic.
            (cond
-             ((typep operation 'node-port-forward-operation)
-              (write-node-port-forward-input operation payload))
              ;; A forwarded connection can end while its last data is on the way.
              ((and (null operation) (plusp (slot-value payload 'gr8s.node.v1::acknowledged-bytes))))
              ((null operation)
-              (error 'runtime-error :message "Interactive operation was not found"))
-             (t (write-node-exec-input operation payload)))))
+              (funcall
+               emit :operation-response
+               (node-operation-response
+                payload gr8s.node.v1::+operationstatus-operation_status_failed+
+                :exit-code 1 :message "Interactive operation was not found")))
+             ((typep operation 'node-port-forward-operation)
+              (handler-case (write-node-port-forward-input operation payload)
+                (error (condition)
+                  (finish-node-exec-operation operation :error (princ-to-string condition)))))
+             (t
+              (handler-case (write-node-exec-input operation payload)
+                (error (condition)
+                  (finish-node-exec-operation operation :error (princ-to-string condition))))))))
         (:operation-cancel
          (let ((operation
                  (find-node-exec-operation

@@ -83,8 +83,20 @@
       (setf *api-connection-certificate-chain* (pure-tls:tls-peer-certificate-chain tls))
       tls)))
 
-(defun kubernetes-authorization-target (path method &key watch)
-  "Return verb, group, resource, name and namespace for Kubernetes request PATH."
+(defun field-selector-exact-name (selector)
+  "Return the object name SELECTOR requires, which authorization treats as the request's name."
+  (when selector
+    (loop for term in (uiop:split-string selector :separator ",")
+          for trimmed = (string-trim " " term)
+          do (cond ((uiop:string-prefix-p "metadata.name==" trimmed)
+                    (return (subseq trimmed (length "metadata.name=="))))
+                   ((uiop:string-prefix-p "metadata.name=" trimmed)
+                    (return (subseq trimmed (length "metadata.name="))))))))
+
+(defun kubernetes-authorization-target (path method &key watch field-selector)
+  "Return verb, group, resource, name and namespace for Kubernetes request PATH.
+As upstream does, a collection request selecting one name by FIELD-SELECTOR is about that name,
+so that a rule limited by resourceNames can allow reading and watching just that object."
   (let* ((parts (remove "" (uiop:split-string path :separator '(#\/)) :test #'equal))
          (group (cond ((and (equal "api" (first parts)) (equal "v1" (second parts))) "")
                       ((and (equal "apis" (first parts)) (>= (length parts) 3)) (second parts))))
@@ -109,7 +121,11 @@
                    verb)))
     (values verb group
             (when resource (if (third resource-parts) (format nil "~A/~A" resource (third resource-parts)) resource))
-            name namespace)))
+            (or name
+                (and (member verb '("list" "watch" "deletecollection") :test #'equal)
+                     (let ((selected (field-selector-exact-name field-selector)))
+                       (and selected (path-segment-name-p selected) selected))))
+            namespace)))
 
 (defun authenticated-discovery-request-p (path method)
   "Recognize read-only discovery URLs granted to all authenticated accounts."
@@ -144,7 +160,8 @@
     (unless (or (authenticated-discovery-request-p path method)
                 (authenticated-self-review-request-p path method))
       (multiple-value-bind (verb group resource name namespace)
-          (kubernetes-authorization-target path method :watch (true-parameter-p (hunchentoot:parameter "watch")))
+          (kubernetes-authorization-target path method :watch (true-parameter-p (hunchentoot:parameter "watch"))
+                                                       :field-selector (hunchentoot:parameter "fieldSelector"))
         (unless (service-account-authorized-p store identity verb group resource name namespace path)
           (core-resource-error 403 "Forbidden" "User ~A is not allowed to ~A ~A"
                                (api-identity-username identity) verb (or resource path)))))

@@ -97,14 +97,21 @@
                 "versions" #( "v1")
                 "serverAddressByClientCIDRs" #())))
 
-(defun api-groups-response (&optional store)
-  "Describe builtin groups and actual store-scoped custom API groups."
+(defun builtin-api-groups ()
+  "Describe the groups this server always serves, whatever its store holds."
   (let ((groups (vector (rbac-api-group)
                        (event-api-group) (workload-api-group) (batch-api-group) (budget-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group) (networking-api-group)
                        (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group) (cert-manager-api-group))))
     (setf groups (concatenate 'vector groups (typed-api-groups) (auth-review-groups)))
     (setf groups (concatenate 'vector groups (vector (autoscaling-api-group) (apiservice-api-group))))
-    (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
+    groups))
+
+(defun api-groups-response (&optional store)
+  "Describe builtin groups and actual store-scoped custom API groups."
+  (let ((groups (builtin-api-groups)))
+    (when store
+      (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector)
+                                (coerce (aggregated-api-groups store) 'vector))))
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
 (defun api-resources-response ()
@@ -126,6 +133,8 @@
       (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
       (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "PodExecOptions" "verbs" #("create" "get"))
       (json-object "name" "pods/attach" "singularName" "" "namespaced" t "kind" "PodAttachOptions" "verbs" #("create" "get"))
+      (json-object "name" "pods/binding" "singularName" "" "namespaced" t "kind" "Binding" "verbs" #("create"))
+      (resource-discovery-entry "componentstatuses" "componentstatus" nil "ComponentStatus" #("get" "list"))
       (json-object "name" "pods/portforward" "singularName" "" "namespaced" t "kind" "PodPortForwardOptions" "verbs" #("create" "get"))
       (json-object "name" "pods/eviction" "singularName" "" "namespaced" t "kind" "Eviction"
                    "group" "policy" "version" "v1" "verbs" #("create"))
@@ -732,17 +741,24 @@
                (finish-output output)))))
 
 (defun relay-runtime-stream (client upstream socket)
-  (let ((client-to-runtime
-          (bt:make-thread
-           (lambda ()
-             (unwind-protect
-                  (ignore-errors (copy-binary-stream client upstream))
-               (ignore-errors (usocket:socket-shutdown socket :io))))
-           :name "gr8s exec client-to-runtime")))
-    (declare (ignore client-to-runtime))
+  "Copy both ways until the runtime ends the stream. The other direction's thread can outlive
+this: it ends with the client's connection, by which time SOCKET's descriptor number may
+belong to another connection, so it must not shut SOCKET down after it has been closed."
+  (let ((lock (bt:make-lock "gr8s exec relay socket"))
+        (closed nil))
+    (bt:make-thread
+     (lambda ()
+       (unwind-protect
+            (ignore-errors (copy-binary-stream client upstream))
+         (bt:with-lock-held (lock)
+           (unless closed
+             (ignore-errors (usocket:socket-shutdown socket :io))))))
+     :name "gr8s exec client-to-runtime")
     (unwind-protect
          (copy-binary-stream upstream client)
-      (ignore-errors (usocket:socket-close socket)))))
+      (bt:with-lock-held (lock)
+        (setf closed t)
+        (ignore-errors (usocket:socket-close socket))))))
 
 (defun proxy-runtime-stream (url)
   (multiple-value-bind (host port target)
@@ -886,7 +902,28 @@ its clients treat any other multi-byte frame as an error message."
        client 8 (make-array 2 :element-type '(unsigned-byte 8)
                             :initial-contents '(3 232))))))
 
-(define-condition exec-input-reader-stopped (error) ())
+(defvar *exec-input-reader-tag* nil
+  "The catch tag of this thread's exec input reader, set only while its catch is established.")
+
+(defmacro with-exec-input-reader-stop (&body body)
+  "Run BODY until STOP-EXEC-INPUT-READER throws out of it.
+A throw needs no handler: an error signalled from an interrupt can land while the thread is
+already signalling, with its handlers unbound for the handler tests, and then finds none."
+  (let ((tag (gensym "EXEC-INPUT")))
+    `(let ((,tag (list :exec-input)))
+       (catch ,tag
+         (let ((*exec-input-reader-tag* ,tag))
+           ,@body)))))
+
+(defun stop-exec-input-reader (thread)
+  "Unwind THREAD's exec input reader. An interrupt that arrives after its catch has gone does nothing."
+  (when (bt:thread-alive-p thread)
+    (ignore-errors
+     (bt:interrupt-thread
+      thread
+      (lambda ()
+        (when *exec-input-reader-tag*
+          (throw *exec-input-reader-tag* nil)))))))
 
 (defun begin-kubernetes-websocket ()
   (let ((key (hunchentoot:header-in* :sec-websocket-key))
@@ -916,7 +953,8 @@ its clients treat any other multi-byte frame as an error message."
 (defun forward-kubernetes-exec-input
     (reconciler session stream write-lock finished-p)
   (handler-case
-      (loop until (funcall finished-p)
+      (with-exec-input-reader-stop
+       (loop until (funcall finished-p)
             do (multiple-value-bind (opcode payload fin-p masked-p)
                    (read-websocket-frame stream)
                  (declare (ignore fin-p))
@@ -964,8 +1002,7 @@ its clients treat any other multi-byte frame as an error message."
                    (10)
                    (otherwise
                     (error 'runtime-error
-                           :message "Unsupported WebSocket input frame")))))
-    (exec-input-reader-stopped () nil)
+                           :message "Unsupported WebSocket input frame"))))))
     (error (condition)
       (unless (funcall finished-p)
         (ignore-errors
@@ -1046,10 +1083,7 @@ its clients treat any other multi-byte frame as an error message."
             (reconciler-cancel-exec-session
              reconciler session "API exec stream ended")))
         (reconciler-release-exec-session reconciler session)
-        (when (and input-thread (bt:thread-alive-p input-thread))
-          (bt:interrupt-thread
-           input-thread
-           (lambda () (error 'exec-input-reader-stopped))))
+        (when input-thread (stop-exec-input-reader input-thread))
         (when input-thread
           (ignore-errors (bt:join-thread input-thread)))))))
 
@@ -1174,6 +1208,8 @@ its clients treat any other multi-byte frame as an error message."
        (pod-attach-response store reconciler (first parts) namespace))
       ((and (= 2 (length parts)) (string= "portforward" (second parts)) (member method '(:get :post)))
        (pod-port-forward-response store reconciler (first parts) namespace))
+            ((and (= 2 (length parts)) (string= "binding" (second parts)) (eq method :post))
+       (pod-binding-response store (first parts) namespace))
       (t (status-response "Failure" "NotFound"
                           (format nil "No route for ~A ~A" method path) 404)))))
 
@@ -1188,7 +1224,8 @@ than wait for the next, which truncates any body that spans records in flight."
         (setf buffer (let ((larger (make-array (* 2 (length buffer)) :element-type '(unsigned-byte 8))))
                        (replace larger buffer))))
       (let ((next (read-sequence buffer stream :start filled)))
-        (when (= next filled)
+        ;; A chunked stream past its last chunk answers 0 whatever START was.
+        (when (<= next filled)
           (when content-length
             (core-resource-error 400 "BadRequest" "Request body ended after ~D of ~D octets" filled content-length))
           (return))
@@ -1204,8 +1241,13 @@ than wait for the next, which truncates any body that spans records in flight."
     (when (and (or chunked (and content-length (plusp content-length)))
                (not form)
                (not (uiop:string-prefix-p "multipart/form-data" (or (hunchentoot:header-in :content-type request) ""))))
-      (setf (slot-value request 'hunchentoot::raw-post-data)
-            (read-complete-body (hunchentoot::content-stream request) (unless chunked content-length))))))
+      (let ((stream (hunchentoot::content-stream request)))
+        ;; Otherwise the last chunk doesn't end the read, which then waits for the
+        ;; connection's timeout and fails the request: kubectl chunks a body from stdin.
+        (when (and chunked (typep stream 'chunga:chunked-input-stream))
+          (setf (chunga:chunked-input-stream-eof-after-last-chunk stream) t))
+        (setf (slot-value request 'hunchentoot::raw-post-data)
+              (read-complete-body stream (unless chunked content-length)))))))
 
 (defun request-media-type ()
   "Return the request's media type without parameters, or an empty string when it has none."
@@ -1246,11 +1288,14 @@ than wait for the next, which truncates any body that spans records in flight."
         (cond
           ((and (uiop:string-prefix-p "/openapi/v3/" path) (not *openapi-v3-completing*))
            (openapi-v3-complete-response store runtime reconciler path))
+          ((nth-value 1 (aggregated-api-route store path)) (aggregated-api-response store path method))
           ((string= path "/metrics")
            (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
            (concatenate 'string (runtime-network-metrics runtime) (gateway-metrics-text) (volume-reclaim-metrics-text)
                         (if store (flowcontrol-metrics-text store) "")))
           ((string= path "/version") (version-response))
+          ((nth-value 1 (component-status-route path))
+           (component-status-response (component-status-route path) method))
           ((string= path "/api")
            (if (aggregated-discovery-requested-p)
                (aggregated-discovery-response store runtime reconciler "/api")
@@ -1309,7 +1354,9 @@ than wait for the next, which truncates any body that spans records in flight."
           ((string= path "/apis/autoscaling/v2") (autoscaling-discovery-response "v2"))
           ((string= path "/apis/apiregistration.k8s.io") (json-response (apiservice-api-group)))
           ((string= path "/apis/apiregistration.k8s.io/v1") (apiservice-discovery-response))
-          ((nth-value 1 (apiservice-route path)) (apiservice-response store (apiservice-route path) method))
+          ((and (nth-value 1 (apiservice-route path))
+                (or (eq method :get) (builtin-apiservice-p store (apiservice-route path))))
+           (apiservice-response store (apiservice-route path) method))
           ((string= path "/apis/apps") (json-response (workload-api-group)))
           ((string= path "/apis/batch") (json-response (batch-api-group)))
           ((string= path "/apis/batch/v1") (batch-resources-response))

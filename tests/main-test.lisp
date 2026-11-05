@@ -39,6 +39,24 @@
     (is (string= "containerd" (getf agent-options :runtime)))
     (is (string= "managed" (getf agent-options :containerd-mode)))))
 
+(test cli-doctor-parses-state-directory-flag-positional-and-cidr
+  ;; Bare `doctor' leaves state-directory unset so run-doctor falls back to the
+  ;; shared default-state-directory (not the old hardcoded /var/lib/gr8s).
+  (let ((options (parse-cli-options '("doctor"))))
+    (is (eq :doctor (getf options :command)))
+    (is-false (getf options :state-directory)))
+  ;; The --state-directory VALUE form must consume its value, not swallow the
+  ;; flag name as the directory (the bug behind the false-positive advice).
+  (let ((options (parse-cli-options
+                  '("doctor" "--state-directory" "/var/lib/gr8s-helm/agent"
+                    "--cluster-pod-cidr" "10.88.0.0/16"))))
+    (is (string= "/var/lib/gr8s-helm/agent" (getf options :state-directory)))
+    (is (string= "10.88.0.0/16" (getf options :cluster-pod-cidr))))
+  ;; A bare positional path still works for backward compatibility.
+  (let ((options (parse-cli-options '("doctor" "/srv/gr8s"))))
+    (is (string= "/srv/gr8s" (getf options :state-directory))))
+  (signals error (parse-cli-options '("doctor" "--bogus"))))
+
 (test agent-role-rejects-incomplete-or-invalid-option-combinations
   (dolist (arguments
            '(("agent")

@@ -186,7 +186,8 @@ them at its root is published as a bare object."
     (loop for group across (gethash "groups" (com.inuoe.jzon:parse (api-groups-response store)))
           do (loop for version across (gethash "versions" group)
                    for key = (concatenate 'string "apis/" (gethash "groupVersion" version))
-                   unless (gethash key paths)
+                   unless (or (gethash key paths)
+                              (aggregated-apiservice store (gethash "name" group) (gethash "version" version)))
                      do (setf (gethash key paths) (core-object "serverRelativeURL" (format nil "/openapi/v3/~A?hash=gr8s-~A" key (gethash "version" version))))))
     (dolist (group (crd-api-groups store))
       (loop for version across (gethash "versions" group)
@@ -264,6 +265,9 @@ kubectl falls back to the v2 document when a kind has no patch operation here."
 (defun openapi-v3-complete-response (store runtime reconciler path)
   "Serve an OpenAPI v3 group document covering every resource its version discovers."
   (multiple-value-bind (group version found) (openapi-v3-document-group-version path)
+    ;; An aggregated server's document isn't merged, and its discovery would be proxied here.
+    (when (and found (plusp (length group)) (aggregated-apiservice store group version))
+      (core-resource-error 404 "NotFound" "No OpenAPI document for aggregated ~A/~A" group version))
     (let* ((body (let ((*openapi-v3-completing* t)) (route-http-request store runtime reconciler path :get)))
            (status (hunchentoot:return-code*)))
       (unless found (return-from openapi-v3-complete-response body))
