@@ -16,6 +16,49 @@
      (unwind-protect (let ((,store (open-store ,path))) ,@body)
        (uiop:delete-directory-tree ,path :validate t :if-does-not-exist :ignore))))
 
+;; Order is the point: data before the rename, and the directory entry after it.
+(test pod-writes-flush-data-before-the-rename-and-the-directory-after
+  (with-temporary-store (store path)
+    (let* ((synced nil)
+           (gr8s::*durable-sync*
+             (lambda (target)
+               (push (list (namestring target)
+                           (not (null (directory (merge-pathnames "*.json" path)))))
+                     synced)))
+           (pod (create-pod store (parse-pod *valid-pod-json*))))
+      ;; The Pod's own file comes last, after the revision high-water mark it depends on.
+      (destructuring-bind ((file before-rename) (directory after-rename)) (last (reverse synced) 2)
+        (is (search ".tmp" file))
+        (is (not before-rename) "the temporary is flushed while the target does not exist yet")
+        (is (equal (namestring path) directory))
+        (is-true after-rename "the directory is flushed once the entry is in place"))
+      (is (probe-file (gr8s::pod-path store pod))))))
+
+(test a-failed-flush-publishes-nothing
+  (with-temporary-store (store path)
+    (let ((gr8s::*durable-sync* (lambda (target) (declare (ignore target)) (error "disk failure"))))
+      (signals error (create-pod store (parse-pod *valid-pod-json*))))
+    (signals kubernetes-error (get-pod store "default" "hello"))
+    (is (null (directory (merge-pathnames "*.json" path))))
+    (is (null (list-pods (open-store path))))))
+
+(test removing-a-pod-flushes-its-directory
+  (with-temporary-store (store path)
+    (create-pod store (parse-pod *valid-pod-json*))
+    (let* ((synced nil)
+           (gr8s::*durable-sync* (lambda (target) (push (namestring target) synced))))
+      (gr8s::remove-pod store "default" "hello")
+      (is (member (namestring path) synced :test #'equal)))))
+
+(test sync-path-flushes-real-files-and-directories
+  (with-temporary-store (store path)
+    (values store)
+    (let ((file (merge-pathnames "probe" path)))
+      (with-open-file (out file :direction :output) (write-string "x" out))
+      (finishes (gr8s::sync-path file))
+      (finishes (gr8s::sync-path path))
+      (signals error (gr8s::sync-path (merge-pathnames "missing" path))))))
+
 (test temporary-stores-remain-isolated-with-identical-random-states
   (let ((seed (make-random-state nil)) (first-path nil))
     (let ((*random-state* (make-random-state seed)))

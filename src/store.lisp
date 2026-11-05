@@ -226,6 +226,37 @@
     (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ"
             year month day hour minute second)))
 
+(defun sync-path (path)
+  "Flush the file or directory at PATH to stable storage, signaling if the kernel reports failure."
+  (let ((descriptor (sb-posix:open (namestring path) sb-posix:o-rdonly)))
+    (unwind-protect (sb-posix:fsync descriptor)
+      (sb-posix:close descriptor))))
+
+(defparameter *durable-sync* #'sync-path
+  "Flush one path to stable storage; dynamically bound by tests that observe or fail a flush.")
+
+(defun containing-directory (path)
+  "Return the directory that holds the entry for PATH."
+  (uiop:pathname-directory-pathname path))
+
+(defun rename-file-durably (temporary target)
+  "Atomically replace TARGET so that a power loss leaves the old contents or the complete new ones.
+The data must reach the disk before the rename, or a crash can leave TARGET empty. Callers publish
+state in memory, and acknowledge it, only after this returns."
+  (funcall *durable-sync* temporary)
+  (uiop:rename-file-overwriting-target temporary target)
+  (funcall *durable-sync* (containing-directory target)))
+
+(defun ensure-directories-exist-durably (path)
+  "Create PATH's missing directories and, only when one was new, flush the entries that lead to it."
+  (multiple-value-bind (result created) (ensure-directories-exist path)
+    (when created
+      (loop for directory = (containing-directory path) then parent
+            for parent = (uiop:pathname-parent-directory-pathname directory)
+            do (funcall *durable-sync* directory)
+            until (equal parent directory)))
+    (values result created)))
+
 (defun persist-pod (store pod)
   "Atomically persist POD's authoritative JSON object in STORE."
   (let* ((target (pod-path store pod))
@@ -240,12 +271,12 @@
                             :if-exists :supersede
                             :if-does-not-exist :create)
       (com.inuoe.jzon:stringify (pod-to-object pod) :stream stream))
-    (uiop:rename-file-overwriting-target temporary target))
+    (rename-file-durably temporary target))
   pod)
 
 (defun persist-node (store node)
   "Atomically persist NODE in STORE's node directory."
-  (ensure-directories-exist (nodes-path store))
+  (ensure-directories-exist-durably (nodes-path store))
   (let* ((target (node-path store node))
          (temporary
            (make-pathname
@@ -258,7 +289,7 @@
                             :if-exists :supersede
                             :if-does-not-exist :create)
       (com.inuoe.jzon:stringify (node-record-to-object node) :stream stream))
-    (uiop:rename-file-overwriting-target temporary target))
+    (rename-file-durably temporary target))
   node)
 
 (defun index-pod (store pod)
@@ -366,8 +397,8 @@
   "Open or create a durable store at PATH and rebuild its in-memory indexes."
   (let* ((directory (uiop:ensure-directory-pathname path))
          (store (make-pod-store directory)))
-    (ensure-directories-exist directory)
-    (ensure-directories-exist (nodes-path store))
+    (ensure-directories-exist-durably directory)
+    (ensure-directories-exist-durably (nodes-path store))
     (dolist (file (directory (merge-pathnames "*.json" directory)))
       (index-pod store (parse-pod file)))
     (dolist (file (directory (merge-pathnames "*.json" (nodes-path store))))
@@ -524,6 +555,8 @@
       (let ((status-path (pod-status-state-path store (pod-uid pod))))
         (when (probe-file status-path) (delete-file status-path)))
       (delete-file (pod-path store pod))
+      ;; Otherwise a power loss could bring a removed Pod back for the agent to restart.
+      (funcall *durable-sync* (containing-directory (pod-path store pod)))
       (remhash (pod-key namespace name) (pod-store-pods store))
       (note-pod-desired-change store)
       (publish-pod-removal-unlocked store pod)

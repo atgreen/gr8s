@@ -40,12 +40,12 @@
   (let* ((path (container-lifecycle-path runtime uid))
          (temporary (make-pathname :name (format nil "lifecycle-~36R" (random (expt 36 10)))
                                    :type "tmp" :defaults path)))
-    (ensure-directories-exist path)
+    (ensure-directories-exist-durably path)
     (unwind-protect
          (progn
            (with-open-file (out temporary :direction :output :if-exists :supersede :if-does-not-exist :create)
              (com.inuoe.jzon:stringify state :stream out))
-           (uiop:rename-file-overwriting-target temporary path))
+           (rename-file-durably temporary path))
       (when (probe-file temporary) (delete-file temporary))))
   state)
 

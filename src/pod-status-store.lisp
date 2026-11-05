@@ -44,12 +44,12 @@
     (when status
       (setf (gethash "status" record) status
             (gethash "observedResourceVersion" record) resource-version))
-    (ensure-directories-exist target)
+    (ensure-directories-exist-durably target)
     (unwind-protect
          (progn
            (with-open-file (stream temporary :direction :output :if-exists :supersede :if-does-not-exist :create)
              (com.inuoe.jzon:stringify record :stream stream))
-           (uiop:rename-file-overwriting-target temporary target))
+           (rename-file-durably temporary target))
       (when (probe-file temporary) (delete-file temporary)))))
 
 (defun load-pod-status-state (store)

@@ -121,7 +121,7 @@
     (unwind-protect
          (progn
            (write-private-text-exclusively temporary text)
-           (uiop:rename-file-overwriting-target temporary path))
+           (rename-file-durably temporary path))
       (when (probe-file temporary)
         (delete-file temporary))))
   path)

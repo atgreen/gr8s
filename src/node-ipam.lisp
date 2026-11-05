@@ -42,14 +42,14 @@
             :name (format nil "allocations-~36R" (random (expt 36 10)))
             :type "tmp"
             :defaults target)))
-    (ensure-directories-exist target)
+    (ensure-directories-exist-durably target)
     (with-open-file (stream temporary
                             :direction :output
                             :if-exists :supersede
                             :if-does-not-exist :create)
       (com.inuoe.jzon:stringify (node-ipam-state-object ipam) :stream stream))
-    (uiop:rename-file-overwriting-target temporary target)
-    (sb-posix:chmod target #o600))
+    (sb-posix:chmod temporary #o600)
+    (rename-file-durably temporary target))
   ipam)
 
 (defun persist-node-ipam (ipam)
