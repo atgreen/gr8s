@@ -646,6 +646,15 @@
                 (t (format nil "False (~A)" (gethash "reason" available))))
           (table-age object))))
 
+(define-table-printer "ComponentStatus"
+    (("Status" "string") ("Message" "string") ("Error" "string"))
+    (object)
+  (let ((healthy (find "Healthy" (or (table-get object "conditions") #()) :test #'equal
+                       :key (lambda (condition) (gethash "type" condition)))))
+    (list (if (and healthy (equal "True" (gethash "status" healthy))) "Healthy" "Unhealthy")
+          (if healthy (gethash "message" healthy "") "")
+          (if healthy (gethash "error" healthy "") ""))))
+
 (define-table-printer "Lease"
     (("Holder" "string") ("Age" "string"))
     (object)
