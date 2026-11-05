@@ -136,6 +136,7 @@
                              (:file "pod-pool")
                              (:file "pod-http-proxy")
                              (:file "debug-server")
+                             (:file "autoscaling-api")
                              (:file "http")
                              (:file "aggregated-discovery")
                              (:file "core-resource-http")

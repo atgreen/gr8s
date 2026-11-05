@@ -366,3 +366,56 @@
                              :content (deployment-json :metadata-extra "\"unknownMeta\":\"foo\","))
       (is (= 400 status))
       (is (search "metadata.unknownMeta" (if (stringp body) body (babel:octets-to-string body)))))))
+
+(defun hpa-fixture (version &rest spec-fields)
+  "Build an autoscaler in VERSION with SPEC-FIELDS after its required target."
+  (gr8s::core-object "apiVersion" version "kind" "HorizontalPodAutoscaler"
+    "metadata" (gr8s::core-object "name" "web")
+    "spec" (apply #'gr8s::core-object
+                  "scaleTargetRef" (gr8s::core-object "apiVersion" "apps/v1" "kind" "Deployment" "name" "web")
+                  "maxReplicas" 5 spec-fields)))
+
+(test autoscalers-round-trip-between-their-versions
+  (with-crd-api (store path)
+    (values store path)
+    (let* ((v1 "/apis/autoscaling/v1/namespaces/default/horizontalpodautoscalers")
+           (v2 "/apis/autoscaling/v2/namespaces/default/horizontalpodautoscalers")
+           (created (crd-api-request 201 v1 :method :post :object (hpa-fixture "autoscaling/v1" "targetCPUUtilizationPercentage" 50))))
+      (is (equal "autoscaling/v1" (gethash "apiVersion" created)))
+      (is (= 50 (gethash "targetCPUUtilizationPercentage" (gethash "spec" created))))
+      (is (= 1 (gethash "minReplicas" (gethash "spec" created))))
+      (is (not (nth-value 1 (gethash "metrics" (gethash "spec" created)))))
+      (let* ((stored (crd-api-request 200 (concatenate 'string v2 "/web")))
+             (metric (aref (gethash "metrics" (gethash "spec" stored)) 0)))
+        (is (equal "autoscaling/v2" (gethash "apiVersion" stored)))
+        (is (= 50 (gethash "averageUtilization" (gethash "target" (gethash "resource" metric))))))
+      (is (equal "autoscaling/v1" (gethash "apiVersion" (crd-api-request 200 (concatenate 'string v1 "/web")))))
+      (is (= 1 (length (gethash "items" (crd-api-request 200 v1)))))
+      (is (equal "autoscaling/v1" (gethash "apiVersion" (crd-api-request 200 v1))))
+      (crd-api-request 200 (concatenate 'string v1 "/web") :method :delete)
+      (crd-api-request 404 (concatenate 'string v2 "/web")))))
+
+(test autoscalers-validate-their-target-and-range
+  (with-crd-api (store path)
+    (values store path)
+    (let ((v2 "/apis/autoscaling/v2/namespaces/default/horizontalpodautoscalers"))
+      (is (search "spec.maxReplicas" (gethash "message" (crd-api-request 422 v2 :method :post :object (hpa-fixture "autoscaling/v2" "minReplicas" 9)))))
+      (let ((missing (hpa-fixture "autoscaling/v2")))
+        (remhash "scaleTargetRef" (gethash "spec" missing))
+        (is (search "spec.scaleTargetRef" (gethash "message" (crd-api-request 422 v2 :method :post :object missing)))))
+      ;; A client cannot claim status for itself.
+      (let ((claimed (hpa-fixture "autoscaling/v2")))
+        (setf (gethash "status" claimed) (gr8s::core-object "currentReplicas" 3 "desiredReplicas" 3))
+        (is (= 0 (gethash "currentReplicas" (gethash "status" (crd-api-request 201 v2 :method :post :object claimed)))))))))
+
+(test apiservices-describe-local-versions-and-refuse-registration
+  (with-crd-api (store path)
+    (values store path)
+    (let* ((collection "/apis/apiregistration.k8s.io/v1/apiservices")
+           (items (gethash "items" (crd-api-request 200 collection)))
+           (names (map 'list (lambda (item) (gethash "name" (gethash "metadata" item))) items)))
+      (dolist (name '("v1" "v1.apps" "v2.autoscaling"))
+        (is (member name names :test #'equal) "~A is absent" name))
+      (is (equal "apps" (gethash "group" (gethash "spec" (crd-api-request 200 (concatenate 'string collection "/v1.apps"))))))
+      (crd-api-request 404 (concatenate 'string collection "/v9.none"))
+      (crd-api-request 405 collection :method :post :text "{}"))))
