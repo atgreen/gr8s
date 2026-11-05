@@ -115,7 +115,7 @@
        (publish-node-snapshot runtime (pod-node-name pod))
        nil))))
 
-(defmethod runtime-logs ((runtime control-plane-runtime) uid container &key tail)
+(defmethod runtime-logs ((runtime control-plane-runtime) uid container &key tail previous)
   (declare (ignore tail))
   (let ((pod (control-plane-pod-by-uid runtime uid)))
     (unless (and pod (pod-node-name pod))
@@ -129,7 +129,8 @@
               :pod (pod-name pod)
               :pod-uid uid
               :container container
-              :stdout t))
+              :stdout t
+              :previous (not (null previous))))
            (operation
              (request-node-operation
               (control-plane-runtime-node-server runtime)

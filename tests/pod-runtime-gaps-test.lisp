@@ -675,3 +675,42 @@
         (is (equal "Started" (gethash "reason" (first stored))))
         (is (equal "Normal" (gethash "type" (first stored))))
         (is (equal (pod-uid pod) (gethash "uid" (gethash "involvedObject" (first stored)))))))))
+
+(test previous-logs-come-from-the-attempt-before-the-current-one
+  (with-temporary-store (store directory)
+    (let* ((now 4000000000) (gr8s::*container-lifecycle-clock* (lambda () now))
+           (pod (lifecycle-pod store))
+           (runtime (gr8s::make-containerd-runtime :log-root directory))
+           (log-directory (gr8s::containerd-pod-log-directory runtime (pod-uid pod))))
+      (ensure-directories-exist log-directory)
+      (flet ((write-log (name text)
+               (with-open-file (out (merge-pathnames name log-directory) :direction :output :if-exists :supersede)
+                 (write-string text out))))
+        (write-log "main.log" "first attempt")
+        (with-lifecycle-cri (fixture pod (list (lifecycle-info "main" 0 gr8s.cri.v1::+containerstate-container_running+ now)))
+          (values fixture)
+          (is (equal "first attempt" (gr8s::runtime-logs runtime (pod-uid pod) "main")))
+          (signals kubernetes-error (gr8s::runtime-logs runtime (pod-uid pod) "main" :previous t)))
+        (write-log "main.1.log" "second attempt")
+        (with-lifecycle-cri (fixture pod (list (lifecycle-info "main" 1 gr8s.cri.v1::+containerstate-container_running+ now)))
+          (values fixture)
+          (is (equal "second attempt" (gr8s::runtime-logs runtime (pod-uid pod) "main")))
+          (is (equal "first attempt" (gr8s::runtime-logs runtime (pod-uid pod) "main" :previous t))))))))
+
+(test followed-logs-end-when-the-container-does
+  (with-temporary-store (store directory)
+    (declare (ignorable directory))
+    (let ((pod (create-pod store (parse-pod (gap-pod-object)))))
+      (is (not (gr8s::pod-container-finished-p store pod "main")))
+      (gr8s::save-pod-observation
+       store pod (gr8s::core-object "phase" "Running"
+                                    "containerStatuses"
+                                    (vector (gr8s::core-object "name" "main" "state" (gr8s::core-object "running" (gr8s::core-object))))))
+      (is (not (gr8s::pod-container-finished-p store pod "main")))
+      (gr8s::save-pod-observation
+       store pod (gr8s::core-object "phase" "Running"
+                                    "containerStatuses"
+                                    (vector (gr8s::core-object "name" "main" "state" (gr8s::core-object "terminated" (gr8s::core-object "exitCode" 0))))))
+      (is-true (gr8s::pod-container-finished-p store pod "main"))
+      (gr8s::remove-pod store (pod-namespace pod) (pod-name pod))
+      (is-true (gr8s::pod-container-finished-p store pod "main")))))
