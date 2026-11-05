@@ -76,6 +76,13 @@ jobs:
         # `make test` runs generate-protocol then (asdf:test-system :gr8s).
         # asdf:test-system exits non-zero if any FiveAM test fails, so a red
         # suite fails the job.
+        #
+        # CL_SOURCE_REGISTRY puts the repo root (where gr8s.asd lives) on
+        # ASDF's source registry so :gr8s itself is found. ocicl resolves the
+        # dependencies via its own search function; without this the primary
+        # system isn't found and ocicl tries (and fails) to fetch it from ghcr.
+        env:
+          CL_SOURCE_REGISTRY: ${{ github.workspace }}/:
         run: make test
 
   privileged:
