@@ -559,6 +559,7 @@ handler and never gets here. A busy host makes this race likely."
                                       (reconcile-crd-deletions store)
                                       (collect-orphaned-custom-resources store)
                                       (reconcile-certificate-signing-requests store pki)
+                                      (reconcile-certificates store pki)
                                       (reconcile-storage-bindings store)
                                       (reconcile-resource-quotas store)
                                       (collect-orphaned-api-objects reconciler)

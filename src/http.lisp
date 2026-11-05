@@ -102,7 +102,7 @@
                                     "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                        (event-api-group) (workload-api-group) (batch-api-group) (budget-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group)
-                       (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group))))
+                       (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group) (cert-manager-api-group))))
     (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
@@ -1167,6 +1167,8 @@ Clients that can read an object as well say so with a further media range."
           ((string= path "/apis/rbac.authorization.k8s.io/v1") (rbac-resources-response))
           ((string= path "/apis/gateway.networking.k8s.io") (json-response (gateway-api-group)))
           ((string= path "/apis/gateway.networking.k8s.io/v1") (gateway-discovery-response))
+          ((string= path "/apis/cert-manager.io") (json-response (cert-manager-api-group)))
+          ((string= path "/apis/cert-manager.io/v1") (cert-manager-discovery-response))
           ((string= path "/apis/apps") (json-response (workload-api-group)))
           ((string= path "/apis/batch") (json-response (batch-api-group)))
           ((string= path "/apis/batch/v1") (batch-resources-response))

@@ -88,7 +88,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-for command in kubectl curl ip nsenter ping ps awk; do
+for command in kubectl curl ip nsenter ping ps awk base64; do
   command -v "$command" >/dev/null
 done
 
@@ -302,6 +302,43 @@ if [ "$gw_unmatched" != "404" ]; then
   echo "Gateway did not 404 an unmatched host (got $gw_unmatched)" >&2; exit 1
 fi
 echo "Gateway API routed host/path to the backend Pod through the in-agent L7 proxy"
+
+# --- cert-manager: a Certificate issues a kubernetes.io/tls Secret (podster-045) ---
+# A selfSigned ClusterIssuer + a Certificate; the control-plane controller must
+# mint a leaf and write a kubernetes.io/tls Secret, proving cert-manager end to
+# end in the native binary. (Serving that Secret from a Gateway HTTPS listener
+# additionally needs node projection of Gateway-referenced Secrets, tracked
+# separately.)
+cat >"$work_directory/clusterissuer.json" <<'JSON'
+{"apiVersion":"cert-manager.io/v1","kind":"ClusterIssuer","metadata":{"name":"selfsigned"},"spec":{"selfSigned":{}}}
+JSON
+cat >"$work_directory/certificate.json" <<'JSON'
+{"apiVersion":"cert-manager.io/v1","kind":"Certificate","metadata":{"name":"web-cert","namespace":"default"},"spec":{"secretName":"web-tls","issuerRef":{"name":"selfsigned","kind":"ClusterIssuer"},"dnsNames":["gw.example.com"],"duration":"24h"}}
+JSON
+gw_post "/apis/cert-manager.io/v1/clusterissuers" "$work_directory/clusterissuer.json"
+gw_post "/apis/cert-manager.io/v1/namespaces/default/certificates" "$work_directory/certificate.json"
+
+cm_crt=
+for attempt in $(seq 1 60); do
+  cm_crt=$(kubectl --kubeconfig "$work_directory/kubeconfig" -n default \
+    get secret web-tls -o jsonpath='{.data.tls\.crt}' 2>/dev/null || true)
+  [ -n "$cm_crt" ] && break
+  sleep 0.5
+done
+if [ -z "$cm_crt" ]; then
+  echo "cert-manager did not issue the web-tls Secret" >&2; exit 1
+fi
+cm_type=$(kubectl --kubeconfig "$work_directory/kubeconfig" -n default get secret web-tls -o jsonpath='{.type}')
+if [ "$cm_type" != "kubernetes.io/tls" ]; then
+  echo "cert-manager Secret has wrong type: $cm_type" >&2; exit 1
+fi
+if ! printf '%s' "$cm_crt" | base64 -d 2>/dev/null | grep -q "BEGIN CERTIFICATE"; then
+  echo "cert-manager tls.crt is not a PEM certificate" >&2; exit 1
+fi
+echo "cert-manager issued a kubernetes.io/tls Secret from a selfSigned Certificate"
+curl -s -o /dev/null -X DELETE "$gw_server/apis/cert-manager.io/v1/namespaces/default/certificates/web-cert" || true
+curl -s -o /dev/null -X DELETE "$gw_server/apis/cert-manager.io/v1/clusterissuers/selfsigned" || true
+kubectl --kubeconfig "$work_directory/kubeconfig" -n default delete secret web-tls --ignore-not-found >/dev/null
 
 # Tear the gateway scenario down and wait for the backend Pod's network state to
 # drain, restoring the single-Pod baseline for the sections that follow.
