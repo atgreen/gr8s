@@ -50,8 +50,10 @@ jobs:
         # vendored in the checkout, so no registry fetch is required here.
         run: |
           git clone --depth 1 https://github.com/ocicl/ocicl.git /tmp/ocicl
-          make -C /tmp/ocicl
-          sudo make -C /tmp/ocicl install
+          # setup.lisp builds and installs the ocicl binary to ~/.local/bin.
+          (cd /tmp/ocicl && sbcl --load setup.lisp)
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
           ocicl setup
           ocicl version
 
