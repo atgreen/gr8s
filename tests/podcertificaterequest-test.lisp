@@ -50,3 +50,29 @@
     (is (not (null entry)))
     (is (eq t (gethash "namespaced" entry)))
     (is (string= "PodCertificateRequest" (gethash "kind" entry)))))
+
+(test podcertificaterequest-builders-produce-request-and-bundle
+  ;; The request object carries the pod/SA/node identity and public key a signer
+  ;; verifies.
+  (let* ((pcr (gr8s::build-pod-certificate-request
+               :name "demo-cert" :namespace "ate-system"
+               :signer-name "podidentity.podcert.ate.dev/identity"
+               :pkix-public-key "QkFTRTY0REVS"
+               :pod-name "demo" :pod-uid "uid-1"
+               :service-account-name "atenet" :service-account-uid "sa-uid"
+               :node-name "gr8s-local" :node-uid "node-uid"
+               :max-expiration-seconds 3600))
+         (spec (gethash "spec" pcr)))
+    (is (string= "PodCertificateRequest" (gethash "kind" pcr)))
+    (is (string= "certificates.k8s.io/v1alpha1" (gethash "apiVersion" pcr)))
+    (is (string= "ate-system" (gethash "namespace" (gethash "metadata" pcr))))
+    (is (string= "podidentity.podcert.ate.dev/identity" (gethash "signerName" spec)))
+    (is (string= "QkFTRTY0REVS" (gethash "pkixPublicKey" spec)))
+    (is (string= "gr8s-local" (gethash "nodeName" spec)))
+    (is (eql 3600 (gethash "maxExpirationSeconds" spec))))
+  ;; The credential bundle is the key PEM then the chain PEM, with a newline
+  ;; boundary even when the key lacks a trailing newline.
+  (is (string= (format nil "KEY~%CHAIN~%")
+               (gr8s::pod-certificate-credential-bundle "KEY" (format nil "CHAIN~%"))))
+  (is (string= (format nil "KEY~%CHAIN~%")
+               (gr8s::pod-certificate-credential-bundle (format nil "KEY~%") (format nil "CHAIN~%")))))

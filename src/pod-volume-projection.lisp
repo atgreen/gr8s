@@ -109,6 +109,40 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
           when bytes
             collect (list (gethash "path" item) bytes (gethash "mode" item default-mode)))))
 
+;;; podCertificate projected source (KEP-4317) building blocks. The async node
+;;; flow -- generate a keypair, create the PodCertificateRequest, wait for the
+;;; signer to fill status.certificateChain, then project the credential bundle
+;;; -- is not yet wired, so podCertificate stays rejected at admission. These
+;;; pure pieces (the request object and the credential-bundle layout) are the
+;;; foundation that integration will use.
+
+(defun build-pod-certificate-request (&key name namespace signer-name pkix-public-key
+                                           pod-name pod-uid service-account-name service-account-uid
+                                           node-name node-uid max-expiration-seconds proof-of-possession)
+  "Build a PodCertificateRequest object for a pod's podCertificate volume: its
+   PKIX public key (base64 DER) plus the pod/SA/node identity the signer checks."
+  (let ((spec (core-object "signerName" signer-name
+                           "podName" pod-name "podUID" pod-uid
+                           "serviceAccountName" service-account-name
+                           "serviceAccountUID" service-account-uid
+                           "nodeName" node-name "nodeUID" node-uid
+                           "pkixPublicKey" pkix-public-key)))
+    (when max-expiration-seconds
+      (setf (gethash "maxExpirationSeconds" spec) max-expiration-seconds))
+    (when proof-of-possession
+      (setf (gethash "proofOfPossession" spec) proof-of-possession))
+    (core-object "apiVersion" "certificates.k8s.io/v1alpha1" "kind" "PodCertificateRequest"
+                 "metadata" (core-object "name" name "namespace" namespace)
+                 "spec" spec)))
+
+(defun pod-certificate-credential-bundle (private-key-pem certificate-chain-pem)
+  "The credentialBundlePath contents for a signed pod certificate: the PEM
+   private key followed by the issued PEM certificate chain (KEP-4317)."
+  (let ((key (if (uiop:string-suffix-p private-key-pem (string #\Newline))
+                 private-key-pem
+                 (concatenate 'string private-key-pem (string #\Newline)))))
+    (concatenate 'string key certificate-chain-pem)))
+
 (defun cluster-trust-bundle-matches-p (bundle signer selector)
   "True when BUNDLE has SIGNER and satisfies SELECTOR's matchLabels (if any)."
   (and (equal signer (gethash "signerName" (gethash "spec" bundle (core-object))))
