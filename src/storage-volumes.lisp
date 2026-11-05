@@ -20,14 +20,74 @@
                  (volume (and volume-name
                               (handler-case (get-core-resource store "persistentvolumes" nil volume-name)
                                 (kubernetes-error (condition) (unless (= 404 (kubernetes-error-status-code condition)) (error condition)))))))
-            (when (and volume (storage-claim-ref-matches-p volume claim)) (push volume result))))))
+            (when (and volume (storage-claim-ref-matches-p volume claim))
+              (push volume result)
+              (setf result (append (pod-csi-volume-objects store pod volume) result)))))))
+    (loop for volume across (gethash "volumes" (gethash "spec" (pod-to-object pod)) #())
+          when (gethash "csi" volume)
+            do (let ((driver (optional-core-resource store "csidrivers" nil (gethash "driver" (gethash "csi" volume)))))
+                 (when driver (push driver result))))
     result))
+
+(defun optional-core-resource (store resource namespace name)
+  "Return one stored object, or NIL only for a genuine NotFound."
+  (handler-case (get-core-resource store resource namespace name)
+    (kubernetes-error (condition)
+      (unless (= 404 (kubernetes-error-status-code condition)) (error condition)))))
+
+(defun pod-csi-volume-objects (store pod volume)
+  "Project what an agent needs to publish a bound CSI VOLUME for POD on its node."
+  (let ((source (gethash "csi" (gethash "spec" volume))))
+    (when source
+      (let ((driver (gethash "driver" source)) (handle (gethash "volumeHandle" source)))
+        (remove nil
+                (append
+                 (list (optional-core-resource store "csidrivers" nil driver)
+                       (optional-core-resource store "volumeattachments" nil
+                                               (volume-attachment-name driver handle (or (pod-node-name pod) ""))))
+                 (loop for field in '("nodeStageSecretRef" "nodePublishSecretRef")
+                       for reference = (gethash field source)
+                       when reference
+                         collect (optional-core-resource store "secrets" (gethash "namespace" reference)
+                                                         (gethash "name" reference)))))))))
+
+(defun csi-volume-secret-reference-p (secret projected)
+  "Return whether a PV among PROJECTED names SECRET as one of its CSI secrets."
+  (let ((metadata (gethash "metadata" secret)))
+    (some (lambda (object)
+            (let ((source (and (equal "PersistentVolume" (gethash "kind" object))
+                               (gethash "csi" (gethash "spec" object)))))
+              (and source
+                   (some (lambda (field)
+                           (let ((reference (gethash field source)))
+                             (and reference
+                                  (equal (gethash "name" metadata) (gethash "name" reference))
+                                  (equal (gethash "namespace" metadata) (gethash "namespace" reference)))))
+                         '("nodeStageSecretRef" "nodePublishSecretRef")))))
+          projected)))
 
 (defun assigned-storage-resource-p (object pod projected)
   "Reject unreferenced claims, forged PV reservations and cross-namespace projection."
   (let* ((metadata (gethash "metadata" object))
          (name (gethash "name" metadata)) (namespace (gethash "namespace" metadata)))
     (cond
+      ((equal "CSIDriver" (gethash "kind" object))
+       (or (some (lambda (volume)
+                   (let ((source (gethash "csi" volume)))
+                     (and source (equal name (gethash "driver" source)))))
+                 (gethash "volumes" (gethash "spec" (pod-to-object pod)) #()))
+           (some (lambda (other)
+                   (let ((source (and (equal "PersistentVolume" (gethash "kind" other))
+                                      (gethash "csi" (gethash "spec" other)))))
+                     (and source (equal name (gethash "driver" source)))))
+                 projected)))
+      ((equal "VolumeAttachment" (gethash "kind" object))
+       (and (equal (pod-node-name pod) (gethash "nodeName" (gethash "spec" object)))
+            (some (lambda (other)
+                    (and (equal "PersistentVolume" (gethash "kind" other))
+                         (equal (storage-resource-name other)
+                                (gethash "persistentVolumeName" (gethash "source" (gethash "spec" object))))))
+                  projected)))
       ((equal "PersistentVolumeClaim" (gethash "kind" object))
        (and (equal namespace (pod-namespace pod)) (member name (storage-pod-claim-names pod) :test #'equal)))
       ((equal "PersistentVolume" (gethash "kind" object))
@@ -104,6 +164,9 @@
            (annotations (gethash "annotations" (gethash "metadata" volume) (core-object)))
            (provisioner (gethash +provisioned-by-annotation+ annotations))
            (claim-readonly (eq t (gethash "readOnly" source))))
+      (when (equal kind "csi")
+        (multiple-value-bind (path readonly) (materialize-persistent-csi-volume store pod volume-name volume)
+          (return-from materialize-persistent-claim-volume (values path (or claim-readonly readonly)))))
       (if (equal kind "nfs")
           (values (materialize-pod-nfs-volume runtime pod volume-name (gethash "nfs" spec)
                                               (gethash "mountOptions" spec)

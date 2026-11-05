@@ -17,6 +17,9 @@
     (append
      (when (gethash "configMap" volume) (list (reference "configmaps" (gethash "configMap" volume) "name")))
      (when (gethash "secret" volume) (list (reference "secrets" (gethash "secret" volume) "secretName")))
+     (let ((source (gethash "csi" volume)))
+       (when (and source (gethash "nodePublishSecretRef" source))
+         (list (reference "secrets" (gethash "nodePublishSecretRef" source) "name"))))
      (when (gethash "projected" volume)
        (loop for source across (gethash "sources" (gethash "projected" volume) #())
              when (gethash "configMap" source)
@@ -69,12 +72,15 @@
                                  ((equal "Secret" (gethash "kind" object)) "secrets")
                                  ((equal "PersistentVolumeClaim" (gethash "kind" object)) "persistentvolumeclaims")
                                  ((equal "PersistentVolume" (gethash "kind" object)) "persistentvolumes")
+                                 ((equal "CSIDriver" (gethash "kind" object)) "csidrivers")
+                                 ((equal "VolumeAttachment" (gethash "kind" object)) "volumeattachments")
                                  (t (invalid-pod "assignment contains an unsupported resource kind")))))
             (unless (if (storage-resource-p resource)
                         (assigned-storage-resource-p object pod projected)
-                        (and (equal namespace (pod-namespace pod))
-                             (some (lambda (reference) (and (equal resource (first reference)) (equal name (second reference))))
-                                   (pod-resource-reference-declarations pod))))
+                        (or (and (equal namespace (pod-namespace pod))
+                                 (some (lambda (reference) (and (equal resource (first reference)) (equal name (second reference))))
+                                       (pod-resource-reference-declarations pod)))
+                            (and (equal resource "secrets") (csi-volume-secret-reference-p object projected))))
               (invalid-pod "assignment contains an unreferenced, cross-namespace or incorrectly bound resource"))
             ;; This status came from the authenticated control plane, rather than
             ;; an API create request. Preserve its real binding observation.
@@ -226,6 +232,7 @@ SHARE names a provisioned volume's export, whose own directory is created on fir
 
 (defun cleanup-pod-volumes (runtime uid)
   "Unmount and delete a terminated Pod's volumes; a failed unmount leaves data for retry."
+  (cleanup-pod-csi-volumes uid)
   (let ((directory (merge-pathnames "volumes/" (containerd-pod-log-directory runtime uid))))
     (when (probe-file directory)
       (dolist (target (pod-volume-mount-targets directory))
@@ -250,6 +257,9 @@ SHARE names a provisioned volume's export, whose own directory is created on fir
       (materialize-persistent-claim-volume
        runtime pod (core-object "claimName" (ephemeral-claim-name (pod-name pod) (gethash "name" volume)))
        (gethash "name" volume) t)))
+  (when (gethash "csi" volume)
+    (return-from materialize-pod-volume
+      (materialize-inline-csi-volume (containerd-runtime-resource-store runtime) pod volume)))
   (when (gethash "nfs" volume)
     (return-from materialize-pod-volume
       (values (materialize-pod-nfs-volume runtime pod (gethash "name" volume) (gethash "nfs" volume) nil)
@@ -269,6 +279,13 @@ SHARE names a provisioned volume's export, whose own directory is created on fir
       (when projection (publish-pod-volume-files directory files group)))
     directory))
 
+(defun container-mount-propagation (mount)
+  "Map a volumeMount's mountPropagation to its CRI mode; drivers publish volumes through Bidirectional."
+  (let ((mode (gethash "mountPropagation" mount "None")))
+    (cond ((equal mode "Bidirectional") gr8s.cri.v1::+mountpropagation-propagation_bidirectional+)
+          ((equal mode "HostToContainer") gr8s.cri.v1::+mountpropagation-propagation_host_to_container+)
+          (t gr8s.cri.v1::+mountpropagation-propagation_private+))))
+
 (defun containerd-pod-mounts (runtime pod container &optional environment)
   "Build CRI bind mounts from validated, materialized Pod volume declarations."
   (let ((volumes (gethash "volumes" (gethash "spec" (pod-to-object pod)) #()))
@@ -282,6 +299,7 @@ SHARE names a provisioned volume's export, whose own directory is created on fir
                         (setf path (stage-container-volume-subpath runtime pod container mount index path relative))))
                     (make-instance 'gr8s.cri.v1::mount
                                    :container-path (gethash "mountPath" mount) :host-path (namestring path)
+                                   :propagation (container-mount-propagation mount)
                                    :readonly (or forced-readonly (not (null (gethash "configMap" volume)))
                                                  (not (null (gethash "secret" volume)))
                                                  (not (null (gethash "downwardAPI" volume)))

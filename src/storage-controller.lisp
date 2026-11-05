@@ -85,8 +85,8 @@
   "Return true only for sources and volume modes the native agent can mount."
   (let ((spec (gethash "spec" volume)))
     (and (equal "Filesystem" (gethash "volumeMode" spec "Filesystem"))
-         (member (storage-source-kind spec) '("hostPath" "local" "nfs") :test #'equal)
-         (or (equal "nfs" (storage-source-kind spec))
+         (member (storage-source-kind spec) '("hostPath" "local" "nfs" "csi") :test #'equal)
+         (or (member (storage-source-kind spec) '("nfs" "csi") :test #'equal)
              (zerop (length (gethash "mountOptions" spec #())))))))
 
 (defun storage-requirement-matches-p (requirement value)
@@ -157,7 +157,9 @@ An agent doesn't hold its own Node labels; the control plane already matched tho
   (let* ((spec (gethash "spec" volume)) (wanted (gethash "spec" claim))
          (ref (gethash "claimRef" spec)) (requested-name (gethash "volumeName" wanted)))
     (and (not (gethash "deletionTimestamp" (gethash "metadata" volume)))
-         (not (or (gethash "dataSource" wanted) (gethash "dataSourceRef" wanted)))
+         ;; Only a sidecar that was asked to clone or restore can have filled this volume.
+         (or (not (or (gethash "dataSource" wanted) (gethash "dataSourceRef" wanted)))
+             (storage-claim-ref-matches-p volume claim))
          (or (not ref) (storage-claim-ref-matches-p volume claim :allow-unbound t))
          (or (not requested-name) (equal requested-name (storage-resource-name volume)))
          (equal (gethash "storageClassName" spec "") (gethash "storageClassName" wanted ""))
@@ -203,7 +205,8 @@ An agent doesn't hold its own Node labels; the control plane already matched tho
              (bound (and claim (storage-bound-volume index claim)))
              (candidate (or bound (and claim (storage-claim-delayed-p index claim) (storage-candidate-volume index claim node used))))
              (provisionable (and claim (not candidate) (storage-claim-delayed-p index claim)
-                                 (storage-claim-provisionable-p (storage-claim-class index claim) claim))))
+                                 (or (storage-claim-provisionable-p (storage-claim-class index claim) claim)
+                                     (storage-claim-awaits-external-provisioner-p (storage-claim-class index claim) claim)))))
         (unless (and claim (or candidate provisionable) (not (gethash "deletionTimestamp" (gethash "metadata" claim)))
                      (or provisionable (storage-node-affinity-matches-p candidate node))
                      (storage-class-topology-matches-p (storage-claim-class index claim) node))
@@ -334,7 +337,12 @@ An agent doesn't hold its own Node labels; the control plane already matched tho
                   (multiple-value-bind (pv pvc) (storage-bind-pair candidate claim)
                     (setf (gethash (core-resource-key "persistentvolumes" nil (storage-resource-name pv)) index) pv
                           (gethash key index) pvc))
-                  (let ((copy (copy-core-object claim)))
+                  (let ((copy (let ((class (storage-claim-class index claim)))
+                                (copy-core-object
+                                 (if (and (storage-claim-awaits-external-provisioner-p class claim)
+                                          (or (not delayed) node))
+                                     (annotate-claim-for-external-provisioner claim class node)
+                                     claim)))))
                     (if (and (gethash "volumeName" (gethash "spec" claim))
                              (equal "yes" (gethash "pv.kubernetes.io/bind-completed" (gethash "annotations" metadata (core-object)))))
                         (storage-status copy "Lost")

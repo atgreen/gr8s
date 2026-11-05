@@ -23,11 +23,12 @@
 
 (defun storage-resource-p (resource)
   "Return whether RESOURCE belongs to the implemented persistent storage APIs."
-  (member resource '("persistentvolumes" "persistentvolumeclaims" "storageclasses") :test #'equal))
+  (or (member resource '("persistentvolumes" "persistentvolumeclaims" "storageclasses") :test #'equal)
+      (csi-storage-resource-p resource)))
 
 (defun storage-resource-schema-name (resource)
   "Return the upstream structural definition for a storage RESOURCE."
-  (concatenate 'string (if (equal resource "storageclasses") "io.k8s.api.storage.v1." "io.k8s.api.core.v1.")
+  (concatenate 'string (if (equal "storage.k8s.io/v1" (core-resource-api-version resource)) "io.k8s.api.storage.v1." "io.k8s.api.core.v1.")
                (core-resource-kind resource)))
 
 (defun storage-quantity (quantity context)
@@ -175,6 +176,7 @@
     (if namespace (setf (gethash "namespace" metadata) namespace) (remhash "namespace" metadata))
     (validate-template-shape object (template-schema (storage-resource-schema-name resource)) kind)
     (cond
+      ((csi-storage-resource-p resource) (normalize-csi-storage-object resource object existing))
       ((equal resource "storageclasses")
        (require-nonempty-string (gethash "provisioner" object) "provisioner")
        (unless (and (<= (length (gethash "provisioner" object)) 253) (core-qualified-key-p (gethash "provisioner" object)))
@@ -249,6 +251,8 @@
 
 (defun validate-storage-update (store resource before after)
   "Enforce storage allocation identity and immutable source/class fields."
+  (when (csi-storage-resource-p resource)
+    (return-from validate-storage-update (validate-csi-storage-update resource before after)))
   (unless *storage-status-write*
     (if (equal resource "storageclasses")
         (dolist (field '("provisioner" "parameters" "reclaimPolicy" "volumeBindingMode"))

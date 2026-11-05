@@ -522,6 +522,12 @@ the node from starting."
     (make-instance
      'gr8s.node.v1::node-status
      :observed-at-unix-nanos (* (- (get-universal-time) 2208988800) 1000000000)
+     :csi-drivers
+     (when (containerd-runtime-p (node-runtime-runtime node-runtime))
+       ;; Reporting runs on its own thread, so a slow driver can't delay heartbeats.
+       (handler-case (scan-csi-plugin-registry)
+         (error (condition) (format *error-output* "gr8s CSI registry scan failed: ~A~%" condition)))
+       (csi-driver-registrations))
      :pods
      (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
        ;; Prune deleted UIDs and never publish a cache entry for an older Pod
