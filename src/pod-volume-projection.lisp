@@ -137,7 +137,9 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
                             (object-volume-files runtime pod "secrets" part (gethash "name" part) default-mode)))
                          ((gethash "downwardAPI" source)
                           (downward-volume-files pod (gethash "items" (gethash "downwardAPI" source) #())
-                                                 default-mode))))
+                                                 default-mode))
+                         ((gethash "serviceAccountToken" source)
+                          (projected-token-volume-files runtime pod (gethash "serviceAccountToken" source) default-mode))))
           t)))
       (t (values nil nil)))))
 

@@ -23,11 +23,12 @@
 
 (defun storage-resource-p (resource)
   "Return whether RESOURCE belongs to the implemented persistent storage APIs."
-  (member resource '("persistentvolumes" "persistentvolumeclaims" "storageclasses") :test #'equal))
+  (or (member resource '("persistentvolumes" "persistentvolumeclaims" "storageclasses") :test #'equal)
+      (csi-storage-resource-p resource)))
 
 (defun storage-resource-schema-name (resource)
   "Return the upstream structural definition for a storage RESOURCE."
-  (concatenate 'string (if (equal resource "storageclasses") "io.k8s.api.storage.v1." "io.k8s.api.core.v1.")
+  (concatenate 'string (if (equal "storage.k8s.io/v1" (core-resource-api-version resource)) "io.k8s.api.storage.v1." "io.k8s.api.core.v1.")
                (core-resource-kind resource)))
 
 (defun storage-quantity (quantity context)
@@ -175,6 +176,7 @@
     (if namespace (setf (gethash "namespace" metadata) namespace) (remhash "namespace" metadata))
     (validate-template-shape object (template-schema (storage-resource-schema-name resource)) kind)
     (cond
+      ((csi-storage-resource-p resource) (normalize-csi-storage-object resource object existing))
       ((equal resource "storageclasses")
        (require-nonempty-string (gethash "provisioner" object) "provisioner")
        (unless (and (<= (length (gethash "provisioner" object)) 253) (core-qualified-key-p (gethash "provisioner" object)))
@@ -188,7 +190,8 @@
              do (loop for expression across (gethash "matchLabelExpressions" term #())
                       do (unless (core-qualified-key-p (gethash "key" expression))
                            (core-resource-error 422 "Invalid" "Invalid allowed topology key"))
-                         (bootstrap-string-array (gethash "values" expression) "topology values" :nonempty t))))
+                         (bootstrap-string-array (gethash "values" expression) "topology values" :nonempty t)))
+       (validate-builtin-storage-class object))
       (t
        (let ((spec (require-object (gethash "spec" object) "spec")))
          (unless (gethash "volumeMode" spec) (setf (gethash "volumeMode" spec) "Filesystem"))
@@ -207,6 +210,9 @@
                (when (gethash "required" (gethash "nodeAffinity" spec (core-object)))
                  (validate-storage-node-selector (gethash "required" (gethash "nodeAffinity" spec (core-object)))))
                (when (equal source "hostPath") (validate-host-storage-source (gethash source spec)))
+               (when (equal source "nfs")
+                 (validate-nfs-source (gethash source spec))
+                 (validate-nfs-mount-options (gethash "mountOptions" spec)))
                (when (equal source "local")
                  (validate-host-storage-source (gethash source spec) :local t)
                  (unless (gethash "required" (gethash "nodeAffinity" spec (core-object)))
@@ -237,9 +243,16 @@
            (setf (gethash "status" object) (if existing (copy-core-object (gethash "status" existing)) (core-object "phase" "Pending")))))))
     object))
 
+(defun storage-claim-expandable-p (store claim)
+  "Return whether CLAIM's StorageClass allows it to grow."
+  (let ((class (gethash (core-resource-key "storageclasses" nil (gethash "storageClassName" (gethash "spec" claim) ""))
+                        (pod-store-resources store))))
+    (and class (eq t (gethash "allowVolumeExpansion" class)))))
+
 (defun validate-storage-update (store resource before after)
   "Enforce storage allocation identity and immutable source/class fields."
-  (declare (ignore store))
+  (when (csi-storage-resource-p resource)
+    (return-from validate-storage-update (validate-csi-storage-update resource before after)))
   (unless *storage-status-write*
     (if (equal resource "storageclasses")
         (dolist (field '("provisioner" "parameters" "reclaimPolicy" "volumeBindingMode"))
@@ -264,4 +277,9 @@
                 (when (and (gethash "volumeName" old)
                            (< (storage-quantity (gethash "storage" (gethash "requests" (gethash "resources" new))) "storage request")
                          (storage-quantity (gethash "storage" (gethash "requests" (gethash "resources" old))) "storage request")))
-                  (core-resource-error 422 "Invalid" "PersistentVolumeClaim storage requests cannot shrink"))))))))
+                  (core-resource-error 422 "Invalid" "PersistentVolumeClaim storage requests cannot shrink"))
+                (when (and (gethash "volumeName" old)
+                           (> (storage-quantity (gethash "storage" (gethash "requests" (gethash "resources" new))) "storage request")
+                              (storage-quantity (gethash "storage" (gethash "requests" (gethash "resources" old))) "storage request"))
+                           (not (storage-claim-expandable-p store after)))
+                  (core-resource-error 403 "Forbidden" "Only a claim whose StorageClass sets allowVolumeExpansion can be resized"))))))))

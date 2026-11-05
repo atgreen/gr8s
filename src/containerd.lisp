@@ -348,12 +348,16 @@ A container running as any user can write here, and a user mount at the path tak
   "Measure writable layers through CRI and disk-backed emptyDirs from their agent-owned directories."
   (let ((sandbox (containerd-owned-sandbox runtime (pod-uid pod))))
     (when sandbox
-      (values
-       (cri-container-writable-bytes (containerd-runtime-socket-path runtime) (cri-pod-sandbox-info-id sandbox))
-       (loop for volume across (gethash "volumes" (gethash "spec" (pod-to-object pod)) #())
-             for source = (gethash "emptyDir" volume)
-             when (and source (not (equal "Memory" (gethash "medium" source))))
-               sum (directory-disk-bytes (namestring (pod-volume-directory runtime pod (gethash "name" volume)))))))))
+      (let ((usage (loop for volume across (gethash "volumes" (gethash "spec" (pod-to-object pod)) #())
+                         for source = (gethash "emptyDir" volume)
+                         when (and source (not (equal "Memory" (gethash "medium" source))))
+                           collect (cons (gethash "name" volume)
+                                         (directory-disk-bytes
+                                          (namestring (pod-volume-directory runtime pod (gethash "name" volume))))))))
+        (values
+         (cri-container-writable-bytes (containerd-runtime-socket-path runtime) (cri-pod-sandbox-info-id sandbox))
+         (reduce #'+ usage :key #'cdr)
+         usage)))))
 
 (defmethod runtime-logs
     ((runtime containerd-runtime) uid container-name &key tail previous)

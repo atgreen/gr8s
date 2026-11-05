@@ -2,6 +2,9 @@
 
 (defvar *core-resource-view-version* nil)
 
+(defvar *typed-api-status-write* nil
+  "True only while a status subresource write replaces a typed object's or Namespace's status.")
+
 (defvar *resource-quota-admission-exempt* nil
   "True while the server creates its own bootstrap objects, which are counted but never refused.")
 
@@ -211,6 +214,15 @@
       (or (and (= 1 (length parts)) (core-label-name-p (first parts)))
           (and (= 2 (length parts)) (dns-subdomain-p (first parts)) (core-label-name-p (second parts)))))))
 
+(defun path-segment-name-p (name)
+  "Accept what upstream's RBAC objects may be named: anything usable as one URL path segment."
+  (and (stringp name) (<= 1 (length name) 253) (not (member name '("." "..") :test #'equal))
+       (notany (lambda (character) (find character "/%")) name)))
+
+(defun rbac-resource-p (resource)
+  "Return whether RESOURCE is an RBAC collection, whose names may contain colons."
+  (member resource '("roles" "rolebindings" "clusterroles" "clusterrolebindings") :test #'equal))
+
 (defun validate-core-metadata (metadata namespace name &key allow-finalizers name-test)
   (require-object metadata "metadata")
   (when (and namespace (not (dns-label-p namespace)))
@@ -293,6 +305,8 @@
     (return-from normalize-core-resource (normalize-hpa-resource input namespace name store)))
   (when (policy-resource-p resource)
     (return-from normalize-core-resource (normalize-policy-resource resource input namespace name store)))
+  (when (typed-api-resource-p resource)
+    (return-from normalize-core-resource (normalize-typed-api-resource resource input namespace name store)))
   (when (networking-resource-p resource)
     (return-from normalize-core-resource (normalize-networking-resource resource input namespace name store)))
   (when (admission-config-resource-p resource)
@@ -416,6 +430,8 @@
 (defun create-core-resource (store resource input namespace &key dry-run)
   (with-store-lock (store)
     (expire-core-events-unlocked store)
+    (unless (or (equal resource "events") *resource-quota-admission-exempt*)
+      (require-namespace-accepts-content store namespace))
     (let* ((input (copy-core-object input))
            (metadata (require-object (gethash "metadata" input) "metadata")))
       (when (csr-resource-p resource)
@@ -486,6 +502,7 @@
       (when (storage-resource-p resource) (validate-storage-update store resource existing object))
       (when (endpointslice-resource-p resource) (validate-endpointslice-update existing object))
       (when (policy-resource-p resource) (validate-policy-update resource existing object))
+      (when (typed-api-resource-p resource) (validate-typed-api-update resource existing object))
       (when (member resource '("services" "persistentvolumeclaims") :test #'equal)
         (enforce-resource-quotas-unlocked store resource namespace object existing))
       (when (and (gethash "uid" metadata) (not (equal (gethash "uid" metadata) (gethash "uid" existing-metadata))))
@@ -515,7 +532,7 @@
       (when (admission-config-resource-p resource) (prepare-admission-config-write object existing))
       (let ((resources (copy-core-resource-index store)))
         (if (or (and (csr-resource-p resource) (csr-finalized-p object))
-                (and (custom-resource-key-p resource)
+                (and (or (custom-resource-key-p resource) (typed-api-resource-p resource))
                      (gethash "deletionTimestamp" metadata) (zerop (length (gethash "finalizers" metadata #())))))
             (remhash (core-resource-key resource namespace name) resources)
             (setf (gethash (core-resource-key resource namespace name) resources) object))
@@ -536,6 +553,10 @@
         (return-from delete-core-resource (delete-csr-unlocked store existing dry-run)))
       (when (storage-resource-p resource)
         (return-from delete-core-resource (delete-storage-resource-unlocked store resource existing dry-run)))
+      (when (equal resource "namespaces")
+        (return-from delete-core-resource (delete-namespace-unlocked store existing dry-run)))
+      (when (typed-api-resource-p resource)
+        (return-from delete-core-resource (delete-typed-api-resource-unlocked store resource existing dry-run)))
       (when (policy-resource-p resource) (validate-policy-delete resource existing))
       (let ((resources (copy-core-resource-index store)))
         (remhash (core-resource-key resource namespace name) resources)

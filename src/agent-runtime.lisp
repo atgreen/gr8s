@@ -525,6 +525,12 @@ the node from starting."
     (make-instance
      'gr8s.node.v1::node-status
      :observed-at-unix-nanos (* (- (get-universal-time) 2208988800) 1000000000)
+     :csi-drivers
+     (when (containerd-runtime-p (node-runtime-runtime node-runtime))
+       ;; Reporting runs on its own thread, so a slow driver can't delay heartbeats.
+       (handler-case (scan-csi-plugin-registry)
+         (error (condition) (format *error-output* "gr8s CSI registry scan failed: ~A~%" condition)))
+       (csi-driver-registrations))
      :pods
      (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
        ;; Prune deleted UIDs and never publish a cache entry for an older Pod
@@ -1042,17 +1048,40 @@ snapshot application."
       (write-websocket-frame
        (node-exec-operation-stream operation) 2 #(255 0) :masked-p t))))
 
+(defun start-volume-reclaim-operation (node-runtime request emit)
+  "Remove a volume's directory on its own thread, since a large tree or dead server takes time."
+  (bt:make-thread
+   (lambda ()
+     (funcall
+      emit :operation-response
+      (handler-case
+          (progn
+            (reclaim-provisioned-volume
+             (node-runtime-state-directory node-runtime)
+             (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string
+                                    (slot-value request 'gr8s.node.v1::volume-json))))
+            (node-operation-response request gr8s.node.v1::+operationstatus-operation_status_complete+))
+        (error (condition)
+          (node-operation-response request gr8s.node.v1::+operationstatus-operation_status_failed+
+                                   :exit-code 1 :message (princ-to-string condition))))))
+   :name "gr8s volume reclaim"))
+
 (defun dispatch-node-operation (node-runtime variant payload emit)
   (handler-case
       (case variant
         (:operation-request
-         (if (and (= (slot-value payload 'gr8s.node.v1::kind)
-                     gr8s.node.v1::+operationkind-operation_kind_exec+)
-                  (or (slot-value payload 'gr8s.node.v1::stdin)
-                      (slot-value payload 'gr8s.node.v1::tty)))
-             (start-node-exec-operation node-runtime payload emit)
-             (dolist (reply (handle-node-operation node-runtime payload))
-               (funcall emit (car reply) (cdr reply)))))
+         (cond
+           ((= (slot-value payload 'gr8s.node.v1::kind)
+               gr8s.node.v1::+operationkind-operation_kind_reclaim_volume+)
+            (start-volume-reclaim-operation node-runtime payload emit))
+           ((and (= (slot-value payload 'gr8s.node.v1::kind)
+                    gr8s.node.v1::+operationkind-operation_kind_exec+)
+                 (or (slot-value payload 'gr8s.node.v1::stdin)
+                     (slot-value payload 'gr8s.node.v1::tty)))
+            (start-node-exec-operation node-runtime payload emit))
+           (t
+            (dolist (reply (handle-node-operation node-runtime payload))
+              (funcall emit (car reply) (cdr reply))))))
         (:operation-input
          (let ((operation
                  (find-node-exec-operation

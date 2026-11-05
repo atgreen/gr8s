@@ -364,6 +364,11 @@
      (let ((status (slot-value envelope 'gr8s.node.v1::status)))
        (bt:with-lock-held ((node-grpc-server-lock server))
          (setf (gethash node-name (node-grpc-server-statuses server)) status))
+       (handler-case
+           (update-node-csi-registrations (node-grpc-server-store server) node-name
+                                          (slot-value status 'gr8s.node.v1::csi-drivers))
+         (kubernetes-error (condition)
+           (format *error-output* "gr8s CSINode ~A update failed: ~A~%" node-name condition)))
        (loop for pod-status in (slot-value status 'gr8s.node.v1::pods)
              for pod = (handler-case
                            (get-pod (node-grpc-server-store server)

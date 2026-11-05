@@ -125,9 +125,11 @@ Configuration resources are exempt so a bad webhook can always be removed."
                                                      :spec webhook :version version)))))
 
 (defun admission-active-p (store attributes)
-  "Test whether any webhook's rules select this operation."
+  "Test whether any webhook's or admission policy's rules select this operation."
   (or (admission-hooks store "mutatingwebhookconfigurations" attributes)
-      (admission-hooks store "validatingwebhookconfigurations" attributes)))
+      (admission-hooks store "validatingwebhookconfigurations" attributes)
+      (admission-policy-candidates store "mutatingadmissionpolicies" attributes)
+      (admission-policy-candidates store "validatingadmissionpolicies" attributes)))
 
 (defun admission-object-labels (object)
   "Return OBJECT's labels when it is an object with metadata."
@@ -530,6 +532,8 @@ vouching for another webhook that names the same host."
 Each IfNeeded webhook runs once more when a later webhook changed the object."
   (let ((hooks (admission-hooks store "mutatingwebhookconfigurations" attributes))
         (invoked nil) (pending nil))
+    ;; As upstream's plugin order has it, mutating policies run ahead of mutating webhooks.
+    (admission-run-mutating-policies store attributes)
     (dolist (hook hooks)
       (let ((changed (admission-invoke-mutating store hook attributes)))
         (when changed (setf pending (union pending invoked)))
@@ -555,7 +559,8 @@ Each IfNeeded webhook runs once more when a later webhook changed the object."
       (list :failed (remove #\Newline (princ-to-string condition))))))
 
 (defun admission-validate (store attributes)
-  "Run the selected validating webhooks concurrently, and refuse on any denial or Fail-policy failure."
+  "Run validating policies, then the selected validating webhooks concurrently, refusing on any denial or Fail-policy failure."
+  (admission-run-validating-policies store attributes)
   (let* ((hooks (remove-if-not (lambda (hook) (admission-hook-selected-p store hook attributes))
                                (admission-hooks store "validatingwebhookconfigurations" attributes)))
          (uid (admission-uid attributes))

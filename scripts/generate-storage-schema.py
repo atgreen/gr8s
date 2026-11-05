@@ -26,7 +26,9 @@ def main():
     shared.SOURCES.update(EXTRA_SOURCES)
     sources = shared.load_sources(args.cache)
     all_messages = shared.proto_messages(sources)
-    roots = ["k8s.io.api.core.v1.PersistentVolume", "k8s.io.api.core.v1.PersistentVolumeClaim", "k8s.io.api.storage.v1.StorageClass"]
+    roots = ["k8s.io.api.core.v1.PersistentVolume", "k8s.io.api.core.v1.PersistentVolumeClaim", "k8s.io.api.storage.v1.StorageClass",
+             "k8s.io.api.storage.v1.CSIDriver", "k8s.io.api.storage.v1.CSINode", "k8s.io.api.storage.v1.VolumeAttachment",
+             "k8s.io.api.storage.v1.CSIStorageCapacity"]
     pending = list(roots)
     messages = {}
     while pending:
