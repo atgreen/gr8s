@@ -32,6 +32,12 @@
 (defvar *cel-remaining-steps* 0
   "Steps left for the expression being evaluated.")
 
+(defvar *cel-declared-variables* '("object" "oldObject" "request")
+  "Variables the environment of the expression being compiled declares.")
+
+(defvar *cel-construction-types* nil
+  "Root type names the expression being compiled may construct, as Object or JSONPatch.")
+
 (defun cel-syntax-error (position control &rest arguments)
   "Signal a compile error at the zero-based POSITION of the expression."
   (error 'cel-compile-error
@@ -317,6 +323,25 @@
              (third arguments) (second arguments)))
       (t (list :call name target arguments)))))
 
+(defun cel-construction-root (node)
+  "Return the root name of a dotted type name such as Object.spec, or NIL for any other NODE."
+  (case (first node)
+    (:ident (second node))
+    (:select (cel-construction-root (second node)))))
+
+(defun cel-parse-construction-fields (parser)
+  "Parse the field initializers of a message construction, allowing a trailing comma."
+  (let ((fields nil))
+    (loop
+      (when (cel-accept parser "}") (return))
+      (let ((name (cel-next-identifier parser)))
+        (cel-expect parser ":")
+        (push (cons name (cel-parse-expression parser)) fields))
+      (unless (cel-accept parser ",")
+        (cel-expect parser "}")
+        (return)))
+    (nreverse fields)))
+
 (defun cel-parse-member (parser)
   "Parse Member: selections, indexes and method calls on a Primary."
   (let ((node (cel-parse-primary parser)))
@@ -332,7 +357,10 @@
            (cel-expect parser "]")
            (setf node (list :index node index))))
         ((cel-operator-p parser "{")
-         (cel-check-error "message construction is not supported"))
+         (unless (member (cel-construction-root node) *cel-construction-types* :test #'equal)
+           (cel-check-error "message construction is not supported"))
+         (cel-accept parser "{")
+         (setf node (list :construct (cel-parse-construction-fields parser))))
         (t (return node))))))
 
 (defun cel-parse-primary (parser)
@@ -497,7 +525,7 @@
     (:ident
      (let ((name (second node)))
        (cond ((member name scope :test #'equal) :dyn)
-             ((member name '("object" "oldObject" "request") :test #'equal) :dyn)
+             ((member name *cel-declared-variables* :test #'equal) :dyn)
              ((equal name "authorizer") (cel-check-error "the authorizer variable is not supported"))
              (t (cel-check-error "undeclared reference to '~A'" name)))))
     (:select
@@ -522,6 +550,9 @@
     (:call (destructuring-bind (name target arguments) (rest node)
              (cel-check-call name target arguments scope)))
     (:list (dolist (item (second node)) (cel-check item scope)) :list)
+    (:construct
+     (dolist (field (second node)) (cel-check (cdr field) scope))
+     :map)
     (:map
      (dolist (pair (second node))
        (unless (cel-compatible-p (cel-check (car pair) scope) :string)
@@ -556,8 +587,8 @@
             (if (eq kind :filter) :list :bool))
            (:map :list)))))))
 
-(defun compile-cel-condition (expression)
-  "Parse and check EXPRESSION, which must have the static result type bool."
+(defun compile-cel-expression (expression)
+  "Parse and check EXPRESSION, returning its program and static result type."
   (when (> (length expression) +cel-maximum-expression-length+)
     (cel-check-error "expression exceeds ~D characters" +cel-maximum-expression-length+))
   (let* ((parser (make-cel-parser (cel-tokenize expression)))
@@ -565,9 +596,13 @@
          (token (cel-peek parser)))
     (unless (eq :eof (first token))
       (cel-syntax-error (third token) "extraneous input '~A'" (second token)))
-    (let ((type (cel-check node nil)))
-      (unless (eq type :bool)
-        (cel-check-error "must evaluate to bool, found ~(~A~)" type)))
+    (values node (cel-check node nil))))
+
+(defun compile-cel-condition (expression)
+  "Parse and check EXPRESSION, which must have the static result type bool."
+  (multiple-value-bind (node type) (compile-cel-expression expression)
+    (unless (eq type :bool)
+      (cel-check-error "must evaluate to bool, found ~(~A~)" type))
     node))
 
 ;;; Evaluation
@@ -847,6 +882,10 @@
                   (and target (list (cel-evaluate target bindings)))
                   (mapcar (lambda (argument) (cel-evaluate argument bindings)) arguments))))
     (:list (map 'vector (lambda (item) (cel-evaluate item bindings)) (second node)))
+    (:construct
+     (let ((object (make-hash-table :test #'equal)))
+       (dolist (field (second node) object)
+         (setf (gethash (car field) object) (cel-evaluate (cdr field) bindings)))))
     (:map
      (let ((object (make-hash-table :test #'equal)))
        (dolist (pair (second node) object)
@@ -864,6 +903,11 @@
      (destructuring-bind (kind iterable variable body predicate) (rest node)
        (cel-comprehend kind (cel-iteration-items (cel-evaluate iterable bindings))
                        variable body predicate bindings)))))
+
+(defun evaluate-cel-value (program bindings)
+  "Run a compiled PROGRAM under a fresh step budget, returning its value of any type."
+  (let ((*cel-remaining-steps* +cel-evaluation-budget+))
+    (cel-evaluate program bindings)))
 
 (defun evaluate-cel-condition (program bindings)
   "Run a compiled PROGRAM under a fresh step budget, signaling on any runtime error."

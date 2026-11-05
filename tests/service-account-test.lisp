@@ -117,7 +117,12 @@
       (is (equal "default" (gethash "serviceAccountName" spec)))
       (is (= 1 (length (gethash "volumes" spec))))
       (is (= 1 (length (gethash "volumeMounts" container))))
-      (is (= 1 (length (gr8s::pod-referenced-resource-objects store pod))))
+      (is (uiop:string-prefix-p "kube-api-access-" (gethash "name" (aref (gethash "volumes" spec) 0))))
+      (is (equal gr8s::+service-account-mount-path+ (gethash "mountPath" (aref (gethash "volumeMounts" container) 0))))
+      ;; The node receives the root CA and the minted token, and nothing else.
+      (gr8s::create-core-resource store "namespaces" (gr8s::core-object "metadata" (gr8s::core-object "name" "default")) nil)
+      (gr8s::ensure-namespace-root-ca store "default")
+      (is (= 2 (length (gr8s::pod-referenced-resource-objects store pod))))
       (let ((host (find "KUBERNETES_SERVICE_HOST" (gethash "env" container) :test #'equal
                         :key (lambda (entry) (gethash "name" entry)))))
         (is (equal "10.96.0.1" (gethash "value" host))))

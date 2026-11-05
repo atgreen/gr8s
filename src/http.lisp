@@ -103,7 +103,8 @@
                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                        (event-api-group) (workload-api-group) (batch-api-group) (budget-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group) (networking-api-group)
                        (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group) (cert-manager-api-group))))
-    (setf groups (concatenate 'vector groups (vector (autoscaling-api-group) (apiservice-api-group) (coordination-api-group))))
+    (setf groups (concatenate 'vector groups (typed-api-groups) (auth-review-groups)))
+    (setf groups (concatenate 'vector groups (vector (autoscaling-api-group) (apiservice-api-group))))
     (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
@@ -545,6 +546,13 @@
              :reason "BadRequest"
              :message (format nil "container ~A is not valid for pod ~A"
                               container name)))
+    (let* ((status (pod-observed-status store pod))
+           (observed (and status (find container (gethash "containerStatuses" status #()) :test #'equal
+                                       :key (lambda (entry) (gethash "name" entry))))))
+      (when (and observed (container-status-never-started-p observed))
+        (error 'kubernetes-error :status-code 400 :reason "BadRequest"
+               :message (format nil "container ~S in pod ~S is waiting to start: ~A" container name
+                                (gethash "reason" (gethash "waiting" (gethash "state" observed)) "ContainerCreating")))))
     (let* ((previous (true-parameter-p (hunchentoot:parameter "previous")))
            (raw (or (reconciler-logs reconciler (pod-uid pod) container :previous previous) ""))
            (text (format-pod-logs-for-request raw)))
@@ -1213,6 +1221,18 @@ Clients that can read an object as well say so with a further media range."
           ((string= path "/apis/storage.k8s.io/v1") (storage-discovery-response))
           ((string= path "/openapi/v3/apis/storage.k8s.io/v1") (openapi-v3-response "storage.k8s.io/v1"))
           ((storage-status-route path) (dispatch-storage-status-request store path method))
+          ((typed-status-route path) (dispatch-typed-status-request store path method))
+          ((namespace-finalize-route path) (dispatch-namespace-finalize-request store path method))
+          ((equal path "/.well-known/openid-configuration") (openid-configuration-response))
+          ((equal path "/openid/v1/jwks") (openid-jwks-response store))
+          ((auth-review-group-route path)
+           (multiple-value-bind (group version-document) (auth-review-group-route path)
+             (if version-document (auth-review-discovery-response group) (json-response (typed-api-group group)))))
+          ((auth-review-route path) (dispatch-auth-review-request store path method))
+          ((nth-value 1 (service-account-token-route path)) (service-account-token-response store path method))
+          ((typed-api-group-route path)
+           (multiple-value-bind (group version-document) (typed-api-group-route path)
+             (if version-document (typed-api-discovery-response group) (json-response (typed-api-group group)))))
           ((string= path "/apis/node.k8s.io") (json-response (policy-api-group "node.k8s.io")))
           ((string= path "/apis/node.k8s.io/v1") (policy-discovery-response "node.k8s.io"))
           ((string= path "/openapi/v3/apis/node.k8s.io/v1") (openapi-v3-response "node.k8s.io/v1"))
@@ -1227,8 +1247,6 @@ Clients that can read an object as well say so with a further media range."
           ((string= path "/apis/gateway.networking.k8s.io/v1") (gateway-discovery-response))
           ((string= path "/apis/cert-manager.io") (json-response (cert-manager-api-group)))
           ((string= path "/apis/cert-manager.io/v1") (cert-manager-discovery-response))
-          ((string= path "/apis/coordination.k8s.io") (json-response (coordination-api-group)))
-          ((string= path "/apis/coordination.k8s.io/v1") (coordination-discovery-response))
           ((string= path "/apis/autoscaling") (json-response (autoscaling-api-group)))
           ((string= path "/apis/autoscaling/v1") (autoscaling-discovery-response "v1"))
           ((string= path "/apis/autoscaling/v2") (autoscaling-discovery-response "v2"))

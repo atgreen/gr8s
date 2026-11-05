@@ -115,7 +115,20 @@ Namespaced ConfigMap and Secret APIs support durable CRUD, list/selectors,
 pagination, patch, optimistic concurrency, and dry-run through current kubectl
 clients. See [ConfigMap and Secret APIs](docs/configmap-secret-api.md) for the
 supported surface. Pods can consume referenced environment keys and mounted
-files. Watch, server-side apply, and full Namespace lifecycle are not yet implemented.
+files. A deleted Namespace turns Terminating and refuses new content while its
+Pods drain first, then its other objects, until its finalizers are released.
+
+Lease, flow control, dynamic resource allocation and admission policy objects are
+served with protobuf requests, selectors, watches, status subresources and
+finalizers. Only the API exists for most of them: no flow control limits requests
+and no allocator serves ResourceClaims. Admission policies are enforced:
+ValidatingAdmissionPolicy and MutatingAdmissionPolicy evaluate CEL on the admission
+path, though `status.typeChecking`, audit annotations and the `authorizer` variable
+are not implemented.
+
+Pods mount signed ES256 ServiceAccount tokens bound to the Pod and its node, renewed
+by the control plane after 80% of their lifetime. TokenRequest, TokenReview, the
+SubjectAccessReview family, authorized impersonation and OIDC discovery are served.
 
 ResourceQuota, LimitRange, RuntimeClass and PriorityClass are served with real
 effects. Quota usage is computed from the live objects and checked under the store

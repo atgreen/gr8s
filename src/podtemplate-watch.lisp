@@ -50,7 +50,7 @@
   "Serve a real Kubernetes JSON watch stream for a resource collection.
 PAGE-READER and EVENT-READER replace the durable journal for separately stored resources."
   (let* ((rv-text (or (hunchentoot:parameter "resourceVersion") ""))
-         (initial (or (equal rv-text "0") (true-parameter-p (hunchentoot:parameter "sendInitialEvents"))))
+         (initial (or (member rv-text '("" "0") :test #'equal) (true-parameter-p (hunchentoot:parameter "sendInitialEvents"))))
          (labels (or (hunchentoot:parameter "labelSelector") ""))
          (fields (or (hunchentoot:parameter "fieldSelector") ""))
          (match (hunchentoot:parameter "resourceVersionMatch"))

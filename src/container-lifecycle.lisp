@@ -173,6 +173,12 @@
      (gethash "containers" state))
     (coerce (sort statuses #'string< :key (lambda (status) (gethash "name" status))) 'vector)))
 
+(defun container-status-never-started-p (status)
+  "Return whether STATUS is waiting without an earlier attempt having run."
+  (and (hash-table-p (gethash "waiting" (gethash "state" status (core-object))))
+       (not (hash-table-p (gethash "terminated" (gethash "lastState" status (core-object)))))
+       (not (equal "CrashLoopBackOff" (gethash "reason" (gethash "waiting" (gethash "state" status)))))))
+
 (defun container-lifecycle-phase (statuses sandbox-ready-p)
   "Derive phase from actual retained exits even after the old sandbox becomes unavailable."
   (cond
@@ -181,6 +187,8 @@
      (if (some (lambda (status) (not (zerop (gethash "exitCode" (gethash "terminated" (gethash "state" status)))))) statuses)
          "Failed" "Succeeded"))
     ((not sandbox-ready-p) "Unknown")
+    ;; As with a kubelet, a container that has yet to start at all keeps the Pod Pending.
+    ((some #'container-status-never-started-p statuses) "Pending")
     ((some (lambda (status) (gethash "running" (gethash "state" status))) statuses) "Running")
     ((some (lambda (status) (equal "CrashLoopBackOff" (gethash "reason" (gethash "waiting" (gethash "state" status) (core-object))))) statuses)
      "Running")

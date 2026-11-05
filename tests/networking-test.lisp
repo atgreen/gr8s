@@ -307,6 +307,40 @@
                          :object (gr8s::core-object "metadata" (gr8s::core-object "name" "not-an-ip")
                                                     "spec" (gr8s::core-object "parentRef" parent))))))
 
+(test pod-stays-pending-until-every-container-has-started
+  (flet ((status (state &optional last-state)
+           (let ((status (gr8s::core-object "state" state)))
+             (when last-state (setf (gethash "lastState" status) last-state))
+             status)))
+    (let ((running (status (gr8s::core-object "running" (gr8s::core-object))))
+          (creating (status (gr8s::core-object "waiting" (gr8s::core-object "reason" "ContainerCreating"))))
+          (restarting (status (gr8s::core-object "waiting" (gr8s::core-object "reason" "CrashLoopBackOff"))
+                              (gr8s::core-object "terminated" (gr8s::core-object "exitCode" 1)))))
+      (is (equal "Pending" (gr8s::container-lifecycle-phase (list running creating) t)))
+      (is (equal "Running" (gr8s::container-lifecycle-phase (list running running) t)))
+      ;; A container that has run before and is waiting to restart does not take the Pod back to Pending.
+      (is (equal "Running" (gr8s::container-lifecycle-phase (list running restarting) t))))))
+
+(test pod-with-an-unreported-container-is-pending
+  ;; The runtime reports only the containers it has created so far.
+  (let* ((object (com.inuoe.jzon:parse *valid-pod-json*))
+         (spec (gethash "spec" object))
+         (first-container (aref (gethash "containers" spec) 0))
+         (second-container (gr8s::copy-core-object first-container)))
+    (setf (gethash "name" second-container) "later"
+          (gethash "ports" second-container) #()
+          (gethash "containers" spec) (vector first-container second-container)
+          (gethash "nodeName" spec) "worker-a")
+    (let* ((pod (parse-pod object))
+           (status (gr8s::core-object "phase" "Running"
+                                      "containerStatuses"
+                                      (vector (gr8s::core-object "name" (gethash "name" first-container)
+                                                                 "state" (gr8s::core-object "running" (gr8s::core-object))))))
+           (result (gr8s::add-declared-container-statuses pod status)))
+      (is (equal "Pending" (gethash "phase" result)))
+      (is (= 2 (length (gethash "containerStatuses" result))))
+      (is (gr8s::container-status-never-started-p (aref (gethash "containerStatuses" result) 1))))))
+
 (test proxy-urls-resolve-to-their-parts
   (is (equal '("alpha" "web" t)
              (multiple-value-list (gr8s::service-http-proxy-route "/api/v1/namespaces/alpha/services/web/proxy"))))
