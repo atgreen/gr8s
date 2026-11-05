@@ -8,6 +8,38 @@
 (defvar *resource-quota-admission-exempt* nil
   "True while the server creates its own bootstrap objects, which are counted but never refused.")
 
+(defvar *crd-view-definition* nil)
+(defvar *crd-request-version* nil)
+(defvar *crd-view-store* nil
+  "The store of the current custom resource request, whose Services route conversion webhooks.")
+(defvar *crd-conversion-deferred* nil
+  "True inside a store transaction, where a conversion webhook must not be called.")
+(defvar *crd-conversion-memo* nil
+  "Conversions this request has already obtained, keyed by object content and target.")
+
+(define-condition crd-conversion-needed (serious-condition)
+  ((definition :initarg :definition :reader crd-conversion-needed-definition)
+   (objects :initarg :objects :reader crd-conversion-needed-objects)
+   (target :initarg :target :reader crd-conversion-needed-target))
+  (:documentation "A store transaction needs a webhook conversion it has not got yet."))
+
+(defparameter +crd-conversion-transaction-attempts+ 16
+  "Times a store transaction may restart to obtain conversions before giving up.")
+
+(defmacro with-crd-deferred-conversions (&body body)
+  "Run the store transaction BODY, restarting it outside the lock whenever it needs a conversion."
+  (let ((run (gensym "RUN")) (done (gensym "DONE")))
+    `(flet ((,run () ,@body))
+       (if *crd-conversion-deferred*
+           (,run)
+           (let ((*crd-conversion-memo* *crd-conversion-memo*))
+             (block ,done
+               (loop repeat +crd-conversion-transaction-attempts+
+                     do (handler-case
+                            (let ((*crd-conversion-deferred* t)) (return-from ,done (,run)))
+                          (crd-conversion-needed (condition) (crd-perform-deferred-conversion condition))))
+               (core-resource-error 500 "InternalError" "Custom resource conversion did not settle")))))))
+
 ;; Core and bootstrap resources share a durable transaction and revision sequence.
 ;; Objects are copied at the boundary so clients cannot mutate indexed state.
 (defun core-object (&rest pairs)
@@ -428,7 +460,8 @@
          (map-equal (gethash "binaryData" left) (gethash "binaryData" right)))))
 
 (defun create-core-resource (store resource input namespace &key dry-run)
-  (with-store-lock (store)
+  (with-crd-deferred-conversions
+   (with-store-lock (store)
     (expire-core-events-unlocked store)
     (unless (or (equal resource "events") *resource-quota-admission-exempt*)
       (require-namespace-accepts-content store namespace))
@@ -474,7 +507,7 @@
         (when (admission-config-resource-p resource) (prepare-admission-config-write object nil))
         (setf (gethash key resources) object)
         (unless dry-run (commit-core-resources store resources revision))
-        (copy-core-object object)))))
+        (copy-core-object object))))))
 
 (defun core-resource-update-view (resource existing)
   "Copy stored object EXISTING into the form the current request's writer sees."
@@ -484,7 +517,8 @@
         (t (copy-core-object existing))))
 
 (defun update-core-resource (store resource namespace name transform &key dry-run)
-  (with-store-lock (store)
+  (with-crd-deferred-conversions
+   (with-store-lock (store)
     (expire-core-events-unlocked store)
     (let* ((existing (get-core-resource-unlocked store resource namespace name))
            (existing-metadata (gethash "metadata" existing))
@@ -537,7 +571,7 @@
             (remhash (core-resource-key resource namespace name) resources)
             (setf (gethash (core-resource-key resource namespace name) resources) object))
         (unless dry-run (commit-core-resources store resources revision)))
-      (copy-core-object object))))
+      (copy-core-object object)))))
 
 (defun delete-core-resource (store resource namespace name &key uid resource-version dry-run)
   (with-store-lock (store)

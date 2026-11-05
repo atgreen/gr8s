@@ -113,7 +113,9 @@
     (when response
       (setf (gethash "uid" response) (gethash "uid" request))
       (admission-test-respond stream
-                              (gr8s::core-object "apiVersion" "admission.k8s.io/v1" "kind" "AdmissionReview" "response" response)
+                              (if (gethash "desiredAPIVersion" request)
+                                  (gr8s::core-object "apiVersion" "apiextensions.k8s.io/v1" "kind" "ConversionReview" "response" response)
+                                  (gr8s::core-object "apiVersion" "admission.k8s.io/v1" "kind" "AdmissionReview" "response" response))
                               :chunked (search "chunked" path)))))
 
 (defun admission-test-backend (certificate key handler)

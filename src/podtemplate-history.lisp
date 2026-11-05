@@ -124,8 +124,10 @@ The lists are replaced rather than changed by commits, so a caller may read them
   "List a consistent revision; return a replacement continuation when history expires."
   (unless (or (null limit) (typep limit '(integer 0 *))) (core-resource-error 400 "BadRequest" "Invalid limit"))
   (unless (member match '(nil "" "Exact" "NotOlderThan") :test #'equal) (core-resource-error 400 "BadRequest" "Invalid resourceVersionMatch"))
-  (let ((label-test (core-selector-predicate labels)) (field-test (core-selector-predicate fields :fields t :field-paths (core-resource-field-paths resource))))
-    (with-store-lock (store)
+  (let ((label-test (core-selector-predicate labels)) (field-test (crd-field-selector-test resource fields)))
+    (crd-prepare-selector-views store resource namespace fields)
+    (with-crd-deferred-conversions
+     (with-store-lock (store)
       (check-crd-resource-context-unlocked store resource)
       (compact-template-history-unlocked store)
       (let* ((token (when (and continuation (plusp (length continuation)))
@@ -169,4 +171,4 @@ The lists are replaced rather than changed by commits, so a caller may read them
             (when (and (equal labels "") (equal fields ""))
               (setf (gethash "remainingItemCount" metadata) (- (length items) end))))
           (values (core-object "apiVersion" (core-resource-api-version resource) "kind" (concatenate 'string (core-resource-kind resource) "List") "metadata" metadata
-                               "items" (map 'vector #'copy-core-object (subseq items 0 end))) 200))))))
+                               "items" (map 'vector #'copy-core-object (subseq items 0 end))) 200)))))))

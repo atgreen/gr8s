@@ -3,8 +3,8 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Serve admitted custom-resource routes, versions, discovery and status using
-;;;; the shared durable journal. Conversion strategy None changes API identity
-;;;; without inventing conversions, and every response applies its version schema.
+;;;; the shared durable journal. Responses convert to the requested version and
+;;;; apply its schema.
 
 (in-package #:gr8s)
 
@@ -72,10 +72,14 @@
         (cond
           ((and (equal kind (gethash "kind" names))
                 (uiop:string-prefix-p (concatenate 'string group "/") (gethash "apiVersion" object "")))
-           (setf object (crd-prepare-value object (crd-schema version) t)
-                 (gethash "apiVersion" object) (format nil "~A/~A" group *crd-request-version*)) object)
+           (setf object (crd-prepare-value (crd-object-at-version definition object *crd-request-version*)
+                                           (crd-schema version) t))
+           object)
           ((and (equal kind (concatenate 'string (gethash "kind" names) "List"))
                 (gethash "items" object))
+           ;; One review converts the whole page, which the per-item views then find remembered.
+           (when (crd-conversion-webhook definition)
+             (crd-convert-objects definition (coerce (gethash "items" object) 'list) *crd-request-version*))
            (setf (gethash "apiVersion" object) (format nil "~A/~A" group *crd-request-version*)
                  (gethash "kind" object) (gethash "listKind" names)
                  (gethash "items" object) (map 'vector #'crd-api-view (gethash "items" object))) object)
@@ -229,6 +233,7 @@
          (declare (ignore tag))
          (let* ((*stored-resource-types* (append *stored-resource-types* (crd-resource-types store)))
                 (*crd-view-definition* definition) (*crd-request-version* version)
+                (*crd-view-store* store) (*crd-conversion-memo* (make-hash-table :test #'equal))
                 (resource (crd-custom-key definition)) (*crd-route* (list resource namespace name)))
            (when (and (equal "Namespaced" (gethash "scope" (gethash "spec" definition))) (null namespace)
                       (or name (not (eq method :get))))
@@ -244,7 +249,8 @@
                      (options (when (and data (plusp (length data))) (com.inuoe.jzon:parse data)))
                      (dry-run (or (core-resource-dry-run-p) (equalp #("All") (gethash "dryRun" (or options (core-object))))))
                      (label-test (core-selector-predicate (hunchentoot:parameter "labelSelector")))
-                     (field-test (core-selector-predicate (hunchentoot:parameter "fieldSelector") :fields t)))
+                     (field-test (crd-field-selector-test resource (hunchentoot:parameter "fieldSelector"))))
+                (crd-prepare-selector-views store resource namespace (hunchentoot:parameter "fieldSelector"))
                 (dolist (object (list-core-resources store resource namespace))
                   (when (and (funcall label-test object) (funcall field-test object))
                     (let ((metadata (gethash "metadata" object)))

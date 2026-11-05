@@ -118,8 +118,7 @@ A client's own stale resourceVersion still fails, in the preview of the next att
                                               :options (admission-delete-options options) :dry-run dry-run)))
     (when (admission-active-p store attributes)
       (let ((labels (core-selector-predicate (hunchentoot:parameter "labelSelector")))
-            (fields (core-selector-predicate (hunchentoot:parameter "fieldSelector") :fields t
-                                             :field-paths (core-resource-field-paths resource))))
+            (fields (crd-field-selector-test resource (hunchentoot:parameter "fieldSelector"))))
         (dolist (object (list-core-resources store resource namespace))
           (when (and (funcall labels object) (funcall fields object))
             (let ((metadata (gethash "metadata" object)))

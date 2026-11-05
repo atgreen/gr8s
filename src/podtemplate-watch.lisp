@@ -10,7 +10,7 @@
 
 (defun template-watch-events (store namespace labels fields revision &key (resource "podtemplates"))
   "Read matching journal events after REVISION and the current storage watermark."
-  (let ((label-test (core-selector-predicate labels)) (field-test (core-selector-predicate fields :fields t :field-paths (core-resource-field-paths resource))))
+  (let ((label-test (core-selector-predicate labels)) (field-test (crd-field-selector-test resource fields)))
     (labels ((matches (object)
                (and (hash-table-p object)
                     (or (null namespace) (equal namespace (gethash "namespace" (gethash "metadata" object))))

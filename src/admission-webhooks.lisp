@@ -105,7 +105,7 @@
 (defun admission-hook-version (webhook attributes)
   "Choose the version to call WEBHOOK at, or NIL when its rules do not match.
 The request's own version wins; matchPolicy Equivalent also accepts another served
-version of the same custom resource, whose conversion strategy is always None."
+version of the same custom resource, which the object is converted to for the call."
   (let ((group (admission-group attributes)) (version (admission-version attributes)) (rules (gethash "rules" webhook)))
     (flet ((matches (candidate)
              (some (lambda (rule) (admission-rule-matches-p rule attributes group candidate)) rules)))
@@ -176,11 +176,9 @@ Configuration resources are exempt so a bad webhook can always be removed."
          (requested (admission-version attributes))
          (converted (not (equal version requested)))
          (request-version (lambda (object)
-                            (when (and converted (hash-table-p object))
-                              (setf object (copy-core-object object)
-                                    (gethash "apiVersion" object)
-                                    (format nil "~A/~A" (admission-group attributes) version)))
-                            object))
+                            (if (and converted (hash-table-p object))
+                                (crd-object-at-version *crd-view-definition* object version)
+                                object)))
          (resource (core-object "group" (admission-group attributes) "version" version
                                 "resource" (admission-plural attributes)))
          (kind (core-object "group" (admission-kind-group attributes)
