@@ -805,6 +805,13 @@ What was consumed isn't kept, for streams too long to hold in memory."
       (bt2:with-lock-held ((ag-http2::connection-flow-control-lock connection))
         (bt2:condition-broadcast (ag-http2::connection-flow-control-cv connection))))))
 
+(defun close-agent-session-connection (channel)
+  "Close CHANNEL's connection but leave it on the channel while the session unwinds.
+AG-GRPC:CHANNEL-CLOSE forgets it, and the reading thread's next read then fails with no
+applicable method for NIL rather than finding a closed connection."
+  (let ((connection (ag-grpc:channel-connection channel)))
+    (when connection (ag-http2:connection-close connection))))
+
 (defun validate-node-snapshot-identity (identity snapshot)
   "Reject another node allocation before an arrival observer can persist any deletion intent."
   (let ((network (slot-value snapshot 'gr8s.node.v1::network))
@@ -1159,8 +1166,13 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                      (setf session-finished-p t
                            close-p t)))
                  (when close-p
-                   (ignore-errors (ag-grpc:channel-close channel))
-                   (ignore-errors (wake-agent-session-senders channel))))))
+                   (ignore-errors (close-agent-session-connection channel))
+                   (ignore-errors (wake-agent-session-senders channel))
+                   ;; Closing does not wake the owner from poll(2), and while it sits
+                   ;; there the kernel holds the socket open, so the peer sees nothing
+                   ;; and nothing else ends the session until the server's idle timeout.
+                   (unless (eq (bt:current-thread) session-thread)
+                     (interrupt-node-session-thread session-thread session-tag))))))
     (cl-cancel:with-cancellable
         (session-context (node-session-control-context control))
       (declare (ignore session-context))
@@ -1294,16 +1306,20 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                  (nth (mod attempt (length targets)) targets)
                (handler-case
                    ;; An interrupted session was abandoned, so it does not count.
-                   (unless (eq :interrupted
-                               (run-one-node-session try-host try-port node-name identity-path
-                                                     apply-snapshot operation-handler
-                                                     (not (null max-sessions)) control stop-predicate
-                                                     underlay-address status-provider
-                                                     ca-certificate-path certificate-path private-key-path
-                                                     snapshot-observer))
-                     (incf completed)
-                     (when (and max-sessions (>= completed max-sessions))
-                       (return completed)))
+                   (if (eq :interrupted
+                           (run-one-node-session try-host try-port node-name identity-path
+                                                 apply-snapshot operation-handler
+                                                 (not (null max-sessions)) control stop-predicate
+                                                 underlay-address status-provider
+                                                 ca-certificate-path certificate-path private-key-path
+                                                 snapshot-observer))
+                       (unless (or (node-session-cancelled-p control) (funcall stop-predicate))
+                         (format *error-output* "gr8s node session to ~A:~A ended; reconnecting~%"
+                                 try-host try-port))
+                       (progn
+                         (incf completed)
+                         (when (and max-sessions (>= completed max-sessions))
+                           (return completed))))
                  (error (condition)
                    (when max-sessions
                      (error condition))

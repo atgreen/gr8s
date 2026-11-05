@@ -175,16 +175,18 @@
                         &key omit-local-plane)
   "Serialize the complete durable core-resource state to the JSON written to disk.
    Returns (values json history floor token-key event-expirations added) so the
-   direct publish path can also set the derived in-memory slots. With
+   direct publish path can also set the derived in-memory slots: HISTORY and FLOOR
+   are what watches read, which reaches further back than what is written. With
    OMIT-LOCAL-PLANE, local-plane kinds (events) are left out -- used for the HA
    replication blob so high-churn events never ride the Raft log."
   (multiple-value-bind (history floor added) (next-template-history store resources revision)
     (let* ((token-key (or (pod-store-template-token-key store) (secure-random-octets 32)))
            (event-expirations (next-event-expirations store resources))
-           (json (com.inuoe.jzon:stringify
+           (json (multiple-value-bind (durable durable-floor) (durable-template-history history floor)
+              (com.inuoe.jzon:stringify
                   (core-object "version" 2 "revision" revision "workloadDeletions" workload-deletions
                                "jobControllerStates" job-controller-states
-                               "templateHistory" (coerce history 'vector) "templateHistoryFloor" floor
+                               "templateHistory" (coerce durable 'vector) "templateHistoryFloor" durable-floor
                                "templateTokenKey" (ag-grpc:base64-encode token-key)
                                "resourceHistoryStart" (pod-store-resource-history-start store)
                                "eventExpirations" event-expirations
@@ -194,7 +196,7 @@
                                                        collect object) 'vector)
                                "customResourceItems" (coerce (loop for key being the hash-keys of resources using (hash-value object)
                                                                    when (custom-resource-key-p (first key))
-                                                                     collect (core-object "resource" (first key) "object" object)) 'vector)))))
+                                                                     collect (core-object "resource" (first key) "object" object)) 'vector))))))
       (values json history floor token-key event-expirations added))))
 
 (defun commit-core-resources (store resources revision

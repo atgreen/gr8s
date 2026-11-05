@@ -5,13 +5,16 @@
 ;;;; Give Nodes a revision for every change clients can see, and a bounded event
 ;;;; journal to watch them by. Node records live outside the durable resource store,
 ;;;; and their revisions come from the Pod revision counter, which already covers
-;;;; Node writes. The journal is memory-only: resuming from before it returns 410
-;;;; Gone, which Kubernetes clients answer by relisting.
+;;;; Node writes. The journal is memory-only: resuming from before it ends the watch
+;;;; with a 410 Gone event, which Kubernetes clients answer by relisting.
 
 (in-package #:gr8s)
 
-(defparameter *node-watch-journal-limit* 1024
-  "Retain at least this many recent Node events for resuming watches.")
+(defparameter *node-watch-journal-limit* 4096
+  "The most Node events kept for resuming watches, however recent.")
+
+(defparameter +node-watch-journal-minimum+ 1024
+  "Keep this many Node events however old, for a cluster too quiet to fill the time window.")
 
 (defparameter +node-selector-field-paths+ '("metadata.name" "spec.unschedulable")
   "The Node fields clients may name in field selectors.")
@@ -23,14 +26,16 @@
           when (> revision current) return revision)))
 
 (defun record-node-watch-event-unlocked (store revision old new)
-  "Append one transition to the journal, compacting once it doubles its retention."
-  (push (list revision old new) (pod-store-node-watch-journal store))
-  (when (> (incf (pod-store-node-watch-journal-length store)) (* 2 *node-watch-journal-limit*))
-    (let ((retained (subseq (pod-store-node-watch-journal store) 0 *node-watch-journal-limit*)))
-      ;; The oldest retained event must stay readable, so resume just before it.
-      (setf (pod-store-node-watch-floor store) (1- (first (car (last retained))))
+  "Append one transition to the journal, compacting what has fallen out of its retention."
+  (push (list revision old new (funcall *podtemplate-clock*)) (pod-store-node-watch-journal store))
+  (multiple-value-bind (retained length floor)
+      (trim-revision-journal (pod-store-node-watch-journal store)
+                             (incf (pod-store-node-watch-journal-length store))
+                             *node-watch-journal-limit* +node-watch-journal-minimum+)
+    (when retained
+      (setf (pod-store-node-watch-floor store) floor
             (pod-store-node-watch-journal store) retained
-            (pod-store-node-watch-journal-length store) *node-watch-journal-limit*))))
+            (pod-store-node-watch-journal-length store) length))))
 
 (defun publish-node-change-unlocked (store old node)
   "Persist NODE at a fresh revision and journal it, unless its API view still equals OLD.

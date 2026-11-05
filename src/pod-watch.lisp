@@ -5,13 +5,20 @@
 ;;;; Give Pods one monotonic revision and a bounded event journal covering spec
 ;;;; writes, scheduling, deletion and observed status. Status-only revisions are
 ;;;; shown to clients but never replace the desired revision agents acknowledge.
-;;;; The journal is memory-only: resuming from before it returns 410 Gone, which
-;;;; Kubernetes clients answer by relisting.
+;;;; The journal is memory-only: resuming from before it ends the watch with a 410
+;;;; Gone event, which Kubernetes clients answer by relisting.
 
 (in-package #:gr8s)
 
-(defparameter *pod-watch-journal-limit* 4096
-  "Retain at least this many recent Pod events for resuming watches.")
+(defparameter *pod-watch-journal-limit* 16384
+  "The most Pod events kept for resuming watches, however recent.
+Each holds two views of a Pod that nothing else does, which is what this limit bounds.")
+
+(defparameter +pod-watch-journal-minimum+ 4096
+  "Keep this many Pod events however old, for a cluster too quiet to fill the time window.")
+
+(defparameter +revision-journal-trim-interval+ 1024
+  "Events between looks for what has aged out of a journal, since each look walks it.")
 
 (defparameter *pod-revision-reservation* 1024
   "Durably reserve this many revisions at once, so restarts never reuse a number.")
@@ -65,15 +72,35 @@ Status-only revisions are newer than that write but do not make a client's spec 
   (pod-response-object pod (or (gethash (pod-uid pod) (pod-store-pod-published-statuses store))
                                (pod-status "Pending"))))
 
+(defun trim-revision-journal (journal length limit minimum)
+  "Return the newest of JOURNAL's LENGTH entries still worth keeping, their count and floor.
+That is at most LIMIT, and MINIMUM (or LIMIT, if lower) however old; the rest of the watch
+history window beyond that. Returns NIL when nothing is due to go."
+  (when (or (> length (* 2 limit)) (zerop (mod length +revision-journal-trim-interval+)))
+    (let* ((minimum (min minimum limit))
+           (now (funcall *podtemplate-clock*))
+           (keep (or (loop for (nil nil nil time) in journal
+                           for count from 0
+                           when (or (>= count limit)
+                                    (and (>= count minimum) (> (- now time) *watch-history-seconds*)))
+                             return count)
+                     length)))
+      (when (< keep length)
+        (let ((retained (subseq journal 0 keep)))
+          ;; The oldest retained event must stay readable, so resume just before it.
+          (values retained keep (1- (first (car (last retained))))))))))
+
 (defun record-pod-watch-event-unlocked (store revision old new)
-  "Append one transition to the journal, compacting once it doubles its retention."
-  (push (list revision old new) (pod-store-pod-watch-journal store))
-  (when (> (incf (pod-store-pod-watch-journal-length store)) (* 2 *pod-watch-journal-limit*))
-    (let* ((retained (subseq (pod-store-pod-watch-journal store) 0 *pod-watch-journal-limit*)))
-      ;; The oldest retained event must stay readable, so resume just before it.
-      (setf (pod-store-pod-watch-floor store) (1- (first (car (last retained))))
+  "Append one transition to the journal, compacting what has fallen out of its retention."
+  (push (list revision old new (funcall *podtemplate-clock*)) (pod-store-pod-watch-journal store))
+  (multiple-value-bind (retained length floor)
+      (trim-revision-journal (pod-store-pod-watch-journal store)
+                             (incf (pod-store-pod-watch-journal-length store))
+                             *pod-watch-journal-limit* +pod-watch-journal-minimum+)
+    (when retained
+      (setf (pod-store-pod-watch-floor store) floor
             (pod-store-pod-watch-journal store) retained
-            (pod-store-pod-watch-journal-length store) *pod-watch-journal-limit*))))
+            (pod-store-pod-watch-journal-length store) length))))
 
 (defun publish-pod-spec-change-unlocked (store old pod)
   "Journal POD at its current revision; OLD is its prior API view, or NIL when created."
