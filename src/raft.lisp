@@ -49,6 +49,12 @@
   ;; apply it and learn they are removed, so they stop disrupting the new quorum.
   (departing-members (make-hash-table :test 'equal))
   (removed nil)
+  ;; Transport glue (ignored by the deterministic in-process sim, where SEND-FN
+  ;; routes by id). PEER-ADDRESSES maps member-id -> (host port), carried in the
+  ;; config command so every member learns where to reach a joiner; ON-CONFIGURED
+  ;; (if set) runs after a membership change so the transport can reconcile links.
+  (peer-addresses (make-hash-table :test 'equal))
+  on-configured
   ;; leader volatile
   (next-index (make-hash-table :test 'equal))
   (match-index (make-hash-table :test 'equal))
@@ -300,7 +306,9 @@
                         ;; A membership change is applied to the config, not the
                         ;; user state machine. Every member applies it in log
                         ;; order, so all converge on the same membership.
-                        (progn (raft-adopt-config node (getf (cdr command) :members)) :configured)
+                        (progn (raft-adopt-config node (getf (cdr command) :members)
+                                                  (getf (cdr command) :addresses))
+                               :configured)
                         (and (raft-node-apply-fn node) (funcall (raft-node-apply-fn node) command))))
                   (callback (gethash index (raft-node-pending node))))
              (when callback
@@ -328,9 +336,12 @@
 ;;; ---------------------------------------------------------------------------
 ;;; Membership change (single-member, effective on commit).
 
-(defun raft-adopt-config (node members)
+(defun raft-adopt-config (node members &optional addresses)
   "Adopt a committed membership MEMBERS (alist id->role). Every member runs this
-   in log order, so all converge. A member that finds itself gone steps down."
+   in log order, so all converge. A member that finds itself gone steps down.
+   ADDRESSES (alist id->(host port)) teaches the transport where to reach peers."
+  (dolist (a addresses)
+    (setf (gethash (car a) (raft-node-peer-addresses node)) (cdr a)))
   (let ((old-peers (raft-node-peers node))
         (leading (eq (raft-node-role node) :leader)))
     (raft-configure node members)
@@ -345,14 +356,17 @@
   (when (raft-node-removed node)
     (clrhash (raft-node-departing-members node))
     (when (eq (raft-node-role node) :leader)
-      (raft-become-follower node (raft-node-current-term node)))))
+      (raft-become-follower node (raft-node-current-term node))))
+  (when (raft-node-on-configured node)
+    (funcall (raft-node-on-configured node) node)))
 
-(defun raft-propose-config (node &key add remove (role :voter) callback)
+(defun raft-propose-config (node &key add remove (role :voter) address callback)
   "Leader-only single-member change. ADD = a member id to add with ROLE (:voter
-   or :witness); REMOVE = a member id to drop (not self). Only one change may be
-   in flight. The new member is replicated to immediately but is not counted for
-   quorum until the config entry commits (effective-on-commit). Returns
-   (values index t) when the change is proposed, else (values nil reason)."
+   or :witness) and ADDRESS = its (host port) so every member can reach it;
+   REMOVE = a member id to drop (not self). Only one change may be in flight. The
+   new member is replicated to immediately but is not counted for quorum until
+   the config entry commits (effective-on-commit). Returns (values index t) when
+   the change is proposed, else (values nil reason)."
   (cond
     ((not (eq (raft-node-role node) :leader)) (values nil :not-leader))
     ((plusp (hash-table-count (raft-node-pending-members node))) (values nil :change-in-flight))
@@ -362,13 +376,26 @@
        (cond
          (add (setf members (cons (cons add role)
                                   (remove add members :key #'car :test #'equal)))
+              (when address (setf (gethash add (raft-node-peer-addresses node)) address))
               ;; Replicate to the joiner now (not yet quorum) so it receives the
-              ;; config entry that promotes it.
+              ;; config entry that promotes it. The transport needs its link before
+              ;; the append goes out, so reconcile immediately.
               (setf (gethash add (raft-node-pending-members node)) role
                     (gethash add (raft-node-next-index node)) (1+ (raft-last-log-index node))
-                    (gethash add (raft-node-match-index node)) 0))
+                    (gethash add (raft-node-match-index node)) 0)
+              (when (raft-node-on-configured node)
+                (funcall (raft-node-on-configured node) node)))
          (remove (setf members (remove remove members :key #'car :test #'equal))))
-       (raft-propose node (list :raft-config :members members) callback)))))
+       ;; Carry the whole address book so a just-joined member (and every other)
+       ;; learns where to reach each peer when this entry commits.
+       (raft-propose node (list :raft-config :members members
+                                :addresses (raft-config-addresses node))
+                     callback)))))
+
+(defun raft-config-addresses (node)
+  "The current member address book as an alist id->(host port) for a config entry."
+  (loop for id being the hash-keys of (raft-node-peer-addresses node) using (hash-value addr)
+        collect (cons id addr)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Message handling.
