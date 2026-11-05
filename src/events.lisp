@@ -133,7 +133,9 @@
 
 (defun expire-core-events-unlocked (store)
   "Delete expired Events atomically, preserving actual DELETED watch events."
-  (let ((now (funcall *event-clock*)) (index nil))
+  (let ((now (funcall *event-clock*)) (index nil)
+        ;; Event expiry is local-plane: publish locally, never replicate (8ia.3).
+        (*local-plane-write* t))
     (maphash (lambda (key object)
                (when (and (equal "events" (first key))
                           (let ((expiry (gethash (gethash "uid" (gethash "metadata" object)) (pod-store-event-expirations store))))
