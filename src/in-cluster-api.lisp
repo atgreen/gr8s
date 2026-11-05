@@ -91,6 +91,10 @@
          (tail (when group (nthcdr (if (equal group "") 2 3) parts)))
          (namespaced (and (>= (length tail) 3) (equal "namespaces" (first tail))))
          (namespace (when namespaced (second tail)))
+         ;; A Namespace's own subresources share the shape of a namespaced collection.
+         (namespace-subresource (and namespaced (= 3 (length tail))
+                                     (member (third tail) '("status" "finalize") :test #'equal)))
+         (namespaced (and namespaced (not namespace-subresource)))
          (resource-parts (if namespaced (cddr tail) tail))
          (resource (first resource-parts)) (name (second resource-parts))
          (verb (case method (:get (cond (watch "watch") (name "get") (resource "list") (t "get")))
@@ -110,18 +114,28 @@
            (let ((parts (remove "" (uiop:split-string path :separator '(#\/)) :test #'equal)))
              (and (member (length parts) '(2 3)) (equal "apis" (first parts)))))))
 
+(defun authenticated-self-review-request-p (path method)
+  "Recognize the self reviews upstream's system:basic-user role grants all authenticated users."
+  (and (eq method :post)
+       (member path '("/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
+                      "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews"
+                      "/apis/authentication.k8s.io/v1/selfsubjectreviews")
+               :test #'equal)))
+
 (defun authorize-in-cluster-request (store request)
   "Authenticate a verified certificate or live bearer token, then enforce current RBAC."
   (let* ((header (hunchentoot:header-in :authorization request))
          (token (when (and header (uiop:string-prefix-p "Bearer " header)) (subseq header 7)))
-         (identity (or (handler-case
-                           (certificate-api-identity *api-connection-certificate-chain*
-                             (in-cluster-client-ca (hunchentoot:request-acceptor request)))
-                         (kubernetes-error () nil))
-                       (and token (authenticate-service-account-token store token))))
+         (authenticated (or (handler-case
+                                (certificate-api-identity *api-connection-certificate-chain*
+                                  (in-cluster-client-ca (hunchentoot:request-acceptor request)))
+                              (kubernetes-error () nil))
+                            (and token (authenticate-service-account-token store token))))
+         (identity (and authenticated (impersonated-api-identity store authenticated request)))
          (path (request-route-path (hunchentoot:script-name request))) (method (hunchentoot:request-method request)))
     (unless identity (core-resource-error 401 "Unauthorized" "A valid client certificate or ServiceAccount bearer token is required"))
-    (unless (authenticated-discovery-request-p path method)
+    (unless (or (authenticated-discovery-request-p path method)
+                (authenticated-self-review-request-p path method))
       (multiple-value-bind (verb group resource name namespace)
           (kubernetes-authorization-target path method :watch (true-parameter-p (hunchentoot:parameter "watch")))
         (unless (service-account-authorized-p store identity verb group resource name namespace path)

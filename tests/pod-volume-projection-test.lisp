@@ -175,7 +175,9 @@
       (is (equal "hello projection" (volume-text path "message"))))))
 
 (test unimplemented-or-invalid-projections-are-refused
-  (dolist (volume '("[{\"name\":\"v\",\"projected\":{\"sources\":[{\"serviceAccountToken\":{\"path\":\"t\",\"expirationSeconds\":3600}}]}}]"
+  (dolist (volume '("[{\"name\":\"v\",\"projected\":{\"sources\":[{\"serviceAccountToken\":{\"path\":\"t\",\"expirationSeconds\":60}}]}}]"
+                    "[{\"name\":\"v\",\"projected\":{\"sources\":[{\"serviceAccountToken\":{\"path\":\"../t\"}}]}}]"
+                    "[{\"name\":\"v\",\"projected\":{\"sources\":[{\"serviceAccountToken\":{\"path\":\"t\"}},{\"serviceAccountToken\":{\"path\":\"t\"}}]}}]"
                     "[{\"name\":\"v\",\"projected\":{\"sources\":[{\"clusterTrustBundle\":{\"path\":\"t\"}}]}}]"
                     "[{\"name\":\"v\",\"downwardAPI\":{\"items\":[{\"path\":\"../x\",\"fieldRef\":{\"fieldPath\":\"metadata.name\"}}]}}]"
                     "[{\"name\":\"v\",\"downwardAPI\":{\"items\":[{\"path\":\"x\"}]}}]"
@@ -184,6 +186,9 @@
                     "[{\"name\":\"v\",\"downwardAPI\":{\"defaultMode\":4096,\"items\":[]}}]"
                     "[{\"name\":\"v\",\"projected\":{\"sources\":[{\"downwardAPI\":{\"items\":[{\"path\":\"same\",\"fieldRef\":{\"fieldPath\":\"metadata.name\"}}]}},{\"configMap\":{\"name\":\"c\",\"items\":[{\"key\":\"k\",\"path\":\"same\"}]}}]}}]"))
     (signals kubernetes-error (projection-pod volume))))
+
+(test token-projections-are-accepted
+  (is-true (projection-pod "[{\"name\":\"v\",\"projected\":{\"sources\":[{\"serviceAccountToken\":{\"path\":\"t\",\"expirationSeconds\":3600,\"audience\":\"a\"}}]}}]")))
 
 (test go-quoting-matches-kubernetes-for-metadata-values
   (is (equal "\"plain\"" (gr8s::go-quoted-string "plain")))

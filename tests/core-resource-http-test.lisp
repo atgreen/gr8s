@@ -28,7 +28,7 @@
                               :key (lambda (object) (gethash "name" object)))))
           (is (hash-table-p resource))
           (is (eq t (gethash "namespaced" resource)))
-          (is (equal '("create" "delete" "get" "list" "patch" "update" "watch")
+          (is (equal '("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
                      (coerce (gethash "verbs" resource) 'list))))))
     (let* ((openapi (check-core-status 200 "/openapi/v3/api/v1"))
            (schemas (gethash "schemas" (gethash "components" openapi))))

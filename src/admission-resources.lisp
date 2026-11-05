@@ -315,7 +315,8 @@
 (defun admission-discovery-response ()
   "Advertise the webhook configuration collections."
   (json-response (core-object "apiVersion" "v1" "kind" "APIResourceList" "groupVersion" +admission-api-version+
-                              "resources" (stored-resource-discovery +admission-api-version+))))
+                              "resources" (concatenate 'vector (stored-resource-discovery +admission-api-version+)
+                                                       (typed-status-discovery +admission-api-version+)))))
 
 (defun add-admission-openapi-paths (paths)
   "Describe webhook configuration CRUD from the pinned structural schemas."

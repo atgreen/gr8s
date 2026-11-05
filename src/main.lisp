@@ -571,10 +571,14 @@ handler and never gets here. A busy host makes this race likely."
                                       (reconcile-storage-bindings store)
                                       (reconcile-volume-attachments store)
                                       (reconcile-resource-quotas store)
+                                      (reconcile-namespace-deletions reconciler)
+                                      (reconcile-namespace-defaults store)
                                       (collect-orphaned-api-objects reconciler)
                                       (reconcile-workloads reconciler)
                                       (reconcile-endpointslices store)
                                       (reconcile-endpoints store)
+                                      (prune-projected-tokens store)
+                                      ;; Each snapshot also carries projected tokens, renewed when due.
                                       (publish-service-discovery-snapshots runtime)
                                       ;; ClusterIP Services are load-balanced in-kernel by the
                                       ;; agent's eBPF socket LB; the control plane only keeps the
