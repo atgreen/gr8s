@@ -321,6 +321,30 @@
              (setf arguments (cddr arguments)))
     options))
 
+(defun parse-doctor-options (arguments)
+  "Parse `gr8s doctor' options: --state-directory/--cluster-pod-cidr VALUE, or a
+bare positional state directory for backward compatibility.  A missing
+:state-directory leaves run-doctor to use the shared default-state-directory."
+  (let ((options (list :command :doctor))
+        (positional-seen nil))
+    (loop while arguments
+          for option = (first arguments)
+          do (cond
+               ((string= option "--state-directory")
+                (setf (getf options :state-directory) (option-value arguments option)
+                      arguments (cddr arguments)))
+               ((string= option "--cluster-pod-cidr")
+                (setf (getf options :cluster-pod-cidr) (option-value arguments option)
+                      arguments (cddr arguments)))
+               ((and (not positional-seen)
+                     (plusp (length option))
+                     (char/= (char option 0) #\-))
+                (setf (getf options :state-directory) option
+                      positional-seen t
+                      arguments (rest arguments)))
+               (t (error "unknown doctor option: ~A" option))))
+    options))
+
 (defun parse-cli-options (arguments)
   (cond
     ((or (null arguments)
@@ -343,7 +367,7 @@
        (error "runtime-assets takes no arguments"))
      (list :command :runtime-assets))
     ((string= "doctor" (first arguments))
-     (list :command :doctor :state-directory (second arguments)))
+     (parse-doctor-options (rest arguments)))
     (t (error "unknown command: ~A" (first arguments)))))
 
 (defun print-runtime-assets ()
@@ -810,8 +834,11 @@ handler and never gets here. A busy host makes this race likely."
                0)
               (:doctor
                (if (plusp (apply #'run-doctor
-                                 (when (getf options :state-directory)
-                                   (list :state-directory (getf options :state-directory)))))
+                                 (append
+                                  (when (getf options :state-directory)
+                                    (list :state-directory (getf options :state-directory)))
+                                  (when (getf options :cluster-pod-cidr)
+                                    (list :cluster-pod-cidr (getf options :cluster-pod-cidr))))))
                    1 0))
               (:serve (serve options))
               (:agent
