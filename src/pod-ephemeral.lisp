@@ -51,6 +51,22 @@
           (remhash "ephemeralContainers" new))
       (setf (pod-ephemeral-containers replacement) (pod-ephemeral-containers existing)))))
 
+(defun canonical-container-declaration (value)
+  "Return VALUE without unset fields, which typed clients and stored JSON represent differently."
+  (cond
+    ((hash-table-p value)
+     (let ((result (core-object)))
+       (maphash (lambda (key item)
+                  (let ((canonical (canonical-container-declaration item)))
+                    (unless (or (member canonical '(nil null "") :test #'equal)
+                                (and (hash-table-p canonical) (zerop (hash-table-count canonical)))
+                                (and (vectorp canonical) (zerop (length canonical))))
+                      (setf (gethash key result) canonical))))
+                value)
+       result))
+    ((and (vectorp value) (not (stringp value))) (map 'vector #'canonical-container-declaration value))
+    (t value)))
+
 (defun validate-pod-ephemeral-update (existing replacement)
   "Require the new list to keep every existing declaration exactly and only add to it."
   (let ((old (gethash "ephemeralContainers" (gethash "spec" (pod-to-object existing)) #()))
@@ -60,7 +76,8 @@
                             :key (lambda (container) (gethash "name" container)))
           do (unless after
                (invalid-pod "existing ephemeral containers ~S may not be removed" (gethash "name" before)))
-             (unless (core-json-equal-p before after)
+             (unless (core-json-equal-p (canonical-container-declaration before)
+                                        (canonical-container-declaration after))
                (invalid-pod "existing ephemeral containers ~S may not be changed" (gethash "name" before))))))
 
 (defun pod-ephemeral-write-input (current method)

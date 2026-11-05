@@ -304,6 +304,11 @@
       (is (find "debugger" (gr8s::pod-all-containers after) :key #'container-spec-name :test #'equal))
       (is (null (gr8s::validate-pod-ephemeral-update before after)))
       (signals kubernetes-error (gr8s::validate-pod-ephemeral-update after before))
+      (let ((typed (parse-pod (gap-pod-object "ephemeralContainers"
+                                              (vector (gap-container "debugger" "tty" t "stdin" t "workingDir" nil
+                                                                     "env" #() "resources" (gr8s::core-object)))))))
+        (remhash "workingDir" (aref (gethash "ephemeralContainers" (gethash "spec" (pod-to-object typed))) 0))
+        (is (null (gr8s::validate-pod-ephemeral-update after typed)) "unset fields do not count as changes"))
       (let ((changed (parse-pod (gap-pod-object "ephemeralContainers" (vector (gap-container "debugger" "image" "other"))))))
         (signals kubernetes-error (gr8s::validate-pod-ephemeral-update after changed)))
       (is (equal (gr8s::pod-runtime-spec-fingerprint before) (gr8s::pod-runtime-spec-fingerprint after))
