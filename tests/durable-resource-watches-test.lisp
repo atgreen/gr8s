@@ -58,6 +58,8 @@
            (setf (gethash "spec" object) (gethash "spec" (workload-fixture (gr8s::core-resource-kind resource) name))))
           ((equal resource "replicationcontrollers")
            (setf (gethash "spec" object) (gethash "spec" (rc-fixture name))))
+          ((equal resource "statefulsets")
+           (setf (gethash "spec" object) (gethash "spec" (stateful-fixture name))))
           ((equal resource "daemonsets")
            (setf (gethash "spec" object) (gethash "spec" (daemonset-fixture name))))
           ((equal resource "controllerrevisions")
