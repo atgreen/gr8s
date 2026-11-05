@@ -1051,11 +1051,32 @@ that reconnects or restarts gets the answer without a second deletion racing the
                                      :exit-code 1 :message (princ-to-string condition))
             (node-operation-response request gr8s.node.v1::+operationstatus-operation_status_complete+)))))))
 
+(defun start-metrics-operation (node-runtime request emit)
+  "Report this node's container usage on its own thread, since it waits on the container runtime."
+  (bt:make-thread
+   (lambda ()
+     (handler-case
+         (let ((metrics (runtime-container-metrics (node-runtime-runtime node-runtime))))
+           (funcall emit :operation-stream
+                    (node-operation-stream
+                     request gr8s.node.v1::+streamchannel-stream_channel_stdout+
+                     (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify metrics))))
+           (funcall emit :operation-response
+                    (node-operation-response request gr8s.node.v1::+operationstatus-operation_status_complete+)))
+       (error (condition)
+         (funcall emit :operation-response
+                  (node-operation-response request gr8s.node.v1::+operationstatus-operation_status_failed+
+                                           :exit-code 1 :message (princ-to-string condition))))))
+   :name "gr8s container metrics"))
+
 (defun dispatch-node-operation (node-runtime variant payload emit)
   (handler-case
       (case variant
         (:operation-request
          (cond
+           ((= (slot-value payload 'gr8s.node.v1::kind)
+               gr8s.node.v1::+operationkind-operation_kind_metrics+)
+            (start-metrics-operation node-runtime payload emit))
            ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_reclaim_volume+)
             (start-volume-reclaim-operation node-runtime payload emit))

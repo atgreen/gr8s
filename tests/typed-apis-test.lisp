@@ -224,6 +224,23 @@
     (typed-check 422 "/apis/authorization.k8s.io/v1/subjectaccessreviews" :method :post
       :object (gr8s::core-object "spec" (gr8s::core-object "resourceAttributes" (gr8s::core-object "verb" "list"))))))
 
+(test self-subject-rules-reviews-answer-as-kubectl-asks
+  (with-typed-http (store)
+    ;; kubectl auth can-i --list sends the empty status that Go renders with null lists.
+    (let* ((status (gethash "status"
+                            (typed-check 201 "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews" :method :post
+                              :object (gr8s::core-object "spec" (gr8s::core-object "namespace" "default")
+                                        "status" (gr8s::core-object "resourceRules" 'null "nonResourceRules" 'null
+                                                                    "incomplete" nil)))))
+           (rule (aref (gethash "resourceRules" status) 0)))
+      ;; The local listener is a cluster administrator, as access reviews already answer.
+      (is (equalp #("*") (gethash "verbs" rule)))
+      (is (equalp #("*") (gethash "resources" rule)))
+      (is (equalp #("*") (gethash "nonResourceURLs" (aref (gethash "nonResourceRules" status) 0)))))
+    (let ((status (gr8s::self-subject-rules-status
+                   store (gr8s::make-api-user-identity :username "bob" :groups #("system:authenticated")) "default")))
+      (is (zerop (length (gethash "resourceRules" status)))))))
+
 (test service-account-tokens-are-signed-bound-and-reviewable
   (with-typed-http (store)
     (typed-namespace "tokens")
