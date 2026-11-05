@@ -775,6 +775,8 @@ handler and never gets here. A busy host makes this race likely."
   (finish-output))
 
 (defun main-with-environment (arguments environment cni-entry)
+  (when (equal (first arguments) +cni-image-command+)
+    (write-cni-plugin-image (second arguments)))
   (if (funcall environment "CNI_COMMAND")
       (funcall cni-entry)
       (handler-case

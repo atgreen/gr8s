@@ -130,6 +130,55 @@
       (uiop:delete-directory-tree root :validate t
                                   :if-does-not-exist :ignore))))
 
+(defun cni-link-target-with-preparer (preparer)
+  "Return the file name the runtime's CNI link resolves to when PREPARER makes the image."
+  (let* ((root (merge-pathnames (format nil "gr8s-runtime-cni-image-~36R/" (random (expt 36 8)))
+                                (uiop:temporary-directory)))
+         (runtime (merge-pathnames "runtime/" root))
+         (executable (merge-pathnames "gr8s.bin" root))
+         (target nil))
+    (unwind-protect
+         (progn
+           (write-test-octets executable #(127 69 76 70))
+           (gr8s::call-with-runtime-assets
+            (list (gr8s::make-runtime-asset :name "containerd" :octets #(1)))
+            runtime
+            (lambda (paths)
+              (declare (ignore paths))
+              (setf target (file-namestring (truename (merge-pathnames "gr8s" runtime)))))
+            :mounter (lambda (directory) (declare (ignore directory)))
+            :unmounter (lambda (directory) (declare (ignore directory)))
+            :cni-executable executable
+            :cni-image-preparer preparer)
+           (is-false (probe-file (merge-pathnames "cni-plugin/" root))))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))
+    target))
+
+(test cni-link-prefers-the-prepared-plugin-image
+  (is (equal "gr8s"
+             (cni-link-target-with-preparer
+              (lambda (directory executable)
+                (declare (ignore executable))
+                (let ((image (merge-pathnames "gr8s" directory)))
+                  (ensure-directories-exist image)
+                  (write-test-octets image #(127 69 76 70))
+                  image))))))
+
+(test cni-link-falls-back-to-the-executable-without-a-plugin-image
+  (is (equal "gr8s.bin" (cni-link-target-with-preparer (constantly nil))))
+  (is (equal "gr8s.bin" (cni-link-target-with-preparer nil))))
+
+(test failed-plugin-image-falls-back
+  (let ((directory (merge-pathnames (format nil "gr8s-cni-image-~36R/" (random (expt 36 8)))
+                                    (uiop:temporary-directory)))
+        (*error-output* (make-broadcast-stream)))
+    (unwind-protect
+         (progn
+           (is-false (gr8s::prepare-cni-plugin-image directory "/bin/false"))
+           (is-false (gr8s::prepare-cni-plugin-image directory "/nonexistent/gr8s"))
+           (is-false (probe-file (merge-pathnames "gr8s" directory))))
+      (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
+
 (test surviving-filesystem-mount-detection-handles-escaped-paths-and-optional-fields
   (with-temporary-store (store path)
     (assert store)

@@ -112,6 +112,41 @@
   #+linux (truename #P"/proc/self/exe")
   #-linux (error "the gr8s CNI executable requires Linux"))
 
+(defparameter +cni-image-command+ "internal-write-cni-image"
+  "Hidden command: write the CNI plugin image to the path that follows it.")
+
+(defun write-cni-plugin-image (path)
+  "Dump this image to PATH uncompressed and without its runtime assets, then exit.
+It must run in a process of its own, because dumping ends the process."
+  (setf *embedded-runtime-assets* nil)
+  (sb-ext:save-lisp-and-die path :executable t :toplevel (lambda () (uiop:quit (main)))))
+
+(defun prepare-cni-plugin-image (directory executable)
+  "Return the path of a CNI plugin image written under DIRECTORY, or NIL if it can't be
+written or run, when the caller keeps using EXECUTABLE. Containerd execs the plugin for
+every sandbox add and delete, and a compressed image inflates all of its embedded
+runtime assets each time, which takes about 0.67s and 185MB on a test VM."
+  (handler-case
+      (let* ((directory (uiop:ensure-directory-pathname directory))
+             (path (namestring (merge-pathnames "gr8s" directory)))
+             (pending (concatenate 'string path ".pending")))
+        (ensure-directories-exist directory)
+        (when (and (zerop (sb-ext:process-exit-code
+                           (sb-ext:run-program (namestring executable)
+                                               (list +cni-image-command+ pending)
+                                               :input nil :output nil :error nil)))
+                   ;; Also proves this location allows exec.
+                   (zerop (sb-ext:process-exit-code
+                           (sb-ext:run-program pending nil
+                                               :environment (cons "CNI_COMMAND=VERSION"
+                                                                  (sb-ext:posix-environ))
+                                               :input nil :output nil :error nil))))
+          (rename-file pending path)
+          path))
+    (error (condition)
+      (format *error-output* "gr8s: using the compressed image as the CNI plugin: ~A~%" condition)
+      nil)))
+
 (defun install-cni-executable-link (directory executable)
   (let ((link (merge-pathnames
                "gr8s"
@@ -125,16 +160,24 @@
     (assets directory function
      &key (mounter #'mount-runtime-tmpfs)
           (unmounter #'unmount-runtime-tmpfs)
-          (cni-executable (current-native-executable)))
-  (let ((root (uiop:ensure-directory-pathname directory)))
+          (cni-executable (current-native-executable))
+          (cni-image-preparer (when (embedded-runtime-assets-p) #'prepare-cni-plugin-image)))
+  (let* ((root (uiop:ensure-directory-pathname directory))
+         ;; The runtime tmpfs is sized for the assets, so this goes beside it.
+         (image-directory (merge-pathnames "cni-plugin/" (uiop:pathname-parent-directory-pathname root))))
     (ensure-directories-exist (merge-pathnames ".mount-point" root))
     (funcall mounter root)
     (unwind-protect
          (progn
            (materialize-runtime-assets assets root)
-           (install-cni-executable-link root cni-executable)
+           (install-cni-executable-link
+            root (or (when cni-image-preparer
+                       (funcall cni-image-preparer image-directory cni-executable))
+                     cni-executable))
            (funcall function (runtime-asset-paths assets root)))
-      (funcall unmounter root))))
+      (funcall unmounter root)
+      (when cni-image-preparer
+        (uiop:delete-directory-tree image-directory :validate t :if-does-not-exist :ignore)))))
 
 (defun embed-runtime-assets (directory)
   (setf *embedded-runtime-assets* (load-runtime-assets directory)))
