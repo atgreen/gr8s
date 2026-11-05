@@ -15,6 +15,11 @@
   readiness-probe
   stopper
   runtime-assets
+  ;; Optional CRI runtime handlers beyond the built-in runc, e.g. a gVisor
+  ;; runsc addon (podster-mgw). Each entry is a plist
+  ;;   (:name STRING :runtime-type STRING :options ALIST-OF (KEY . TOML-SCALAR))
+  ;; appended after runc in the generated containerd config.
+  extra-runtime-handlers
   runtime-preparer
   bpf-mounter
   bpf-unmounter
@@ -82,6 +87,7 @@
 (defun make-managed-containerd
     (&key state-directory executable oci-runtime cni-bin-directory
           shim-socket-directory
+          extra-runtime-handlers
           runtime-assets
           (runtime-preparer #'call-with-runtime-assets)
           (bpf-mounter #'mount-managed-bpffs)
@@ -102,6 +108,7 @@
      (namestring (uiop:ensure-directory-pathname cni-bin-directory))
      :shim-socket-directory
      (or shim-socket-directory (default-shim-socket-directory state))
+     :extra-runtime-handlers extra-runtime-handlers
      :platform platform
      :snapshotter snapshotter
      :metadata-no-sync metadata-no-sync
@@ -180,11 +187,44 @@
         "--config"
         (managed-containerd-config-path manager)))
 
+(defun managed-containerd-runtime-handlers (manager)
+  "The ordered CRI runtime handlers for the generated config. runc is the
+   built-in default; any EXTRA-RUNTIME-HANDLERS (e.g. a gVisor runsc addon) are
+   appended. Each handler is a plist (:name :runtime-type :options), where
+   :options is an alist of (KEY . TOML-SCALAR) already rendered for TOML."
+  (cons
+   (list :name "runc"
+         :runtime-type "io.containerd.runc.v2"
+         :options
+         (list (cons "BinaryName"
+                     (format nil "'~A'" (managed-containerd-oci-runtime manager)))
+               (cons "Root"
+                     (format nil "'~A'"
+                             (managed-containerd-directory manager "containerd/run/runc")))
+               (cons "SystemdCgroup" "false")))
+   (managed-containerd-extra-runtime-handlers manager)))
+
+(defun managed-containerd-runtimes-toml (manager)
+  "Render the [...containerd.runtimes] TOML block from the handler list. Emitting
+   only runc yields the exact bytes the single-handler config produced before."
+  (let ((prefix "plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes"))
+    (with-output-to-string (stream)
+      (format stream "      [~A]~%" prefix)
+      (dolist (handler (managed-containerd-runtime-handlers manager))
+        (let ((name (getf handler :name))
+              (type (getf handler :runtime-type))
+              (options (getf handler :options)))
+          (format stream "        [~A.~A]~%          runtime_type = '~A'~%" prefix name type)
+          (when options
+            (format stream "          [~A.~A.options]~%" prefix name)
+            (dolist (option options)
+              (format stream "            ~A = ~A~%" (car option) (cdr option)))))))))
+
 (defun managed-containerd-config-text (manager)
   (let ((root (managed-containerd-directory manager "containerd/root"))
         (state (managed-containerd-directory manager "containerd/run"))
         (temporary (managed-containerd-directory manager "containerd/tmp"))
-        (runc-root (managed-containerd-directory manager "containerd/run/runc"))
+        (runtimes (managed-containerd-runtimes-toml manager))
         (socket (managed-containerd-socket-path manager))
         (cni-config (managed-containerd-directory manager "containerd/cni/net.d"))
         (snapshotter (managed-containerd-snapshotter manager)))
@@ -193,10 +233,7 @@
      "version = 4~%root = '~A'~%state = '~A'~%temp = '~A'~%~
 [plugins]~%~:[~;  [plugins.'io.containerd.metadata.v1.bolt']~%    no_sync = true~%~]  [plugins.'io.containerd.cri.v1.images']~%    snapshotter = '~A'~%~
   [plugins.'io.containerd.cri.v1.runtime']~%    disable_apparmor = true~%    restrict_oom_score_adj = true~%    netns_mounts_under_state_dir = true~%~
-    [plugins.'io.containerd.cri.v1.runtime'.containerd]~%      default_runtime_name = 'runc'~%~
-      [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes]~%~
-        [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]~%          runtime_type = 'io.containerd.runc.v2'~%~
-          [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]~%            BinaryName = '~A'~%            Root = '~A'~%            SystemdCgroup = false~%~
+    [plugins.'io.containerd.cri.v1.runtime'.containerd]~%      default_runtime_name = 'runc'~%~A~
     [plugins.'io.containerd.cri.v1.runtime'.cni]~%      bin_dirs = ['~A']~%      conf_dir = '~A'~%      use_internal_loopback = true~%~
   [plugins.'io.containerd.nri.v1.nri']~%    disable = true~%~
   [plugins.'io.containerd.shim.v1.manager']~%    socket_dir = '~A'~%~
@@ -205,8 +242,7 @@
   [plugins.'io.containerd.server.v1.grpc']~%    address = '~A'~%~
   [plugins.'io.containerd.server.v1.ttrpc']~%    address = '~A.ttrpc'~%"
      root state temporary (managed-containerd-metadata-no-sync manager) snapshotter
-     (managed-containerd-oci-runtime manager)
-     runc-root
+     runtimes
      (managed-containerd-cni-bin-directory manager)
      cni-config (managed-containerd-shim-socket-directory manager)
      (managed-containerd-platform manager)
