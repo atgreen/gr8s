@@ -302,6 +302,12 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
                         #("create" "delete" "get" "list" "patch" "update" "watch"))))
    'vector))
 
+(defun rbac-api-group ()
+  "Describe the implemented rbac.authorization.k8s.io API group."
+  (core-object "apiVersion" "v1" "kind" "APIGroup" "name" "rbac.authorization.k8s.io"
+               "versions" (vector (core-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
+               "preferredVersion" (core-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1")))
+
 (defun rbac-resources-response ()
   "Return discovery for the supported RBAC v1 resource collections."
   (json-response
@@ -440,30 +446,21 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
                  current)
                 (dry-run updated)
                 (t
-                 ;; A fresh store's counter can trail a record's initial version.
-                 (setf (node-record-resource-version updated)
-                       (write-to-string (max (next-pod-revision-unlocked store)
-                                             (1+ (parse-integer (node-record-resource-version current))))))
-                 (persist-node store updated)
-                 ;; Other holders keep this record, as with readiness updates.
-                 (setf (node-record-labels current) (node-record-labels updated)
-                       (node-record-annotations current) (node-record-annotations updated)
-                       (node-record-taints current) (node-record-taints updated)
-                       (node-record-unschedulable current) (node-record-unschedulable updated)
-                       (node-record-resource-version current) (node-record-resource-version updated))
-                 (note-node-desired-change store)   ; desired API write (8ia.4)
-                 current))))))))))
+                 (let ((old (node-api-object current)))
+                   (persist-node store updated)
+                   ;; Other holders keep this record, as with readiness updates.
+                   (setf (node-record-labels current) (node-record-labels updated)
+                         (node-record-annotations current) (node-record-annotations updated)
+                         (node-record-taints current) (node-record-taints updated)
+                         (node-record-unschedulable current) (node-record-unschedulable updated))
+                   (publish-node-change-unlocked store old current)
+                   (note-node-desired-change store)   ; desired API write (8ia.4)
+                   current)))))))))))
 
 (defun nodes-api-response (store &optional name)
-  "Return the actual registered worker list or one node by NAME."
-  (if name
-      (json-response (node-api-object (get-node store name)))
-      (let ((labels (core-selector-predicate (hunchentoot:parameter "labelSelector")))
-            (fields (core-selector-predicate (hunchentoot:parameter "fieldSelector") :fields t
-                                         :field-paths '("metadata.name" "spec.unschedulable"))))
-        (json-response
-         (core-object "apiVersion" "v1" "kind" "NodeList"
-                      "metadata" (core-object "resourceVersion" "0")
-                      "items" (coerce (remove-if-not
-                                       (lambda (node) (and (funcall labels node) (funcall fields node)))
-                                       (mapcar #'node-api-object (list-nodes store))) 'vector))))))
+  "Return the actual registered worker list, a watch of it, or one node by NAME."
+  (cond
+    (name (json-response (node-api-object (get-node store name))))
+    ((true-parameter-p (hunchentoot:parameter "watch")) (node-watch-response store))
+    (t (json-response (node-list-page store (hunchentoot:parameter "labelSelector")
+                                      (hunchentoot:parameter "fieldSelector"))))))

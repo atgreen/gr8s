@@ -123,7 +123,9 @@
     (gr8s:mark-node-ready store "worker-a" 100)
     (let ((pod (create-pod store (parse-pod *valid-pod-json*))))
       (gr8s:schedule-pod store pod)
-      (let ((updated (update-pod store (parse-pod *valid-pod-json*) "2")))
+      ;; Revisions are shared with Node changes, so read the Pod's rather than count them.
+      (let ((updated (update-pod store (parse-pod *valid-pod-json*)
+                                 (pod-resource-version (get-pod store "default" (gr8s:pod-name pod))))))
         (is (string= "worker-a" (gr8s:pod-node-name updated)))
         (is (string= "worker-a"
                      (gethash "nodeName"
@@ -133,7 +135,8 @@
         (setf (gethash "nodeName" spec) "worker-b")
         (handler-case
             (progn
-              (update-pod store (parse-pod object) "3")
+              (update-pod store (parse-pod object)
+                          (pod-resource-version (get-pod store "default" (gr8s:pod-name pod))))
               (fail "a scheduled Pod must not move through an update"))
           (kubernetes-error (condition)
             (is (string= "Conflict" (kubernetes-error-reason condition)))))))))
