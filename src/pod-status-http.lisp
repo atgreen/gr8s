@@ -11,7 +11,7 @@
 (in-package #:gr8s)
 
 (defparameter *pod-system-condition-types*
-  '("PodScheduled" "Initialized" "ContainersReady" "Ready")
+  '("PodScheduled" "Initialized" "ContainersReady" "Ready" "PodResizeInProgress")
   "Conditions recomputed from actual observations on every reconciliation.")
 
 (defvar *local-primary-ipv4* nil "This host's primary IPv4 address, once discovered.")
@@ -33,13 +33,24 @@
         address
         (or *local-primary-ipv4* (setf *local-primary-ipv4* (discover-local-primary-ipv4))))))
 
+(defun containerd-node-address (runtime)
+  "Return the address this runtime's node is reached at, which hostNetwork Pods share."
+  (or (containerd-runtime-host-address runtime)
+      *local-primary-ipv4*
+      (setf *local-primary-ipv4* (discover-local-primary-ipv4))
+      ""))
+
 (defun add-pod-host-address (store pod status)
-  "Publish the assigned node's address while STORE's lock is held; agents have no node table."
+  "Publish the assigned node's address while STORE's lock is held; agents have no node table.
+A hostNetwork Pod has no address of its own, so it reports its node's as its Pod IP."
   (let* ((node (and (pod-node-name pod) (gethash (pod-node-name pod) (pod-store-nodes store))))
          (address (and node (node-reported-address node))))
     (when address
       (setf (gethash "hostIP" status) address
-            (gethash "hostIPs" status) (vector (core-object "ip" address))))
+            (gethash "hostIPs" status) (vector (core-object "ip" address)))
+      (when (and (pod-host-network-p pod) (not (equal "Pending" (gethash "phase" status))))
+        (setf (gethash "podIP" status) address
+              (gethash "podIPs" status) (vector (core-object "ip" address)))))
     status))
 
 (defun decode-pod-status-protobuf (bytes)

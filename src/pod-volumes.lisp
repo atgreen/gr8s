@@ -226,12 +226,12 @@
          (object (handler-case (get-core-resource (containerd-runtime-resource-store runtime) resource (pod-namespace pod) name)
                    (kubernetes-error (condition)
                      (unless (and optional (= 404 (kubernetes-error-status-code condition)))
-                       (error 'runtime-error :message (format nil "Missing environment source ~A/~A" resource name))))))
+                       (container-config-error "Missing environment source ~A/~A" resource name)))))
          (data (and object (gethash "data" object))))
     (multiple-value-bind (value present) (if data (gethash key data) (values nil nil))
       (unless present
         (if optional (return-from containerd-key-environment-value (values nil nil))
-            (error 'runtime-error :message (format nil "Environment source ~A/~A lacks key ~A" resource name key))))
+            (container-config-error "Environment source ~A/~A lacks key ~A" resource name key)))
       (let ((text (if (equal resource "secrets")
                       (handler-case (trivial-utf-8:utf-8-bytes-to-string (core-base64-bytes value "Secret environment"))
                         (error () (error 'runtime-error :message "Secret environment value is not valid UTF-8"))) value)))
@@ -249,8 +249,7 @@
                    (kubernetes-error (condition)
                      (unless (and (eq t (gethash "optional" reference))
                                   (= 404 (kubernetes-error-status-code condition)))
-                       (error 'runtime-error
-                              :message (format nil "Missing environment source ~A/~A" resource name))))))
+                       (container-config-error "Missing environment source ~A/~A" resource name)))))
          (data (and object (gethash "data" object))))
     (when data
       (loop for key being the hash-keys of data using (hash-value value)
@@ -320,6 +319,12 @@
               (setf (cdr existing) (cdr pair))
               (push (cons (car pair) (cdr pair)) result)))))))
 
+(defun containerd-sandbox-address (runtime pod sandbox-id)
+  "Return POD's own address: its sandbox's, or its node's when it shares the node's network."
+  (if (containerd-pod-host-network-p runtime pod)
+      (containerd-node-address runtime)
+      (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime) sandbox-id)))
+
 (defun containerd-pod-environment (runtime pod container sandbox-id)
   "Resolve a container's variables: Services, then envFrom in order, then explicit env."
   (let* ((object (pod-runtime-container-object pod container)) (pod-ip nil))
@@ -352,9 +357,12 @@
                              (reference
                               (let ((metadata (gethash "metadata" (pod-to-object pod))))
                                 (gethash (cdr reference) (gethash (car reference) metadata (core-object)) "")))
-                             ((equal field "status.podIP")
-                              (or pod-ip (setf pod-ip (cri-pod-sandbox-ip
-                                                      (containerd-runtime-socket-path runtime) sandbox-id))))) t))))
+                             ((equal field "spec.serviceAccountName")
+                              (gethash "serviceAccountName" (gethash "spec" (pod-to-object pod)) ""))
+                             ((member field '("status.hostIP" "status.hostIPs") :test #'equal)
+                              (containerd-node-address runtime))
+                             ((member field '("status.podIP" "status.podIPs") :test #'equal)
+                              (or pod-ip (setf pod-ip (containerd-sandbox-address runtime pod sandbox-id))))) t))))
              (when include (list (cons (gethash "name" variable) value))))))))
 
 (defun cri-seccomp-profile (context)
@@ -398,7 +406,7 @@
     (let ((user (gethash "runAsUser" effective)) (group (gethash "runAsGroup" effective)))
       (when (and (eq t (gethash "runAsNonRoot" effective))
                  (not (and user (plusp user))))
-        (error 'runtime-error :message "runAsNonRoot requires a verified nonzero runAsUser"))
+        (container-config-error "runAsNonRoot requires a verified nonzero runAsUser"))
       (make-instance
        'gr8s.cri.v1::linux-container-security-context
        :run-as-user (when user (make-instance 'gr8s.cri.v1::int64value :value user))
@@ -406,6 +414,12 @@
        :supplemental-groups (pod-supplemental-groups pod)
        :seccomp (cri-seccomp-profile effective)
        :selinux-options (cri-selinux-options effective)
+       :namespace-options (when (or (pod-spec-flag-p pod "hostPID") (pod-spec-flag-p pod "hostIPC"))
+                            (make-instance
+                             'gr8s.cri.v1::namespace-option
+                             :pid (if (pod-spec-flag-p pod "hostPID") gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
+                             :ipc (if (pod-spec-flag-p pod "hostIPC") gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
+                             :network (if (pod-host-network-p pod) gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)))
        :capabilities (let ((capabilities (gethash "capabilities" effective)))
                        (when capabilities
                          (make-instance 'gr8s.cri.v1::capability

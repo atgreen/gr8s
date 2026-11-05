@@ -4,7 +4,7 @@
 
 (test generated-uids-have-rfc-4122-version-and-variant-bits
   (is (string=
-       "00010203-0405-4607-8809-0A0B0C0D0E0F"
+       "00010203-0405-4607-8809-0a0b0c0d0e0f"
        (gr8s::generate-uid
         #(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)))))
 

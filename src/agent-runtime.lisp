@@ -161,6 +161,10 @@
 
 (defun configure-node-runtime-network (node-runtime network &key (persist t))
   (validate-node-network-object network)
+  (let ((runtime (node-runtime-runtime node-runtime))
+        (address (gethash "underlayAddress" network "")))
+    (when (and (typep runtime 'containerd-runtime) (plusp (length address)))
+      (setf (containerd-runtime-host-address runtime) address)))
   (when (node-runtime-manager node-runtime)
     (validate-pod-pool-host-routes (gethash "clusterPodCIDR" network)
                                   (node-runtime-state-directory node-runtime)))

@@ -102,7 +102,7 @@
     (cond
       ((equal policy "None"))
       ((or (equal policy "Default")
-           (and (equal policy "ClusterFirst") (containerd-runtime-host-network runtime)))
+           (and (equal policy "ClusterFirst") (containerd-pod-host-network-p runtime pod)))
        (multiple-value-setq (servers searches options) (read-host-pod-dns-configuration)))
       (t
        (if (containerd-runtime-dns-servers runtime)

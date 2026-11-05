@@ -12,7 +12,8 @@
   "Return CONTAINER's authoritative JSON specification within POD."
   (find (container-spec-name container)
         (let ((spec (gethash "spec" (pod-to-object pod))))
-          (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec)))
+          (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec)
+                       (gethash "ephemeralContainers" spec #())))
         :key (lambda (object) (gethash "name" object)) :test #'equal))
 
 (defun safe-volume-relative-path-p (path)
@@ -63,10 +64,11 @@
     (drop-null-fields (require-object context "securityContext"))
     (reject-unsupported-fields context
                                (if pod '("runAsUser" "runAsGroup" "runAsNonRoot" "fsGroup"
-                                         "supplementalGroups" "seLinuxOptions" "seccompProfile")
+                                         "supplementalGroups" "seLinuxOptions" "seccompProfile" "sysctls")
                                    '("runAsUser" "runAsGroup" "runAsNonRoot" "privileged"
                                      "readOnlyRootFilesystem" "allowPrivilegeEscalation"
                                      "seLinuxOptions" "seccompProfile" "capabilities")) "securityContext")
+    (when pod (validate-pod-sysctls context))
     (when (gethash "seccompProfile" context) (validate-seccomp-profile (gethash "seccompProfile" context)))
     (when (gethash "seLinuxOptions" context) (validate-selinux-options (gethash "seLinuxOptions" context)))
     (when (gethash "capabilities" context) (validate-container-capabilities (gethash "capabilities" context)))
@@ -120,7 +122,8 @@
          (reject-unsupported-fields ref '("fieldPath" "apiVersion") "fieldRef")
          (unless (and (equal "v1" (gethash "apiVersion" ref "v1"))
                       (or (member (gethash "fieldPath" ref)
-                                  '("metadata.name" "metadata.namespace" "metadata.uid" "spec.nodeName" "status.podIP") :test #'equal)
+                                  '("metadata.name" "metadata.namespace" "metadata.uid" "spec.nodeName" "spec.serviceAccountName"
+                                    "status.podIP" "status.podIPs" "status.hostIP" "status.hostIPs") :test #'equal)
                           (pod-metadata-subscript-reference (gethash "fieldPath" ref))))
            (invalid-pod "unsupported downward API field reference")))
         ;; Unlike in a volume, an unnamed container here means the variable's own.
@@ -154,6 +157,12 @@
 (defun validate-runtime-container (container)
   "Validate mount declarations, executable probes, image policy and security settings."
   (validate-environment-sources container)
+  (validate-container-lifecycle container)
+  (validate-container-resize-policy container)
+  (dolist (field '("stdin" "stdinOnce" "tty"))
+    (multiple-value-bind (value present) (gethash field container)
+      (when (and present (not (member value '(t nil))))
+        (invalid-pod "container.~A must be boolean" field))))
   (dolist (kind '("startupProbe" "readinessProbe" "livenessProbe"))
     (when (gethash kind container) (validate-container-probe (gethash kind container) kind)))
   (when (gethash "imagePullPolicy" container)
@@ -314,7 +323,8 @@
              (when (member (gethash "name" volume) names :test #'equal) (invalid-pod "volume names must be unique"))
              (push (gethash "name" volume) names))
     (loop for container across (concatenate 'vector (optional-vector spec "initContainers" "spec")
-                                           (optional-vector spec "containers" "spec"))
+                                           (optional-vector spec "containers" "spec")
+                                           (optional-vector spec "ephemeralContainers" "spec"))
           do (require-object container "container")
              (loop for mount across (optional-vector container "volumeMounts" "container")
                    unless (member (gethash "name" mount) names :test #'equal)

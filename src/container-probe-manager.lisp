@@ -35,8 +35,8 @@
   (events (make-hash-table :test #'equal)))
 
 (defstruct container-probe-stop-job
-  "Own the asynchronous CRI stop of one exact failed container."
-  uid id deadline thread started-p finished-p failure cancelled-p)
+  "Own the asynchronous CRI stop of one exact failed container, running any preStop hook first."
+  uid id pod deadline thread started-p finished-p failure cancelled-p)
 
 (defun ensure-container-probe-manager (runtime)
   "Lazily allocate the native runtime's private asynchronous probe state."
@@ -259,14 +259,21 @@
                            :on-hold-p (and (equal kind "startupProbe") same (gethash "startupSucceeded" saved)))))
     target))
 
+(defun pod-probed-container-objects (pod)
+  "Return the declarations that may have probes: POD's sidecars and applications."
+  (let ((spec (gethash "spec" (pod-to-object pod))))
+    (append (remove-if-not (lambda (object) (equal "Always" (gethash "restartPolicy" object)))
+                           (coerce (gethash "initContainers" spec #()) 'list))
+            (coerce (gethash "containers" spec) 'list))))
+
 (defun sync-container-probe-targets (runtime pod observed &key (start-workers t))
   "Attach declared probes to actual running IDs; retire all stale attempt workers."
   (let* ((manager (ensure-container-probe-manager runtime))
          (state (load-container-lifecycle-state runtime (pod-uid pod)))
          (current nil) (created nil))
-    (loop for container across (gethash "containers" (gethash "spec" (pod-to-object pod)))
+    (loop for container in (pod-probed-container-objects pod)
           for name = (gethash "name" container)
-          for status = (find name (gethash "containerStatuses" (runtime-pod-status observed)) :test #'equal :key (lambda (value) (gethash "name" value)))
+          for status = (find name (container-lifecycle-all-statuses observed) :test #'equal :key (lambda (value) (gethash "name" value)))
           when (and status (gethash "running" (gethash "state" status))
                     (some (lambda (kind) (gethash kind container)) '("startupProbe" "readinessProbe" "livenessProbe")))
             do (push (cons name (subseq (gethash "containerID" status) (length "containerd://"))) current))
@@ -278,8 +285,8 @@
       (let* ((key (list (pod-uid pod) (car entry)))
              (existing (bt:with-lock-held ((container-probe-manager-lock manager)) (gethash key (container-probe-manager-targets manager)))))
         (unless existing
-          (let* ((container (find (car entry) (gethash "containers" (gethash "spec" (pod-to-object pod))) :test #'equal :key (lambda (item) (gethash "name" item))))
-                 (status (find (car entry) (gethash "containerStatuses" (runtime-pod-status observed)) :test #'equal :key (lambda (item) (gethash "name" item))))
+          (let* ((container (find (car entry) (pod-probed-container-objects pod) :test #'equal :key (lambda (item) (gethash "name" item))))
+                 (status (find (car entry) (container-lifecycle-all-statuses observed) :test #'equal :key (lambda (item) (gethash "name" item))))
                  (target (make-native-probe-target pod container status observed state)))
             (bt:with-lock-held ((container-probe-manager-lock manager))
               (unless (container-probe-manager-stopping-p manager)
@@ -346,6 +353,13 @@
              (bt:with-lock-held ((container-probe-manager-lock manager))
                (when (container-probe-stop-job-cancelled-p job) (return-from run-container-probe-stop nil))
                (setf (container-probe-stop-job-started-p job) t))
+             (let ((pod (container-probe-stop-job-pod job)))
+               (when pod
+                 (run-container-pre-stop-hook
+                  runtime pod
+                  (cri-container-status (containerd-runtime-socket-path runtime) (container-probe-stop-job-id job))
+                  (container-probe-stop-job-deadline job)
+                  (containerd-pod-sandbox-address runtime pod))))
              (cri-stop-container (containerd-runtime-socket-path runtime) (container-probe-stop-job-id job)
                                  :grace-period (max 0 (ceiling (- (container-probe-stop-job-deadline job) (funcall (container-probe-manager-clock manager)))))))
         (setf (container-probe-stop-job-finished-p job) t))
@@ -358,7 +372,7 @@
    (lambda (name entry)
      (let* ((request (gethash "probeRestart" entry))
             (id (and request (gethash "containerID" request)))
-            (status (find name (gethash "containerStatuses" (runtime-pod-status observed)) :test #'equal :key (lambda (item) (gethash "name" item)))))
+            (status (find name (container-lifecycle-all-statuses observed) :test #'equal :key (lambda (item) (gethash "name" item)))))
        (when (and id status (gethash "running" (gethash "state" status))
                   (equal (gethash "containerID" status) (concatenate 'string "containerd://" id)))
          (let ((job nil))
@@ -366,7 +380,7 @@
              (let ((old (gethash id (container-probe-manager-jobs manager))))
                (unless (or (container-probe-manager-stopping-p manager)
                            (and old (not (container-probe-stop-job-finished-p old))))
-                 (setf job (make-container-probe-stop-job :uid (pod-uid pod) :id id :deadline (gethash "deadline" request))
+                 (setf job (make-container-probe-stop-job :uid (pod-uid pod) :id id :pod pod :deadline (gethash "deadline" request))
                        (gethash id (container-probe-manager-jobs manager)) job))))
            (when job
              (bt:with-lock-held ((container-probe-manager-lock manager))
@@ -382,7 +396,7 @@
            (manager (containerd-runtime-probes runtime))
            (snapshots (when manager (snapshot-container-probes manager uid)))
            (state (load-container-lifecycle-state runtime uid)))
-      (loop for status across (gethash "containerStatuses" (runtime-pod-status observed))
+      (loop for status across (container-lifecycle-all-statuses observed)
             when (gethash "running" (gethash "state" status))
               do (let* ((name (gethash "name" status))
                         (snapshot (find name snapshots :test #'equal :key (lambda (value) (container-probe-target-name (first value)))))
@@ -402,12 +416,13 @@
 
 (defun container-probe-restart-required-p (runtime pod observed)
   "Request reconciliation for actual exits killed by probes even when they exit zero."
-  (and (not (equal "Never" (pod-restart-policy pod)))
-       (let ((state (load-container-lifecycle-state runtime (pod-uid pod))))
-         (loop for status across (gethash "containerStatuses" (runtime-pod-status observed))
-               for request = (gethash "probeRestart" (gethash (gethash "name" status) (gethash "containers" state) (core-object)))
-               thereis (and request (gethash "terminated" (gethash "state" status))
-                            (equal (gethash "containerID" status) (concatenate 'string "containerd://" (gethash "containerID" request))))))))
+  (let ((state (load-container-lifecycle-state runtime (pod-uid pod))))
+    (loop for status across (container-lifecycle-all-statuses observed)
+          for request = (gethash "probeRestart" (gethash (gethash "name" status) (gethash "containers" state) (core-object)))
+          thereis (and request (gethash "terminated" (gethash "state" status))
+                       (or (equal "update" (gethash "kind" request))
+                           (not (equal "Never" (pod-restart-policy pod))))
+                            (equal (gethash "containerID" status) (concatenate 'string "containerd://" (gethash "containerID" request)))))))
 
 (defun preserve-stopped-container-probe-events (runtime manager)
   "Merge retired Events only into existing checkpoints, serialized with deletion."

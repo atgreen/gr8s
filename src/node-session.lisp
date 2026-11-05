@@ -274,7 +274,8 @@
   (loop for node in (sort (copy-list (list-nodes (node-grpc-server-store server)))
                          #'string< :key #'node-record-name)
         unless (or (string= node-name (node-record-name node))
-                   (string= "" (node-record-underlay-address node)))
+                   (string= "" (node-record-underlay-address node))
+                   (string= "" (node-record-pod-cidr node)))
           collect (make-instance 'gr8s.node.v1::node-route
                                  :node-id (node-record-id node)
                                  :pod-cidr (node-record-pod-cidr node)
