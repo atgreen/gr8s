@@ -389,7 +389,16 @@
                    :metadata-no-sync (getf options :containerd-no-sync)
                    :runtime-assets *embedded-runtime-assets*
                    :extra-runtime-handlers
-                   (load-installed-runtime-addons state-directory)
+                   ;; Runtime addons are a node-level resource at the node's
+                   ;; state root. serve runs its local agent (and thus
+                   ;; containerd) under <state>/agent/, so it passes
+                   ;; :runtime-addons-directory to point back at <state>, where
+                   ;; the operator installed them. A standalone `gr8s agent`
+                   ;; falls back to its own --state-directory.
+                   (load-installed-runtime-addons
+                    (uiop:ensure-directory-pathname
+                     (or (getf options :runtime-addons-directory)
+                         (getf options :state-directory))))
                    :cni-bin-directory
                    (uiop:pathname-directory-pathname
                     (pathname (getf options :containerd-executable))))))
@@ -498,7 +507,12 @@
           (getf options :token) token
           (getf options :ca-pin) (cluster-pki-ca-fingerprint pki)
           (getf options :node-name) node-name
-          (getf options :state-directory) (namestring directory))
+          (getf options :state-directory) (namestring directory)
+          ;; Containerd runs under <node-state>/agent/, but runtime addons live
+          ;; at the node state root the operator manages, so look for them in the
+          ;; parent of this agent directory.
+          (getf options :runtime-addons-directory)
+          (namestring (uiop:pathname-parent-directory-pathname directory)))
     (setf (local-node-agent-thread worker)
           (bt:make-thread
            (lambda ()
