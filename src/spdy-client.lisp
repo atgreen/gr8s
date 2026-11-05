@@ -67,8 +67,9 @@
     (write-sequence payload stream)
     (finish-output stream)))
 
-(defun spdy-open-stream (session stream-type)
-  "Open a stream the server will take for the remotecommand channel STREAM-TYPE, returning its ID."
+(defun spdy-open-stream (session stream-type &optional headers)
+  "Open a stream the server will take for the channel STREAM-TYPE, returning its ID.
+HEADERS are further (name . value) pairs for it."
   (bt:with-lock-held ((spdy-session-write-lock session))
     (let ((id (spdy-session-next-stream-id session)) (payload (spdy-octet-buffer)))
       (incf (spdy-session-next-stream-id session) 2)
@@ -76,7 +77,7 @@
       (spdy-put-u32 0 payload)
       (vector-push-extend 0 payload)
       (vector-push-extend 0 payload)
-      (loop for octet across (spdy-header-block session (list (cons "streamtype" stream-type)))
+      (loop for octet across (spdy-header-block session (append headers (list (cons "streamtype" stream-type))))
             do (vector-push-extend octet payload))
       (spdy-write-control-frame session +spdy-syn-stream+ 0 payload)
       id)))
@@ -126,22 +127,22 @@ Pings are answered here. A GOAWAY ends the session, and other control frames car
               (return (list :data (logand (spdy-read-u32 head 0) #x7FFFFFFF)
                             (logbitp 0 flags) payload))))))))
 
-(defun runtime-spdy-request (target host port)
-  "Return the HTTP request upgrading to SPDY for the one protocol version this client speaks."
+(defun runtime-spdy-request (target host port protocol)
+  "Return the HTTP request upgrading to SPDY for the stream PROTOCOL."
   (format nil
-          "POST ~A HTTP/1.1~C~CHost: ~A:~D~C~CConnection: Upgrade~C~CUpgrade: SPDY/3.1~C~CX-Stream-Protocol-Version: v4.channel.k8s.io~C~CContent-Length: 0~C~C~C~C"
+          "POST ~A HTTP/1.1~C~CHost: ~A:~D~C~CConnection: Upgrade~C~CUpgrade: SPDY/3.1~C~CX-Stream-Protocol-Version: ~A~C~CContent-Length: 0~C~C~C~C"
           target #\Return #\Linefeed host port #\Return #\Linefeed
-          #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+          #\Return #\Linefeed #\Return #\Linefeed protocol #\Return #\Linefeed
           #\Return #\Linefeed #\Return #\Linefeed))
 
-(defun connect-runtime-stream (url)
+(defun connect-runtime-stream (url &key (protocol "v4.channel.k8s.io"))
   "Upgrade a one-time streaming URL to SPDY, returning the socket and a session."
   (multiple-value-bind (host port target) (parse-runtime-stream-url url)
     (let* ((socket (usocket:socket-connect host port :element-type '(unsigned-byte 8)))
            (stream (usocket:socket-stream socket)))
       (handler-case
           (progn
-            (write-sequence (ascii-octets (runtime-spdy-request target host port)) stream)
+            (write-sequence (ascii-octets (runtime-spdy-request target host port protocol)) stream)
             (finish-output stream)
             (multiple-value-bind (status headers) (parse-http-response-head (read-http-response-head stream))
               (declare (ignore headers))

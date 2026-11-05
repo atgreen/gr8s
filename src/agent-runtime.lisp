@@ -1080,6 +1080,9 @@ that reconnects or restarts gets the answer without a second deletion racing the
            ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_reclaim_volume+)
             (start-volume-reclaim-operation node-runtime payload emit))
+           ((= (slot-value payload 'gr8s.node.v1::kind)
+               gr8s.node.v1::+operationkind-operation_kind_port_forward+)
+            (start-node-port-forward-operation node-runtime payload emit))
            ((or (= (slot-value payload 'gr8s.node.v1::kind)
                    gr8s.node.v1::+operationkind-operation_kind_attach+)
                 (and (= (slot-value payload 'gr8s.node.v1::kind)
@@ -1095,9 +1098,14 @@ that reconnects or restarts gets the answer without a second deletion racing the
                  (find-node-exec-operation
                   node-runtime
                   (slot-value payload 'gr8s.node.v1::operation-id))))
-           (unless operation
-             (error 'runtime-error :message "Interactive operation was not found"))
-           (write-node-exec-input operation payload)))
+           (cond
+             ((typep operation 'node-port-forward-operation)
+              (write-node-port-forward-input operation payload))
+             ;; A forwarded connection can end while its last data is on the way.
+             ((and (null operation) (plusp (slot-value payload 'gr8s.node.v1::acknowledged-bytes))))
+             ((null operation)
+              (error 'runtime-error :message "Interactive operation was not found"))
+             (t (write-node-exec-input operation payload)))))
         (:operation-cancel
          (let ((operation
                  (find-node-exec-operation
