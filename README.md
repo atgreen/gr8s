@@ -13,8 +13,23 @@ rather than shelling out to a container CLI), but almost everything above and
 around that boundary is Lisp. The control plane schedules Pods and publishes
 desired state; the agent owns the node runtime and reports observed status.
 
-## What makes gr8s unusual
+## What's special about gr8s
 
+gr8s is a clean-slate, modern implementation of Kubernetes. Kubernetes grew up
+before eBPF, and the ecosystem spent a decade bolting modern primitives onto it:
+eBPF dataplanes replacing kube-proxy/iptables, consensus behind a separate etcd,
+gateways behind proxy sidecars. gr8s starts from where the ecosystem landed and
+makes those primitives **foundational** rather than retrofitted — the dataplane
+*is* eBPF, the datastore *is* a built-in Raft, the gateway *is* the node agent —
+and it does it in one language and one static binary, with no kube-proxy, no
+iptables, no Envoy, no etcd, and no C toolchain anywhere in the build.
+
+- **eBPF is the dataplane, not an add-on.** Whistler compiles eBPF *directly from
+  Lisp* — no LLVM, no clang, no `.c`, no hand-written ELF. The CNI anti-spoof
+  egress guard, the NetworkPolicy firewall, the ClusterIP service load balancer,
+  and the Gateway's inbound `sk_lookup` steering are all Lisp→eBPF, loaded through
+  a Lisp BPF loader and a Lisp rtnetlink stack. There is no kube-proxy and no
+  iptables; packet handling lives in the kernel, programmed from Lisp.
 - **One static image, every role.** `gr8s serve` is the control plane *and* a
   node; the same binary is the standalone agent and the CNI plugin. It embeds
   statically linked containerd 2.4.2, `containerd-shim-runc-v2`, runc 1.5.2, and
@@ -22,11 +37,6 @@ desired state; the agent owns the node runtime and reports observed status.
   no host glibc, no separate CNI helper binary. At startup it mounts a private
   `tmpfs` and BPF filesystem, materializes the payload, and runs its own
   containerd.
-- **The dataplane is compiled from Common Lisp.** Whistler compiles eBPF
-  *directly from Lisp* — no LLVM, no clang, no `.c`, no hand-written ELF. The CNI
-  anti-spoof egress guard, the NetworkPolicy firewall, the ClusterIP service load
-  balancer, and the Gateway's inbound steering are all Lisp→eBPF, loaded through
-  a Lisp BPF loader and a Lisp rtnetlink stack.
 - **Gateway API with no proxy sidecar.** HTTPRoutes are *JIT-compiled*: SBCL
   turns the routing table into a native dispatch function with route constants
   inlined and Gateway-API precedence baked into the branch order, recompiled on
