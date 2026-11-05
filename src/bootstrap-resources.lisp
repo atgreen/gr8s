@@ -240,6 +240,7 @@
     ("statefulsets" ("sts") ("all"))
     ("jobs" () ("all"))
     ("cronjobs" ("cj") ("all"))
+    ("componentstatuses" ("cs") ())
     ("horizontalpodautoscalers" ("hpa") ("all"))
     ("poddisruptionbudgets" ("pdb"))
     ("certificatesigningrequests" ("csr"))

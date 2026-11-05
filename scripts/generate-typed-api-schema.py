@@ -37,7 +37,7 @@ TYPES = [("core-types.go", "k8s.io.api.core.v1."), ("coordination-types.go", "k8
          ("admission-types.go", "k8s.io.api.admissionregistration.v1."),
          ("autoscaling1-types.go", "k8s.io.api.autoscaling.v1."), ("autoscaling2-types.go", "k8s.io.api.autoscaling.v2.")]
 ROOTS = [package + kind for package, kinds in (
-    ("k8s.io.api.core.v1.", ["NamespaceStatus"]),
+    ("k8s.io.api.core.v1.", ["NamespaceStatus", "Binding"]),
     ("k8s.io.api.coordination.v1.", ["Lease"]),
     ("k8s.io.api.autoscaling.v1.", ["HorizontalPodAutoscaler"]),
     ("k8s.io.api.autoscaling.v2.", ["HorizontalPodAutoscaler"]),
@@ -48,7 +48,7 @@ ROOTS = [package + kind for package, kinds in (
     ("k8s.io.api.authorization.v1.", ["SubjectAccessReview", "LocalSubjectAccessReview", "SelfSubjectAccessReview", "SelfSubjectRulesReview"]),
     ("k8s.io.api.authentication.v1.", ["TokenRequest", "TokenReview", "SelfSubjectReview"]),
 ) for kind in kinds]
-REVIEWS = {"NamespaceStatus", "TokenRequest", "TokenReview", "SelfSubjectReview", "SubjectAccessReview", "LocalSubjectAccessReview",
+REVIEWS = {"NamespaceStatus", "Binding", "TokenRequest", "TokenReview", "SelfSubjectReview", "SubjectAccessReview", "LocalSubjectAccessReview",
            "SelfSubjectAccessReview", "SelfSubjectRulesReview"}
 
 

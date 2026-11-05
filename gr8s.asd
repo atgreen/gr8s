@@ -180,6 +180,7 @@
                              (:file "flowcontrol")
                              (:file "http")
                              (:file "pod-port-forward")
+                             (:file "pod-binding")
                              (:file "aggregated-discovery")
                              (:file "core-resource-http")
                              (:file "storage-http")

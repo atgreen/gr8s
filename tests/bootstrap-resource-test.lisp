@@ -125,7 +125,7 @@
 (test every-named-discovery-resource-exists
   ;; A misspelled table entry would silently publish nothing.
   (loop for (resource) in gr8s::*resource-discovery-names*
-        do (is (or (member resource '("pods" "nodes" "apiservices" "volumeattributesclasses") :test #'equal)
+        do (is (or (member resource '("pods" "nodes" "apiservices" "volumeattributesclasses" "componentstatuses") :test #'equal)
                    (assoc resource gr8s::*stored-resource-types* :test #'equal))
                "~A is not a served resource" resource)))
 
@@ -306,3 +306,63 @@
     ;; Other kinds keep DNS names.
     (check-core-status 422 "/api/v1/namespaces/alpha/configmaps" :method :post
       :object (gr8s::core-object "metadata" (gr8s::core-object "name" "not:dns")))))
+
+(test pods-can-be-bound-once-to-a-node-that-exists
+  (with-core-api (store directory)
+    (values directory)
+    (gr8s:register-node store (gr8s:make-node-record :id "bind-id" :name "bind-node" :pod-cidr "10.88.40.0/24"))
+    (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
+           (name (pod-name pod))
+           (binding (concatenate 'string "/api/v1/namespaces/default/pods/" name "/binding")))
+      (flet ((bind (code node &optional (bound-name name))
+               (check-core-status
+                code binding :method :post
+                :object (gr8s::core-object "apiVersion" "v1" "kind" "Binding"
+                                           "metadata" (gr8s::core-object "name" bound-name)
+                                           "target" (gr8s::core-object "kind" "Node" "name" node)))))
+        (bind 404 "no-such-node")
+        (bind 400 "bind-node" "another-pod")
+        (is (null (gr8s::pod-node-name (gr8s:get-pod store "default" name))))
+        (is (= 201 (gethash "code" (bind 201 "bind-node"))))
+        (is (equal "bind-node" (gr8s::pod-node-name (gr8s:get-pod store "default" name))))
+        ;; A Pod is bound once.
+        (bind 409 "bind-node")))))
+
+(test componentstatuses-are-listed-and-read-only
+  (with-core-api (store directory)
+    (values store directory)
+    (let ((items (gethash "items" (check-core-status 200 "/api/v1/componentstatuses"))))
+      (is (equal '("controller-manager" "etcd-0" "scheduler")
+                 (map 'list (lambda (item) (gethash "name" (gethash "metadata" item))) items)))
+      (is (equal "True" (gethash "status" (aref (gethash "conditions" (aref items 0)) 0)))))
+    (is (equal "ComponentStatus" (gethash "kind" (check-core-status 200 "/api/v1/componentstatuses/scheduler"))))
+    (check-core-status 404 "/api/v1/componentstatuses/nothing")
+    (check-core-status 405 "/api/v1/componentstatuses/scheduler" :method :delete)
+    (let ((names (map 'list (lambda (entry) (gethash "name" entry))
+                      (gethash "resources" (check-core-status 200 "/api/v1")))))
+      (is (member "componentstatuses" names :test #'equal))
+      (is (member "pods/binding" names :test #'equal)))))
+
+(test a-chunked-request-body-ends-at-its-last-chunk
+  ;; kubectl create --raw -f - chunks what it reads from stdin. The body's read used to
+  ;; wait out the connection's 20 second timeout and fail with a 500.
+  (with-core-api (store directory)
+    (values store directory)
+    (let* ((body "{\"apiVersion\":\"v1\",\"kind\":\"Namespace\",\"metadata\":{\"name\":\"chunked\"}}")
+           (socket (usocket:socket-connect "127.0.0.1" 18089 :element-type '(unsigned-byte 8)))
+           (stream (usocket:socket-stream socket)))
+      (unwind-protect
+           (progn
+             (write-sequence
+              (trivial-utf-8:string-to-utf-8-bytes
+               (format nil "POST /api/v1/namespaces HTTP/1.1~C~CHost: x~C~CContent-Type: application/json~C~CTransfer-Encoding: chunked~C~C~C~C~X~C~C~A~C~C0~C~C~C~C"
+                       #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+                       (length body) #\Return #\Linefeed body #\Return #\Linefeed
+                       #\Return #\Linefeed #\Return #\Linefeed))
+              stream)
+             (finish-output stream)
+             (is-true (usocket:wait-for-input socket :timeout 5 :ready-only t) "no answer within 5 seconds")
+             (let ((status (gr8s::admission-read-line stream)))
+               (is (search " 201 " status) "got ~A" status))
+             (is (equal "chunked" (gethash "name" (gethash "metadata" (gr8s::get-core-resource store "namespaces" nil "chunked"))))))
+        (usocket:socket-close socket)))))
