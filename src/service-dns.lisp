@@ -24,8 +24,8 @@
     (setf (gethash "kind" result) kind
           (gethash "apiVersion" result) (cond ((equal kind "Service") "v1")
                                               ((equal kind "Secret") "v1")
-                                              ((equal kind "ClusterTrustBundle") "certificates.k8s.io/v1beta1")
-                                              ((equal kind "PodCertificateRequest") "certificates.k8s.io/v1alpha1")
+                                              ((equal kind "ClusterTrustBundle") "certificates.k8s.io/v1")
+                                              ((equal kind "PodCertificateRequest") "certificates.k8s.io/v1beta1")
                                               ((equal kind "NetworkPolicy") "networking.k8s.io/v1")
                                               ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
                                                "gateway.networking.k8s.io/v1")
@@ -58,7 +58,12 @@
              (gethash "data" result) (copy-core-object (gethash "data" object))))
       ((equal kind "ClusterTrustBundle")
        ;; Trust anchors a node needs for the clusterTrustBundle projected volume
-       ;; (KEP-4317). The whole spec (signerName + trustBundle PEM) is public.
+       ;; (KEP-4317). The whole spec (signerName + trustBundle PEM) is public, and
+       ;; the labels must cross too: a clusterTrustBundle source selects bundles
+       ;; by labelSelector (e.g. podcert.ate.dev/canarying=live), so dropping
+       ;; them would leave a signerName+selector volume matching nothing.
+       (when (gethash "labels" source)
+         (setf (gethash "labels" metadata) (copy-core-object (gethash "labels" source))))
        (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
       ((equal kind "PodCertificateRequest")
        ;; The node created this request's public key and now needs the signed

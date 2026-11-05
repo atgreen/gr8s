@@ -15,10 +15,14 @@
 (defparameter *pod-certificate-trust-domain* "cluster.local"
   "The SPIFFE trust domain the built-in pod-certificate signer issues under.")
 
-(defparameter *pod-certificate-signers*
-  '("podidentity.podcert.ate.dev/identity" "servicedns.podcert.ate.dev/identity")
-  "signerNames the built-in signer issues for. Requests for any other signer stay
-   Pending for whatever external controller owns that name, exactly as upstream.")
+(defparameter *pod-certificate-signers* '()
+  "signerNames the built-in signer issues for. Empty by default: gr8s provides
+   the KEP-4317 kubelet mechanics (the PodCertificateRequest API, projection and
+   volumes) and leaves signing to whatever controller owns each signer -- as a
+   real cluster does, and as Agent Substrate expects (it deploys its own
+   podcertcontroller, which signs under its own CA). Set this (e.g. to
+   '(\"podidentity.podcert.ate.dev/identity\")) only for a standalone gr8s that
+   should self-sign those names from the cluster CA.")
 
 (defparameter *pod-certificate-default-duration* (* 24 60 60)
   "The lifetime the built-in signer issues when a request sets no bound.")
@@ -36,6 +40,29 @@
   (let ((spec (gethash "spec" pcr (core-object))))
     (and (equal pod-uid (gethash "podUID" spec))
          (equal pkix (gethash "pkixPublicKey" spec)))))
+
+(defun signer-domain (signer-name)
+  "The domain of a signerName, e.g. postgres.podcert.ate.dev for
+   postgres.podcert.ate.dev/identity (the part before the final slash)."
+  (let ((slash (position #\/ signer-name :from-end t)))
+    (if slash (subseq signer-name 0 slash) signer-name)))
+
+(defun pod-certificate-source-user-annotations (store namespace pod-name pod-uid request-name)
+  "The userAnnotations of the podCertificate volume source that produced the
+   request named REQUEST-NAME, copied verbatim into the request's
+   unverifiedUserAnnotations for the signer (KEP-4317). Matched from the live pod
+   by the source's derived request name -- a pod may carry several sources for
+   one signer -- so a node cannot assert annotations the pod's spec does not set."
+  (let ((pod (ignore-errors (get-pod store namespace pod-name))))
+    (when (and pod (equal pod-uid (pod-uid pod)))
+      (loop for volume across (gethash "volumes" (gethash "spec" (pod-to-object pod)) #())
+            for projected = (gethash "projected" volume)
+            when projected
+              do (loop for src across (gethash "sources" projected #())
+                       for pc = (gethash "podCertificate" src)
+                       when (and pc (equal request-name (pod-certificate-request-name pod pc)))
+                         do (return-from pod-certificate-source-user-annotations
+                              (gethash "userAnnotations" pc)))))))
 
 (defun ensure-pod-certificate-request-from-claim (store node-name claim)
   "Idempotently ensure the PodCertificateRequest a node's CLAIM asks for exists
@@ -60,10 +87,19 @@
         :pkix-public-key pkix
         :pod-name (slot-value claim 'gr8s.node.v1::pod-name) :pod-uid pod-uid
         :service-account-name (slot-value claim 'gr8s.node.v1::service-account-name)
-        :service-account-uid (let ((uid (slot-value claim 'gr8s.node.v1::service-account-uid)))
-                               (when (plusp (length uid)) uid))
+        ;; The node cannot resolve the SA UID (ServiceAccounts are not projected
+        ;; to it), so the control plane fills it from its own store by SA name.
+        :service-account-uid (let ((uid (slot-value claim 'gr8s.node.v1::service-account-uid))
+                                   (sa-name (slot-value claim 'gr8s.node.v1::service-account-name)))
+                               (if (plusp (length uid)) uid
+                                   (let ((sa (ignore-errors
+                                              (get-core-resource store "serviceaccounts" namespace sa-name))))
+                                     (and sa (gethash "uid" (gethash "metadata" sa))))))
         :node-name node-name :node-uid (node-metadata-uid store node-name)
-        :max-expiration-seconds (when (plusp max) max))
+        :max-expiration-seconds (when (plusp max) max)
+        :unverified-user-annotations
+        (pod-certificate-source-user-annotations store namespace
+                                                 (slot-value claim 'gr8s.node.v1::pod-name) pod-uid name))
        namespace))))
 
 ;;; ---------------------------------------------------------------------------
@@ -156,6 +192,11 @@
                     (gethash "notBefore" status) (stamp not-before)
                     (gethash "notAfter" status) (stamp not-after)
                     (gethash "beginRefreshAt" status) (stamp (- not-after (floor (- not-after not-before) 3)))
+                    ;; The v1beta1 terminal condition clients wait on.
+                    (gethash "conditions" status)
+                    (vector (core-object "type" "Issued" "status" "True" "reason" "Issued"
+                                         "message" "gr8s built-in signer issued the certificate"
+                                         "lastTransitionTime" (stamp not-before)))
                     (gethash "status" current) status))
             current))))))
 

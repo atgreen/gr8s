@@ -184,7 +184,11 @@
                  (equal kind (gethash "kind" object kind)))
       (core-resource-error 400 "BadRequest" "Expected ~A ~A" version kind))
     (reject-unsupported-fields object (append '("apiVersion" "kind" "metadata") fields) kind)
-    (validate-core-metadata metadata namespace name :name-test (when (rbac-resource-p resource) #'path-segment-name-p))
+    (validate-core-metadata metadata namespace name
+                            :name-test (when (or (rbac-resource-p resource)
+                                                 ;; KEP-3257 signer-linked names carry colons.
+                                                 (equal resource "clustertrustbundles"))
+                                         #'path-segment-name-p))
     (setf (gethash "kind" object) kind (gethash "apiVersion" object) version)
     (if namespace (setf (gethash "namespace" metadata) namespace) (remhash "namespace" metadata))
     (cond

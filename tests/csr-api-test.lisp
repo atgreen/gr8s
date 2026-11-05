@@ -113,7 +113,11 @@
       (is (equal "Wire-CSR" (gethash "name" (gethash "metadata" created))))
       (csr-api-request 200 "/apis/certificates.k8s.io")
       (let ((resources (gethash "resources" (csr-api-request 200 "/apis/certificates.k8s.io/v1"))))
-        (is (= 3 (length resources))))
+        ;; certificatesigningrequests (+/approval, +/status) and the GA
+        ;; ClusterTrustBundle, all under certificates.k8s.io/v1 (k8s 1.37).
+        (is (= 4 (length resources)))
+        (is (find "clustertrustbundles" resources :test #'equal
+                  :key (lambda (r) (gethash "name" r)))))
       (let ((listed (csr-api-request 200 (concatenate 'string collection "?fieldSelector=spec.signerName=example.test/wire"))))
         (is (= 1 (length (gethash "items" listed)))))
       (setf (gethash "finalizers" (gethash "metadata" created)) #("example.test/retain"))

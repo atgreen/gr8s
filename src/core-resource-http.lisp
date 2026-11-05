@@ -285,6 +285,10 @@
       (core-resource-error 400 "BadRequest" "Invalid request namespace"))
     (when (and name (not (cond ((csr-resource-p resource) (csr-path-name-p name))
                                ((rbac-resource-p resource) (path-segment-name-p name))
+                               ;; A signer-linked ClusterTrustBundle is named
+                               ;; <signerName with the final / as :>:<suffix>
+                               ;; (KEP-3257), so its name carries colons.
+                               ((equal resource "clustertrustbundles") (path-segment-name-p name))
                                ((equal resource "ipaddresses") (networking-canonical-ip-p name))
                                (t (dns-subdomain-p name)))))
       (core-resource-error 400 "BadRequest" "Invalid request name"))
