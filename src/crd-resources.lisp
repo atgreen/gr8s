@@ -356,7 +356,12 @@
     (when (and (not existing) (gethash "deletionTimestamp" (gethash "metadata" definition)))
       (core-resource-error 405 "MethodNotAllowed" "Custom definition is terminating"))
     (when (and (equal "Cluster" (gethash "scope" spec)) namespace) (crd-schema-error "metadata.namespace" "resource is cluster scoped"))
-    (validate-crd-metadata metadata namespace name)
+    ;; A metadata failure is reported along with the schema's, as upstream lists them all.
+    (let ((metadata-error (handler-case (progn (validate-crd-metadata metadata namespace name) nil)
+                            (kubernetes-error (condition)
+                              ;; A strict decoding refusal is a bad request, not a field to list.
+                              (unless (= 422 (kubernetes-error-status-code condition)) (error condition))
+                              (kubernetes-error-message condition)))))
     (if namespace (setf (gethash "namespace" metadata) namespace) (remhash "namespace" metadata))
     (if (and status-p *crd-status-write* existing)
         (let* ((copy (crd-object-at-version definition existing version-name)) (copy-meta (gethash "metadata" copy))
@@ -367,8 +372,9 @@
               (let* ((*crd-track-pruning* t) (*crd-pruned-fields* nil)
                      (status (crd-prepare-value (gethash "status" object) status-schema nil 0 "status")))
                 (when *crd-pruned-fields* (crd-report-pruned-fields *crd-pruned-fields*))
-                (crd-validate-value status status-schema "status" 0
-                                    (gethash "status" old-view) (nth-value 1 (gethash "status" old-view)))
+                (crd-validate-all status status-schema "status"
+                                  :old (gethash "status" old-view) :has-old (nth-value 1 (gethash "status" old-view))
+                                  :prior (and metadata-error (list metadata-error)))
                 (setf (gethash "status" copy) status))
               (remhash "status" copy))
           (setf object copy))
@@ -381,7 +387,9 @@
           (let ((*crd-track-pruning* t) (*crd-pruned-fields* nil))
             (setf object (crd-prepare-value object (crd-schema version) t))
             (when *crd-pruned-fields* (crd-report-pruned-fields *crd-pruned-fields*)))
-          (crd-validate-value object (crd-schema version) "resource" 0 old-view (and existing t))))
+          (crd-validate-all object (crd-schema version) "resource" :old old-view :has-old (and existing t)
+                            :prior (and metadata-error (list metadata-error)))))
+    (when metadata-error (core-resource-error 422 "Invalid" "~A" metadata-error)))
     ;; Rules read the object as the client wrote it, against the old object at the same version.
     (crd-enforce-validation-rules
      (crd-schema version) object old-view (gethash "kind" names) (gethash "name" metadata))
