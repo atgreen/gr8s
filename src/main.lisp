@@ -597,11 +597,12 @@ handler and never gets here. A busy host makes this race likely."
   "Print a startup banner (Spring-Boot style) naming the role gr8s is starting."
   (fresh-line)
   (terpri)
-  (dolist (line '("     __ _ _ __ ( _ ) ___"
-                  "    / _` | '__/ _ \\/ __|"
-                  "   | (_| | | | (_) \\__ \\"
-                  "    \\__, |_|  \\___/|___/"
-                  "    |___/"))
+  (dolist (line '("                 ___"
+                  "    __ _ _ __    ( _ )  ___"
+                  "   / _` | '__|   / _ \\ / __|"
+                  "  | (_| | |     | (_) |\\__ \\"
+                  "   \\__, |_|      \\___/ |___/"
+                  "   |___/"))
     (write-line line))
   (terpri)
   (format t "   gr8s · a Kubernetes-compatible control plane in Common Lisp~%")
