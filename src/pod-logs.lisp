@@ -96,6 +96,49 @@ Text with no CRI lines, as from a non-CRI runtime, passes through unless a filte
                    :timestamps (true-parameter-p (hunchentoot:parameter "timestamps"))
                    :since (pod-logs-since)))
 
+(defun pod-container-finished-p (store pod container)
+  "Return whether CONTAINER's latest report shows it terminated, or POD is gone or finished."
+  (let ((current (handler-case (get-pod store (pod-namespace pod) (pod-name pod))
+                   (kubernetes-error () nil))))
+    (or (null current)
+        (not (equal (pod-uid current) (pod-uid pod)))
+        (let* ((status (pod-observed-status store current))
+               (item (and status
+                          (find container
+                                (concatenate 'vector (gethash "containerStatuses" status #())
+                                             (gethash "initContainerStatuses" status #())
+                                             (gethash "ephemeralContainerStatuses" status #()))
+                                :test #'equal :key (lambda (entry) (gethash "name" entry))))))
+          (or (and status (member (gethash "phase" status) '("Succeeded" "Failed") :test #'equal))
+              (and item (hash-table-p (gethash "state" item)) (gethash "terminated" (gethash "state" item))))))))
+
+(defun serve-followed-pod-logs (store reconciler pod container text offset)
+  "Send TEXT, then stream whole new log lines past OFFSET until the container ends or the client leaves."
+  (setf (hunchentoot:content-type*) "text/plain; charset=utf-8")
+  (let ((stream (hunchentoot:send-headers))
+        (timestamps (true-parameter-p (hunchentoot:parameter "timestamps"))))
+    (flet ((send (string)
+             (when (plusp (length string))
+               (write-sequence (trivial-utf-8:string-to-utf-8-bytes string) stream)
+               (finish-output stream))))
+      (handler-case
+          (progn
+            (send text)
+            (loop
+              (let* ((finished (pod-container-finished-p store pod container))
+                     (raw (handler-case (or (reconciler-logs reconciler (pod-uid pod) container) "")
+                            (runtime-error () "")))
+                     (end (position #\Newline raw :from-end t)))
+                (when (and end (>= end offset))
+                  (send (format-pod-logs (subseq raw offset (1+ end)) :timestamps timestamps))
+                  (setf offset (1+ end)))
+                (when finished (return)))
+              (sleep 1)))
+        ;; The headers have gone, so nothing can be reported; a client hanging
+        ;; up, whatever the transport makes of it, is how a follow usually ends.
+        (error () nil))))
+  nil)
+
 (defun serve-pod-logs-websocket (text)
   "Answer an upgraded log request with TEXT in the protocol the client asked for."
   (let* ((key (hunchentoot:header-in* :sec-websocket-key))

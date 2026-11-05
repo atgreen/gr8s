@@ -244,7 +244,7 @@
                                 "verbs" (if (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource)
                                                 (policy-resource-p resource) (networking-resource-p resource)
                                                 (admission-config-resource-p resource)
-                                                (member resource '("services" "networkpolicies" "podtemplates" "events" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions" "customresourcedefinitions") :test #'equal))
+                                                (member resource '("services" "networkpolicies" "podtemplates" "events" "horizontalpodautoscalers" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions" "customresourcedefinitions") :test #'equal))
                                             #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
                                             #("create" "delete" "get" "list" "patch" "update" "watch"))))
    'vector))
@@ -307,7 +307,7 @@
   "Return the requested Node object from a typed or JSON PUT, or a patch applied to NODE's view."
   (if (eq method :put)
       (core-resource-request-object "Node")
-      (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
+      (let* ((content-type (request-media-type))
              (patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)))
              (current (node-api-object node)))
         (cond ((equal content-type "application/json-patch+json") (apply-core-json-patch current patch))

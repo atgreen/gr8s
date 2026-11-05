@@ -279,10 +279,10 @@
                      (list status))
                  (pod-reconciliation-superseded () nil))))
 
-(defun reconciler-logs (reconciler uid container &key tail)
+(defun reconciler-logs (reconciler uid container &key tail previous)
   (bt:with-lock-held ((reconciler-lock reconciler))
     (runtime-logs (reconciler-runtime reconciler)
-                  uid container :tail tail)))
+                  uid container :tail tail :previous previous)))
 
 (defun reconciler-exec-url
     (reconciler uid container command &key stdin stdout stderr tty)

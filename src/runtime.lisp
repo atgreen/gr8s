@@ -119,7 +119,7 @@
 (defgeneric stop-runtime-deletions (runtime)
   (:documentation "Cancel and join background deletion operations before runtime services stop."))
 (defmethod stop-runtime-deletions ((runtime t)) nil)
-(defgeneric runtime-logs (runtime uid container &key tail))
+(defgeneric runtime-logs (runtime uid container &key tail previous))
 (defgeneric runtime-exec-url
     (runtime uid container command &key stdin stdout stderr tty))
 (defgeneric runtime-exec-sync
@@ -194,8 +194,8 @@
   (fail-if-requested runtime)
   (remhash uid (fake-runtime-pods runtime)))
 
-(defmethod runtime-logs ((runtime fake-runtime) uid container &key tail)
-  (declare (ignore tail))
+(defmethod runtime-logs ((runtime fake-runtime) uid container &key tail previous)
+  (declare (ignore tail previous))
   (fail-if-requested runtime)
   (let ((pod (runtime-observe runtime uid)))
     (and pod (gethash container (runtime-pod-logs pod) ""))))

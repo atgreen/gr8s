@@ -122,13 +122,16 @@
                  (setf (gethash key (pod-store-resources store)) object)))))
   store)
 
+(defparameter +template-history-recent-limit+ 512
+  "Newest journal entries kept separately, so that an idle watch reads few of them.")
+
 (defun commit-core-resources (store resources revision
                               &key (workload-deletions (pod-store-workload-deletions store))
                                 (job-controller-states (pod-store-job-controller-states store)))
   "Atomically commit API status, Job retry state and durable deletion/history indexes before publishing memory."
   ;; Write the complete new state before publishing it in memory. A failed
   ;; atomic write leaves both the old disk state and the old index intact.
-  (multiple-value-bind (history floor) (next-template-history store resources revision)
+  (multiple-value-bind (history floor added) (next-template-history store resources revision)
    (let ((token-key (or (pod-store-template-token-key store) (secure-random-octets 32)))
          (event-expirations (next-event-expirations store resources)))
     (write-private-text-atomically
@@ -150,6 +153,11 @@
         (pod-store-job-controller-states store) job-controller-states
         (pod-store-resource-revision store) revision
         (pod-store-template-history store) history
+        (pod-store-template-history-recent store)
+        (let ((recent (append added (pod-store-template-history-recent store))))
+          (if (nthcdr +template-history-recent-limit+ recent)
+              (subseq recent 0 +template-history-recent-limit+)
+              recent))
         (pod-store-template-history-floor store) floor
         (pod-store-template-token-key store) token-key
         (pod-store-event-expirations store) event-expirations))))
@@ -281,6 +289,8 @@
     (return-from normalize-core-resource (normalize-batch-resource input namespace name)))
   (when (budget-resource-p resource)
     (return-from normalize-core-resource (normalize-budget-resource input namespace name)))
+  (when (hpa-resource-p resource)
+    (return-from normalize-core-resource (normalize-hpa-resource input namespace name store)))
   (when (policy-resource-p resource)
     (return-from normalize-core-resource (normalize-policy-resource resource input namespace name store)))
   (when (networking-resource-p resource)
@@ -454,6 +464,7 @@
   "Copy stored object EXISTING into the form the current request's writer sees."
   (cond ((custom-resource-key-p resource) (crd-api-view (copy-core-object existing)))
         ((equal resource "events") (event-api-view (copy-core-object existing) (or *core-resource-view-version* "v1")))
+        ((and (hpa-resource-p resource) (equal *core-resource-view-version* "autoscaling/v1")) (hpa-v1-view existing))
         (t (copy-core-object existing))))
 
 (defun update-core-resource (store resource namespace name transform &key dry-run)

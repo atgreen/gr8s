@@ -46,6 +46,10 @@
           ((equal resource "customresourcedefinitions")
            (setf object (crd-fixture :group "watch.example.test" :plural "watched"))
            (setf (gethash "labels" (gethash "metadata" object)) (gr8s::core-object "app" "watched")))
+          ((equal resource "horizontalpodautoscalers")
+           (setf (gethash "spec" object)
+                 (gr8s::core-object "maxReplicas" 2 "scaleTargetRef"
+                                    (gr8s::core-object "apiVersion" "apps/v1" "kind" "Deployment" "name" "web"))))
           ((equal resource "persistentvolumes")
            (setf (gethash "spec" object)
                  (gr8s::core-object "capacity" (gr8s::core-object "storage" "1Gi") "accessModes" #("ReadWriteOnce")

@@ -742,7 +742,8 @@ snapshot application."
                    (runtime-logs
                     (node-runtime-runtime node-runtime)
                     (slot-value request 'gr8s.node.v1::pod-uid)
-                    (slot-value request 'gr8s.node.v1::container))))
+                    (slot-value request 'gr8s.node.v1::container)
+                    :previous (slot-value request 'gr8s.node.v1::previous))))
              (list
               (cons
                :operation-stream

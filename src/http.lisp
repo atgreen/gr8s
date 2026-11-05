@@ -103,6 +103,7 @@
                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                        (event-api-group) (workload-api-group) (batch-api-group) (budget-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group) (networking-api-group)
                        (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group) (cert-manager-api-group))))
+    (setf groups (concatenate 'vector groups (vector (autoscaling-api-group) (apiservice-api-group))))
     (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
@@ -152,18 +153,23 @@
      (gethash "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta" definitions)
      (json-object
       "type" "object"
+      "description" "ObjectMeta is metadata that all persisted resources must have, which includes all objects users must create."
       "properties"
-      (json-object "name" (json-object "type" "string")
-                   "namespace" (json-object "type" "string")
-                   "uid" (json-object "type" "string")
-                   "resourceVersion" (json-object "type" "string")
-                   "generation" (json-object "type" "integer" "format" "int64")
-                   "deletionTimestamp" (json-object "type" "string" "format" "date-time")
-                   "deletionGracePeriodSeconds" (json-object "type" "integer" "format" "int64")
+      (json-object "name" (json-object "type" "string" "description" "Name must be unique within a namespace.")
+                   "generateName" (json-object "type" "string" "description" "GenerateName is an optional prefix, used by the server to generate a unique name only if the Name field has not been provided.")
+                   "namespace" (json-object "type" "string" "description" "Namespace defines the space within which each name must be unique.")
+                   "uid" (json-object "type" "string" "description" "UID is the unique in time and space value for this object.")
+                   "resourceVersion" (json-object "type" "string" "description" "An opaque value that represents the internal version of this object.")
+                   "generation" (json-object "type" "integer" "format" "int64" "description" "A sequence number representing a specific generation of the desired state.")
+                   "creationTimestamp" (json-object "type" "string" "format" "date-time" "description" "CreationTimestamp is a timestamp representing the server time when this object was created.")
+                   "deletionTimestamp" (json-object "type" "string" "format" "date-time" "description" "DeletionTimestamp is the time at which this resource will be deleted.")
+                   "deletionGracePeriodSeconds" (json-object "type" "integer" "format" "int64" "description" "Number of seconds allowed for this object to gracefully terminate before it is removed.")
                    "labels" (json-object "type" "object"
+                                         "description" "Map of string keys and values that can be used to organize and categorize objects."
                                          "additionalProperties"
                                          (json-object "type" "string"))
                    "annotations" (json-object "type" "object"
+                                              "description" "Annotations is an unstructured key value map stored with a resource."
                                               "additionalProperties"
                                               (json-object "type" "string"))))
      (gethash "io.k8s.api.core.v1.EnvVar" definitions)
@@ -539,12 +545,16 @@
              :reason "BadRequest"
              :message (format nil "container ~A is not valid for pod ~A"
                               container name)))
-    (let ((text (format-pod-logs-for-request (or (reconciler-logs reconciler (pod-uid pod) container) ""))))
-      (if (upgrade-request-p)
-          (serve-pod-logs-websocket text)
-          (progn
-            (setf (hunchentoot:content-type*) "text/plain; charset=utf-8")
-            text)))))
+    (let* ((previous (true-parameter-p (hunchentoot:parameter "previous")))
+           (raw (or (reconciler-logs reconciler (pod-uid pod) container :previous previous) ""))
+           (text (format-pod-logs-for-request raw)))
+      (cond
+        ((upgrade-request-p) (serve-pod-logs-websocket text))
+        ((and (true-parameter-p (hunchentoot:parameter "follow")) (not previous))
+         (serve-followed-pod-logs store reconciler pod container text (length raw)))
+        (t
+         (setf (hunchentoot:content-type*) "text/plain; charset=utf-8")
+         text)))))
 
 (defstruct exec-options
   command
@@ -1128,18 +1138,63 @@ than wait for the next, which truncates any body that spans records in flight."
       (setf (slot-value request 'hunchentoot::raw-post-data)
             (read-complete-body (hunchentoot::content-stream request) (unless chunked content-length))))))
 
+(defun request-media-type ()
+  "Return the request's media type without parameters, or an empty string when it has none."
+  (string-trim " " (subseq (or (hunchentoot:header-in* :content-type) "")
+                           0 (position #\; (or (hunchentoot:header-in* :content-type) "")))))
+
+(defun request-route-path (path)
+  "Treat /api/ as /api, as Kubernetes' path recorder does for every API route."
+  (let ((trimmed (string-right-trim "/" path)))
+    (if (plusp (length trimmed)) trimmed path)))
+
+(defun accept-media-ranges ()
+  "Split the current Accept header into media ranges, each a list of its parts."
+  (loop for range in (uiop:split-string (or (hunchentoot:header-in* :accept) "") :separator '(#\,))
+        for parts = (mapcar (lambda (part) (string-trim " " part)) (uiop:split-string range :separator '(#\;)))
+        when (plusp (length (first parts))) collect parts))
+
+(defun require-representable-accept ()
+  "Answer 406 when a client accepts only the Table form no backend here can produce.
+Clients that can read an object as well say so with a further media range."
+  (let ((ranges (accept-media-ranges)))
+    (when (and ranges (every (lambda (parts) (member "as=Table" (rest parts) :test #'string=)) ranges))
+      (core-resource-error 406 "NotAcceptable"
+                           "only the following media types are accepted: application/json, application/vnd.kubernetes.protobuf"))))
+
 (defun handle-http-request (store runtime reconciler request)
   (handler-case
-      (let ((path (progn (read-request-body request) (hunchentoot:script-name request)))
+      (let ((path (progn (read-request-body request) (request-route-path (hunchentoot:script-name request))))
             (method (hunchentoot:request-method request))
             (*crd-field-validation* (crd-request-field-validation)))
+        (require-representable-accept)
+        (route-http-request store runtime reconciler path method))
+    (kubernetes-error (error)
+      (kubernetes-error-response error))
+    (com.inuoe.jzon:json-parse-error (error)
+      (status-response "Failure" "BadRequest" (princ-to-string error) 400))
+    (runtime-error (error)
+      (status-response "Failure" "RuntimeError"
+                       (runtime-error-message error) 500))))
+
+(defun route-http-request (store runtime reconciler path method)
+  "Answer the current request from whichever API handler serves PATH."
+  (progn
         (cond
+          ((and (uiop:string-prefix-p "/openapi/v3/" path) (not *openapi-v3-completing*))
+           (openapi-v3-complete-response store runtime reconciler path))
           ((string= path "/metrics")
            (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
            (concatenate 'string (runtime-network-metrics runtime) (gateway-metrics-text)))
           ((string= path "/version") (version-response))
-          ((string= path "/api") (api-versions-response))
-          ((string= path "/apis") (api-groups-response store))
+          ((string= path "/api")
+           (if (aggregated-discovery-requested-p)
+               (aggregated-discovery-response store runtime reconciler "/api")
+               (api-versions-response)))
+          ((string= path "/apis")
+           (if (aggregated-discovery-requested-p)
+               (aggregated-discovery-response store runtime reconciler "/apis")
+               (api-groups-response store)))
           ((string= path "/apis/admissionregistration.k8s.io") (json-response (admission-api-group-object)))
           ((string= path "/apis/admissionregistration.k8s.io/v1") (admission-discovery-response))
           ((string= path "/openapi/v3/apis/admissionregistration.k8s.io/v1") (openapi-v3-response +admission-api-version+))
@@ -1172,6 +1227,12 @@ than wait for the next, which truncates any body that spans records in flight."
           ((string= path "/apis/gateway.networking.k8s.io/v1") (gateway-discovery-response))
           ((string= path "/apis/cert-manager.io") (json-response (cert-manager-api-group)))
           ((string= path "/apis/cert-manager.io/v1") (cert-manager-discovery-response))
+          ((string= path "/apis/autoscaling") (json-response (autoscaling-api-group)))
+          ((string= path "/apis/autoscaling/v1") (autoscaling-discovery-response "v1"))
+          ((string= path "/apis/autoscaling/v2") (autoscaling-discovery-response "v2"))
+          ((string= path "/apis/apiregistration.k8s.io") (json-response (apiservice-api-group)))
+          ((string= path "/apis/apiregistration.k8s.io/v1") (apiservice-discovery-response))
+          ((nth-value 1 (apiservice-route path)) (apiservice-response store (apiservice-route path) method))
           ((string= path "/apis/apps") (json-response (workload-api-group)))
           ((string= path "/apis/batch") (json-response (batch-api-group)))
           ((string= path "/apis/batch/v1") (batch-resources-response))
@@ -1216,11 +1277,4 @@ than wait for the next, which truncates any body that spans records in flight."
              (pod-http-proxy-response store namespace id method)))
           ((nth-value 2 (pod-route-parts path))
            (dispatch-pod-request store runtime reconciler path method))
-          (t (status-response "Failure" "NotFound" "route not found" 404))))
-    (kubernetes-error (error)
-      (kubernetes-error-response error))
-    (com.inuoe.jzon:json-parse-error (error)
-      (status-response "Failure" "BadRequest" (princ-to-string error) 400))
-    (runtime-error (error)
-      (status-response "Failure" "RuntimeError"
-                       (runtime-error-message error) 500))))
+          (t (status-response "Failure" "NotFound" "route not found" 404)))))
