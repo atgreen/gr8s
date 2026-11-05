@@ -50,8 +50,10 @@ jobs:
         # vendored in the checkout, so no registry fetch is required here.
         run: |
           git clone --depth 1 https://github.com/ocicl/ocicl.git /tmp/ocicl
-          make -C /tmp/ocicl
-          sudo make -C /tmp/ocicl install
+          # setup.lisp builds and installs the ocicl binary to ~/.local/bin.
+          (cd /tmp/ocicl && sbcl --load setup.lisp)
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
           ocicl setup
           ocicl version
 
@@ -74,6 +76,15 @@ jobs:
         # `make test` runs generate-protocol then (asdf:test-system :gr8s).
         # asdf:test-system exits non-zero if any FiveAM test fails, so a red
         # suite fails the job.
+        #
+        # CL_SOURCE_REGISTRY points ASDF at the repo root (for gr8s.asd) and at
+        # the vendored ocicl/ tree recursively (//) for every dependency. The
+        # recursive scan is needed because deps' secondary systems (e.g.
+        # 0conf/dns-wire, defined inside 0conf.asd) are not individual rows in
+        # ocicl.csv, so ocicl's name-keyed search can't resolve them; finding
+        # the .asd files directly does. Trailing ':' inherits the ocicl config.
+        env:
+          CL_SOURCE_REGISTRY: "${{ github.workspace }}/:${{ github.workspace }}/ocicl//:"
         run: make test
 
   privileged:

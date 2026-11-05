@@ -11,7 +11,7 @@
         ;; client-go v0.27 discovery compares this media type literally. JSON
         ;; is UTF-8 already; a charset parameter breaks its legacy fallback.
         (hunchentoot:content-type*) "application/json")
-  (com.inuoe.jzon:stringify (crd-api-view (event-api-view object))))
+  (com.inuoe.jzon:stringify (table-representation (crd-api-view (event-api-view object)))))
 
 (defun status-response (status reason message code &optional details)
   "Answer a Kubernetes Status, with DETAILS such as the causes clients inspect when given."
@@ -433,7 +433,8 @@
 
 (defun apply-pod-response (store reconciler name &optional (namespace "default"))
   (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
-         (structured (member content-type '("application/json-patch+json" "application/strategic-merge-patch+json")
+         (applied (equal content-type "application/apply-patch+yaml"))
+         (structured (member content-type '("application/json-patch+json" "application/strategic-merge-patch+json" "application/apply-patch+yaml")
                              :test #'equal))
          (patch (unless structured (request-json-object)))
          (existing (handler-case (get-pod store namespace name)
@@ -445,6 +446,7 @@
         (admit-pod-input store (if existing "UPDATE" "CREATE") namespace name
                          (cond ((and existing structured) (pod-patched-object (pod-to-object existing) content-type))
                                (existing (merge-json-object (copy-json-object (pod-to-object existing)) patch))
+                               (applied (apply-pod-created-object namespace name))
                                (structured (core-resource-error 404 "NotFound" "pods ~S not found" name))
                                (t patch))
                          existing)
@@ -1218,21 +1220,15 @@ than wait for the next, which truncates any body that spans records in flight."
         for parts = (mapcar (lambda (part) (string-trim " " part)) (uiop:split-string range :separator '(#\;)))
         when (plusp (length (first parts))) collect parts))
 
-(defun require-representable-accept ()
-  "Answer 406 when a client accepts only the Table form no backend here can produce.
-Clients that can read an object as well say so with a further media range."
-  (let ((ranges (accept-media-ranges)))
-    (when (and ranges (every (lambda (parts) (member "as=Table" (rest parts) :test #'string=)) ranges))
-      (core-resource-error 406 "NotAcceptable"
-                           "only the following media types are accepted: application/json, application/vnd.kubernetes.protobuf"))))
-
 (defun handle-http-request (store runtime reconciler request)
   (handler-case
       (let ((path (progn (read-request-body request) (request-route-path (hunchentoot:script-name request))))
             (method (hunchentoot:request-method request))
             (*crd-field-validation* (crd-request-field-validation)))
-        (require-representable-accept)
-        (route-http-request store runtime reconciler path method))
+        (when (and store (not *authenticated-api-identity*))
+          (flowcontrol-note-request store (request-api-identity) path method))
+        (multiple-value-bind (*table-request* *table-api-version*) (negotiate-table-request)
+          (route-http-request store runtime reconciler path method)))
     (kubernetes-error (error)
       (kubernetes-error-response error))
     (com.inuoe.jzon:json-parse-error (error)
@@ -1249,7 +1245,8 @@ Clients that can read an object as well say so with a further media range."
            (openapi-v3-complete-response store runtime reconciler path))
           ((string= path "/metrics")
            (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
-           (concatenate 'string (runtime-network-metrics runtime) (gateway-metrics-text) (volume-reclaim-metrics-text)))
+           (concatenate 'string (runtime-network-metrics runtime) (gateway-metrics-text) (volume-reclaim-metrics-text)
+                        (if store (flowcontrol-metrics-text store) "")))
           ((string= path "/version") (version-response))
           ((string= path "/api")
            (if (aggregated-discovery-requested-p)
@@ -1317,7 +1314,7 @@ Clients that can read an object as well say so with a further media range."
           ((string= path "/apis/policy/v1") (budget-resources-response))
           ((string= path "/openapi/v3/apis/policy/v1") (openapi-v3-response "policy/v1"))
           ((string= path "/apis/apps/v1") (workload-resources-response))
-          ((string= path "/openapi/v2") (json-response (crd-openapi-document store nil nil nil)))
+          ((string= path "/openapi/v2") (openapi-v2-response store))
           ((string= path "/openapi/v3") (crd-openapi-discovery-response store))
           ((string= path "/openapi/v3/apis/events.k8s.io/v1") (openapi-v3-response "events.k8s.io/v1"))
           ((string= path "/openapi/v3/apis/apps/v1") (openapi-v3-response "apps/v1"))

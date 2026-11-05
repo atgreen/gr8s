@@ -229,7 +229,8 @@
     (values store path)
     (multiple-value-bind (body status)
         (drakma:http-request "http://127.0.0.1:18094/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
-                             :method :post :content-type "application/json" :content "{}"
+                             :method :post :content-type "application/json"
+                             :content "{\"apiVersion\":\"authorization.k8s.io/v1\",\"kind\":\"SelfSubjectAccessReview\",\"spec\":{\"nonResourceAttributes\":{\"path\":\"/\",\"verb\":\"get\"}}}"
                              :accept "application/json;as=Table;v=v1;g=meta.k8s.io")
       (is (= 406 status))
       (is (equal "NotAcceptable" (gethash "reason" (com.inuoe.jzon:parse (if (stringp body) body (babel:octets-to-string body)))))))
@@ -419,3 +420,124 @@
       (is (equal "apps" (gethash "group" (gethash "spec" (crd-api-request 200 (concatenate 'string collection "/v1.apps"))))))
       (crd-api-request 404 (concatenate 'string collection "/v9.none"))
       (crd-api-request 405 collection :method :post :text "{}"))))
+
+(defun apply-merge-patch (path text &optional manager)
+  "Merge-patch PATH as a named manager."
+  (check-core-status 200 path :method :patch :octets text :content-type "application/merge-patch+json"
+                     :parameters (when manager (list (cons "fieldManager" manager)))))
+
+(test update-managers-own-what-they-change-and-conflict-with-appliers
+  (with-core-api (store path)
+    (values store path)
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+    (let ((config-path "/api/v1/namespaces/alpha/configmaps/one"))
+      (check-core-status 201 config-path :method :patch
+        :octets "{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"one\"},\"data\":{\"a\":\"1\"}}"
+        :content-type "application/apply-patch+yaml" :parameters '(("fieldManager" . "applier")))
+      (let* ((patched (apply-merge-patch config-path "{\"data\":{\"a\":\"2\",\"b\":\"3\"}}" "patcher"))
+             (entries (gethash "managedFields" (gethash "metadata" patched)))
+             (updater (find "patcher" entries :test #'equal :key (lambda (entry) (gethash "manager" entry))))
+             (applier (find "applier" entries :test #'equal :key (lambda (entry) (gethash "manager" entry)))))
+        (is (equal "Update" (gethash "operation" updater)))
+        (is (hash-table-p (gethash "f:a" (gethash "f:data" (gethash "fieldsV1" updater)))))
+        (is (hash-table-p (gethash "f:b" (gethash "f:data" (gethash "fieldsV1" updater)))))
+        ;; The updater took the changed field from the applier.
+        (is (null applier)))
+      ;; The applier now conflicts with the Update manager, until it forces.
+      (let ((conflict (check-core-status 409 config-path :method :patch
+                        :octets "{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"one\"},\"data\":{\"a\":\"9\"}}"
+                        :content-type "application/apply-patch+yaml" :parameters '(("fieldManager" . "applier")))))
+        (is (search "patcher" (gethash "message" conflict)) "~A" (gethash "message" conflict)))
+      (let ((forced (check-core-status 200 config-path :method :patch
+                      :octets "{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"one\"},\"data\":{\"a\":\"9\"}}"
+                      :content-type "application/apply-patch+yaml"
+                      :parameters '(("fieldManager" . "applier") ("force" . "true")))))
+        (is (equal "9" (gethash "a" (gethash "data" forced))))
+        (is (equal "3" (gethash "b" (gethash "data" forced))))
+        (let ((updater (find "patcher" (gethash "managedFields" (gethash "metadata" forced)) :test #'equal
+                             :key (lambda (entry) (gethash "manager" entry)))))
+          (is (not (nth-value 1 (gethash "f:a" (gethash "f:data" (gethash "fieldsV1" updater))))))
+          (is (hash-table-p (gethash "f:b" (gethash "f:data" (gethash "fieldsV1" updater)))))))
+      ;; An unchanged write takes nothing and an explicit empty list resets tracking.
+      (let* ((current (check-core-status 200 config-path)))
+        (setf (gethash "managedFields" (gethash "metadata" current)) #())
+        (let ((reset (check-core-status 200 config-path :method :put :object current)))
+          (is (not (gethash "managedFields" (gethash "metadata" reset)))))))))
+
+(test map-lists-merge-by-key-and-prune-only-what-a-manager-owned
+  (with-core-api (store path)
+    (values store path)
+    (let* ((definition (crd-fixture))
+           (version (aref (gethash "versions" (gethash "spec" definition)) 0))
+           (spec-properties (gethash "properties" (gethash "spec" (gethash "properties" (gethash "openAPIV3Schema" (gethash "schema" version)))))))
+      (setf (gethash "ports" spec-properties)
+            (gr8s::core-object "type" "array" "x-kubernetes-list-type" "map" "x-kubernetes-list-map-keys" #("name")
+                               "items" (gr8s::core-object "type" "object" "required" #("name")
+                                                          "properties" (gr8s::core-object "name" (gr8s::core-object "type" "string")
+                                                                                          "port" (gr8s::core-object "type" "integer"))))
+            (gethash "tags" spec-properties)
+            (gr8s::core-object "type" "array" "x-kubernetes-list-type" "set" "items" (gr8s::core-object "type" "string")))
+      (check-core-status 201 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post :object definition))
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+    (let ((widget "/apis/widgets.example.test/v1/namespaces/alpha/widgets/one"))
+      (flet ((apply-widget (manager spec &optional (expected 200) force)
+               (check-core-status expected widget :method :patch
+                 :octets (format nil "{\"apiVersion\":\"widgets.example.test/v1\",\"kind\":\"Widget\",\"metadata\":{\"name\":\"one\"},\"spec\":~A}" spec)
+                 :content-type "application/apply-patch+yaml"
+                 :parameters (append (list (cons "fieldManager" manager))
+                                     (when force '(("force" . "true")))))))
+        (apply-widget "first" "{\"ports\":[{\"name\":\"a\",\"port\":1}],\"tags\":[\"x\"]}" 201)
+        (let ((both (apply-widget "second" "{\"ports\":[{\"name\":\"b\",\"port\":2}],\"tags\":[\"y\"]}")))
+          (is (= 2 (length (gethash "ports" (gethash "spec" both)))))
+          (is (= 2 (length (gethash "tags" (gethash "spec" both)))))
+          (let* ((first-entry (find "second" (gethash "managedFields" (gethash "metadata" both)) :test #'equal
+                                    :key (lambda (entry) (gethash "manager" entry))))
+                 (ports (gethash "f:ports" (gethash "f:spec" (gethash "fieldsV1" first-entry)))))
+            (is (hash-table-p (gethash "k:{\"name\":\"b\"}" ports)) "~A" (com.inuoe.jzon:stringify ports))
+            (is (hash-table-p (gethash "v:\"y\"" (gethash "f:tags" (gethash "f:spec" (gethash "fieldsV1" first-entry))))))))
+        ;; Changing another manager's entry conflicts; touching only one's own does not.
+        (apply-widget "second" "{\"ports\":[{\"name\":\"a\",\"port\":9}]}" 409)
+        (let ((dropped (apply-widget "first" "{\"tags\":[\"x\"]}")))
+          (is (equal '("b") (map 'list (lambda (port) (gethash "name" port)) (gethash "ports" (gethash "spec" dropped)))))
+          (is (equal '("x" "y") (sort (coerce (gethash "tags" (gethash "spec" dropped)) 'list) #'string<))))))))
+
+(test apply-reaches-pods-and-their-status
+  (with-core-api (store path)
+    (values store path)
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+    (let ((pod "/api/v1/namespaces/alpha/pods/one"))
+      (flet ((apply-pod (where manager body expected)
+               (check-core-status expected where :method :patch :octets body
+                                  :content-type "application/apply-patch+yaml"
+                                  :parameters (list (cons "fieldManager" manager)))))
+        (let ((created (apply-pod pod "first"
+                                  "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"one\"},\"spec\":{\"containers\":[{\"name\":\"a\",\"image\":\"i\"}]}}"
+                                  201)))
+          (is (equal "first" (gethash "manager" (aref (gethash "managedFields" (gethash "metadata" created)) 0)))))
+        (let ((status "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"one\"},\"status\":{\"conditions\":[{\"type\":\"MyStatus\",\"status\":\"True\"}]}}"))
+          ;; The Pod endpoint ignores status; the status endpoint applies it.
+          (apply-pod pod "second" status 200)
+          (flet ((has-status ()
+                   (find "MyStatus" (gethash "conditions" (gethash "status" (check-core-status 200 pod)) #())
+                         :test #'equal :key (lambda (condition) (gethash "type" condition)))))
+            (is (null (has-status)))
+            (apply-pod (concatenate 'string pod "/status") "second" status 200)
+            (is-true (has-status))))))))
+
+(test map-list-keys-default-and-shared-items-do-not-conflict
+  (let* ((gr8s::*apply-schema*
+           (com.inuoe.jzon:parse "{\"properties\":{\"ports\":{\"type\":\"array\",\"x-kubernetes-list-type\":\"map\",\"x-kubernetes-list-map-keys\":[\"containerPort\",\"protocol\"],\"items\":{\"type\":\"object\"}}}}"))
+         (live (com.inuoe.jzon:parse "{\"metadata\":{},\"ports\":[{\"containerPort\":80,\"protocol\":\"TCP\",\"name\":\"a\"}]}"))
+         (first-config (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"X\",\"metadata\":{},\"ports\":[{\"containerPort\":80,\"name\":\"a\"}]}"))
+         (second-config (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"X\",\"metadata\":{},\"ports\":[{\"containerPort\":80,\"hostPort\":9}]}"))
+         (dropped (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"X\",\"metadata\":{}}")))
+    (let* ((one (gr8s::apply-merge live first-config "configmaps" "first" nil))
+           (two (gr8s::apply-merge one second-config "configmaps" "second" nil)))
+      ;; A port without a protocol is the TCP entry, which both managers may hold.
+      (is (= 1 (length (gethash "ports" two))))
+      (is (= 9 (gethash "hostPort" (aref (gethash "ports" two) 0))))
+      (let ((alone (gr8s::apply-merge one dropped "configmaps" "first" nil)))
+        (is (not (nth-value 1 (gethash "ports" alone))))))))

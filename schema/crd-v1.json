@@ -92,6 +92,24 @@
                     "status": {
                       "type": "object",
                       "properties": {}
+                    },
+                    "scale": {
+                      "type": "object",
+                      "required": [
+                        "specReplicasPath",
+                        "statusReplicasPath"
+                      ],
+                      "properties": {
+                        "specReplicasPath": {
+                          "type": "string"
+                        },
+                        "statusReplicasPath": {
+                          "type": "string"
+                        },
+                        "labelSelectorPath": {
+                          "type": "string"
+                        }
+                      }
                     }
                   }
                 },
@@ -100,6 +118,52 @@
                 },
                 "deprecationWarning": {
                   "type": "string"
+                },
+                "selectableFields": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "jsonPath"
+                    ],
+                    "properties": {
+                      "jsonPath": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "additionalPrinterColumns": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "name",
+                      "type",
+                      "jsonPath"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string"
+                      },
+                      "format": {
+                        "type": "string"
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "priority": {
+                        "type": "integer",
+                        "format": "int32"
+                      },
+                      "jsonPath": {
+                        "type": "string"
+                      }
+                    }
+                  }
                 }
               },
               "required": [
@@ -119,8 +183,50 @@
               "strategy": {
                 "type": "string",
                 "enum": [
-                  "None"
+                  "None",
+                  "Webhook"
                 ]
+              },
+              "webhook": {
+                "type": "object",
+                "properties": {
+                  "conversionReviewVersions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "clientConfig": {
+                    "type": "object",
+                    "properties": {
+                      "url": {
+                        "type": "string"
+                      },
+                      "caBundle": {
+                        "type": "string",
+                        "format": "byte"
+                      },
+                      "service": {
+                        "type": "object",
+                        "properties": {
+                          "namespace": {
+                            "type": "string"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "port": {
+                            "type": "integer",
+                            "format": "int32"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
               }
             }
           }

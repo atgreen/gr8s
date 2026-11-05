@@ -10,7 +10,7 @@
 
 (defun template-watch-events (store namespace labels fields revision &key (resource "podtemplates"))
   "Read matching journal events after REVISION and the current storage watermark."
-  (let ((label-test (core-selector-predicate labels)) (field-test (core-selector-predicate fields :fields t :field-paths (core-resource-field-paths resource))))
+  (let ((label-test (core-selector-predicate labels)) (field-test (crd-field-selector-test resource fields)))
     (labels ((matches (object)
                (and (hash-table-p object)
                     (or (null namespace) (equal namespace (gethash "namespace" (gethash "metadata" object))))
@@ -49,7 +49,8 @@
                                      bookmark-api-version)
   "Serve a real Kubernetes JSON watch stream for a resource collection.
 PAGE-READER and EVENT-READER replace the durable journal for separately stored resources."
-  (let* ((rv-text (or (hunchentoot:parameter "resourceVersion") ""))
+  (let* ((*table-send-columns* t)
+         (rv-text (or (hunchentoot:parameter "resourceVersion") ""))
          (send-initial-text (hunchentoot:parameter "sendInitialEvents"))
          (send-initial (true-parameter-p send-initial-text))
          (initial (if send-initial-text send-initial (member rv-text '("" "0") :test #'equal)))
@@ -88,7 +89,12 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
                  (write-sequence (trivial-utf-8:string-to-utf-8-bytes
                                   (concatenate 'string (com.inuoe.jzon:stringify event) (string #\Newline))) out)
                  (finish-output out))
-               (emit (event) (write-event (crd-api-view (event-api-view event))))
+               (emit (event)
+                 (let ((view (crd-api-view (event-api-view event))))
+                   (when (and *table-request* (not (equal "ERROR" (gethash "type" view))))
+                     (setf (gethash "object" view) (table-representation (gethash "object" view))
+                           *table-send-columns* nil))
+                   (write-event view)))
                (bookmark (&optional initial-end)
                  ;; Carries no object to project, so the views that rewrite one would only mangle it.
                  (let ((metadata (core-object "resourceVersion" (write-to-string revision))))

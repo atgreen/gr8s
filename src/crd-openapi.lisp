@@ -275,8 +275,13 @@ kubectl falls back to the v2 document when a kind has no patch operation here."
              (resources (gethash "resources" discovery #()))
              (document (if (= status 200)
                            (com.inuoe.jzon:parse body)
+                           ;; A document with no hand-written route still publishes its kinds' schemas.
                            (core-object "openapi" "3.0.0" "info" (core-object "title" "gr8s" "version" "v1")
-                                        "paths" (core-object) "components" (core-object "schemas" (core-object)))))
+                                        "paths" (core-object)
+                                        "components" (core-object
+                                                      "schemas"
+                                                      (let ((*schema-reference-prefix* "#/components/schemas/"))
+                                                        (openapi-definitions))))))
              (paths (gethash "paths" document)))
         (when (zerop (length resources))
           (setf (hunchentoot:return-code*) status)
