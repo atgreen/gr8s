@@ -58,6 +58,10 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 <!-- END BEADS INTEGRATION -->
 
 
+## Testing eBPF as root
+
+BPF and native runtime tests run as root in disposable VMs. See "Testing eBPF and the native runtime as root" in AGENTS.md.
+
 ## Build & Test
 
 _Add your build and test commands here_
