@@ -137,6 +137,89 @@
     (let ((terms (loop for (id . n) in (rsim-nodes sim) collect (gr8s::raft-node-current-term n))))
       (is (apply #'= terms) "all members on one term after heal"))))
 
+;;; ---------------------------------------------------------------------------
+;;; Durability + compaction (podster-c2d.2).
+
+(defun make-standalone-node (&key kv storage snapshot/restore)
+  "A single raft-node with a no-op transport and a KV state machine."
+  (let ((kv (or kv (make-hash-table :test 'equal))))
+    (values
+     (gr8s::make-raft-node
+      :id "n1" :peers nil
+      :send-fn (lambda (to msg) (declare (ignore to msg)))
+      :apply-fn (lambda (command) (raft-kv-apply kv command))
+      :storage storage
+      :snapshot-fn (when snapshot/restore
+                     (lambda () (loop for k being the hash-keys of kv using (hash-value v)
+                                      collect (cons k v))))
+      :restore-fn (when snapshot/restore
+                    (lambda (state) (clrhash kv) (loop for (k . v) in state do (setf (gethash k kv) v)))))
+     kv)))
+
+(defmacro with-raft-temp-dir ((path) &body body)
+  `(let ((,path (namestring (merge-pathnames (format nil "gr8s-raft-~36R/wal" (random (expt 36 10)))
+                                             (uiop:temporary-directory)))))
+     (unwind-protect (progn ,@body)
+       (ignore-errors (uiop:delete-directory-tree
+                       (uiop:pathname-directory-pathname ,path) :validate t :if-does-not-exist :ignore)))))
+
+(test raft-compaction-trims-log-and-preserves-access
+  (let ((node (make-standalone-node)))
+    (dotimes (i 5) (gr8s::raft-log-append node (gr8s::make-raft-entry :term 1 :command (list :set "x" i))))
+    (setf (gr8s::raft-node-commit-index node) 5)
+    (is (= 5 (gr8s::raft-last-log-index node)))
+    (gr8s::raft-compact node 3)
+    (is (= 3 (gr8s::raft-node-snapshot-index node)))
+    (is (= 1 (gr8s::raft-node-snapshot-term node)))
+    (is (= 5 (gr8s::raft-last-log-index node)))            ; absolute length unchanged by compaction
+    (is (null (gr8s::raft-log-entry node 2)))              ; compacted away
+    (is (null (gr8s::raft-log-entry node 3)))              ; == snapshot boundary
+    (is (= 1 (gr8s::raft-log-term node 3)))                ; term still answerable at the boundary
+    (let ((e4 (gr8s::raft-log-entry node 4)))
+      (is (not (null e4)))                                 ; tail intact
+      (is (= 4 (gr8s::raft-entry-index e4))))))
+
+(test raft-crash-recovery-restores-hard-state-and-log
+  (with-raft-temp-dir (path)
+    ;; Write a WAL: hard state + three log entries, then "crash" (close).
+    (multiple-value-bind (node kv) (make-standalone-node :storage (gr8s::open-file-raft-storage path))
+      (declare (ignore kv))
+      (setf (gr8s::raft-node-current-term node) 7 (gr8s::raft-node-voted-for node) "peer-b")
+      (gr8s::raft-persist-hard-state node)
+      (gr8s::raft-log-append node (gr8s::make-raft-entry :term 7 :command '(:set "a" 1)))
+      (gr8s::raft-log-append node (gr8s::make-raft-entry :term 7 :command '(:set "b" 2)))
+      (gr8s::raft-log-append node (gr8s::make-raft-entry :term 7 :command '(:set "a" 3)))
+      (gr8s::close-file-raft-storage (gr8s::raft-node-storage node)))
+    ;; Recover a fresh node from the same WAL.
+    (let ((node2 (make-standalone-node)))
+      (gr8s::recover-raft-node node2 path)
+      (is (= 7 (gr8s::raft-node-current-term node2)))
+      (is (equal "peer-b" (gr8s::raft-node-voted-for node2)))
+      (is (= 3 (gr8s::raft-last-log-index node2)))
+      (is (equal '(:set "a" 3) (gr8s::raft-entry-command (gr8s::raft-log-entry node2 3))))
+      (is (= 7 (gr8s::raft-log-term node2 2)))
+      (gr8s::close-file-raft-storage (gr8s::raft-node-storage node2)))))
+
+(test raft-recovery-restores-snapshot-state
+  (with-raft-temp-dir (path)
+    (multiple-value-bind (node kv) (make-standalone-node :storage (gr8s::open-file-raft-storage path)
+                                                         :snapshot/restore t)
+      (dotimes (i 5) (gr8s::raft-log-append node (gr8s::make-raft-entry :term 2 :command (list :set "x" i))))
+      (setf (gr8s::raft-node-commit-index node) 5)
+      (gr8s::raft-apply-committed node)                    ; kv now has x=4
+      (is (= 4 (gethash "x" kv)))
+      (gr8s::raft-compact node 3)                          ; persists snapshot image of kv
+      (gr8s::close-file-raft-storage (gr8s::raft-node-storage node)))
+    ;; Recover: snapshot image restores the state machine; the tail survives.
+    (multiple-value-bind (node2 kv2) (make-standalone-node :snapshot/restore t)
+      (gr8s::recover-raft-node node2 path)
+      (is (= 4 (gethash "x" kv2)) "state machine restored from snapshot")
+      (is (= 3 (gr8s::raft-node-snapshot-index node2)))
+      (is (= 5 (gr8s::raft-last-log-index node2)))         ; entries 4,5 survived compaction
+      (is (not (null (gr8s::raft-log-entry node2 4))))
+      (is (= 3 (gr8s::raft-node-last-applied node2)))      ; applied up to the snapshot boundary
+      (gr8s::close-file-raft-storage (gr8s::raft-node-storage node2)))))
+
 (test raft-single-node-self-elects
   (let ((sim (make-rsim '("solo") '(("solo" . 3)))))
     (rsim-run sim 4)

@@ -27,9 +27,13 @@
   (role :follower)                      ; :follower | :candidate | :leader
   (current-term 0 :type fixnum)
   (voted-for nil)
-  (log (make-array 0 :adjustable t :fill-pointer 0))  ; vector of RAFT-ENTRY; log[0] is index 1
+  (log (make-array 0 :adjustable t :fill-pointer 0))  ; vector of RAFT-ENTRY after snapshot-index
   (commit-index 0 :type fixnum)
   (last-applied 0 :type fixnum)
+  ;; compaction: entries <= snapshot-index are discarded; snapshot-term is the
+  ;; term of the last entry the snapshot includes. log[0] is index snapshot-index+1.
+  (snapshot-index 0 :type fixnum)
+  (snapshot-term 0 :type fixnum)
   leader-id
   ;; leader volatile
   (next-index (make-hash-table :test 'equal))
@@ -44,36 +48,95 @@
   ;; injectables
   send-fn                               ; (lambda (to message-plist))
   apply-fn                              ; (lambda (command) -> result)
+  storage                               ; a RAFT-STORAGE for durable hard-state/log, or NIL
+  snapshot-fn                           ; (lambda () -> opaque state-machine snapshot)
+  restore-fn                            ; (lambda (snapshot)) restores the state machine
   (timeout-fn (lambda () 10))           ; -> next election timeout (randomized in prod)
   ;; leader: commit-index -> list of (client-callback . nil); resolved on apply
   (pending (make-hash-table :test 'eql)))
 
 ;;; ---------------------------------------------------------------------------
-;;; Log helpers (1-based).
+;;; Durable storage protocol (implemented by file-raft-storage in raft-log.lisp;
+;;; NIL = volatile, used by the deterministic simulator). Raft requires
+;;; currentTerm, votedFor and the log to survive a crash.
+
+(defgeneric raft-storage-save-hard-state (storage term vote)
+  (:method ((storage null) term vote) (declare (ignore term vote)) nil))
+(defgeneric raft-storage-append-entry (storage entry)
+  (:method ((storage null) entry) (declare (ignore entry)) nil))
+(defgeneric raft-storage-truncate (storage index)
+  (:method ((storage null) index) (declare (ignore index)) nil))
+(defgeneric raft-storage-save-snapshot (storage index term state)
+  (:method ((storage null) index term state) (declare (ignore index term state)) nil))
+
+(defun raft-persist-hard-state (node)
+  (raft-storage-save-hard-state (raft-node-storage node)
+                                (raft-node-current-term node) (raft-node-voted-for node)))
+
+;;; ---------------------------------------------------------------------------
+;;; Log helpers (1-based, offset by snapshot-index for compaction).
 
 (defun raft-log-length (node)
-  (fill-pointer (raft-node-log node)))
+  "Absolute index of the last entry (snapshot-index + in-memory tail length)."
+  (+ (raft-node-snapshot-index node) (fill-pointer (raft-node-log node))))
 
 (defun raft-log-entry (node index)
-  "The RAFT-ENTRY at 1-based INDEX, or NIL for index 0 / out of range."
-  (when (and (>= index 1) (<= index (raft-log-length node)))
-    (aref (raft-node-log node) (1- index))))
+  "The RAFT-ENTRY at absolute INDEX, or NIL if compacted/out of range."
+  (let ((pos (- index (raft-node-snapshot-index node) 1)))
+    (when (and (>= pos 0) (< pos (fill-pointer (raft-node-log node))))
+      (aref (raft-node-log node) pos))))
 
 (defun raft-log-term (node index)
-  "Term of the entry at INDEX; 0 for the index-0 sentinel."
-  (if (zerop index) 0 (let ((e (raft-log-entry node index))) (if e (raft-entry-term e) 0))))
+  "Term of the entry at absolute INDEX; 0 at index 0; snapshot-term at/below the
+   snapshot boundary."
+  (cond ((zerop index) 0)
+        ((= index (raft-node-snapshot-index node)) (raft-node-snapshot-term node))
+        ((< index (raft-node-snapshot-index node)) (raft-node-snapshot-term node))
+        (t (let ((e (raft-log-entry node index))) (if e (raft-entry-term e) 0)))))
 
 (defun raft-last-log-index (node) (raft-log-length node))
 (defun raft-last-log-term (node) (raft-log-term node (raft-log-length node)))
 
 (defun raft-log-truncate (node index)
-  "Drop every entry at 1-based INDEX and beyond."
-  (setf (fill-pointer (raft-node-log node)) (max 0 (1- index))))
+  "Drop every entry at absolute INDEX and beyond."
+  (setf (fill-pointer (raft-node-log node))
+        (max 0 (- index (raft-node-snapshot-index node) 1)))
+  (raft-storage-truncate (raft-node-storage node) index))
 
 (defun raft-log-append (node entry)
   (vector-push-extend entry (raft-node-log node))
   (setf (raft-entry-index entry) (raft-log-length node))
+  (raft-storage-append-entry (raft-node-storage node) entry)
   entry)
+
+;;; ---------------------------------------------------------------------------
+;;; Snapshot / compaction.
+
+(defun raft-compact (node upto)
+  "Discard committed log entries at/below absolute index UPTO, folding them into
+   the snapshot. UPTO must be <= commit-index. Persists the snapshot."
+  (when (and (> upto (raft-node-snapshot-index node)) (<= upto (raft-node-commit-index node)))
+    (let ((term (raft-log-term node upto))
+          (drop (- upto (raft-node-snapshot-index node))))
+      ;; shift the in-memory tail left by DROP entries
+      (let* ((v (raft-node-log node)) (n (fill-pointer v)))
+        (loop for i from drop below n do (setf (aref v (- i drop)) (aref v i)))
+        (setf (fill-pointer v) (max 0 (- n drop))))
+      (setf (raft-node-snapshot-index node) upto
+            (raft-node-snapshot-term node) term)
+      (raft-storage-save-snapshot (raft-node-storage node) upto term
+                                  (and (raft-node-snapshot-fn node)
+                                       (funcall (raft-node-snapshot-fn node)))))))
+
+(defun raft-restore-snapshot (node index term state)
+  "Install a snapshot into NODE (used on recovery and, later, InstallSnapshot):
+   drop the log, set the snapshot boundary, and restore the state machine."
+  (setf (fill-pointer (raft-node-log node)) 0
+        (raft-node-snapshot-index node) index
+        (raft-node-snapshot-term node) term
+        (raft-node-last-applied node) (max (raft-node-last-applied node) index)
+        (raft-node-commit-index node) (max (raft-node-commit-index node) index))
+  (when (raft-node-restore-fn node) (funcall (raft-node-restore-fn node) state)))
 
 (defun raft-majority (node)
   (1+ (floor (1+ (length (raft-node-peers node))) 2)))  ; floor((N+1)/2)+ -> strict majority of N
@@ -92,6 +155,7 @@
         (raft-node-current-term node) term
         (raft-node-voted-for node) nil
         (raft-node-leader-id node) leader-id)
+  (raft-persist-hard-state node)
   (raft-reset-election-timer node))
 
 (defun raft-send (node to message)
@@ -106,6 +170,7 @@
   (incf (raft-node-current-term node))
   (setf (raft-node-voted-for node) (raft-node-id node)
         (raft-node-leader-id node) nil)
+  (raft-persist-hard-state node)
   (clrhash (raft-node-votes node))
   (setf (gethash (raft-node-id node) (raft-node-votes node)) t)
   (raft-reset-election-timer node)
@@ -221,6 +286,7 @@
                      up-to-date)))
     (when grant
       (setf (raft-node-voted-for node) candidate)
+      (raft-persist-hard-state node)
       (raft-reset-election-timer node))
     (raft-send node candidate
                (list :type :request-vote-reply :term (raft-node-current-term node)

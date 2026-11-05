@@ -45,6 +45,7 @@
                              (:file "container-probe-spec")
                              (:file "store")
                              (:file "raft")
+                             (:file "raft-log")
                              (:file "pod-status-store")
                              (:file "pod-finalizers")
                              (:file "pod-deletion")
