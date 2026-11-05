@@ -99,3 +99,32 @@
   "The current membership as an alist id->role, from this member's view."
   (bt:with-lock-held ((raft-member-lock member))
     (raft-current-config (raft-member-node member))))
+
+(defun raft-member-propose-sync (member command &key (timeout 5))
+  "Propose COMMAND on the leader and block until it commits, returning the
+   state-machine result. The commit callback fires under the member lock (from
+   the proposing or a delivery thread) and hands the result to this waiter
+   through a separate mailbox lock, so there is no lock-order hazard. Returns
+   (values result t) on commit, (values nil :not-leader) if MEMBER is not the
+   leader, or (values nil :timeout) if the entry does not commit in time."
+  (let ((lock (bt:make-lock "gr8s raft propose-sync"))
+        (cv (bt:make-condition-variable))
+        (done nil) (result nil))
+    (multiple-value-bind (index ok)
+        (raft-member-propose member command
+                             (lambda (r)
+                               (bt:with-lock-held (lock)
+                                 (setf result r done t)
+                                 (bt:condition-notify cv))))
+      (declare (ignore index))
+      (if (not ok)
+          (values nil :not-leader)
+          (bt:with-lock-held (lock)
+            (let ((deadline (+ (get-internal-real-time)
+                               (* timeout internal-time-units-per-second))))
+              (loop until done
+                    do (let ((remaining (/ (- deadline (get-internal-real-time))
+                                           internal-time-units-per-second)))
+                         (when (<= remaining 0) (return))
+                         (bt:condition-wait cv lock :timeout remaining)))
+              (if done (values result t) (values nil :timeout))))))))

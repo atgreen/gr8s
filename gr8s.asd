@@ -194,6 +194,7 @@
                              (:file "raft-test")
                              (:file "raft-transport-test")
                              (:file "raft-cluster-test")
+                             (:file "raft-failover-test")
                              (:file "ha-leader-gate-test")
                              (:file "raft-store-test")
                              (:file "raft-plane-test")
