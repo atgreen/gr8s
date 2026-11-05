@@ -140,6 +140,38 @@
       (when (> allowed completions)
         (core-resource-error 422 "Invalid" "maxFailedIndexes cannot exceed completions")))))
 
+(defun validate-job-completions-update (spec old-spec)
+  "Refuse a completions change, except an Indexed Job's scaling together with its parallelism."
+  (unless (workload-equal-p (gethash "completions" spec) (gethash "completions" old-spec))
+    (unless (equal "Indexed" (gethash "completionMode" spec))
+      (core-resource-error 422 "Invalid" "Job.spec.completions is immutable"))
+    (unless (eql (gethash "completions" spec) (gethash "parallelism" spec))
+      (core-resource-error 422 "Invalid" "Job.spec.completions can only be modified in tandem with spec.parallelism"))))
+
+(defun job-template-immutable-view (spec existing)
+  "Return SPEC's template with the fields a suspended EXISTING Job may change put back as they were.
+A suspended Job with no active Pods may take new resources, and one that never started new scheduling
+directives and Pod metadata, so what is left must still equal the stored template."
+  (let* ((old-spec (gethash "spec" existing)) (old-status (gethash "status" existing (core-object)))
+         (old-template (gethash "template" old-spec))
+         (view (copy-core-object (gethash "template" spec)))
+         (suspended (eq t (gethash "suspend" old-spec))))
+    (flet ((restore (target source field)
+             (multiple-value-bind (value present) (gethash field source)
+               (if present (setf (gethash field target) (copy-core-object value)) (remhash field target)))))
+      (when (and suspended (null (gethash "startTime" old-status)))
+        (dolist (field '("labels" "annotations"))
+          (restore (gethash "metadata" view) (gethash "metadata" old-template) field))
+        (dolist (field '("nodeSelector" "tolerations" "affinity"))
+          (restore (gethash "spec" view) (gethash "spec" old-template) field)))
+      (when (and suspended (zerop (gethash "active" old-status 0)))
+        (dolist (list '("containers" "initContainers"))
+          (let ((new (gethash list (gethash "spec" view) #()))
+                (old (gethash list (gethash "spec" old-template) #())))
+            (when (= (length new) (length old))
+              (map nil (lambda (target source) (restore target source "resources")) new old))))))
+    view))
+
 (defun normalize-batch-resource (input namespace name)
   "Validate genuine executable Job state; ordinary writes never submit runtime status."
   (let* ((object (copy-core-object (require-object input "Job")))
@@ -255,10 +287,13 @@
             unless (find name (gethash "finalizers" (gethash "metadata" existing) #()) :test #'equal)
               do (core-resource-error 422 "Invalid" "Job finalizers cannot be added after deletion begins")))
     (when existing
-      (dolist (field '("selector" "template" "completions" "completionMode" "manualSelector" "managedBy"
+      (dolist (field '("selector" "completionMode" "manualSelector" "managedBy"
                        "podFailurePolicy" "successPolicy" "backoffLimitPerIndex"))
         (unless (workload-equal-p (gethash field spec) (gethash field (gethash "spec" existing)))
-          (core-resource-error 422 "Invalid" "Job.spec.~A is immutable" field))))
+          (core-resource-error 422 "Invalid" "Job.spec.~A is immutable" field)))
+      (validate-job-completions-update spec (gethash "spec" existing))
+      (unless (workload-equal-p (job-template-immutable-view spec existing) (gethash "template" (gethash "spec" existing)))
+        (core-resource-error 422 "Invalid" "Job.spec.template is immutable")))
     (remhash "deletionTimestamp" metadata)
     (when (and existing (gethash "deletionTimestamp" (gethash "metadata" existing)))
       (setf (gethash "deletionTimestamp" metadata) (gethash "deletionTimestamp" (gethash "metadata" existing))))

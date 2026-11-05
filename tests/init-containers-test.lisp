@@ -186,3 +186,35 @@
             (t (setf (gethash "volumeMounts" init)
                      (vector (gr8s::core-object "name" "missing" "mountPath" "/data")))))
       (signals kubernetes-error (parse-pod object)))))
+
+(test a-final-init-failure-stops-sidecars-instead-of-restarting-them
+  (let* ((object (gr8s::core-object
+                  "apiVersion" "v1" "kind" "Pod" "metadata" (gr8s::core-object "name" "failing")
+                  "spec" (gr8s::core-object
+                          "restartPolicy" "Never"
+                          "initContainers" (vector (gr8s::core-object "name" "sidecar" "image" "busybox" "restartPolicy" "Always")
+                                                   (gr8s::core-object "name" "setup" "image" "busybox"))
+                          "containers" (vector (gr8s::core-object "name" "main" "image" "busybox")))))
+         (pod (parse-pod object)))
+    (flet ((status (name state) (gr8s::core-object "name" name "state" state))
+           (exited (code) (gr8s::core-object "terminated" (gr8s::core-object "exitCode" code)))
+           (running () (gr8s::core-object "running" (gr8s::core-object))))
+      (let ((failed (vector (status "sidecar" (running)) (status "setup" (exited 3))))
+            (working (vector (status "sidecar" (running)) (status "setup" (running))))
+            (sidecar-crash (vector (status "sidecar" (exited 3)) (status "setup" (running)))))
+        (is-true (gr8s::pod-init-failed-for-good-p pod failed))
+        (is-false (gr8s::pod-init-failed-for-good-p pod working))
+        ;; A sidecar's own exit is restarted, whatever the Pod's policy says.
+        (is-false (gr8s::pod-init-failed-for-good-p pod sidecar-crash))
+        ;; A running sidecar needs stopping; a stopped one does not need restarting.
+        (is-true (gr8s::pod-sidecar-progress-required-p pod (gr8s::core-object "initContainerStatuses" failed)))
+        (is-false (gr8s::pod-sidecar-progress-required-p
+                   pod (gr8s::core-object "initContainerStatuses"
+                                          (vector (status "sidecar" (exited 137)) (status "setup" (exited 3))))))
+        (is-true (gr8s::pod-sidecar-progress-required-p pod (gr8s::core-object "initContainerStatuses" sidecar-crash)))))
+    ;; Other policies retry the init container, so nothing is final.
+    (setf (gethash "restartPolicy" (gethash "spec" object)) "OnFailure")
+    (is-false (gr8s::pod-init-failed-for-good-p
+               (parse-pod object)
+               (vector (gr8s::core-object "name" "setup" "state"
+                                          (gr8s::core-object "terminated" (gr8s::core-object "exitCode" 3))))))))

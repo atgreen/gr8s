@@ -147,7 +147,8 @@ Keys are sorted, unset and omitempty zero values vanish, and pointers to empty o
                                                        "ownerReferences" (vector (workload-owner-reference daemonset))))))
       (when (gethash "annotations" metadata)
         (setf (gethash "annotations" (workload-metadata object)) (copy-core-object (gethash "annotations" metadata))))
-      (handler-case (create-core-resource store "controllerrevisions" object namespace)
+      (handler-case (with-controller-admission ("daemon-set-controller")
+                      (admitted-create-core-resource store "controllerrevisions" object namespace))
         (kubernetes-error (condition)
           (unless (= 409 (kubernetes-error-status-code condition)) (error condition))
           (let ((existing (get-core-resource store "controllerrevisions" namespace name)))
@@ -209,12 +210,36 @@ A daemon Pod ignores a node being cordoned, but needs an agent to run on."
 
 (defun delete-daemon-pod (reconciler pod)
   "Start deleting one exact daemon Pod, tolerating one that is already gone."
-  (handler-case (delete-reconciled-pod reconciler (pod-namespace pod) (pod-name pod) :uid (pod-uid pod))
+  (handler-case (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod) "daemon-set-controller" :uid (pod-uid pod))
     (kubernetes-error (condition)
       (unless (member (kubernetes-error-status-code condition) '(404 409)) (error condition)))))
 
-(defun manage-daemon-pods (reconciler daemonset current observations eligible)
-  "Keep exactly one Pod on each eligible node, replacing terminal ones and removing every other Pod."
+(defun daemon-surge-count (daemonset desired)
+  "Return how many extra Pods DAEMONSET's rolling update may run across DESIRED nodes."
+  (let* ((strategy (gethash "updateStrategy" (gethash "spec" daemonset)))
+         (rolling (and (equal "RollingUpdate" (gethash "type" strategy)) (gethash "rollingUpdate" strategy))))
+    (if rolling
+        (workload-rollout-count (gethash "maxSurge" rolling 0) desired :round-up t)
+        0)))
+
+(defun daemon-excess-pods (daemonset running hashes)
+  "Return the Pods to remove from a node whose live Pods are RUNNING, oldest first.
+Without surge a node keeps its oldest Pod. A surging node also keeps one old and one new Pod
+while the new one is coming up, and gives up the old one once it is unready or replaced."
+  (if (zerop (daemon-surge-count daemonset 1))
+      (mapcar #'car (cdr running))
+      (let* ((minimum (gethash "minReadySeconds" (gethash "spec" daemonset)))
+             (new (find-if (lambda (pair) (daemon-pod-updated-p (car pair) hashes)) running))
+             (old (find-if-not (lambda (pair) (daemon-pod-updated-p (car pair) hashes)) running))
+             (excess (mapcar #'car (remove-if (lambda (pair) (or (eq pair new) (eq pair old))) running))))
+        (if (and new old
+                 (or (not (pod-status-ready-p (cdr old)))
+                     (workload-pod-available-p (cdr new) minimum)))
+            (cons (car old) excess)
+            excess))))
+
+(defun manage-daemon-pods (reconciler daemonset current observations eligible hashes)
+  "Keep the Pods each eligible node should run, replacing terminal ones and removing every other Pod."
   (let ((store (reconciler-store reconciler)) (eligible-names (mapcar #'node-record-name eligible)))
     (dolist (pair observations)
       (let ((name (pod-node-name (car pair))))
@@ -226,7 +251,8 @@ A daemon Pod ignores a node being cordoned, but needs an agent to run on."
         (dolist (pair pods)
           (when (and (daemonset-pod-terminal-p (cdr pair)) (not (deletion-requested-p (car pair))))
             (delete-daemon-pod reconciler (car pair))))
-        (dolist (pair (cdr running)) (delete-daemon-pod reconciler (car pair)))
+        (dolist (pod (daemon-excess-pods daemonset running hashes))
+          (delete-daemon-pod reconciler pod))
         (when (null pods)
           (create-replica-set-pod store daemonset :node-name name
                                   :labels (list (cons +controller-revision-hash-label+
@@ -236,6 +262,30 @@ A daemon Pod ignores a node being cordoned, but needs an agent to run on."
   "Return whether POD runs one of the hash labels meaning the current template."
   (let ((labels (gethash "labels" (workload-metadata (pod-to-object pod)))))
     (and labels (member (gethash +controller-revision-hash-label+ labels) hashes :test #'equal))))
+
+(defun surge-daemon-pods (reconciler daemonset current observations eligible hashes)
+  "Roll by creating replacements first: every node with an unavailable old Pod, and maxSurge others.
+A new Pod's arrival is what frees its node's old Pod, which DAEMON-EXCESS-PODS then removes."
+  (let* ((store (reconciler-store reconciler)) (minimum (gethash "minReadySeconds" (gethash "spec" daemonset)))
+         (surging 0) (allowed nil) (candidates nil))
+    (dolist (node eligible)
+      (let* ((name (node-record-name node))
+             (running (remove-if (lambda (pair) (or (deletion-requested-p (car pair)) (daemonset-pod-terminal-p (cdr pair))))
+                                 (daemonset-pods-on-node observations name)))
+             (new (find-if (lambda (pair) (daemon-pod-updated-p (car pair) hashes)) running))
+             (old (find-if-not (lambda (pair) (daemon-pod-updated-p (car pair) hashes)) running)))
+        (cond ((null old))
+              ((and new (not (workload-pod-available-p (cdr new) minimum))) (incf surging))
+              (new)
+              ((workload-pod-available-p (cdr old) minimum) (push name candidates))
+              (t (push name allowed)))))
+    (dolist (name (append (nreverse allowed)
+                          (let ((candidates (nreverse candidates))
+                                (room (max 0 (- (daemon-surge-count daemonset (length eligible)) surging))))
+                            (subseq candidates 0 (min room (length candidates))))))
+      (create-replica-set-pod store daemonset :node-name name
+                              :labels (list (cons +controller-revision-hash-label+
+                                                  (daemonset-revision-label current)))))))
 
 (defun roll-daemon-pods (reconciler daemonset observations eligible hashes)
   "Delete out-of-date Pods: unavailable ones at once, available ones within maxUnavailable."
@@ -269,8 +319,10 @@ A daemon Pod ignores a node being cordoned, but needs an agent to run on."
     (dolist (revision old)
       (when (and (plusp excess) (not (member (daemonset-revision-label revision) live :test #'equal)))
         (let ((metadata (workload-metadata revision)))
-          (delete-core-resource store "controllerrevisions" (gethash "namespace" metadata)
-                                (gethash "name" metadata) :uid (gethash "uid" metadata)))
+          (when (controller-delete-allowed-p store "controllerrevisions" (gethash "namespace" metadata)
+                                             (gethash "name" metadata) "daemon-set-controller")
+            (delete-core-resource store "controllerrevisions" (gethash "namespace" metadata)
+                                  (gethash "name" metadata) :uid (gethash "uid" metadata))))
         (decf excess)))))
 
 (defun publish-daemonset-status (reconciler daemonset nodes eligible hashes)
@@ -308,7 +360,10 @@ A daemon Pod ignores a node being cordoned, but needs an agent to run on."
          (rolling (equal "RollingUpdate" (gethash "type" (gethash "updateStrategy" (gethash "spec" daemonset))))))
     (multiple-value-bind (current old hashes) (daemonset-construct-history store daemonset)
       (let ((observations (daemonset-observations reconciler daemonset :claim t)))
-        (manage-daemon-pods reconciler daemonset current observations eligible)
-        (when rolling (roll-daemon-pods reconciler daemonset observations eligible hashes))
+        (manage-daemon-pods reconciler daemonset current observations eligible hashes)
+        (when rolling
+          (if (plusp (daemon-surge-count daemonset (length eligible)))
+              (surge-daemon-pods reconciler daemonset current observations eligible hashes)
+              (roll-daemon-pods reconciler daemonset observations eligible hashes)))
         (clean-daemonset-history store daemonset old observations))
       (publish-daemonset-status reconciler daemonset nodes eligible hashes))))

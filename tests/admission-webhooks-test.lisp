@@ -912,3 +912,77 @@
         (is (equal "2" (gethash "other" (gethash "data" body))) "the concurrent write survives")
         (is (equal "3" (gethash "mine" (gethash "data" body))))))))
 
+(test controller-writes-pass-through-webhooks
+  (with-admission-api (store)
+    (let ((seen nil) (deny-create nil) (deny-delete nil)
+          (reconciler (make-reconciler store (make-fake-runtime))))
+      (flet ((pods () (list-pods store "alpha"))
+             (scale (replicas)
+               (check-core-status 200 "/api/v1/namespaces/alpha/replicationcontrollers/rc" :method :patch
+                 :content-type "application/merge-patch+json"
+                 :object (gr8s::core-object "spec" (gr8s::core-object "replicas" replicas)))))
+        (with-admission-handler (path request)
+          (push request seen)
+          (cond ((search "/mutate" path)
+                 (apply #'admission-test-allow
+                        (admission-test-patch (admission-test-add "/metadata/annotations" (gr8s::core-object "mutated" "yes")))))
+                ((and deny-create (equal "CREATE" (gethash "operation" request)))
+                 (admission-test-deny "no more pods"))
+                ((and deny-delete (equal "DELETE" (gethash "operation" request)))
+                 (admission-test-deny "keep this pod"))
+                (t (admission-test-allow))))
+        (admission-test-config "MutatingWebhookConfiguration" "pods"
+                               (admission-test-pod-webhook "mutate.example.com" "/mutate" '("pods") '("CREATE")))
+        (admission-test-config "ValidatingWebhookConfiguration" "pods"
+                               (admission-test-pod-webhook "validate.example.com" "/validate" '("pods") '("CREATE" "DELETE")))
+        (let ((fixture (rc-fixture "rc" 1)))
+          (check-core-status 201 "/api/v1/namespaces/alpha/replicationcontrollers" :method :post :object fixture))
+        (gr8s::reconcile-workloads reconciler)
+        ;; A mutating webhook's change reaches the Pod the controller creates.
+        (is (= 1 (length (pods))))
+        (is (equal "yes" (gethash "mutated" (gethash "annotations" (gethash "metadata" (pod-to-object (first (pods))))))))
+        (let ((request (find-if (lambda (entry) (equal "CREATE" (gethash "operation" entry))) seen)))
+          (is (equal "system:serviceaccount:kube-system:replication-controller"
+                     (gethash "username" (gethash "userInfo" request))))
+          (is (equal "alpha" (gethash "namespace" request))))
+        ;; A refusal leaves the Pod uncreated and reports it on the owner.
+        (setf deny-create t)
+        (scale 2)
+        (gr8s::reconcile-workloads reconciler)
+        (is (= 1 (length (pods))))
+        (let ((status (gethash "status" (gr8s::get-core-resource store "replicationcontrollers" "alpha" "rc"))))
+          (is (search "no more pods" (gethash "message" (aref (gethash "conditions" status) 0)))))
+        (setf deny-create nil)
+        (gr8s::reconcile-workloads reconciler)
+        (is (= 2 (length (pods))))
+        ;; A refused deletion leaves the Pod alone until the webhook allows it.
+        (setf deny-delete t seen nil)
+        (scale 1)
+        (gr8s::reconcile-workloads reconciler)
+        (is (notany #'gr8s::deletion-requested-p (pods)))
+        (is-true (find "DELETE" seen :test #'equal :key (lambda (entry) (gethash "operation" entry))))
+        (setf deny-delete nil)
+        (gr8s::reconcile-workloads reconciler)
+        (is (= 1 (length (pods))))))))
+
+(test garbage-collection-offers-its-deletions-to-webhooks
+  (with-admission-api (store)
+    (let ((seen nil) (deny t) (reconciler (make-reconciler store (make-fake-runtime))))
+      (with-admission-handler (path request)
+        (push request seen)
+        (if deny (admission-test-deny "keep this configmap") (admission-test-allow)))
+      (let ((orphan (admission-test-configmap "orphan")))
+        (setf (gethash "ownerReferences" (gethash "metadata" orphan))
+              (vector (gr8s::core-object "apiVersion" "v1" "kind" "ConfigMap" "name" "absent" "uid" "absent-uid")))
+        (check-core-status 201 "/api/v1/namespaces/alpha/configmaps" :method :post :object orphan))
+      (admission-test-config "ValidatingWebhookConfiguration" "configmaps"
+                             (admission-test-webhook "validate.example.com" "/validate"))
+      (gr8s::collect-orphaned-api-objects reconciler)
+      (is-true (gr8s::get-core-resource store "configmaps" "alpha" "orphan"))
+      (let ((request (first seen)))
+        (is (equal "DELETE" (gethash "operation" request)))
+        (is (equal "system:serviceaccount:kube-system:generic-garbage-collector"
+                   (gethash "username" (gethash "userInfo" request)))))
+      (setf deny nil)
+      (gr8s::collect-orphaned-api-objects reconciler)
+      (signals kubernetes-error (gr8s::get-core-resource store "configmaps" "alpha" "orphan")))))

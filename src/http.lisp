@@ -530,12 +530,10 @@
                       (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions"))))
   (multiple-value-bind (status pod)
       (multiple-value-bind (arguments foreground) (pod-delete-request-arguments)
-        ;; A Pod with blocking dependents stays until they are gone.
-        (let ((held (and foreground (not (getf arguments :dry-run))
-                         (hold-pod-for-foreground-deletion store namespace name (getf arguments :uid)))))
-          (if held
-              (values (reconcile-pod reconciler namespace name) held)
-              (apply #'delete-reconciled-pod reconciler namespace name arguments))))
+        ;; A Pod with blocking dependents stops now, and its object stays until they are gone.
+        (when (and foreground (not (getf arguments :dry-run)))
+          (hold-pod-for-foreground-deletion store namespace name (getf arguments :uid)))
+        (apply #'delete-reconciled-pod reconciler namespace name arguments))
     (if (equal "Deleted" (and status (gethash "reason" status)))
         (status-response "Success" "Deleted" (format nil "Pod ~A deleted" name) 200)
         (json-response (pod-response-object pod (or status (pod-status "Running" :reason "Terminating")))))))

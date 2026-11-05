@@ -195,6 +195,74 @@ The search widens backward from NOW so a long-idle object costs little to catch 
                      finally (return total))))
     (if (logbitp (1- (* 8 size)) value) (- value (ash 1 (* 8 size))) value)))
 
+(defun posix-tz-offset-end (text start)
+  "Parse a POSIX TZ [+-]hh[:mm[:ss]] at START, returning its seconds and where it ends."
+  (let* ((sign (case (and (< start (length text)) (char text start)) (#\- -1) (t 1)))
+         (position (if (and (< start (length text)) (find (char text start) "+-")) (1+ start) start))
+         (total 0))
+    (loop for unit in '(3600 60 1)
+          do (multiple-value-bind (value end) (parse-integer text :start position :junk-allowed t)
+               (unless value (cron-schedule-error "Malformed time zone rule"))
+               (incf total (* unit value))
+               (setf position end)
+               (if (and (< position (length text)) (char= #\: (char text position)))
+                   (incf position)
+                   (return))))
+    (values (* sign total) position)))
+
+(defun posix-tz-name-end (text start)
+  "Return where the POSIX TZ zone name at START ends: quoted in angle brackets, or letters."
+  (if (and (< start (length text)) (char= #\< (char text start)))
+      (1+ (or (position #\> text :start start) (cron-schedule-error "Malformed time zone rule")))
+      (or (position-if-not #'alpha-char-p text :start start) (length text))))
+
+(defun parse-posix-tz-rule (text)
+  "Parse a Mm.w.d[/time] date rule into (month week weekday seconds).
+The other two POSIX date forms name fixed days, which no recurring zone in the database uses."
+  (let* ((slash (position #\/ text))
+         (parts (uiop:split-string (subseq text 1 slash) :separator '(#\.)))
+         (fields (mapcar (lambda (part) (parse-integer part :junk-allowed t)) parts)))
+    (unless (and (char= #\M (char text 0)) (= 3 (length fields)) (every #'identity fields))
+      (cron-schedule-error "Unsupported time zone rule ~S" text))
+    (append fields (list (if slash (posix-tz-offset-end text (1+ slash)) 7200)))))
+
+(defun posix-tz-rule-time (rule year offset)
+  "Return the universal time RULE falls on in YEAR, where clocks read OFFSET seconds east of UTC."
+  (destructuring-bind (month week weekday seconds) rule
+    (let* ((first (encode-universal-time 0 0 0 1 month year 0))
+           (first-weekday (mod (1+ (nth-value 6 (decode-universal-time first 0))) 7))
+           (next-month (if (= month 12)
+                           (encode-universal-time 0 0 0 1 1 (1+ year) 0)
+                           (encode-universal-time 0 0 0 1 (1+ month) year 0)))
+           (day (+ (mod (- weekday first-weekday) 7) (* 7 (1- week)))))
+      (loop while (>= (+ first (* day 86400)) next-month) do (decf day 7))
+      (- (+ first (* day 86400) seconds) offset))))
+
+(defun extend-zone-transitions (transitions offsets footer now)
+  "Append the changes FOOTER's recurring rule makes through decades past NOW to the zone's tables."
+  (let* ((std-end (posix-tz-name-end footer 0)))
+    (multiple-value-bind (std-west std-next) (posix-tz-offset-end footer std-end)
+      (let* ((dst-end (posix-tz-name-end footer std-next))
+             (comma (position #\, footer))
+             (std (- std-west))
+             (dst (if (< dst-end comma) (- (posix-tz-offset-end footer dst-end)) (+ std 3600)))
+             (rules (uiop:split-string (subseq footer (1+ comma)) :separator '(#\,)))
+             (times (length transitions))
+             (last (if (plusp times) (aref transitions (1- times)) (- now (* 366 86400))))
+             (first-year (nth-value 5 (decode-universal-time last 0)))
+             (last-year (+ 25 (nth-value 5 (decode-universal-time now 0))))
+             (added nil))
+        (unless (= 2 (length rules)) (cron-schedule-error "Malformed time zone rule"))
+        (let ((start (parse-posix-tz-rule (first rules))) (end (parse-posix-tz-rule (second rules))))
+          (loop for year from first-year to last-year
+                do (let ((to-dst (posix-tz-rule-time start year std))
+                         (to-std (posix-tz-rule-time end year dst)))
+                     (when (> to-dst last) (push (cons to-dst dst) added))
+                     (when (> to-std last) (push (cons to-std std) added)))))
+        (let ((sorted (sort added #'< :key #'car)))
+          (values (concatenate 'vector transitions (mapcar #'car sorted))
+                  (concatenate 'vector offsets (mapcar #'cdr sorted))))))))
+
 (defun parse-tzif (bytes now)
   "Build a CRON-ZONE from TZif BYTES, refusing one whose rules for times past its table are unread."
   (flet ((check (start)
@@ -224,8 +292,9 @@ The search widens backward from NOW so a long-idle object costs little to catch 
                 (+ +unix-epoch-universal+ (tzif-integer bytes (+ time-base (* size position)) size))
                 (aref offsets position)
                 (tzif-integer bytes (+ type-base (* 6 (aref bytes (+ index-base position)))) 4)))
+        ;; Slim zone files stop listing changes once a recurring rule covers them.
         (when (and (find #\, footer) (or (zerop times) (< (aref transitions (1- times)) (+ now (* 366 86400)))))
-          (cron-schedule-error "This host's time zone data lists no future offset changes for this zone"))
+          (multiple-value-setq (transitions offsets) (extend-zone-transitions transitions offsets footer now)))
         (make-cron-zone :transitions transitions :offsets offsets
                         :initial (tzif-integer bytes type-base 4))))))
 

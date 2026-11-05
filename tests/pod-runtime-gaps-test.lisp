@@ -742,3 +742,67 @@
                    (gr8s::containerd-pod-security-context pod (aref (pod-containers pod) 0) :target-id "abc"))))
     (is (= gr8s.cri.v1::+namespacemode-pod+ (slot-value options 'gr8s.cri.v1::pid)))))
 
+(test node-judges-a-resize-against-its-capacity-and-other-pods
+  (flet ((table (&rest pairs)
+           (let ((result (make-hash-table :test #'equal)))
+             (loop for (name value) on pairs by #'cddr do (setf (gethash name result) value))
+             result)))
+    (let ((capacity (table "cpu" 4 "memory" 1000)))
+      ;; Within what the node has left.
+      (is (null (gr8s::pod-resize-verdict (table "cpu" 2) (table "cpu" 1) (table "cpu" 2) capacity)))
+      ;; More than the node could ever give.
+      (multiple-value-bind (reason message)
+          (gr8s::pod-resize-verdict (table "cpu" 5) (table "cpu" 1) (table) capacity)
+        (is (equal "Infeasible" reason))
+        (is (search "cpu" message)))
+      ;; Possible once others let go.
+      (multiple-value-bind (reason message)
+          (gr8s::pod-resize-verdict (table "memory" 800) (table "memory" 100) (table "memory" 300) capacity)
+        (is (equal "Deferred" reason))
+        (is (search "memory" message)))
+      ;; Shrinking never waits, even on an overcommitted node.
+      (is (null (gr8s::pod-resize-verdict (table "cpu" 1) (table "cpu" 2) (table "cpu" 9) capacity))))))
+
+(test pending-resize-is-recorded-once-and-cleared
+  (let ((state (gr8s::core-object)))
+    (is-true (gr8s::note-pod-resize-pending state "Deferred" "wait"))
+    (is (equal "Deferred" (gethash "reason" (gethash "resizePending" state))))
+    (is-false (gr8s::note-pod-resize-pending state "Deferred" "wait"))
+    (is-true (gr8s::note-pod-resize-pending state "Infeasible" "never"))
+    (is-true (gr8s::note-pod-resize-pending state nil nil))
+    (is-false (nth-value 1 (gethash "resizePending" state)))
+    (is-false (gr8s::note-pod-resize-pending state nil nil))))
+
+(test a-node-reported-resize-wait-becomes-the-pod-condition
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((pod (create-pod store (parse-pod (gap-pod-object))))
+           (status (gr8s::core-object
+                    "phase" "Running"
+                    "conditions" (vector (gr8s::core-object "type" "PodResizePending" "status" "True"
+                                                            "reason" "Deferred" "message" "wait"))))
+           (conditions (gethash "conditions" (gr8s::add-pod-status-conditions store pod status)))
+           (pending (gr8s::find-pod-condition conditions "PodResizePending")))
+      (is (equal "Deferred" (gethash "reason" pending)))
+      (is (equal "wait" (gethash "message" pending)))
+      (is (null (gr8s::find-pod-condition conditions "PodResizeInProgress"))))))
+
+(test the-api-refuses-a-resize-beyond-the-node
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s:register-node store (gr8s:make-node-record :id "id-worker" :name "worker" :pod-cidr "10.88.7.0/24"))
+    (gr8s:mark-node-ready store "worker" (get-universal-time))
+    (gr8s::update-node-capacity store "worker" (gr8s::core-object "cpu" "2" "memory" "1Gi" "pods" "10"))
+    (flet ((pod (cpu)
+             (let ((object (gap-pod-object "nodeName" "worker")))
+               (setf (gethash "resources" (aref (gethash "containers" (gethash "spec" object)) 0))
+                     (gr8s::core-object "requests" (gr8s::core-object "cpu" cpu)))
+               (parse-pod object))))
+      (let ((pod (create-pod store (pod "1"))))
+        (is (null (gr8s::refuse-pod-resize-beyond-node store pod (pod "2"))))
+        (let ((condition (handler-case (gr8s::refuse-pod-resize-beyond-node store pod (pod "3"))
+                           (kubernetes-error (condition) condition))))
+          (is (= 403 (gr8s::kubernetes-error-status-code condition)))
+          (is (search "enough allocatable" (gr8s::kubernetes-error-message condition)))
+          (is (equal "NodeCapacity"
+                     (gethash "reason" (aref (gethash "causes" (gr8s::kubernetes-error-details condition)) 0)))))))))

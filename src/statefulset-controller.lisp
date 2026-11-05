@@ -166,7 +166,8 @@ A template equal to an older revision makes that revision the newest again, whic
 (defun create-statefulset-pod (store set template ordinal revision-name)
   "Create SET's Pod at ORDINAL unless SET changed since it was read, after its claims exist."
   (when (statefulset-ensure-claims store set ordinal)
-    (let ((pod (admit-in-cluster-pod store (parse-pod (statefulset-pod-object set template ordinal revision-name)))))
+    (let ((pod (admit-controller-pod store (statefulset-pod-object set template ordinal revision-name)
+                                     "statefulset-controller")))
       (with-store-lock (store)
         (when (workload-current-unlocked store "statefulsets" set :generation t)
           (create-pod-unlocked store pod))))))
@@ -174,7 +175,7 @@ A template equal to an older revision makes that revision the newest again, whic
 (defun statefulset-delete-pod (reconciler member)
   "Start deleting one exact member Pod, tolerating one that is already gone."
   (let ((pod (statefulset-member-pod member)))
-    (handler-case (delete-reconciled-pod reconciler (pod-namespace pod) (pod-name pod) :uid (pod-uid pod))
+    (handler-case (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod) "statefulset-controller" :uid (pod-uid pod))
       (kubernetes-error (condition)
         (unless (member (kubernetes-error-status-code condition) '(404 409)) (error condition))))))
 
@@ -284,8 +285,10 @@ A template equal to an older revision makes that revision the newest again, whic
     (dolist (revision old)
       (when (plusp excess)
         (let ((metadata (workload-metadata revision)))
-          (delete-core-resource store "controllerrevisions" (gethash "namespace" metadata)
-                                (gethash "name" metadata) :uid (gethash "uid" metadata)))
+          (when (controller-delete-allowed-p store "controllerrevisions" (gethash "namespace" metadata)
+                                             (gethash "name" metadata) "statefulset-controller")
+            (delete-core-resource store "controllerrevisions" (gethash "namespace" metadata)
+                                  (gethash "name" metadata) :uid (gethash "uid" metadata))))
         (decf excess)))))
 
 (defun publish-statefulset-status (reconciler set current update)
