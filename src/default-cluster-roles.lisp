@@ -121,9 +121,9 @@
                "labels" (core-object "kubernetes.io/bootstrapping" "rbac-defaults")
                "annotations" (core-object "rbac.authorization.kubernetes.io/autoupdate" "true")))
 
-(defun ensure-default-rbac-object (store resource body)
+(defun ensure-default-rbac-object (store resource body &optional namespace)
   "Create a default RBAC object unless one by that name exists, which is left as it is."
-  (handler-case (create-core-resource store resource body nil)
+  (handler-case (create-core-resource store resource body namespace)
     (kubernetes-error (condition)
       (unless (= 409 (kubernetes-error-status-code condition)) (error condition)))))
 

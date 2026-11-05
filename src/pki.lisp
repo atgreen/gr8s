@@ -175,9 +175,9 @@
      tbs algorithm
      (pure-tls/acme::encode-bit-string (ecdsa-sign-der signer tbs)))))
 
-(defun ca-certificate-der (private-key public-key)
-  "Sign a self-issued cluster CA with a zero subordinate-CA path length."
-  (let* ((name (pure-tls/acme::encode-subject +pki-ca-common-name+))
+(defun ca-certificate-der (private-key public-key &key (common-name +pki-ca-common-name+))
+  "Sign a self-issued CA with a zero subordinate-CA path length."
+  (let* ((name (pure-tls/acme::encode-subject common-name))
          (basic-constraints
            (pure-tls/acme::encode-critical-extension
             +oid-basic-constraints+
