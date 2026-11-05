@@ -59,9 +59,10 @@
                        :kubeconfig nil)))
     (loop while arguments
           for option = (first arguments)
-          do (if (string= option "--disable-agent")
+          do (if (member option '("--disable-agent" "--raft-init") :test #'string=)
                  (progn
-                   (setf (getf options :disable-agent) t)
+                   (cond ((string= option "--disable-agent") (setf (getf options :disable-agent) t))
+                         ((string= option "--raft-init") (setf (getf options :raft-init) t)))
                    (setf arguments (rest arguments)))
                  (let ((value (option-value arguments option)))
                    (cond
@@ -112,6 +113,20 @@
                       (setf (getf options :containerd-log-root) value))
                      ((string= option "--kubeconfig")
                       (setf (getf options :kubeconfig) value))
+                     ;; HA (podster-c2d.7.1): opt in to a Raft-replicated control
+                     ;; plane. Absent these, serve runs single-node as before.
+                     ((string= option "--raft-id")
+                      (setf (getf options :raft-id) value))
+                     ((string= option "--raft-listen")
+                      (setf (getf options :raft-listen) value))
+                     ((string= option "--raft-port")
+                      (setf (getf options :raft-port) (parse-port value)))
+                     ((string= option "--raft-join")
+                      (setf (getf options :raft-join) value))
+                     ((string= option "--raft-node-name")
+                      (setf (getf options :raft-node-name) value))
+                     ((string= option "--raft-token")
+                      (setf (getf options :raft-token) value))
                      (t (error "unknown serve option: ~A" option)))
                    (setf arguments (cddr arguments)))))
     (unless (string= "127.0.0.1" (getf options :listen))
@@ -582,11 +597,13 @@ handler and never gets here. A busy host makes this race likely."
          (service-network-created nil)
          (worker nil)
          (node-server nil)
+         (ha nil)
          (local-agent nil))
     (setf *shutdown-requested* nil)
     (install-shutdown-handlers)
     (unwind-protect
          (progn
+           (setf ha (maybe-start-ha-control-plane store pki options))
            (setf node-server
                  (start-node-grpc-server
                   store :host (getf options :node-listen "127.0.0.1")
@@ -622,6 +639,7 @@ handler and never gets here. A busy host makes this race likely."
                            :store store :runtime runtime
                            :reconciler reconciler))
                     (setf worker (start-reconciliation-worker reconciler
+                                  :leader-gate (when ha (lambda () (ha-control-plane-leader-p ha)))
                                   :before-reconcile (lambda ()
                                       (reconcile-crd-deletions store)
                                       (collect-orphaned-custom-resources store)
@@ -653,8 +671,30 @@ handler and never gets here. A busy host makes this race likely."
                (when (or api-server service-network-created) (remove-in-cluster-network pki))
                (setf (pod-store-in-cluster-config store) nil))))
       (when local-agent (stop-local-node-agent local-agent))
+      (when ha (stop-ha-control-plane ha))
       (when node-server (stop-node-grpc-server node-server))))
   0)
+
+(defun maybe-start-ha-control-plane (store pki options)
+  "Start a Raft-replicated control plane when --raft-init or --raft-join was
+   given, else NIL (single-node)."
+  (when (or (getf options :raft-init) (getf options :raft-join))
+    (let ((id (or (getf options :raft-id) (getf options :node-name)))
+          (join (getf options :raft-join)))
+      (multiple-value-bind (join-host join-port)
+          (if join (parse-agent-server join) (values nil nil))
+        (format t "gr8s HA: Raft member ~A (~:[join ~A:~D~;founding cluster~])~%"
+                id (getf options :raft-init) join-host join-port)
+        (start-ha-control-plane
+         store
+         :id id
+         :host (or (getf options :raft-listen) "127.0.0.1")
+         :port (or (getf options :raft-port) 0)
+         :init (getf options :raft-init)
+         :join-host join-host :join-port join-port
+         :node-name (getf options :raft-node-name)
+         :token (getf options :raft-token)
+         :pki pki)))))
 
 (defun print-help ()
   (format t
