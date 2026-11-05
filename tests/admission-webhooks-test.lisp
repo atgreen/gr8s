@@ -789,9 +789,9 @@
         (is (equal "PodAttachOptions" (gethash "kind" (gethash "kind" request))))
         (is (equal "held" (gethash "name" request)))
         (is (equal "PodAttachOptions" (gethash "kind" (gethash "object" request)))))
-      ;; The runtime has no attach yet, which an allowed request learns plainly.
-      (let ((body (check-core-status 501 "/api/v1/namespaces/alpha/pods/held/attach?container=other&stdin=true" :method :post)))
-        (is (search "not implemented" (gethash "message" body)))))))
+      ;; An allowed request still has to be a stream, which runs after admission.
+      (let ((body (check-core-status 400 "/api/v1/namespaces/alpha/pods/held/attach?container=other&stdin=true" :method :post)))
+        (is (search "upgraded connection" (gethash "message" body)))))))
 
 (test containers-validate-termination-message-settings
   (flet ((pod-with (field value)
@@ -913,3 +913,4 @@
                     :object (gr8s::core-object "data" (gr8s::core-object "mine" "3")))))
         (is (equal "2" (gethash "other" (gethash "data" body))) "the concurrent write survives")
         (is (equal "3" (gethash "mine" (gethash "data" body))))))))
+

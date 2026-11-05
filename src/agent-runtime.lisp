@@ -21,6 +21,7 @@
   (stop-requested nil)
   (operations (make-hash-table :test #'equal))
   (operations-lock (bt:make-lock "gr8s node runtime operations"))
+  (reclaim-queue (make-volume-reclaim-queue))
   (lock (bt:make-lock "gr8s node runtime"))
   (state-changed (bt:make-condition-variable :name "gr8s node runtime state"))
   (apply-lock (bt:make-lock "gr8s node snapshot application"))
@@ -394,6 +395,8 @@ the node from starting."
 (defun stop-node-runtime (node-runtime)
   (let ((thread nil))
     (cancel-all-node-operations node-runtime "node runtime stopped")
+    ;; A runtime can start again, and a stopped queue can't.
+    (work-queue-stop (shiftf (node-runtime-reclaim-queue node-runtime) (make-volume-reclaim-queue)))
     (bt:with-lock-held ((node-runtime-lock node-runtime))
       (when (member (node-runtime-state node-runtime) '(:starting :running))
         (setf (node-runtime-stop-requested node-runtime) t)
@@ -806,63 +809,23 @@ snapshot application."
 
 (defstruct (node-exec-operation
              (:constructor make-node-exec-operation
-                 (node-runtime request socket stream emit)))
+                 (node-runtime request socket session emit)))
   node-runtime
   request
   socket
-  stream
+  ;; The SPDY connection to the runtime's streaming server.
+  session
   emit
   thread
+  ;; An alist of channel keyword to the stream carrying it.
+  streams
+  ;; What the error stream has said so far, read as one status at its end.
+  (status-octets (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
   (sequence 0)
   (last-input-sequence 0)
   (exit-code 0)
   (finished-p nil)
-  (lock (bt:make-lock "gr8s interactive exec operation"))
-  (write-lock (bt:make-lock "gr8s interactive exec websocket writer")))
-
-(defun runtime-websocket-request (target host port key)
-  (format nil
-          "GET ~A HTTP/1.1~C~CHost: ~A:~D~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-WebSocket-Key: ~A~C~CSec-WebSocket-Version: 13~C~CSec-WebSocket-Protocol: v5.channel.k8s.io~C~C~C~C"
-          target #\Return #\Linefeed host port #\Return #\Linefeed
-          #\Return #\Linefeed #\Return #\Linefeed key #\Return #\Linefeed
-          #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed))
-
-(defun connect-runtime-websocket (url)
-  (multiple-value-bind (host port target) (parse-runtime-stream-url url)
-    (let* ((socket
-             (usocket:socket-connect
-              host port :element-type '(unsigned-byte 8)))
-           (stream (usocket:socket-stream socket))
-           (key
-             (ag-grpc:base64-encode
-              (make-array 16 :element-type '(unsigned-byte 8)
-                             :initial-contents
-                             (loop repeat 16 collect (random 256))))))
-      (handler-case
-          (progn
-            (write-sequence
-             (ascii-octets
-              (runtime-websocket-request target host port key))
-             stream)
-            (finish-output stream)
-            (multiple-value-bind (status headers)
-                (parse-http-response-head (read-http-response-head stream))
-              (unless (= 101 status)
-                (error 'runtime-error
-                       :message
-                       (format nil "containerd rejected exec with HTTP ~D"
-                               status)))
-              (unless (string-equal
-                       "v5.channel.k8s.io"
-                       (cdr (assoc :sec-websocket-protocol headers)))
-                (error 'runtime-error
-                       :message "containerd did not negotiate remotecommand v5")))
-            (values socket stream))
-        (error (condition)
-          (ignore-errors (usocket:socket-close socket))
-          (if (typep condition 'runtime-error)
-              (error condition)
-              (error 'runtime-error :message (princ-to-string condition))))))))
+  (lock (bt:make-lock "gr8s interactive exec operation")))
 
 (defun find-node-exec-operation (node-runtime operation-id)
   (bt:with-lock-held ((node-runtime-operations-lock node-runtime))
@@ -918,11 +881,6 @@ snapshot application."
              operation gr8s.node.v1::+operationstatus-operation_status_complete+
              :exit-code exit-code))))))
 
-(defun node-exec-output-channel (wire-channel)
-  (case wire-channel
-    (1 gr8s.node.v1::+streamchannel-stream_channel_stdout+)
-    (2 gr8s.node.v1::+streamchannel-stream_channel_stderr+)))
-
 (defun node-exec-status-exit-code (data)
   (handler-case
       (let* ((status
@@ -930,11 +888,13 @@ snapshot application."
                 (trivial-utf-8:utf-8-bytes-to-string data)))
              (details (gethash "details" status))
              (causes (and details (gethash "causes" details))))
-        (or (loop for cause across causes
-                  when (string= "ExitCode" (gethash "reason" cause ""))
-                    return (parse-integer (gethash "message" cause "")
-                                          :junk-allowed t))
-            1))
+        (if (equal "Success" (gethash "status" status))
+            0
+            (or (loop for cause across causes
+                      when (string= "ExitCode" (gethash "reason" cause ""))
+                        return (parse-integer (gethash "message" cause "")
+                                              :junk-allowed t))
+                1)))
     (error () 1)))
 
 (defun emit-node-exec-stream (operation channel data)
@@ -947,58 +907,77 @@ snapshot application."
       (node-exec-operation-request operation) channel data
       :sequence sequence))))
 
+(defun open-node-exec-streams (operation)
+  "Open the streams the runtime expects for OPERATION's channels, in the order clients use."
+  (let* ((request (node-exec-operation-request operation))
+         (session (node-exec-operation-session operation))
+         (streams (list (cons :error (spdy-open-stream session "error")))))
+    (flet ((open-channel (slot channel name)
+             (when (slot-value request slot)
+               (push (cons channel (spdy-open-stream session name)) streams))))
+      (open-channel 'gr8s.node.v1::stdin :stdin "stdin")
+      (open-channel 'gr8s.node.v1::stdout :stdout "stdout")
+      (open-channel 'gr8s.node.v1::stderr :stderr "stderr")
+      (open-channel 'gr8s.node.v1::tty :resize "resize"))
+    (setf (node-exec-operation-streams operation) streams)))
+
 (defun run-node-exec-reader (operation)
-  (handler-case
-      (loop
-        (multiple-value-bind (opcode payload)
-            (read-websocket-frame (node-exec-operation-stream operation))
-          (case opcode
-            (2
-             (when (zerop (length payload))
-               (error 'runtime-error :message "Empty remotecommand frame"))
-             (let ((channel (aref payload 0))
-                   (data (subseq payload 1)))
-               (cond
-                 ((node-exec-output-channel channel)
-                  (emit-node-exec-stream
-                   operation (node-exec-output-channel channel) data))
-                 ((= channel 3)
-                  (bt:with-lock-held ((node-exec-operation-lock operation))
-                    (setf (node-exec-operation-exit-code operation)
-                          (node-exec-status-exit-code data)))))))
-            (8 (return))
-            (9
-             (bt:with-lock-held ((node-exec-operation-write-lock operation))
-               (write-websocket-frame
-                (node-exec-operation-stream operation) 10 payload
-                :masked-p t)))
-            (10)
-            (otherwise
-             (error 'runtime-error
-                    :message (format nil "Unsupported WebSocket opcode ~D"
-                                     opcode))))))
-    (error (condition)
-      (unless (node-exec-operation-finished-p operation)
-        (finish-node-exec-operation operation :error (princ-to-string condition)))
-      (return-from run-node-exec-reader nil)))
+  "Forward output until the error stream and every output stream have ended."
+  (let ((streams (node-exec-operation-streams operation))
+        (open (remove-if (lambda (entry) (member (car entry) '(:stdin :resize))) (node-exec-operation-streams operation)))
+        (status (node-exec-operation-status-octets operation)))
+    (flet ((channel-of (id) (car (rassoc id streams))))
+      (handler-case
+          (loop while open
+                do (let ((frame (spdy-read-frame (node-exec-operation-session operation))))
+                     (ecase (first frame)
+                       ((nil) (return))
+                       (:reset (setf open (remove (second frame) open :key #'cdr)))
+                       (:data
+                        (destructuring-bind (id fin data) (rest frame)
+                          (case (channel-of id)
+                            (:stdout (when (plusp (length data))
+                                       (emit-node-exec-stream
+                                        operation gr8s.node.v1::+streamchannel-stream_channel_stdout+ data)))
+                            (:stderr (when (plusp (length data))
+                                       (emit-node-exec-stream
+                                        operation gr8s.node.v1::+streamchannel-stream_channel_stderr+ data)))
+                            (:error (loop for octet across data do (vector-push-extend octet status))))
+                          (when fin (setf open (remove id open :key #'cdr))))))))
+        (error (condition)
+          (unless (node-exec-operation-finished-p operation)
+            (finish-node-exec-operation operation :error (princ-to-string condition)))
+          (return-from run-node-exec-reader nil)))))
+  ;; A stream that ended without a status was closed from this side.
+  (when (plusp (length (node-exec-operation-status-octets operation)))
+    (bt:with-lock-held ((node-exec-operation-lock operation))
+      (setf (node-exec-operation-exit-code operation)
+            (node-exec-status-exit-code (coerce (node-exec-operation-status-octets operation)
+                                                '(simple-array (unsigned-byte 8) (*)))))))
   (finish-node-exec-operation operation))
 
 (defun start-node-exec-operation (node-runtime request emit)
   (assigned-operation-pod node-runtime request)
-  (let ((url
-          (runtime-exec-url
-           (node-runtime-runtime node-runtime)
-           (slot-value request 'gr8s.node.v1::pod-uid)
-           (slot-value request 'gr8s.node.v1::container)
-           (slot-value request 'gr8s.node.v1::command)
-           :stdin (slot-value request 'gr8s.node.v1::stdin)
-           :stdout (slot-value request 'gr8s.node.v1::stdout)
-           :stderr (slot-value request 'gr8s.node.v1::stderr)
-           :tty (slot-value request 'gr8s.node.v1::tty))))
-    (multiple-value-bind (socket stream) (connect-runtime-websocket url)
+  (let* ((runtime (node-runtime-runtime node-runtime))
+         (uid (slot-value request 'gr8s.node.v1::pod-uid))
+         (container (slot-value request 'gr8s.node.v1::container))
+         (channels (list :stdin (slot-value request 'gr8s.node.v1::stdin)
+                         :stdout (slot-value request 'gr8s.node.v1::stdout)
+                         :stderr (slot-value request 'gr8s.node.v1::stderr)
+                         :tty (slot-value request 'gr8s.node.v1::tty)))
+         (url (if (= (slot-value request 'gr8s.node.v1::kind)
+                     gr8s.node.v1::+operationkind-operation_kind_attach+)
+                  (apply #'runtime-attach-url runtime uid container channels)
+                  (apply #'runtime-exec-url runtime uid container
+                         (slot-value request 'gr8s.node.v1::command) channels))))
+    (multiple-value-bind (socket session) (connect-runtime-stream url)
       (let ((operation
               (make-node-exec-operation
-               node-runtime request socket stream emit)))
+               node-runtime request socket session emit)))
+        (handler-case (open-node-exec-streams operation)
+          (error (condition)
+            (ignore-errors (usocket:socket-close socket))
+            (error 'runtime-error :message (princ-to-string condition))))
         (remember-node-exec-operation node-runtime operation)
         (emit-node-exec-response
          operation gr8s.node.v1::+operationstatus-operation_status_accepted+)
@@ -1008,63 +987,60 @@ snapshot application."
                :name "gr8s interactive exec reader"))
         operation))))
 
-(defun node-exec-input-payload (input)
-  (case (slot-value input 'gr8s.node.v1::channel)
-    (#.gr8s.node.v1::+streamchannel-stream_channel_stdin+
-     (let ((data (slot-value input 'gr8s.node.v1::data)))
-       (when (plusp (length data))
-         (concatenate '(vector (unsigned-byte 8)) #(0) data))))
-    (#.gr8s.node.v1::+streamchannel-stream_channel_terminal_resize+
-     (concatenate
-      '(vector (unsigned-byte 8)) #(4)
-      (trivial-utf-8:string-to-utf-8-bytes
-       (with-output-to-string (output)
-         (com.inuoe.jzon:stringify
-          (let ((size (make-hash-table :test #'equal)))
-            (setf (gethash "width" size)
-                  (slot-value input 'gr8s.node.v1::columns)
-                  (gethash "height" size)
-                  (slot-value input 'gr8s.node.v1::rows))
-            size)
-          :stream output)))))
-    (otherwise
-     (error 'runtime-error :message "Unsupported interactive input channel"))))
+(defun node-terminal-size-octets (input)
+  "Return the JSON the runtime's resize stream reads for a terminal-resize INPUT."
+  (trivial-utf-8:string-to-utf-8-bytes
+   (format nil "{\"Width\":~D,\"Height\":~D}~%"
+           (slot-value input 'gr8s.node.v1::columns)
+           (slot-value input 'gr8s.node.v1::rows))))
 
 (defun write-node-exec-input (operation input)
   ;; The generated binding renames this field's slot because SEQUENCE is a
   ;; Common Lisp symbol, while preserving the protobuf :SEQUENCE initarg.
   (let ((sequence
-          (slot-value input 'gr8s.node.v1::proto-sequence)))
+          (slot-value input 'gr8s.node.v1::proto-sequence))
+        (session (node-exec-operation-session operation))
+        (streams (node-exec-operation-streams operation)))
     (bt:with-lock-held ((node-exec-operation-lock operation))
       (unless (> sequence (node-exec-operation-last-input-sequence operation))
         (error 'runtime-error :message "Interactive input sequence is stale"))
-      (setf (node-exec-operation-last-input-sequence operation) sequence)))
-  (bt:with-lock-held ((node-exec-operation-write-lock operation))
-    (let ((payload (node-exec-input-payload input)))
-      (when payload
-        (write-websocket-frame
-         (node-exec-operation-stream operation) 2 payload :masked-p t)))
-    (when (slot-value input 'gr8s.node.v1::eof)
-      (write-websocket-frame
-       (node-exec-operation-stream operation) 2 #(255 0) :masked-p t))))
+      (setf (node-exec-operation-last-input-sequence operation) sequence))
+    (case (slot-value input 'gr8s.node.v1::channel)
+      (#.gr8s.node.v1::+streamchannel-stream_channel_stdin+
+       (let ((stdin (cdr (assoc :stdin streams))) (data (slot-value input 'gr8s.node.v1::data))
+             (eof (slot-value input 'gr8s.node.v1::eof)))
+         (when (and stdin (or eof (plusp (length data))))
+           (spdy-write-data session stdin data :fin eof))))
+      (#.gr8s.node.v1::+streamchannel-stream_channel_terminal_resize+
+       (let ((resize (cdr (assoc :resize streams))))
+         (when resize (spdy-write-data session resize (node-terminal-size-octets input)))))
+      (otherwise
+       (error 'runtime-error :message "Unsupported interactive input channel")))))
+
+(defparameter *reclaim-volume-call* #'reclaim-provisioned-volume
+  "Remove a provisioned volume's directory, taking the state directory and the PV.")
 
 (defun start-volume-reclaim-operation (node-runtime request emit)
-  "Remove a volume's directory on its own thread, since a large tree or dead server takes time."
-  (bt:make-thread
-   (lambda ()
-     (funcall
-      emit :operation-response
-      (handler-case
-          (progn
-            (reclaim-provisioned-volume
-             (node-runtime-state-directory node-runtime)
-             (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string
-                                    (slot-value request 'gr8s.node.v1::volume-json))))
-            (node-operation-response request gr8s.node.v1::+operationstatus-operation_status_complete+))
-        (error (condition)
-          (node-operation-response request gr8s.node.v1::+operationstatus-operation_status_failed+
-                                   :exit-code 1 :message (princ-to-string condition))))))
-   :name "gr8s volume reclaim"))
+  "Queue a volume's removal. A request for one already running joins it, so a control plane
+that reconnects or restarts gets the answer without a second deletion racing the first."
+  (let ((volume (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string
+                                       (slot-value request 'gr8s.node.v1::volume-json))))
+        (directory (node-runtime-state-directory node-runtime))
+        (reclaim *reclaim-volume-call*))
+    (work-queue-submit
+     (node-runtime-reclaim-queue node-runtime)
+     (storage-resource-name volume)
+     (volume-reclaim-lane volume)
+     (lambda () (funcall reclaim directory volume))
+     :on-done
+     (lambda (value condition)
+       (declare (ignore value))
+       (funcall
+        emit :operation-response
+        (if condition
+            (node-operation-response request gr8s.node.v1::+operationstatus-operation_status_failed+
+                                     :exit-code 1 :message (princ-to-string condition))
+            (node-operation-response request gr8s.node.v1::+operationstatus-operation_status_complete+)))))))
 
 (defun dispatch-node-operation (node-runtime variant payload emit)
   (handler-case
@@ -1074,10 +1050,12 @@ snapshot application."
            ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_reclaim_volume+)
             (start-volume-reclaim-operation node-runtime payload emit))
-           ((and (= (slot-value payload 'gr8s.node.v1::kind)
-                    gr8s.node.v1::+operationkind-operation_kind_exec+)
-                 (or (slot-value payload 'gr8s.node.v1::stdin)
-                     (slot-value payload 'gr8s.node.v1::tty)))
+           ((or (= (slot-value payload 'gr8s.node.v1::kind)
+                   gr8s.node.v1::+operationkind-operation_kind_attach+)
+                (and (= (slot-value payload 'gr8s.node.v1::kind)
+                        gr8s.node.v1::+operationkind-operation_kind_exec+)
+                     (or (slot-value payload 'gr8s.node.v1::stdin)
+                         (slot-value payload 'gr8s.node.v1::tty))))
             (start-node-exec-operation node-runtime payload emit))
            (t
             (dolist (reply (handle-node-operation node-runtime payload))

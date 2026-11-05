@@ -312,7 +312,7 @@
             "securityContext" "serviceAccountName" "automountServiceAccountToken"
             "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig"
             "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
-            "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "hostAliases" "ephemeralContainers") "spec")
+            "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "shareProcessNamespace" "hostAliases" "ephemeralContainers") "spec")
     (dolist (field '("hostname" "subdomain"))
       (when (eq (gethash field spec) 'null) (remhash field spec))
       (let ((value (gethash field spec "")))

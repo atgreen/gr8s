@@ -123,7 +123,39 @@
                  (gr8s::current-node-snapshot server "worker-a")
                  'gr8s.node.v1::pods))))))
 
-(test interactive-node-exec-bridges-runtime-websocket-streams
+(defun fake-spdy-read-frame (stream)
+  "Read one frame a client sent: (:syn id type), (:data id fin octets), or NIL at the end."
+  (let ((head (gr8s::spdy-read-octets stream 8)))
+    (when head
+      (let* ((size (logand (gr8s::spdy-read-u32 head 4) #xFFFFFF))
+             (payload (if (plusp size) (gr8s::spdy-read-octets stream size) (make-array 0 :element-type '(unsigned-byte 8)))))
+        (if (logbitp 7 (aref head 0))
+            (let* ((text (map 'string #'code-char payload))
+                   (position (+ (search "streamtype" text) (length "streamtype") 4)))
+              ;; Five octets of sync flush follow the value.
+              (list :syn (gr8s::spdy-read-u32 payload 0) (subseq text position (- (length text) 5))))
+            (list :data (gr8s::spdy-read-u32 head 0) (logbitp 0 (aref head 4)) payload))))))
+
+(defun fake-spdy-accept (stream count)
+  "Answer the upgrade on STREAM and return an alist of channel name to stream ID for COUNT streams."
+  (gr8s::read-http-response-head stream)
+  (write-sequence
+   (gr8s::ascii-octets
+    (format nil "HTTP/1.1 101 Switching Protocols~C~CConnection: Upgrade~C~CUpgrade: SPDY/3.1~C~C~C~C"
+            #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed))
+   stream)
+  (finish-output stream)
+  (loop repeat count
+        for frame = (fake-spdy-read-frame stream)
+        collect (cons (third frame) (second frame))))
+
+(defun fake-spdy-send (stream id text &key fin octets)
+  "Send TEXT, or OCTETS, on stream ID as the runtime would."
+  (let ((data (or octets (trivial-utf-8:string-to-utf-8-bytes text)))
+        (session (gr8s::make-spdy-session stream)))
+    (gr8s::spdy-write-data session id data :fin fin)))
+
+(test interactive-node-exec-bridges-runtime-spdy-streams
   (with-temporary-store (store path)
     (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
            (runtime (make-fake-runtime))
@@ -136,6 +168,8 @@
               :element-type '(unsigned-byte 8)))
            (port (usocket:get-local-port listener))
            (received nil)
+           (opened nil)
+           (stream-ids nil)
            (upstream-error nil)
            (upstream-thread nil)
            (emitted nil)
@@ -169,47 +203,23 @@
                             (stream (usocket:socket-stream socket)))
                        (unwind-protect
                             (progn
-                              (gr8s::read-http-response-head stream)
-                              (write-sequence
-                               (gr8s::ascii-octets
-                                (format nil
-                                        "HTTP/1.1 101 Switching Protocols~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-WebSocket-Protocol: v5.channel.k8s.io~C~C~C~C"
-                                        #\Return #\Linefeed #\Return #\Linefeed
-                                        #\Return #\Linefeed #\Return #\Linefeed
-                                        #\Return #\Linefeed))
-                               stream)
-                              (finish-output stream)
-                              (dotimes (index 3)
-                                (multiple-value-bind (opcode payload)
-                                    (gr8s::read-websocket-frame stream)
-                                  (assert (< index 3))
-                                  (push (cons opcode payload) received)))
-                              (gr8s::write-websocket-frame
-                               stream 2
-                               (concatenate
-                                '(vector (unsigned-byte 8))
-                                #(1)
-                                (trivial-utf-8:string-to-utf-8-bytes
-                                 "remote shell\n")))
-                              (gr8s::write-websocket-frame
-                               stream 2
-                               (concatenate
-                                '(vector (unsigned-byte 8))
-                                #(2)
-                                (trivial-utf-8:string-to-utf-8-bytes
-                                 "remote error\n")))
-                              (gr8s::write-websocket-frame
-                               stream 2
-                               (concatenate
-                                '(vector (unsigned-byte 8)) #(3)
-                                (gr8s::exec-exit-status-bytes 7)))
-                              (gr8s::write-websocket-frame
-                               stream 8
-                               (make-array 0 :element-type '(unsigned-byte 8))))
+                              (let ((streams (fake-spdy-accept stream 5)))
+                                (setf opened (mapcar #'car streams))
+                                (dotimes (index 3)
+                                  (push (fake-spdy-read-frame stream) received))
+                                (fake-spdy-send stream (cdr (assoc "stdout" streams :test #'equal))
+                                                "remote shell\n" :fin t)
+                                (fake-spdy-send stream (cdr (assoc "stderr" streams :test #'equal))
+                                                "remote error\n" :fin t)
+                                (fake-spdy-send stream (cdr (assoc "error" streams :test #'equal)) nil
+                                                :octets (gr8s::exec-exit-status-bytes 7) :fin t)
+                                (setf stream-ids streams)
+                                ;; Wait for the client to go away, as the real server's handler returns first.
+                                (ignore-errors (loop while (fake-spdy-read-frame stream)))))
                          (ignore-errors (usocket:socket-close socket))))
                    (error (condition)
                      (setf upstream-error condition))))
-               :name "gr8s fake interactive runtime websocket"))
+               :name "gr8s fake interactive runtime stream"))
         (gr8s::set-fake-runtime-exec-url
          runtime (format nil "http://127.0.0.1:~D/exec/token" port))
         (unwind-protect
@@ -258,21 +268,21 @@
                  :timeout 3))
                (bt:join-thread upstream-thread)
                (is (null upstream-error) "~A" upstream-error)
-               (let ((frames (nreverse received)))
+               (is (equal '("error" "stdin" "stdout" "stderr" "resize") opened))
+               (let ((frames (reverse received))
+                     (stdin (cdr (assoc "stdin" stream-ids :test #'equal)))
+                     (resize (cdr (assoc "resize" stream-ids :test #'equal))))
                  (is (= 3 (length frames)))
-                 (is (every (lambda (frame) (= 2 (car frame))) frames))
-                 (is (= 0 (aref (cdr (first frames)) 0)))
+                 (is (equal (list :data stdin nil) (subseq (first frames) 0 3)))
                  (is (string= "echo hi\n"
-                              (trivial-utf-8:utf-8-bytes-to-string
-                               (subseq (cdr (first frames)) 1))))
-                 (is (= 4 (aref (cdr (second frames)) 0)))
-                 (let ((size
-                         (com.inuoe.jzon:parse
-                          (trivial-utf-8:utf-8-bytes-to-string
-                           (subseq (cdr (second frames)) 1)))))
-                   (is (= 80 (gethash "width" size)))
-                   (is (= 24 (gethash "height" size))))
-                 (is (equalp #(255 0) (cdr (third frames)))))
+                              (trivial-utf-8:utf-8-bytes-to-string (fourth (first frames)))))
+                 (is (equal (list :data resize nil) (subseq (second frames) 0 3)))
+                 (let ((size (com.inuoe.jzon:parse
+                              (trivial-utf-8:utf-8-bytes-to-string (fourth (second frames))))))
+                   (is (= 80 (gethash "Width" size)))
+                   (is (= 24 (gethash "Height" size))))
+                 ;; Ending stdin ends that stream alone, leaving the output to come.
+                 (is (equal (list :data stdin t) (subseq (third frames) 0 3))))
                (let ((stdout
                        (bt:with-lock-held (emitted-lock)
                          (find
@@ -313,6 +323,74 @@
           (gr8s::stop-node-runtime node-runtime)
           (ignore-errors (usocket:socket-close listener)))))))
 
+(test node-attach-streams-the-container-without-stdin-or-a-command
+  (with-temporary-store (store path)
+    (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
+           (runtime (make-fake-runtime))
+           (node-runtime (gr8s::make-node-runtime (merge-pathnames "attach-agent/" path) runtime nil))
+           (listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :element-type '(unsigned-byte 8)))
+           (emitted nil)
+           (emitted-lock (bt:make-lock "gr8s attach emitted messages"))
+           (opened nil)
+           (request (make-instance 'gr8s.node.v1::operation-request
+                                   :operation-id "attach-agent-1"
+                                   :kind gr8s.node.v1::+operationkind-operation_kind_attach+
+                                   :namespace "default" :pod (pod-name pod) :pod-uid (pod-uid pod)
+                                   :container "web" :stdout t :stderr t))
+           (upstream
+             (bt:make-thread
+              (lambda ()
+                (let* ((socket (usocket:socket-accept listener :element-type '(unsigned-byte 8)))
+                       (stream (usocket:socket-stream socket)))
+                  (unwind-protect
+                       (progn
+                         (let ((streams (fake-spdy-accept stream 3)))
+                           (setf opened (mapcar #'car streams))
+                           (fake-spdy-send stream (cdr (assoc "stdout" streams :test #'equal)) (format nil "attached~%") :fin t)
+                           (fake-spdy-send stream (cdr (assoc "stderr" streams :test #'equal)) nil
+                                           :octets (make-array 0 :element-type '(unsigned-byte 8)) :fin t)
+                           (fake-spdy-send stream (cdr (assoc "error" streams :test #'equal)) nil
+                                           :octets (gr8s::exec-exit-status-bytes 0) :fin t)
+                           (ignore-errors (loop while (fake-spdy-read-frame stream)))))
+                    (ignore-errors (usocket:socket-close socket)))))
+              :name "gr8s fake attach stream")))
+      (labels ((emit (variant payload)
+                 (bt:with-lock-held (emitted-lock)
+                   (setf emitted (nconc emitted (list (cons variant payload))))))
+               (response (status)
+                 (bt:with-lock-held (emitted-lock)
+                   (cdr (find-if (lambda (entry)
+                                   (and (eq :operation-response (car entry))
+                                        (= status (slot-value (cdr entry) 'gr8s.node.v1::status))))
+                                 emitted)))))
+        (gr8s::set-fake-runtime-exec-url
+         runtime (format nil "http://127.0.0.1:~D/attach/token" (usocket:get-local-port listener)))
+        (unwind-protect
+             (progn
+               (gr8s::start-node-runtime node-runtime)
+               (gr8s::reconcile-node-snapshot node-runtime (desired-snapshot-for-test pod))
+               (gr8s::dispatch-node-operation node-runtime :operation-request request #'emit)
+               (is-true (wait-until
+                         (lambda () (response gr8s.node.v1::+operationstatus-operation_status_complete+))
+                         :timeout 3))
+               (bt:join-thread upstream)
+               (is (equal '("error" "stdout" "stderr") opened))
+               (is (= 0 (slot-value (response gr8s.node.v1::+operationstatus-operation_status_complete+)
+                                    'gr8s.node.v1::exit-code)))
+               (let ((stdout (bt:with-lock-held (emitted-lock)
+                               (cdr (find :operation-stream emitted :key #'car)))))
+                 (is (string= (format nil "attached~%") (trivial-utf-8:utf-8-bytes-to-string
+                                            (slot-value stdout 'gr8s.node.v1::data))))))
+          (gr8s::stop-node-runtime node-runtime)
+          (ignore-errors (usocket:socket-close listener)))))))
+
+(test node-exec-status-reads-the-exit-code-of-a-status-frame
+  (flet ((frame (text) (trivial-utf-8:string-to-utf-8-bytes text)))
+    (is (= 0 (gr8s::node-exec-status-exit-code (gr8s::exec-exit-status-bytes 0))))
+    (is (= 7 (gr8s::node-exec-status-exit-code (gr8s::exec-exit-status-bytes 7))))
+    (is (= 0 (gr8s::node-exec-status-exit-code (frame "{\"status\":\"Success\"}"))))
+    (is (= 1 (gr8s::node-exec-status-exit-code (frame "{\"status\":\"Failure\"}"))))))
+
 (test ending-agent-session-abandons-its-interactive-exec-operations
   (with-temporary-store (store path)
     (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
@@ -348,19 +426,9 @@
                           (stream (usocket:socket-stream socket)))
                      (unwind-protect
                           (progn
-                            (gr8s::read-http-response-head stream)
-                            (write-sequence
-                             (gr8s::ascii-octets
-                              (format nil
-                                      "HTTP/1.1 101 Switching Protocols~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-WebSocket-Protocol: v5.channel.k8s.io~C~C~C~C"
-                                      #\Return #\Linefeed #\Return #\Linefeed
-                                      #\Return #\Linefeed #\Return #\Linefeed
-                                      #\Return #\Linefeed))
-                             stream)
-                            (finish-output stream)
+                            (fake-spdy-accept stream 5)
                             (setf upstream-connected-p t)
-                            (handler-case (read-byte stream)
-                              (end-of-file () nil)
+                            (handler-case (loop while (fake-spdy-read-frame stream))
                               (error () nil))
                             (setf upstream-closed-p t))
                        (ignore-errors (usocket:socket-close socket))))
@@ -575,3 +643,17 @@
           (gr8s::reconcile-node-snapshot agent (desired-snapshot-for-test))
           (is (null (list-pods (gr8s::node-runtime-store agent))))
           (gr8s::stop-node-runtime agent))))))
+
+(test spdy-header-blocks-announce-the-dictionary-once-and-store-their-names
+  (let* ((session (gr8s::make-spdy-session nil))
+         (first (gr8s::spdy-header-block session '(("streamtype" . "error"))))
+         (second (gr8s::spdy-header-block session '(("streamtype" . "stdin")))))
+    (is (equalp #(#x78 #xF9 #xE3 #xC6 #xA7 #xC2) (subseq first 0 6)))
+    (is (= 0 (aref first 6)))
+    (let ((size (+ (aref first 7) (* 256 (aref first 8)))))
+      (is (= size (- (length first) 16)))
+      (is (equalp #(0 0 0 #xFF #xFF) (subseq first (- (length first) 5))))
+      (is (= (logxor size #xFFFF) (+ (aref first 9) (* 256 (aref first 10))))))
+    ;; The stream continues, so only the first block has a zlib header.
+    (is (= 0 (aref second 0)))
+    (is (search "stdin" (map 'string #'code-char second)))))
