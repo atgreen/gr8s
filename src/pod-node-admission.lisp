@@ -13,18 +13,19 @@
   "The scheduler's words for a Pod whose host ports are taken.")
 
 (defun pod-host-ports (pod)
-  "Return the (ip . port) host ports POD's containers claim; an unset ip means every address."
+  "Return the (protocol ip . port) host ports POD's containers claim; an unset ip means every address."
   (loop for container across (gethash "containers" (gethash "spec" (pod-to-object pod)) #())
         append (loop for port across (gethash "ports" container #())
                      for number = (gethash "hostPort" port 0)
                      when (and (integerp number) (plusp number))
                        collect (let ((ip (gethash "hostIP" port "")))
-                                 (cons (if (equal ip "0.0.0.0") "" ip) number)))))
+                                 (list* (gethash "protocol" port "TCP") (if (equal ip "0.0.0.0") "" ip) number)))))
 
 (defun host-ports-conflict-p (left right)
-  "Return whether two (ip . port) claims overlap, where an unset ip overlaps every address."
-  (and (= (cdr left) (cdr right))
-       (or (equal (car left) (car right)) (equal "" (car left)) (equal "" (car right)))))
+  "Return whether two (protocol ip . port) claims overlap, where an unset ip overlaps every address."
+  (and (equal (car left) (car right))
+       (= (cddr left) (cddr right))
+       (or (equal (cadr left) (cadr right)) (equal "" (cadr left)) (equal "" (cadr right)))))
 
 (defun pod-host-ports-free-p (store pod node)
   "Return whether none of POD's host ports is claimed on NODE. Call with STORE's lock held."

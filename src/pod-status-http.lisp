@@ -31,7 +31,11 @@
   (let ((address (node-record-underlay-address node)))
     (if (plusp (length address))
         address
-        (or *local-primary-ipv4* (setf *local-primary-ipv4* (discover-local-primary-ipv4))))))
+        (node-primary-ipv4))))
+
+(defun node-primary-ipv4 ()
+  "Return this host's primary IPv4 address, discovering it once."
+  (or *local-primary-ipv4* (setf *local-primary-ipv4* (discover-local-primary-ipv4))))
 
 (defun add-pod-host-address (store pod status)
   "Publish the assigned node's address while STORE's lock is held; agents have no node table."

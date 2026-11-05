@@ -139,11 +139,18 @@
               (gethash "resourceVersion" state ""))
           :spec-fingerprint (or (and sandbox (cdr (assoc +gr8s-spec-fingerprint-label+ (cri-pod-sandbox-info-labels sandbox) :test #'string=)))
                                 (gethash "specFingerprint" state))
-          :pod-ip (if sandbox (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime) (cri-pod-sandbox-info-id sandbox)) (gethash "podIP" state ""))
+          :pod-ip (cond ((and sandbox (assoc +gr8s-host-network-label+ (cri-pod-sandbox-info-labels sandbox) :test #'string=))
+                         (node-primary-ipv4))
+                        (sandbox (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime) (cri-pod-sandbox-info-id sandbox)))
+                        (t (gethash "podIP" state "")))
           :phase (container-lifecycle-phase statuses (and sandbox (= gr8s.cri.v1::+podsandboxstate-sandbox_ready+
                                                                          (cri-pod-sandbox-info-state sandbox))))
           :container-details details
           :status (core-object "containerStatuses" statuses)) state)))))))
+
+(defun containerd-pod-host-network-p (runtime pod)
+  "Return whether POD's sandbox uses the node's network namespace."
+  (or (containerd-runtime-host-network runtime) (pod-host-network-p pod)))
 
 (defun containerd-replace-uid (runtime uid)
   "Remove UID's sandbox for recreation under the same Pod, keeping its volumes."

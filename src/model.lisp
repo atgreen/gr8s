@@ -180,7 +180,7 @@
                           value))))
 
 (defun parse-ports (container)
-  "Parse and validate the supported TCP container ports and host ports in CONTAINER."
+  "Parse and validate the container ports and host ports in CONTAINER."
   (loop for port across (optional-vector container "ports" "container")
         collect
         (progn
@@ -197,9 +197,35 @@
             (unless (and (stringp host-ip)
                          (or (zerop (length host-ip)) (ignore-errors (parse-ipv4-integer host-ip))))
               (invalid-pod "hostIP must be an IPv4 address"))
-            (unless (and (stringp protocol) (string= protocol "TCP"))
-              (invalid-pod "only TCP container ports are supported"))
+            (unless (member protocol '("TCP" "UDP" "SCTP") :test #'equal)
+              (invalid-pod "container port protocol must be TCP, UDP or SCTP"))
             number))))
+
+(defun normalize-pod-host-network (spec)
+  "Validate hostNetwork, whose containers' ports are necessarily also the host's."
+  (when (eq (gethash "hostNetwork" spec) 'null) (remhash "hostNetwork" spec))
+  (let ((host-network (gethash "hostNetwork" spec)))
+    (unless (member host-network '(t nil)) (invalid-pod "spec.hostNetwork must be boolean"))
+    (when host-network
+      (dolist (field '("containers" "initContainers"))
+        (let ((containers (gethash field spec)))
+          (when (and (vectorp containers) (not (stringp containers)))
+            (loop for container across containers
+                  when (hash-table-p container)
+                    do (let ((ports (gethash "ports" container)))
+                         (when (and (vectorp ports) (not (stringp ports)))
+                           (loop for port across ports
+                                 when (hash-table-p port)
+                                   do (let ((number (gethash "containerPort" port))
+                                            (host (gethash "hostPort" port 0)))
+                                        (if (member host '(0 null))
+                                            (setf (gethash "hostPort" port) number)
+                                            (unless (eql host number)
+                                              (invalid-pod "hostPort must match containerPort when hostNetwork is true"))))))))))))))
+
+(defun pod-host-network-p (pod)
+  "Return whether POD runs in the node's network namespace."
+  (eq t (gethash "hostNetwork" (gethash "spec" (pod-to-object pod)))))
 
 (defun default-container-termination-message (object)
   "Apply the Kubernetes termination message defaults, refusing any other requested behavior."
@@ -297,7 +323,8 @@
             "securityContext" "serviceAccountName" "automountServiceAccountToken"
             "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig"
             "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
-            "affinity") "spec")
+            "affinity" "hostNetwork") "spec")
+    (normalize-pod-host-network spec)
     (dolist (field '("hostname" "subdomain"))
       (when (eq (gethash field spec) 'null) (remhash field spec))
       (let ((value (gethash field spec "")))

@@ -42,7 +42,7 @@
 (defun containerd-container-mounts (runtime pod container sandbox-id &optional environment)
   "Append the real Pod hosts mount unless host networking or an explicit user mount applies."
   (let ((mounts (containerd-pod-mounts runtime pod container environment)))
-    (if (or (containerd-runtime-host-network runtime)
+    (if (or (containerd-pod-host-network-p runtime pod)
             (find "/etc/hosts" mounts :test #'equal
                   :key (lambda (mount) (slot-value mount 'gr8s.cri.v1::container-path))))
         mounts

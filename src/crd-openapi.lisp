@@ -114,6 +114,7 @@
   "Expose current schema URLs for every actually served group/version."
   (let ((paths (core-object "apis/admissionregistration.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/admissionregistration.k8s.io/v1?hash=gr8s-admissionregistration-v1")
                             "apis/discovery.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/discovery.k8s.io/v1?hash=gr8s-endpointslices-v1")
+                            "apis/networking.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/networking.k8s.io/v1?hash=gr8s-networking-v1")
                             "apis/certificates.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/certificates.k8s.io/v1?hash=gr8s-certificates-v1")
                             "apis/apps/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/apps/v1?hash=gr8s-apps-v1")
                             "apis/node.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/node.k8s.io/v1?hash=gr8s-node-v1")

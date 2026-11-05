@@ -213,12 +213,12 @@
 
 (test pod-protobuf-retains-explicit-pointer-zero-and-unsupported-features
   (let* ((container (core-test-protobuf '((1 "main") (2 "web:v1"))))
-         (spec (core-test-protobuf (list (list 2 container) (list 21 0) (list 11 1))))
+         (spec (core-test-protobuf (list (list 2 container) (list 21 0) (list 12 1))))
          (input (core-test-protobuf-envelope "Pod" (list (list 1 (core-test-protobuf '((1 "unsupported")))) (list 2 spec))))
          (decoded (gr8s::decode-core-resource-protobuf input "Pod")))
     (is (not (null (nth-value 1 (gethash "automountServiceAccountToken" (gethash "spec" decoded))))))
     (is (null (gethash "automountServiceAccountToken" (gethash "spec" decoded))))
-    (is (eq t (gethash "hostNetwork" (gethash "spec" decoded))))
+    (is (eq t (gethash "hostPID" (gethash "spec" decoded))))
     (with-core-api (store path)
       (values path)
       (check-core-status 422 "/api/v1/namespaces/alpha/pods" :method :post
@@ -266,7 +266,11 @@
       (is (equal "http" (gethash "targetPort" port)))
       (check-core-status 422 "/api/v1/namespaces/alpha/services" :method :post
                          :content-type "application/vnd.kubernetes.protobuf"
-                         :octets (service-wire-fixture "nodeport" :type "NodePort"))
-      (is (= 1 (length (gr8s::list-core-resources store "services" "alpha")))))))
+                         :octets (service-wire-fixture "bogus" :type "Bogus"))
+      (is (= 1 (length (gr8s::list-core-resources store "services" "alpha"))))
+      (let ((node-port (check-core-status 201 "/api/v1/namespaces/alpha/services" :method :post
+                                          :content-type "application/vnd.kubernetes.protobuf"
+                                          :octets (service-wire-fixture "nodeport" :type "NodePort"))))
+        (is (integerp (gethash "nodePort" (aref (gethash "ports" (gethash "spec" node-port)) 0))))))))
 
 (in-suite gr8s)

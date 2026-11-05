@@ -178,7 +178,8 @@
               (when resource-version
                 (list (cons +gr8s-resource-version-label+
                             resource-version)))
-              (when spec-fingerprint (list (cons +gr8s-spec-fingerprint-label+ spec-fingerprint))))
+              (when spec-fingerprint (list (cons +gr8s-spec-fingerprint-label+ spec-fingerprint)))
+              (when host-network (list (cons +gr8s-host-network-label+ "true"))))
      :linux
      (make-instance
       'gr8s.cri.v1::linux-pod-sandbox-config

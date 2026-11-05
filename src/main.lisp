@@ -564,6 +564,7 @@ handler and never gets here. A busy host makes this race likely."
                                       (collect-orphaned-api-objects reconciler)
                                       (reconcile-workloads reconciler)
                                       (reconcile-endpointslices store)
+                                      (reconcile-endpoints store)
                                       (publish-service-discovery-snapshots runtime)
                                       ;; ClusterIP Services are load-balanced in-kernel by the
                                       ;; agent's eBPF socket LB; the control plane only keeps the

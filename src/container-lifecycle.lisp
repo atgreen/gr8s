@@ -286,7 +286,7 @@
     (make-cri-pod-sandbox-config
      (pod-name pod) (pod-uid pod) (pod-namespace pod) 0
      (namestring (containerd-pod-log-directory runtime (pod-uid pod)))
-     (containerd-runtime-host-network runtime)
+     (containerd-pod-host-network-p runtime pod)
      :resource-version (pod-resource-version pod) :spec-fingerprint (pod-runtime-spec-fingerprint pod)
      :privileged (pod-requests-privileged-container-p pod)
      :hostname (pod-runtime-hostname pod)
@@ -302,7 +302,7 @@
        :id (cri-run-pod-sandbox
             (containerd-runtime-socket-path runtime)
             :name (pod-name pod) :uid (pod-uid pod) :namespace (pod-namespace pod)
-            :log-directory (namestring directory) :host-network (containerd-runtime-host-network runtime)
+            :log-directory (namestring directory) :host-network (containerd-pod-host-network-p runtime pod)
             :resource-version (pod-resource-version pod) :spec-fingerprint (pod-runtime-spec-fingerprint pod)
             :privileged (pod-requests-privileged-container-p pod)
             :hostname (pod-runtime-hostname pod)

@@ -218,14 +218,15 @@
                                   "metadata" (gr8s::core-object "name" name "namespace" "default")))))
 
 (test host-ports-are-validated-and-only-tcp-is-accepted
-  (is (equal '(("" . 8080)) (gr8s::pod-host-ports (host-port-test-pod "a" 8080))))
-  (is (equal '(("" . 8080)) (gr8s::pod-host-ports (host-port-test-pod "a" 8080 :ip "0.0.0.0"))))
-  (is (equal '(("10.0.0.1" . 8080)) (gr8s::pod-host-ports (host-port-test-pod "a" 8080 :ip "10.0.0.1"))))
+  (is (equal '(("TCP" "" . 8080)) (gr8s::pod-host-ports (host-port-test-pod "a" 8080))))
+  (is (equal '(("TCP" "" . 8080)) (gr8s::pod-host-ports (host-port-test-pod "a" 8080 :ip "0.0.0.0"))))
+  (is (equal '(("TCP" "10.0.0.1" . 8080)) (gr8s::pod-host-ports (host-port-test-pod "a" 8080 :ip "10.0.0.1"))))
   (signals gr8s::kubernetes-error (host-port-test-pod "a" 70000))
   (signals gr8s::kubernetes-error (host-port-test-pod "a" 8080 :ip "not-an-address"))
-  (is (gr8s::host-ports-conflict-p '("" . 1) '("10.0.0.1" . 1)))
-  (is-false (gr8s::host-ports-conflict-p '("10.0.0.2" . 1) '("10.0.0.1" . 1)))
-  (is-false (gr8s::host-ports-conflict-p '("" . 1) '("" . 2))))
+  (is (gr8s::host-ports-conflict-p '("TCP" "" . 1) '("TCP" "10.0.0.1" . 1)))
+  (is-false (gr8s::host-ports-conflict-p '("TCP" "10.0.0.2" . 1) '("TCP" "10.0.0.1" . 1)))
+  (is-false (gr8s::host-ports-conflict-p '("TCP" "" . 1) '("TCP" "" . 2)))
+  (is-false (gr8s::host-ports-conflict-p '("TCP" "" . 1) '("UDP" "" . 1))))
 
 (test the-scheduler-will-not-place-two-pods-on-one-host-port
   (with-temporary-store (store path)
@@ -336,7 +337,7 @@
                (is (zerop (hash-table-count forwarders)) "A Pod with no address has nothing to relay to")
                (gr8s::update-pod-observed-status store served (gr8s::core-object "phase" "Running" "podIP" "10.1.2.3"))
                (gr8s::converge-host-port-forwarders forwarders store)
-               (let ((forwarder (gethash (cons "127.0.0.1" 28431) forwarders)))
+               (let ((forwarder (gethash (list* "TCP" "127.0.0.1" 28431) forwarders)))
                  (is (equal '("10.1.2.3" . 80) (gr8s::host-port-forwarder-target forwarder))))
                (gr8s::update-pod-observed-status store served (gr8s::core-object "phase" "Failed" "podIP" "10.1.2.3"))
                (gr8s::converge-host-port-forwarders forwarders store)

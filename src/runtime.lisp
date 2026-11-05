@@ -5,6 +5,7 @@
 (defparameter +gr8s-resource-version-label+ "io.gr8s.resource-version")
 (defparameter +gr8s-container-label+ "io.gr8s.container")
 (defparameter +gr8s-spec-fingerprint-label+ "io.gr8s.spec-fingerprint")
+(defparameter +gr8s-host-network-label+ "io.gr8s.host-network")
 
 (define-condition runtime-error (error)
   ((message :initarg :message :reader runtime-error-message))
