@@ -289,6 +289,8 @@
     (return-from normalize-core-resource (normalize-batch-resource input namespace name)))
   (when (budget-resource-p resource)
     (return-from normalize-core-resource (normalize-budget-resource input namespace name)))
+  (when (hpa-resource-p resource)
+    (return-from normalize-core-resource (normalize-hpa-resource input namespace name store)))
   (when (policy-resource-p resource)
     (return-from normalize-core-resource (normalize-policy-resource resource input namespace name store)))
   (when (admission-config-resource-p resource)
@@ -460,6 +462,7 @@
   "Copy stored object EXISTING into the form the current request's writer sees."
   (cond ((custom-resource-key-p resource) (crd-api-view (copy-core-object existing)))
         ((equal resource "events") (event-api-view (copy-core-object existing) (or *core-resource-view-version* "v1")))
+        ((and (hpa-resource-p resource) (equal *core-resource-view-version* "autoscaling/v1")) (hpa-v1-view existing))
         (t (copy-core-object existing))))
 
 (defun update-core-resource (store resource namespace name transform &key dry-run)

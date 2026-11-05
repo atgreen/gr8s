@@ -28,6 +28,7 @@
 
 (defun event-api-view (input &optional (version *core-resource-view-version*))
   "Project Event objects, lists and watch envelopes into the requested API version."
+  (when (equal version "autoscaling/v1") (return-from event-api-view (hpa-api-view input)))
   (if (not (and (hash-table-p input) (equal version "events.k8s.io/v1"))) input
       (cond
         ((equal "Event" (gethash "kind" input)) (convert-event-fields input t))
