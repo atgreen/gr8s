@@ -90,6 +90,16 @@
       (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ"
               year month day hour minute second))))
 
+(defun container-start-cancelled-p (info)
+  "Return whether INFO exited only because the agent cancelled its StartContainer call.
+Its process never ran, so this says nothing about the container and restart policy
+doesn't apply: a Pod that never restarts would otherwise go straight to Failed."
+  (and (= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_exited+)
+       (eql 128 (cri-container-info-exit-code info))
+       (equal "StartError" (cri-container-info-reason info))
+       (search "context canceled" (or (cri-container-info-message info) ""))
+       t))
+
 (defun containerd-container-status-object (info)
   "Translate actual CRI state; consumers must not infer completion from an empty list."
   (let* ((running (= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_running+))
@@ -100,6 +110,8 @@
     (cond
       (running
        (setf (gethash "running" state) (if started (core-object "startedAt" started) (core-object))))
+      ((container-start-cancelled-p info)
+       (setf (gethash "waiting" state) (core-object "reason" "ContainerCreating")))
       ((= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_exited+)
        (let ((terminated (core-object "exitCode" (cri-container-info-exit-code info)
                                       "containerID" id)))

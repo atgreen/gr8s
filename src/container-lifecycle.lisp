@@ -420,6 +420,21 @@
                            (list (core-object "name" name "image" (container-spec-image spec) "imageID" ""
                                               "restartCount" 0 "ready" nil "started" nil "state" state)))))))
 
+(defun containerd-discard-cancelled-starts (runtime uid state infos)
+  "Remove attempts whose StartContainer the agent cancelled, returning the other INFOS.
+A first attempt never ran, so it leaves no trace and is made again as attempt zero."
+  (remove-if
+   (lambda (info)
+     (when (container-start-cancelled-p info)
+       (cri-delete-container (containerd-runtime-socket-path runtime) (cri-container-info-id info))
+       (when (zerop (cri-container-info-attempt info))
+         (remhash (cri-container-info-name info) (gethash "containers" state))
+         (let ((log (merge-pathnames (container-attempt-log-path (cri-container-info-name info) 0)
+                                     (containerd-pod-log-directory runtime uid))))
+           (when (probe-file log) (delete-file log))))
+       t))
+   infos))
+
 (defun converge-containerd-containers (runtime pod)
   "Converge each declared container while retaining its unchanged sandbox and siblings."
   (let* ((uid (pod-uid pod)) (socket (containerd-runtime-socket-path runtime))
@@ -454,8 +469,10 @@
       (save-container-lifecycle-state runtime uid state)
       (setf sandbox (containerd-start-sandbox runtime pod)))
     (let* ((config (containerd-sandbox-config runtime pod))
-           (infos (mapcar (lambda (summary) (cri-container-status socket (cri-container-summary-id summary)))
-                          (containerd-containers runtime sandbox)))
+           (infos (containerd-discard-cancelled-starts
+                   runtime uid state
+                   (mapcar (lambda (summary) (cri-container-status socket (cri-container-summary-id summary)))
+                           (containerd-containers runtime sandbox))))
            (current (containerd-stop-unknown-attempts runtime (current-container-infos infos state)))
            (now (funcall *container-lifecycle-clock*))
            (waiting (make-hash-table :test #'equal)) (restarting nil) (created-names nil)

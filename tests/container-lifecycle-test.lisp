@@ -118,6 +118,50 @@
                 ,@body)
            (dolist (pair ,originals) (setf (symbol-function (car pair)) (cdr pair))))))))
 
+;; Run 14: Variable Expansion's Pod went to Failed in 3 seconds, its only container having
+;; "exited" 128 with this message when its StartContainer call was cancelled.
+(defun cancelled-start-info (name now &optional (message "failed to create containerd task: failed to create shim task: context canceled"))
+  (let ((info (lifecycle-info name 0 gr8s.cri.v1::+containerstate-container_exited+ now 128)))
+    (setf (gr8s::cri-container-info-reason info) "StartError"
+          (gr8s::cri-container-info-message info) message
+          (gr8s::cri-container-info-started-at info) 0)
+    info))
+
+(test cancelled-container-start-is-retried-however-the-pod-restarts
+  (with-temporary-store (store directory)
+    (let* ((now 4000000000) (gr8s::*container-lifecycle-clock* (lambda () now))
+           (pod (lifecycle-pod store "Never"))
+           (runtime (gr8s::make-containerd-runtime :log-root directory))
+           (healthy (lifecycle-info "main" 0 gr8s.cri.v1::+containerstate-container_running+ now))
+           (cancelled (cancelled-start-info "side" now))
+           (log (merge-pathnames "side.log" (gr8s::containerd-pod-log-directory runtime (pod-uid pod)))))
+      (ensure-directories-exist log)
+      (with-open-file (stream log :direction :output :if-does-not-exist :create) (declare (ignorable stream)))
+      (with-lifecycle-cri (fixture pod (list healthy cancelled))
+        (let ((observed (runtime-observe runtime (pod-uid pod))))
+          (is (not (equal "Failed" (gr8s::runtime-pod-phase observed))))
+          (is (gr8s::native-container-progress-required-p pod observed))
+          (let* ((after (gr8s::runtime-reconcile-containers runtime pod observed))
+                 (status (find "side" (gethash "containerStatuses" (gr8s::runtime-pod-status after))
+                               :test #'equal :key (lambda (item) (gethash "name" item)))))
+            (is (member '(:delete "side-0") (lifecycle-cri-fixture-calls fixture) :test #'equal))
+            (is (member '(:create "side" 0 "same-sandbox") (lifecycle-cri-fixture-calls fixture) :test #'equal))
+            (is (eql 0 (gethash "restartCount" status)))
+            (is (gethash "running" (gethash "state" status)))))))))
+
+(test container-start-that-really-failed-stays-terminal
+  (with-temporary-store (store directory)
+    (let* ((now 4000000000) (gr8s::*container-lifecycle-clock* (lambda () now))
+           (pod (lifecycle-pod store "Never"))
+           (runtime (gr8s::make-containerd-runtime :log-root directory))
+           (failed (cancelled-start-info "side" now "failed to create containerd task: exec: no such file"))
+           (done (lifecycle-info "main" 0 gr8s.cri.v1::+containerstate-container_exited+ now)))
+      (with-lifecycle-cri (fixture pod (list done failed))
+        (let ((observed (runtime-observe runtime (pod-uid pod))))
+          (is (equal "Failed" (gr8s::runtime-pod-phase observed)))
+          (gr8s::runtime-reconcile-containers runtime pod observed)
+          (is (null (lifecycle-cri-fixture-calls fixture))))))))
+
 (test native-restarts-only-the-failed-sibling-while-pod-is-running
   (with-temporary-store (store directory)
     (let* ((now 4000000000) (gr8s::*container-lifecycle-clock* (lambda () now))
