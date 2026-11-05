@@ -47,19 +47,22 @@
   (let ((slash (position #\/ signer-name :from-end t)))
     (if slash (subseq signer-name 0 slash) signer-name)))
 
-(defun pod-signer-user-annotations (store namespace pod-name pod-uid signer-name)
-  "The pod annotations a signer may read as unverifiedUserAnnotations: those whose
-   key is in the signer's own domain (KEP-4317), copied from the live pod so a
-   node cannot assert annotations the pod does not carry."
-  (let ((pod (ignore-errors (get-pod store namespace pod-name)))
-        (domain (concatenate 'string (signer-domain signer-name) "/"))
-        (result (core-object)))
+(defun pod-certificate-source-user-annotations (store namespace pod-name pod-uid request-name)
+  "The userAnnotations of the podCertificate volume source that produced the
+   request named REQUEST-NAME, copied verbatim into the request's
+   unverifiedUserAnnotations for the signer (KEP-4317). Matched from the live pod
+   by the source's derived request name -- a pod may carry several sources for
+   one signer -- so a node cannot assert annotations the pod's spec does not set."
+  (let ((pod (ignore-errors (get-pod store namespace pod-name))))
     (when (and pod (equal pod-uid (pod-uid pod)))
-      (let ((annotations (gethash "annotations" (gethash "metadata" (pod-to-object pod)) (core-object))))
-        (maphash (lambda (key value)
-                   (when (uiop:string-prefix-p domain key) (setf (gethash key result) value)))
-                 annotations)))
-    result))
+      (loop for volume across (gethash "volumes" (gethash "spec" (pod-to-object pod)) #())
+            for projected = (gethash "projected" volume)
+            when projected
+              do (loop for src across (gethash "sources" projected #())
+                       for pc = (gethash "podCertificate" src)
+                       when (and pc (equal request-name (pod-certificate-request-name pod pc)))
+                         do (return-from pod-certificate-source-user-annotations
+                              (gethash "userAnnotations" pc)))))))
 
 (defun ensure-pod-certificate-request-from-claim (store node-name claim)
   "Idempotently ensure the PodCertificateRequest a node's CLAIM asks for exists
@@ -95,9 +98,8 @@
         :node-name node-name :node-uid (node-metadata-uid store node-name)
         :max-expiration-seconds (when (plusp max) max)
         :unverified-user-annotations
-        (pod-signer-user-annotations store namespace
-                                     (slot-value claim 'gr8s.node.v1::pod-name) pod-uid
-                                     (slot-value claim 'gr8s.node.v1::signer-name)))
+        (pod-certificate-source-user-annotations store namespace
+                                                 (slot-value claim 'gr8s.node.v1::pod-name) pod-uid name))
        namespace))))
 
 ;;; ---------------------------------------------------------------------------

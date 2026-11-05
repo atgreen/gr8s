@@ -128,6 +128,17 @@
                       "/apis/authentication.k8s.io/v1/selfsubjectreviews")
                :test #'equal)))
 
+(defun field-selector-exact-name (selector)
+  "The object name a fieldSelector pins via metadata.name=NAME (or ==), else NIL.
+   Authorizing a name-scoped list/watch against a rule's resourceNames (KEP-4601)
+   is safe because the server enforces the same selector on the results, so the
+   caller sees only that object -- exactly what a resourceNames grant intends."
+  (when (and (stringp selector) (plusp (length selector)))
+    (dolist (raw (uiop:split-string selector :separator '(#\,)))
+      (let* ((term (string-trim " " raw)) (bang (search "!=" term)) (eq (position #\= term)))
+        (when (and eq (not bang) (string= "metadata.name" (subseq term 0 eq)))
+          (return (string-left-trim "=" (subseq term eq))))))))
+
 (defun authorize-in-cluster-request (store request)
   "Authenticate a verified certificate or live bearer token, then enforce current RBAC."
   (let* ((header (hunchentoot:header-in :authorization request))
@@ -145,6 +156,10 @@
                 (authenticated-self-review-request-p path method))
       (multiple-value-bind (verb group resource name namespace)
           (kubernetes-authorization-target path method :watch (true-parameter-p (hunchentoot:parameter "watch")))
+        ;; A name-scoped list/watch (metadata.name field selector) authorizes
+        ;; against a rule's resourceNames, as upstream does since 1.31 (KEP-4601).
+        (when (and (null name) (member verb '("list" "watch") :test #'equal))
+          (setf name (field-selector-exact-name (hunchentoot:parameter "fieldSelector"))))
         (unless (service-account-authorized-p store identity verb group resource name namespace path)
           (core-resource-error 403 "Forbidden" "User ~A is not allowed to ~A ~A"
                                (api-identity-username identity) verb (or resource path)))))

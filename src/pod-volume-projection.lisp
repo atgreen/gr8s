@@ -152,6 +152,28 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
                  "metadata" (core-object "name" name "namespace" namespace)
                  "spec" spec)))
 
+(defun ec-private-key-pkcs8-pem (private-key)
+  "Encode an EC (P-256) PRIVATE-KEY as PKCS#8 with PEM block type \"PRIVATE KEY\"
+   -- the form KEP-4317 credential bundles use. SEC1 (\"EC PRIVATE KEY\") is what
+   the ACME helper emits, but strict loaders (Agent Substrate's credential
+   reader) accept only PKCS#8, so build PrivateKeyInfo around the SEC1 blob."
+  (let* ((key-data (ironclad:destructure-private-key private-key))
+         (d-bytes (getf key-data :x))
+         (public-point (getf key-data :y))
+         ;; Inner SEC1 ECPrivateKey; the curve lives in the PKCS#8 algorithm, so
+         ;; omit the [0] parameters and keep only the optional [1] public key.
+         (sec1 (pure-tls/acme::encode-sequence
+                (pure-tls/acme::encode-integer 1)
+                (pure-tls/acme::encode-octet-string d-bytes)
+                (pure-tls/acme::encode-context-tag 1 (pure-tls/acme::encode-bit-string public-point))))
+         (pkcs8 (pure-tls/acme::encode-sequence
+                 (pure-tls/acme::encode-integer 0)
+                 (pure-tls/acme::encode-sequence
+                  (pure-tls/acme::encode-oid pure-tls/acme::*oid-ec-public-key*)
+                  (pure-tls/acme::encode-oid pure-tls/acme::*oid-secp256r1*))
+                 (pure-tls/acme::encode-octet-string sec1))))
+    (pure-tls/acme::wrap-pem "PRIVATE KEY" pkcs8)))
+
 (defun pod-certificate-credential-bundle (private-key-pem certificate-chain-pem)
   "The credentialBundlePath contents for a signed pod certificate: the PEM
    private key followed by the issued PEM certificate chain (KEP-4317)."
@@ -191,7 +213,7 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
                  (sa (ignore-errors (get-core-resource store "serviceaccounts" (pod-namespace pod) sa-name)))
                  (material
                    (list :pod (pod-uid pod) :name name :namespace (pod-namespace pod)
-                         :private-key-pem (pure-tls/acme::encode-ec-private-key-pem private-key)
+                         :private-key-pem (ec-private-key-pkcs8-pem private-key)
                          :claim (list :name name :namespace (pod-namespace pod)
                                       :signer-name (gethash "signerName" source)
                                       :pkix-public-key (ag-grpc:base64-encode

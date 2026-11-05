@@ -40,7 +40,27 @@
                                                                      "keyPath" "k" "maxExpirationSeconds" 60)))
     ;; Two output paths cannot collide.
     (signals gr8s:kubernetes-error (validate (pod-certificate-source "signerName" "s" "keyType" "ECDSAP256"
-                                                                     "keyPath" "same" "certificateChainPath" "same")))))
+                                                                     "keyPath" "same" "certificateChainPath" "same")))
+    ;; userAnnotations (string map, copied into unverifiedUserAnnotations) and
+    ;; user (file-owner UID) are accepted; a non-UID user is refused.
+    (finishes (validate (pod-certificate-source "signerName" "s" "keyType" "ECDSAP256" "keyPath" "k"
+                                                "userAnnotations" (gr8s::core-object "postgres.podcert.ate.dev/username" "owner")
+                                                "user" 65532)))
+    (signals gr8s:kubernetes-error (validate (pod-certificate-source "signerName" "s" "keyType" "ECDSAP256"
+                                                                     "keyPath" "k" "user" -1)))))
+
+(test pod-certificate-private-key-is-pkcs8-not-sec1
+  ;; KEP-4317 credential bundles carry the key as PKCS#8 (PEM "PRIVATE KEY").
+  ;; SEC1 ("EC PRIVATE KEY") is rejected by strict loaders such as Agent
+  ;; Substrate's objectstore-plugin ("unknown PEM block type EC PRIVATE KEY").
+  (multiple-value-bind (priv pub) (ironclad:generate-key-pair :secp256r1)
+    (declare (ignore pub))
+    (let ((pem (gr8s::ec-private-key-pkcs8-pem priv)))
+      (is (uiop:string-prefix-p "-----BEGIN PRIVATE KEY-----" pem))
+      (is (null (search "EC PRIVATE KEY" pem)))
+      ;; It parses back as a valid PKCS#8 key.
+      (finishes (pure-tls::parse-pkcs8-private-key
+                 (pure-tls::pem-decode (trivial-utf-8:string-to-utf-8-bytes pem) "PRIVATE KEY"))))))
 
 ;;; --- node: claim, gating, projection -----------------------------------------
 
@@ -96,7 +116,7 @@
                     (second (find path files :key #'first :test #'equal)))))
             ;; The credential bundle is the private key PEM then the chain PEM.
             (let ((bundle (file-text "creds.pem")) (key (file-text "key.pem")) (chain (file-text "chain.pem")))
-              (is (uiop:string-prefix-p "-----BEGIN EC PRIVATE KEY-----" key))
+              (is (uiop:string-prefix-p "-----BEGIN PRIVATE KEY-----" key))
               (is (search "BEGIN CERTIFICATE" chain))
               (is (string= bundle (gr8s::pod-certificate-credential-bundle key chain))))))))))
 
