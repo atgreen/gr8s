@@ -148,6 +148,17 @@
     (core-object "apiVersion" "v1" "kind" "Pod" "metadata" metadata
                  "spec" (copy-core-object (gethash "spec" template)))))
 
+(defun workload-controller-name (owner)
+  "Name the upstream controller whose service account would write for OWNER."
+  (let ((kind (gethash "kind" owner)))
+    (cond ((equal kind "DaemonSet") "daemon-set-controller")
+          ((equal kind "StatefulSet") "statefulset-controller")
+          ((equal kind "ReplicationController") "replication-controller")
+          ((equal kind "Deployment") "deployment-controller")
+          ((equal kind "Job") "job-controller")
+          ((equal kind "CronJob") "cronjob-controller")
+          (t "replicaset-controller"))))
+
 (defun create-replica-set-pod (store owner &key node-name labels)
   "Admit a real Pod and commit it only if its owner's UID and generation remain current.
 NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the template's labels."
@@ -157,7 +168,7 @@ NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the templat
       (let ((metadata (workload-metadata object)))
         (unless (gethash "labels" metadata) (setf (gethash "labels" metadata) (core-object)))
         (loop for (key . value) in labels do (setf (gethash key (gethash "labels" metadata)) value))))
-    (let ((pod (admit-in-cluster-pod store (parse-pod object :allow-generate-name t))))
+    (let ((pod (admit-controller-pod store object (workload-controller-name owner))))
       (with-store-lock (store)
         (when (workload-current-unlocked store (workload-owner-resource owner) owner :generation t)
           (create-pod-unlocked store pod))))))
@@ -185,7 +196,8 @@ NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the templat
                                         (string> (pod-name (car a)) (pod-name (car b))))))))
                  (loop for pair in active repeat (- delta)
                        for pod = (car pair)
-                       do (delete-reconciled-pod reconciler (pod-namespace pod) (pod-name pod) :uid (pod-uid pod)))))
+                       do (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod)
+                                                 (workload-controller-name owner) :uid (pod-uid pod)))))
         (error (condition) (setf failure (princ-to-string condition)))))
     (let* ((active (replica-set-observations reconciler owner))
            (ready (count-if (lambda (pair) (pod-status-ready-p (cdr pair))) active))
@@ -263,12 +275,15 @@ NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the templat
              (match-labels (gethash "matchLabels" selector (core-object))))
         (setf (gethash "pod-template-hash" labels) hash (gethash "pod-template-hash" match-labels) hash
               (gethash "matchLabels" selector) match-labels)
-        (let ((input (core-object "apiVersion" "apps/v1" "kind" "ReplicaSet"
-                                  "metadata" (core-object "name" name "labels" (copy-core-object labels)
-                                               "ownerReferences" (vector (workload-owner-reference deployment))
-                                               "annotations" (core-object "deployment.kubernetes.io/revision" (write-to-string revision)))
-                                  "spec" (core-object "replicas" 0 "selector" selector "template" template
-                                                       "minReadySeconds" (gethash "minReadySeconds" spec)))))
+        (let ((input (admit-controller-object
+                      store "replicasets"
+                      (core-object "apiVersion" "apps/v1" "kind" "ReplicaSet"
+                                   "metadata" (core-object "name" name "labels" (copy-core-object labels)
+                                                           "ownerReferences" (vector (workload-owner-reference deployment))
+                                                           "annotations" (core-object "deployment.kubernetes.io/revision" (write-to-string revision)))
+                                   "spec" (core-object "replicas" 0 "selector" selector "template" template
+                                                       "minReadySeconds" (gethash "minReadySeconds" spec)))
+                      (gethash "namespace" dmeta) "deployment-controller")))
           ;; Verify the owner's identity and commit its child in one lock.
           (with-store-lock (store)
             (when (workload-current-unlocked store "deployments" deployment :generation t)
@@ -481,8 +496,10 @@ NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the templat
           (when (and (plusp excess) (zerop (gethash "replicas" (gethash "spec" set)))
                      (not (deployment-old-pods-exist-p reconciler (list set))))
             (let ((metadata (workload-metadata set)))
-              (delete-core-resource store "replicasets" (gethash "namespace" metadata) (gethash "name" metadata)
-                                    :uid (gethash "uid" metadata)))
+              (when (controller-delete-allowed-p store "replicasets" (gethash "namespace" metadata) (gethash "name" metadata)
+                                                 "deployment-controller")
+                (delete-core-resource store "replicasets" (gethash "namespace" metadata) (gethash "name" metadata)
+                                      :uid (gethash "uid" metadata))))
             (decf excess)))))))
 
 (defun reconcile-workloads (reconciler)

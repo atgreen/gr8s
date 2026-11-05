@@ -33,9 +33,12 @@
     (dolist (descriptor types)
       (let ((resource (first descriptor)))
         (dolist (object (list-core-resources store resource))
+          (drop-dangling-owner-references store resource object)
           (when (api-object-orphaned-p store object)
             (let ((metadata (gethash "metadata" object)))
               (handler-case
-                  (delete-core-resource store resource (gethash "namespace" metadata) (gethash "name" metadata) :uid (gethash "uid" metadata))
+                  (when (controller-delete-allowed-p store resource (gethash "namespace" metadata) (gethash "name" metadata)
+                                                     "generic-garbage-collector")
+                    (delete-core-resource store resource (gethash "namespace" metadata) (gethash "name" metadata) :uid (gethash "uid" metadata)))
                 (kubernetes-error (condition)
                   (unless (member (kubernetes-error-status-code condition) '(404 409)) (error condition)))))))))))

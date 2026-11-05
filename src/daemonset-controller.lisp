@@ -147,7 +147,8 @@ Keys are sorted, unset and omitempty zero values vanish, and pointers to empty o
                                                        "ownerReferences" (vector (workload-owner-reference daemonset))))))
       (when (gethash "annotations" metadata)
         (setf (gethash "annotations" (workload-metadata object)) (copy-core-object (gethash "annotations" metadata))))
-      (handler-case (create-core-resource store "controllerrevisions" object namespace)
+      (handler-case (with-controller-admission ("daemon-set-controller")
+                      (admitted-create-core-resource store "controllerrevisions" object namespace))
         (kubernetes-error (condition)
           (unless (= 409 (kubernetes-error-status-code condition)) (error condition))
           (let ((existing (get-core-resource store "controllerrevisions" namespace name)))
@@ -209,7 +210,7 @@ A daemon Pod ignores a node being cordoned, but needs an agent to run on."
 
 (defun delete-daemon-pod (reconciler pod)
   "Start deleting one exact daemon Pod, tolerating one that is already gone."
-  (handler-case (delete-reconciled-pod reconciler (pod-namespace pod) (pod-name pod) :uid (pod-uid pod))
+  (handler-case (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod) "daemon-set-controller" :uid (pod-uid pod))
     (kubernetes-error (condition)
       (unless (member (kubernetes-error-status-code condition) '(404 409)) (error condition)))))
 
@@ -269,8 +270,10 @@ A daemon Pod ignores a node being cordoned, but needs an agent to run on."
     (dolist (revision old)
       (when (and (plusp excess) (not (member (daemonset-revision-label revision) live :test #'equal)))
         (let ((metadata (workload-metadata revision)))
-          (delete-core-resource store "controllerrevisions" (gethash "namespace" metadata)
-                                (gethash "name" metadata) :uid (gethash "uid" metadata)))
+          (when (controller-delete-allowed-p store "controllerrevisions" (gethash "namespace" metadata)
+                                             (gethash "name" metadata) "daemon-set-controller")
+            (delete-core-resource store "controllerrevisions" (gethash "namespace" metadata)
+                                  (gethash "name" metadata) :uid (gethash "uid" metadata))))
         (decf excess)))))
 
 (defun publish-daemonset-status (reconciler daemonset nodes eligible hashes)

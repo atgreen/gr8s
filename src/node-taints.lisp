@@ -93,7 +93,7 @@
                 (push (pod-uid pod) live)
                 (when (>= now (+ noticed seconds))
                   (handler-case
-                      (delete-reconciled-pod reconciler (pod-namespace pod) (pod-name pod) :uid (pod-uid pod))
+                      (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod) "node-lifecycle-controller" :uid (pod-uid pod))
                     (kubernetes-error (condition)
                       (unless (member (kubernetes-error-status-code condition) '(404 409))
                         (error condition)))))))))))

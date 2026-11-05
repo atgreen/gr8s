@@ -12,12 +12,82 @@
 (defun admission-request-options (kind)
   "Describe the current request's write options as the webhook's request.options."
   (let ((options (core-object "apiVersion" "meta.k8s.io/v1" "kind" kind)))
-    (when (hunchentoot:parameter "dryRun")
-      (setf (gethash "dryRun" options) (vector (hunchentoot:parameter "dryRun"))))
-    (dolist (field '("fieldManager" "fieldValidation"))
-      (when (hunchentoot:parameter field)
-        (setf (gethash field options) (hunchentoot:parameter field))))
+    (unless *admission-controller*
+      (when (hunchentoot:parameter "dryRun")
+        (setf (gethash "dryRun" options) (vector (hunchentoot:parameter "dryRun"))))
+      (dolist (field '("fieldManager" "fieldValidation"))
+        (when (hunchentoot:parameter field)
+          (setf (gethash field options) (hunchentoot:parameter field)))))
     options))
+
+(defmacro with-controller-admission ((controller) &body body)
+  "Run BODY's writes through the webhooks as the in-process CONTROLLER, which has no HTTP request."
+  `(let ((*admission-controller* ,controller)) ,@body))
+
+(defun admit-controller-pod (store object controller)
+  "Run a Pod OBJECT that CONTROLLER is creating through the webhooks and in-cluster admission.
+Call without STORE's lock, because webhooks answer over the network. Return the POD to commit."
+  (with-controller-admission (controller)
+    (let* ((metadata (gethash "metadata" object)) (namespace (gethash "namespace" metadata)))
+      (multiple-value-bind (admitted attributes)
+          (admit-pod-input store "CREATE" namespace (gethash "name" metadata) object nil)
+        (admit-pod-result store attributes
+                          (admit-in-cluster-pod store (request-pod-in-namespace admitted namespace :allow-generate-name t)))))))
+
+(defun admit-controller-object (store resource input namespace controller)
+  "Run an object CONTROLLER commits under its own lock through the webhooks, returning what to commit.
+Call without STORE's lock. Writes that need no such lock use ADMITTED-CREATE-CORE-RESOURCE instead."
+  (with-controller-admission (controller)
+    (let* ((name (gethash "name" (gethash "metadata" input)))
+           (attributes (admission-attributes-for store "CREATE" resource namespace name
+                                                 :options (admission-request-options "CreateOptions"))))
+      (if (not (admission-active-p store attributes))
+          input
+          (progn
+            (setf (admission-object attributes) (admission-input-view store resource input namespace attributes))
+            (let ((mutated (admission-mutate store attributes)))
+              (setf (admission-object attributes) (admission-input-view store resource mutated namespace attributes))
+              (admission-validate store attributes)
+              mutated))))))
+
+(defun custom-resource-storage-view (store resource)
+  "Return the definition and storage version of custom RESOURCE, which a controller has no request to name."
+  (when (custom-resource-key-p resource)
+    (let ((definition (with-store-lock (store)
+                        (loop for key being the hash-keys of (pod-store-resources store) using (hash-value object)
+                              when (and (equal "customresourcedefinitions" (first key))
+                                        (equal resource (crd-custom-key object)))
+                                return (copy-core-object object)))))
+      (when definition
+        (values definition
+                (gethash "name" (find-if (lambda (version) (gethash "storage" version))
+                                         (gethash "versions" (gethash "spec" definition)))))))))
+
+(defun controller-delete-allowed-p (store resource namespace name controller)
+  "Offer CONTROLLER's deletion of an object to the webhooks, returning whether it may go ahead.
+A refusal is logged and the controller tries again on a later pass, as an API client would."
+  (handler-case
+      (with-controller-admission (controller)
+        (multiple-value-bind (*crd-view-definition* *crd-request-version*) (custom-resource-storage-view store resource)
+          (let ((attributes (admission-attributes-for store "DELETE" resource namespace name
+                                                      :options (admission-delete-options nil))))
+            (when (admission-active-p store attributes)
+              (admit-delete store attributes
+                            (if (equal resource "pods")
+                                (copy-core-object (pod-to-object (get-pod store namespace name)))
+                                (core-resource-update-view resource (get-core-resource store resource namespace name)))))))
+        t)
+    (kubernetes-error (condition)
+      (unless (= 404 (kubernetes-error-status-code condition))
+        (format *error-output* "gr8s ~A: deletion of ~A ~@[~A/~]~A refused: ~A~%"
+                controller resource namespace name condition))
+      nil)))
+
+(defun delete-controller-pod (reconciler namespace name controller &key uid)
+  "Delete a Pod as CONTROLLER once the webhooks allow it, returning whether it went ahead."
+  (when (controller-delete-allowed-p (reconciler-store reconciler) "pods" namespace name controller)
+    (delete-reconciled-pod reconciler namespace name :uid uid)
+    t))
 
 (defun admission-delete-options (options)
   "Describe DeleteOptions for a webhook, copying what the client sent."
@@ -185,7 +255,7 @@ Returns the attributes as a second value for the validating step."
   (let ((attributes (admission-attributes-for store operation "pods" namespace name
                                               :options (admission-request-options
                                                         (if (equal operation "CREATE") "CreateOptions" "UpdateOptions"))
-                                              :dry-run (core-resource-dry-run-p))))
+                                              :dry-run (and (not *admission-controller*) (core-resource-dry-run-p)))))
     (if (not (admission-active-p store attributes))
         (values raw attributes)
         (let ((view (handler-case
