@@ -17,9 +17,73 @@
                    "names" (core-object "plural" "customresourcedefinitions" "kind" "CustomResourceDefinition" "listKind" "CustomResourceDefinitionList"))))
 
 (defun crd-openapi-definition-name (definition version &optional list)
-  "Return a group-qualified schema identity for one actual custom kind."
+  "Name a custom kind's definition as Kubernetes does: group reversed, then version and kind."
   (let* ((spec (gethash "spec" definition)) (names (gethash "names" spec)))
-    (format nil "io.gr8s.custom.~A.~A.~A" (gethash "group" spec) version (gethash (if list "listKind" "kind") names))))
+    (format nil "~{~A.~}~A.~A" (reverse (uiop:split-string (gethash "group" spec) :separator '(#\.)))
+            version (gethash (if list "listKind" "kind") names))))
+
+(defparameter +openapi-type-meta-descriptions+
+  '(("apiVersion" . "APIVersion defines the versioned schema of this representation of an object. Servers should convert recognized schemas to the latest internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources")
+    ("kind" . "Kind is a string value representing the REST resource this object represents. Servers may infer this from the endpoint the client submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds"))
+  "Descriptions of the type fields Kubernetes adds to every published kind.")
+
+(defparameter +openapi-metadata-description+
+  "Standard object's metadata. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata")
+
+(defun crd-openapi-v2-schema (schema)
+  "Copy SCHEMA without what OpenAPI v2 cannot express, as Kubernetes does when publishing it.
+Nullable, preserved and int-or-string nodes lose their type, since v2 clients would
+otherwise reject the values these allow."
+  (let ((copy (copy-core-object schema)))
+    (dolist (field '("allOf" "anyOf" "oneOf" "not")) (remhash field copy))
+    (when (or (gethash "nullable" copy) (gethash "x-kubernetes-preserve-unknown-fields" copy)
+              (gethash "x-kubernetes-int-or-string" copy))
+      (dolist (field '("type" "items" "properties" "additionalProperties" "nullable")) (remhash field copy)))
+    (when (hash-table-p (gethash "properties" copy))
+      (let ((properties (core-object)))
+        (maphash (lambda (key child) (setf (gethash key properties) (crd-openapi-v2-schema child)))
+                 (gethash "properties" copy))
+        (setf (gethash "properties" copy) properties)))
+    (dolist (field '("items" "additionalProperties"))
+      (when (hash-table-p (gethash field copy))
+        (setf (gethash field copy) (crd-openapi-v2-schema (gethash field copy)))))
+    copy))
+
+(defun crd-openapi-add-object-fields (schema v3)
+  "Declare the type and metadata fields of a Kubernetes object on SCHEMA."
+  (let ((properties (gethash "properties" schema (core-object))))
+    (loop for (field . description) in +openapi-type-meta-descriptions+
+          do (setf (gethash field properties) (core-object "type" "string" "description" description)))
+    (let ((metadata (reference-schema "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta")))
+      (setf (gethash "metadata" properties)
+            (if v3
+                (core-object "allOf" (vector metadata) "description" +openapi-metadata-description+)
+                (progn (setf (gethash "description" metadata) +openapi-metadata-description+) metadata))))
+    (setf (gethash "properties" schema) properties)
+    schema))
+
+(defun crd-openapi-add-embedded-fields (schema v3)
+  "Declare object fields wherever SCHEMA embeds a Kubernetes resource."
+  (when (hash-table-p schema)
+    (when (hash-table-p (gethash "properties" schema))
+      (maphash (lambda (key child) (declare (ignore key)) (crd-openapi-add-embedded-fields child v3))
+               (gethash "properties" schema)))
+    (dolist (field '("items" "additionalProperties"))
+      (crd-openapi-add-embedded-fields (gethash field schema) v3))
+    (when (gethash "x-kubernetes-embedded-resource" schema)
+      (crd-openapi-add-object-fields schema v3)))
+  schema)
+
+(defun crd-openapi-kind-schema (version v3)
+  "Build the published schema of an admitted version.
+An OpenAPI v2 client assumes unlisted fields are invalid, so a schema that preserves
+them at its root is published as a bare object."
+  (let ((schema (crd-schema version)))
+    (if (and (not v3) (gethash "x-kubernetes-preserve-unknown-fields" schema))
+        (core-object "type" "object")
+        (crd-openapi-add-object-fields
+         (crd-openapi-add-embedded-fields (if v3 (copy-core-object schema) (crd-openapi-v2-schema schema)) v3)
+         v3))))
 
 (defun crd-add-openapi-version (document definition version v3)
   "Publish an admitted version's schemas and real collection/item/status paths."
@@ -27,7 +91,7 @@
          (group (gethash "group" spec)) (version-name (gethash "name" version))
          (schema-name (crd-openapi-definition-name definition version-name))
          (list-name (crd-openapi-definition-name definition version-name t))
-         (schema (copy-core-object (crd-schema version)))
+         (schema (crd-openapi-kind-schema version v3))
          (definitions (if v3 (gethash "schemas" (gethash "components" document)) (gethash "definitions" document)))
          (paths (gethash "paths" document)) (namespaced (equal "Namespaced" (gethash "scope" spec)))
          (collection (format nil "/apis/~A/~A/~A~A" group version-name
@@ -35,10 +99,6 @@
          (item (concatenate 'string collection "/{name}")))
     (setf (gethash "x-kubernetes-group-version-kind" schema)
           (vector (core-object "group" group "version" version-name "kind" (gethash "kind" names))))
-    (let ((properties (gethash "properties" schema (core-object))))
-      (dolist (field '("kind" "apiVersion")) (setf (gethash field properties) (core-object "type" "string")))
-      (setf (gethash "metadata" properties) (reference-schema "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta")
-            (gethash "properties" schema) properties))
     (setf (gethash schema-name definitions) schema
           (gethash list-name definitions)
           (core-object "type" "object" "properties"

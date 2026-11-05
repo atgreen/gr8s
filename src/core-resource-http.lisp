@@ -38,10 +38,12 @@
                                       (if (equal expected-kind "Scale") "autoscaling/v1"
                                           (when (member expected-kind '("Event" "DeleteOptions") :test #'equal) *core-resource-view-version*))))
       ((member content-type '("" "application/json") :test #'string=)
-       (require-object (if (member expected-kind '("CustomResourceDefinition" "CertificateSigningRequest") :test #'equal)
-                           (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))
-                           (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)
-                                                :max-string-length (* 2 1024 1024))) "request"))
+       (let ((text (hunchentoot:raw-post-data :force-text t)))
+         (if (member expected-kind '("CustomResourceDefinition" "CertificateSigningRequest") :test #'equal)
+             (require-object (crd-parse-json-content text) "request")
+             (apply-typed-field-validation
+              (require-object (com.inuoe.jzon:parse text :max-string-length (* 2 1024 1024)) "request")
+              text expected-kind))))
       (t (core-resource-error 415 "UnsupportedMediaType" "Supported resource request formats are JSON and Kubernetes protobuf")))))
 
 (defun core-selector-terms (selector)
@@ -243,9 +245,11 @@
 (defun core-resource-patch-response (store resource namespace name dry-run)
   (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
          (patch nil))
+    (when (string= content-type "application/apply-patch+yaml")
+      (return-from core-resource-patch-response (apply-patch-response store resource namespace name dry-run)))
     (unless (member content-type '("application/merge-patch+json" "application/strategic-merge-patch+json"
                                    "application/json-patch+json") :test #'string=)
-      (core-resource-error 415 "UnsupportedMediaType" "Supported patch types are JSON merge, strategic merge, and JSON patch"))
+      (core-resource-error 415 "UnsupportedMediaType" "Supported patch types are JSON merge, strategic merge, JSON patch and apply"))
     (setf patch (if (or (equal resource "customresourcedefinitions") (custom-resource-key-p resource))
                     (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))
                     (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t) :max-string-length (* 2 1024 1024))))
@@ -344,9 +348,6 @@
         (t (core-resource-error 405 "MethodNotAllowed" "Method is not supported for this resource endpoint"))))))
 
 (defun add-core-resource-openapi-definitions (definitions)
-  (let ((metadata (gethash "properties" (gethash "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta" definitions))))
-    (setf (gethash "generateName" metadata) (json-object "type" "string")
-          (gethash "creationTimestamp" metadata) (json-object "type" "string" "format" "date-time")))
   (dolist (kind '("ConfigMap" "Secret"))
     (let* ((secret (string= kind "Secret"))
            (properties

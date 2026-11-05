@@ -19,10 +19,7 @@
 
 (defun crd-report-pruned-fields (fields)
   "Reject strict unknown fields or emit a real warning while retaining pruning."
-  (let ((message (format nil "unknown fields: ~{~A~^, ~}" (reverse fields))))
-    (cond ((equal *crd-field-validation* "Strict") (core-resource-error 400 "BadRequest" "~A" message))
-          ((equal *crd-field-validation* "Warn")
-           (setf (hunchentoot:header-out :warning) (format nil "299 - ~A" (com.inuoe.jzon:stringify (subseq message 0 (min 1000 (length message))))))))))
+  (report-field-problems (mapcar #'unknown-field-problem (reverse fields))))
 
 (defun crd-version-rank (version)
   "Rank recognized Kubernetes versions by stability, numeric major and prerelease."
@@ -185,10 +182,7 @@
   (let ((object (com.inuoe.jzon:parse text :max-string-length (* 2 1024 1024))))
     (when (member *crd-field-validation* '("Strict" "Warn") :test #'equal)
       (let ((duplicates (crd-json-duplicate-fields text)))
-        (when duplicates
-          (let ((message (format nil "duplicate fields: ~{~A~^, ~}" (reverse duplicates))))
-            (if (equal *crd-field-validation* "Strict") (core-resource-error 400 "BadRequest" "~A" message)
-                (setf (hunchentoot:header-out :warning) (format nil "299 - ~A" (com.inuoe.jzon:stringify message))))))))
+        (report-field-problems (mapcar #'duplicate-field-problem (reverse duplicates)))))
     object))
 
 (defun crd-read-json ()

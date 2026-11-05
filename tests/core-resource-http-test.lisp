@@ -135,10 +135,11 @@
       (check-core-status 200 (concatenate 'string item "?dryRun=All") :method :delete)
       (check-core-status 200 item :method :delete :object (gr8s::core-object "dryRun" #( "All")))
       (check-core-status 200 item)
-      (let ((body (check-core-status 415 item :method :patch :content-type "application/apply-patch+yaml"
+      (let ((body (check-core-status 400 item :method :patch :content-type "application/apply-patch+yaml"
                                     :object (core-fixture "ConfigMap" "dry"))))
         (is (string= "Status" (gethash "kind" body)))
-        (is (string= "Failure" (gethash "status" body))))
+        (is (string= "Failure" (gethash "status" body)))
+        (is (search "fieldManager is required" (gethash "message" body))))
       (let ((wrong (core-fixture "ConfigMap" "wrong")))
         (setf (gethash "namespace" (gethash "metadata" wrong)) "other")
         (check-core-status 400 collection :method :post :object wrong)))))
