@@ -281,7 +281,14 @@
                               (gethash "group" (gethash "spec" (gethash "object" event)))))))
             (close stream)))
         ;; That revision is now behind a change nothing recorded, so it must relist.
-        (is (= 410 (nth-value 1 (drakma:http-request collection :parameters `(("watch" . "true") ("resourceVersion" . ,revision) ("timeoutSeconds" . "1")))))))
+        (multiple-value-bind (stream code)
+            (drakma:http-request collection :want-stream t :parameters `(("watch" . "true") ("resourceVersion" . ,revision) ("timeoutSeconds" . "1")))
+          (unwind-protect
+               (let ((event (read-template-watch-event stream)))
+                 (is (= 200 code))
+                 (is (equal "ERROR" (gethash "type" event)))
+                 (is (= 410 (gethash "code" (gethash "object" event)))))
+            (close stream))))
       (dolist (event (let ((*watch-test-server* "http://127.0.0.1:18094"))
                        (apply #'collect-watch-stream "/apis/apiregistration.k8s.io/v1/apiservices" (watch-list-parameters))))
         (is (member (gethash "type" event) '("ADDED" "BOOKMARK") :test #'equal))))))
