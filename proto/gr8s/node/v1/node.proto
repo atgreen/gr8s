@@ -145,6 +145,8 @@ message OperationStream {
   StreamChannel channel = 3;
   bytes data = 4;
   bool eof = 5;
+  // PORT_FORWARD: how much more input the node has written to the Pod.
+  uint64 acknowledged_bytes = 6;
 }
 
 message ServerHello {
@@ -195,6 +197,7 @@ enum OperationKind {
   OPERATION_KIND_RECLAIM_VOLUME = 3;
   OPERATION_KIND_ATTACH = 4;
   OPERATION_KIND_METRICS = 5;
+  OPERATION_KIND_PORT_FORWARD = 6;
 }
 
 message OperationRequest {
@@ -212,6 +215,8 @@ message OperationRequest {
   bool previous = 12;
   // The PersistentVolume whose provisioned directory RECLAIM_VOLUME removes.
   bytes volume_json = 13;
+  // The port in the Pod's network namespace PORT_FORWARD connects to.
+  uint32 port = 14;
 }
 
 message OperationInput {
@@ -222,6 +227,8 @@ message OperationInput {
   uint32 rows = 5;
   uint32 columns = 6;
   bool eof = 7;
+  // PORT_FORWARD: how much more output has reached the client.
+  uint64 acknowledged_bytes = 8;
 }
 
 message OperationCancel {

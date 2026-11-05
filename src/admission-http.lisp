@@ -239,6 +239,10 @@ A client's own stale resourceVersion still fails, in the preview of the next att
                               "tty" (and (exec-options-tty options) t)
                               "container" (or (exec-options-container options) ""))))
 
+(defun admit-pod-port-forward (store namespace name)
+  "Offer a Pod port-forward with its PodPortForwardOptions to the webhooks."
+  (admit-connect store "portforward" namespace name "PodPortForwardOptions" (core-object)))
+
 (defun admit-pod-proxy (store namespace id)
   "Offer a Pod proxy connection with its PodProxyOptions to the webhooks."
   (let* ((raw (hunchentoot:script-name*))

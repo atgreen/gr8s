@@ -251,6 +251,97 @@
    runtime uid container gr8s.node.v1::+operationkind-operation_kind_attach+ nil
    :stdin stdin :stdout stdout :stderr stderr :tty tty))
 
+(defstruct (control-plane-port-forward
+             (:constructor make-control-plane-port-forward (operation)))
+  "One forwarded connection. Unlike a terminal's, its output is consumed as it goes, and each
+direction waits for acknowledgements, so a long download neither piles up here nor on the node."
+  operation
+  (input-sequence 0)
+  ;; Bytes sent to the Pod and not yet acknowledged by the node.
+  (in-flight 0)
+  ;; Bytes returned by the last NEXT call, acknowledged by the one after it.
+  (delivered 0)
+  (lock (bt:make-lock "gr8s control-plane port-forward"))
+  (window (bt:make-condition-variable :name "gr8s port-forward window")))
+
+(defun send-control-plane-port-forward-input (runtime session &key data eof (acknowledged 0))
+  "Send the node a piece of input. A node operation takes one message at a time from here."
+  (let ((operation (control-plane-port-forward-operation session)))
+    (send-node-operation-input
+     (control-plane-runtime-node-server runtime) operation
+     (make-instance
+      'gr8s.node.v1::operation-input
+      :operation-id (operation-request-id (pending-node-operation-request operation))
+      :sequence (bt:with-lock-held ((control-plane-port-forward-lock session))
+                  (incf (control-plane-port-forward-input-sequence session)))
+      :channel gr8s.node.v1::+streamchannel-stream_channel_stdin+
+      :data (or data (make-array 0 :element-type '(unsigned-byte 8)))
+      :eof eof :acknowledged-bytes acknowledged))))
+
+(defmethod runtime-start-port-forward ((runtime control-plane-runtime) uid port)
+  (let ((pod (control-plane-pod-by-uid runtime uid)))
+    (unless (and pod (pod-node-name pod))
+      (error 'runtime-error :message "Pod is not assigned to a node"))
+    (make-control-plane-port-forward
+     (queue-node-operation
+      (control-plane-runtime-node-server runtime)
+      (pod-node-name pod)
+      (make-instance
+       'gr8s.node.v1::operation-request
+       :operation-id (generate-uid)
+       :kind gr8s.node.v1::+operationkind-operation_kind_port_forward+
+       :namespace (pod-namespace pod)
+       :pod (pod-name pod)
+       :pod-uid uid
+       :port port)))))
+
+(defmethod runtime-port-forward-send
+    ((runtime control-plane-runtime) (session control-plane-port-forward) data &key eof)
+  (let ((operation (control-plane-port-forward-operation session)))
+    (bt:with-lock-held ((control-plane-port-forward-lock session))
+      (loop while (and (>= (control-plane-port-forward-in-flight session) +port-forward-window-bytes+)
+                       (not (pending-node-operation-done-p operation)))
+            ;; NEXT notices the operation ending, but it may be busy writing to a slow client.
+            do (bt:condition-wait (control-plane-port-forward-window session)
+                                  (control-plane-port-forward-lock session) :timeout 0.2))
+      (incf (control-plane-port-forward-in-flight session) (length data)))
+    (send-control-plane-port-forward-input runtime session :data data :eof eof)))
+
+(defmethod runtime-port-forward-next ((runtime control-plane-runtime) (session control-plane-port-forward))
+  (let ((operation (control-plane-port-forward-operation session))
+        (delivered (control-plane-port-forward-delivered session)))
+    (when (plusp delivered)
+      (setf (control-plane-port-forward-delivered session) 0)
+      ;; The operation may just have ended, and then nobody needs to know.
+      (ignore-errors (send-control-plane-port-forward-input runtime session :acknowledged delivered)))
+    (loop
+      (multiple-value-bind (message done) (take-next-node-operation-message operation)
+        (when done
+          (return (values nil t (pending-node-operation-error operation))))
+        (let ((acknowledged (slot-value message 'gr8s.node.v1::acknowledged-bytes))
+              (data (slot-value message 'gr8s.node.v1::data)))
+          (when (plusp acknowledged)
+            (bt:with-lock-held ((control-plane-port-forward-lock session))
+              (decf (control-plane-port-forward-in-flight session) acknowledged)
+              (bt:condition-notify (control-plane-port-forward-window session))))
+          (when (plusp (length data))
+            (setf (control-plane-port-forward-delivered session) (length data))
+            (return (values data nil nil))))))))
+
+(defmethod runtime-cancel-port-forward
+    ((runtime control-plane-runtime) (session control-plane-port-forward) reason)
+  (let ((operation (control-plane-port-forward-operation session)))
+    (ignore-errors
+     (cancel-node-operation (control-plane-runtime-node-server runtime) operation reason))
+    ;; Whatever the node says now, nothing here waits any longer.
+    (finish-node-operation operation :error reason)))
+
+(defmethod runtime-release-port-forward
+    ((runtime control-plane-runtime) (session control-plane-port-forward))
+  (release-node-operation
+   (control-plane-runtime-node-server runtime)
+   (control-plane-port-forward-operation session)))
+
 (defmethod runtime-container-metrics ((runtime control-plane-runtime))
   "Ask each node for its containers' usage; a node that cannot answer has no measures this time."
   (let ((metrics (make-hash-table :test #'equal)))
