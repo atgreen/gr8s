@@ -213,7 +213,7 @@
 
 (test pod-protobuf-retains-explicit-pointer-zero-and-unsupported-features
   (let* ((container (core-test-protobuf '((1 "main") (2 "web:v1"))))
-         (spec (core-test-protobuf (list (list 2 container) (list 21 0) (list 11 1))))
+         (spec (core-test-protobuf (list (list 2 container) (list 21 0) (list 11 1) (list 27 1))))
          (input (core-test-protobuf-envelope "Pod" (list (list 1 (core-test-protobuf '((1 "unsupported")))) (list 2 spec))))
          (decoded (gr8s::decode-core-resource-protobuf input "Pod")))
     (is (not (null (nth-value 1 (gethash "automountServiceAccountToken" (gethash "spec" decoded))))))

@@ -30,6 +30,9 @@
                      (kubernetes-error-message condition))))
   (:documentation "Describe an HTTP-facing Kubernetes API failure."))
 
+(defparameter *pod-resize-update* nil
+  "True while the resize subresource writes, the only way to change container resources.")
+
 (defstruct container-spec
   "Represent the supported, runtime-relevant portion of a Pod container."
   name
@@ -45,6 +48,7 @@
   namespace
   containers
   (init-containers #())
+  (ephemeral-containers #())
   (restart-policy "Always")
   uid
   resource-version
@@ -54,8 +58,8 @@
   status-revision)
 
 (defun pod-all-containers (pod)
-  "Return init and application containers for shared credentials, mounts and named operations."
-  (concatenate 'vector (pod-init-containers pod) (pod-containers pod)))
+  "Return every declared container, for shared credentials, mounts and named operations."
+  (concatenate 'vector (pod-init-containers pod) (pod-containers pod) (pod-ephemeral-containers pod)))
 
 (defstruct node-record
   "Represent a registered worker node and its control-plane lease state."
@@ -72,7 +76,13 @@
   ;; Quantity strings the node's agent measured about itself.
   capacity
   ;; Quantity strings clients advertised through the Node status subresource.
-  extended-resources)
+  extended-resources
+  ;; Written through the API and enforced by the scheduler and the eviction pass.
+  (taints #())
+  unschedulable
+  ;; A Node created through the API has no agent: its status is whatever was written.
+  api-only
+  api-status)
 
 (defun invalid-pod (control &rest arguments)
   "Signal an HTTP 422 Kubernetes error formatted by CONTROL and ARGUMENTS."
@@ -202,13 +212,18 @@
             number))))
 
 (defun default-container-termination-message (object)
-  "Apply the Kubernetes termination message defaults, refusing any other requested behavior."
+  "Apply the Kubernetes termination message defaults and validate requested paths and policies."
   (loop for (field default) in '(("terminationMessagePath" "/dev/termination-log")
                                  ("terminationMessagePolicy" "File"))
-        do (let ((value (gethash field object)))
-             (cond ((member value '(nil null "") :test #'equal) (setf (gethash field object) default))
-                   ((not (equal value default))
-                    (invalid-pod "container.~A other than ~S is not implemented" field default))))))
+        do (when (member (gethash field object) '(nil null "") :test #'equal)
+             (setf (gethash field object) default)))
+  (let ((path (gethash "terminationMessagePath" object)))
+    (unless (and (stringp path) (plusp (length path)) (char= #\/ (char path 0))
+                 (<= (length path) 4096) (not (find #\Null path))
+                 (not (member ".." (uiop:split-string path :separator '(#\/)) :test #'equal)))
+      (invalid-pod "container.terminationMessagePath must be an absolute path without traversal")))
+  (unless (member (gethash "terminationMessagePolicy" object) '("File" "FallbackToLogsOnError") :test #'equal)
+    (invalid-pod "container.terminationMessagePolicy must be File or FallbackToLogsOnError")))
 
 (defun parse-container (object)
   "Validate a container JSON OBJECT and return a CONTAINER-SPEC."
@@ -216,7 +231,7 @@
    object '("name" "image" "command" "args" "env" "envFrom" "ports" "resources"
             "imagePullPolicy" "volumeMounts" "securityContext" "workingDir"
             "startupProbe" "readinessProbe" "livenessProbe"
-            "terminationMessagePath" "terminationMessagePolicy")
+            "terminationMessagePath" "terminationMessagePolicy" "stdin" "stdinOnce" "tty" "lifecycle" "resizePolicy")
    "container")
   (default-container-termination-message object)
   (normalize-container-resources object)
@@ -297,7 +312,7 @@
             "securityContext" "serviceAccountName" "automountServiceAccountToken"
             "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig"
             "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
-            "affinity") "spec")
+            "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "hostAliases" "ephemeralContainers") "spec")
     (dolist (field '("hostname" "subdomain"))
       (when (eq (gethash field spec) 'null) (remhash field spec))
       (let ((value (gethash field spec "")))
@@ -308,8 +323,10 @@
       (unless (and (integerp grace) (<= 0 grace #x7fffffffffffffff))
         (invalid-pod "spec.terminationGracePeriodSeconds must be a nonnegative int64"))
       (setf (gethash "terminationGracePeriodSeconds" spec) grace))
+    (validate-pod-host-settings spec)
     (validate-runtime-pod-spec spec)
     (validate-pod-dns-spec spec)
+    (default-host-network-ports spec)
     (let* ((prefix (pod-generate-name-prefix metadata))
            (specified (gethash "name" metadata))
            (name (if (and allow-generate-name (plusp (length prefix))
@@ -332,7 +349,8 @@
       (let* ((parsed-containers (map 'vector #'parse-container containers))
              (init-containers (map 'vector #'parse-init-container
                                    (optional-vector spec "initContainers" "spec")))
-             (all-containers (concatenate 'vector init-containers parsed-containers)))
+             (ephemeral-containers (parse-pod-ephemeral-containers spec))
+             (all-containers (concatenate 'vector init-containers parsed-containers ephemeral-containers)))
         (unless (= (length all-containers)
                    (length (remove-duplicates
                             (map 'list #'container-spec-name all-containers)
@@ -343,6 +361,7 @@
          :namespace namespace
          :containers parsed-containers
          :init-containers init-containers
+         :ephemeral-containers ephemeral-containers
          :restart-policy restart-policy
          :uid (gethash "uid" metadata)
          :resource-version (gethash "resourceVersion" metadata)

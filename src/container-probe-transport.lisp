@@ -106,6 +106,8 @@
       (loop for redirects from 0
             do (multiple-value-bind (body code response-headers)
                    (drakma:http-request uri :method :get :proxy nil :redirect nil :want-stream t :verify nil
+                                            ;; The declared path is already encoded; encoding it again corrupts it.
+                                            :preserve-uri t
                                             :connection-timeout timeout :keep-alive nil :close t :force-binary t
                                             :user-agent agent :accept nil :additional-headers headers)
                  (unwind-protect
