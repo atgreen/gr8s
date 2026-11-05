@@ -103,5 +103,14 @@
                                                            (store-of-member m a sa b sb c sc) "cm2" "k")))
                                             live))
                           :timeout 10)
-                         "the post-failover create replicates to every survivor"))))
+                         "the post-failover create replicates to every survivor")
+                     ;; A delete also replicates to every survivor's store.
+                     (gr8s::delete-core-resource new-store "configmaps" "default" "cm1")
+                     (is (poll-until
+                          (lambda () (every (lambda (m)
+                                              (null (configmap-value
+                                                     (store-of-member m a sa b sb c sc) "cm1" "k")))
+                                            live))
+                          :timeout 10)
+                         "a delete replicates to every survivor's store"))))
             (dolist (m live) (ignore-errors (gr8s::stop-raft-member m)))))))))
