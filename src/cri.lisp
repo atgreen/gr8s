@@ -92,6 +92,21 @@
            (gr8s.cri.v1::url response))
       (ag-grpc:channel-close channel))))
 
+(defun cri-attach-url (socket-path container-id &key stdin stdout stderr tty (timeout 30))
+  "Create a one-time CRI streaming URL attached to CONTAINER-ID's own process."
+  (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
+    (unwind-protect
+         (multiple-value-bind (response status)
+             (gr8s.cri.v1::runtime-service-attach
+              (gr8s.cri.v1::make-runtime-service-stub channel)
+              (make-instance 'gr8s.cri.v1::attach-request
+                             :container-id container-id
+                             :stdin stdin :stdout stdout :stderr stderr :tty tty)
+              :timeout timeout)
+           (ensure-cri-status "Attach" status)
+           (gr8s.cri.v1::url response))
+      (ag-grpc:channel-close channel))))
+
 (defparameter *cri-runtime-request-timeout* 120
   "Pinned kubelet CRI request overhead/cleanup budget, separate from command duration.")
 
@@ -151,7 +166,7 @@
 (defun make-cri-pod-sandbox-config
     (name uid namespace attempt log-directory host-network
      &key resource-version spec-fingerprint dns-servers dns-searches dns-options privileged hostname security
-          sysctls host-pid host-ipc)
+          sysctls (pid-mode gr8s.cri.v1::+namespacemode-container+) host-ipc)
   "Build sandbox identity, ownership labels, hostname and native network/security configuration."
   (let ((metadata
           (make-instance 'gr8s.cri.v1::pod-sandbox-metadata
@@ -196,7 +211,7 @@
         :network (if host-network
                      gr8s.cri.v1::+namespacemode-node+
                      gr8s.cri.v1::+namespacemode-pod+)
-        :pid (if host-pid gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
+        :pid pid-mode
         :ipc (if host-ipc gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+))
        security)))))
 
@@ -204,7 +219,7 @@
     (socket-path &key name uid (namespace "default") (attempt 0)
                    log-directory host-network resource-version spec-fingerprint
                    dns-servers dns-searches dns-options privileged hostname security runtime-handler
-                   sysctls host-pid host-ipc (timeout 120))
+                   sysctls (pid-mode gr8s.cri.v1::+namespacemode-container+) host-ipc (timeout 120))
   "Create and start a CRI pod sandbox under RUNTIME-HANDLER, returning its runtime ID."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
@@ -216,7 +231,7 @@
                    :dns-servers dns-servers
                    :dns-searches dns-searches
                    :dns-options dns-options :privileged privileged :hostname hostname
-                   :security security :sysctls sysctls :host-pid host-pid :host-ipc host-ipc)))
+                   :security security :sysctls sysctls :pid-mode pid-mode :host-ipc host-ipc)))
            (multiple-value-bind (response status)
                (gr8s.cri.v1::runtime-service-run-pod-sandbox
                 stub
@@ -271,8 +286,9 @@
              (ensure-cri-deletion-status "RemovePodSandbox" status)))
       (ag-grpc:channel-close channel))))
 
-(defun cri-pull-image (socket-path image &key timeout)
-  "Pull IMAGE without a default operation deadline; callers may supply TIMEOUT."
+(defun cri-pull-image (socket-path image &key timeout auth)
+  "Pull IMAGE without a default operation deadline; callers may supply TIMEOUT.
+AUTH is a (username . password) credential for the registry."
   ;; Download and extraction can exceed an ordinary CRI request's deadline.
   ;; Match Kubernetes' remote image client: keep the cancellable call context,
   ;; but do not abort an active pull merely because two minutes have elapsed.
@@ -283,7 +299,9 @@
               (gr8s.cri.v1::make-image-service-stub channel)
               (make-instance
                'gr8s.cri.v1::pull-image-request
-               :image (make-instance 'gr8s.cri.v1::image-spec :image image))
+               :image (make-instance 'gr8s.cri.v1::image-spec :image image)
+               :auth (when auth
+                       (make-instance 'gr8s.cri.v1::auth-config :username (car auth) :password (cdr auth))))
               :timeout timeout)
            (ensure-cri-status "PullImage" status)
            (gr8s.cri.v1::image-ref response))
@@ -488,8 +506,8 @@
              (ensure-cri-deletion-status "RemoveContainer" status)))
       (ag-grpc:channel-close channel))))
 
-(defun cri-image-present-p (socket-path image &key (timeout 30))
-  "Query the CRI image service without contacting a registry."
+(defun cri-local-image (socket-path image timeout)
+  "Return IMAGE's CRI record without contacting a registry, or NIL when the node lacks it."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
          (multiple-value-bind (response status)
@@ -499,5 +517,14 @@
                              :image (make-instance 'gr8s.cri.v1::image-spec :image image))
               :timeout timeout)
            (ensure-cri-status "ImageStatus" status)
-           (not (null (gr8s.cri.v1::image response))))
+           (gr8s.cri.v1::image response))
       (ag-grpc:channel-close channel))))
+
+(defun cri-image-present-p (socket-path image &key (timeout 30))
+  "Query the CRI image service without contacting a registry."
+  (not (null (cri-local-image socket-path image timeout))))
+
+(defun cri-image-id (socket-path image &key (timeout 30))
+  "Return the ID of the local image IMAGE currently names, or NIL when the node lacks it."
+  (let ((record (cri-local-image socket-path image timeout)))
+    (when record (gr8s.cri.v1::id record))))

@@ -318,13 +318,22 @@
                             (invalid-pod "projected volume has conflicting path ~S" (gethash "path" item)))
                           (push (gethash "path" item) paths)))))))
 
+(defun validate-image-volume-source (source)
+  "Validate an image volume's required reference and optional pull policy."
+  (drop-null-fields source)
+  (reject-unsupported-fields source '("reference" "pullPolicy") "image")
+  (require-nonempty-string (gethash "reference" source) "image.reference")
+  (when (gethash "pullPolicy" source)
+    (unless (member (gethash "pullPolicy" source) '("Always" "IfNotPresent" "Never") :test #'equal)
+      (invalid-pod "invalid image.pullPolicy"))))
+
 (defun validate-pod-volume (volume)
   "Validate a durable ConfigMap, Secret, downward API, projected, disk or tmpfs volume."
   (drop-null-fields volume)
-  (reject-unsupported-fields volume '("name" "configMap" "secret" "downwardAPI" "projected" "emptyDir" "hostPath" "persistentVolumeClaim" "nfs" "ephemeral" "csi") "volume")
+  (reject-unsupported-fields volume '("name" "configMap" "secret" "downwardAPI" "projected" "emptyDir" "hostPath" "persistentVolumeClaim" "nfs" "ephemeral" "csi" "image") "volume")
   (require-dns-label (gethash "name" volume) "volume.name")
   (let ((sources (remove-if-not (lambda (key) (nth-value 1 (gethash key volume)))
-                                '("configMap" "secret" "downwardAPI" "projected" "emptyDir" "hostPath" "persistentVolumeClaim" "nfs" "ephemeral" "csi"))))
+                                '("configMap" "secret" "downwardAPI" "projected" "emptyDir" "hostPath" "persistentVolumeClaim" "nfs" "ephemeral" "csi" "image"))))
     (unless (= 1 (length sources)) (invalid-pod "volume requires exactly one source"))
     (let* ((kind (first sources)) (source (require-object (gethash kind volume) "volume source")))
       (when (equal kind "hostPath")
@@ -348,6 +357,9 @@
         (return-from validate-pod-volume volume))
       (when (equal kind "ephemeral")
         (validate-ephemeral-source source)
+        (return-from validate-pod-volume volume))
+      (when (equal kind "image")
+        (validate-image-volume-source source)
         (return-from validate-pod-volume volume))
       (when (equal kind "persistentVolumeClaim")
         (reject-unsupported-fields source '("claimName" "readOnly") "persistentVolumeClaim")
@@ -377,6 +389,13 @@
   (multiple-value-bind (value present) (gethash "automountServiceAccountToken" spec)
     (when (and present (not (member value '(t nil))))
       (invalid-pod "automountServiceAccountToken must be boolean")))
+  (when (eq (gethash "imagePullSecrets" spec) 'null) (remhash "imagePullSecrets" spec))
+  (loop for reference across (optional-vector spec "imagePullSecrets" "spec")
+        do (drop-null-fields (require-object reference "imagePullSecrets"))
+           (reject-unsupported-fields reference '("name") "imagePullSecrets")
+           ;; As upstream, an empty name is accepted and then ignored.
+           (unless (equal "" (gethash "name" reference ""))
+             (require-dns-subdomain (gethash "name" reference) "imagePullSecrets.name")))
   (let ((names nil))
     (loop for volume across (optional-vector spec "volumes" "spec")
           do (validate-pod-volume volume)
@@ -423,12 +442,15 @@
                (invalid-pod "matchFields only supports one metadata.name value with In or NotIn")))))
 
 (defun validate-pod-affinity (spec)
-  "Accept node affinity, which the scheduler evaluates; Pod affinity has no implementation and is refused."
+  "Validate node affinity and inter-Pod affinity, all of which the scheduler evaluates."
   (when (eq (gethash "affinity" spec) 'null) (remhash "affinity" spec))
   (let ((affinity (gethash "affinity" spec)))
     (when affinity
       (drop-null-fields (require-object affinity "spec.affinity"))
-      (reject-unsupported-fields affinity '("nodeAffinity") "spec.affinity")
+      (reject-unsupported-fields affinity '("nodeAffinity" "podAffinity" "podAntiAffinity") "spec.affinity")
+      (dolist (kind '("podAffinity" "podAntiAffinity"))
+        (when (gethash kind affinity)
+          (validate-pod-affinity-group (gethash kind affinity) kind)))
       (let ((node-affinity (gethash "nodeAffinity" affinity)))
         (when node-affinity
           (drop-null-fields (require-object node-affinity "nodeAffinity"))

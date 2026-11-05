@@ -193,6 +193,8 @@ enum OperationKind {
   OPERATION_KIND_LOGS = 1;
   OPERATION_KIND_EXEC = 2;
   OPERATION_KIND_RECLAIM_VOLUME = 3;
+  OPERATION_KIND_ATTACH = 4;
+  OPERATION_KIND_METRICS = 5;
 }
 
 message OperationRequest {
@@ -254,4 +256,50 @@ message CniResponse {
   uint32 error_code = 4;
   string error_message = 5;
   string error_details = 6;
+}
+
+// Raft consensus transport between HA control-plane members (podster-c2d.3).
+// A single one-way delivery carrying one serialized Raft message; replies flow
+// as their own Deliver calls, matching the core's fire-and-forget send model.
+service RaftTransport {
+  rpc Deliver(RaftEnvelope) returns (RaftAck);
+  // A new member asks the cluster to admit it (podster-c2d.10). Call it on any
+  // member; a follower answers with accepted=false and the current leader's
+  // address so the joiner can retry there. The leader validates the join token,
+  // proposes the membership change, and returns the member address book so the
+  // joiner can reach every peer.
+  rpc Join(JoinRequest) returns (JoinResponse);
+}
+
+message RaftEnvelope {
+  uint32 protocol_version = 1;
+  bytes payload = 2;
+}
+
+message RaftAck {
+}
+
+message RaftMember {
+  string id = 1;
+  string host = 2;
+  uint32 port = 3;
+  string role = 4;   // "voter" | "witness"
+}
+
+message JoinRequest {
+  string member_id = 1;
+  string host = 2;
+  uint32 port = 3;
+  string role = 4;        // "voter" | "witness"
+  string node_name = 5;   // the name the join token is bound to
+  string join_token = 6;
+  string api_url = 7;     // the joiner's HTTP API base URL, for leader-aware redirects
+}
+
+message JoinResponse {
+  bool accepted = 1;
+  string leader_id = 2;    // when not accepted: where to retry
+  string leader_host = 3;
+  uint32 leader_port = 4;
+  repeated RaftMember members = 5;  // the address book, when accepted
 }

@@ -11,11 +11,15 @@
   :description "A small Kubernetes-compatible control plane in Common Lisp"
   :author "gr8s contributors"
   :license "MIT"
-  :version "0.1.0"
+  ;; The Kubernetes API version gr8s implements. The gr8s release itself is this
+  ;; base plus a "-gr8s.N" suffix carried in a git tag (e.g. v1.36.0-gr8s.0),
+  ;; surfaced through VERSION-STRING as +GR8S-VERSION+ (see src/version.lisp).
+  :version "1.36.0"
   :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cl-cancel"
                "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
                "pure-tls/acme" "drakma"
-               "sb-posix" "slynk" "trivial-utf-8" "usocket" "whistler/loader")
+               "sb-posix" "slynk" "trivial-utf-8" "usocket" "version-string"
+               "whistler/loader")
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
                (:static-file "schema/crd-v1.json")
@@ -33,6 +37,7 @@
                (:module "src"
                 :serial t
                 :components ((:file "package")
+                             (:file "version")
                              (:file "grpc-close-compat")
                              (:file "cri-v1-generated")
                              (:file "csi-v1-generated")
@@ -50,6 +55,11 @@
                              (:file "container-resources")
                              (:file "container-probe-spec")
                              (:file "store")
+                             (:file "raft")
+                             (:file "raft-log")
+                             (:file "raft-transport")
+                             (:file "raft-cluster")
+                             (:file "raft-store")
                              (:file "pod-status-store")
                              (:file "pod-finalizers")
                              (:file "pod-deletion")
@@ -59,6 +69,8 @@
                              (:file "node-tls")
                              (:file "csr-crypto")
                              (:file "core-resources")
+                             (:file "raft-plane")
+                             (:file "raft-control-plane")
                              (:file "yaml")
                              (:file "podtemplate-history")
                              (:file "bootstrap-resources")
@@ -84,9 +96,11 @@
                              (:file "pod-admission-policy")
                              (:file "resource-quota")
                              (:file "pod-resource-fit")
+                             (:file "pod-affinity")
                              (:file "node-taints")
                              (:file "pod-node-admission")
                              (:file "endpointslice-api")
+                             (:file "work-queue")
                              (:file "storage-provisioner")
                              (:file "networking-api")
                              (:file "storage-controller")
@@ -132,6 +146,7 @@
                              (:file "container-probe-manager")
                              (:file "container-hooks")
                              (:file "pod-resize")
+                             (:file "image-pull-credentials")
                              (:file "container-images")
                              (:file "reconciler")
                              (:file "service-dns")
@@ -145,6 +160,7 @@
                              (:file "nfs-volumes")
                              (:file "csi-node")
                              (:file "telemetry")
+                             (:file "spdy-client")
                              (:file "agent-runtime")
                              (:file "pod-pool")
                              (:file "pod-http-proxy")
@@ -213,6 +229,25 @@
                              (:file "dns-port-pair-test")
                              (:file "model-test")
                              (:file "store-test")
+                             (:file "raft-test")
+                             (:file "raft-transport-test")
+                             (:file "raft-cluster-test")
+                             (:file "raft-failover-test")
+                             (:file "raft-join-test")
+                             (:file "witness-command-test")
+                             (:file "ha-leader-gate-test")
+                             (:file "ha-store-test")
+                             (:file "ha-control-plane-test")
+                             (:file "ha-controller-write-test")
+                             (:file "ha-pod-failover-test")
+                             (:file "ha-node-cidr-test")
+                             (:file "ha-local-plane-test")
+                             (:file "ha-redirect-http-test")
+                             (:file "agent-failover-test")
+                             (:file "ha-smoke-test")
+                             (:file "raft-store-test")
+                             (:file "raft-plane-test")
+                             (:file "raft-membership-test")
                              (:file "core-resources-test")
                              (:file "crd-schema-test")
                              (:file "yaml-test")
@@ -258,6 +293,7 @@
                              (:file "gateway-controller-test")
                              (:file "cert-manager-test")
                              (:file "pod-volumes-test")
+                             (:file "image-pull-credentials-test")
                              (:file "pod-volume-projection-test")
                              (:file "debug-server-test")
                              (:file "pod-subpaths-test")
@@ -277,6 +313,7 @@
                              (:file "storage-http-test")
                              (:file "typed-apis-test")
                              (:file "storage-provisioner-test")
+                             (:file "work-queue-test")
                              (:file "csi-test")
                              (:file "policy-api-test")
                              (:file "service-account-test")

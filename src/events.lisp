@@ -133,7 +133,9 @@
 
 (defun expire-core-events-unlocked (store)
   "Delete expired Events atomically, preserving actual DELETED watch events."
-  (let ((now (funcall *event-clock*)) (index nil))
+  (let ((now (funcall *event-clock*)) (index nil)
+        ;; Event expiry is local-plane: publish locally, never replicate (8ia.3).
+        (*local-plane-write* t))
     (maphash (lambda (key object)
                (when (and (equal "events" (first key))
                           (let ((expiry (gethash (gethash "uid" (gethash "metadata" object)) (pod-store-event-expirations store))))
@@ -163,8 +165,8 @@
   "Advertise the actual versioned Event CRUD, list and watch operations."
   (json-response
    (core-object "apiVersion" "v1" "kind" "APIResourceList" "groupVersion" "events.k8s.io/v1"
-                "resources" (vector (core-object "name" "events" "singularName" "event" "namespaced" t "kind" "Event"
-                                                 "verbs" #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch"))))))
+                "resources" (vector (resource-discovery-entry "events" "event" t "Event"
+                                                              #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch"))))))
 
 (defun add-event-openapi-paths (paths modern-p)
   "Describe both Event API versions with their actual schemas and operations."

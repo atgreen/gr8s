@@ -90,9 +90,8 @@
     (unless (find +job-tracking-finalizer+ (gethash "finalizers" metadata #()) :test #'equal)
       (setf (gethash "finalizers" metadata)
             (concatenate 'vector (gethash "finalizers" metadata #()) (vector +job-tracking-finalizer+))))
-    (let ((pod (admit-in-cluster-pod store
-                 (parse-pod (core-object "apiVersion" "v1" "kind" "Pod" "metadata" metadata "spec" spec)
-                            :allow-generate-name t))))
+    (let ((pod (admit-controller-pod
+                store (core-object "apiVersion" "v1" "kind" "Pod" "metadata" metadata "spec" spec) "job-controller")))
       (with-store-lock (store)
         (when (workload-current-unlocked store "jobs" job :generation t)
           (create-pod-unlocked store pod))))))
@@ -177,7 +176,9 @@
                (failures (job-uncounted-uids status "failed"))
                (releasable (remove-if-not (lambda (uid) (member uid tracked :test #'equal))
                                           (job-releasable-uids state)))
-               (completed (parse-job-indexes (gethash "completedIndexes" status "")))
+               ;; A scaled-down Indexed Job forgets indexes it no longer has.
+               (completed (job-indexes-below (parse-job-indexes (gethash "completedIndexes" status ""))
+                                             (or (gethash "completions" (gethash "spec" job)) most-positive-fixnum)))
                (failed-indexes (parse-job-indexes (gethash "failedIndexes" status "")))
                (new-successes nil) (new-failures nil))
           (dolist (pair (list (cons "succeeded" successes) (cons "failed" failures)))
@@ -283,8 +284,7 @@ any other, and a Job already failing, counts it at once."
   (let ((store (reconciler-store reconciler)))
     (dolist (pod pods)
       (handler-case
-          (progn
-            (delete-reconciled-pod reconciler (pod-namespace pod) (pod-name pod) :uid (pod-uid pod))
+          (when (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod) "job-controller" :uid (pod-uid pod))
             (when release
               (let ((current (gethash (pod-key (pod-namespace pod) (pod-name pod)) (pod-store-pods store))))
                 (when current (remove-accounted-job-finalizer store job current :deleting t)))))
@@ -295,7 +295,8 @@ any other, and a Job already failing, counts it at once."
   "Return the outcome this Job has reached, as a type, reason and message."
   (let* ((deadline (gethash "activeDeadlineSeconds" spec))
          (succeeded (gethash "succeeded" status 0))
-         (attempts (+ (gethash "failed" status 0) (length (job-uncounted-uids status "failed")) restarts))
+         (failures (+ (gethash "failed" status 0) (length (job-uncounted-uids status "failed"))))
+         (limit (gethash "backoffLimit" spec 6))
          (completed (parse-job-indexes (gethash "completedIndexes" status "")))
          (failed-indexes (parse-job-indexes (gethash "failedIndexes" status "")))
          (allowed-failures (gethash "maxFailedIndexes" spec))
@@ -304,7 +305,8 @@ any other, and a Job already failing, counts it at once."
       (finishing
        (values (if (equal "FailureTarget" (gethash "type" finishing)) "Failed" "Complete")
                (gethash "reason" finishing) (gethash "message" finishing)))
-      ((> attempts (gethash "backoffLimit" spec 6))
+      ;; Failed Pods may reach the limit, while restarts in place count against it as soon as they meet it.
+      ((or (> failures limit) (if (zerop limit) (plusp restarts) (>= restarts limit)))
        (values "Failed" "BackoffLimitExceeded" "Job has reached the specified backoff limit"))
       ((and deadline start-time (>= (funcall *job-clock*) (+ start-time deadline)))
        (values "Failed" "DeadlineExceeded" "Job was active longer than specified deadline"))
@@ -493,8 +495,10 @@ any other, and a Job already failing, counts it at once."
          (finished (and ttl condition (ignore-errors (pod-deletion-time (gethash "lastTransitionTime" condition))))))
     (when (and finished (>= (funcall *job-clock*) (+ finished ttl)))
       (let ((metadata (workload-metadata job)))
-        (delete-workload-resource store "jobs" (gethash "namespace" metadata) (gethash "name" metadata)
-                                  :uid (gethash "uid" metadata) :policy "Foreground")))))
+        (when (controller-delete-allowed-p store "jobs" (gethash "namespace" metadata) (gethash "name" metadata)
+                                           "ttl-after-finished-controller")
+          (delete-workload-resource store "jobs" (gethash "namespace" metadata) (gethash "name" metadata)
+                                    :uid (gethash "uid" metadata) :policy "Foreground"))))))
 
 (defun forget-deleted-job-states (store)
   "Drop retry and index records of Jobs that no longer exist, so they cannot accumulate."

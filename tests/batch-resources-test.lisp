@@ -113,3 +113,61 @@
     (let ((object (normalize-test-job input)))
       (is (equal "work" (gethash "job" (gethash "labels" (gethash "metadata" (gethash "template" (gethash "spec" object))))))))))
 
+
+(defun fidelity-job (name &rest spec-fields)
+  "Build a one-container Job with SPEC-FIELDS set."
+  (let ((spec (gr8s::core-object
+               "template" (gr8s::core-object
+                           "spec" (gr8s::core-object "restartPolicy" "Never"
+                                                     "containers" (vector (gr8s::core-object "name" "main" "image" "busybox:1.36.1")))))))
+    (loop for (key value) on spec-fields by #'cddr do (setf (gethash key spec) value))
+    (gr8s::core-object "apiVersion" "batch/v1" "kind" "Job" "metadata" (gr8s::core-object "name" name) "spec" spec)))
+
+(test indexed-jobs-scale-completions-only-in-tandem-with-parallelism
+  (with-temporary-store (store path)
+    (values path)
+    (flet ((scale (name completions parallelism)
+             (gr8s::update-core-resource store "jobs" "alpha" name
+               (lambda (object)
+                 (setf (gethash "completions" (gethash "spec" object)) completions)
+                 (when parallelism (setf (gethash "parallelism" (gethash "spec" object)) parallelism))
+                 object))))
+      (gr8s::create-core-resource store "jobs" (fidelity-job "indexed" "completionMode" "Indexed" "completions" 4 "parallelism" 4) "alpha")
+      (gr8s::create-core-resource store "jobs" (fidelity-job "plain" "completions" 4 "parallelism" 4) "alpha")
+      (is (= 2 (gethash "completions" (gethash "spec" (scale "indexed" 2 2)))))
+      (signals kubernetes-error (scale "indexed" 3 nil))
+      (signals kubernetes-error (scale "plain" 2 2)))))
+
+(test suspended-jobs-accept-the-template-changes-kubernetes-allows
+  (with-temporary-store (store path)
+    (values path)
+    (flet ((edit (name function)
+             (gr8s::update-core-resource store "jobs" "alpha" name
+               (lambda (object)
+                 (funcall function (gethash "template" (gethash "spec" object)))
+                 object)))
+           (resources (template)
+             (setf (gethash "resources" (aref (gethash "containers" (gethash "spec" template)) 0))
+                   (gr8s::core-object "requests" (gr8s::core-object "cpu" "100m"))))
+           (selector (template)
+             (setf (gethash "nodeSelector" (gethash "spec" template)) (gr8s::core-object "zone" "a")))
+           (image (template)
+             (setf (gethash "image" (aref (gethash "containers" (gethash "spec" template)) 0)) "busybox:changed")))
+      (gr8s::create-core-resource store "jobs" (fidelity-job "held" "suspend" t) "alpha")
+      (is-true (edit "held" #'resources))
+      (is-true (edit "held" #'selector))
+      (signals kubernetes-error (edit "held" #'image))
+      (gr8s::create-core-resource store "jobs" (fidelity-job "running") "alpha")
+      (signals kubernetes-error (edit "running" #'resources))
+      (signals kubernetes-error (edit "running" #'selector)))))
+
+(test job-backoff-limit-counts-restarts-in-place-as-soon-as-they-meet-it
+  (let ((spec (gr8s::core-object "backoffLimit" 2 "completions" 1 "parallelism" 1)))
+    (is (null (gr8s::job-terminal-decision spec (gr8s::core-object) 1 nil 1)))
+    (is (equal "Failed" (gr8s::job-terminal-decision spec (gr8s::core-object) 2 nil 1)))
+    ;; Failed Pods, by contrast, may reach the limit.
+    (is (null (gr8s::job-terminal-decision spec (gr8s::core-object "failed" 2) 0 nil 1)))
+    (is (equal "Failed" (gr8s::job-terminal-decision spec (gr8s::core-object "failed" 3) 0 nil 1))))
+  (let ((spec (gr8s::core-object "backoffLimit" 0 "completions" 1 "parallelism" 1)))
+    (is (null (gr8s::job-terminal-decision spec (gr8s::core-object) 0 nil 1)))
+    (is (equal "Failed" (gr8s::job-terminal-decision spec (gr8s::core-object) 1 nil 1)))))

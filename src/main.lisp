@@ -60,9 +60,11 @@
                        :local-storage-path +default-local-storage-path+)))
     (loop while arguments
           for option = (first arguments)
-          do (if (member option '("--disable-agent" "--containerd-no-sync") :test #'string=)
+          do (if (member option '("--disable-agent" "--raft-init" "--containerd-no-sync") :test #'string=)
                  (progn
-                   (setf (getf options (if (string= option "--disable-agent") :disable-agent :containerd-no-sync)) t)
+                   (cond ((string= option "--disable-agent") (setf (getf options :disable-agent) t))
+                         ((string= option "--raft-init") (setf (getf options :raft-init) t))
+                         ((string= option "--containerd-no-sync") (setf (getf options :containerd-no-sync) t)))
                    (setf arguments (rest arguments)))
                  (let ((value (option-value arguments option)))
                    (cond
@@ -113,6 +115,20 @@
                       (setf (getf options :containerd-log-root) value))
                      ((string= option "--kubeconfig")
                       (setf (getf options :kubeconfig) value))
+                     ;; HA (podster-c2d.7.1): opt in to a Raft-replicated control
+                     ;; plane. Absent these, serve runs single-node as before.
+                     ((string= option "--raft-id")
+                      (setf (getf options :raft-id) value))
+                     ((string= option "--raft-listen")
+                      (setf (getf options :raft-listen) value))
+                     ((string= option "--raft-port")
+                      (setf (getf options :raft-port) (parse-port value)))
+                     ((string= option "--raft-join")
+                      (setf (getf options :raft-join) value))
+                     ((string= option "--raft-node-name")
+                      (setf (getf options :raft-node-name) value))
+                     ((string= option "--raft-token")
+                      (setf (getf options :raft-token) value))
                      ((string= option "--local-storage-path")
                       (unless (storage-absolute-path-p value)
                         (error "local storage path must be absolute without traversal"))
@@ -199,6 +215,62 @@
     (unless (getf options :node-name) (error "join-token requires --node-name"))
     options))
 
+(defun parse-witness-options (arguments)
+  "Options for 'gr8s witness': a headless Raft voting member (a quorum
+   tie-breaker) that joins an existing cluster and holds no application state."
+  (let ((options (list :command :witness
+                       :listen "127.0.0.1" :port 0
+                       :state-directory (namestring (default-state-directory)))))
+    (loop while arguments
+          for option = (first arguments)
+          for value = (option-value arguments option)
+          do (cond
+               ((string= option "--join") (setf (getf options :join) value))
+               ((string= option "--node-name")
+                (setf (getf options :node-name) (ensure-valid-node-name value)))
+               ((string= option "--member-id") (setf (getf options :member-id) value))
+               ((string= option "--token") (setf (getf options :token) value))
+               ((string= option "--ca-pin") (setf (getf options :ca-pin) value))
+               ((string= option "--listen") (setf (getf options :listen) value))
+               ((string= option "--port") (setf (getf options :port) (parse-port value)))
+               ((string= option "--state-directory") (setf (getf options :state-directory) value))
+               (t (error "unknown witness option: ~A" option)))
+             (setf arguments (cddr arguments)))
+    (unless (getf options :join) (error "witness requires --join HOST:PORT"))
+    (unless (getf options :member-id)
+      (setf (getf options :member-id)
+            (or (getf options :node-name)
+                (error "witness requires --node-name or --member-id"))))
+    options))
+
+(defun run-witness (options &key (stop-predicate (lambda () *shutdown-requested*)))
+  "Start a headless witness member, join the cluster at --join, and run until
+   shutdown. The witness persists its Raft WAL under the state directory, votes
+   and counts toward quorum, but never leads and serves no state machine."
+  (multiple-value-bind (host port) (parse-agent-server (getf options :join))
+    (let* ((state (uiop:ensure-directory-pathname (getf options :state-directory)))
+           (storage (open-file-raft-storage (merge-pathnames "raft/witness.log" state)))
+           (member (start-raft-member (getf options :member-id)
+                                      :host (getf options :listen)
+                                      :port (getf options :port)
+                                      :apply-fn (lambda (command) (declare (ignore command)) nil)
+                                      :storage storage)))
+      (unwind-protect
+           (progn
+             (raft-member-start member)
+             (unless (raft-cluster-join member host port
+                                        :role :witness
+                                        :node-name (getf options :node-name)
+                                        :token (getf options :token))
+               (error "witness ~A could not join the cluster at ~A:~D"
+                      (getf options :member-id) host port))
+             (format t "gr8s witness ~A joined the cluster via ~A:~D; holding quorum.~%"
+                     (getf options :member-id) host port)
+             (finish-output)
+             (loop until (funcall stop-predicate) do (sleep 0.2)))
+        (ignore-errors (stop-raft-member member)))
+      0)))
+
 (defun print-node-join-token (options &optional (output *standard-output*))
   (let* ((state (uiop:ensure-directory-pathname (getf options :state-directory)))
          (root (merge-pathnames "pki/" state)))
@@ -231,8 +303,6 @@
                 (setf (getf options :server) value))
                (t (error "unknown kubeconfig option: ~A" option)))
              (setf arguments (cddr arguments)))
-    (unless (getf options :output)
-      (error "kubeconfig requires --output"))
     options))
 
 (defun parse-cli-options (arguments)
@@ -240,12 +310,16 @@
     ((or (null arguments)
          (member (first arguments) '("help" "--help" "-h") :test #'string=))
      (list :command :help))
+    ((member (first arguments) '("version" "--version" "-v") :test #'string=)
+     (list :command :version))
     ((string= "serve" (first arguments))
      (parse-serve-options (rest arguments)))
     ((string= "agent" (first arguments))
      (parse-agent-options (rest arguments)))
     ((string= "join-token" (first arguments))
      (parse-join-token-options (rest arguments)))
+    ((string= "witness" (first arguments))
+     (parse-witness-options (rest arguments)))
     ((string= "kubeconfig" (first arguments))
      (parse-kubeconfig-options (rest arguments)))
     ((string= "runtime-assets" (first arguments))
@@ -264,16 +338,25 @@
                 (length (runtime-asset-octets asset))))
       (format t "runtime assets: external~%")))
 
-(defun write-kubeconfig (path server-url)
+(defun print-kubeconfig (stream server-url)
+  (format stream
+          "apiVersion: v1~%kind: Config~%clusters:~%  - name: gr8s~%    cluster:~%      server: ~A~%contexts:~%  - name: gr8s~%    context:~%      cluster: gr8s~%      namespace: default~%      user: gr8s~%current-context: gr8s~%users:~%  - name: gr8s~%    user: {}~%"
+          server-url))
+
+(defun write-kubeconfig (path server-url &key private)
+  "Write a kubeconfig to PATH, readable only by its owner when PRIVATE."
   (ensure-directories-exist path)
   (with-open-file (stream path
                           :direction :output
                           :if-exists :supersede
                           :if-does-not-exist :create)
-    (format stream
-            "apiVersion: v1~%kind: Config~%clusters:~%  - name: gr8s~%    cluster:~%      server: ~A~%contexts:~%  - name: gr8s~%    context:~%      cluster: gr8s~%      namespace: default~%      user: gr8s~%current-context: gr8s~%users:~%  - name: gr8s~%    user: {}~%"
-            server-url))
+    (print-kubeconfig stream server-url))
+  (when private (sb-posix:chmod path #o600))
   path)
+
+(defun default-kubeconfig-path (options)
+  "Return where serve writes its kubeconfig when none was named."
+  (merge-pathnames "kubeconfig" (uiop:ensure-directory-pathname (getf options :state-directory))))
 
 (defun runtime-from-options (options)
   (cond
@@ -325,6 +408,15 @@
                    (uiop:ensure-directory-pathname
                     (getf options :state-directory))))
 
+(defun parse-agent-servers (server)
+  "Parse --server into a list of (host port). Accepts a comma-separated list of
+   HOST:PORT so an agent can fail over across HA control-plane members."
+  (loop for spec in (uiop:split-string server :separator '(#\,))
+        for trimmed = (string-trim '(#\Space) spec)
+        unless (zerop (length trimmed))
+          collect (multiple-value-bind (host port) (parse-agent-server trimmed)
+                    (list host port))))
+
 (defun agent (options &key control
                             (stop-predicate (lambda () *shutdown-requested*)))
   (multiple-value-bind (host port) (parse-agent-server (getf options :server))
@@ -351,6 +443,7 @@
                 host port node-name identity
                 (lambda (snapshot)
                   (reconcile-node-snapshot node-runtime snapshot))
+                :endpoints (parse-agent-servers (getf options :server))
                 :snapshot-observer (lambda (snapshot) (receive-node-snapshot-intent node-runtime snapshot))
                 :operation-handler
                 (lambda (variant payload emit)
@@ -448,6 +541,11 @@ handler and never gets here. A busy host makes this race likely."
   reconciler
   observer
   before-reconcile
+  ;; HA (podster-c2d.7): a nullary predicate that is true when this control
+  ;; plane may act as the cluster leader. When set and false, the pass is
+  ;; skipped so controllers only drive reconciliation on the Raft leader; NIL
+  ;; (the default) always runs, keeping the single-node path unchanged.
+  leader-gate
   thread
   (stop-requested nil)
   (interval 1.0)
@@ -462,7 +560,10 @@ handler and never gets here. A busy host makes this race likely."
 (defun reconciliation-worker-loop (worker)
   (loop until (reconciliation-worker-stopping-p worker)
         do (handler-case
-               (progn
+               ;; Only drive controllers when we hold leadership; a follower
+               ;; reconciles nothing and simply waits to be promoted.
+               (when (let ((gate (reconciliation-worker-leader-gate worker)))
+                       (or (null gate) (funcall gate)))
                  (when (reconciliation-worker-before-reconcile worker)
                    (funcall (reconciliation-worker-before-reconcile worker)))
                  (reconcile-all (reconciliation-worker-reconciler worker)
@@ -477,10 +578,11 @@ handler and never gets here. A busy host makes this race likely."
                 (reconciliation-worker-lock worker)
                 :timeout (reconciliation-worker-interval worker))))))
 
-(defun start-reconciliation-worker (reconciler &key (interval 1.0) observer before-reconcile)
+(defun start-reconciliation-worker (reconciler &key (interval 1.0) observer before-reconcile
+                                                     leader-gate)
   (let ((worker (make-reconciliation-worker
                  :reconciler reconciler :interval interval :observer observer
-                 :before-reconcile before-reconcile)))
+                 :before-reconcile before-reconcile :leader-gate leader-gate)))
     (setf (reconciliation-worker-thread worker)
           (bt:make-thread
            (lambda () (reconciliation-worker-loop worker))
@@ -521,11 +623,13 @@ handler and never gets here. A busy host makes this race likely."
          (service-network-created nil)
          (worker nil)
          (node-server nil)
+         (ha nil)
          (local-agent nil))
     (setf *shutdown-requested* nil)
     (install-shutdown-handlers)
     (unwind-protect
          (progn
+           (setf ha (maybe-start-ha-control-plane store pki options))
            (setf node-server
                  (start-node-grpc-server
                   store :host (getf options :node-listen "127.0.0.1")
@@ -562,8 +666,10 @@ handler and never gets here. A busy host makes this race likely."
                           (start-server
                            :address address :port port
                            :store store :runtime runtime
-                           :reconciler reconciler))
+                           :reconciler reconciler
+                           :leader-status-fn (when ha (lambda () (ha-control-plane-leader-status ha)))))
                     (setf worker (start-reconciliation-worker reconciler
+                                  :leader-gate (when ha (lambda () (ha-control-plane-leader-p ha)))
                                   :before-reconcile (lambda ()
                                       (reconcile-crd-deletions store)
                                       (collect-orphaned-custom-resources store)
@@ -586,10 +692,11 @@ handler and never gets here. A busy host makes this race likely."
                                       ;; in-cluster API address present.
                                       (when service-network-created
                                         (ensure-in-cluster-network pki)))))
-                    (when (getf options :kubeconfig)
-                      (write-kubeconfig
-                       (getf options :kubeconfig)
-                       (format nil "http://~A:~D" address port)))
+                    (let ((kubeconfig (or (getf options :kubeconfig) (default-kubeconfig-path options))))
+                      ;; A file the user named keeps its usual mode, as they may read it as another user.
+                      (write-kubeconfig kubeconfig (format nil "http://~A:~D" address port)
+                                        :private (null (getf options :kubeconfig)))
+                      (format t "gr8s kubeconfig: ~A~%" (namestring kubeconfig)))
                     (format t "gr8s listening on http://~A:~D~%" address port)
                     (finish-output)
                     (loop until *shutdown-requested* do (sleep 0.1)))
@@ -601,24 +708,71 @@ handler and never gets here. A busy host makes this race likely."
                (when (or api-server service-network-created) (remove-in-cluster-network pki))
                (setf (pod-store-in-cluster-config store) nil))))
       (when local-agent (stop-local-node-agent local-agent))
+      (when ha (stop-ha-control-plane ha))
       (when node-server (stop-node-grpc-server node-server))))
   0)
 
+(defun maybe-start-ha-control-plane (store pki options)
+  "Start a Raft-replicated control plane when --raft-init or --raft-join was
+   given, else NIL (single-node)."
+  (when (or (getf options :raft-init) (getf options :raft-join))
+    (let ((id (or (getf options :raft-id) (getf options :node-name)))
+          (join (getf options :raft-join)))
+      (multiple-value-bind (join-host join-port)
+          (if join (parse-agent-server join) (values nil nil))
+        (format t "gr8s HA: Raft member ~A (~:[join ~A:~D~;founding cluster~])~%"
+                id (getf options :raft-init) join-host join-port)
+        (start-ha-control-plane
+         store
+         :id id
+         :host (or (getf options :raft-listen) "127.0.0.1")
+         :port (or (getf options :raft-port) 0)
+         :init (getf options :raft-init)
+         :join-host join-host :join-port join-port
+         :node-name (getf options :raft-node-name)
+         :token (getf options :raft-token)
+         :api-url (format nil "http://~A:~D" (getf options :listen) (getf options :port))
+         :pki pki)))))
+
 (defun print-help ()
   (format t
-          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--containerd-no-sync] [--kubeconfig FILE] [--local-storage-path DIR]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%"))
+          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--containerd-no-sync] [--kubeconfig FILE] [--local-storage-path DIR]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s witness --join HOST:PORT --node-name NAME [--token TOKEN] [--listen IPV4] [--port PORT] [--state-directory DIR]~%  gr8s kubeconfig [--output FILE] [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%  gr8s version~%"))
+
+(defun print-gr8s-banner (role)
+  "Print a startup banner (Spring-Boot style) naming the role gr8s is starting."
+  (fresh-line)
+  (terpri)
+  (dolist (line '("               ___"
+                  "    __ _ _ __ ( _ )  ___"
+                  "   / _` | '__|/ _ \\ / __|"
+                  "  | (_| | |  | (_) |\\__ \\"
+                  "   \\__, |_|   \\___/ |___/"
+                  "   |___/"))
+    (write-line line))
+  (terpri)
+  (format t "   gr8s ~A · a Kubernetes-compatible control plane in Common Lisp~%" +gr8s-version+)
+  (multiple-value-bind (major minor) (kubernetes-api-version-components)
+    (format t "   Kubernetes API v~A.~A · ~A · no Envoy, no kube-proxy, no etcd~%~%" major minor role))
+  (finish-output))
 
 (defun main-with-environment (arguments environment cni-entry)
   (if (funcall environment "CNI_COMMAND")
       (funcall cni-entry)
       (handler-case
           (let ((options (parse-cli-options arguments)))
-            (when (member (getf options :command) '(:serve :agent))
+            (when (member (getf options :command) '(:serve :agent :witness))
+              (print-gr8s-banner (case (getf options :command)
+                                   (:serve "control plane")
+                                   (:agent "node agent")
+                                   (:witness "witness arbiter")))
               (install-stale-timeout-guard))
             (case (getf options :command)
               (:help (print-help) 0)
+              (:version (format t "gr8s ~A~%" +gr8s-version+) 0)
               (:kubeconfig
-               (write-kubeconfig (getf options :output) (getf options :server))
+               (if (getf options :output)
+                   (write-kubeconfig (getf options :output) (getf options :server))
+                   (print-kubeconfig *standard-output* (getf options :server)))
                0)
               (:join-token (print-node-join-token options))
               (:runtime-assets
@@ -633,7 +787,11 @@ handler and never gets here. A busy host makes this race likely."
               (:agent
                (setf *shutdown-requested* nil)
                (install-shutdown-handlers)
-               (agent options))))
+               (agent options))
+              (:witness
+               (setf *shutdown-requested* nil)
+               (install-shutdown-handlers)
+               (run-witness options))))
         (error (error)
           (format *error-output* "gr8s: ~A~%" error)
           2))))

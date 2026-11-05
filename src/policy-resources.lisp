@@ -189,7 +189,9 @@
     (when (gethash "scopeSelector" spec) (validate-quota-scope-selector (gethash "scopeSelector" spec)))
     (let ((scopes (quota-spec-scopes spec)))
       (dolist (scope scopes)
-        (unless (member scope '("Terminating" "NotTerminating" "BestEffort" "NotBestEffort" "PriorityClass") :test #'equal)
+        (unless (member scope '("Terminating" "NotTerminating" "BestEffort" "NotBestEffort" "PriorityClass"
+                                "CrossNamespacePodAffinity")
+                        :test #'equal)
           (core-resource-error 422 "Invalid" "ResourceQuota scope ~S is not implemented" scope))
         (when (gethash "hard" spec)
           (maphash (lambda (name value)

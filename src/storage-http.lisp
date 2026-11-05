@@ -22,12 +22,12 @@
                                                                             "verbs" #("get" "patch" "update")))))))
 
 (defun storage-status-discovery ()
-  "Advertise implemented PV/PVC status subresources."
+  "Advertise implemented PV/PVC status subresources; VolumeAttachment's belongs to storage.k8s.io."
   (map 'vector (lambda (resource)
                  (core-object "name" (concatenate 'string resource "/status") "singularName" ""
                               "namespaced" (core-resource-namespaced-p resource) "kind" (core-resource-kind resource)
                               "verbs" #("get" "patch" "update")))
-       '("persistentvolumes" "persistentvolumeclaims" "volumeattachments")))
+       '("persistentvolumes" "persistentvolumeclaims")))
 
 (defun storage-status-route (path)
   "Resolve only named PV/PVC status subresources."

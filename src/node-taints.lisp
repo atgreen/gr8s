@@ -93,7 +93,7 @@
                 (push (pod-uid pod) live)
                 (when (>= now (+ noticed seconds))
                   (handler-case
-                      (delete-reconciled-pod reconciler (pod-namespace pod) (pod-name pod) :uid (pod-uid pod))
+                      (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod) "node-lifecycle-controller" :uid (pod-uid pod))
                     (kubernetes-error (condition)
                       (unless (member (kubernetes-error-status-code condition) '(404 409))
                         (error condition)))))))))))
@@ -130,6 +130,7 @@
             (setf (node-record-resource-version node) (write-to-string (next-pod-revision-unlocked store)))
             (persist-node store node)
             (setf (gethash name (pod-store-nodes store)) node)
+            (note-node-desired-change store)   ; desired API write (8ia.4)
             (json-response (node-api-object node) 201))))))
 
 (defun delete-node-response (store name)

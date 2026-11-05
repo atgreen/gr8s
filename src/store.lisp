@@ -50,12 +50,79 @@
   (nominated-nodes (make-hash-table :test #'equal))
   ;; Pod UID to the (message . time) of its latest FailedScheduling Event.
   (scheduling-notes (make-hash-table :test #'equal))
-  (lock (bt:make-lock "gr8s store")))
+  (lock (bt:make-lock "gr8s store"))
+  ;; HA (podster-c2d.7.2). When CONSENSUS-COMMIT-FN is set, a durable
+  ;; (consensus-plane) write is not published locally under the store lock;
+  ;; instead the committed state blob is handed to this function, which
+  ;; replicates it through Raft and installs it on every replica (including this
+  ;; one) via INSTALL-CORE-STATE-BLOB. CONSENSUS-WRITE-LOCK serializes writers so
+  ;; the store lock is never held across the Raft round-trip (no deadlock with
+  ;; the apply path). NIL (the default) keeps the single-node path unchanged.
+  consensus-commit-fn
+  (consensus-write-lock (bt:make-lock "gr8s consensus write")))
 
 (defmacro with-store-lock ((store) &body body)
-  "Evaluate BODY while holding STORE's lock."
-  `(bt:with-lock-held ((pod-store-lock ,store))
-     ,@body))
+  "Evaluate BODY while holding STORE's lock. In HA consensus mode (STORE has a
+   consensus-commit-fn) a durable write made in BODY is not published under the
+   lock; COMMIT-CORE-RESOURCES stashes the committed state, and once the store
+   lock is released the state is replicated through Raft and installed on every
+   replica. The store lock is therefore never held across the Raft round-trip, so
+   there is no deadlock with the apply path, and writers serialize on the
+   consensus-write lock. This is sound because WITH-STORE-LOCK is non-reentrant,
+   so it is never nested: every acquisition is the outermost one. Without HA this
+   is a plain lock hold, identical to the single-node path."
+  (let ((s (gensym "STORE")))
+    `(let ((,s ,store))
+       (if (pod-store-consensus-commit-fn ,s)
+           (bt:with-lock-held ((pod-store-consensus-write-lock ,s))
+             (let ((*pending-consensus-commit* nil)
+                   (*pending-pod-commit* nil)
+                   (*pending-node-commit* nil)
+                   (*core-write-active* t))
+               (multiple-value-prog1
+                   (bt:with-lock-held ((pod-store-lock ,s)) ,@body)
+                 ;; Replicate whatever the body committed, once the store lock is
+                 ;; released: core API resources, Pod desired state, node desired state.
+                 (when *pending-consensus-commit*
+                   (funcall (pod-store-consensus-commit-fn ,s) :core-state *pending-consensus-commit*))
+                 (when *pending-pod-commit*
+                   (funcall (pod-store-consensus-commit-fn ,s) :pod-state *pending-pod-commit*))
+                 (when *pending-node-commit*
+                   (funcall (pod-store-consensus-commit-fn ,s) :node-state *pending-node-commit*)))))
+           (bt:with-lock-held ((pod-store-lock ,s)) ,@body)))))
+
+(defvar *pending-consensus-commit* nil
+  "Bound by WITH-CORE-WRITE; COMMIT-CORE-RESOURCES stashes the committed state
+   blob here (instead of publishing) when STORE is in HA consensus mode, so the
+   write can be replicated after the store lock is released.")
+
+(defvar *core-write-active* nil
+  "True only within a WITH-CORE-WRITE body, so COMMIT-CORE-RESOURCES knows the
+   caller will flush the replicated write after releasing the store lock. A
+   durable write made outside WITH-CORE-WRITE (e.g. a not-yet-converted
+   controller path) publishes locally as before.")
+
+(defvar *local-plane-write* nil
+  "True while writing only local-plane resources (events). COMMIT-CORE-RESOURCES
+   then publishes locally and never replicates, so high-churn events stay off the
+   Raft log (podster-8ia.3). Each member keeps its own; agents/controllers on the
+   new leader regenerate them after failover.")
+
+(defvar *pending-pod-commit* nil
+  "Bound by WITH-STORE-LOCK; set to the serialized Pod desired-state index when a
+   Pod desired-state write happens on an HA store, so the change replicates to
+   the other members after the store lock is released (podster-8ia.2).")
+
+(defvar *pending-node-commit* nil
+  "Bound by WITH-STORE-LOCK; set to the serialized node index when a node
+   DESIRED-state write (CIDR assignment, taints, labels) happens on an HA store.
+   Node heartbeat/lease writes deliberately do NOT set this -- they are observed
+   state, re-reported by agents after they reconnect (podster-8ia.4).")
+
+(defmacro with-core-write ((store) &body body)
+  "Historical alias: WITH-STORE-LOCK is now itself HA-aware, so a durable write
+   needs no special wrapper. Kept so existing call sites read intently."
+  `(with-store-lock (,store) ,@body))
 
 (defun pod-key (namespace name)
   "Return the stable in-memory key for NAMESPACE and Pod NAME."
@@ -198,7 +265,102 @@
   "Install POD in STORE's namespace/name index and return it."
   (setf (gethash (pod-key (pod-namespace pod) (pod-name pod))
                  (pod-store-pods store))
-        pod))
+        pod)
+  ;; A desired-state Pod write lands here (after persist); flag it for HA
+  ;; replication. A no-op off the consensus path. Done after the index update so
+  ;; the replicated snapshot includes this Pod (podster-8ia.2).
+  (note-pod-desired-change store)
+  pod)
+
+;;; ---------------------------------------------------------------------------
+;;; HA Pod desired-state replication (podster-8ia.2).
+;;;
+;;; Pods live outside the core-resource index: each is persisted in its own file,
+;;; and the persisted object is the DESIRED state (its observed status is kept
+;;; separately and merged on read). To replicate, the leader applies a Pod write
+;;; locally as always and then ships the whole Pod desired-state index; followers
+;;; reconcile their Pod files and index to match. Observed status is never
+;;; replicated -- agents re-report it after they reconnect to the new leader.
+
+(defun pod-desired-state-json (store)
+  "Serialize every Pod's authoritative (desired-state) object."
+  (com.inuoe.jzon:stringify
+   (let ((table (make-hash-table :test #'equal)))
+     (setf (gethash "pods" table)
+           (coerce (loop for pod being the hash-values of (pod-store-pods store)
+                         collect (pod-to-object pod))
+                   'vector))
+     table)))
+
+(defun note-pod-desired-change (store)
+  "On an HA store, stash the Pod desired-state index so WITH-STORE-LOCK replicates
+   it after the lock is released. A no-op off the consensus path (e.g. the node
+   agent's own store, or a write outside WITH-STORE-LOCK)."
+  (when (and *core-write-active* (pod-store-consensus-commit-fn store))
+    (setf *pending-pod-commit* (pod-desired-state-json store))))
+
+(defun install-pod-state-blob (store json)
+  "Install a replicated Pod desired-state blob on this replica: make the Pod files
+   and index match it exactly. Uses the RAW store lock (see INSTALL-CORE-STATE-BLOB)."
+  (bt:with-lock-held ((pod-store-lock store))
+    (let ((state (com.inuoe.jzon:parse json))
+          (seen (make-hash-table :test #'equal)))
+      (loop for object across (gethash "pods" state)
+            for pod = (parse-pod object)
+            for key = (pod-key (pod-namespace pod) (pod-name pod))
+            do (setf (gethash key seen) t)
+               (persist-pod store pod)
+               (index-pod store pod))
+      ;; Drop Pods the leader no longer has.
+      (loop for key being the hash-keys of (pod-store-pods store)
+            for pod = (gethash key (pod-store-pods store))
+            unless (gethash key seen)
+              do (ignore-errors (delete-file (pod-path store pod)))
+                 (remhash key (pod-store-pods store))))))
+
+;;; ---------------------------------------------------------------------------
+;;; HA node desired-state replication (podster-8ia.4).
+;;;
+;;; Node records mix desired state (the control-plane-assigned podCIDR, taints,
+;;; labels) with observed state (ready/lastHeartbeat/leaseDeadline, re-reported by
+;;; the agent). Only DESIRED writes call NOTE-NODE-DESIRED-CHANGE; heartbeat
+;;; writes do not, so a node's lease churn never hits the Raft log. The critical
+;;; field is podCIDR: a control-plane allocation that is not re-derivable, so a
+;;; new leader must keep it or it could hand the node a different CIDR than the
+;;; one its agent is already running.
+
+(defun node-desired-state-json (store)
+  "Serialize every node record for replication."
+  (com.inuoe.jzon:stringify
+   (let ((table (make-hash-table :test #'equal)))
+     (setf (gethash "nodes" table)
+           (coerce (loop for node being the hash-values of (pod-store-nodes store)
+                         collect (node-record-to-object node))
+                   'vector))
+     table)))
+
+(defun note-node-desired-change (store)
+  "Stash the node index so WITH-STORE-LOCK replicates it after the lock is
+   released. Call only from node DESIRED-state writes, never heartbeat writes."
+  (when (and *core-write-active* (pod-store-consensus-commit-fn store))
+    (setf *pending-node-commit* (node-desired-state-json store))))
+
+(defun install-node-state-blob (store json)
+  "Install a replicated node desired-state blob on this replica: make the node
+   files and index match it. Uses the RAW store lock (see INSTALL-CORE-STATE-BLOB)."
+  (bt:with-lock-held ((pod-store-lock store))
+    (let ((state (com.inuoe.jzon:parse json))
+          (seen (make-hash-table :test #'equal)))
+      (loop for object across (gethash "nodes" state)
+            for node = (parse-node-record object)
+            do (setf (gethash (node-record-name node) seen) t)
+               (persist-node store node)
+               (setf (gethash (node-record-name node) (pod-store-nodes store)) node))
+      (loop for name being the hash-keys of (pod-store-nodes store)
+            for node = (gethash name (pod-store-nodes store))
+            unless (gethash name seen)
+              do (ignore-errors (delete-file (node-path store node)))
+                 (remhash name (pod-store-nodes store))))))
 
 (defun open-store (path)
   "Open or create a durable store at PATH and rebuild its in-memory indexes."
@@ -363,6 +525,7 @@
         (when (probe-file status-path) (delete-file status-path)))
       (delete-file (pod-path store pod))
       (remhash (pod-key namespace name) (pod-store-pods store))
+      (note-pod-desired-change store)
       (publish-pod-removal-unlocked store pod)
       (remhash (pod-uid pod) (pod-store-pod-finalization-states store))
       (remhash (pod-uid pod) (pod-store-pod-observed-phases store))

@@ -320,7 +320,7 @@
      :privileged (pod-requests-privileged-container-p pod)
      :hostname (pod-runtime-hostname pod)
      :security (containerd-pod-sandbox-security pod)
-     :sysctls (pod-sysctls pod) :host-pid (pod-spec-flag-p pod "hostPID") :host-ipc (pod-spec-flag-p pod "hostIPC")
+     :sysctls (pod-sysctls pod) :pid-mode (pod-pid-namespace-mode pod) :host-ipc (pod-spec-flag-p pod "hostIPC")
      :dns-servers servers :dns-searches searches :dns-options options)))
 
 (defun containerd-start-sandbox (runtime pod)
@@ -338,7 +338,7 @@
             :hostname (pod-runtime-hostname pod)
             :security (containerd-pod-sandbox-security pod)
             :runtime-handler (pod-runtime-handler pod)
-            :sysctls (pod-sysctls pod) :host-pid (pod-spec-flag-p pod "hostPID") :host-ipc (pod-spec-flag-p pod "hostIPC")
+            :sysctls (pod-sysctls pod) :pid-mode (pod-pid-namespace-mode pod) :host-ipc (pod-spec-flag-p pod "hostIPC")
             :dns-servers servers :dns-searches searches :dns-options options)))))
 
 (defun containerd-prune-old-attempts (runtime infos &optional created-names)
@@ -522,7 +522,9 @@
                                   config-errors))))))))
       (containerd-prune-old-attempts runtime infos created-names)
       (when (and (pod-sidecar-names pod)
-                 (pod-applications-finished-p pod (container-lifecycle-statuses current state)))
+                 (let ((statuses (container-lifecycle-statuses current state)))
+                   (or (pod-applications-finished-p pod statuses)
+                       (pod-init-failed-for-good-p pod statuses))))
         (start-finished-pod-sidecar-shutdown runtime pod sandbox))
       (let* ((observed (runtime-observe runtime uid))
              (statuses (container-lifecycle-all-statuses observed)))

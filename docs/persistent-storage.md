@@ -11,6 +11,7 @@
 | `emptyDir` | A Pod volume, on disk or `medium: Memory` | One Pod | Removed with the Pod |
 | Generic ephemeral | A Pod `ephemeral` volume using any dynamic class | One Pod | Removed with the Pod |
 | CSI | A driver you install, as a PV or an inline Pod volume | Set by the driver | Set by the driver |
+| OCI image | A Pod `image` volume | One Pod, read-only | Unmounted with the Pod |
 
 No helper Pod, image or NFS client package is needed for the built-in kinds.
 
@@ -101,9 +102,34 @@ Each Pod gets its own mount, removed when the Pod ends.
 
 A provisioned volume is released when its claim is deleted and no running Pod uses
 it. With `Delete`, the control plane asks an agent to remove the directory, then
-deletes the PV. It retries every 30 seconds until that works, for example while
-the volume's node is down. Removal never follows symbolic links or crosses into
-another filesystem, and only touches a `pvc-*` directory matching the PV's name.
+deletes the PV. A failure is retried with a delay that doubles from 1 second to 5
+minutes, for example while the volume's node is down. Removal never follows symbolic
+links or crosses into another filesystem, and only touches a `pvc-*` directory
+matching the PV's name.
+
+Deletions run in lanes: one for local disks, with 4 at a time on each node, and one
+for each NFS server, with 2 at a time. A call to a dead NFS server can block
+indefinitely and can't be cancelled, so lanes keep it from holding up local volumes
+or other servers. The control plane never waits on an agent, and keeps at most 8
+requests outstanding per node and lane. A request stays outstanding until the agent
+answers or its session ends, and the agent runs each volume's deletion only once.
+After a failed NFS deletion, the next attempt goes to another Ready node if there is
+one, which helps when a single node can't reach the share. It can't help with a call
+that hangs rather than fails, because that request stays outstanding.
+
+To see what reclaim is doing, use `kubectl describe pv` or these metrics on `/metrics`:
+
+| Report | Meaning |
+|---|---|
+| `VolumeFailedDelete` Warning event | An attempt failed, and says when the next one is |
+| `VolumeReclaimStalled` Warning event | A request has gone 5 minutes unanswered. It's reported once per request and not retried, because the agent may still be working. |
+| `gr8s_volume_reclaim_failures_total` | Failed attempts since this control plane started |
+| `gr8s_volume_reclaim_waiting` | Released volumes with no request outstanding |
+| `gr8s_volume_reclaim_outstanding{node,lane}` | Requests awaiting an answer |
+| `gr8s_volume_reclaim_oldest_outstanding_seconds` | Age of the oldest of those requests |
+
+The PV stays `Released` during retries, unlike upstream's built-in deleters, which
+move it to `Failed`.
 
 `Retain` keeps the data and the old claim UID, so a new claim with the same name
 can't take it over. An administrator must clear the PV's `claimRef` to reuse it.
@@ -129,6 +155,29 @@ A generic ephemeral volume is a PV-backed scratch space. gr8s creates a claim ca
 `<pod>-<volume>`, owned by the Pod, and it's deleted with the Pod, which also
 reclaims its volume under a `Delete` class. An existing claim with that name is
 never adopted: the Pod fails to start with an error instead.
+
+## OCI image volumes
+
+A Pod can mount the contents of a container image read-only, which suits models,
+datasets and config that ship separately from the application:
+
+```yaml
+volumes:
+- name: model
+  image:
+    reference: registry.example.test/models/small:v2
+    pullPolicy: IfNotPresent
+```
+
+- **Pull policy:** as for a container image, this defaults to `Always` for an
+  untagged or `:latest` image and `IfNotPresent` otherwise.
+- **Pulling:** the image is pulled only if a container mounts the volume. Until it
+  arrives the container waits, and a failed pull is reported as `ErrImagePull` and
+  retried, without using up a restart.
+- **`subPath` and `subPathExpr`:** these select a directory inside the image. The
+  container fails to start if it isn't there.
+- **Private registries:** the Pod's `imagePullSecrets` apply to these pulls, as they
+  do for its containers.
 
 ## CSI
 
@@ -193,8 +242,9 @@ The first passed on a VM on 2026-11-04: real local PV/PVC and direct hostPath wr
 read-only enforcement, restart preservation without restarting the consumer, claim
 protection, Retain UID ownership, explicit reclamation and clean native exit.
 
-**The dynamic, NFS and CSI paths have unit tests only so far.** They run through
-injected mount calls and a fake driver, and haven't yet been run against a real
-kernel NFS mount, a real CSI driver or real sidecars. The second script above covers
-the NFS and local-path half. Its `--nfs-*` options are optional, and it needs a
-share the node can write to.
+**The dynamic, NFS, CSI and image volume paths have unit tests only so far.** They
+run through injected mount and image calls and a fake driver, and haven't yet been
+run against a real kernel NFS mount, a real CSI driver, real sidecars or containerd's
+image mounts. The second script above covers the NFS and local-path half. Its
+`--nfs-*` options are optional, and it needs a share the node can write to. For image
+volumes, run the upstream `ImageVolume` spec with `scripts/test-podtemplates-sonobuoy.py`.

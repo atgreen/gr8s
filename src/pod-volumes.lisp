@@ -28,10 +28,14 @@
                collect (reference "secrets" (gethash "secret" source) "name"))))))
 
 (defun pod-resource-reference-declarations (pod)
-  "Collect namespace-local resource declarations from volumes and environment sources."
+  "Collect namespace-local resource declarations from volumes, environment sources and pull secrets."
   (let* ((spec (gethash "spec" (pod-to-object pod))) (references nil))
     (loop for volume across (gethash "volumes" spec #())
           do (setf references (append (pod-volume-resource-references volume) references)))
+    ;; A missing pull secret is optional because the kubelet pulls without it.
+    (loop for reference across (gethash "imagePullSecrets" spec #())
+          when (plusp (length (gethash "name" reference "")))
+            do (push (list "secrets" (gethash "name" reference) t) references))
     (loop for container across (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec))
           do (loop for variable across (gethash "env" container #())
                    for from = (gethash "valueFrom" variable)
@@ -52,9 +56,12 @@
   (let ((result nil))
     (dolist (reference (pod-resource-reference-declarations pod))
       (destructuring-bind (resource name optional) reference
+        (declare (ignore optional))
         (handler-case (push (get-core-resource store resource (pod-namespace pod) name) result)
+          ;; Every snapshot carries every Pod on the node, so signalling here would
+          ;; stop them all. The agent reports a required object's absence on this Pod.
           (kubernetes-error (condition)
-            (unless (and optional (= 404 (kubernetes-error-status-code condition))) (error condition))))))
+            (unless (= 404 (kubernetes-error-status-code condition)) (error condition))))))
     (let ((token-object (handler-case (pod-projected-token-object store pod)
                           ;; A missing account delays only this Pod, as its unready volume reports.
                           (kubernetes-error () nil))))
@@ -292,25 +299,44 @@ SHARE names a provisioned volume's export, whose own directory is created on fir
           ((equal mode "HostToContainer") gr8s.cri.v1::+mountpropagation-propagation_host_to_container+)
           (t gr8s.cri.v1::+mountpropagation-propagation_private+))))
 
+(defun container-image-volume-mount (runtime pod container mount source environment)
+  "Return the CRI mount of image volume SOURCE, once its image may be used under its pull policy.
+The runtime mounts the image itself, and it fails the container if a subPath isn't in the image."
+  (let ((reference (gethash "reference" source)))
+    (ensure-container-image runtime reference
+                            (gethash "pullPolicy" source (default-image-pull-policy reference))
+                            (lambda ()
+                              (pod-image-pull-credentials runtime pod (container-spec-name container) reference)))
+    (make-instance 'gr8s.cri.v1::mount
+                   :container-path (gethash "mountPath" mount)
+                   :image (make-instance
+                           'gr8s.cri.v1::image-spec
+                           :image (or (cri-image-id (containerd-runtime-socket-path runtime) reference) reference))
+                   :image-sub-path (container-mount-subpath mount environment)
+                   :propagation (container-mount-propagation mount)
+                   :readonly t)))
+
 (defun containerd-pod-mounts (runtime pod container &optional environment)
-  "Build CRI bind mounts from validated, materialized Pod volume declarations."
+  "Build CRI mounts from validated Pod volume declarations, materializing those the node provides."
   (let ((volumes (gethash "volumes" (gethash "spec" (pod-to-object pod)) #()))
         (object (pod-runtime-container-object pod container)))
     (loop for mount across (gethash "volumeMounts" object #()) for index from 0
           for volume = (find (gethash "name" mount) volumes :test #'equal
                              :key (lambda (volume) (gethash "name" volume)))
-          collect (multiple-value-bind (path forced-readonly) (materialize-pod-volume runtime pod volume)
-                    (let ((relative (container-mount-subpath mount environment)))
-                      (when (plusp (length relative))
-                        (setf path (stage-container-volume-subpath runtime pod container mount index path relative))))
-                    (make-instance 'gr8s.cri.v1::mount
-                                   :container-path (gethash "mountPath" mount) :host-path (namestring path)
-                                   :propagation (container-mount-propagation mount)
-                                   :readonly (or forced-readonly (not (null (gethash "configMap" volume)))
-                                                 (not (null (gethash "secret" volume)))
-                                                 (not (null (gethash "downwardAPI" volume)))
-                                                 (not (null (gethash "projected" volume)))
-                                                 (eq t (gethash "readOnly" mount))))))))
+          collect (if (gethash "image" volume)
+                      (container-image-volume-mount runtime pod container mount (gethash "image" volume) environment)
+                      (multiple-value-bind (path forced-readonly) (materialize-pod-volume runtime pod volume)
+                        (let ((relative (container-mount-subpath mount environment)))
+                          (when (plusp (length relative))
+                            (setf path (stage-container-volume-subpath runtime pod container mount index path relative))))
+                        (make-instance 'gr8s.cri.v1::mount
+                                       :container-path (gethash "mountPath" mount) :host-path (namestring path)
+                                       :propagation (container-mount-propagation mount)
+                                       :readonly (or forced-readonly (not (null (gethash "configMap" volume)))
+                                                     (not (null (gethash "secret" volume)))
+                                                     (not (null (gethash "downwardAPI" volume)))
+                                                     (not (null (gethash "projected" volume)))
+                                                     (eq t (gethash "readOnly" mount)))))))))
 
 (defun containerd-key-environment-value (runtime pod resource reference)
   "Resolve a required or optional environment key without exposing Secret data in errors."
@@ -496,8 +522,9 @@ A literal value may refer to any variable defined before it, as $(NAME)."
           :selinux-options (cri-selinux-options context)
           :supplemental-groups (pod-supplemental-groups pod))))
 
-(defun containerd-pod-security-context (pod container)
-  "Map effective Pod/container Linux identities, confinement and privileges to the CRI API."
+(defun containerd-pod-security-context (pod container &key target-id)
+  "Map effective Pod/container Linux identities, confinement and privileges to the CRI API.
+TARGET-ID names the running container whose PID namespace an ephemeral container joins."
   (let* ((pod-context (gethash "securityContext" (gethash "spec" (pod-to-object pod))))
          (container-context (gethash "securityContext" (pod-runtime-container-object pod container)))
          (effective (core-object)))
@@ -514,12 +541,15 @@ A literal value may refer to any variable defined before it, as $(NAME)."
        :supplemental-groups (pod-supplemental-groups pod)
        :seccomp (cri-seccomp-profile effective)
        :selinux-options (cri-selinux-options effective)
-       :namespace-options (when (or (pod-spec-flag-p pod "hostPID") (pod-spec-flag-p pod "hostIPC"))
-                            (make-instance
-                             'gr8s.cri.v1::namespace-option
-                             :pid (if (pod-spec-flag-p pod "hostPID") gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
-                             :ipc (if (pod-spec-flag-p pod "hostIPC") gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
-                             :network (if (pod-host-network-p pod) gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)))
+       :namespace-options (make-instance
+                           'gr8s.cri.v1::namespace-option
+                           :pid (if (and target-id (= (pod-pid-namespace-mode pod)
+                                                      gr8s.cri.v1::+namespacemode-container+))
+                                    gr8s.cri.v1::+namespacemode-target+
+                                    (pod-pid-namespace-mode pod))
+                           :target-id (or target-id "")
+                           :ipc (if (pod-spec-flag-p pod "hostIPC") gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
+                           :network (if (pod-host-network-p pod) gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+))
        :capabilities (let ((capabilities (gethash "capabilities" effective)))
                        (when capabilities
                          (make-instance 'gr8s.cri.v1::capability

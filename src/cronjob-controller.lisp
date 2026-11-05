@@ -103,7 +103,8 @@
          (namespace (gethash "namespace" (workload-metadata cronjob)))
          (name (gethash "name" (gethash "metadata" input))))
     (handler-case
-        (let ((job (create-core-resource store "jobs" input namespace)))
+        (let ((job (with-controller-admission ("cronjob-controller")
+                     (admitted-create-core-resource store "jobs" input namespace))))
           (record-cronjob-event store cronjob "Normal" "SuccessfulCreate" (format nil "Created job ~A" name))
           job)
       (kubernetes-error (condition)
@@ -115,7 +116,8 @@
   "Delete the Jobs STATUS lists as active, leaving their Pods to background collection."
   (loop for entry across (gethash "active" status #())
         do (handler-case
-               (progn
+               (when (controller-delete-allowed-p store "jobs" (gethash "namespace" entry) (gethash "name" entry)
+                                                  "cronjob-controller")
                  (delete-workload-resource store "jobs" (gethash "namespace" entry) (gethash "name" entry)
                                            :uid (gethash "uid" entry) :policy "Background")
                  (record-cronjob-event store cronjob "Normal" "SuccessfulDelete"
@@ -154,7 +156,8 @@
                      for job in ordered
                      do (let ((metadata (workload-metadata job)))
                           (handler-case
-                              (progn
+                              (when (controller-delete-allowed-p store "jobs" (gethash "namespace" metadata) (gethash "name" metadata)
+                                                                 "cronjob-controller")
                                 (delete-workload-resource store "jobs" (gethash "namespace" metadata) (gethash "name" metadata)
                                                           :uid (gethash "uid" metadata) :policy "Background")
                                 (record-cronjob-event store cronjob "Normal" "SuccessfulDelete"
