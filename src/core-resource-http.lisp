@@ -289,6 +289,7 @@
                                (t (dns-subdomain-p name)))))
       (core-resource-error 400 "BadRequest" "Invalid request name"))
     (let ((*csr-request-actor* (if (csr-resource-p resource) (csr-http-request-actor store) (core-object)))
+          (*apply-update-manager* (and (member method '(:post :put :patch)) (list (apply-default-manager) nil)))
           (*core-resource-view-version* (cond ((and (equal resource "events") (uiop:string-prefix-p "/apis/" path)) "events.k8s.io/v1")
                                               ((uiop:string-prefix-p "/apis/autoscaling/v1/" path) "autoscaling/v1")
                                               (t (core-resource-api-version resource))))

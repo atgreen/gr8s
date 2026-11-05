@@ -303,7 +303,7 @@
     (reject-unsupported-fields
      metadata '("name" "generateName" "namespace" "labels" "annotations" "uid"
                 "resourceVersion" "creationTimestamp" "deletionTimestamp"
-                "deletionGracePeriodSeconds" "generation" "ownerReferences" "finalizers")
+                "deletionGracePeriodSeconds" "generation" "ownerReferences" "finalizers" "managedFields")
      "metadata")
     (validate-owner-references metadata)
     (validate-pod-finalizers metadata)

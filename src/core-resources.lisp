@@ -8,6 +8,7 @@
 (defvar *resource-quota-admission-exempt* nil
   "True while the server creates its own bootstrap objects, which are counted but never refused.")
 
+(defvar *apply-update-manager* nil)
 (defvar *crd-view-definition* nil)
 (defvar *crd-request-version* nil)
 (defvar *crd-view-store* nil
@@ -496,6 +497,7 @@
         (when (gethash key resources)
           (core-resource-error 409 "AlreadyExists" "~A ~A/~A already exists" (core-resource-kind resource) namespace name))
         (prepare-core-resource-metadata object nil revision)
+        (apply-track-write nil object resource)
         (prepare-workload-write resource object nil)
         (when (batch-resource-p resource)
           (if (cronjob-resource-p resource) (prepare-cronjob-write object nil) (prepare-batch-write object nil)))
@@ -557,6 +559,7 @@
                  (or (not (core-resource-immutable-p object)) (not (core-resource-data-equal-p existing object))))
         (core-resource-error 422 "Invalid" "Immutable resource data cannot change"))
       (prepare-core-resource-metadata object existing revision)
+      (apply-track-write existing object resource)
       (prepare-workload-write resource object existing)
       (when (batch-resource-p resource)
         (if (cronjob-resource-p resource) (prepare-cronjob-write object existing) (prepare-batch-write object existing)))

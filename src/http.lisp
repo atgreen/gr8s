@@ -428,7 +428,8 @@
 
 (defun apply-pod-response (store reconciler name &optional (namespace "default"))
   (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
-         (structured (member content-type '("application/json-patch+json" "application/strategic-merge-patch+json")
+         (applied (equal content-type "application/apply-patch+yaml"))
+         (structured (member content-type '("application/json-patch+json" "application/strategic-merge-patch+json" "application/apply-patch+yaml")
                              :test #'equal))
          (patch (unless structured (request-json-object)))
          (existing (handler-case (get-pod store namespace name)
@@ -440,6 +441,7 @@
         (admit-pod-input store (if existing "UPDATE" "CREATE") namespace name
                          (cond ((and existing structured) (pod-patched-object (pod-to-object existing) content-type))
                                (existing (merge-json-object (copy-json-object (pod-to-object existing)) patch))
+                               (applied (apply-pod-created-object namespace name))
                                (structured (core-resource-error 404 "NotFound" "pods ~S not found" name))
                                (t patch))
                          existing)

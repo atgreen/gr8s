@@ -209,11 +209,18 @@
           ((member method '(:put :patch))
            (let* ((view (crd-api-view existing))
                   (type (request-media-type))
+                  (*apply-update-manager* (list (apply-default-manager) "status"))
                   (input (if (eq method :put) (crd-read-json)
-                             (let ((patch (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))))
-                               (cond ((equal type "application/merge-patch+json") (merge-json-object view patch))
+                             (let ((patch (if (equal type "application/apply-patch+yaml")
+                                              nil
+                                              (crd-parse-json-content (hunchentoot:raw-post-data :force-text t)))))
+                               (cond ((equal type "application/apply-patch+yaml")
+                                      (let ((*apply-schema* (apply-resource-schema resource)) (*apply-update-manager* nil))
+                                        (apply-merge view (apply-read-configuration resource namespace name) resource
+                                                     (apply-field-manager) (apply-force-p) "status")))
+                                     ((equal type "application/merge-patch+json") (merge-json-object view patch))
                                      ((equal type "application/json-patch+json") (apply-core-json-patch view patch))
-                                     (t (core-resource-error 415 "UnsupportedMediaType" "Custom status supports JSON/merge patches"))))))
+                                     (t (core-resource-error 415 "UnsupportedMediaType" "Custom status supports JSON/merge patches and apply"))))))
                   (input (admit-subresource-write store resource "status" namespace name input view
                                                   :dry-run (core-resource-dry-run-p)))
                   (*crd-status-write* t))

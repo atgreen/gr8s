@@ -134,7 +134,8 @@ A hostNetwork Pod has no address of its own, so it reports its node's as its Pod
 
 (defun write-pod-status-response (store reconciler name namespace method)
   "Apply a status write and answer with what the client wrote over the observed status."
-  (let* ((pod (get-pod store namespace name))
+  (let* ((*pod-patch-subresource* "status")
+         (pod (get-pod store namespace name))
          (current (pod-response-object pod (reconcile-pod reconciler namespace name)))
          (input (admit-subresource-write store "pods" "status" namespace name
                                          (require-object (pod-status-write-input current method) "Pod") current

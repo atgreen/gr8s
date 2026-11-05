@@ -87,8 +87,12 @@
       (let ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;)))))
         (pod-patched-object current content-type))))
 
+(defvar *pod-patch-subresource* nil "The Pod subresource a patch of the current request targets.")
+
 (defun pod-patched-object (current content-type)
   "Apply the current request's patch of CONTENT-TYPE to a copy of Pod object CURRENT."
+  (when (equal content-type "application/apply-patch+yaml")
+    (return-from pod-patched-object (apply-pod-patched-object current *pod-patch-subresource*)))
   (let ((patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t) :max-string-length (* 2 1024 1024))))
     (cond ((equal content-type "application/json-patch+json")
            (apply-core-json-patch (copy-json-object current) patch))
