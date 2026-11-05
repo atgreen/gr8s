@@ -198,6 +198,7 @@
                              (:file "raft-join-test")
                              (:file "witness-command-test")
                              (:file "ha-leader-gate-test")
+                             (:file "ha-store-test")
                              (:file "raft-store-test")
                              (:file "raft-plane-test")
                              (:file "raft-membership-test")

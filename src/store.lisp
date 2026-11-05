@@ -41,12 +41,51 @@
   (pod-client-statuses (make-hash-table :test #'equal))
   ;; Pod UID to the node reserved for it while its preemption victims terminate.
   (nominated-nodes (make-hash-table :test #'equal))
-  (lock (bt:make-lock "gr8s store")))
+  (lock (bt:make-lock "gr8s store"))
+  ;; HA (podster-c2d.7.2). When CONSENSUS-COMMIT-FN is set, a durable
+  ;; (consensus-plane) write is not published locally under the store lock;
+  ;; instead the committed state blob is handed to this function, which
+  ;; replicates it through Raft and installs it on every replica (including this
+  ;; one) via INSTALL-CORE-STATE-BLOB. CONSENSUS-WRITE-LOCK serializes writers so
+  ;; the store lock is never held across the Raft round-trip (no deadlock with
+  ;; the apply path). NIL (the default) keeps the single-node path unchanged.
+  consensus-commit-fn
+  (consensus-write-lock (bt:make-lock "gr8s consensus write")))
 
 (defmacro with-store-lock ((store) &body body)
   "Evaluate BODY while holding STORE's lock."
   `(bt:with-lock-held ((pod-store-lock ,store))
      ,@body))
+
+(defvar *pending-consensus-commit* nil
+  "Bound by WITH-CORE-WRITE; COMMIT-CORE-RESOURCES stashes the committed state
+   blob here (instead of publishing) when STORE is in HA consensus mode, so the
+   write can be replicated after the store lock is released.")
+
+(defvar *core-write-active* nil
+  "True only within a WITH-CORE-WRITE body, so COMMIT-CORE-RESOURCES knows the
+   caller will flush the replicated write after releasing the store lock. A
+   durable write made outside WITH-CORE-WRITE (e.g. a not-yet-converted
+   controller path) publishes locally as before.")
+
+(defmacro with-core-write ((store) &body body)
+  "Run a durable (consensus-plane) write BODY. BODY executes under the store lock
+   and returns the write's result; if STORE is in HA consensus mode, BODY's call
+   to COMMIT-CORE-RESOURCES stashes the committed state instead of publishing it,
+   and the state is then replicated through Raft with the store lock released
+   (writers serialized by the consensus-write lock). Without HA, this is exactly
+   WITH-STORE-LOCK."
+  (let ((s (gensym "STORE")) (result (gensym "RESULT")))
+    `(let ((,s ,store))
+       (if (pod-store-consensus-commit-fn ,s)
+           (bt:with-lock-held ((pod-store-consensus-write-lock ,s))
+             (let* ((*pending-consensus-commit* nil)
+                    (*core-write-active* t)
+                    (,result (with-store-lock (,s) ,@body)))
+               (when *pending-consensus-commit*
+                 (funcall (pod-store-consensus-commit-fn ,s) *pending-consensus-commit*))
+               ,result))
+           (with-store-lock (,s) ,@body)))))
 
 (defun pod-key (namespace name)
   "Return the stable in-memory key for NAMESPACE and Pod NAME."
