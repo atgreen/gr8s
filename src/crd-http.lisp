@@ -124,7 +124,6 @@
   "Return collections and real status subresources for one served group/version."
   (if (equal group "apiextensions.k8s.io")
       (let ((resources (stored-resource-discovery +crd-api-version+)))
-        (loop for entry across resources do (setf (gethash "shortNames" entry) #("crd" "crds")))
         (concatenate 'vector resources
           (vector (core-object "name" "customresourcedefinitions/status" "namespaced" nil "kind" "CustomResourceDefinition" "verbs" #("get" "patch" "update")))))
       (with-store-lock (store)

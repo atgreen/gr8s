@@ -112,6 +112,23 @@ indefinitely and can't be cancelled, so lanes keep it from holding up local volu
 or other servers. The control plane never waits on an agent, and keeps at most 8
 requests outstanding per node and lane. A request stays outstanding until the agent
 answers or its session ends, and the agent runs each volume's deletion only once.
+After a failed NFS deletion, the next attempt goes to another Ready node if there is
+one, which helps when a single node can't reach the share. It can't help with a call
+that hangs rather than fails, because that request stays outstanding.
+
+To see what reclaim is doing, use `kubectl describe pv` or these metrics on `/metrics`:
+
+| Report | Meaning |
+|---|---|
+| `VolumeFailedDelete` Warning event | An attempt failed, and says when the next one is |
+| `VolumeReclaimStalled` Warning event | A request has gone 5 minutes unanswered. It's reported once per request and not retried, because the agent may still be working. |
+| `gr8s_volume_reclaim_failures_total` | Failed attempts since this control plane started |
+| `gr8s_volume_reclaim_waiting` | Released volumes with no request outstanding |
+| `gr8s_volume_reclaim_outstanding{node,lane}` | Requests awaiting an answer |
+| `gr8s_volume_reclaim_oldest_outstanding_seconds` | Age of the oldest of those requests |
+
+The PV stays `Released` during retries, unlike upstream's built-in deleters, which
+move it to `Failed`.
 
 `Retain` keeps the data and the old claim UID, so a new claim with the same name
 can't take it over. An administrator must clear the PV's `claimRef` to reuse it.

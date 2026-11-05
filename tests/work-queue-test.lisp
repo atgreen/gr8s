@@ -246,6 +246,164 @@ so requests wait until the test finishes them."
     (is (null (in-flight-names reclaimer)))
     (is (zerop (hash-table-count (gr8s::retry-backoff-entries (gr8s::volume-reclaimer-backoff reclaimer)))))))
 
+;;; Reporting
+
+(defun volume-events (store name)
+  "Return the Events about PV NAME."
+  (remove-if-not (lambda (event) (equal name (gethash "name" (gethash "involvedObject" event))))
+                 (gr8s::list-core-resources store "events" "default")))
+
+(defun volume-event (store name reason)
+  (find reason (volume-events store name) :key (lambda (event) (gethash "reason" event)) :test #'equal))
+
+(defun ready-second-node (store)
+  (gr8s:register-node store (make-test-node "worker-b" "b" "10.64.16.0/20"))
+  (gr8s:mark-node-ready store "worker-b" (expt 10 11)))
+
+(defun in-flight-node (reclaimer name)
+  (gr8s::volume-reclaim-request-node (gethash name (gr8s::volume-reclaimer-in-flight reclaimer))))
+
+(test failures-raise-a-counted-warning-event-on-the-volume
+  (with-test-reclaimer (reclaimer store path)
+    (released-local-volume store 0)
+    (gr8s::reconcile-storage-bindings store)
+    (gr8s::volume-reclaimer-step reclaimer 1000)
+    (is (null (volume-events store "pvc-local-0")))
+    (finish-reclaim reclaimer "pvc-local-0" :error "Permission denied")
+    (gr8s::volume-reclaimer-step reclaimer 1000)
+    (let ((event (volume-event store "pvc-local-0" "VolumeFailedDelete")))
+      (is-true event)
+      (is (equal "Warning" (gethash "type" event)))
+      (is (= 1 (gethash "count" event)))
+      (is (search "Permission denied" (gethash "message" event)))
+      (is (search "retrying in 1s" (gethash "message" event)))
+      (is (equal "PersistentVolume" (gethash "kind" (gethash "involvedObject" event)))))
+    (gr8s::volume-reclaimer-step reclaimer 1001)
+    (finish-reclaim reclaimer "pvc-local-0" :error "Still denied")
+    (gr8s::volume-reclaimer-step reclaimer 1001)
+    (let ((event (volume-event store "pvc-local-0" "VolumeFailedDelete")))
+      (is (= 2 (gethash "count" event)))
+      (is (search "Still denied" (gethash "message" event)))
+      (is (search "retrying in 2s" (gethash "message" event))))
+    (is (= 1 (length (volume-events store "pvc-local-0"))))))
+
+(test long-failure-messages-still-produce-an-event
+  (with-test-reclaimer (reclaimer store path)
+    (released-local-volume store 0)
+    (gr8s::reconcile-storage-bindings store)
+    (gr8s::volume-reclaimer-step reclaimer 1000)
+    (finish-reclaim reclaimer "pvc-local-0" :error (make-string 5000 :initial-element #\x))
+    (gr8s::volume-reclaimer-step reclaimer 1000)
+    (is-true (volume-event store "pvc-local-0" "VolumeFailedDelete"))))
+
+(test an-unanswered-request-is-reported-once-and-never-resent
+  (with-test-reclaimer (reclaimer store path)
+    (released-local-volume store 0)
+    (gr8s::reconcile-storage-bindings store)
+    (gr8s::volume-reclaimer-step reclaimer 1000)
+    (let ((request (gethash "pvc-local-0" (gr8s::volume-reclaimer-in-flight reclaimer))))
+      (gr8s::volume-reclaimer-step reclaimer 1299)
+      (is (null (volume-event store "pvc-local-0" "VolumeReclaimStalled")))
+      (gr8s::volume-reclaimer-step reclaimer 1300)
+      (let ((event (volume-event store "pvc-local-0" "VolumeReclaimStalled")))
+        (is-true event)
+        (is (= 1 (gethash "count" event)))
+        (is (search "worker-a" (gethash "message" event)))
+        (is (search "300 seconds" (gethash "message" event))))
+      (gr8s::volume-reclaimer-step reclaimer 9000)
+      (is (= 1 (gethash "count" (volume-event store "pvc-local-0" "VolumeReclaimStalled"))))
+      (is (eq request (gethash "pvc-local-0" (gr8s::volume-reclaimer-in-flight reclaimer))))
+      (is (zerop (gr8s::volume-reclaimer-failures reclaimer))))))
+
+(test metrics-report-failures-backlog-and-the-oldest-request
+  (with-test-reclaimer (reclaimer store path)
+    (dotimes (index 10) (released-local-volume store index))
+    (released-nfs-volume store 0 "nas.example.test")
+    (gr8s::reconcile-storage-bindings store)
+    (is (null (gr8s::volume-reclaimer-metrics reclaimer)))
+    (gr8s::volume-reclaimer-step reclaimer 1000)
+    (gr8s::volume-reclaimer-step reclaimer 1042)
+    (let ((text (gr8s::volume-reclaimer-metrics reclaimer)))
+      (is (search (format nil "gr8s_volume_reclaim_failures_total 0~%") text))
+      ;; Two of the local volumes are over the limit of eight, so they're still waiting.
+      (is (search (format nil "gr8s_volume_reclaim_waiting 2~%") text))
+      (is (search (format nil "gr8s_volume_reclaim_oldest_outstanding_seconds 42~%") text))
+      (is (search (format nil "gr8s_volume_reclaim_outstanding{node=\"worker-a\",lane=\"local\"} 8~%") text))
+      (is (search (format nil "gr8s_volume_reclaim_outstanding{node=\"worker-a\",lane=\"nfs/nas.example.test\"} 1~%") text)))
+    (finish-reclaim reclaimer "pvc-nfs-0" :error "boom")
+    (gr8s::volume-reclaimer-step reclaimer 1043)
+    (is (search (format nil "gr8s_volume_reclaim_failures_total 1~%") (gr8s::volume-reclaimer-metrics reclaimer)))
+    ;; /metrics reads the running reclaimer, and is empty before there is one.
+    (let ((gr8s::*active-volume-reclaimer* nil))
+      (is (equal "" (gr8s::volume-reclaim-metrics-text))))
+    (let ((gr8s::*active-volume-reclaimer* reclaimer))
+      (is (search "gr8s_volume_reclaim_waiting" (gr8s::volume-reclaim-metrics-text))))))
+
+(test retry-state-is-dropped-once-a-volume-is-gone
+  (with-test-reclaimer (reclaimer store path)
+    (released-nfs-volume store 0 "nas.example.test")
+    (gr8s::reconcile-storage-bindings store)
+    (gr8s::volume-reclaimer-step reclaimer 1000)
+    (finish-reclaim reclaimer "pvc-nfs-0" :error "boom")
+    (gr8s::volume-reclaimer-step reclaimer 1000)
+    (is (gethash "pvc-nfs-0" (gr8s::volume-reclaimer-failed-nodes reclaimer)))
+    (gr8s::delete-core-resource store "persistentvolumes" nil "pvc-nfs-0")
+    (gr8s::volume-reclaimer-step reclaimer 1000)
+    (is (zerop (hash-table-count (gr8s::volume-reclaimer-failed-nodes reclaimer))))
+    (is (zerop (hash-table-count (gr8s::retry-backoff-entries (gr8s::volume-reclaimer-backoff reclaimer)))))))
+
+;;; Choosing another node
+
+(test a-failed-nfs-deletion-tries-the-other-ready-nodes-in-turn
+  (with-test-reclaimer (reclaimer store path)
+    (ready-second-node store)
+    (released-nfs-volume store 0 "nas.example.test")
+    (gr8s::reconcile-storage-bindings store)
+    (gr8s::volume-reclaimer-step reclaimer 1000)
+    (is (equal "worker-a" (in-flight-node reclaimer "pvc-nfs-0")))
+    (finish-reclaim reclaimer "pvc-nfs-0" :error "stale file handle")
+    (gr8s::volume-reclaimer-step reclaimer 1000)
+    (gr8s::volume-reclaimer-step reclaimer 1001)
+    (is (equal "worker-b" (in-flight-node reclaimer "pvc-nfs-0")))
+    ;; Every node has now failed, so a new round starts at the first.
+    (finish-reclaim reclaimer "pvc-nfs-0" :error "stale file handle")
+    (gr8s::volume-reclaimer-step reclaimer 1001)
+    (gr8s::volume-reclaimer-step reclaimer 1003)
+    (is (equal "worker-a" (in-flight-node reclaimer "pvc-nfs-0")))
+    (finish-reclaim reclaimer "pvc-nfs-0" :error "stale file handle")
+    (gr8s::volume-reclaimer-step reclaimer 1003)
+    (gr8s::volume-reclaimer-step reclaimer 1007)
+    (is (equal "worker-b" (in-flight-node reclaimer "pvc-nfs-0")))
+    ;; Success ends it, and the next volume starts fresh.
+    (finish-reclaim reclaimer "pvc-nfs-0")
+    (gr8s::volume-reclaimer-step reclaimer 1007)
+    (signals kubernetes-error (gr8s::get-core-resource store "persistentvolumes" nil "pvc-nfs-0"))
+    (is (zerop (hash-table-count (gr8s::volume-reclaimer-failed-nodes reclaimer))))))
+
+(test a-retry-skips-a-node-that-is-no-longer-ready
+  (with-test-reclaimer (reclaimer store path)
+    (ready-second-node store)
+    (released-nfs-volume store 0 "nas.example.test")
+    (gr8s::reconcile-storage-bindings store)
+    (gr8s::volume-reclaimer-step reclaimer 1000)
+    (finish-reclaim reclaimer "pvc-nfs-0" :error "session closed")
+    (gr8s::mark-node-not-ready store "worker-b")
+    (gr8s::volume-reclaimer-step reclaimer 1000)
+    (gr8s::volume-reclaimer-step reclaimer 1001)
+    ;; Only worker-a is Ready, so it's tried again even though it has already failed.
+    (is (equal "worker-a" (in-flight-node reclaimer "pvc-nfs-0")))))
+
+(test local-volumes-only-ever-go-to-their-own-node
+  (with-test-reclaimer (reclaimer store path)
+    (ready-second-node store)
+    (released-local-volume store 0)
+    (gr8s::reconcile-storage-bindings store)
+    (dolist (now '(1000 1001 1003))
+      (gr8s::volume-reclaimer-step reclaimer now)
+      (is (equal "worker-a" (in-flight-node reclaimer "pvc-local-0")))
+      (finish-reclaim reclaimer "pvc-local-0" :error "disk error")
+      (gr8s::volume-reclaimer-step reclaimer now))))
+
 ;;; The agent
 
 (defun reclaim-request (volume)

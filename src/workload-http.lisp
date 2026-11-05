@@ -16,13 +16,6 @@
 (defun workload-resources-response ()
   "Advertise workload collections and their separately authorized subresources."
   (let ((resources (stored-resource-discovery "apps/v1")))
-    (loop for resource across resources
-          do (setf (gethash "shortNames" resource)
-                   (cond ((equal "Deployment" (gethash "kind" resource)) #("deploy"))
-                         ((equal "ReplicaSet" (gethash "kind" resource)) #("rs"))
-                         ((equal "DaemonSet" (gethash "kind" resource)) #("ds"))
-                         ((equal "StatefulSet" (gethash "kind" resource)) #("sts"))
-                         (t #()))))
     (json-response
      (core-object "apiVersion" "v1" "kind" "APIResourceList" "groupVersion" "apps/v1" "resources"
                   (concatenate 'vector resources

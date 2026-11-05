@@ -310,7 +310,7 @@
                                                         (lambda (old) (declare (ignore old)) replacement) :dry-run dry-run))))
         ((and writable-scope name (eq method :patch)) (core-resource-patch-response store resource namespace name dry-run))
         ((and writable-scope (null name)
-              (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource) (batch-resource-p resource) (budget-resource-p resource) (admission-config-resource-p resource) (policy-resource-p resource) (typed-api-resource-p resource) (networking-resource-p resource) (member resource '("configmaps" "secrets" "serviceaccounts" "roles" "rolebindings" "clusterroles" "clusterrolebindings" "networkpolicies" "services" "podtemplates" "events" "horizontalpodautoscalers" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions" "customresourcedefinitions") :test #'equal))
+              (core-resource-delete-collection-p resource)
               (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
                 (options (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions")))
