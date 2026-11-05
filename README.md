@@ -743,6 +743,12 @@ Ephemeral containers are added through `pods/ephemeralcontainers`, and `pods/res
 changes CPU and memory in place, or restarts that container under a RestartContainer
 policy. Readiness gates and a Pod's own `resources` remain unsupported.
 
+External API servers can be registered with an `APIService`. gr8s publishes the
+`extension-apiserver-authentication` ConfigMap they read from `kube-system`, with a separate
+front-proxy CA, checks each one's discovery document to set its `Available` condition, lists its
+group in discovery and proxies its requests over TLS with the caller's identity in `X-Remote-*`
+headers. OpenAPI documents aren't merged, so `kubectl explain` doesn't cover aggregated types.
+
 All ten unchanged upstream probe conformance cases pass in the
 [focused result](docs/container-probes-upstream-2026-11-04.json). The
 [native validation record](docs/container-probes-native-2026-11-04.json)

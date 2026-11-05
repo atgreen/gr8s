@@ -29,13 +29,16 @@ EXTRA_SOURCES = {
     "autoscaling1-types.go": (PREFIX + "autoscaling/v1/types.go", "ab10da716388987895cb94be11cf776b5632644128de7959cd97bc37b5b874c6"),
     "autoscaling2.proto": (PREFIX + "autoscaling/v2/generated.proto", "5685de748fa37900a21082f826e93f349a7e3203d4c6bfd2225ba893d5b9a01a"),
     "autoscaling2-types.go": (PREFIX + "autoscaling/v2/types.go", "68f36b28a6bb91cb0c9ca53591d8e5d52778f7f2ca69cea3120ba7eae95910aa"),
+    "apiregistration.proto": ("kube-aggregator/v0.36.0/pkg/apis/apiregistration/v1/generated.proto", "479631736e800008f0f1231e509f1269fd4d5ccc21b2691a11834fa07ee0f5f6"),
+    "apiregistration-types.go": ("kube-aggregator/v0.36.0/pkg/apis/apiregistration/v1/types.go", "cbcc6f87cb4916a737b32c0b6096da2705463c200b12d9d14b28e1dd5158610e"),
     "admission-types.go": (PREFIX + "admissionregistration/v1/types.go", "35f58a673ffd825f9bf1ba7ac36795be353978e9d0db507eb7874b8d86bc9b74"),
 }
 TYPES = [("core-types.go", "k8s.io.api.core.v1."), ("coordination-types.go", "k8s.io.api.coordination.v1."),
          ("flowcontrol-types.go", "k8s.io.api.flowcontrol.v1."), ("dra-types.go", "k8s.io.api.resource.v1."),
          ("authorization-types.go", "k8s.io.api.authorization.v1."), ("authentication-types.go", "k8s.io.api.authentication.v1."),
          ("admission-types.go", "k8s.io.api.admissionregistration.v1."),
-         ("autoscaling1-types.go", "k8s.io.api.autoscaling.v1."), ("autoscaling2-types.go", "k8s.io.api.autoscaling.v2.")]
+         ("autoscaling1-types.go", "k8s.io.api.autoscaling.v1."), ("autoscaling2-types.go", "k8s.io.api.autoscaling.v2."),
+         ("apiregistration-types.go", "k8s.io.kube_aggregator.pkg.apis.apiregistration.v1.")]
 ROOTS = [package + kind for package, kinds in (
     ("k8s.io.api.core.v1.", ["NamespaceStatus", "Binding"]),
     ("k8s.io.api.coordination.v1.", ["Lease"]),
@@ -47,6 +50,7 @@ ROOTS = [package + kind for package, kinds in (
                                               "MutatingAdmissionPolicy", "MutatingAdmissionPolicyBinding"]),
     ("k8s.io.api.authorization.v1.", ["SubjectAccessReview", "LocalSubjectAccessReview", "SelfSubjectAccessReview", "SelfSubjectRulesReview"]),
     ("k8s.io.api.authentication.v1.", ["TokenRequest", "TokenReview", "SelfSubjectReview"]),
+    ("k8s.io.kube_aggregator.pkg.apis.apiregistration.v1.", ["APIService"]),
 ) for kind in kinds]
 REVIEWS = {"NamespaceStatus", "Binding", "TokenRequest", "TokenReview", "SelfSubjectReview", "SubjectAccessReview", "LocalSubjectAccessReview",
            "SelfSubjectAccessReview", "SelfSubjectRulesReview"}
@@ -60,6 +64,11 @@ def resolve_full_sources(cache):
             EXTRA_SOURCES[key] = (EXTRA_SOURCES[key][0], re.search(r'"%s": \("[^"]+", "([0-9a-f]{64})"' % re.escape(key), text)[1])
     shared.SOURCES.update(EXTRA_SOURCES)
     return shared.load_sources(cache)
+
+
+def definition_name(message):
+    """Name a message's OpenAPI definition; Go's import path keeps the repository's hyphen there."""
+    return message.replace("k8s.io.", "io.k8s.", 1).replace("kube_aggregator", "kube-aggregator")
 
 
 def leaf_names(all_messages, fields):
@@ -110,7 +119,7 @@ def main():
     # Inline innermost messages first, so an outer inline member sees its child's flattened names.
     for _ in range(3):
         for name, fields in messages.items():
-            properties = all_definitions.get(name.replace("k8s.io.", "io.k8s.", 1), {}).get("properties", {})
+            properties = all_definitions.get(definition_name(name), {}).get("properties", {})
             for field in fields.values():
                 if properties and field["name"] not in properties and not field.get("inline"):
                     folded = {key.lower(): key for key in properties}
@@ -121,11 +130,11 @@ def main():
                         if child and leaf_names(all_messages, child) & set(properties):
                             field["inline"] = True
     for name, fields in messages.items():
-        properties = all_definitions.get(name.replace("k8s.io.", "io.k8s.", 1), {}).get("properties", {})
+        properties = all_definitions.get(definition_name(name), {}).get("properties", {})
         for field in fields.values():
             if properties and field["name"] not in properties and not field.get("inline"):
                 raise ValueError(f"Unmapped JSON field: {name}.{field['name']}")
-    pending = [root.replace("k8s.io.", "io.k8s.", 1) for root in ROOTS]
+    pending = [definition_name(root) for root in ROOTS]
     pending.extend(name + "List" for name in list(pending) if name.rsplit(".", 1)[1] not in REVIEWS)
     definitions = {}
     while pending:

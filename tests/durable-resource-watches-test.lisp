@@ -28,6 +28,8 @@
                                               "resources" #("watched-kind"))))))
       (cond
         ((equal resource "leases") (spec))
+        ((equal resource "apiservices")
+         (spec "group" "watched.example.test" "version" "v1" "groupPriorityMinimum" 1000 "versionPriority" 100))
         ((equal resource "prioritylevelconfigurations") (spec "type" "Exempt"))
         ((equal resource "flowschemas") (spec "priorityLevelConfiguration" (gr8s::core-object "name" "exempt")))
         ((equal resource "deviceclasses") (spec))
@@ -165,6 +167,7 @@
       (destructuring-bind (resource kind version namespaced) descriptor
         (let* ((name (cond ((equal resource "customresourcedefinitions") "watched.watch.example.test")
                            ((equal resource "ipaddresses") "192.0.2.77")
+                           ((equal resource "apiservices") "v1.watched.example.test")
                            (t "watched")))
                (namespace (and namespaced "alpha"))
                (collection (if (equal version "v1") "/api/v1" (concatenate 'string "/apis/" version)))

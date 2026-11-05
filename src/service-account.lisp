@@ -252,7 +252,14 @@
    store "clusterroles"
    (core-object "metadata" (default-rbac-metadata "system:service-account-issuer-discovery")
                 "rules" (vector (core-object "nonResourceURLs" #("/.well-known/openid-configuration" "/openid/v1/jwks")
-                                             "verbs" #("get"))))))
+                                             "verbs" #("get")))))
+  (ensure-default-rbac-object
+   store "clusterroles"
+   (core-object "metadata" (default-rbac-metadata "system:auth-delegator")
+                "rules" (vector (core-object "apiGroups" #("authentication.k8s.io") "resources" #("tokenreviews")
+                                             "verbs" #("create"))
+                                (core-object "apiGroups" #("authorization.k8s.io") "resources" #("subjectaccessreviews")
+                                             "verbs" #("create"))))))
 
 (defun ensure-native-bootstrap-namespaces (store)
   "Create the standard namespaces and their default accounts for a native cluster."
@@ -265,7 +272,8 @@
         (unless (= 409 (kubernetes-error-status-code condition)) (error condition))))
     (ensure-default-service-account store name))
   (ensure-system-priority-classes store)
-  (ensure-system-cluster-roles store))
+  (ensure-system-cluster-roles store)
+  (ensure-extension-apiserver-rbac store))
 
 (defun ensure-namespace-root-ca (store namespace)
   "Publish the actual native API trust anchor without rotating the ConfigMap identity."

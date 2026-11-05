@@ -632,6 +632,20 @@
           (let ((text (if conditions (format nil "~{~A~^,~}" conditions) "Pending")))
             (if (table-get object "status" "certificate") (format nil "~A,Issued" text) text)))))
 
+(define-table-printer "APIService"
+    (("Service" "string") ("Available" "string") ("Age" "string"))
+    (object)
+  (let ((service (table-get object "spec" "service"))
+        (available (find "Available" (or (table-get object "status" "conditions") #()) :test #'equal
+                         :key (lambda (condition) (gethash "type" condition)))))
+    (list (if (hash-table-p service)
+              (format nil "~A/~A" (gethash "namespace" service) (gethash "name" service))
+              "Local")
+          (cond ((null available) "Unknown")
+                ((equal "True" (gethash "status" available)) "True")
+                (t (format nil "False (~A)" (gethash "reason" available))))
+          (table-age object))))
+
 (define-table-printer "ComponentStatus"
     (("Status" "string") ("Message" "string") ("Error" "string"))
     (object)
