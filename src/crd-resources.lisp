@@ -156,6 +156,52 @@
                  (unless (member (gethash "type" declared) '("string" "boolean" "integer") :test #'equal)
                    (crd-schema-error path "~A must point to a field of type string, boolean or integer" json-path)))))))
 
+(defun crd-simple-json-path-p (path)
+  "Test for a simple JSONPath: dotted fields and bracketed quoted names from the root."
+  (and (stringp path) (plusp (length path))
+       (cl-ppcre:scan "^(\\.[A-Za-z0-9_-]+|\\['[^']+'\\])+$" path)))
+
+(defun validate-crd-scale-subresource (scale subresources)
+  "Admit scale paths under .spec and .status, which reading and writing scale use."
+  (require-object scale "scale subresource")
+  (admission-drop-nulls scale)
+  (reject-unsupported-fields scale '("specReplicasPath" "statusReplicasPath" "labelSelectorPath") "scale subresource")
+  (let ((spec (gethash "specReplicasPath" scale)) (status (gethash "statusReplicasPath" scale))
+        (selector (gethash "labelSelectorPath" scale)) (prefix "spec.versions[].subresources.scale"))
+    (unless (and (crd-simple-json-path-p spec) (uiop:string-prefix-p ".spec." spec))
+      (crd-schema-error (format nil "~A.specReplicasPath" prefix) "should be a json path under .spec"))
+    (unless (and (crd-simple-json-path-p status) (uiop:string-prefix-p ".status." status))
+      (crd-schema-error (format nil "~A.statusReplicasPath" prefix) "should be a json path under .status"))
+    (when selector
+      (unless (and (crd-simple-json-path-p selector)
+                   (or (uiop:string-prefix-p ".spec." selector) (uiop:string-prefix-p ".status." selector)))
+        (crd-schema-error (format nil "~A.labelSelectorPath" prefix) "should be a json path under either .spec or .status")))
+    subresources))
+
+(defun validate-crd-printer-columns (version)
+  "Admit printer columns with a name, known type and format, and a JSONPath."
+  (let ((columns (gethash "additionalPrinterColumns" version)) (path "spec.versions[].additionalPrinterColumns"))
+    (when (eq columns 'null) (remhash "additionalPrinterColumns" version) (setf columns nil))
+    (when columns
+      (unless (and (crd-array-p columns) (every #'hash-table-p columns)) (crd-schema-error path "requires an array of objects"))
+      (let ((seen nil))
+        (loop for column across columns
+              for name = (gethash "name" column)
+              do (admission-drop-nulls column)
+                 (reject-unsupported-fields column '("name" "type" "format" "description" "priority" "jsonPath") "printer column")
+                 (unless (and (stringp name) (plusp (length name))) (crd-schema-error path "name: Required value"))
+                 (when (member name seen :test #'equal) (crd-schema-error path "Duplicate value: ~S" name))
+                 (push name seen)
+                 (unless (member (gethash "type" column) '("integer" "number" "string" "boolean" "date") :test #'equal)
+                   (crd-schema-error path "type must be one of boolean,date,integer,number,string"))
+                 (when (gethash "format" column)
+                   (unless (member (gethash "format" column) '("int32" "int64" "float" "double" "byte" "date" "date-time" "password") :test #'equal)
+                     (crd-schema-error path "format must be one of byte,date,date-time,double,float,int32,int64,password")))
+                 (unless (and (stringp (gethash "jsonPath" column)) (plusp (length (gethash "jsonPath" column))))
+                   (crd-schema-error path "jsonPath: Required value"))
+                 (unless (table-json-path-steps (gethash "jsonPath" column))
+                   (crd-schema-error path "jsonPath must be a simple json path starting with .")))))))
+
 (defun validate-crd-conversion (conversion name)
   "Admit strategy None, or a webhook whose target and review versions are usable."
   (admission-drop-nulls conversion)
@@ -228,7 +274,7 @@
     (unless (and (crd-array-p versions) (plusp (length versions))) (crd-schema-error "spec.versions" "requires version definitions"))
     (let ((seen nil) (storage 0) (served 0))
       (loop for version across versions for version-name = (gethash "name" version)
-            do (reject-unsupported-fields version '("name" "served" "storage" "schema" "subresources" "deprecated" "deprecationWarning" "selectableFields") "CRD version")
+            do (reject-unsupported-fields version '("name" "served" "storage" "schema" "subresources" "deprecated" "deprecationWarning" "selectableFields" "additionalPrinterColumns") "CRD version")
                (unless (and (dns-label-p version-name) (not (member version-name seen :test #'equal))) (crd-schema-error "spec.versions" "version names must be unique DNS labels"))
                (push version-name seen)
                (dolist (field '("served" "storage"))
@@ -242,12 +288,15 @@
                (validate-crd-structural-node (crd-schema version) "openAPIV3Schema" t)
                (unless (equal "object" (gethash "type" (crd-schema version))) (crd-schema-error "openAPIV3Schema" "root must have object type"))
                (validate-crd-selectable-fields version)
+               (validate-crd-printer-columns version)
                (crd-check-schema-rules (crd-schema version) "openAPIV3Schema" t)
                (when (gethash "subresources" version)
                  (let ((subresources (require-object (gethash "subresources" version) "subresources")))
-                   (reject-unsupported-fields subresources '("status") "CRD subresources")
+                   (reject-unsupported-fields subresources '("status" "scale") "CRD subresources")
                    (when (nth-value 1 (gethash "status" subresources))
-                     (require-object (gethash "status" subresources) "status subresource")))))
+                     (require-object (gethash "status" subresources) "status subresource"))
+                   (when (nth-value 1 (gethash "scale" subresources))
+                     (validate-crd-scale-subresource (gethash "scale" subresources) subresources)))))
       (unless (and (= storage 1) (plusp served)) (crd-schema-error "spec.versions" "requires exactly one storage version and at least one served version")))
     (when existing
       (let ((before (gethash "spec" existing)))
@@ -299,7 +348,8 @@
          (version-name (or *crd-request-version* (car (last (uiop:split-string (gethash "apiVersion" object "") :separator '(#\/))))))
          (version (or (crd-version definition version-name :served t) (core-resource-error 404 "NotFound" "Custom version is not served")))
          (status-p (nth-value 1 (gethash "status" (gethash "subresources" version (core-object)))))
-         (storage-name (gethash "name" (crd-storage-version definition))))
+         (storage-name (gethash "name" (crd-storage-version definition)))
+         (old-view (and existing (crd-prepare-value (crd-object-at-version definition existing version-name) (crd-schema version) t))))
     (unless (and (equal (gethash "kind" names) (gethash "kind" object))
                  (equal (format nil "~A/~A" (gethash "group" spec) version-name) (gethash "apiVersion" object)))
       (core-resource-error 400 "BadRequest" "Incorrect custom resource kind or API version"))
@@ -317,7 +367,8 @@
               (let* ((*crd-track-pruning* t) (*crd-pruned-fields* nil)
                      (status (crd-prepare-value (gethash "status" object) status-schema nil 0 "status")))
                 (when *crd-pruned-fields* (crd-report-pruned-fields *crd-pruned-fields*))
-                (crd-validate-value status status-schema "status")
+                (crd-validate-value status status-schema "status" 0
+                                    (gethash "status" old-view) (nth-value 1 (gethash "status" old-view)))
                 (setf (gethash "status" copy) status))
               (remhash "status" copy))
           (setf object copy))
@@ -330,14 +381,10 @@
           (let ((*crd-track-pruning* t) (*crd-pruned-fields* nil))
             (setf object (crd-prepare-value object (crd-schema version) t))
             (when *crd-pruned-fields* (crd-report-pruned-fields *crd-pruned-fields*)))
-          (crd-validate-value object (crd-schema version) "resource")))
+          (crd-validate-value object (crd-schema version) "resource" 0 old-view (and existing t))))
     ;; Rules read the object as the client wrote it, against the old object at the same version.
     (crd-enforce-validation-rules
-     (crd-schema version) object
-     (and existing
-          (let ((*crd-apply-defaults* t))
-            (crd-prepare-value (crd-object-at-version definition existing version-name) (crd-schema version) t)))
-     (gethash "kind" names) (gethash "name" metadata))
+     (crd-schema version) object old-view (gethash "kind" names) (gethash "name" metadata))
     (setf object (crd-object-at-version definition object storage-name)
           metadata (gethash "metadata" object))
     (remhash "deletionTimestamp" metadata)

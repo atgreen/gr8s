@@ -403,16 +403,6 @@
   (let ((field-path (gethash "fieldPath" rule)))
     (if field-path (concatenate 'string path field-path) path)))
 
-(defun crd-list-map-entry (old-items keys item)
-  "Find the entry of a map list OLD-ITEMS with ITEM's key values."
-  (and (hash-table-p item) (crd-array-p old-items)
-       (find-if (lambda (candidate)
-                  (and (hash-table-p candidate)
-                       (every (lambda (key)
-                                (crd-json-equal-p (gethash key item) (gethash key candidate)))
-                              keys)))
-                old-items)))
-
 (defun crd-walk-rules (schema value old has-old path)
   "Run the rules on VALUE and everything below it, correlating OLD when HAS-OLD."
   (when (and (eq value 'null)) (return-from crd-walk-rules nil))
@@ -445,7 +435,7 @@
                           (coerce (gethash "x-kubernetes-list-map-keys" schema #()) 'list))))
            (loop for child across value
                  for index from 0
-                 do (let ((old-child (and keys has-old (crd-list-map-entry old keys child))))
+                 do (let ((old-child (and keys has-old (and (crd-array-p old) (crd-map-list-entry old keys child)))))
                       (crd-walk-rules items child old-child (and old-child t) (format nil "~A[~D]" path index))))))))))
 
 (defun crd-schema-has-rules-p (schema)

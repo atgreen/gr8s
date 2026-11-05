@@ -139,9 +139,20 @@
         ((equal type "integer") (integerp value)) ((equal type "number") (numberp value))
         ((equal type "boolean") (member value '(t nil)))))
 
-(defun crd-validate-value (value schema path &optional (depth 0))
-  "Enforce schema constraints on an already defaulted/pruned JSON value."
+(defun crd-map-list-entry (old-items keys item)
+  "Find the entry of a map list OLD-ITEMS with ITEM's key values."
+  (and (hash-table-p item)
+       (find-if (lambda (candidate)
+                  (and (hash-table-p candidate)
+                       (every (lambda (key) (crd-json-equal-p (gethash key item) (gethash key candidate))) keys)))
+                old-items)))
+
+(defun crd-validate-value (value schema path &optional (depth 0) old has-old)
+  "Enforce schema constraints on an already defaulted/pruned JSON value.
+With an OLD value, whatever an update left unchanged at a correlated path keeps
+passing even if the schema has since tightened, as upstream's ratcheting does."
   (when (> depth 64) (crd-schema-error path "resource nesting exceeds 64"))
+  (when (and has-old (crd-json-equal-p value old)) (return-from crd-validate-value value))
   (when (eq value 'null)
     (unless (gethash "nullable" schema) (crd-schema-error path "null is not allowed"))
     (return-from crd-validate-value value))
@@ -187,12 +198,20 @@
                        (> (hash-table-count value) (gethash bound schema)))) (crd-schema-error path "violates ~A" bound)))
       (maphash (lambda (key child)
                  (let ((sub (or (and properties (gethash key properties)) (and (hash-table-p additional) additional))))
-                   (when sub (crd-validate-value child sub (format nil "~A.~A" path key) (1+ depth))))) value)))
+                   (when sub
+                     (multiple-value-bind (old-child present)
+                         (if (and has-old (hash-table-p old)) (gethash key old) (values nil nil))
+                       (crd-validate-value child sub (format nil "~A.~A" path key) (1+ depth) old-child present))))) value)))
   (when (crd-array-p value)
     (when (and (gethash "minItems" schema) (< (length value) (gethash "minItems" schema))) (crd-schema-error path "below minItems"))
     (when (and (gethash "maxItems" schema) (> (length value) (gethash "maxItems" schema))) (crd-schema-error path "above maxItems"))
     (loop for child across value for index from 0
-          do (when (gethash "items" schema) (crd-validate-value child (gethash "items" schema) (format nil "~A[~D]" path index) (1+ depth))))
+          do (when (gethash "items" schema)
+               ;; Only map list entries correlate with the old list, by their keys.
+               (let ((old-child (and has-old (crd-array-p old) (equal "map" (gethash "x-kubernetes-list-type" schema))
+                                     (crd-map-list-entry old (coerce (gethash "x-kubernetes-list-map-keys" schema #()) 'list) child))))
+                 (crd-validate-value child (gethash "items" schema) (format nil "~A[~D]" path index) (1+ depth)
+                                     old-child (and old-child t)))))
     (let ((keys (gethash "x-kubernetes-list-map-keys" schema)) (seen nil))
       (loop for child across value
             for identity = (if keys

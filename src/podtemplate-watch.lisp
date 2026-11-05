@@ -49,7 +49,8 @@
                                      (bookmark-api-version (and (null page-reader) (core-resource-api-version resource))))
   "Serve a real Kubernetes JSON watch stream for a resource collection.
 PAGE-READER and EVENT-READER replace the durable journal for separately stored resources."
-  (let* ((rv-text (or (hunchentoot:parameter "resourceVersion") ""))
+  (let* ((*table-send-columns* t)
+         (rv-text (or (hunchentoot:parameter "resourceVersion") ""))
          (initial (or (member rv-text '("" "0") :test #'equal) (true-parameter-p (hunchentoot:parameter "sendInitialEvents"))))
          (labels (or (hunchentoot:parameter "labelSelector") ""))
          (fields (or (hunchentoot:parameter "fieldSelector") ""))
@@ -77,8 +78,12 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
            (deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second)))
            (last-bookmark (get-internal-real-time)))
       (labels ((emit (event)
-                 (write-sequence (trivial-utf-8:string-to-utf-8-bytes
-                                  (concatenate 'string (com.inuoe.jzon:stringify (crd-api-view (event-api-view event))) (string #\Newline))) out)
+                 (let ((view (crd-api-view (event-api-view event))))
+                   (when (and *table-request* (not (equal "BOOKMARK" (gethash "type" view))) (not (equal "ERROR" (gethash "type" view))))
+                     (setf (gethash "object" view) (table-representation (gethash "object" view))
+                           *table-send-columns* nil))
+                   (write-sequence (trivial-utf-8:string-to-utf-8-bytes
+                                    (concatenate 'string (com.inuoe.jzon:stringify view) (string #\Newline))) out))
                  (finish-output out))
                (bookmark (&optional initial-end)
                  (let ((metadata (core-object "resourceVersion" (write-to-string revision))))

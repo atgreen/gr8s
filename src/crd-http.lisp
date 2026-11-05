@@ -116,8 +116,8 @@
                        (when (and definition (<= 1 (length rest) 3)
                                   (or (not namespace) (equal "Namespaced" (gethash "scope" (gethash "spec" definition))))
                                   (or (/= (length rest) 3)
-                                      (and (equal "status" (third rest))
-                                           (nth-value 1 (gethash "status" (gethash "subresources" (crd-version definition version) (core-object)))))))
+                                      (and (member (third rest) '("status" "scale") :test #'equal)
+                                           (nth-value 1 (gethash (third rest) (gethash "subresources" (crd-version definition version) (core-object)))))))
                          (list :resource (copy-core-object definition) version namespace (second rest) (third rest))))))))))))))
 
 (defun crd-discovery-resources (store group version)
@@ -138,10 +138,17 @@
                                                             "namespaced" (equal "Namespaced" (gethash "scope" spec)) "kind" (gethash "kind" names)
                                                             "verbs" #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch"))))
                                  (dolist (field '("shortNames" "categories")) (when (gethash field names) (setf (gethash field resource) (copy-core-object (gethash field names)))))
-                                 (cons resource (when (nth-value 1 (gethash "status" (gethash "subresources" entry (core-object))))
-                                                  (list (core-object "name" (concatenate 'string (gethash "plural" names) "/status")
-                                                                     "namespaced" (equal "Namespaced" (gethash "scope" spec)) "kind" (gethash "kind" names)
-                                                                     "verbs" #("get" "patch" "update"))))))) 'vector))))
+                                 (cons resource
+                                       (append
+                                        (when (nth-value 1 (gethash "status" (gethash "subresources" entry (core-object))))
+                                          (list (core-object "name" (concatenate 'string (gethash "plural" names) "/status")
+                                                             "namespaced" (equal "Namespaced" (gethash "scope" spec)) "kind" (gethash "kind" names)
+                                                             "verbs" #("get" "patch" "update"))))
+                                        (when (nth-value 1 (gethash "scale" (gethash "subresources" entry (core-object))))
+                                          (list (core-object "name" (concatenate 'string (gethash "plural" names) "/scale")
+                                                             "namespaced" (equal "Namespaced" (gethash "scope" spec)) "kind" "Scale"
+                                                             "group" "autoscaling" "version" "v1"
+                                                             "verbs" #("get" "patch" "update")))))))) 'vector))))
 
 (defun crd-json-duplicate-fields (text)
   "Find repeated decoded keys without conflating equal keys in different objects."
@@ -215,6 +222,93 @@
                                      :dry-run (core-resource-dry-run-p)))))
           (t (core-resource-error 405 "MethodNotAllowed" "Unsupported custom status method")))))
 
+(defun crd-json-path-parts (path)
+  "Split a simple JSONPath into its field names."
+  (mapcar (lambda (match) (string-trim ".[]'" match))
+          (cl-ppcre:all-matches-as-strings "\\.[A-Za-z0-9_-]+|\\['[^']+'\\]" path)))
+
+(defun crd-read-json-path (object path)
+  "Read a simple JSONPath from OBJECT, giving NIL when any part is absent."
+  (let ((value object))
+    (dolist (part (crd-json-path-parts path) value)
+      (setf value (and (hash-table-p value) (gethash part value))))))
+
+(defun crd-write-json-path (object path value)
+  "Write VALUE at a simple JSONPath in OBJECT, creating the objects along the way."
+  (let ((parts (crd-json-path-parts path)) (node object))
+    (loop for (part . more) on parts
+          do (if more
+                 (let ((next (gethash part node)))
+                   (unless (hash-table-p next)
+                     (setf next (core-object) (gethash part node) next))
+                   (setf node next))
+                 (setf (gethash part node) value)))
+    object))
+
+(defun crd-scale-view (object definition)
+  "Build the autoscaling/v1 Scale of a custom OBJECT from its version's scale paths."
+  (let* ((scale (gethash "scale" (gethash "subresources" (crd-version definition *crd-request-version*))))
+         (selector (and (gethash "labelSelectorPath" scale)
+                        (crd-read-json-path object (gethash "labelSelectorPath" scale))))
+         (replicas (crd-read-json-path object (gethash "specReplicasPath" scale)))
+         (status-replicas (crd-read-json-path object (gethash "statusReplicasPath" scale)))
+         (metadata (gethash "metadata" object))
+         (status (core-object "replicas" (if (integerp status-replicas) status-replicas 0))))
+    (when (stringp selector) (setf (gethash "selector" status) selector))
+    (core-object "apiVersion" "autoscaling/v1" "kind" "Scale"
+                 "metadata" (core-object "name" (gethash "name" metadata) "namespace" (gethash "namespace" metadata)
+                                         "uid" (gethash "uid" metadata) "resourceVersion" (gethash "resourceVersion" metadata)
+                                         "creationTimestamp" (gethash "creationTimestamp" metadata))
+                 "spec" (core-object "replicas" (if (integerp replicas) replicas 0))
+                 "status" status)))
+
+(defun dispatch-crd-scale (store resource namespace name method)
+  "Read and write replicas through the scale subresource with its optimistic metadata."
+  (let* ((definition *crd-view-definition*)
+         (scale (gethash "scale" (gethash "subresources" (crd-version definition *crd-request-version*))))
+         (current (crd-api-view (get-core-resource store resource namespace name)))
+         (view (crd-scale-view current definition))
+         (dry-run (core-resource-dry-run-p)))
+    (flet ((scale-response (object)
+             (let ((*crd-view-definition* nil))
+               (json-response object))))
+      (ecase method
+        (:get (scale-response view))
+        ((:put :patch)
+         (let* ((text (hunchentoot:raw-post-data :force-text t))
+                (type (request-media-type))
+                (input (if (eq method :put)
+                           (require-object (com.inuoe.jzon:parse text) "Scale")
+                           (let ((patch (com.inuoe.jzon:parse text)))
+                             (cond ((equal type "application/merge-patch+json") (merge-json-object (copy-core-object view) patch))
+                                   ((equal type "application/json-patch+json") (apply-core-json-patch (copy-core-object view) patch))
+                                   (t (core-resource-error 415 "UnsupportedMediaType" "Scale supports JSON and merge patches")))))))
+           (unless (and (equal "Scale" (gethash "kind" input "Scale")) (hash-table-p (gethash "spec" input)))
+             (core-resource-error 400 "BadRequest" "Expected an autoscaling/v1 Scale"))
+           (let ((replicas (gethash "replicas" (gethash "spec" input)))
+                 (expected (let ((metadata (gethash "metadata" input)))
+                             (and (hash-table-p metadata) (gethash "resourceVersion" metadata))))
+                 (uid (let ((metadata (gethash "metadata" input)))
+                        (and (hash-table-p metadata) (gethash "uid" metadata)))))
+             (unless (typep replicas '(integer 0 *))
+               (crd-schema-error "spec.replicas" "must be greater than or equal to 0"))
+             (let* ((input (admit-subresource-write store resource "scale" namespace name input view
+                                                    :kind "Scale" :kind-api-version "autoscaling/v1" :dry-run dry-run))
+                    (replicas (let ((spec (gethash "spec" input))) (if (hash-table-p spec) (gethash "replicas" spec replicas) replicas)))
+                    (updated
+                      (update-core-resource
+                       store resource namespace name
+                       (lambda (old)
+                         (when (and (stringp expected) (plusp (length expected))
+                                    (not (equal expected (gethash "resourceVersion" (gethash "metadata" old)))))
+                           (core-resource-error 409 "Conflict" "The resource was modified; apply your changes to the latest version"))
+                         (when (and (stringp uid) (plusp (length uid))
+                                    (not (equal uid (gethash "uid" (gethash "metadata" old)))))
+                           (core-resource-error 409 "Conflict" "metadata.uid does not match the stored object"))
+                         (crd-write-json-path old (gethash "specReplicasPath" scale) replicas))
+                       :dry-run dry-run)))
+               (scale-response (crd-scale-view (crd-api-view updated) definition))))))))))
+
 (defun dispatch-crd-request (store path method)
   "Handle one real served route using a store-scoped descriptor and version context."
   (let ((route (crd-special-route store path)))
@@ -241,6 +335,7 @@
            (when (and namespace (not (dns-label-p namespace))) (core-resource-error 400 "BadRequest" "Invalid namespace"))
            (when (and name (not (dns-subdomain-p name))) (core-resource-error 400 "BadRequest" "Invalid name"))
            (cond
+             ((equal subresource "scale") (dispatch-crd-scale store resource namespace name method))
              (subresource (dispatch-crd-status store resource namespace name method))
              ((and (eq method :patch) (equal "application/strategic-merge-patch+json" (hunchentoot:header-in* :content-type)))
               (core-resource-error 415 "UnsupportedMediaType" "Custom resources do not support strategic merge"))

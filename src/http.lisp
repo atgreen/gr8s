@@ -11,7 +11,7 @@
         ;; client-go v0.27 discovery compares this media type literally. JSON
         ;; is UTF-8 already; a charset parameter breaks its legacy fallback.
         (hunchentoot:content-type*) "application/json")
-  (com.inuoe.jzon:stringify (crd-api-view (event-api-view object))))
+  (com.inuoe.jzon:stringify (table-representation (crd-api-view (event-api-view object)))))
 
 (defun status-response (status reason message code &optional details)
   "Answer a Kubernetes Status, with DETAILS such as the causes clients inspect when given."
@@ -1162,21 +1162,13 @@ than wait for the next, which truncates any body that spans records in flight."
         for parts = (mapcar (lambda (part) (string-trim " " part)) (uiop:split-string range :separator '(#\;)))
         when (plusp (length (first parts))) collect parts))
 
-(defun require-representable-accept ()
-  "Answer 406 when a client accepts only the Table form no backend here can produce.
-Clients that can read an object as well say so with a further media range."
-  (let ((ranges (accept-media-ranges)))
-    (when (and ranges (every (lambda (parts) (member "as=Table" (rest parts) :test #'string=)) ranges))
-      (core-resource-error 406 "NotAcceptable"
-                           "only the following media types are accepted: application/json, application/vnd.kubernetes.protobuf"))))
-
 (defun handle-http-request (store runtime reconciler request)
   (handler-case
       (let ((path (progn (read-request-body request) (request-route-path (hunchentoot:script-name request))))
             (method (hunchentoot:request-method request))
             (*crd-field-validation* (crd-request-field-validation)))
-        (require-representable-accept)
-        (route-http-request store runtime reconciler path method))
+        (multiple-value-bind (*table-request* *table-api-version*) (negotiate-table-request)
+          (route-http-request store runtime reconciler path method)))
     (kubernetes-error (error)
       (kubernetes-error-response error))
     (com.inuoe.jzon:json-parse-error (error)
