@@ -54,16 +54,15 @@
             (unless (and optional (= 404 (kubernetes-error-status-code condition))) (error condition))))))
     (remove-duplicates (append result (pod-persistent-resource-objects store pod)) :test #'equalp)))
 
-(defun install-assigned-resource-objects (store assignments &optional service-discovery)
-  "Atomically install Pod-scoped references, exact PVC/PV bindings and public Service discovery."
-  (let ((resources (make-hash-table :test #'equal)))
-    (dolist (assignment assignments)
-      (let* ((pod (assignment-pod assignment))
-             (projected (mapcar (lambda (bytes)
-                                  (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string bytes)
-                                                       :max-string-length (* 2 1024 1024)))
-                                (slot-value assignment 'gr8s.node.v1::resource-objects-json))))
-        (dolist (object projected)
+(defun assignment-resource-objects (assignment)
+  "Return ASSIGNMENT's validated objects as (KEY . OBJECT), or signal if any is not acceptable."
+  (let* ((pod (assignment-pod assignment))
+         (projected (mapcar (lambda (bytes)
+                              (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string bytes)
+                                                   :max-string-length (* 2 1024 1024)))
+                            (slot-value assignment 'gr8s.node.v1::resource-objects-json))))
+    (loop for object in projected
+          collect
           (let* ((metadata (require-object (gethash "metadata" object) "metadata"))
                  (namespace (gethash "namespace" metadata)) (name (gethash "name" metadata))
                  (resource (cond ((equal "ConfigMap" (gethash "kind" object)) "configmaps")
@@ -80,8 +79,23 @@
             ;; This status came from the authenticated control plane, rather than
             ;; an API create request. Preserve its real binding observation.
             (let ((*storage-status-write* (not (null (storage-resource-p resource)))))
-              (setf (gethash (core-resource-key resource namespace name) resources)
+              (cons (core-resource-key resource namespace name)
                     (normalize-core-resource resource object namespace name)))))))
+
+(defun install-assigned-resource-objects (store assignments &optional service-discovery)
+  "Atomically install Pod-scoped references, exact PVC/PV bindings and public Service discovery."
+  (let ((resources (make-hash-table :test #'equal)))
+    (dolist (assignment assignments)
+      ;; Every snapshot carries every Pod, so failing the whole of it would stop
+      ;; all Pods on this node. One Pod's bad object delays only that Pod, whose
+      ;; volumes then report the missing resource.
+      (handler-case
+          (loop for (key . object) in (assignment-resource-objects assignment)
+                do (setf (gethash key resources) object))
+        (kubernetes-error (condition)
+          (format *error-output* "gr8s Pod ~A/~A assignment rejected: ~A~%"
+                  (slot-value assignment 'gr8s.node.v1::namespace)
+                  (slot-value assignment 'gr8s.node.v1::name) condition))))
     (install-service-discovery-projection resources service-discovery)
     (with-store-lock (store)
       (unless (equalp resources (pod-store-resources store))
