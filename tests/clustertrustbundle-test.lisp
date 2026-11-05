@@ -45,3 +45,55 @@ MIIBtest
       (is (not (null entry)))
       (is (null (gethash "namespaced" entry)))
       (is (string= "ClusterTrustBundle" (gethash "kind" entry))))))
+
+(defun ctb-object (name signer &optional live)
+  (let ((metadata (gr8s::core-object "name" name)))
+    (when live (setf (gethash "labels" metadata) (gr8s::core-object "canarying" "live")))
+    (gr8s::core-object "apiVersion" "certificates.k8s.io/v1beta1" "kind" "ClusterTrustBundle"
+                       "metadata" metadata
+                       "spec" (gr8s::core-object "signerName" signer "trustBundle" (format nil "PEM-~A~%" name)))))
+
+(defun ctb-source-pem (store source)
+  (trivial-utf-8:utf-8-bytes-to-string
+   (second (first (gr8s::cluster-trust-bundle-volume-files store source #o644)))))
+
+(test clustertrustbundle-projected-source-validates-and-resolves
+  ;; Validation: a clusterTrustBundle projected source needs a path and exactly
+  ;; one of name / signerName.
+  (finishes
+    (gr8s::validate-projected-source
+     (gr8s::core-object "sources"
+                        (vector (gr8s::core-object "clusterTrustBundle"
+                                                   (gr8s::core-object "path" "roots.pem" "signerName" "s"))))))
+  (signals gr8s:kubernetes-error
+    (gr8s::validate-projected-source
+     (gr8s::core-object "sources"
+                        (vector (gr8s::core-object "clusterTrustBundle"
+                                                   (gr8s::core-object "signerName" "s")))))) ; no path
+  (signals gr8s:kubernetes-error
+    (gr8s::validate-projected-source
+     (gr8s::core-object "sources"
+                        (vector (gr8s::core-object "clusterTrustBundle"
+                                                   (gr8s::core-object "path" "r.pem" "name" "a" "signerName" "s")))))) ; both
+  ;; Resolution against the store: name, signerName (concatenated), label-narrowed.
+  (with-temporary-store (store directory)
+    (gr8s::create-core-resource store "clustertrustbundles" (ctb-object "roots-a" "sds/identity" t) nil)
+    (gr8s::create-core-resource store "clustertrustbundles" (ctb-object "roots-b" "sds/identity" nil) nil)
+    (is (string= (format nil "PEM-roots-a~%")
+                 (ctb-source-pem store (gr8s::core-object "path" "b.pem" "name" "roots-a"))))
+    (is (string= (format nil "PEM-roots-a~%PEM-roots-b~%")
+                 (ctb-source-pem store (gr8s::core-object "path" "b.pem" "signerName" "sds/identity"))))
+    (is (string= (format nil "PEM-roots-a~%")
+                 (ctb-source-pem store (gr8s::core-object "path" "b.pem" "signerName" "sds/identity"
+                                                          "labelSelector" (gr8s::core-object
+                                                                           "matchLabels" (gr8s::core-object "canarying" "live"))))))
+    ;; A missing named bundle fails unless optional.
+    (signals gr8s:kubernetes-error
+      (gr8s::cluster-trust-bundle-volume-files store (gr8s::core-object "path" "b.pem" "name" "absent") #o644))
+    (is (string= "" (ctb-source-pem store (gr8s::core-object "path" "b.pem" "name" "absent" "optional" t))))
+    ;; Projected to the node via the service-discovery snapshot.
+    (let ((resources (make-hash-table :test #'equal)))
+      (gr8s::install-service-discovery-projection
+       resources (slot-value (gr8s::node-desired-state-snapshot store "n1")
+                             'gr8s.node.v1::service-discovery-objects-json))
+      (is (not (null (gethash (gr8s::core-resource-key "clustertrustbundles" nil "roots-a") resources)))))))

@@ -109,6 +109,45 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
           when bytes
             collect (list (gethash "path" item) bytes (gethash "mode" item default-mode)))))
 
+(defun cluster-trust-bundle-matches-p (bundle signer selector)
+  "True when BUNDLE has SIGNER and satisfies SELECTOR's matchLabels (if any)."
+  (and (equal signer (gethash "signerName" (gethash "spec" bundle (core-object))))
+       (let ((match (and selector (gethash "matchLabels" selector))))
+         (or (null match)
+             (let ((labels (gethash "labels" (gethash "metadata" bundle) (core-object))))
+               (loop for key being the hash-keys of match using (hash-value value)
+                     always (equal value (gethash key labels))))))))
+
+(defun cluster-trust-bundle-volume-files (store source default-mode)
+  "Resolve a clusterTrustBundle projected SOURCE against STORE's projected
+   ClusterTrustBundles and return a single (path PEM-bytes mode) entry. Selects
+   by name, or by signerName (optionally narrowed by labelSelector), with the
+   matching bundles' PEMs concatenated in stable name order (KEP-4317)."
+  (let* ((path (gethash "path" source))
+         (name (gethash "name" source))
+         (signer (gethash "signerName" source))
+         (selector (gethash "labelSelector" source))
+         (optional (eq t (gethash "optional" source)))
+         (bundles
+           (if name
+               (let ((bundle (ignore-errors (get-core-resource store "clustertrustbundles" nil name))))
+                 (cond (bundle (list bundle))
+                       (optional nil)
+                       (t (invalid-pod "clusterTrustBundle ~A not found" name))))
+               (sort (remove-if-not (lambda (bundle)
+                                      (cluster-trust-bundle-matches-p bundle signer selector))
+                                    (list-core-resources store "clustertrustbundles"))
+                     #'string< :key (lambda (bundle) (gethash "name" (gethash "metadata" bundle)))))))
+    (when (and (not name) (null bundles) (not optional))
+      (invalid-pod "no ClusterTrustBundle matches signerName ~A" signer))
+    (let ((pem (with-output-to-string (out)
+                 (dolist (bundle bundles)
+                   (let ((trust (gethash "trustBundle" (gethash "spec" bundle (core-object)))))
+                     (when (and (stringp trust) (plusp (length trust)))
+                       (write-string trust out)
+                       (unless (uiop:string-suffix-p trust (string #\Newline)) (terpri out))))))))
+      (list (list path (trivial-utf-8:string-to-utf-8-bytes pem) default-mode)))))
+
 (defun pod-volume-desired-files (runtime pod volume)
   "Return VOLUME's (path bytes mode) entries and whether it is a projection at all."
   (let ((mode (lambda (source) (gethash "defaultMode" source #o644))))
@@ -139,7 +178,11 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
                           (downward-volume-files pod (gethash "items" (gethash "downwardAPI" source) #())
                                                  default-mode))
                          ((gethash "serviceAccountToken" source)
-                          (projected-token-volume-files runtime pod (gethash "serviceAccountToken" source) default-mode))))
+                          (projected-token-volume-files runtime pod (gethash "serviceAccountToken" source) default-mode))
+                         ((gethash "clusterTrustBundle" source)
+                          (cluster-trust-bundle-volume-files
+                           (containerd-runtime-resource-store runtime)
+                           (gethash "clusterTrustBundle" source) default-mode))))
           t)))
       (t (values nil nil)))))
 

@@ -292,7 +292,8 @@
   (let ((paths nil))
     (loop for source across (optional-vector projected "sources" "projected")
           do (drop-null-fields source)
-             (reject-unsupported-fields source '("configMap" "secret" "downwardAPI" "serviceAccountToken") "projected source")
+             (reject-unsupported-fields source '("configMap" "secret" "downwardAPI" "serviceAccountToken"
+                                                 "clusterTrustBundle") "projected source")
              (unless (= 1 (hash-table-count source))
                (invalid-pod "projected source requires exactly one kind"))
              (let ((part (or (gethash "configMap" source) (gethash "secret" source))))
@@ -311,6 +312,25 @@
                  (when (member (gethash "path" part) paths :test #'equal)
                    (invalid-pod "projected volume has conflicting path ~S" (gethash "path" part)))
                  (push (gethash "path" part) paths)))
+             (let ((part (gethash "clusterTrustBundle" source)))
+               (when part
+                 (drop-null-fields (require-object part "clusterTrustBundle"))
+                 (reject-unsupported-fields part '("path" "name" "signerName" "labelSelector" "optional")
+                                            "clusterTrustBundle")
+                 (let ((path (gethash "path" part))
+                       (name (gethash "name" part))
+                       (signer (gethash "signerName" part)))
+                   (unless (and (stringp path) (plusp (length path)))
+                     (invalid-pod "clusterTrustBundle projection requires a path"))
+                   ;; Exactly one selector: a concrete name, or a signerName
+                   ;; (optionally narrowed by labelSelector).
+                   (unless (if name (not signer) signer)
+                     (invalid-pod "clusterTrustBundle requires exactly one of name or signerName"))
+                   (when (and name (gethash "labelSelector" part))
+                     (invalid-pod "clusterTrustBundle labelSelector applies only with signerName"))
+                   (when (member path paths :test #'equal)
+                     (invalid-pod "projected volume has conflicting path ~S" path))
+                   (push path paths))))
              (let ((part (or (gethash "configMap" source) (gethash "secret" source) (gethash "downwardAPI" source))))
                (when part
                  (loop for item across (gethash "items" part #())
