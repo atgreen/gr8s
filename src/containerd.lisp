@@ -261,6 +261,16 @@ A container running as any user can write here, and a user mount at the path tak
                      (not (zerop (cri-container-info-exit-code info))))
             (read-termination-log-tail (cri-container-info-log-path info)))))))
 
+(defun containerd-ephemeral-target-id (runtime pod spec)
+  "Return the runtime ID of the container whose PID namespace SPEC targets, if it targets one."
+  (let ((target (gethash "targetContainerName" (pod-runtime-container-object pod spec))))
+    (when target
+      (let ((container (containerd-owned-container runtime (pod-uid pod) target)))
+        (unless container
+          (error 'runtime-error
+                 :message (format nil "Target container ~A is not running" target)))
+        (cri-container-summary-id container)))))
+
 (defun containerd-create-container (runtime pod sandbox-id sandbox-config spec &key (attempt 0))
   (let ((socket (containerd-runtime-socket-path runtime)))
     (let ((policy (gethash "imagePullPolicy" (pod-runtime-container-object pod spec)
@@ -270,7 +280,8 @@ A container running as any user can write here, and a user mount at the path tak
       (ensure-container-image runtime (container-spec-image spec) policy))
     (let* ((environment (containerd-pod-environment runtime pod spec sandbox-id))
            (mounts (containerd-container-mounts runtime pod spec sandbox-id environment))
-           (security (containerd-pod-security-context pod spec))
+           (security (containerd-pod-security-context
+                      pod spec :target-id (containerd-ephemeral-target-id runtime pod spec)))
            (termination (containerd-termination-file runtime pod spec attempt mounts))
            (termination-labels
              (when termination
@@ -414,6 +425,18 @@ A container running as any user can write here, and a user mount at the path tak
         (cri-container-summary-id container)
         command
         :stdin stdin :stdout stdout :stderr stderr :tty tty)))))
+
+(defmethod runtime-attach-url
+    ((runtime containerd-runtime) uid container-name &key stdin stdout stderr tty)
+  (call-containerd-runtime
+   (lambda ()
+     (let ((container (containerd-owned-container runtime uid container-name)))
+       (unless container
+         (error 'runtime-error
+                :message (format nil "Container ~A is not owned by gr8s" container-name)))
+       (cri-attach-url (containerd-runtime-socket-path runtime)
+                       (cri-container-summary-id container)
+                       :stdin stdin :stdout stdout :stderr stderr :tty tty)))))
 
 (defmethod runtime-exec-sync
     ((runtime containerd-runtime) uid container-name command &key (timeout 30))

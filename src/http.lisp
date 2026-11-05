@@ -842,6 +842,16 @@ its clients treat any other multi-byte frame as an error message."
         (t (trivial-utf-8:string-to-utf-8-bytes
             (format nil "command terminated with exit code ~D" exit-code)))))
 
+(defun exec-failure-frame-bytes (message)
+  "Return the status channel's payload for a stream that could not be served, with MESSAGE."
+  (format *error-output* "gr8s Pod stream failed: ~A~%" message)
+  (trivial-utf-8:string-to-utf-8-bytes
+   (if (equal "channel.k8s.io" (requested-kubernetes-websocket-protocol))
+       message
+       (com.inuoe.jzon:stringify
+        (json-object "apiVersion" "v1" "kind" "Status" "status" "Failure" "message" message
+                     "reason" "InternalError" "code" 500)))))
+
 (defun serve-runtime-exec-sync (result stdout-p stderr-p)
   (let ((key (hunchentoot:header-in* :sec-websocket-key))
         (protocol (requested-kubernetes-websocket-protocol)))
@@ -961,14 +971,22 @@ its clients treat any other multi-byte frame as an error message."
     (#.gr8s.node.v1::+streamchannel-stream_channel_stdout+ 1)
     (#.gr8s.node.v1::+streamchannel-stream_channel_stderr+ 2)))
 
-(defun serve-agent-exec-session (reconciler uid container options)
+(defun serve-agent-exec-session (reconciler uid container options &key attach)
+  "Bridge the client's WebSocket to a node exec, or with ATTACH to the container's own process."
   (let* ((session
-           (reconciler-start-exec-session
-            reconciler uid container (exec-options-command options)
-            :stdin (exec-options-stdin options)
-            :stdout (exec-options-stdout options)
-            :stderr (exec-options-stderr options)
-            :tty (exec-options-tty options)))
+           (if attach
+               (reconciler-start-attach-session
+                reconciler uid container
+                :stdin (exec-options-stdin options)
+                :stdout (exec-options-stdout options)
+                :stderr (exec-options-stderr options)
+                :tty (exec-options-tty options))
+               (reconciler-start-exec-session
+                reconciler uid container (exec-options-command options)
+                :stdin (exec-options-stdin options)
+                :stdout (exec-options-stdout options)
+                :stderr (exec-options-stderr options)
+                :tty (exec-options-tty options))))
          (client (begin-kubernetes-websocket))
          (write-lock (bt:make-lock "gr8s kubectl exec websocket writer"))
          (finished-lock (bt:make-lock "gr8s kubectl exec finished"))
@@ -1003,11 +1021,14 @@ its clients treat any other multi-byte frame as an error message."
                         (when done-p
                           (setf completed-p t)
                           (loop-finish))))
-             (let ((exit-code
-                     (reconciler-exec-session-exit-code reconciler session)))
-               (bt:with-lock-held (write-lock)
-                 (let ((status (exec-status-frame-bytes exit-code)))
-                   (when status (write-kubernetes-channel-frame client 3 status)))))
+             ;; A failure on the node reaches the client as its message, not as a dropped connection.
+             (let ((status (handler-case
+                               (exec-status-frame-bytes (reconciler-exec-session-exit-code reconciler session))
+                             (runtime-error (condition)
+                               (exec-failure-frame-bytes (runtime-error-message condition))))))
+               (when status
+                 (bt:with-lock-held (write-lock)
+                   (write-kubernetes-channel-frame client 3 status))))
              (mark-finished)
              (bt:with-lock-held (write-lock)
                (write-websocket-frame
@@ -1065,6 +1086,38 @@ its clients treat any other multi-byte frame as an error message."
               :stderr (exec-options-stderr options)
               :tty (exec-options-tty options)))))))
 
+(defun attach-container-tty-p (pod container)
+  "Return the TTY the container was created with, which an attach cannot change."
+  (let ((spec (find container (pod-all-containers pod) :key #'container-spec-name :test #'string=)))
+    (and (gethash "tty" (pod-runtime-container-object pod spec)) t)))
+
+(defun pod-attach-response (store reconciler name &optional (namespace "default"))
+  "Offer a Pod attach to the webhooks, then stream the container's own process."
+  (let* ((pod (get-pod store namespace name))
+         (options (exec-options-from-parameters (hunchentoot:get-parameters*)))
+         (container (or (exec-options-container options)
+                        (container-spec-name (aref (pod-containers pod) 0)))))
+    (admit-pod-attach store namespace name options)
+    (unless (upgrade-request-p)
+      (bad-exec-request "Pod attach requires an upgraded connection"))
+    (unless (or (exec-options-stdin options) (exec-options-stdout options) (exec-options-stderr options))
+      (bad-exec-request "you must specify at least one of stdin, stdout, stderr"))
+    (unless (find container (pod-all-containers pod) :key #'container-spec-name :test #'string=)
+      (bad-exec-request (format nil "container ~A is not valid for pod ~A" container name)))
+    ;; A terminal merges stderr into stdout, and containerd refuses both together.
+    (let ((tty (attach-container-tty-p pod container)))
+      (setf (exec-options-tty options) tty)
+      (when tty (setf (exec-options-stderr options) nil)))
+    (if (typep (reconciler-runtime reconciler) 'control-plane-runtime)
+        (serve-agent-exec-session reconciler (pod-uid pod) container options :attach t)
+        (proxy-runtime-stream
+         (reconciler-attach-url
+          reconciler (pod-uid pod) container
+          :stdin (exec-options-stdin options)
+          :stdout (exec-options-stdout options)
+          :stderr (exec-options-stderr options)
+          :tty (exec-options-tty options))))))
+
 (defun pod-route-parts (path)
   "Return Pod subresource parts, namespace, and a route match indicator."
   (let ((parts (uiop:split-string path :separator '(#\/))))
@@ -1112,7 +1165,7 @@ its clients treat any other multi-byte frame as an error message."
       ((and (= 2 (length parts)) (string= "eviction" (second parts)) (eq method :post))
        (pod-eviction-response store reconciler (first parts) namespace))
       ((and (= 2 (length parts)) (string= "attach" (second parts)) (member method '(:get :post)))
-       (pod-attach-response store (first parts) namespace))
+       (pod-attach-response store reconciler (first parts) namespace))
       (t (status-response "Failure" "NotFound"
                           (format nil "No route for ~A ~A" method path) 404)))))
 

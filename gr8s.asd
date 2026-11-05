@@ -146,6 +146,7 @@
                              (:file "nfs-volumes")
                              (:file "csi-node")
                              (:file "telemetry")
+                             (:file "spdy-client")
                              (:file "agent-runtime")
                              (:file "pod-pool")
                              (:file "pod-http-proxy")

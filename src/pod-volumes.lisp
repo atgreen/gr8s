@@ -496,8 +496,9 @@ A literal value may refer to any variable defined before it, as $(NAME)."
           :selinux-options (cri-selinux-options context)
           :supplemental-groups (pod-supplemental-groups pod))))
 
-(defun containerd-pod-security-context (pod container)
-  "Map effective Pod/container Linux identities, confinement and privileges to the CRI API."
+(defun containerd-pod-security-context (pod container &key target-id)
+  "Map effective Pod/container Linux identities, confinement and privileges to the CRI API.
+TARGET-ID names the running container whose PID namespace an ephemeral container joins."
   (let* ((pod-context (gethash "securityContext" (gethash "spec" (pod-to-object pod))))
          (container-context (gethash "securityContext" (pod-runtime-container-object pod container)))
          (effective (core-object)))
@@ -514,12 +515,15 @@ A literal value may refer to any variable defined before it, as $(NAME)."
        :supplemental-groups (pod-supplemental-groups pod)
        :seccomp (cri-seccomp-profile effective)
        :selinux-options (cri-selinux-options effective)
-       :namespace-options (when (or (pod-spec-flag-p pod "hostPID") (pod-spec-flag-p pod "hostIPC"))
-                            (make-instance
-                             'gr8s.cri.v1::namespace-option
-                             :pid (if (pod-spec-flag-p pod "hostPID") gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
-                             :ipc (if (pod-spec-flag-p pod "hostIPC") gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
-                             :network (if (pod-host-network-p pod) gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)))
+       :namespace-options (make-instance
+                           'gr8s.cri.v1::namespace-option
+                           :pid (if (and target-id (= (pod-pid-namespace-mode pod)
+                                                      gr8s.cri.v1::+namespacemode-container+))
+                                    gr8s.cri.v1::+namespacemode-target+
+                                    (pod-pid-namespace-mode pod))
+                           :target-id (or target-id "")
+                           :ipc (if (pod-spec-flag-p pod "hostIPC") gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
+                           :network (if (pod-host-network-p pod) gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+))
        :capabilities (let ((capabilities (gethash "capabilities" effective)))
                        (when capabilities
                          (make-instance 'gr8s.cri.v1::capability

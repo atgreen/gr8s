@@ -161,17 +161,14 @@ A client's own stale resourceVersion still fails, in the preview of the next att
                               "container" (or (exec-options-container options) "")
                               "command" (coerce (exec-options-command options) 'vector))))
 
-(defun pod-attach-response (store name namespace)
-  "Offer a Pod attach to the webhooks, then refuse it because the runtime cannot attach."
-  (let ((options (exec-options-from-parameters (hunchentoot:get-parameters*))))
-    (get-pod store namespace name)
-    (admit-connect store "attach" namespace name "PodAttachOptions"
-                   (core-object "stdin" (and (exec-options-stdin options) t)
-                                "stdout" (and (exec-options-stdout options) t)
-                                "stderr" (and (exec-options-stderr options) t)
-                                "tty" (and (exec-options-tty options) t)
-                                "container" (or (exec-options-container options) "")))
-    (core-resource-error 501 "NotImplemented" "Pod attach is not implemented")))
+(defun admit-pod-attach (store namespace name options)
+  "Offer a Pod attach with its PodAttachOptions to the webhooks."
+  (admit-connect store "attach" namespace name "PodAttachOptions"
+                 (core-object "stdin" (and (exec-options-stdin options) t)
+                              "stdout" (and (exec-options-stdout options) t)
+                              "stderr" (and (exec-options-stderr options) t)
+                              "tty" (and (exec-options-tty options) t)
+                              "container" (or (exec-options-container options) ""))))
 
 (defun admit-pod-proxy (store namespace id)
   "Offer a Pod proxy connection with its PodProxyOptions to the webhooks."
