@@ -641,3 +641,37 @@
       (is (equal "foo-value;;bar-value" (value "FOOBAR")))
       (is (equal "$(LATER)" (value "EARLY")) "only earlier variables are known")
       (is (equal "$(FOO)" (value "ESCAPED"))))))
+
+(test http-hooks-and-probes-send-their-declared-path-as-written
+  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t))
+         (port (usocket:get-local-port listener))
+         (line nil)
+         (server (bt:make-thread
+                  (lambda ()
+                    (let* ((socket (usocket:socket-accept listener)) (stream (usocket:socket-stream socket)))
+                      (setf line (read-line stream))
+                      (usocket:socket-close socket))))))
+    (unwind-protect
+         (progn
+           (ignore-errors
+            (gr8s::run-http-container-probe
+             (gr8s::core-object "path" "/dial?host=a&request=echo%3Fmsg%3Dhi" "scheme" "HTTP") "127.0.0.1" port 3))
+           (bt:join-thread server)
+           (is (search "GET /dial?host=a&request=echo%3Fmsg%3Dhi HTTP/1.1" line)))
+      (usocket:socket-close listener))))
+
+(test container-occurrences-become-node-events
+  (with-temporary-store (store directory)
+    (let* ((pod (create-pod store (parse-pod (gap-pod-object))))
+           (runtime (gr8s::make-containerd-runtime :log-root directory))
+           (name (container-spec-name (aref (gr8s::pod-containers pod) 0))))
+      (gr8s::record-container-lifecycle-event runtime (pod-uid pod) name 0 "Started" "Started container")
+      (let ((events (gr8s::runtime-events runtime (pod-uid pod))))
+        (is (= 1 (length events)))
+        (gr8s::record-node-runtime-events store pod "node" events)
+        (gr8s::record-node-runtime-events store pod "node" events))
+      (let ((stored (gr8s::list-core-resources store "events" (pod-namespace pod))))
+        (is (= 1 (length stored)) "a replayed page does not repeat the Event")
+        (is (equal "Started" (gethash "reason" (first stored))))
+        (is (equal "Normal" (gethash "type" (first stored))))
+        (is (equal (pod-uid pod) (gethash "uid" (gethash "involvedObject" (first stored)))))))))

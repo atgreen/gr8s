@@ -490,6 +490,8 @@
                   ;; An interrupted or ambiguous StartContainer must reuse the
                   ;; already created attempt instead of allocating another.
                   (cri-start-container socket (cri-container-info-id info))
+                  (record-container-lifecycle-event runtime uid name (cri-container-info-attempt info)
+                                                    "Started" (format nil "Started container ~A" name))
                   (start-container-post-start-hook runtime pod spec (cri-container-info-id info)
                                                    (cri-pod-sandbox-info-id sandbox)))
                  ((container-restart-eligible-p pod info state)
@@ -525,7 +527,9 @@
                       (gethash "lastState" status) (core-object "terminated" (copy-core-object (gethash "lastTermination" entry)))
                       (gethash "ready" status) nil (gethash "started" status) nil))
         (loop for (spec message reason) in config-errors
-              do (report-container-config-error observed spec message reason))
+              do (report-container-config-error observed spec message reason)
+                 (record-container-lifecycle-event runtime uid (container-spec-name spec) reason "Failed"
+                                                   (format nil "Error: ~A: ~A" reason message) "Warning"))
         (when (and restarting (pod-initialization-complete-p pod (runtime-pod-status observed)))
           (setf (runtime-pod-phase observed) "Running"))
         ;; An existing sandbox's creation revision may be older than a metadata

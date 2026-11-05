@@ -301,7 +301,11 @@ A container running as any user can write here, and a user mount at the path tak
              :attempt attempt
              :labels termination-labels
              :log-path (container-attempt-log-path (container-spec-name spec) attempt))))
+      (record-container-lifecycle-event runtime (pod-uid pod) (container-spec-name spec) attempt
+                                        "Created" (format nil "Created container ~A" (container-spec-name spec)))
       (cri-start-container socket container-id)
+      (record-container-lifecycle-event runtime (pod-uid pod) (container-spec-name spec) attempt
+                                        "Started" (format nil "Started container ~A" (container-spec-name spec)))
       (start-container-post-start-hook runtime pod spec container-id sandbox-id)
       container-id)))
 

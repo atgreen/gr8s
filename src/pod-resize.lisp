@@ -205,9 +205,8 @@
             ((container-resize-restart-required-p object applied desired)
              (request-container-update-restart pod state name id) (setf changed t))
             (t
-             (let ((resources (cri-linux-container-resources object)))
-               (when resources
-                 (cri-update-container-resources (containerd-runtime-socket-path runtime) id resources)))
+             (cri-update-container-resources (containerd-runtime-socket-path runtime) id
+                                             (cri-linux-container-resources object))
              (setf (gethash "appliedResources" entry) (copy-core-object desired) changed t))))))
     (when changed (save-container-lifecycle-state runtime uid state))
     changed))

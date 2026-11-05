@@ -19,6 +19,17 @@
   "Track one running postStart hook by its exact container, or a Pod's sidecar shutdown."
   uid container-id thread)
 
+(defun record-container-lifecycle-event (runtime uid name occurrence reason message &optional (type "Normal"))
+  "Queue one Event about container NAME's OCCURRENCE, sent with this Pod's next status report."
+  (let* ((manager (ensure-container-probe-manager runtime))
+         (now (current-timestamp (floor (funcall (container-probe-manager-clock manager)))))
+         (event (core-object "id" (format nil "lifecycle-~A-~A-~A" name occurrence reason)
+                             "kind" "lifecycle" "container" name "reason" reason "type" type
+                             "message" (bounded-probe-event-message message) "count" 1
+                             "firstTimestamp" now "lastTimestamp" now)))
+    (bt:with-lock-held ((container-probe-manager-lock manager))
+      (retain-container-probe-event manager uid event))))
+
 (defun validate-container-lifecycle-handler (handler context)
   "Validate one lifecycle handler: exactly one of exec, httpGet and sleep."
   (drop-null-fields (require-object handler context))
@@ -105,8 +116,9 @@
                         (multiple-value-bind (success message)
                             (run-container-hook runtime container container-id address handler)
                           (unless success
-                            (format *error-output* "gr8s FailedPostStartHook ~A/~A ~A: ~A~%"
-                                    (pod-namespace pod) (pod-name pod) (container-spec-name spec) message)
+                            (record-container-lifecycle-event
+                             runtime (pod-uid pod) (container-spec-name spec) container-id "FailedPostStartHook"
+                             (format nil "PostStartHook failed: ~A" message) "Warning")
                             (ignore-errors
                              (cri-stop-container (containerd-runtime-socket-path runtime) container-id
                                                  :grace-period grace))))
@@ -161,8 +173,9 @@
                        (multiple-value-bind (success message)
                            (run-container-hook runtime container (cri-container-info-id info) address handler)
                          (unless success
-                           (format *error-output* "gr8s FailedPreStopHook ~A/~A ~A: ~A~%" (pod-namespace pod) (pod-name pod)
-                                   (cri-container-info-name info) message))))
+                           (record-container-lifecycle-event
+                            runtime (pod-uid pod) (cri-container-info-name info) (cri-container-info-id info)
+                            "FailedPreStopHook" (format nil "PreStopHook failed: ~A" message) "Warning"))))
                      :name (format nil "preStop ~A/~A" (pod-name pod) (cri-container-info-name info)))))
         ;; A hook that outlives its grace is abandoned; stopping the container ends it.
         (loop while (and (bt:thread-alive-p thread) (not cancelled)
@@ -171,6 +184,8 @@
 
 (defun stop-container-with-pre-stop (runtime pod info deadline address)
   "Run INFO's preStop hook, then signal the container with whatever grace remains."
+  (record-container-lifecycle-event runtime (pod-uid pod) (cri-container-info-name info) (cri-container-info-id info)
+                                    "Killing" (format nil "Stopping container ~A" (cri-container-info-name info)))
   (run-container-pre-stop-hook runtime pod info deadline address)
   (cri-stop-container (containerd-runtime-socket-path runtime) (cri-container-info-id info)
                       :grace-period (max 0 (ceiling (- deadline (funcall *pod-deletion-clock*))))))
