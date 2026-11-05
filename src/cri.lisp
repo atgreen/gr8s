@@ -92,6 +92,21 @@
            (gr8s.cri.v1::url response))
       (ag-grpc:channel-close channel))))
 
+(defun cri-attach-url (socket-path container-id &key stdin stdout stderr tty (timeout 30))
+  "Create a one-time CRI streaming URL attached to CONTAINER-ID's own process."
+  (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
+    (unwind-protect
+         (multiple-value-bind (response status)
+             (gr8s.cri.v1::runtime-service-attach
+              (gr8s.cri.v1::make-runtime-service-stub channel)
+              (make-instance 'gr8s.cri.v1::attach-request
+                             :container-id container-id
+                             :stdin stdin :stdout stdout :stderr stderr :tty tty)
+              :timeout timeout)
+           (ensure-cri-status "Attach" status)
+           (gr8s.cri.v1::url response))
+      (ag-grpc:channel-close channel))))
+
 (defparameter *cri-runtime-request-timeout* 120
   "Pinned kubelet CRI request overhead/cleanup budget, separate from command duration.")
 
@@ -150,7 +165,8 @@
 
 (defun make-cri-pod-sandbox-config
     (name uid namespace attempt log-directory host-network
-     &key resource-version spec-fingerprint dns-servers dns-searches dns-options privileged hostname security)
+     &key resource-version spec-fingerprint dns-servers dns-searches dns-options privileged hostname security
+          sysctls (pid-mode gr8s.cri.v1::+namespacemode-container+) host-ipc)
   "Build sandbox identity, ownership labels, hostname and native network/security configuration."
   (let ((metadata
           (make-instance 'gr8s.cri.v1::pod-sandbox-metadata
@@ -178,10 +194,12 @@
               (when resource-version
                 (list (cons +gr8s-resource-version-label+
                             resource-version)))
-              (when spec-fingerprint (list (cons +gr8s-spec-fingerprint-label+ spec-fingerprint))))
+              (when spec-fingerprint (list (cons +gr8s-spec-fingerprint-label+ spec-fingerprint)))
+              (when host-network (list (cons +gr8s-host-network-label+ "true"))))
      :linux
      (make-instance
       'gr8s.cri.v1::linux-pod-sandbox-config
+      :sysctls sysctls
       :security-context
       (apply
        #'make-instance
@@ -192,13 +210,16 @@
         'gr8s.cri.v1::namespace-option
         :network (if host-network
                      gr8s.cri.v1::+namespacemode-node+
-                     gr8s.cri.v1::+namespacemode-pod+))
+                     gr8s.cri.v1::+namespacemode-pod+)
+        :pid pid-mode
+        :ipc (if host-ipc gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+))
        security)))))
 
 (defun cri-run-pod-sandbox
     (socket-path &key name uid (namespace "default") (attempt 0)
                    log-directory host-network resource-version spec-fingerprint
-                   dns-servers dns-searches dns-options privileged hostname security runtime-handler (timeout 120))
+                   dns-servers dns-searches dns-options privileged hostname security runtime-handler
+                   sysctls (pid-mode gr8s.cri.v1::+namespacemode-container+) host-ipc (timeout 120))
   "Create and start a CRI pod sandbox under RUNTIME-HANDLER, returning its runtime ID."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
@@ -210,7 +231,7 @@
                    :dns-servers dns-servers
                    :dns-searches dns-searches
                    :dns-options dns-options :privileged privileged :hostname hostname
-                   :security security)))
+                   :security security :sysctls sysctls :pid-mode pid-mode :host-ipc host-ipc)))
            (multiple-value-bind (response status)
                (gr8s.cri.v1::runtime-service-run-pod-sandbox
                 stub
@@ -286,7 +307,7 @@
 (defun cri-create-container
     (socket-path sandbox-id sandbox-config
      &key name image command args env uid mounts security-context resources working-directory
-          (attempt 0) log-path (timeout 120))
+          stdin stdin-once tty labels (attempt 0) log-path (timeout 120))
   "Create a container in SANDBOX-ID and return its runtime ID."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
@@ -308,6 +329,7 @@
                 :command command
                 :args args
                 :working-dir (or working-directory "")
+                :stdin (not (null stdin)) :stdin-once (not (null stdin-once)) :tty (not (null tty))
                 :mounts mounts
                 :linux (when (or security-context resources)
                          (make-instance 'gr8s.cri.v1::linux-container-config
@@ -320,7 +342,8 @@
                          (list (cons +gr8s-managed-label+ "true")
                                (cons +gr8s-container-label+ name))
                          (when uid
-                           (list (cons +gr8s-uid-label+ uid))))))
+                           (list (cons +gr8s-uid-label+ uid)))
+                         labels)))
               :timeout timeout)
            (ensure-cri-status "CreateContainer" status)
            (gr8s.cri.v1::container-id response))

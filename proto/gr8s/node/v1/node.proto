@@ -78,6 +78,15 @@ message NodeStatus {
   uint64 observed_at_unix_nanos = 1;
   repeated PodObservedStatus pods = 2;
   repeated EndpointTelemetry endpoints = 3;
+  // Every CSI driver registered on this node, in full on each report.
+  repeated CsiDriverRegistration csi_drivers = 4;
+}
+
+message CsiDriverRegistration {
+  string name = 1;
+  string node_id = 2;
+  int64 max_volumes = 3;
+  map<string, string> topology = 4;
 }
 
 message EndpointTelemetry {
@@ -183,6 +192,9 @@ enum OperationKind {
   OPERATION_KIND_UNSPECIFIED = 0;
   OPERATION_KIND_LOGS = 1;
   OPERATION_KIND_EXEC = 2;
+  OPERATION_KIND_RECLAIM_VOLUME = 3;
+  OPERATION_KIND_ATTACH = 4;
+  OPERATION_KIND_METRICS = 5;
 }
 
 message OperationRequest {
@@ -197,6 +209,9 @@ message OperationRequest {
   bool stdout = 9;
   bool stderr = 10;
   bool tty = 11;
+  bool previous = 12;
+  // The PersistentVolume whose provisioned directory RECLAIM_VOLUME removes.
+  bytes volume_json = 13;
 }
 
 message OperationInput {

@@ -28,7 +28,7 @@
                               :key (lambda (object) (gethash "name" object)))))
           (is (hash-table-p resource))
           (is (eq t (gethash "namespaced" resource)))
-          (is (equal '("create" "delete" "get" "list" "patch" "update" "watch")
+          (is (equal '("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
                      (coerce (gethash "verbs" resource) 'list))))))
     (let* ((openapi (check-core-status 200 "/openapi/v3/api/v1"))
            (schemas (gethash "schemas" (gethash "components" openapi))))
@@ -135,10 +135,11 @@
       (check-core-status 200 (concatenate 'string item "?dryRun=All") :method :delete)
       (check-core-status 200 item :method :delete :object (gr8s::core-object "dryRun" #( "All")))
       (check-core-status 200 item)
-      (let ((body (check-core-status 415 item :method :patch :content-type "application/apply-patch+yaml"
+      (let ((body (check-core-status 400 item :method :patch :content-type "application/apply-patch+yaml"
                                     :object (core-fixture "ConfigMap" "dry"))))
         (is (string= "Status" (gethash "kind" body)))
-        (is (string= "Failure" (gethash "status" body))))
+        (is (string= "Failure" (gethash "status" body)))
+        (is (search "fieldManager is required" (gethash "message" body))))
       (let ((wrong (core-fixture "ConfigMap" "wrong")))
         (setf (gethash "namespace" (gethash "metadata" wrong)) "other")
         (check-core-status 400 collection :method :post :object wrong)))))
@@ -213,7 +214,7 @@
 
 (test pod-protobuf-retains-explicit-pointer-zero-and-unsupported-features
   (let* ((container (core-test-protobuf '((1 "main") (2 "web:v1"))))
-         (spec (core-test-protobuf (list (list 2 container) (list 21 0) (list 11 1))))
+         (spec (core-test-protobuf (list (list 2 container) (list 21 0) (list 11 1) (list 37 1))))
          (input (core-test-protobuf-envelope "Pod" (list (list 1 (core-test-protobuf '((1 "unsupported")))) (list 2 spec))))
          (decoded (gr8s::decode-core-resource-protobuf input "Pod")))
     (is (not (null (nth-value 1 (gethash "automountServiceAccountToken" (gethash "spec" decoded))))))
@@ -266,7 +267,11 @@
       (is (equal "http" (gethash "targetPort" port)))
       (check-core-status 422 "/api/v1/namespaces/alpha/services" :method :post
                          :content-type "application/vnd.kubernetes.protobuf"
-                         :octets (service-wire-fixture "nodeport" :type "NodePort"))
-      (is (= 1 (length (gr8s::list-core-resources store "services" "alpha")))))))
+                         :octets (service-wire-fixture "bogus" :type "Bogus"))
+      (is (= 1 (length (gr8s::list-core-resources store "services" "alpha"))))
+      (let ((node-port (check-core-status 201 "/api/v1/namespaces/alpha/services" :method :post
+                                          :content-type "application/vnd.kubernetes.protobuf"
+                                          :octets (service-wire-fixture "nodeport" :type "NodePort"))))
+        (is (integerp (gethash "nodePort" (aref (gethash "ports" (gethash "spec" node-port)) 0))))))))
 
 (in-suite gr8s)

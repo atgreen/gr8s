@@ -41,7 +41,7 @@
       (core-resource-error 405 "MethodNotAllowed" "Unsupported ResourceQuota status method"))
     (let* ((*policy-status-write* t)
            (dry-run (core-resource-dry-run-p))
-           (content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
+           (content-type (request-media-type))
            (input (if (eq method :put)
                       (core-resource-request-object (core-resource-kind resource))
                       (progn
@@ -99,7 +99,7 @@ As with a kubelet, measured CPU, memory, storage and conditions are never taken 
       (return-from dispatch-node-status-request (json-response current)))
     (unless (member method '(:put :patch))
       (core-resource-error 405 "MethodNotAllowed" "Unsupported Node status method"))
-    (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
+    (let* ((content-type (request-media-type))
            (requested
              (if (eq method :put)
                  (core-resource-request-object "Node")

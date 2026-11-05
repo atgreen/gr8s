@@ -115,7 +115,20 @@ Namespaced ConfigMap and Secret APIs support durable CRUD, list/selectors,
 pagination, patch, optimistic concurrency, and dry-run through current kubectl
 clients. See [ConfigMap and Secret APIs](docs/configmap-secret-api.md) for the
 supported surface. Pods can consume referenced environment keys and mounted
-files. Watch, server-side apply, and full Namespace lifecycle are not yet implemented.
+files. A deleted Namespace turns Terminating and refuses new content while its
+Pods drain first, then its other objects, until its finalizers are released.
+
+Lease, flow control, dynamic resource allocation and admission policy objects are
+served with protobuf requests, selectors, watches, status subresources and
+finalizers. Only the API exists for most of them: no flow control limits requests
+and no allocator serves ResourceClaims. Admission policies are enforced:
+ValidatingAdmissionPolicy and MutatingAdmissionPolicy evaluate CEL on the admission
+path, though `status.typeChecking`, audit annotations and the `authorizer` variable
+are not implemented.
+
+Pods mount signed ES256 ServiceAccount tokens bound to the Pod and its node, renewed
+by the control plane after 80% of their lifetime. TokenRequest, TokenReview, the
+SubjectAccessReview family, authorized impersonation and OIDC discovery are served.
 
 ResourceQuota, LimitRange, RuntimeClass and PriorityClass are served with real
 effects. Quota usage is computed from the live objects and checked under the store
@@ -593,8 +606,15 @@ exact-container restart, preserving healthy siblings. Probe-specific termination
 grace and actual failure Events survive node process restarts. Ordinary init
 containers execute in declaration order; applications wait for real zero exits.
 Failed initialization obeys the Pod restart policy, and native restart retains
-actual attempts and retry history. Restartable init sidecars and readiness gates
-remain unsupported.
+actual attempts and retry history. Restartable init sidecars start before later
+containers, restart whatever the Pod's policy, and stop last in reverse order.
+postStart and preStop hooks run against the exact attempt, and termination messages
+come from a per-attempt file with optional log fallback. A container whose
+configuration cannot be generated reports `CreateContainerConfigError` while its
+siblings run; image pulls run in the background and failures report `ErrImagePull`.
+Ephemeral containers are added through `pods/ephemeralcontainers`, and `pods/resize`
+changes CPU and memory in place, or restarts that container under a RestartContainer
+policy. Readiness gates and a Pod's own `resources` remain unsupported.
 
 All ten unchanged upstream probe conformance cases pass in the
 [focused result](docs/container-probes-upstream-2026-11-04.json). The
@@ -624,6 +644,16 @@ Server-side apply and finalizer processing remain unsupported.
 Templates have a 2 MiB serialized storage limit so admitted objects can be read
 back by the durable JSON loader.
 
+`apps/v1` StatefulSets have `status` and `scale` subresources and a controller with
+stable ordinal names and hostnames, `OrderedReady` and `Parallel` Pod management,
+`spec.ordinals`, rolling updates in reverse ordinal order bounded by a partition,
+`OnDelete`, and ControllerRevision history, so a template returning to an earlier
+form rolls back to that revision. Each `volumeClaimTemplates` entry becomes a real
+PersistentVolumeClaim per ordinal that binds through the storage controller, using
+the default `local-path` class unless a template names another.
+`persistentVolumeClaimRetentionPolicy` is honored in both
+directions. A rolling update's `maxUnavailable` above 1 is refused.
+
 `policy/v1` PodDisruptionBudgets have a `status` subresource and a disruption
 controller that computes status from observed Pod readiness with upstream's
 arithmetic. A selected Pod with a controller of unknown scale fails safe to no
@@ -635,8 +665,8 @@ The scheduler keeps TCP host ports, as well as declared requests, within what a 
 has, leaving a Pod that does not fit Pending with the reason in its `PodScheduled`
 condition. A Pod that named its own node bypasses the scheduler, so it fails with
 `OutOfcpu`, `OutOfmemory`, `OutOfpods` or `NodePorts` as a kubelet would fail it. The agent makes a `hostPort` real with a userspace TCP
-relay, so a Pod sees the node, not the original client, as the connection's source;
-UDP host ports are refused.
+or UDP relay, so a Pod sees the node, not the original client, as the source;
+SCTP host ports are scheduled but not relayed.
 
 Deployments and ReplicaSets expose `apps/v1` JSON/protobuf CRUD, selectors,
 resumable watches, revision-consistent lists, strategic patches and separate
@@ -661,14 +691,20 @@ following node labels written through the Node API, and record `apps/v1`
 ControllerRevisions whose data is the JSON a typed client marshals for the
 template. RollingUpdate replaces Pods within `maxUnavailable`; `maxSurge` is
 refused because surge is not implemented. OnDelete leaves running Pods alone.
-Only `metadata.labels` and `metadata.annotations` of a Node can be written: taints
-and `spec.unschedulable` are refused because nothing would enforce them.
+A Node's labels, annotations, taints and `spec.unschedulable` can be written: the
+scheduler enforces taints and cordoning, and a control-plane pass evicts Pods that
+do not tolerate a NoExecute taint. A Node created through the API has no agent, so
+it can never run a Pod and keeps whatever status was written; an agent's own Node
+cannot be deleted through the API.
 
 PersistentVolume, PersistentVolumeClaim and StorageClass APIs now support durable
-CRUD, typed protobuf, status subresources and resumable JSON watches. Static
-filesystem hostPath/local volumes bind to matching claims and mount real backing
-storage into native Pods. See [persistent storage](docs/persistent-storage.md)
-for supported behavior, protection, Retain reclamation and remaining extensions.
+CRUD, typed protobuf, status subresources and resumable JSON watches. A default
+`local-path` class and a `gr8s.io/nfs` provisioner create volumes on demand with no
+helper Pod, static NFS, `local` and `hostPath` volumes mount into native Pods, and
+CSI drivers can be installed with their usual sidecars. The dynamic, NFS and CSI
+paths have unit tests but haven't yet run against real NFS mounts or real drivers.
+See [persistent storage](docs/persistent-storage.md) for supported behavior,
+protection, reclamation and remaining extensions.
 
 CRDs in `apiextensions.k8s.io/v1` now establish real schema-backed custom APIs.
 Custom resources support durable JSON CRUD/status/watch, per-version discovery
@@ -751,14 +787,31 @@ The [native validation record](docs/podtemplate-conformance-2026-11-03.json)
 captures all five upstream cases passing, plus local API and persistence checks.
 
 Services accept JSON and typed Kubernetes protobuf requests, including numeric
-and named target ports. Managed native clusters allocate durable IPv4 TCP
-ClusterIP Services from
-`10.96.0.0/16`. Native listeners forward connections to ready Service backends, resolving numeric
-or named target ports against selected Pods or manually managed slices. The
-reserved `default/kubernetes` Service describes the HTTPS API at `10.96.0.1:443`.
-This initial implementation supports single-stack TCP without session affinity;
-UDP, NodePort, LoadBalancer and legacy Endpoints resources remain unsupported.
-TCP forwarding currently replaces the original client source address.
+and named target ports. Managed native clusters allocate durable IPv4 ClusterIP
+Services from `10.96.0.0/16`, over TCP, UDP or SCTP. A cgroup `connect4` eBPF
+program rewrites a Pod's connect(2) to a ready backend, resolving numeric or named
+target ports against selected Pods or manually managed slices; unconnected UDP
+`sendto(2)` does not pass through it. `sessionAffinity: ClientIP` holds each
+client's network namespace on one backend until the timeout passes or the
+Service's backend set changes. The reserved `default/kubernetes` Service describes
+the HTTPS API at `10.96.0.1:443`, with matching Endpoints and an EndpointSlice.
+
+`NodePort` and `LoadBalancer` Services allocate node ports from 30000-32767. The
+agent relays each in userspace, for TCP and UDP, with client-address affinity, so a
+Pod sees the node as the source; a port with no ready backends has no listener.
+No cloud controller assigns a LoadBalancer an address, and only `Cluster` traffic
+policies are accepted.
+
+The API server proxies `services/[scheme:]name[:port]/proxy` to a ready backend,
+as it does for Pods, and keeps a proxied HTML page's rooted links inside the proxy.
+`nodes/name/proxy` answers the kubelet reads `/pods` and `/healthz` from the store,
+since no kubelet HTTP server exists to forward to.
+
+Core Endpoints follow selector Services, and manual Endpoints behind a selectorless
+Service are mirrored into EndpointSlices. The `networking.k8s.io/v1` API serves
+Ingress and IngressClass with no controller behind them, IPAddress as stored
+objects that allocation does not create, and ServiceCIDR, where only the default
+`kubernetes` range is `Ready` because nothing allocates from another.
 
 EndpointSlices expose the stable `discovery.k8s.io/v1` JSON/protobuf API with
 selector lists, durable watches, strategic patches and collection deletion. The

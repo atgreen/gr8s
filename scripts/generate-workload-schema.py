@@ -42,7 +42,7 @@ def main():
     baseline = json.loads((ROOT / "schema/podtemplate-v1.json").read_text())
     all_messages = core.proto_messages(sources)
     roots = ["k8s.io.api.apps.v1.Deployment", "k8s.io.api.apps.v1.ReplicaSet", "k8s.io.api.apps.v1.DaemonSet",
-             "k8s.io.api.apps.v1.ControllerRevision", "k8s.io.api.core.v1.ReplicationController",
+             "k8s.io.api.apps.v1.StatefulSet", "k8s.io.api.apps.v1.ControllerRevision", "k8s.io.api.core.v1.ReplicationController",
              "k8s.io.api.autoscaling.v1.Scale"]
     pending, messages = roots[:], {}
     while pending:
@@ -68,7 +68,7 @@ def main():
     all_definitions = json.loads(sources["swagger.json"])["definitions"]
     pending = [n.replace("k8s.io.", "io.k8s.", 1) for n in roots]
     pending += ["io.k8s.api.apps.v1.DeploymentList", "io.k8s.api.apps.v1.ReplicaSetList",
-                "io.k8s.api.apps.v1.DaemonSetList", "io.k8s.api.apps.v1.ControllerRevisionList",
+                "io.k8s.api.apps.v1.DaemonSetList", "io.k8s.api.apps.v1.StatefulSetList", "io.k8s.api.apps.v1.ControllerRevisionList",
                 "io.k8s.api.core.v1.ReplicationControllerList"]
     definitions = {}
     while pending:

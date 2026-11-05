@@ -35,7 +35,7 @@
 (test unsupported-pod-spec-fields-are-rejected
   (signals kubernetes-error
     (parse-pod
-     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"shareProcessNamespace\":true,\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}")))
+     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"hostUsers\":false,\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}")))
 
 (test kubectl-generated-default-pod-fields-are-accepted
   (let ((pod
@@ -82,4 +82,6 @@
      "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"restartPolicy\":\"Sometimes\",\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}"))
   (signals kubernetes-error
     (parse-pod
-     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\",\"ports\":[{\"containerPort\":53,\"protocol\":\"UDP\"}]}]}}")))
+     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\",\"ports\":[{\"containerPort\":53,\"protocol\":\"QUIC\"}]}]}}"))
+  (is (parse-pod
+       "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"busybox\",\"ports\":[{\"containerPort\":53,\"protocol\":\"UDP\"}]}]}}")))

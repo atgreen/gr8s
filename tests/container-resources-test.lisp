@@ -50,10 +50,12 @@
     (is (= 1000 (gr8s.cri.v1::cpu-quota cri)))
     (is (= 2 (gr8s.cri.v1::cpu-shares cri)))))
 
-(test empty-resources-stay-unconstrained
-  (is (null (resource-test-cri "{}")))
-  (is (null (resource-test-cri "{\"limits\":{},\"requests\":{}}")))
-  (is (null (resource-test-cri "{\"limits\":null}"))))
+(test empty-resources-stay-unlimited-with-the-minimum-cpu-share
+  (dolist (resources '("{}" "{\"limits\":{},\"requests\":{}}" "{\"limits\":null}"))
+    (let ((cri (resource-test-cri resources)))
+      (is (= 2 (gr8s.cri.v1::cpu-shares cri)) "the minimum share, as a kubelet gives")
+      (is (= 0 (gr8s.cri.v1::cpu-quota cri)))
+      (is (= 0 (gr8s.cri.v1::memory-limit-in-bytes cri))))))
 
 (test pods-default-requests-from-limits-and-keep-declared-requests
   (let* ((pod (resource-test-pod "{\"limits\":{\"cpu\":\"1\",\"memory\":\"1Gi\"},\"requests\":{\"cpu\":\"500m\"}}"))

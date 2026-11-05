@@ -115,7 +115,7 @@
        (publish-node-snapshot runtime (pod-node-name pod))
        nil))))
 
-(defmethod runtime-logs ((runtime control-plane-runtime) uid container &key tail)
+(defmethod runtime-logs ((runtime control-plane-runtime) uid container &key tail previous)
   (declare (ignore tail))
   (let ((pod (control-plane-pod-by-uid runtime uid)))
     (unless (and pod (pod-node-name pod))
@@ -129,7 +129,8 @@
               :pod (pod-name pod)
               :pod-uid uid
               :container container
-              :stdout t))
+              :stdout t
+              :previous (not (null previous))))
            (operation
              (request-node-operation
               (control-plane-runtime-node-server runtime)
@@ -199,9 +200,9 @@
   (input-sequence 0)
   (lock (bt:make-lock "gr8s control-plane exec session")))
 
-(defmethod runtime-start-exec-session
-    ((runtime control-plane-runtime) uid container command
-     &key stdin stdout stderr tty)
+(defun start-control-plane-stream-session
+    (runtime uid container kind command &key stdin stdout stderr tty)
+  "Ask the Pod's node to open a streaming operation of KIND and return its session."
   (let ((pod (control-plane-pod-by-uid runtime uid)))
     (unless (and pod (pod-node-name pod))
       (error 'runtime-error :message "Pod is not assigned to a node"))
@@ -212,13 +213,26 @@
       (make-instance
        'gr8s.node.v1::operation-request
        :operation-id (generate-uid)
-       :kind gr8s.node.v1::+operationkind-operation_kind_exec+
+       :kind kind
        :namespace (pod-namespace pod)
        :pod (pod-name pod)
        :pod-uid uid
        :container container
        :command command
        :stdin stdin :stdout stdout :stderr stderr :tty tty)))))
+
+(defmethod runtime-start-exec-session
+    ((runtime control-plane-runtime) uid container command
+     &key stdin stdout stderr tty)
+  (start-control-plane-stream-session
+   runtime uid container gr8s.node.v1::+operationkind-operation_kind_exec+ command
+   :stdin stdin :stdout stdout :stderr stderr :tty tty))
+
+(defmethod runtime-start-attach-session
+    ((runtime control-plane-runtime) uid container &key stdin stdout stderr tty)
+  (start-control-plane-stream-session
+   runtime uid container gr8s.node.v1::+operationkind-operation_kind_attach+ nil
+   :stdin stdin :stdout stdout :stderr stderr :tty tty))
 
 (defmethod runtime-send-exec-session-input
     ((runtime control-plane-runtime) (session control-plane-exec-session)

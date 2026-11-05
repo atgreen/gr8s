@@ -120,18 +120,19 @@ Keys are sorted, unset and omitempty zero values vanish, and pointers to empty o
                (push (add-revision-owner store daemonset revision) result)))))
     (sort result #'< :key (lambda (revision) (gethash "revision" revision)))))
 
-(defun bump-daemonset-collision-count (store daemonset count)
-  "Durably record a revision name collision so the next pass hashes differently."
-  (with-store-lock (store)
-    (let ((current (workload-current-unlocked store "daemonsets" daemonset)))
-      (when current
-        (let ((copy (copy-core-object current)) (resources (copy-core-resource-index store))
-              (revision (1+ (pod-store-resource-revision store))))
-          (setf (gethash "collisionCount" (gethash "status" copy)) count)
-          (prepare-core-resource-metadata copy current revision)
-          (setf (gethash (core-resource-key "daemonsets" (gethash "namespace" (workload-metadata copy))
-                                            (gethash "name" (workload-metadata copy))) resources) copy)
-          (commit-core-resources store resources revision))))))
+(defun bump-daemonset-collision-count (store owner count)
+  "Durably record a revision name collision of OWNER so the next pass hashes differently."
+  (let ((resource (workload-owner-resource owner)))
+    (with-store-lock (store)
+      (let ((current (workload-current-unlocked store resource owner)))
+        (when current
+          (let ((copy (copy-core-object current)) (resources (copy-core-resource-index store))
+                (revision (1+ (pod-store-resource-revision store))))
+            (setf (gethash "collisionCount" (gethash "status" copy)) count)
+            (prepare-core-resource-metadata copy current revision)
+            (setf (gethash (core-resource-key resource (gethash "namespace" (workload-metadata copy))
+                                              (gethash "name" (workload-metadata copy))) resources) copy)
+            (commit-core-resources store resources revision)))))))
 
 (defun create-daemonset-revision (store daemonset data number)
   "Create the ControllerRevision for DAEMONSET's template, or count a name collision and retry later."
@@ -178,10 +179,13 @@ the rest of the history instead of deleting one a client is about to use."
                                :test #'equal))))
 
 (defun daemonset-node-eligible-p (daemonset node)
-  "Return whether DAEMONSET's template selects NODE. gr8s nodes carry no taints to tolerate."
+  "Return whether DAEMONSET's template selects NODE, whose taints it must tolerate.
+A daemon Pod ignores a node being cordoned, but needs an agent to run on."
   (let* ((pod-spec (gethash "spec" (gethash "template" (gethash "spec" daemonset))))
          (template-pod (make-pod :object (core-object "spec" pod-spec))))
-    (and (node-selector-matches-p (gethash "nodeSelector" pod-spec) node)
+    (and (not (node-record-api-only node))
+         (spec-tolerates-node-scheduling-p pod-spec node)
+         (node-selector-matches-p (gethash "nodeSelector" pod-spec) node)
          (pod-node-affinity-matches-p template-pod node)
          (member (gethash "nodeName" pod-spec) (list nil "" 'null (node-record-name node)) :test #'equal))))
 

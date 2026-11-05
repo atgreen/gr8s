@@ -2,6 +2,9 @@
 
 (defvar *core-resource-view-version* nil)
 
+(defvar *typed-api-status-write* nil
+  "True only while a status subresource write replaces a typed object's or Namespace's status.")
+
 (defvar *resource-quota-admission-exempt* nil
   "True while the server creates its own bootstrap objects, which are counted but never refused.")
 
@@ -33,6 +36,7 @@
     ("deployments" "Deployment" "apps/v1" t)
     ("replicasets" "ReplicaSet" "apps/v1" t)
     ("daemonsets" "DaemonSet" "apps/v1" t)
+    ("statefulsets" "StatefulSet" "apps/v1" t)
     ("controllerrevisions" "ControllerRevision" "apps/v1" t)
     ("jobs" "Job" "batch/v1" t)
     ("poddisruptionbudgets" "PodDisruptionBudget" "policy/v1" t)
@@ -121,11 +125,14 @@
                  (setf (gethash key (pod-store-resources store)) object)))))
   store)
 
+(defparameter +template-history-recent-limit+ 512
+  "Newest journal entries kept separately, so that an idle watch reads few of them.")
+
 (defun core-state-json (store resources revision workload-deletions job-controller-states)
   "Serialize the complete durable core-resource state to the JSON written to disk.
-   Returns (values json history floor token-key event-expirations) so the direct
-   publish path can also set the derived in-memory slots."
-  (multiple-value-bind (history floor) (next-template-history store resources revision)
+   Returns (values json history floor token-key event-expirations added) so the
+   direct publish path can also set the derived in-memory slots."
+  (multiple-value-bind (history floor added) (next-template-history store resources revision)
     (let* ((token-key (or (pod-store-template-token-key store) (secure-random-octets 32)))
            (event-expirations (next-event-expirations store resources))
            (json (com.inuoe.jzon:stringify
@@ -140,7 +147,7 @@
                                "customResourceItems" (coerce (loop for key being the hash-keys of resources using (hash-value object)
                                                                    when (custom-resource-key-p (first key))
                                                                      collect (core-object "resource" (first key) "object" object)) 'vector)))))
-      (values json history floor token-key event-expirations))))
+      (values json history floor token-key event-expirations added))))
 
 (defun commit-core-resources (store resources revision
                               &key (workload-deletions (pod-store-workload-deletions store))
@@ -152,7 +159,7 @@
    replica then installs it via INSTALL-CORE-STATE-BLOB."
   ;; Write the complete new state before publishing it in memory. A failed
   ;; atomic write leaves both the old disk state and the old index intact.
-  (multiple-value-bind (json history floor token-key event-expirations)
+  (multiple-value-bind (json history floor token-key event-expirations added)
       (core-state-json store resources revision workload-deletions job-controller-states)
     (cond
       ((and *core-write-active* (pod-store-consensus-commit-fn store))
@@ -165,6 +172,11 @@
              (pod-store-job-controller-states store) job-controller-states
              (pod-store-resource-revision store) revision
              (pod-store-template-history store) history
+             (pod-store-template-history-recent store)
+             (let ((recent (append added (pod-store-template-history-recent store))))
+               (if (nthcdr +template-history-recent-limit+ recent)
+                   (subseq recent 0 +template-history-recent-limit+)
+                   recent))
              (pod-store-template-history-floor store) floor
              (pod-store-template-token-key store) token-key
              (pod-store-event-expirations store) event-expirations)))))
@@ -230,7 +242,16 @@
       (or (and (= 1 (length parts)) (core-label-name-p (first parts)))
           (and (= 2 (length parts)) (dns-subdomain-p (first parts)) (core-label-name-p (second parts)))))))
 
-(defun validate-core-metadata (metadata namespace name &key allow-finalizers)
+(defun path-segment-name-p (name)
+  "Accept what upstream's RBAC objects may be named: anything usable as one URL path segment."
+  (and (stringp name) (<= 1 (length name) 253) (not (member name '("." "..") :test #'equal))
+       (notany (lambda (character) (find character "/%")) name)))
+
+(defun rbac-resource-p (resource)
+  "Return whether RESOURCE is an RBAC collection, whose names may contain colons."
+  (member resource '("roles" "rolebindings" "clusterroles" "clusterrolebindings") :test #'equal))
+
+(defun validate-core-metadata (metadata namespace name &key allow-finalizers name-test)
   (require-object metadata "metadata")
   (when (and namespace (not (dns-label-p namespace)))
     (core-resource-error 422 "Invalid" "metadata.namespace must be a DNS label"))
@@ -240,7 +261,7 @@
   (when (and name (not (equal name (gethash "name" metadata))))
     (core-resource-error 400 "BadRequest" "metadata.name does not match the request name"))
   (let ((object-name (gethash "name" metadata)))
-    (unless (dns-subdomain-p object-name)
+    (unless (if name-test (funcall name-test object-name) (dns-subdomain-p object-name))
       (core-resource-error 422 "Invalid" "metadata.name must be a DNS subdomain")))
   (dolist (field '("labels" "annotations"))
     (when (gethash field metadata)
@@ -308,8 +329,14 @@
     (return-from normalize-core-resource (normalize-batch-resource input namespace name)))
   (when (budget-resource-p resource)
     (return-from normalize-core-resource (normalize-budget-resource input namespace name)))
+  (when (hpa-resource-p resource)
+    (return-from normalize-core-resource (normalize-hpa-resource input namespace name store)))
   (when (policy-resource-p resource)
     (return-from normalize-core-resource (normalize-policy-resource resource input namespace name store)))
+  (when (typed-api-resource-p resource)
+    (return-from normalize-core-resource (normalize-typed-api-resource resource input namespace name store)))
+  (when (networking-resource-p resource)
+    (return-from normalize-core-resource (normalize-networking-resource resource input namespace name store)))
   (when (admission-config-resource-p resource)
     (return-from normalize-core-resource (normalize-admission-config resource input name)))
   (when (csr-resource-p resource)
@@ -431,6 +458,8 @@
 (defun create-core-resource (store resource input namespace &key dry-run)
   (with-core-write (store)
     (expire-core-events-unlocked store)
+    (unless (or (equal resource "events") *resource-quota-admission-exempt*)
+      (require-namespace-accepts-content store namespace))
     (let* ((input (copy-core-object input))
            (metadata (require-object (gethash "metadata" input) "metadata")))
       (when (csr-resource-p resource)
@@ -479,6 +508,7 @@
   "Copy stored object EXISTING into the form the current request's writer sees."
   (cond ((custom-resource-key-p resource) (crd-api-view (copy-core-object existing)))
         ((equal resource "events") (event-api-view (copy-core-object existing) (or *core-resource-view-version* "v1")))
+        ((and (hpa-resource-p resource) (equal *core-resource-view-version* "autoscaling/v1")) (hpa-v1-view existing))
         (t (copy-core-object existing))))
 
 (defun update-core-resource (store resource namespace name transform &key dry-run)
@@ -500,6 +530,7 @@
       (when (storage-resource-p resource) (validate-storage-update store resource existing object))
       (when (endpointslice-resource-p resource) (validate-endpointslice-update existing object))
       (when (policy-resource-p resource) (validate-policy-update resource existing object))
+      (when (typed-api-resource-p resource) (validate-typed-api-update resource existing object))
       (when (member resource '("services" "persistentvolumeclaims") :test #'equal)
         (enforce-resource-quotas-unlocked store resource namespace object existing))
       (when (and (gethash "uid" metadata) (not (equal (gethash "uid" metadata) (gethash "uid" existing-metadata))))
@@ -529,7 +560,7 @@
       (when (admission-config-resource-p resource) (prepare-admission-config-write object existing))
       (let ((resources (copy-core-resource-index store)))
         (if (or (and (csr-resource-p resource) (csr-finalized-p object))
-                (and (custom-resource-key-p resource)
+                (and (or (custom-resource-key-p resource) (typed-api-resource-p resource))
                      (gethash "deletionTimestamp" metadata) (zerop (length (gethash "finalizers" metadata #())))))
             (remhash (core-resource-key resource namespace name) resources)
             (setf (gethash (core-resource-key resource namespace name) resources) object))
@@ -546,6 +577,8 @@
       (when (or (and uid (not (equal uid (gethash "uid" metadata))))
                 (and resource-version (not (equal resource-version (gethash "resourceVersion" metadata)))))
         (core-resource-error 409 "Conflict" "Delete precondition does not match the stored object"))
+      ;; A COND (not RETURN-FROM) so WITH-CORE-WRITE's consensus flush always runs
+      ;; on the delegated delete paths too (they stash via COMMIT-CORE-RESOURCES).
       (cond
         ((or (equal resource "customresourcedefinitions") (custom-resource-key-p resource))
          (delete-crd-object-unlocked store resource existing dry-run))
@@ -553,9 +586,16 @@
          (delete-csr-unlocked store existing dry-run))
         ((storage-resource-p resource)
          (delete-storage-resource-unlocked store resource existing dry-run))
+        ((equal resource "namespaces")
+         (delete-namespace-unlocked store existing dry-run))
+        ((typed-api-resource-p resource)
+         (delete-typed-api-resource-unlocked store resource existing dry-run))
         (t
          (when (policy-resource-p resource) (validate-policy-delete resource existing))
          (let ((resources (copy-core-resource-index store)))
            (remhash (core-resource-key resource namespace name) resources)
+           ;; A selector Service owns the Endpoints of its name; a manual Endpoints object outlives its Service.
+           (when (and (equal resource "services") (plusp (hash-table-count (gethash "selector" (gethash "spec" existing) (core-object)))))
+             (remhash (core-resource-key "endpoints" namespace name) resources))
            (unless dry-run (commit-core-resources store resources (1+ (pod-store-resource-revision store)))))
          (copy-core-object existing))))))

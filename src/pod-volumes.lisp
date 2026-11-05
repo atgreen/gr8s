@@ -6,7 +6,7 @@
 ;;;; materialize ConfigMap, Secret and emptyDir mounts in agent-owned directories.
 ;;;; Private resource data stays scoped to the Pod namespace; paths are validated
 ;;;; before touching the filesystem and fsGroup controls mounted data access.
-;;;; Memory emptyDirs are real tmpfs mounts that live until the Pod terminates.
+;;;; Memory emptyDirs and NFS volumes are real mounts that live until the Pod terminates.
 
 (in-package #:gr8s)
 
@@ -17,6 +17,9 @@
     (append
      (when (gethash "configMap" volume) (list (reference "configmaps" (gethash "configMap" volume) "name")))
      (when (gethash "secret" volume) (list (reference "secrets" (gethash "secret" volume) "secretName")))
+     (let ((source (gethash "csi" volume)))
+       (when (and source (gethash "nodePublishSecretRef" source))
+         (list (reference "secrets" (gethash "nodePublishSecretRef" source) "name"))))
      (when (gethash "projected" volume)
        (loop for source across (gethash "sources" (gethash "projected" volume) #())
              when (gethash "configMap" source)
@@ -52,36 +55,59 @@
         (handler-case (push (get-core-resource store resource (pod-namespace pod) name) result)
           (kubernetes-error (condition)
             (unless (and optional (= 404 (kubernetes-error-status-code condition))) (error condition))))))
+    (let ((token-object (handler-case (pod-projected-token-object store pod)
+                          ;; A missing account delays only this Pod, as its unready volume reports.
+                          (kubernetes-error () nil))))
+      (when token-object (push token-object result)))
     (remove-duplicates (append result (pod-persistent-resource-objects store pod)) :test #'equalp)))
 
-(defun install-assigned-resource-objects (store assignments &optional service-discovery)
-  "Atomically install Pod-scoped references, exact PVC/PV bindings and public Service discovery."
-  (let ((resources (make-hash-table :test #'equal)))
-    (dolist (assignment assignments)
-      (let* ((pod (assignment-pod assignment))
-             (projected (mapcar (lambda (bytes)
-                                  (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string bytes)
-                                                       :max-string-length (* 2 1024 1024)))
-                                (slot-value assignment 'gr8s.node.v1::resource-objects-json))))
-        (dolist (object projected)
+(defun assignment-resource-objects (assignment)
+  "Return ASSIGNMENT's validated objects as (KEY . OBJECT), or signal if any is not acceptable."
+  (let* ((pod (assignment-pod assignment))
+         (projected (mapcar (lambda (bytes)
+                              (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string bytes)
+                                                   :max-string-length (* 2 1024 1024)))
+                            (slot-value assignment 'gr8s.node.v1::resource-objects-json))))
+    (loop for object in projected
+          collect
           (let* ((metadata (require-object (gethash "metadata" object) "metadata"))
                  (namespace (gethash "namespace" metadata)) (name (gethash "name" metadata))
                  (resource (cond ((equal "ConfigMap" (gethash "kind" object)) "configmaps")
                                  ((equal "Secret" (gethash "kind" object)) "secrets")
                                  ((equal "PersistentVolumeClaim" (gethash "kind" object)) "persistentvolumeclaims")
                                  ((equal "PersistentVolume" (gethash "kind" object)) "persistentvolumes")
+                                 ((equal "CSIDriver" (gethash "kind" object)) "csidrivers")
+                                 ((equal "VolumeAttachment" (gethash "kind" object)) "volumeattachments")
                                  (t (invalid-pod "assignment contains an unsupported resource kind")))))
             (unless (if (storage-resource-p resource)
                         (assigned-storage-resource-p object pod projected)
-                        (and (equal namespace (pod-namespace pod))
-                             (some (lambda (reference) (and (equal resource (first reference)) (equal name (second reference))))
-                                   (pod-resource-reference-declarations pod))))
+                        (or (and (equal namespace (pod-namespace pod))
+                                 (or (and (equal resource "secrets") (equal name (projected-token-secret-name pod))
+                                          (pod-projected-token-sources pod))
+                                     (some (lambda (reference) (and (equal resource (first reference)) (equal name (second reference))))
+                                           (pod-resource-reference-declarations pod))))
+                            (and (equal resource "secrets") (csi-volume-secret-reference-p object projected))))
               (invalid-pod "assignment contains an unreferenced, cross-namespace or incorrectly bound resource"))
             ;; This status came from the authenticated control plane, rather than
             ;; an API create request. Preserve its real binding observation.
             (let ((*storage-status-write* (not (null (storage-resource-p resource)))))
-              (setf (gethash (core-resource-key resource namespace name) resources)
+              (cons (core-resource-key resource namespace name)
                     (normalize-core-resource resource object namespace name)))))))
+
+(defun install-assigned-resource-objects (store assignments &optional service-discovery)
+  "Atomically install Pod-scoped references, exact PVC/PV bindings and public Service discovery."
+  (let ((resources (make-hash-table :test #'equal)))
+    (dolist (assignment assignments)
+      ;; Every snapshot carries every Pod, so failing the whole of it would stop
+      ;; all Pods on this node. One Pod's bad object delays only that Pod, whose
+      ;; volumes then report the missing resource.
+      (handler-case
+          (loop for (key . object) in (assignment-resource-objects assignment)
+                do (setf (gethash key resources) object))
+        (kubernetes-error (condition)
+          (format *error-output* "gr8s Pod ~A/~A assignment rejected: ~A~%"
+                  (slot-value assignment 'gr8s.node.v1::namespace)
+                  (slot-value assignment 'gr8s.node.v1::name) condition))))
     (install-service-discovery-projection resources service-discovery)
     (with-store-lock (store)
       (unless (equalp resources (pod-store-resources store))
@@ -160,23 +186,69 @@
   (error 'runtime-error :message (format nil "Could not ~A Pod volume ~A: ~A" operation target
                                          (sb-int:strerror (sb-alien:get-errno)))))
 
-(defun ensure-pod-memory-volume (directory source)
+(defun pod-volume-nfs-mount-p (target)
+  "Return whether the kernel reports an NFS filesystem mounted at TARGET."
+  (loop for line in (uiop:read-file-lines *pod-mount-table-path*)
+        for fields = (uiop:split-string line :separator '(#\Space))
+        for separator = (position "-" fields :test #'equal)
+        thereis (and separator (>= (length fields) 5) (< (1+ separator) (length fields))
+                     (equal (string-right-trim "/" target) (decode-mountinfo-path (nth 4 fields)))
+                     (member (nth (1+ separator) fields) '("nfs" "nfs4") :test #'equal))))
+
+(defun materialize-pod-nfs-volume (runtime pod name source mount-options &key share)
+  "Mount SOURCE for POD once and return the path, without touching the mount itself.
+SHARE names a provisioned volume's export, whose own directory is created on first use."
+  (let* ((pod-directory (containerd-pod-log-directory runtime (pod-uid pod)))
+         (volumes (merge-pathnames "volumes/" pod-directory)))
+    (ensure-directories-exist volumes)
+    (sb-posix:chmod (namestring pod-directory) #o700)
+    (let* ((root (namestring (truename volumes)))
+           (target (concatenate 'string root name))
+           (server (gethash "server" source))
+           (path (gethash "path" source))
+           (tokens (append (nfs-mount-option-tokens mount-options)
+                           (when (eq t (gethash "readOnly" source)) (list "ro")))))
+      (unless (nfs-target-mounted-p target)
+        (ensure-directories-exist (uiop:ensure-directory-pathname target))
+        (handler-case (mount-nfs-filesystem server path target tokens)
+          (nfs-mount-error (condition)
+            (unless (and share (= sb-posix:enoent (nfs-mount-error-errno condition)))
+              (error condition))
+            (ensure-provisioned-nfs-directory server share (subseq path (1+ (position #\/ path :from-end t)))
+                                              (concatenate 'string root "." name "-share")
+                                              (remove "ro" tokens :test #'equal))
+            (mount-nfs-filesystem server path target tokens))))
+      (uiop:ensure-directory-pathname target))))
+
+(defun pod-memory-volume-bytes (pod source)
+  "Size a Memory emptyDir by its limit and the Pod's memory limit, whichever is smaller, as a kubelet does."
+  (let* ((limit (gethash "sizeLimit" source))
+         (size (unless (member limit '(nil 0 "0") :test #'equal) (storage-quantity limit "emptyDir.sizeLimit")))
+         (memory (and pod (gethash "memory" (nth-value 1 (pod-spec-resource-totals (gethash "spec" (pod-to-object pod))))))))
+    (if (and size memory) (min size memory) (or size memory))))
+
+(defun ensure-pod-memory-volume (directory source &optional pod)
   "Mount a tmpfs at DIRECTORY once, so restarted containers keep the volume's contents."
   (unless (pod-volume-mount-targets directory)
     (let* ((target (namestring (truename directory)))
-           (limit (gethash "sizeLimit" source))
-           (options (if (member limit '(nil 0 "0") :test #'equal) ""
-                        (format nil "size=~D" (ceiling (storage-quantity limit "emptyDir.sizeLimit"))))))
+           (bytes (pod-memory-volume-bytes pod source))
+           (options (if bytes (format nil "size=~D" (ceiling bytes)) "")))
       (unless (zerop (funcall *pod-tmpfs-mount* target options))
         (pod-volume-system-error "mount" target)))))
 
 (defun cleanup-pod-volumes (runtime uid)
   "Unmount and delete a terminated Pod's volumes; a failed unmount leaves data for retry."
+  (cleanup-pod-csi-volumes uid)
   (let ((directory (merge-pathnames "volumes/" (containerd-pod-log-directory runtime uid))))
     (when (probe-file directory)
       (dolist (target (pod-volume-mount-targets directory))
-        (unless (zerop (funcall *pod-tmpfs-unmount* target))
-          (pod-volume-system-error "unmount" target)))
+        (if (pod-volume-nfs-mount-p target)
+            (unmount-nfs-filesystem target)
+            (unless (zerop (funcall *pod-tmpfs-unmount* target))
+              (pod-volume-system-error "unmount" target))))
+      ;; The tree deletion below must never reach into a share that is still mounted.
+      (when (pod-volume-mount-targets directory)
+        (error 'runtime-error :message (format nil "Pod volumes under ~A are still mounted" directory)))
       (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
 
 (defun materialize-pod-volume (runtime pod volume)
@@ -184,7 +256,20 @@
   (when (gethash "hostPath" volume)
     (return-from materialize-pod-volume (materialize-host-storage-source (gethash "hostPath" volume))))
   (when (gethash "persistentVolumeClaim" volume)
-    (return-from materialize-pod-volume (materialize-persistent-claim-volume runtime pod (gethash "persistentVolumeClaim" volume))))
+    (return-from materialize-pod-volume
+      (materialize-persistent-claim-volume runtime pod (gethash "persistentVolumeClaim" volume) (gethash "name" volume))))
+  (when (gethash "ephemeral" volume)
+    (return-from materialize-pod-volume
+      (materialize-persistent-claim-volume
+       runtime pod (core-object "claimName" (ephemeral-claim-name (pod-name pod) (gethash "name" volume)))
+       (gethash "name" volume) t)))
+  (when (gethash "csi" volume)
+    (return-from materialize-pod-volume
+      (materialize-inline-csi-volume (containerd-runtime-resource-store runtime) pod volume)))
+  (when (gethash "nfs" volume)
+    (return-from materialize-pod-volume
+      (values (materialize-pod-nfs-volume runtime pod (gethash "name" volume) (gethash "nfs" volume) nil)
+              (eq t (gethash "readOnly" (gethash "nfs" volume))))))
   (let* ((directory (pod-volume-directory runtime pod (gethash "name" volume)))
          (group (pod-fs-group pod)))
     (ensure-directories-exist directory)
@@ -193,12 +278,19 @@
     (sb-posix:chmod (namestring (containerd-pod-log-directory runtime (pod-uid pod))) #o700)
     (let ((source (gethash "emptyDir" volume)))
       (when (and source (equal "Memory" (gethash "medium" source)))
-        (ensure-pod-memory-volume directory source)))
+        (ensure-pod-memory-volume directory source pod)))
     ;; Applied after mounting because the tmpfs root replaces the directory's mode.
     (set-pod-volume-permissions directory (if group #o2770 #o777) group)
     (multiple-value-bind (files projection) (pod-volume-desired-files runtime pod volume)
       (when projection (publish-pod-volume-files directory files group)))
     directory))
+
+(defun container-mount-propagation (mount)
+  "Map a volumeMount's mountPropagation to its CRI mode; drivers publish volumes through Bidirectional."
+  (let ((mode (gethash "mountPropagation" mount "None")))
+    (cond ((equal mode "Bidirectional") gr8s.cri.v1::+mountpropagation-propagation_bidirectional+)
+          ((equal mode "HostToContainer") gr8s.cri.v1::+mountpropagation-propagation_host_to_container+)
+          (t gr8s.cri.v1::+mountpropagation-propagation_private+))))
 
 (defun containerd-pod-mounts (runtime pod container &optional environment)
   "Build CRI bind mounts from validated, materialized Pod volume declarations."
@@ -213,6 +305,7 @@
                         (setf path (stage-container-volume-subpath runtime pod container mount index path relative))))
                     (make-instance 'gr8s.cri.v1::mount
                                    :container-path (gethash "mountPath" mount) :host-path (namestring path)
+                                   :propagation (container-mount-propagation mount)
                                    :readonly (or forced-readonly (not (null (gethash "configMap" volume)))
                                                  (not (null (gethash "secret" volume)))
                                                  (not (null (gethash "downwardAPI" volume)))
@@ -226,12 +319,12 @@
          (object (handler-case (get-core-resource (containerd-runtime-resource-store runtime) resource (pod-namespace pod) name)
                    (kubernetes-error (condition)
                      (unless (and optional (= 404 (kubernetes-error-status-code condition)))
-                       (error 'runtime-error :message (format nil "Missing environment source ~A/~A" resource name))))))
+                       (container-config-error "Missing environment source ~A/~A" resource name)))))
          (data (and object (gethash "data" object))))
     (multiple-value-bind (value present) (if data (gethash key data) (values nil nil))
       (unless present
         (if optional (return-from containerd-key-environment-value (values nil nil))
-            (error 'runtime-error :message (format nil "Environment source ~A/~A lacks key ~A" resource name key))))
+            (container-config-error "Environment source ~A/~A lacks key ~A" resource name key)))
       (let ((text (if (equal resource "secrets")
                       (handler-case (trivial-utf-8:utf-8-bytes-to-string (core-base64-bytes value "Secret environment"))
                         (error () (error 'runtime-error :message "Secret environment value is not valid UTF-8"))) value)))
@@ -249,8 +342,7 @@
                    (kubernetes-error (condition)
                      (unless (and (eq t (gethash "optional" reference))
                                   (= 404 (kubernetes-error-status-code condition)))
-                       (error 'runtime-error
-                              :message (format nil "Missing environment source ~A/~A" resource name))))))
+                       (container-config-error "Missing environment source ~A/~A" resource name)))))
          (data (and object (gethash "data" object))))
     (when data
       (loop for key being the hash-keys of data using (hash-value value)
@@ -320,19 +412,30 @@
               (setf (cdr existing) (cdr pair))
               (push (cons (car pair) (cdr pair)) result)))))))
 
+(defun containerd-sandbox-address (runtime pod sandbox-id)
+  "Return POD's own address: its sandbox's, or its node's when it shares the node's network."
+  (if (containerd-pod-host-network-p runtime pod)
+      (containerd-node-address runtime)
+      (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime) sandbox-id)))
+
 (defun containerd-pod-environment (runtime pod container sandbox-id)
-  "Resolve a container's variables: Services, then envFrom in order, then explicit env."
-  (let* ((object (pod-runtime-container-object pod container)) (pod-ip nil))
+  "Resolve a container's variables: Services, then envFrom in order, then explicit env.
+A literal value may refer to any variable defined before it, as $(NAME)."
+  (let* ((object (pod-runtime-container-object pod container)) (pod-ip nil)
+         (environment
+           (merge-environment
+            (when (and runtime (containerd-runtime-resource-store runtime)) (pod-service-environment runtime pod))
+            (loop for source across (gethash "envFrom" object #())
+                  append (environment-source-pairs runtime pod source)))))
     (merge-environment
-     (when (and runtime (containerd-runtime-resource-store runtime)) (pod-service-environment runtime pod))
-     (loop for source across (gethash "envFrom" object #())
-           append (environment-source-pairs runtime pod source))
+     environment
      (loop for variable across (gethash "env" object #())
            for from = (gethash "valueFrom" variable)
            append
            (multiple-value-bind (value include)
                (cond
-                 ((null from) (values (gethash "value" variable "") t))
+                 ((null from)
+                  (values (expand-container-command-argument (gethash "value" variable "") environment) t))
                  ((gethash "secretKeyRef" from)
                   (containerd-key-environment-value runtime pod "secrets" (gethash "secretKeyRef" from)))
                  ((gethash "configMapKeyRef" from)
@@ -352,10 +455,15 @@
                              (reference
                               (let ((metadata (gethash "metadata" (pod-to-object pod))))
                                 (gethash (cdr reference) (gethash (car reference) metadata (core-object)) "")))
-                             ((equal field "status.podIP")
-                              (or pod-ip (setf pod-ip (cri-pod-sandbox-ip
-                                                      (containerd-runtime-socket-path runtime) sandbox-id))))) t))))
-             (when include (list (cons (gethash "name" variable) value))))))))
+                             ((equal field "spec.serviceAccountName")
+                              (gethash "serviceAccountName" (gethash "spec" (pod-to-object pod)) ""))
+                             ((member field '("status.hostIP" "status.hostIPs") :test #'equal)
+                              (containerd-node-address runtime))
+                             ((member field '("status.podIP" "status.podIPs") :test #'equal)
+                              (or pod-ip (setf pod-ip (containerd-sandbox-address runtime pod sandbox-id))))) t))))
+             (when include
+               (setf environment (merge-environment environment (list (cons (gethash "name" variable) value))))
+               (list (cons (gethash "name" variable) value))))))))
 
 (defun cri-seccomp-profile (context)
   "Map a validated seccompProfile to CRI, leaving an unset profile to mean Unconfined."
@@ -388,8 +496,9 @@
           :selinux-options (cri-selinux-options context)
           :supplemental-groups (pod-supplemental-groups pod))))
 
-(defun containerd-pod-security-context (pod container)
-  "Map effective Pod/container Linux identities, confinement and privileges to the CRI API."
+(defun containerd-pod-security-context (pod container &key target-id)
+  "Map effective Pod/container Linux identities, confinement and privileges to the CRI API.
+TARGET-ID names the running container whose PID namespace an ephemeral container joins."
   (let* ((pod-context (gethash "securityContext" (gethash "spec" (pod-to-object pod))))
          (container-context (gethash "securityContext" (pod-runtime-container-object pod container)))
          (effective (core-object)))
@@ -398,7 +507,7 @@
     (let ((user (gethash "runAsUser" effective)) (group (gethash "runAsGroup" effective)))
       (when (and (eq t (gethash "runAsNonRoot" effective))
                  (not (and user (plusp user))))
-        (error 'runtime-error :message "runAsNonRoot requires a verified nonzero runAsUser"))
+        (container-config-error "runAsNonRoot requires a verified nonzero runAsUser"))
       (make-instance
        'gr8s.cri.v1::linux-container-security-context
        :run-as-user (when user (make-instance 'gr8s.cri.v1::int64value :value user))
@@ -406,6 +515,15 @@
        :supplemental-groups (pod-supplemental-groups pod)
        :seccomp (cri-seccomp-profile effective)
        :selinux-options (cri-selinux-options effective)
+       :namespace-options (make-instance
+                           'gr8s.cri.v1::namespace-option
+                           :pid (if (and target-id (= (pod-pid-namespace-mode pod)
+                                                      gr8s.cri.v1::+namespacemode-container+))
+                                    gr8s.cri.v1::+namespacemode-target+
+                                    (pod-pid-namespace-mode pod))
+                           :target-id (or target-id "")
+                           :ipc (if (pod-spec-flag-p pod "hostIPC") gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
+                           :network (if (pod-host-network-p pod) gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+))
        :capabilities (let ((capabilities (gethash "capabilities" effective)))
                        (when capabilities
                          (make-instance 'gr8s.cri.v1::capability

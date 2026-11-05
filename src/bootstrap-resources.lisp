@@ -31,7 +31,8 @@
                    (core-resource-error 422 "Invalid" "Nonresource rules cannot contain resource fields"))
                  (bootstrap-string-array (gethash "nonResourceURLs" rule) "rule.nonResourceURLs" :nonempty t)
                  (loop for url across (gethash "nonResourceURLs" rule)
-                       unless (char= #\/ (char url 0))
+                       ;; A lone * is how upstream's cluster-admin grants every URL.
+                       unless (or (equal url "*") (and (plusp (length url)) (char= #\/ (char url 0))))
                          do (core-resource-error 422 "Invalid" "nonResourceURLs must begin with /")))
                (progn
                  (bootstrap-string-array (gethash "resources" rule) "rule.resources" :nonempty t)
@@ -55,7 +56,7 @@
     (default-rbac-api-group ref "rbac.authorization.k8s.io")
     (unless (and (equal "rbac.authorization.k8s.io" (gethash "apiGroup" ref))
                  (member (gethash "kind" ref) (if cluster-p '("ClusterRole") '("Role" "ClusterRole")) :test #'equal)
-                 (dns-subdomain-p (gethash "name" ref)))
+                 (path-segment-name-p (gethash "name" ref)))
       (core-resource-error 422 "Invalid" "Invalid roleRef"))
     (unless (and (vectorp subjects) (not (stringp subjects)))
       (core-resource-error 422 "Invalid" "subjects must be an array"))
@@ -177,7 +178,7 @@
                  (equal kind (gethash "kind" object kind)))
       (core-resource-error 400 "BadRequest" "Expected ~A ~A" version kind))
     (reject-unsupported-fields object (append '("apiVersion" "kind" "metadata") fields) kind)
-    (validate-core-metadata metadata namespace name)
+    (validate-core-metadata metadata namespace name :name-test (when (rbac-resource-p resource) #'path-segment-name-p))
     (setf (gethash "kind" object) kind (gethash "apiVersion" object) version)
     (if namespace (setf (gethash "namespace" metadata) namespace) (remhash "namespace" metadata))
     (cond
@@ -188,8 +189,9 @@
          (reject-unsupported-fields spec '("finalizers") "Namespace.spec")
          (when (gethash "finalizers" spec)
            (bootstrap-string-array (gethash "finalizers" spec) "spec.finalizers"))
-         (setf (gethash "spec" object) spec
-               (gethash "status" object) (core-object "phase" "Active"))))
+         (setf (gethash "spec" object) spec)
+         (normalize-namespace-lifecycle
+          object (and name store (gethash (core-resource-key "namespaces" nil name) (pod-store-resources store))))))
       ((equal resource "serviceaccounts")
        (multiple-value-bind (automount present) (gethash "automountServiceAccountToken" object)
          (when (and present (not (member automount '(t nil))))
@@ -228,6 +230,9 @@
                                 "shortNames" (cond ((equal resource "certificatesigningrequests") #("csr"))
                                                    ((equal resource "configmaps") #("cm"))
                                                    ((equal resource "services") #("svc"))
+                                                   ((equal resource "endpoints") #("ep"))
+                                                   ((equal resource "ingresses") #("ing"))
+                                                   ((equal resource "networkpolicies") #("netpol"))
                                                    ((equal resource "replicationcontrollers") #("rc"))
                                                    ((equal resource "events") #("ev"))
                                                    ((equal resource "cronjobs") #("cj"))
@@ -239,9 +244,9 @@
                                                    ((equal resource "limitranges") #("limits"))
                                                    ((equal resource "priorityclasses") #("pc")) (t #()))
                                 "verbs" (if (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource)
-                                                (policy-resource-p resource)
+                                                (policy-resource-p resource) (typed-api-resource-p resource) (networking-resource-p resource)
                                                 (admission-config-resource-p resource)
-                                                (member resource '("podtemplates" "events" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "controllerrevisions" "customresourcedefinitions") :test #'equal))
+                                                (member resource '("configmaps" "secrets" "serviceaccounts" "roles" "rolebindings" "clusterroles" "clusterrolebindings" "networkpolicies" "services" "podtemplates" "events" "horizontalpodautoscalers" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions" "customresourcedefinitions") :test #'equal))
                                             #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
                                             #("create" "delete" "get" "list" "patch" "update" "watch"))))
    'vector))
@@ -278,9 +283,17 @@
                   (when (node-record-annotations node)
                     (setf (gethash "annotations" metadata) (copy-core-object (node-record-annotations node))))
                   metadata)
-     "spec" (core-object "unschedulable" nil "podCIDR" (node-record-pod-cidr node)
-                         "podCIDRs" (vector (node-record-pod-cidr node)))
-     "status" (core-object
+     "spec" (let ((spec (core-object "unschedulable" (not (null (node-record-unschedulable node))))))
+              (when (plusp (length (node-record-pod-cidr node)))
+                (setf (gethash "podCIDR" spec) (node-record-pod-cidr node)
+                      (gethash "podCIDRs" spec) (vector (node-record-pod-cidr node))))
+              (when (plusp (length (node-record-taints node)))
+                (setf (gethash "taints" spec) (copy-core-object (node-record-taints node))))
+              spec)
+     "status" (or
+               (and (node-record-api-only node)
+                    (copy-core-object (or (node-record-api-status node) (core-object))))
+               (core-object
                "conditions" (vector (core-object "type" "Ready"
                                                   "status" (if (node-record-ready-p node) "True" "False")
                                                   "reason" (if (node-record-ready-p node) "AgentReady" "AgentNotReady")
@@ -290,13 +303,13 @@
                "capacity" (node-resource-list node)
                "allocatable" (node-resource-list node)
                "nodeInfo" (core-object "operatingSystem" "linux" "architecture" (native-node-architecture)
-                                        "kubeletVersion" "v1.36.0-gr8s.0")))))
+                                        "kubeletVersion" "v1.36.0-gr8s.0"))))))
 
 (defun node-write-input (node method)
   "Return the requested Node object from a typed or JSON PUT, or a patch applied to NODE's view."
   (if (eq method :put)
       (core-resource-request-object "Node")
-      (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
+      (let* ((content-type (request-media-type))
              (patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)))
              (current (node-api-object node)))
         (cond ((equal content-type "application/json-patch+json") (apply-core-json-patch current patch))
@@ -317,11 +330,7 @@
       (core-resource-error 400 "BadRequest" "metadata.name does not match the request name"))
     (when (and (gethash "uid" metadata) (not (equal (node-record-id node) (gethash "uid" metadata))))
       (core-resource-error 409 "Conflict" "metadata.uid does not match the stored Node"))
-    (when (eq t (gethash "unschedulable" spec))
-      (core-resource-error 422 "Invalid" "gr8s does not support cordoning: spec.unschedulable cannot be set"))
-    (let ((taints (gethash "taints" spec)))
-      (when (and taints (not (eq taints 'null)) (plusp (length taints)))
-        (core-resource-error 422 "Invalid" "gr8s does not enforce taints: spec.taints cannot be set")))
+    (validate-node-taints spec)
     (when (and (gethash "podCIDR" spec) (not (equal (gethash "podCIDR" spec) (node-record-pod-cidr node))))
       (core-resource-error 422 "Invalid" "spec.podCIDR is immutable"))
     (when (member labels '(nil null)) (setf labels (core-object)))
@@ -333,6 +342,23 @@
              builtin)
     (maphash (lambda (key value) (unless (nth-value 1 (gethash key builtin)) (setf (gethash key custom) value))) labels)
     (values custom annotations)))
+
+(defun node-write-taints (input current)
+  "Return INPUT's taints as stored, keeping the time a surviving taint was added."
+  (let* ((spec (gethash "spec" input (core-object)))
+         (requested (let ((value (gethash "taints" spec))) (if (member value '(nil null)) #() value))))
+    (map 'vector
+         (lambda (taint)
+           (let ((copy (copy-core-object taint))
+                 (old (find-if (lambda (existing)
+                                 (and (equal (gethash "key" existing) (gethash "key" taint))
+                                      (equal (gethash "effect" existing) (gethash "effect" taint))))
+                               (node-record-taints current))))
+             (when (and old (gethash "timeAdded" old)) (setf (gethash "timeAdded" copy) (gethash "timeAdded" old)))
+             (when (and (equal "NoExecute" (gethash "effect" copy)) (not (gethash "timeAdded" copy)))
+               (setf (gethash "timeAdded" copy) (current-timestamp)))
+             copy))
+         requested)))
 
 (defun write-node-response (store name method)
   "Apply a Node update or patch to its durable labels and annotations."
@@ -351,10 +377,15 @@
               (core-resource-error 409 "Conflict" "The Node was modified; apply your changes to the latest version"))
             (let ((updated (copy-node-record current)))
               (setf (node-record-labels updated) (copy-core-object labels)
-                    (node-record-annotations updated) (copy-core-object annotations))
+                    (node-record-annotations updated) (copy-core-object annotations)
+                    (node-record-taints updated) (node-write-taints input current)
+                    (node-record-unschedulable updated)
+                    (eq t (gethash "unschedulable" (gethash "spec" input (core-object)))))
               (cond
                 ((and (workload-equal-p labels (or (node-record-labels current) (core-object)))
-                      (workload-equal-p annotations (or (node-record-annotations current) (core-object))))
+                      (workload-equal-p annotations (or (node-record-annotations current) (core-object)))
+                      (workload-equal-p (node-record-taints updated) (node-record-taints current))
+                      (eq (node-record-unschedulable updated) (node-record-unschedulable current)))
                  current)
                 (dry-run updated)
                 (t
@@ -366,6 +397,8 @@
                  ;; Other holders keep this record, as with readiness updates.
                  (setf (node-record-labels current) (node-record-labels updated)
                        (node-record-annotations current) (node-record-annotations updated)
+                       (node-record-taints current) (node-record-taints updated)
+                       (node-record-unschedulable current) (node-record-unschedulable updated)
                        (node-record-resource-version current) (node-record-resource-version updated))
                  current))))))))))
 

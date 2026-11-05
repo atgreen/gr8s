@@ -4,7 +4,7 @@
 ;;;; Purpose:
 ;;;; Map verified Kubernetes API certificate subjects and live ServiceAccount
 ;;;; tokens into request identities. Share User/Group RBAC and server-owned CSR
-;;;; actor fields without accepting headers or client-supplied identity claims.
+;;;; actor fields. Identity headers count only through authorized impersonation.
 
 (in-package #:gr8s)
 

@@ -8,7 +8,9 @@
   (urgent-deletions (make-hash-table :test #'equal))
   (convergence-lock (bt:make-lock "gr8s running convergence ownership"))
   ;; Pod UID to the universal time its local storage was last measured.
-  (storage-measurements (make-hash-table :test #'equal)))
+  (storage-measurements (make-hash-table :test #'equal))
+  ;; Pod UID to when a NoExecute taint with a finite toleration was first noticed.
+  (taint-timers (make-hash-table :test #'equal)))
 
 (define-condition pod-reconciliation-superseded (serious-condition) ()
   (:documentation "Unwind obsolete creation without translating cancellation into a Pod failure."))
@@ -131,8 +133,25 @@
 (defun pod-ephemeral-limit-p (pod)
   "Return whether any container of POD declares an ephemeral-storage limit."
   (let ((spec (gethash "spec" (pod-to-object pod))))
-    (some (lambda (container) (gethash "ephemeral-storage" (container-resource-map container "limits")))
-          (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec)))))
+    (or (some (lambda (container) (gethash "ephemeral-storage" (container-resource-map container "limits")))
+              (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec)))
+        (some #'pod-disk-empty-dir-limit (gethash "volumes" spec #())))))
+
+(defun pod-disk-empty-dir-limit (volume)
+  "Return the byte limit of a disk-backed emptyDir VOLUME, or NIL."
+  (let* ((source (gethash "emptyDir" volume))
+         (limit (and source (not (equal "Memory" (gethash "medium" source))) (gethash "sizeLimit" source))))
+    (unless (member limit '(nil 0 "0") :test #'equal)
+      (storage-quantity limit "emptyDir.sizeLimit"))))
+
+(defun pod-empty-dir-violation (pod volume-usage)
+  "Return why a disk-backed emptyDir in the (NAME . BYTES) list VOLUME-USAGE exceeds its limit, or NIL."
+  (loop for volume across (gethash "volumes" (gethash "spec" (pod-to-object pod)) #())
+        for limit = (pod-disk-empty-dir-limit volume)
+        for used = (cdr (assoc (gethash "name" volume) volume-usage :test #'equal))
+        when (and limit used (> used limit))
+          return (format nil "Usage of EmptyDir volume ~S exceeds the limit ~S."
+                         (gethash "name" volume) (gethash "sizeLimit" (gethash "emptyDir" volume)))))
 
 (defun pod-ephemeral-violation (pod layers volume-bytes)
   "Return why measured LAYERS and VOLUME-BYTES exceed POD's ephemeral-storage limits, or NIL."
@@ -156,8 +175,11 @@
         (setf (gethash (pod-uid pod) table) now)
         ;; A failed measurement says nothing about the Pod; the next one decides.
         (handler-case
-            (multiple-value-bind (layers volume-bytes) (runtime-ephemeral-usage (reconciler-runtime reconciler) pod)
-              (when volume-bytes (pod-ephemeral-violation pod layers volume-bytes)))
+            (multiple-value-bind (layers volume-bytes volume-usage)
+                (runtime-ephemeral-usage (reconciler-runtime reconciler) pod)
+              (when volume-bytes
+                (or (pod-empty-dir-violation pod volume-usage)
+                    (pod-ephemeral-violation pod layers volume-bytes))))
           (error (condition)
             (format *error-output* "gr8s Pod ~A/~A storage measurement failed: ~A~%"
                     (pod-namespace pod) (pod-name pod) condition)
@@ -277,10 +299,10 @@
                      (list status))
                  (pod-reconciliation-superseded () nil))))
 
-(defun reconciler-logs (reconciler uid container &key tail)
+(defun reconciler-logs (reconciler uid container &key tail previous)
   (bt:with-lock-held ((reconciler-lock reconciler))
     (runtime-logs (reconciler-runtime reconciler)
-                  uid container :tail tail)))
+                  uid container :tail tail :previous previous)))
 
 (defun reconciler-exec-url
     (reconciler uid container command &key stdin stdout stderr tty)
@@ -301,6 +323,14 @@
     (runtime-start-exec-session
      (reconciler-runtime reconciler) uid container command
      :stdin stdin :stdout stdout :stderr stderr :tty tty)))
+
+(defun reconciler-start-attach-session (reconciler uid container &key stdin stdout stderr tty)
+  (runtime-start-attach-session (reconciler-runtime reconciler) uid container
+                                :stdin stdin :stdout stdout :stderr stderr :tty tty))
+
+(defun reconciler-attach-url (reconciler uid container &key stdin stdout stderr tty)
+  (runtime-attach-url (reconciler-runtime reconciler) uid container
+                      :stdin stdin :stdout stdout :stderr stderr :tty tty))
 
 (defun reconciler-send-exec-session-input
     (reconciler session channel data &key rows columns eof)

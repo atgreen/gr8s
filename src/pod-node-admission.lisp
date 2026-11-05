@@ -13,18 +13,19 @@
   "The scheduler's words for a Pod whose host ports are taken.")
 
 (defun pod-host-ports (pod)
-  "Return the (ip . port) host ports POD's containers claim; an unset ip means every address."
+  "Return the (protocol ip . port) host ports POD's containers claim; an unset ip means every address."
   (loop for container across (gethash "containers" (gethash "spec" (pod-to-object pod)) #())
         append (loop for port across (gethash "ports" container #())
                      for number = (gethash "hostPort" port 0)
                      when (and (integerp number) (plusp number))
                        collect (let ((ip (gethash "hostIP" port "")))
-                                 (cons (if (equal ip "0.0.0.0") "" ip) number)))))
+                                 (list* (gethash "protocol" port "TCP") (if (equal ip "0.0.0.0") "" ip) number)))))
 
 (defun host-ports-conflict-p (left right)
-  "Return whether two (ip . port) claims overlap, where an unset ip overlaps every address."
-  (and (= (cdr left) (cdr right))
-       (or (equal (car left) (car right)) (equal "" (car left)) (equal "" (car right)))))
+  "Return whether two (protocol ip . port) claims overlap, where an unset ip overlaps every address."
+  (and (equal (car left) (car right))
+       (= (cddr left) (cddr right))
+       (or (equal (cadr left) (cadr right)) (equal "" (cadr left)) (equal "" (cadr right)))))
 
 (defun pod-host-ports-free-p (store pod node)
   "Return whether none of POD's host ports is claimed on NODE. Call with STORE's lock held."
@@ -76,7 +77,7 @@ no reservation; otherwise it competes as the scheduler charges it. Call with STO
   (let* ((status (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)))
          (reason (and status (gethash "reason" status))))
     (and (equal "Failed" (and status (gethash "phase" status))) (stringp reason)
-         (or (equal reason "NodePorts") (uiop:string-prefix-p "OutOf" reason)))))
+         (or (equal reason "NodePorts") (equal reason "SysctlForbidden") (uiop:string-prefix-p "OutOf" reason)))))
 
 (defun admit-assigned-pod (store pod)
   "Decide whether POD, assigned to a node, may start there, and record a refusal as a kubelet does.
@@ -87,8 +88,9 @@ A Pod the node has reported on is past admission, however full the node is now."
               ((pod-admission-rejected-p store pod) (return-from admit-assigned-pod nil))
               ((or (deletion-requested-p pod) (gethash (pod-uid pod) (pod-store-pod-observed-phases store)))
                (return-from admit-assigned-pod t))
-              (t (let ((node (get-node-unlocked store (pod-node-name pod))))
-                   (and node (first (node-pod-fit-failures store pod node :admission t)))))))))
+              (t (or (pod-forbidden-sysctl-failure pod)
+                     (let ((node (get-node-unlocked store (pod-node-name pod))))
+                       (and node (first (node-pod-fit-failures store pod node :admission t))))))))))
     (when failure
       (save-pod-observation
        store pod
@@ -103,6 +105,8 @@ A Pod the node has reported on is past admission, however full the node is now."
     (dolist (node nodes)
       (dolist (failure (or (mapcar #'car (node-pod-fit-failures store pod node))
                            (unless (node-record-ready-p node) '("node(s) not ready"))
+                           (when (node-record-unschedulable node) '("node(s) were unschedulable"))
+                           (unless (pod-node-taints-allow-p pod node) '("node(s) had untolerated taints"))
                            (unless (and (pod-node-selector-matches-p pod node) (pod-node-affinity-matches-p pod node))
                              '("node(s) didn't match Pod's node affinity/selector"))))
         (let ((entry (assoc failure counts :test #'equal)))

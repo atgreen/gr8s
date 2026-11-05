@@ -2,6 +2,14 @@
   (:use #:cl)
   (:shadow #:labels #:some))
 
+(defpackage #:gr8s.csi.v1
+  (:use #:cl)
+  (:shadow #:type #:labels #:some #:block))
+
+(defpackage #:gr8s.pluginregistration.v1
+  (:use #:cl)
+  (:shadow #:type #:block))
+
 (defpackage #:gr8s.node.v1
   (:use #:cl)
   (:shadow #:labels #:phase))

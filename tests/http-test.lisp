@@ -529,6 +529,7 @@
               :element-type '(unsigned-byte 8)))
            (runtime-port (usocket:get-local-port listener))
            (upstream-frames nil)
+           (upstream-streams nil)
            (upstream-error nil)
            (upstream-thread nil)
            (http-server nil)
@@ -544,33 +545,15 @@
                           (stream (usocket:socket-stream socket)))
                      (unwind-protect
                           (progn
-                            (gr8s::read-http-response-head stream)
-                            (write-sequence
-                             (gr8s::ascii-octets
-                              (format nil
-                                      "HTTP/1.1 101 Switching Protocols~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-WebSocket-Protocol: v5.channel.k8s.io~C~C~C~C"
-                                      #\Return #\Linefeed #\Return #\Linefeed
-                                      #\Return #\Linefeed #\Return #\Linefeed
-                                      #\Return #\Linefeed))
-                             stream)
-                            (finish-output stream)
-                            (loop repeat 3
-                                  do
-                              (multiple-value-bind (opcode payload)
-                                  (gr8s::read-websocket-frame stream)
-                                (push (cons opcode payload) upstream-frames)))
-                            (gr8s::write-websocket-frame
-                             stream 2
-                             (concatenate
-                              '(vector (unsigned-byte 8)) #(1)
-                              (trivial-utf-8:string-to-utf-8-bytes
-                               "through remote agent\n")))
-                            (gr8s::write-websocket-frame
-                             stream 2
-                             (concatenate
-                              '(vector (unsigned-byte 8)) #(3)
-                              (gr8s::exec-exit-status-bytes 7)))
-                            (gr8s::write-websocket-frame stream 8 #()))
+                            (let ((streams (fake-spdy-accept stream 4)))
+                              (loop repeat 3
+                                    do (push (fake-spdy-read-frame stream) upstream-frames))
+                              (setf upstream-streams streams)
+                              (fake-spdy-send stream (cdr (assoc "stdout" streams :test #'equal))
+                                              "through remote agent\n" :fin t)
+                              (fake-spdy-send stream (cdr (assoc "error" streams :test #'equal)) nil
+                                              :octets (gr8s::exec-exit-status-bytes 7) :fin t)
+                              (ignore-errors (loop while (fake-spdy-read-frame stream)))))
                        (ignore-errors (usocket:socket-close socket))))
                  (error (condition) (setf upstream-error condition))))
              :name "gr8s HTTP remote exec fake runtime"))
@@ -671,9 +654,10 @@
              (is (null upstream-error) "~A" upstream-error)
              (let ((frames (nreverse upstream-frames)))
                (is (= 3 (length frames)))
-               (is (= 0 (aref (cdr (first frames)) 0)))
-               (is (= 4 (aref (cdr (second frames)) 0)))
-               (is (equalp #(255 0) (cdr (third frames)))))
+               (is (= (cdr (assoc "stdin" upstream-streams :test #'equal)) (second (first frames))))
+               (is (= (cdr (assoc "resize" upstream-streams :test #'equal)) (second (second frames))))
+               (is (= (cdr (assoc "stdin" upstream-streams :test #'equal)) (second (third frames))))
+               (is-true (third (third frames))))
              (is (equal (list (pod-uid pod) "web" '("sh" "-i")
                               t t nil t)
                         (gr8s::fake-runtime-last-exec fake-runtime))))
@@ -728,19 +712,9 @@
                           (stream (usocket:socket-stream socket)))
                      (unwind-protect
                           (progn
-                            (gr8s::read-http-response-head stream)
-                            (write-sequence
-                             (gr8s::ascii-octets
-                              (format nil
-                                      "HTTP/1.1 101 Switching Protocols~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-WebSocket-Protocol: v5.channel.k8s.io~C~C~C~C"
-                                      #\Return #\Linefeed #\Return #\Linefeed
-                                      #\Return #\Linefeed #\Return #\Linefeed
-                                      #\Return #\Linefeed))
-                             stream)
-                            (finish-output stream)
+                            (fake-spdy-accept stream 4)
                             (setf upstream-connected-p t)
-                            (handler-case (read-byte stream)
-                              (end-of-file () nil)
+                            (handler-case (loop while (fake-spdy-read-frame stream))
                               (error () nil))
                             (setf upstream-closed-p t))
                        (ignore-errors (usocket:socket-close socket))))

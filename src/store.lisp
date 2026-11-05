@@ -18,12 +18,19 @@
   (resources (make-hash-table :test #'equal))
   (resource-revision 0)
   template-history
+  (template-history-recent nil)
+  (template-history-maintained-at 0)
   (template-history-floor 0)
   (resource-history-start 0)
   template-token-key
   (event-expirations (make-hash-table :test #'equal))
   in-cluster-config
   (credential-lock (bt:make-lock "gr8s ServiceAccount credentials"))
+  service-account-signing-key
+  ;; Digest of each verified token to its claims.
+  (verified-tokens (make-hash-table :test #'equal))
+  ;; (Pod UID, token identity) to the projected token last minted for it.
+  (projected-tokens (make-hash-table :test #'equal))
   (workload-lock (bt:make-lock "gr8s workload controllers"))
   (workload-deletions (make-hash-table :test #'equal))
   (job-controller-states (make-hash-table :test #'equal))
@@ -41,6 +48,8 @@
   (pod-client-statuses (make-hash-table :test #'equal))
   ;; Pod UID to the node reserved for it while its preemption victims terminate.
   (nominated-nodes (make-hash-table :test #'equal))
+  ;; Pod UID to the (message . time) of its latest FailedScheduling Event.
+  (scheduling-notes (make-hash-table :test #'equal))
   (lock (bt:make-lock "gr8s store"))
   ;; HA (podster-c2d.7.2). When CONSENSUS-COMMIT-FN is set, a durable
   ;; (consensus-plane) write is not published locally under the store lock;
@@ -137,6 +146,11 @@
       (setf (gethash "capacity" object) (node-record-capacity node)))
     (when (node-record-extended-resources node)
       (setf (gethash "extendedResources" object) (node-record-extended-resources node)))
+    (when (plusp (length (node-record-taints node)))
+      (setf (gethash "taints" object) (node-record-taints node)))
+    (when (node-record-unschedulable node) (setf (gethash "unschedulable" object) t))
+    (when (node-record-api-only node) (setf (gethash "apiOnly" object) t))
+    (when (node-record-api-status node) (setf (gethash "apiStatus" object) (node-record-api-status node)))
     object))
 
 (defun parse-node-record (input)
@@ -157,6 +171,10 @@
                       :resource-version (gethash "resourceVersion" object "1")
                       :capacity (gethash "capacity" object)
                       :extended-resources (gethash "extendedResources" object)
+                      :taints (gethash "taints" object #())
+                      :unschedulable (eq t (gethash "unschedulable" object))
+                      :api-only (eq t (gethash "apiOnly" object))
+                      :api-status (gethash "apiStatus" object)
                       :ready-p (and (eq t (gethash "ready" object))
                                     (integerp heartbeat) (integerp deadline)
                                     (<= (get-universal-time) deadline)))))
@@ -179,7 +197,7 @@
     (setf (aref octets 6) (logior #x40 (logand #x0f (aref octets 6)))
           (aref octets 8) (logior #x80 (logand #x3f (aref octets 8))))
     (format nil
-            "~2,'0X~2,'0X~2,'0X~2,'0X-~2,'0X~2,'0X-~2,'0X~2,'0X-~2,'0X~2,'0X-~2,'0X~2,'0X~2,'0X~2,'0X~2,'0X~2,'0X"
+            "~(~2,'0X~2,'0X~2,'0X~2,'0X-~2,'0X~2,'0X-~2,'0X~2,'0X-~2,'0X~2,'0X-~2,'0X~2,'0X~2,'0X~2,'0X~2,'0X~2,'0X~)"
             (aref octets 0) (aref octets 1) (aref octets 2) (aref octets 3)
             (aref octets 4) (aref octets 5) (aref octets 6) (aref octets 7)
             (aref octets 8) (aref octets 9) (aref octets 10) (aref octets 11)
@@ -396,6 +414,7 @@
       (validate-pod-dns-update existing replacement)
       (validate-pod-finalizer-update existing replacement)
       (validate-pod-policy-update existing replacement)
+      (preserve-pod-ephemeral-containers existing replacement)
       (when (pod-node-name existing)
         (when (and (pod-node-name replacement)
                    (not (string= (pod-node-name existing)
@@ -456,6 +475,7 @@
       (remhash (pod-uid pod) (pod-store-pod-condition-histories store))
       (remhash (pod-uid pod) (pod-store-pod-client-statuses store))
       (remhash (pod-uid pod) (pod-store-nominated-nodes store))
+      (remhash (pod-uid pod) (pod-store-scheduling-notes store))
       pod)))
 
 (defun delete-pod (store namespace name)

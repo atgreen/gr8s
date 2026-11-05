@@ -56,7 +56,8 @@
                        :containerd-oci-runtime (default-containerd-oci-runtime)
                        :containerd-socket "/run/containerd/containerd.sock"
                        :containerd-log-root "/var/log/gr8s/pods/"
-                       :kubeconfig nil)))
+                       :kubeconfig nil
+                       :local-storage-path +default-local-storage-path+)))
     (loop while arguments
           for option = (first arguments)
           do (if (member option '("--disable-agent" "--raft-init") :test #'string=)
@@ -127,6 +128,10 @@
                       (setf (getf options :raft-node-name) value))
                      ((string= option "--raft-token")
                       (setf (getf options :raft-token) value))
+                     ((string= option "--local-storage-path")
+                      (unless (storage-absolute-path-p value)
+                        (error "local storage path must be absolute without traversal"))
+                      (setf (getf options :local-storage-path) value))
                      (t (error "unknown serve option: ~A" option)))
                    (setf arguments (cddr arguments)))))
     (unless (string= "127.0.0.1" (getf options :listen))
@@ -643,6 +648,9 @@ handler and never gets here. A busy host makes this race likely."
                             (list :host "10.96.0.1" :port 443
                                   :ca-pem (uiop:read-file-string (cluster-pki-ca-certificate-path pki))))
                       (ensure-native-namespace-root-cas store))
+                    (seed-default-storage-class store state-directory
+                                                :path (getf options :local-storage-path))
+                    (start-volume-reclaimer store node-server (lambda () *shutdown-requested*))
                     (setf server
                           (start-server
                            :address address :port port
@@ -657,10 +665,16 @@ handler and never gets here. A busy host makes this race likely."
                                       (reconcile-certificate-signing-requests store pki)
                                       (reconcile-certificates store pki)
                                       (reconcile-storage-bindings store)
+                                      (reconcile-volume-attachments store)
                                       (reconcile-resource-quotas store)
+                                      (reconcile-namespace-deletions reconciler)
+                                      (reconcile-namespace-defaults store)
                                       (collect-orphaned-api-objects reconciler)
                                       (reconcile-workloads reconciler)
                                       (reconcile-endpointslices store)
+                                      (reconcile-endpoints store)
+                                      (prune-projected-tokens store)
+                                      ;; Each snapshot also carries projected tokens, renewed when due.
                                       (publish-service-discovery-snapshots runtime)
                                       ;; ClusterIP Services are load-balanced in-kernel by the
                                       ;; agent's eBPF socket LB; the control plane only keeps the
@@ -710,7 +724,7 @@ handler and never gets here. A busy host makes this race likely."
 
 (defun print-help ()
   (format t
-          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s witness --join HOST:PORT --node-name NAME [--token TOKEN] [--listen IPV4] [--port PORT] [--state-directory DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%"))
+          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE] [--local-storage-path DIR]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s witness --join HOST:PORT --node-name NAME [--token TOKEN] [--listen IPV4] [--port PORT] [--state-directory DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%"))
 
 (defun print-gr8s-banner (role)
   "Print a startup banner (Spring-Boot style) naming the role gr8s is starting."

@@ -84,8 +84,12 @@
               (let ((entry (find name environment :key #'car :test #'equal :from-end t)))
                 (unless (and entry (cdr entry) (plusp (length (cdr entry))))
                   (push name missing))))
-            (when missing (error 'runtime-error :message "Volume subPathExpr has an empty or missing environment value"))
-            (expand-container-command-argument expression environment))))))
+            (when missing (container-config-error "Volume subPathExpr has an empty or missing environment value"))
+            (let ((expanded (expand-container-command-argument expression environment)))
+              ;; Validation saw only the expression; the values can still escape the volume.
+              (unless (valid-container-subpath-p expanded)
+                (container-config-error "Volume subPathExpr ~S must expand to a relative path without parent traversal" expression))
+              expanded))))))
 
 (defun canonical-linux-subpath (path &key allow-missing)
   "Resolve literal Linux names without treating stars or brackets as Lisp pathname wildcards."

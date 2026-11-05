@@ -16,7 +16,10 @@
 (defun storage-discovery-response ()
   "Describe actual StorageClass operations using the shared resource registry."
   (json-response (core-object "apiVersion" "v1" "kind" "APIResourceList" "groupVersion" "storage.k8s.io/v1"
-                              "resources" (stored-resource-discovery "storage.k8s.io/v1"))))
+                              "resources" (concatenate 'vector (stored-resource-discovery "storage.k8s.io/v1")
+                                                       (vector (core-object "name" "volumeattachments/status" "singularName" ""
+                                                                            "namespaced" nil "kind" "VolumeAttachment"
+                                                                            "verbs" #("get" "patch" "update")))))))
 
 (defun storage-status-discovery ()
   "Advertise implemented PV/PVC status subresources."
@@ -24,13 +27,13 @@
                  (core-object "name" (concatenate 'string resource "/status") "singularName" ""
                               "namespaced" (core-resource-namespaced-p resource) "kind" (core-resource-kind resource)
                               "verbs" #("get" "patch" "update")))
-       '("persistentvolumes" "persistentvolumeclaims")))
+       '("persistentvolumes" "persistentvolumeclaims" "volumeattachments")))
 
 (defun storage-status-route (path)
   "Resolve only named PV/PVC status subresources."
   (when (uiop:string-suffix-p path "/status")
     (let ((route (core-resource-route (subseq path 0 (- (length path) 7)))))
-      (when (and route (third route) (member (first route) '("persistentvolumes" "persistentvolumeclaims") :test #'equal)) route))))
+      (when (and route (third route) (member (first route) '("persistentvolumes" "persistentvolumeclaims" "volumeattachments") :test #'equal)) route))))
 
 (defun dispatch-storage-status-request (store path method)
   "Read or atomically update storage status without allowing status writes to replace spec."
@@ -39,7 +42,7 @@
     (unless (member method '(:put :patch)) (core-resource-error 405 "MethodNotAllowed" "Unsupported storage status method"))
     (let* ((*storage-status-write* t)
            (dry-run (core-resource-dry-run-p))
-           (content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
+           (content-type (request-media-type))
            (input (if (eq method :put) (core-resource-request-object (core-resource-kind resource))
                       (progn
                         (unless (member content-type '("application/merge-patch+json" "application/strategic-merge-patch+json" "application/json-patch+json") :test #'equal)
@@ -86,7 +89,8 @@
 
 (defun add-storage-openapi-paths (paths &optional (version "v1"))
   "Describe stable storage paths from the pinned schemas."
-  (dolist (resource '("persistentvolumes" "persistentvolumeclaims" "storageclasses"))
+  (dolist (resource '("persistentvolumes" "persistentvolumeclaims" "storageclasses"
+                      "csidrivers" "csinodes" "volumeattachments" "csistoragecapacities"))
     (when (equal version (core-resource-api-version resource))
       (let* ((namespaced (core-resource-namespaced-p resource))
              (kind (core-resource-kind resource))
@@ -112,7 +116,7 @@
                 (gethash item paths)
                 (core-object "parameters" (if namespaced (vector (parameter "namespace") (parameter "name")) (vector (parameter "name")))
                              "get" (operation "get") "put" (operation "put") "patch" (operation "patch") "delete" (operation "delete")))
-          (unless (equal resource "storageclasses")
+          (when (member resource '("persistentvolumes" "persistentvolumeclaims" "volumeattachments") :test #'equal)
             (setf (gethash (concatenate 'string item "/status") paths)
                   (core-object "parameters" (gethash "parameters" (gethash item paths))
                                "get" (operation "get") "put" (operation "put") "patch" (operation "patch"))))))))

@@ -16,7 +16,8 @@
              (remaining (if namespaced (cddr tail) tail))
              (type (assoc (first remaining) *stored-resource-types* :test #'equal)))
         (when (and type (or (equal version (third type))
-                                  (and (equal "events" (first type)) (equal version "events.k8s.io/v1")))
+                                  (and (equal "events" (first type)) (equal version "events.k8s.io/v1"))
+                                  (and (equal "horizontalpodautoscalers" (first type)) (equal version "autoscaling/v1")))
                    (<= 1 (length remaining) 2)
                    (every (lambda (part) (plusp (length part))) remaining)
                    (or (not namespaced) (fourth type))
@@ -31,17 +32,19 @@
 
 (defun core-resource-request-object (expected-kind)
   (when (and *crd-view-definition* (not (equal expected-kind "DeleteOptions"))) (return-from core-resource-request-object (crd-read-json)))
-  (let ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;)))))
+  (let ((content-type (request-media-type)))
     (cond
       ((string= content-type "application/vnd.kubernetes.protobuf")
        (decode-core-resource-protobuf (hunchentoot:raw-post-data :force-binary t) expected-kind
                                       (if (equal expected-kind "Scale") "autoscaling/v1"
                                           (when (member expected-kind '("Event" "DeleteOptions") :test #'equal) *core-resource-view-version*))))
       ((member content-type '("" "application/json") :test #'string=)
-       (require-object (if (member expected-kind '("CustomResourceDefinition" "CertificateSigningRequest") :test #'equal)
-                           (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))
-                           (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)
-                                                :max-string-length (* 2 1024 1024))) "request"))
+       (let ((text (hunchentoot:raw-post-data :force-text t)))
+         (if (member expected-kind '("CustomResourceDefinition" "CertificateSigningRequest") :test #'equal)
+             (require-object (crd-parse-json-content text) "request")
+             (apply-typed-field-validation
+              (require-object (com.inuoe.jzon:parse text :max-string-length (* 2 1024 1024)) "request")
+              text expected-kind))))
       (t (core-resource-error 415 "UnsupportedMediaType" "Supported resource request formats are JSON and Kubernetes protobuf")))))
 
 (defun core-selector-terms (selector)
@@ -241,11 +244,13 @@
         finally (return object)))
 
 (defun core-resource-patch-response (store resource namespace name dry-run)
-  (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
+  (let* ((content-type (request-media-type))
          (patch nil))
+    (when (string= content-type "application/apply-patch+yaml")
+      (return-from core-resource-patch-response (apply-patch-response store resource namespace name dry-run)))
     (unless (member content-type '("application/merge-patch+json" "application/strategic-merge-patch+json"
                                    "application/json-patch+json") :test #'string=)
-      (core-resource-error 415 "UnsupportedMediaType" "Supported patch types are JSON merge, strategic merge, and JSON patch"))
+      (core-resource-error 415 "UnsupportedMediaType" "Supported patch types are JSON merge, strategic merge, JSON patch and apply"))
     (setf patch (if (or (equal resource "customresourcedefinitions") (custom-resource-key-p resource))
                     (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))
                     (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t) :max-string-length (* 2 1024 1024))))
@@ -258,13 +263,15 @@
             (apply-core-json-patch old patch)
             (if (and (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource)
                          (budget-resource-p resource)
-                         (policy-resource-p resource)
-                         (member resource '("podtemplates" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "controllerrevisions") :test #'equal))
+                         (policy-resource-p resource) (typed-api-resource-p resource) (networking-resource-p resource)
+                         (member resource '("podtemplates" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions") :test #'equal))
                      (equal content-type "application/strategic-merge-patch+json"))
                 (template-strategic-merge old (require-object patch "patch")
                   (template-schema (cond ((csr-resource-p resource) *csr-schema-name*)
                                          ((storage-resource-p resource) (storage-resource-schema-name resource))
                                          ((policy-resource-p resource) (policy-resource-schema-name resource))
+                                         ((typed-api-resource-p resource) (typed-api-schema-name resource))
+                                         ((networking-resource-p resource) (networking-resource-schema-name resource))
                                          ((endpointslice-resource-p resource) "io.k8s.api.discovery.v1.EndpointSlice")
                                          ((budget-resource-p resource) "io.k8s.api.policy.v1.PodDisruptionBudget")
                                          ((equal resource "podtemplates") "io.k8s.api.core.v1.PodTemplate")
@@ -276,11 +283,15 @@
   (destructuring-bind (resource namespace name) (core-resource-route path)
     (when (and namespace (not (dns-label-p namespace)))
       (core-resource-error 400 "BadRequest" "Invalid request namespace"))
-    (when (and name (not (if (csr-resource-p resource) (csr-path-name-p name) (dns-subdomain-p name))))
+    (when (and name (not (cond ((csr-resource-p resource) (csr-path-name-p name))
+                               ((rbac-resource-p resource) (path-segment-name-p name))
+                               ((equal resource "ipaddresses") (networking-canonical-ip-p name))
+                               (t (dns-subdomain-p name)))))
       (core-resource-error 400 "BadRequest" "Invalid request name"))
     (let ((*csr-request-actor* (if (csr-resource-p resource) (csr-http-request-actor store) (core-object)))
-          (*core-resource-view-version* (if (and (equal resource "events") (uiop:string-prefix-p "/apis/" path))
-                                         "events.k8s.io/v1" (core-resource-api-version resource)))
+          (*core-resource-view-version* (cond ((and (equal resource "events") (uiop:string-prefix-p "/apis/" path)) "events.k8s.io/v1")
+                                              ((uiop:string-prefix-p "/apis/autoscaling/v1/" path) "autoscaling/v1")
+                                              (t (core-resource-api-version resource))))
           (dry-run (core-resource-dry-run-p))
           (writable-scope (or namespace (not (core-resource-namespaced-p resource)))))
       (cond
@@ -298,7 +309,7 @@
                                                         (lambda (old) (declare (ignore old)) replacement) :dry-run dry-run))))
         ((and writable-scope name (eq method :patch)) (core-resource-patch-response store resource namespace name dry-run))
         ((and writable-scope (null name)
-              (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource) (batch-resource-p resource) (budget-resource-p resource) (admission-config-resource-p resource) (policy-resource-p resource) (member resource '("podtemplates" "events" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "controllerrevisions" "customresourcedefinitions") :test #'equal))
+              (or (csr-resource-p resource) (storage-resource-p resource) (endpointslice-resource-p resource) (batch-resource-p resource) (budget-resource-p resource) (admission-config-resource-p resource) (policy-resource-p resource) (typed-api-resource-p resource) (networking-resource-p resource) (member resource '("configmaps" "secrets" "serviceaccounts" "roles" "rolebindings" "clusterroles" "clusterrolebindings" "networkpolicies" "services" "podtemplates" "events" "horizontalpodautoscalers" "deployments" "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions" "customresourcedefinitions") :test #'equal))
               (eq method :delete))
          (let* ((body (hunchentoot:raw-post-data :force-binary t))
                 (options (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions")))
@@ -314,7 +325,9 @@
                   (delete-csr-collection store (or (hunchentoot:parameter "labelSelector") "") (or (hunchentoot:parameter "fieldSelector") "") :dry-run (or dry-run preview)))
                  ((or (workload-resource-p resource) (batch-resource-p resource))
                   (delete-workload-collection store resource namespace options (or dry-run preview)))
-                 ((or (storage-resource-p resource) (endpointslice-resource-p resource) (policy-resource-p resource))
+                 ((or (storage-resource-p resource) (endpointslice-resource-p resource) (policy-resource-p resource)
+                      (typed-api-resource-p resource)
+                      (networking-resource-p resource) (member resource '("services" "networkpolicies") :test #'equal))
                   (delete-storage-collection store resource namespace (or (hunchentoot:parameter "labelSelector") "")
                                              (or (hunchentoot:parameter "fieldSelector") "") :dry-run (or dry-run preview)))
                  (t (delete-template-collection store namespace (or (hunchentoot:parameter "labelSelector") "")
@@ -344,9 +357,6 @@
         (t (core-resource-error 405 "MethodNotAllowed" "Method is not supported for this resource endpoint"))))))
 
 (defun add-core-resource-openapi-definitions (definitions)
-  (let ((metadata (gethash "properties" (gethash "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta" definitions))))
-    (setf (gethash "generateName" metadata) (json-object "type" "string")
-          (gethash "creationTimestamp" metadata) (json-object "type" "string" "format" "date-time")))
   (dolist (kind '("ConfigMap" "Secret"))
     (let* ((secret (string= kind "Secret"))
            (properties
@@ -382,7 +392,12 @@
                                   "io.k8s.api.core.v1.LimitRange" "io.k8s.api.core.v1.LimitRangeList"
                                   "io.k8s.api.node.v1.RuntimeClass" "io.k8s.api.node.v1.RuntimeClassList"
                                   "io.k8s.api.scheduling.v1.PriorityClass" "io.k8s.api.scheduling.v1.PriorityClassList"
-                                  "io.k8s.api.discovery.v1.EndpointSlice" "io.k8s.api.discovery.v1.EndpointSliceList") :test #'equal))
+                                  "io.k8s.api.discovery.v1.EndpointSlice" "io.k8s.api.discovery.v1.EndpointSliceList"
+                                  "io.k8s.api.core.v1.Endpoints" "io.k8s.api.core.v1.EndpointsList"
+                                  "io.k8s.api.networking.v1.Ingress" "io.k8s.api.networking.v1.IngressList"
+                                  "io.k8s.api.networking.v1.IngressClass" "io.k8s.api.networking.v1.IngressClassList"
+                                  "io.k8s.api.networking.v1.ServiceCIDR" "io.k8s.api.networking.v1.ServiceCIDRList"
+                                  "io.k8s.api.networking.v1.IPAddress" "io.k8s.api.networking.v1.IPAddressList") :test #'equal))
                  name (concatenate 'string "io.gr8s.template." name)))
            (rewrite (schema)
              (cond ((hash-table-p schema)

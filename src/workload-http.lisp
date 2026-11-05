@@ -21,12 +21,13 @@
                    (cond ((equal "Deployment" (gethash "kind" resource)) #("deploy"))
                          ((equal "ReplicaSet" (gethash "kind" resource)) #("rs"))
                          ((equal "DaemonSet" (gethash "kind" resource)) #("ds"))
+                         ((equal "StatefulSet" (gethash "kind" resource)) #("sts"))
                          (t #()))))
     (json-response
      (core-object "apiVersion" "v1" "kind" "APIResourceList" "groupVersion" "apps/v1" "resources"
                   (concatenate 'vector resources
-                    (coerce (loop for name in '("deployments" "replicasets" "daemonsets")
-                                  for kind in '("Deployment" "ReplicaSet" "DaemonSet")
+                    (coerce (loop for name in '("deployments" "replicasets" "daemonsets" "statefulsets")
+                                  for kind in '("Deployment" "ReplicaSet" "DaemonSet" "StatefulSet")
                                   append (append
                                           (unless (equal name "daemonsets")
                                             (list (core-object "name" (concatenate 'string name "/scale") "namespaced" t
@@ -45,7 +46,7 @@
        (list (sixth parts) (fifth parts) (seventh parts) (eighth parts)))
       ((and (= 9 (length parts)) (dns-label-p (sixth parts)) (dns-subdomain-p (eighth parts))
             (or (and (equal (subseq parts 0 5) '("" "apis" "apps" "v1" "namespaces"))
-                     (member (seventh parts) '("deployments" "replicasets") :test #'equal)
+                     (member (seventh parts) '("deployments" "replicasets" "statefulsets") :test #'equal)
                      (member (ninth parts) '("scale" "status") :test #'equal))
                 (and (equal (subseq parts 0 5) '("" "apis" "apps" "v1" "namespaces"))
                      (equal (seventh parts) "daemonsets") (equal (ninth parts) "status"))
@@ -65,7 +66,7 @@
 (defun workload-read-subresource-input (old kind schema method)
   "Read JSON/protobuf PUT or schema-aware supported patch formats."
   (if (eq method :put) (core-resource-request-object kind)
-      (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
+      (let* ((content-type (request-media-type))
              (patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t))))
         (cond ((equal content-type "application/json-patch+json") (apply-core-json-patch old patch))
               ((equal content-type "application/merge-patch+json") (merge-json-object old (require-object patch "patch")))
@@ -144,7 +145,7 @@
 
 (defun add-workload-openapi-paths (paths)
   "Describe workload CRUD, collection deletion, and status/scale request schemas."
-  (dolist (resource '("deployments" "replicasets" "daemonsets" "controllerrevisions"))
+  (dolist (resource '("deployments" "replicasets" "daemonsets" "statefulsets" "controllerrevisions"))
     (let* ((kind (core-resource-kind resource)) (schema (concatenate 'string "io.k8s.api.apps.v1." kind))
            (collection (format nil "/apis/apps/v1/namespaces/{namespace}/~A" resource))
            (item (concatenate 'string collection "/{name}")))

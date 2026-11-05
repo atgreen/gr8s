@@ -175,7 +175,9 @@
       (is (equal "hello projection" (volume-text path "message"))))))
 
 (test unimplemented-or-invalid-projections-are-refused
-  (dolist (volume '("[{\"name\":\"v\",\"projected\":{\"sources\":[{\"serviceAccountToken\":{\"path\":\"t\",\"expirationSeconds\":3600}}]}}]"
+  (dolist (volume '("[{\"name\":\"v\",\"projected\":{\"sources\":[{\"serviceAccountToken\":{\"path\":\"t\",\"expirationSeconds\":60}}]}}]"
+                    "[{\"name\":\"v\",\"projected\":{\"sources\":[{\"serviceAccountToken\":{\"path\":\"../t\"}}]}}]"
+                    "[{\"name\":\"v\",\"projected\":{\"sources\":[{\"serviceAccountToken\":{\"path\":\"t\"}},{\"serviceAccountToken\":{\"path\":\"t\"}}]}}]"
                     "[{\"name\":\"v\",\"projected\":{\"sources\":[{\"clusterTrustBundle\":{\"path\":\"t\"}}]}}]"
                     "[{\"name\":\"v\",\"downwardAPI\":{\"items\":[{\"path\":\"../x\",\"fieldRef\":{\"fieldPath\":\"metadata.name\"}}]}}]"
                     "[{\"name\":\"v\",\"downwardAPI\":{\"items\":[{\"path\":\"x\"}]}}]"
@@ -184,6 +186,9 @@
                     "[{\"name\":\"v\",\"downwardAPI\":{\"defaultMode\":4096,\"items\":[]}}]"
                     "[{\"name\":\"v\",\"projected\":{\"sources\":[{\"downwardAPI\":{\"items\":[{\"path\":\"same\",\"fieldRef\":{\"fieldPath\":\"metadata.name\"}}]}},{\"configMap\":{\"name\":\"c\",\"items\":[{\"key\":\"k\",\"path\":\"same\"}]}}]}}]"))
     (signals kubernetes-error (projection-pod volume))))
+
+(test token-projections-are-accepted
+  (is-true (projection-pod "[{\"name\":\"v\",\"projected\":{\"sources\":[{\"serviceAccountToken\":{\"path\":\"t\",\"expirationSeconds\":3600,\"audience\":\"a\"}}]}}]")))
 
 (test go-quoting-matches-kubernetes-for-metadata-values
   (is (equal "\"plain\"" (gr8s::go-quoted-string "plain")))
@@ -198,6 +203,7 @@
       (stub 'gr8s::checkpoint-container-lifecycle-observation nil)
       (stub 'gr8s::native-container-progress-required-p nil)
       (stub 'gr8s::container-probe-restart-required-p nil)
+      (stub 'gr8s::reconcile-container-updates nil)
       (sb-int:encapsulate 'gr8s::reconcile-container-probes 'stub
                           (lambda (f r p observed) (declare (ignore f r p)) observed))
       (sb-int:encapsulate 'gr8s::refresh-pod-projected-volumes 'stub
@@ -208,6 +214,7 @@
            (is-true refreshed))
       (dolist (name '(gr8s::checkpoint-container-lifecycle-observation gr8s::native-container-progress-required-p
                       gr8s::container-probe-restart-required-p gr8s::reconcile-container-probes
+                      gr8s::reconcile-container-updates
                       gr8s::refresh-pod-projected-volumes))
         (sb-int:unencapsulate name 'stub)))))
 

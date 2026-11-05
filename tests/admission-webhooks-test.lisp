@@ -309,6 +309,28 @@
       (check-core-status 200 item :method :delete)
       (check-core-status 404 item))))
 
+(test mutating-webhook-configurations-reject-an-invalid-reinvocation-policy
+  (with-admission-api (store)
+    (values store)
+    (let ((body (check-core-status 422 "/apis/admissionregistration.k8s.io/v1/mutatingwebhookconfigurations"
+                  :method :post
+                  :object (gr8s::core-object
+                           "apiVersion" "admissionregistration.k8s.io/v1" "kind" "MutatingWebhookConfiguration"
+                           "metadata" (gr8s::core-object "name" "bad")
+                           "webhooks" (vector (admission-test-webhook "a.b.c" "/x" "reinvocationPolicy" "Sometimes"))))))
+      (is (search "reinvocationPolicy" (gethash "message" body))))))
+
+(test validating-webhooks-ignore-the-field-only-mutating-webhooks-declare
+  (with-admission-api (store)
+    (values store)
+    (let ((created (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingwebhookconfigurations"
+                     :method :post
+                     :object (gr8s::core-object
+                              "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingWebhookConfiguration"
+                              "metadata" (gr8s::core-object "name" "lenient")
+                              "webhooks" (vector (admission-test-webhook "a.b.c" "/x" "reinvocationPolicy" "Never"))))))
+      (is (not (nth-value 1 (gethash "reinvocationPolicy" (aref (gethash "webhooks" created) 0))))))))
+
 (test webhook-configurations-reject-invalid-fields
   (with-admission-api (store)
     (values store)
@@ -325,7 +347,6 @@
       (rejected "timeout value" "timeoutSeconds" 31)
       (rejected "failurePolicy" "failurePolicy" "Sometimes")
       (rejected "matchPolicy" "matchPolicy" "Maybe")
-      (rejected "reinvocationPolicy" "reinvocationPolicy" "Never")
       (rejected "admissionReviewVersions" "admissionReviewVersions" #("v2"))
       (rejected "clientConfig" "clientConfig" (gr8s::core-object))
       (rejected "https" "clientConfig" (gr8s::core-object "url" "http://example.com/"))
@@ -766,19 +787,22 @@
         (is (equal "PodAttachOptions" (gethash "kind" (gethash "kind" request))))
         (is (equal "held" (gethash "name" request)))
         (is (equal "PodAttachOptions" (gethash "kind" (gethash "object" request)))))
-      ;; The runtime has no attach yet, which an allowed request learns plainly.
-      (let ((body (check-core-status 501 "/api/v1/namespaces/alpha/pods/held/attach?container=other&stdin=true" :method :post)))
-        (is (search "not implemented" (gethash "message" body)))))))
+      ;; An allowed request still has to be a stream, which runs after admission.
+      (let ((body (check-core-status 400 "/api/v1/namespaces/alpha/pods/held/attach?container=other&stdin=true" :method :post)))
+        (is (search "upgraded connection" (gethash "message" body)))))))
 
-(test containers-refuse-termination-messages-they-cannot-honor
+(test containers-validate-termination-message-settings
   (flet ((pod-with (field value)
            (let* ((object (gr8s::copy-core-object (pod-to-object (parse-pod *valid-pod-json*))))
                   (container (aref (gethash "containers" (gethash "spec" object)) 0)))
              (setf (gethash field container) value)
              object)))
     (is (gr8s::pod-name (parse-pod (pod-with "terminationMessagePolicy" "File"))))
-    (signals kubernetes-error (parse-pod (pod-with "terminationMessagePolicy" "FallbackToLogsOnError")))
-    (signals kubernetes-error (parse-pod (pod-with "terminationMessagePath" "/elsewhere")))))
+    (is (gr8s::pod-name (parse-pod (pod-with "terminationMessagePolicy" "FallbackToLogsOnError"))))
+    (is (gr8s::pod-name (parse-pod (pod-with "terminationMessagePath" "/elsewhere"))))
+    (signals kubernetes-error (parse-pod (pod-with "terminationMessagePolicy" "Sometimes")))
+    (signals kubernetes-error (parse-pod (pod-with "terminationMessagePath" "relative/path")))
+    (signals kubernetes-error (parse-pod (pod-with "terminationMessagePath" "/a/../b")))))
 
 (test webhook-configurations-accept-hyphenated-custom-kinds
   (with-admission-api (store)
@@ -887,3 +911,4 @@
                     :object (gr8s::core-object "data" (gr8s::core-object "mine" "3")))))
         (is (equal "2" (gethash "other" (gethash "data" body))) "the concurrent write survives")
         (is (equal "3" (gethash "mine" (gethash "data" body))))))))
+

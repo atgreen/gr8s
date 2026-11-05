@@ -2,7 +2,7 @@
 ;;;; SPDX-License-Identifier: MIT
 ;;;;
 ;;;; Purpose:
-;;;; Reserve statically provided volumes in a durable two-sided
+;;;; Reserve static and dynamically provisioned volumes in a durable two-sided
 ;;;; transaction. Claims never become Bound without an exclusive PV claimRef UID;
 ;;;; installing a binding never claims a volume plugin successfully mounted it.
 
@@ -12,11 +12,47 @@
   "Return a validated API object's metadata name."
   (gethash "name" (gethash "metadata" object)))
 
+(defun ephemeral-claim-name (pod-name volume-name)
+  "Name the claim a generic ephemeral volume owns, as Kubernetes does."
+  (format nil "~A-~A" pod-name volume-name))
+
 (defun storage-pod-claim-names (pod)
-  "Return PVC names explicitly referenced by POD."
+  "Return PVC names POD references, including those of its generic ephemeral volumes."
   (loop for volume across (gethash "volumes" (gethash "spec" (pod-to-object pod)) #())
         for source = (gethash "persistentVolumeClaim" volume)
-        when source collect (gethash "claimName" source)))
+        when source collect (gethash "claimName" source)
+        when (gethash "ephemeral" volume)
+          collect (ephemeral-claim-name (pod-name pod) (gethash "name" volume))))
+
+(defun storage-ephemeral-claim (store pod volume)
+  "Build the admitted claim a generic ephemeral VOLUME asks for, owned by POD."
+  (let* ((template (gethash "volumeClaimTemplate" (gethash "ephemeral" volume)))
+         (name (ephemeral-claim-name (pod-name pod) (gethash "name" volume)))
+         (metadata (copy-core-object (gethash "metadata" template (core-object)))))
+    (setf (gethash "name" metadata) name
+          (gethash "namespace" metadata) (pod-namespace pod)
+          (gethash "ownerReferences" metadata)
+          (vector (core-object "apiVersion" "v1" "kind" "Pod" "name" (pod-name pod) "uid" (pod-uid pod)
+                               "controller" t "blockOwnerDeletion" t)))
+    (normalize-storage-resource
+     "persistentvolumeclaims"
+     (core-object "apiVersion" "v1" "kind" "PersistentVolumeClaim" "metadata" metadata
+                  "spec" (copy-core-object (gethash "spec" template)))
+     (pod-namespace pod) name store)))
+
+(defun storage-ensure-ephemeral-claims (store index)
+  "Add each missing generic ephemeral claim to INDEX; an existing claim is never adopted."
+  (loop for pod being the hash-values of (pod-store-pods store)
+        unless (gethash "deletionTimestamp" (gethash "metadata" (pod-to-object pod)))
+          do (loop for volume across (gethash "volumes" (gethash "spec" (pod-to-object pod)) #())
+                   when (gethash "ephemeral" volume)
+                     do (let ((key (core-resource-key "persistentvolumeclaims" (pod-namespace pod)
+                                                      (ephemeral-claim-name (pod-name pod) (gethash "name" volume)))))
+                          (unless (gethash key index)
+                            (handler-case (setf (gethash key index) (storage-ephemeral-claim store pod volume))
+                              (kubernetes-error (condition)
+                                (format *error-output* "gr8s Pod ~A/~A ephemeral volume rejected: ~A~%"
+                                        (pod-namespace pod) (pod-name pod) condition))))))))
 
 (defun storage-pod-active-p (store pod)
   "Keep storage protected until a Pod is terminal or actually removed."
@@ -49,9 +85,9 @@
   "Return true only for sources and volume modes the native agent can mount."
   (let ((spec (gethash "spec" volume)))
     (and (equal "Filesystem" (gethash "volumeMode" spec "Filesystem"))
-         (member (storage-source-kind spec) '("hostPath" "local") :test #'equal)
-         (not (find "ReadWriteOncePod" (gethash "accessModes" spec) :test #'equal))
-         (zerop (length (gethash "mountOptions" spec #()))))))
+         (member (storage-source-kind spec) '("hostPath" "local" "nfs" "csi") :test #'equal)
+         (or (member (storage-source-kind spec) '("nfs" "csi") :test #'equal)
+             (zerop (length (gethash "mountOptions" spec #())))))))
 
 (defun storage-requirement-matches-p (requirement value)
   "Evaluate Kubernetes set/existence/integer node and label requirements."
@@ -91,6 +127,20 @@
                              (loop for requirement across (gethash "matchFields" term #())
                                    always (storage-requirement-matches-p requirement (node-record-name node)))))))))
 
+(defun storage-node-affinity-excludes-node-name-p (volume name)
+  "Return whether VOLUME's affinity rules out the node called NAME, judging only its name.
+An agent doesn't hold its own Node labels; the control plane already matched those."
+  (let ((required (gethash "required" (gethash "nodeAffinity" (gethash "spec" volume) (core-object)))))
+    (and required
+         (notany (lambda (term)
+                   (and (every (lambda (requirement)
+                                 (or (not (equal "kubernetes.io/hostname" (gethash "key" requirement)))
+                                     (storage-requirement-matches-p requirement name)))
+                               (gethash "matchExpressions" term #()))
+                        (every (lambda (requirement) (storage-requirement-matches-p requirement name))
+                               (gethash "matchFields" term #()))))
+                 (gethash "nodeSelectorTerms" required #())))))
+
 (defun storage-class-topology-matches-p (class node)
   "Honor a selected StorageClass's allowed node topology."
   (let ((terms (and class (gethash "allowedTopologies" class))))
@@ -107,7 +157,9 @@
   (let* ((spec (gethash "spec" volume)) (wanted (gethash "spec" claim))
          (ref (gethash "claimRef" spec)) (requested-name (gethash "volumeName" wanted)))
     (and (not (gethash "deletionTimestamp" (gethash "metadata" volume)))
-         (not (or (gethash "dataSource" wanted) (gethash "dataSourceRef" wanted)))
+         ;; Only a sidecar that was asked to clone or restore can have filled this volume.
+         (or (not (or (gethash "dataSource" wanted) (gethash "dataSourceRef" wanted)))
+             (storage-claim-ref-matches-p volume claim))
          (or (not ref) (storage-claim-ref-matches-p volume claim :allow-unbound t))
          (or (not requested-name) (equal requested-name (storage-resource-name volume)))
          (equal (gethash "storageClassName" spec "") (gethash "storageClassName" wanted ""))
@@ -124,9 +176,10 @@
   (gethash (core-resource-key "storageclasses" nil (gethash "storageClassName" (gethash "spec" claim) "")) index))
 
 (defun storage-claim-delayed-p (index claim)
-  "Wait for a scheduled consumer only for explicitly delayed, unbound claims."
+  "Wait for a scheduled consumer for delayed classes and storage that exists on one node."
   (let ((class (storage-claim-class index claim)))
-    (and class (equal "WaitForFirstConsumer" (gethash "volumeBindingMode" class))
+    (and class (or (equal "WaitForFirstConsumer" (gethash "volumeBindingMode" class))
+                   (storage-class-node-bound-p class))
          (not (gethash "volumeName" (gethash "spec" claim))))))
 
 (defun storage-candidate-volume (index claim &optional node used)
@@ -150,9 +203,12 @@
     (dolist (name (storage-pod-claim-names pod) t)
       (let* ((claim (gethash (core-resource-key "persistentvolumeclaims" (pod-namespace pod) name) index))
              (bound (and claim (storage-bound-volume index claim)))
-             (candidate (or bound (and claim (storage-claim-delayed-p index claim) (storage-candidate-volume index claim node used)))))
-        (unless (and claim candidate (not (gethash "deletionTimestamp" (gethash "metadata" claim)))
-                     (storage-node-affinity-matches-p candidate node)
+             (candidate (or bound (and claim (storage-claim-delayed-p index claim) (storage-candidate-volume index claim node used))))
+             (provisionable (and claim (not candidate) (storage-claim-delayed-p index claim)
+                                 (or (storage-claim-provisionable-p (storage-claim-class index claim) claim)
+                                     (storage-claim-awaits-external-provisioner-p (storage-claim-class index claim) claim)))))
+        (unless (and claim (or candidate provisionable) (not (gethash "deletionTimestamp" (gethash "metadata" claim)))
+                     (or provisionable (storage-node-affinity-matches-p candidate node))
                      (storage-class-topology-matches-p (storage-claim-class index claim) node))
           (return-from pod-node-storage-compatible-p nil))
         (let* ((modes (gethash "accessModes" (gethash "spec" claim)))
@@ -161,7 +217,7 @@
                     (and (find "ReadWriteOnce" modes :test #'equal)
                          (some (lambda (other) (and (pod-node-name other) (not (equal (pod-node-name other) (node-record-name node))))) others)))
             (return-from pod-node-storage-compatible-p nil)))
-        (push (storage-resource-name candidate) used)))))
+        (when candidate (push (storage-resource-name candidate) used))))))
 
 (defun storage-object-in-use-unlocked (store resource object)
   "Enforce implemented PV and PVC protection using exact persisted references."
@@ -227,6 +283,12 @@
       (let* ((meta (gethash "metadata" object)) (annotations (gethash "annotations" meta (core-object))))
         (setf (gethash "pv.kubernetes.io/bind-completed" annotations) "yes"
               (gethash "annotations" meta) annotations)))
+    ;; A built-in provisioner's capacity is advisory, so growing needs no node work.
+    (when (and (builtin-provisioner-p (gethash +provisioned-by-annotation+ (gethash "annotations" (gethash "metadata" pv) (core-object))))
+               (> (storage-quantity (gethash "storage" (gethash "requests" (gethash "resources" (gethash "spec" pvc)))) "claim capacity")
+                  (storage-quantity (gethash "storage" (gethash "capacity" spec)) "volume capacity")))
+      (setf (gethash "storage" (gethash "capacity" spec))
+            (gethash "storage" (gethash "requests" (gethash "resources" (gethash "spec" pvc))))))
     (storage-status pv "Bound")
     (storage-status pvc "Bound")
     (setf (gethash "capacity" (gethash "status" pvc)) (copy-core-object (gethash "capacity" spec))
@@ -236,7 +298,10 @@
 (defun reconcile-storage-bindings (store)
   "Publish real static reservations, releases and protected deletions atomically."
   (with-store-lock (store)
-    (let* ((original (pod-store-resources store)) (index (copy-core-resource-index store))
+    (let* ((original (pod-store-resources store))
+           (index (let ((copy (copy-core-resource-index store)))
+                    (storage-ensure-ephemeral-claims store copy)
+                    copy))
            (claims (sort (loop for key being the hash-keys of index using (hash-value object)
                               when (equal "persistentvolumeclaims" (first key)) collect object)
                          #'string< :key (lambda (object) (format nil "~A/~A" (gethash "namespace" (gethash "metadata" object)) (storage-resource-name object)))))
@@ -251,7 +316,8 @@
       (dolist (claim claims)
         (let* ((metadata (gethash "metadata" claim))
                (key (core-resource-key "persistentvolumeclaims" (gethash "namespace" metadata) (gethash "name" metadata))))
-          (when (and (gethash key index) (not (gethash "deletionTimestamp" metadata)))
+          ;; A claim created in this pass has no UID to bind against until it commits.
+          (when (and (gethash key index) (gethash "uid" metadata) (not (gethash "deletionTimestamp" metadata)))
             (unless (or (gethash "volumeName" (gethash "spec" claim))
                         (nth-value 1 (gethash "storageClassName" (gethash "spec" claim))))
               (let ((class (storage-default-class-unlocked store)))
@@ -265,12 +331,18 @@
                    (delayed (storage-claim-delayed-p index claim))
                    (candidate (or bound (and (or (not delayed) node)
                                             (storage-class-topology-matches-p (storage-claim-class index claim) node)
-                                            (storage-candidate-volume index claim node)))))
+                                            (or (storage-candidate-volume index claim node)
+                                                (storage-provisioned-volume store (storage-claim-class index claim) claim node))))))
               (if candidate
                   (multiple-value-bind (pv pvc) (storage-bind-pair candidate claim)
                     (setf (gethash (core-resource-key "persistentvolumes" nil (storage-resource-name pv)) index) pv
                           (gethash key index) pvc))
-                  (let ((copy (copy-core-object claim)))
+                  (let ((copy (let ((class (storage-claim-class index claim)))
+                                (copy-core-object
+                                 (if (and (storage-claim-awaits-external-provisioner-p class claim)
+                                          (or (not delayed) node))
+                                     (annotate-claim-for-external-provisioner claim class node)
+                                     claim)))))
                     (if (and (gethash "volumeName" (gethash "spec" claim))
                              (equal "yes" (gethash "pv.kubernetes.io/bind-completed" (gethash "annotations" metadata (core-object)))))
                         (storage-status copy "Lost")
@@ -285,7 +357,8 @@
              (cond ((and claim (storage-claim-ref-matches-p volume claim) (equal (storage-resource-name volume) (gethash "volumeName" (gethash "spec" claim))))
                     (storage-status copy "Bound"))
                    ((and ref (gethash "uid" ref) (plusp (length (gethash "uid" ref))))
-                    (if (equal "Retain" (gethash "persistentVolumeReclaimPolicy" (gethash "spec" volume)))
+                    (if (or (equal "Retain" (gethash "persistentVolumeReclaimPolicy" (gethash "spec" volume)))
+                            (gethash +provisioned-by-annotation+ (gethash "annotations" (gethash "metadata" volume) (core-object))))
                         (storage-status copy "Released")
                         (storage-status copy "Failed" "ReclaimUnsupported" "No native deleter or recycler is installed; backing storage was retained")))
                    (t (storage-status copy "Available")))

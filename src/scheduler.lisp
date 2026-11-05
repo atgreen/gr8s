@@ -38,8 +38,8 @@
             do (when (string= (node-record-id existing) (node-record-id node))
                  (node-conflict "Node identity ~A is already claimed"
                                 (node-record-id node)))
-               (when (string= (node-record-pod-cidr existing)
-                              (node-record-pod-cidr node))
+               (when (and (plusp (length (node-record-pod-cidr node)))
+                          (string= (node-record-pod-cidr existing) (node-record-pod-cidr node)))
                  (node-conflict "PodCIDR ~A is already claimed"
                                 (node-record-pod-cidr node))))
       (setf (node-record-ready-p node) nil
@@ -205,8 +205,8 @@
                                       node-prefix)
               unless (loop for node being the hash-values
                              of (pod-store-nodes store)
-                           thereis (ipv4-prefixes-overlap-p candidate
-                                                          (node-record-pod-cidr node)))
+                           thereis (and (plusp (length (node-record-pod-cidr node)))
+                                        (ipv4-prefixes-overlap-p candidate (node-record-pod-cidr node))))
                 return candidate
               finally (error "No free /~D PodCIDR remains in ~A"
                              node-prefix cluster-cidr))))))
@@ -272,6 +272,53 @@
           ((/= left-count right-count) (< left-count right-count))
           (t (string< (node-record-name left) (node-record-name right))))))
 
+(defparameter +failed-scheduling-event-interval+ 30
+  "Seconds between repeats of one Pod's FailedScheduling Event while its reason is unchanged.")
+
+(defun record-pod-scheduling-event (store pod type reason message)
+  "Record the scheduler's Event about POD, counting repeats of the same reason."
+  (handler-case
+      (let* ((name (concatenate 'string (pod-name pod) "."
+                                (string-downcase
+                                 (subseq (octets-to-hex
+                                          (ironclad:digest-sequence
+                                           :sha256 (trivial-utf-8:string-to-utf-8-bytes
+                                                    (format nil "~A/~A" (pod-uid pod) reason))))
+                                         0 16))))
+             (now (current-timestamp))
+             (existing (handler-case (get-core-resource store "events" (pod-namespace pod) name)
+                         (kubernetes-error (condition)
+                           (unless (= 404 (kubernetes-error-status-code condition)) (error condition))
+                           nil))))
+        (if existing
+            (update-core-resource store "events" (pod-namespace pod) name
+              (lambda (old)
+                (setf (gethash "count" old) (1+ (gethash "count" old 1))
+                      (gethash "lastTimestamp" old) now
+                      (gethash "message" old) message)
+                old))
+            (create-core-resource store "events"
+              (core-object "apiVersion" "v1" "kind" "Event" "metadata" (core-object "name" name)
+                           "involvedObject" (core-object "apiVersion" "v1" "kind" "Pod" "namespace" (pod-namespace pod)
+                                                         "name" (pod-name pod) "uid" (pod-uid pod))
+                           "reason" reason "message" message "type" type "count" 1
+                           "firstTimestamp" now "lastTimestamp" now
+                           "source" (core-object "component" "default-scheduler")
+                           "reportingComponent" "default-scheduler" "reportingInstance" "default-scheduler")
+              (pod-namespace pod))))
+    (error (condition)
+      (format *error-output* "gr8s scheduling Event for ~A/~A failed: ~A~%" (pod-namespace pod) (pod-name pod) condition))))
+
+(defun note-pod-unschedulable (store pod)
+  "Tell the Pod's owner why it cannot be placed, when the reason is new or a while has passed."
+  (let* ((message (with-store-lock (store) (pod-unschedulable-message store pod)))
+         (now (get-universal-time))
+         (last (with-store-lock (store) (gethash (pod-uid pod) (pod-store-scheduling-notes store)))))
+    (unless (and last (equal message (car last)) (< (- now (cdr last)) +failed-scheduling-event-interval+))
+      (with-store-lock (store)
+        (setf (gethash (pod-uid pod) (pod-store-scheduling-notes store)) (cons message now)))
+      (record-pod-scheduling-event store pod "Warning" "FailedScheduling" message))))
+
 (defun schedule-pod (store pod)
   "Return POD's selected node, or preempt lower-priority Pods when no placeable node fits it."
   (let ((node nil) (victims nil))
@@ -293,6 +340,13 @@
                       (gethash (pod-uid pod) (pod-store-nominated-nodes store)) (node-record-name (car plan))))))))
     ;; Deletion takes the store lock itself and is retried by reconciliation.
     (dolist (victim victims) (preempt-pod store victim))
+    (if node
+        (progn
+          (with-store-lock (store) (remhash (pod-uid pod) (pod-store-scheduling-notes store)))
+          (record-pod-scheduling-event store pod "Normal" "Scheduled"
+                                       (format nil "Successfully assigned ~A/~A to ~A" (pod-namespace pod) (pod-name pod)
+                                               (node-record-name node))))
+        (note-pod-unschedulable store pod))
     node))
 
 (defun update-pod-observed-phase (store pod phase)

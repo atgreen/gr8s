@@ -5,14 +5,15 @@
 ;;;; Supply namespace-bound ServiceAccount credentials to Pods and authenticate
 ;;;; them against live account identities. Evaluate stored RBAC policies for the
 ;;;; authenticated identity before granting in-cluster API resource access.
-;;;; Credentials are opaque random bearer tokens; deleting/recreating an account
-;;;; invalidates its previous credentials through the account UID binding.
+;;;; Pods mount signed tokens bound to them (see service-account-tokens.lisp).
+;;;; Opaque tokens in legacy credential Secrets still authenticate. Either way,
+;;;; deleting and recreating an account invalidates its previous credentials.
 
 (in-package #:gr8s)
 
 (defstruct api-service-account-identity
-  "Represent a ServiceAccount authenticated by a live, UID-bound credential."
-  namespace name uid)
+  "Represent a ServiceAccount authenticated by a live, UID-bound credential, with what its token proves as EXTRA."
+  namespace name uid extra)
 
 (defun service-account-token-secret-name (name uid)
   "Return a stable Secret name bound to the account NAME and UID."
@@ -88,8 +89,32 @@
         (multiple-value-bind (value present) (gethash "automountServiceAccountToken" account)
           (if present value t)))))
 
+(defparameter +service-account-mount-path+ "/var/run/secrets/kubernetes.io/serviceaccount"
+  "Where a Pod's containers find their automounted API credentials.")
+
+(defparameter +automount-token-seconds+ 3607
+  "The lifetime upstream gives automounted tokens, which the node renews before expiry.")
+
+(defun automount-api-access-volume ()
+  "Build the projected volume holding a Pod's token, the cluster CA and its namespace, as upstream admission does."
+  (core-object
+   "name" (format nil "kube-api-access-~A" (string-downcase (subseq (generate-uid) 0 5)))
+   "projected"
+   (core-object
+    "defaultMode" #o644
+    "sources"
+    (vector (core-object "serviceAccountToken" (core-object "path" "token" "expirationSeconds" +automount-token-seconds+))
+            (core-object "configMap" (core-object "name" "kube-root-ca.crt"
+                                                  "items" (vector (core-object "key" "ca.crt" "path" "ca.crt"))))
+            (core-object "downwardAPI"
+                         (core-object "items"
+                                      (vector (core-object "path" "namespace"
+                                                           "fieldRef" (core-object "apiVersion" "v1"
+                                                                                   "fieldPath" "metadata.namespace")))))))))
+
 (defun admit-in-cluster-pod (store pod)
   "Run Pod policy admission, then inject service environment and credential mounts when the API is enabled."
+  (require-namespace-accepts-content store (pod-namespace pod))
   (let ((pod (admit-pod-policies store pod))
         (config (pod-store-in-cluster-config store)))
     (unless config (return-from admit-in-cluster-pod pod))
@@ -99,23 +124,17 @@
            (account-name (gethash "serviceAccountName" spec "default"))
            (account (get-core-resource store "serviceaccounts" namespace account-name))
            (mount-p (pod-automount-service-account-p spec account))
-           (secret (when mount-p (ensure-service-account-credential store namespace account-name)))
-           (secret-name (when secret (gethash "name" (gethash "metadata" secret))))
-           (volume-name "gr8s-api-access")
-           (mount-path "/var/run/secrets/kubernetes.io/serviceaccount"))
+           (containers (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec)))
+           ;; A container already mounting this path brought its own credentials.
+           (unmounted (remove-if (lambda (container)
+                                   (find +service-account-mount-path+ (gethash "volumeMounts" container #()) :test #'equal
+                                         :key (lambda (mount) (gethash "mountPath" mount))))
+                                 containers))
+           (volume (when (and mount-p (plusp (length unmounted))) (automount-api-access-volume))))
       (setf (gethash "serviceAccountName" spec) account-name)
-      (when mount-p
-        (let ((existing (find volume-name (gethash "volumes" spec #()) :test #'equal
-                              :key (lambda (volume) (gethash "name" volume)))))
-          (if existing
-              (unless (equal secret-name (gethash "secretName" (gethash "secret" existing (core-object))))
-                (invalid-pod "gr8s-api-access volume name is reserved for account credentials"))
-              (setf (gethash "volumes" spec)
-                    (concatenate 'vector (gethash "volumes" spec #())
-                                 (vector (core-object "name" volume-name
-                                                      "secret" (core-object "secretName" secret-name "defaultMode" #o644))))))))
-      (loop for container across (concatenate 'vector (gethash "initContainers" spec #())
-                                              (gethash "containers" spec))
+      (when volume
+        (setf (gethash "volumes" spec) (concatenate 'vector (gethash "volumes" spec #()) (vector volume))))
+      (loop for container across containers
             do (dolist (pair (list (cons "KUBERNETES_SERVICE_HOST" (getf config :host))
                                   (cons "KUBERNETES_SERVICE_PORT" (write-to-string (getf config :port)))
                                   (cons "KUBERNETES_SERVICE_PORT_HTTPS" (write-to-string (getf config :port)))))
@@ -124,18 +143,20 @@
                    (setf (gethash "env" container)
                          (concatenate 'vector (gethash "env" container #())
                                       (vector (core-object "name" (car pair) "value" (cdr pair)))))))
-               (when (and mount-p
-                          (not (find mount-path (gethash "volumeMounts" container #()) :test #'equal
-                                     :key (lambda (mount) (gethash "mountPath" mount)))))
+               (when (and volume (find container unmounted :test #'eq))
                  (setf (gethash "volumeMounts" container)
                        (concatenate 'vector (gethash "volumeMounts" container #())
-                                    (vector (core-object "name" volume-name "mountPath" mount-path "readOnly" t))))))
+                                    (vector (core-object "name" (gethash "name" volume)
+                                                         "mountPath" +service-account-mount-path+ "readOnly" t))))))
       (parse-pod object :allow-generate-name (null (pod-name pod))))))
 
-(defun authenticate-service-account-token (store token)
-  "Authenticate only server-issued tokens against live account and credential UIDs."
+(defun authenticate-service-account-token (store token &optional audiences)
+  "Authenticate a signed token for AUDIENCES, defaulting to the API's own, or a server-issued opaque credential."
   (unless (and (stringp token) (<= 1 (length token) 4096))
     (return-from authenticate-service-account-token nil))
+  (when (find #\. token)
+    (return-from authenticate-service-account-token
+      (verify-service-account-jwt store token (or audiences (list +service-account-issuer+)))))
   (let* ((digest (service-account-token-digest token))
          (record (read-service-account-issuer-record store digest)))
     (when record
@@ -188,6 +209,7 @@
   "Honor the verified system:masters group, then evaluate applicable live RoleBindings and ClusterRoleBindings."
   (when (find "system:masters" (api-identity-groups identity) :test #'equal)
     (return-from service-account-authorized-p t))
+
   (let ((bindings (append (list-core-resources store "clusterrolebindings")
                           (when namespace (list-core-resources store "rolebindings" namespace)))))
     (some
@@ -217,6 +239,20 @@
           (get-core-resource store "serviceaccounts" namespace "default")
           (error condition)))))
 
+(defun ensure-system-cluster-roles (store)
+  "Create the upstream bootstrap ClusterRoles clients bind to by name, keeping any existing one."
+  (flet ((ensure (name &rest rules)
+           (handler-case
+               (create-core-resource store "clusterroles"
+                (core-object "metadata" (core-object "name" name) "rules" (coerce rules 'vector)) nil)
+             (kubernetes-error (condition)
+               (unless (= 409 (kubernetes-error-status-code condition)) (error condition))))))
+    (ensure "cluster-admin"
+            (core-object "apiGroups" #("*") "resources" #("*") "verbs" #("*"))
+            (core-object "nonResourceURLs" #("*") "verbs" #("*")))
+    (ensure "system:service-account-issuer-discovery"
+            (core-object "nonResourceURLs" #("/.well-known/openid-configuration" "/openid/v1/jwks") "verbs" #("get")))))
+
 (defun ensure-native-bootstrap-namespaces (store)
   "Create the standard namespaces and their default accounts for a native cluster."
   (dolist (name '("default" "kube-system" "kube-public" "kube-node-lease"))
@@ -227,7 +263,8 @@
       (kubernetes-error (condition)
         (unless (= 409 (kubernetes-error-status-code condition)) (error condition))))
     (ensure-default-service-account store name))
-  (ensure-system-priority-classes store))
+  (ensure-system-priority-classes store)
+  (ensure-system-cluster-roles store))
 
 (defun ensure-namespace-root-ca (store namespace)
   "Publish the actual native API trust anchor without rotating the ConfigMap identity."

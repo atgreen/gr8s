@@ -52,7 +52,7 @@
 (defun csr-subresource-input (old method)
   "Read typed replacement or actual schema-aware JSON patch once per request."
   (if (eq method :put) (core-resource-request-object "CertificateSigningRequest")
-      (let* ((type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
+      (let* ((type (request-media-type))
              (patch (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))))
         (cond ((equal type "application/json-patch+json") (apply-core-json-patch (copy-core-object old) patch))
               ((equal type "application/merge-patch+json") (merge-json-object (copy-core-object old) (require-object patch "patch")))
