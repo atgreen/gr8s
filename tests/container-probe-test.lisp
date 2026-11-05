@@ -58,9 +58,11 @@
                       (error () nil)))
                   :name "container probe HTTP fixture")))
     (unwind-protect (funcall function (usocket:get-local-port listener))
-      (ignore-errors (usocket:socket-close listener))
+      ;; Closed only after its thread has gone: an accept loop that outlives its listener
+      ;; takes connections from whichever listener reuses the descriptor number.
       (when (bt:thread-alive-p thread) (ignore-errors (bt:destroy-thread thread)))
-      (ignore-errors (bt:join-thread thread)))))
+      (ignore-errors (bt:join-thread thread))
+      (ignore-errors (usocket:socket-close listener)))))
 
 (test http-probes-use-real-status-headers-redirects-and-no-proxy
   (let ((requests nil))
@@ -184,10 +186,10 @@
     (unwind-protect (funcall function target)
       (setf stopping t)
       (ignore-errors (usocket:socket-close (usocket:socket-connect host (if socket-path 0 target) :element-type '(unsigned-byte 8) :timeout 1)))
-      (ignore-errors (usocket:socket-close listener))
       (unless (wait-until (lambda () (not (bt:thread-alive-p acceptor))) :timeout 1)
         (ignore-errors (bt:destroy-thread acceptor)))
       (ignore-errors (bt:join-thread acceptor))
+      (ignore-errors (usocket:socket-close listener))
       (dolist (socket sockets) (ignore-errors (usocket:socket-close socket)))
       (dolist (worker workers)
         (when (bt:thread-alive-p worker) (ignore-errors (bt:destroy-thread worker)))

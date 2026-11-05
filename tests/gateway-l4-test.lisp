@@ -21,24 +21,46 @@
 (defun l4-start-tag-backend (port tag)
   "Accept connections and send TAG on connect, then close. Raw sockets (no
    fd-streams) to match the proxy's I/O. Returns a stop fn."
-  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
-        (stop (list nil))
-        (tag-bytes (babel:string-to-octets tag)))
+  (let* ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
+         (stop (list nil))
+         (tag-bytes (babel:string-to-octets tag))
+         (thread nil))
     (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
     (sb-bsd-sockets:socket-bind socket #(127 0 0 1) port)
     (sb-bsd-sockets:socket-listen socket 8)
-    (bt:make-thread
-     (lambda ()
-       (loop until (car stop) do
-         (handler-case
-             (let ((client (sb-bsd-sockets:socket-accept socket)))
-               (sb-bsd-sockets:socket-send client tag-bytes (length tag-bytes))
-               (ignore-errors (sb-bsd-sockets:socket-close client)))
-           (error () nil))))
-     :name (format nil "l4 test backend ~A" tag))
+    (setf thread
+          (bt:make-thread
+           (lambda ()
+             (loop until (car stop) do
+               (handler-case
+                   (let ((client (sb-bsd-sockets:socket-accept socket)))
+                     (sb-bsd-sockets:socket-send client tag-bytes (length tag-bytes))
+                     (ignore-errors (sb-bsd-sockets:socket-close client)))
+                 (error () nil))))
+           :name (format nil "l4 test backend ~A" tag)))
     (lambda ()
       (setf (car stop) t)
+      ;; Wake the accept and wait for this thread before closing. Closing first leaves it
+      ;; looping on a descriptor number that the next listener takes, where it accepted
+      ;; and closed that server's connections: podster-uqb.106.
+      (ignore-errors
+       (let ((waker (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+         (unwind-protect (sb-bsd-sockets:socket-connect waker #(127 0 0 1) port)
+           (ignore-errors (sb-bsd-sockets:socket-close waker)))))
+      (ignore-errors (bt:join-thread thread))
       (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+
+(test the-tag-backend-is-gone-before-its-listener-closes
+  ;; podster-uqb.106: a backend thread that outlived its listener went on accepting on that
+  ;; descriptor number, which by then was the next test server's, and closed its connections.
+  (let* ((tag "stops-cleanly")
+         (stop (l4-start-tag-backend +l4-backend-a-port+ tag))
+         (name (format nil "l4 test backend ~A" tag)))
+    (flet ((running-p ()
+             (find name (bt:all-threads) :key #'bt:thread-name :test #'equal)))
+      (is-true (running-p))
+      (funcall stop)
+      (is-false (running-p)))))
 
 (defun l4-client-read-tag (port &key send)
   "Connect to PORT, optionally SEND bytes, and read the reply tag as a string.

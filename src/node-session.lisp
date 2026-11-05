@@ -391,26 +391,32 @@ What was consumed isn't kept, for streams too long to hold in memory."
                        (string= (slot-value pod-status 'gr8s.node.v1::uid) (pod-uid pod))
                        (string= (slot-value pod-status 'gr8s.node.v1::resource-version)
                                 (pod-resource-version pod)))
-               do (let* ((bytes (slot-value pod-status 'gr8s.node.v1::status-json))
-                         (object (handler-case
-                                     (when (plusp (length bytes))
-                                       (com.inuoe.jzon:parse
-                                        (trivial-utf-8:utf-8-bytes-to-string bytes)))
-                                   (error () nil))))
-                    (unless (hash-table-p object) (setf object (make-hash-table :test #'equal)))
-                    (setf (gethash "phase" object) (slot-value pod-status 'gr8s.node.v1::phase))
-                    (unless (string= "" (slot-value pod-status 'gr8s.node.v1::pod-ip))
-                      (setf (gethash "podIP" object) (slot-value pod-status 'gr8s.node.v1::pod-ip)
-                            (gethash "podIPs" object)
-                            (vector (json-object "ip" (slot-value pod-status 'gr8s.node.v1::pod-ip)))))
-                    (let ((events (gethash "gr8sRuntimeEvents" object)))
-                      (remhash "gr8sRuntimeEvents" object)
-                      (update-pod-observed-status (node-grpc-server-store server) pod object)
-                      (record-node-runtime-events (node-grpc-server-store server) pod node-name events)
-                      ;; Cleanup is distinct from phase and API finalizer retention.
-                      ;; The authenticated peer still owns this exact UID/RV.
-                      (when (and (deletion-requested-p pod) (slot-value pod-status 'gr8s.node.v1::runtime-deleted))
-                        (save-pod-finalization-state (node-grpc-server-store server) pod object t)))))))
+               do (handler-case
+                      (let* ((bytes (slot-value pod-status 'gr8s.node.v1::status-json))
+                             (object (handler-case
+                                         (when (plusp (length bytes))
+                                           (com.inuoe.jzon:parse
+                                            (trivial-utf-8:utf-8-bytes-to-string bytes)))
+                                       (error () nil))))
+                        (unless (hash-table-p object) (setf object (make-hash-table :test #'equal)))
+                        (setf (gethash "phase" object) (slot-value pod-status 'gr8s.node.v1::phase))
+                        (unless (string= "" (slot-value pod-status 'gr8s.node.v1::pod-ip))
+                          (setf (gethash "podIP" object) (slot-value pod-status 'gr8s.node.v1::pod-ip)
+                                (gethash "podIPs" object)
+                                (vector (json-object "ip" (slot-value pod-status 'gr8s.node.v1::pod-ip)))))
+                        (let ((events (gethash "gr8sRuntimeEvents" object)))
+                          (remhash "gr8sRuntimeEvents" object)
+                          (update-pod-observed-status (node-grpc-server-store server) pod object)
+                          (record-node-runtime-events (node-grpc-server-store server) pod node-name events)
+                          ;; Cleanup is distinct from phase and API finalizer retention.
+                          ;; The authenticated peer still owns this exact UID/RV.
+                          (when (and (deletion-requested-p pod) (slot-value pod-status 'gr8s.node.v1::runtime-deleted))
+                            (save-pod-finalization-state (node-grpc-server-store server) pod object t))))
+                    ;; The next status report retries this Pod. Failing here would
+                    ;; lose the rest of this report and end the session of every Pod.
+                    (error (condition)
+                      (format *error-output* "gr8s Pod ~A/~A status update failed: ~A~%"
+                              (pod-namespace pod) (pod-name pod) condition))))))
     (:operation-response
      (note-node-operation-response
       server (slot-value envelope 'gr8s.node.v1::operation-response)))
@@ -1006,7 +1012,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
   (lock (bt:make-lock "gr8s snapshot work"))
   (changed (bt:make-condition-variable :name "gr8s snapshot work changed")))
 
-(defun retry-agent-snapshot-work (worker work)
+(defun retry-agent-snapshot-work (worker work &key (delay .1))
   "Retry an incomplete latest projection without growing a queue or acknowledging it."
   (bt:with-lock-held ((agent-snapshot-worker-lock worker))
     (when (and (not (agent-snapshot-worker-stopping-p worker))
@@ -1017,7 +1023,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
       ;; Async runtime deletion needs a later observation before admission can
       ;; resume. Yield instead of spinning; new snapshots and stop wake us.
       (bt:condition-wait (agent-snapshot-worker-changed worker)
-                         (agent-snapshot-worker-lock worker) :timeout .1))))
+                         (agent-snapshot-worker-lock worker) :timeout delay))))
 
 (defun run-agent-snapshot-work (worker)
   "Apply ordered work and close the session on failure without acknowledging pending revisions."
@@ -1047,7 +1053,10 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                       (setf (agent-snapshot-worker-replay-revision worker) nil))))
               ;; Durable urgent intent superseded this application.
               ;; Its revision was not applied and must not be acked.
-              (pod-reconciliation-superseded () (retry-agent-snapshot-work worker work)))))
+              (pod-reconciliation-superseded () (retry-agent-snapshot-work worker work))
+              ;; The other Pods were applied. Waiting on one Pod's runtime
+              ;; isn't a reason to end a session they all depend on.
+              (node-snapshot-incomplete () (retry-agent-snapshot-work worker work :delay 1)))))
       (error (condition)
         (format *error-output* "gr8s node snapshot application failed: ~A~%" condition)
         (bt:with-lock-held ((agent-snapshot-worker-lock worker))

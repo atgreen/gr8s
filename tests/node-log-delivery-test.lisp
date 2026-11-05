@@ -558,3 +558,239 @@
         (setf (deferred-cleanup-runtime-delete-released-p runtime) t)
         (release-blocked-log-runtime runtime)
         (when owner (bt:join-thread owner))))))
+
+;;; One Pod's runtime failure stays local to that Pod (podster-uqb.18). Upstream
+;;; teardown once produced 27 session restarts from `container is in starting
+;;; state, can't be removed` on Pods that had already been withdrawn.
+
+(defstruct (pod-failing-runtime (:include gr8s::fake-runtime)
+                                (:constructor make-pod-failing-runtime ()))
+  ;; Pod names whose removal, or ensure, fails until the name is taken away.
+  (undeletable nil)
+  (broken nil))
+
+(defmethod gr8s::runtime-delete-pod ((runtime pod-failing-runtime) pod)
+  (when (member (pod-name pod) (pod-failing-runtime-undeletable runtime) :test #'equal)
+    (error 'gr8s:runtime-error
+           :message "failed to set removing state: container is in starting state, can't be removed"))
+  (call-next-method))
+
+(defmethod gr8s:runtime-ensure ((runtime pod-failing-runtime) pod)
+  ;; Not a RUNTIME-ERROR, which RECONCILE-POD already reports on the Pod.
+  (when (member (pod-name pod) (pod-failing-runtime-broken runtime) :test #'equal)
+    (error "unexpected failure for one Pod"))
+  (call-next-method))
+
+(defun local-test-pod (name &optional uid)
+  "Return a parsed Pod called NAME, optionally with an exact UID, for an agent's own store."
+  (let ((object (pod-to-object (node-log-test-pod name))))
+    (setf (gethash "uid" (gethash "metadata" object)) (or uid (format nil "uid-~A" name))
+          (gethash "resourceVersion" (gethash "metadata" object)) "7")
+    (parse-pod object)))
+
+(defun unreadable-assignment (pod)
+  "Return POD's assignment with JSON this agent can't parse, keeping its UID."
+  (let ((assignment (pod-assignment-for-test pod)))
+    (setf (slot-value assignment 'gr8s.node.v1::pod-json)
+          (trivial-utf-8:string-to-utf-8-bytes "{not json"))
+    assignment))
+
+(test a-withdrawn-pods-removal-failure-does-not-fail-the-snapshot
+  (with-temporary-store (store path)
+    (values store)
+    (let* ((runtime (make-pod-failing-runtime))
+           (node (gr8s::make-node-runtime (merge-pathnames "agent/" path) runtime nil))
+           (agent-store (gr8s::node-runtime-store node))
+           (stuck (local-test-pod "stuck"))
+           (withdrawn (local-test-pod "withdrawn"))
+           (kept (local-test-pod "kept")))
+      (setf (gr8s::node-runtime-state node) :running)
+      (dolist (pod (list stuck withdrawn))
+        (gr8s::put-assigned-pod agent-store pod)
+        (gr8s::reconcile-pod (gr8s::node-runtime-reconciler node) "default" (pod-name pod)))
+      (setf (pod-failing-runtime-undeletable runtime) (list "stuck"))
+      (let ((statuses (gr8s::reconcile-node-snapshot node (desired-snapshot-for-test kept))))
+        (is (= 1 (length statuses)))
+        (is (equal "kept" (slot-value (first statuses) 'gr8s.node.v1::name))))
+      (signals gr8s:kubernetes-error (get-pod agent-store "default" "withdrawn"))
+      (is-true (gr8s::deletion-requested-p (get-pod agent-store "default" "stuck")))
+      (is-true (runtime-observe runtime (pod-uid kept)))
+      ;; The reconciler owns the retry from here, and never recreates the Pod.
+      (let ((ensures (fake-runtime-ensure-count runtime)))
+        (setf (pod-failing-runtime-undeletable runtime) nil)
+        (gr8s:reconcile-all (gr8s::node-runtime-reconciler node))
+        (signals gr8s:kubernetes-error (get-pod agent-store "default" "stuck"))
+        (is (= ensures (fake-runtime-ensure-count runtime)))))))
+
+(test a-terminating-uid-holds-back-only-its-replacement-and-the-acknowledgement
+  (with-temporary-store (store path)
+    (values store)
+    (let* ((runtime (make-pod-failing-runtime))
+           (node (gr8s::make-node-runtime (merge-pathnames "agent/" path) runtime nil))
+           (agent-store (gr8s::node-runtime-store node))
+           (old (local-test-pod "web" "uid-old"))
+           (new (local-test-pod "web" "uid-new"))
+           (other (local-test-pod "other")))
+      (setf (gr8s::node-runtime-state node) :running)
+      (gr8s::put-assigned-pod agent-store old)
+      (gr8s::reconcile-pod (gr8s::node-runtime-reconciler node) "default" "web")
+      (setf (pod-failing-runtime-undeletable runtime) (list "web"))
+      ;; Two runs of the same snapshot: blocked on the old UID, then clear of it.
+      (signals gr8s::node-snapshot-incomplete
+        (gr8s::reconcile-node-snapshot node (desired-snapshot-for-test new other)))
+      (is-true (runtime-observe runtime (pod-uid other)))
+      (is-true (runtime-observe runtime "uid-old"))
+      (is (null (runtime-observe runtime "uid-new")))
+      (setf (pod-failing-runtime-undeletable runtime) nil)
+      (gr8s:reconcile-all (gr8s::node-runtime-reconciler node))
+      (is (= 2 (length (gr8s::reconcile-node-snapshot
+                        node (desired-snapshot-for-test new other)))))
+      (is-true (runtime-observe runtime "uid-new")))))
+
+(test an-unreadable-assignment-fails-only-its-own-pod
+  (with-temporary-store (store path)
+    (values store)
+    (let* ((runtime (make-pod-failing-runtime))
+           (node (gr8s::make-node-runtime (merge-pathnames "agent/" path) runtime nil))
+           (agent-store (gr8s::node-runtime-store node))
+           (running (local-test-pod "running"))
+           (other (local-test-pod "other"))
+           (snapshot (desired-snapshot-for-test other)))
+      (setf (gr8s::node-runtime-state node) :running)
+      (gr8s::put-assigned-pod agent-store running)
+      (gr8s::reconcile-pod (gr8s::node-runtime-reconciler node) "default" "running")
+      (push (unreadable-assignment running) (slot-value snapshot 'gr8s.node.v1::pods))
+      (is-false (gr8s::receive-node-snapshot-intent node snapshot))
+      (signals gr8s::node-snapshot-incomplete (gr8s::reconcile-node-snapshot node snapshot))
+      ;; Its UID is still assigned, so its running Pod is not treated as withdrawn.
+      (is-false (gr8s::deletion-requested-p (get-pod agent-store "default" "running")))
+      (is-true (runtime-observe runtime (pod-uid running)))
+      (is-true (runtime-observe runtime (pod-uid other))))))
+
+(test a-reconciliation-pass-continues-past-one-pods-unexpected-failure
+  (with-temporary-store (store path)
+    (values store)
+    (let* ((runtime (make-pod-failing-runtime))
+           (node (gr8s::make-node-runtime (merge-pathnames "agent/" path) runtime nil))
+           (agent-store (gr8s::node-runtime-store node))
+           (broken (local-test-pod "broken"))
+           (healthy (local-test-pod "healthy")))
+      (setf (pod-failing-runtime-broken runtime) (list "broken"))
+      (gr8s::put-assigned-pod agent-store broken)
+      (gr8s::put-assigned-pod agent-store healthy)
+      (is (= 1 (length (gr8s:reconcile-all (gr8s::node-runtime-reconciler node)))))
+      (is-true (runtime-observe runtime (pod-uid healthy)))
+      (is (null (runtime-observe runtime (pod-uid broken)))))))
+
+(test an-incomplete-snapshot-is-retried-without-closing-its-session
+  (let* ((closed nil)
+         (attempts 0)
+         (acknowledged nil)
+         (worker (gr8s::start-agent-snapshot-worker
+                  (lambda (snapshot replay)
+                    (declare (ignore replay))
+                    (when (= 1 (incf attempts))
+                      (error 'gr8s::node-snapshot-incomplete :message "one Pod"))
+                    (setf acknowledged (slot-value snapshot 'gr8s.node.v1::revision)))
+                  (lambda () (setf closed t)))))
+    (unwind-protect
+         (progn
+           (gr8s::queue-agent-snapshot-work
+            worker (make-instance 'gr8s.node.v1::desired-state-snapshot :revision 5) :replay t)
+           (is-true (wait-until (lambda () (eql 5 acknowledged)) :timeout 5))
+           (is (= 2 attempts))
+           (is-false closed)
+           (is (null (gr8s::agent-snapshot-worker-failure worker))))
+      (gr8s::stop-agent-snapshot-worker worker))))
+
+(test late-input-for-a-finished-operation-fails-only-that-operation
+  (with-temporary-store (store path)
+    (values store)
+    (let* ((node (gr8s::make-node-runtime (merge-pathnames "agent/" path) (make-fake-runtime) nil))
+           (replies nil))
+      (gr8s::dispatch-node-operation
+       node :operation-input
+       (make-instance 'gr8s.node.v1::operation-input
+                      :operation-id "ended-long-ago" :sequence 9
+                      :channel gr8s.node.v1::+streamchannel-stream_channel_stdin+)
+       (lambda (variant message) (push (cons variant message) replies)))
+      (is (= 1 (length replies)))
+      (is (eq :operation-response (car (first replies))))
+      (is (equal "ended-long-ago" (slot-value (cdr (first replies)) 'gr8s.node.v1::operation-id)))
+      (is (= gr8s.node.v1::+operationstatus-operation_status_failed+
+             (slot-value (cdr (first replies)) 'gr8s.node.v1::status))))))
+
+(test one-pods-status-failure-keeps-the-rest-of-the-report
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s:register-node store (gr8s:make-node-record :id "log-worker-id" :name "log-worker"
+                                                   :pod-cidr "10.88.21.0/24"))
+    (let* ((first-pod (create-pod store (node-log-test-pod "first")))
+           (second-pod (create-pod store (node-log-test-pod "second")))
+           (server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0))
+           (original (symbol-function 'gr8s::update-pod-observed-status))
+           (status (gr8s::pod-status "Running")))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s::update-pod-observed-status)
+                   (lambda (store pod object)
+                     (when (equal "first" (pod-name pod)) (error "one Pod's store write failed"))
+                     (funcall original store pod object)))
+             (gr8s::handle-node-agent-envelope
+              server "log-worker"
+              (gr8s::make-agent-envelope
+               :status
+               (make-instance
+                'gr8s.node.v1::node-status
+                :pods (list (gr8s::pod-observed-status-message first-pod status)
+                            (gr8s::pod-observed-status-message second-pod status)))))
+             (is (null (gr8s::pod-observed-status store first-pod)))
+             (is (equal "Running" (gethash "phase" (gr8s::pod-observed-status store second-pod)))))
+        (setf (symbol-function 'gr8s::update-pod-observed-status) original)
+        (gr8s:stop-node-grpc-server server)))))
+
+(test one-pods-removal-failure-keeps-the-node-session-connected
+  (with-temporary-store (store path)
+    (gr8s:register-node store (gr8s:make-node-record :id "log-worker-id" :name "log-worker"
+                                                   :pod-cidr "10.88.21.0/24"))
+    (let* ((stuck (create-pod store (node-log-test-pod "stuck")))
+           (runtime (make-pod-failing-runtime))
+           (node (gr8s::make-node-runtime (merge-pathnames "session-agent/" path) runtime nil))
+           (server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0
+                                               :heartbeat-timeout-seconds 6))
+           (proxy (gr8s::make-control-plane-runtime store server))
+           (identity (merge-pathnames "session/identity.json" path))
+           (control (gr8s::make-node-session-control))
+           (closed 0)
+           (agent nil))
+      (unwind-protect
+           (progn
+             (gr8s::start-node-runtime node)
+             (setf agent
+                   (bt:make-thread
+                    (lambda ()
+                      (gr8s:run-node-session
+                       "127.0.0.1" (gr8s:node-grpc-server-port server) "log-worker" identity
+                       (lambda (snapshot) (gr8s::reconcile-node-snapshot node snapshot))
+                       :underlay-address "" :control control :reconnect-delay .01
+                       :operation-handler
+                       (lambda (variant payload emit)
+                         (declare (ignore payload emit))
+                         (when (eq variant :session-closed) (incf closed)))))))
+             (is-true (wait-until (lambda () (runtime-observe runtime (pod-uid stuck))) :timeout 5))
+             (setf (pod-failing-runtime-undeletable runtime) (list "stuck"))
+             (gr8s:remove-pod store "default" "stuck" :uid (pod-uid stuck))
+             (let ((revision (gr8s::publish-node-snapshot proxy "log-worker")))
+               (is-true (wait-until
+                         (lambda () (= revision (gr8s:node-session-acknowledged-revision server "log-worker")))
+                         :timeout 8)))
+             (is (= 0 closed))
+             (is-true (gr8s::deletion-requested-p
+                       (get-pod (gr8s::node-runtime-store node) "default" "stuck")))
+             (setf (pod-failing-runtime-undeletable runtime) nil)
+             (is-true (wait-until (lambda () (null (runtime-observe runtime (pod-uid stuck)))) :timeout 8))
+             (is (= 0 closed)))
+        (gr8s::cancel-node-session control)
+        (when agent (ignore-errors (bt:join-thread agent)))
+        (gr8s::stop-node-runtime node)
+        (gr8s:stop-node-grpc-server server)))))
