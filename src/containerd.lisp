@@ -90,6 +90,19 @@
       (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ"
               year month day hour minute second))))
 
+(defun container-start-cancelled-p (info)
+  "Return whether INFO exited only because the agent abandoned its StartContainer call.
+That says nothing about the container, so restart policy doesn't apply: a Pod that never
+restarts would otherwise go straight to Failed. The agent's own cancellation now lets the
+call finish (WITH-RUNNING-POD-CANCELLATION-DEFERRED), but the client timeout and the agent
+exiting mid-call still abandon it."
+  (let ((message (or (cri-container-info-message info) "")))
+    (and (= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_exited+)
+         (eql 128 (cri-container-info-exit-code info))
+         (equal "StartError" (cri-container-info-reason info))
+         (or (search "context canceled" message) (search "context deadline exceeded" message))
+         t)))
+
 (defun containerd-container-status-object (info)
   "Translate actual CRI state; consumers must not infer completion from an empty list."
   (let* ((running (= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_running+))
@@ -100,6 +113,8 @@
     (cond
       (running
        (setf (gethash "running" state) (if started (core-object "startedAt" started) (core-object))))
+      ((container-start-cancelled-p info)
+       (setf (gethash "waiting" state) (core-object "reason" "ContainerCreating")))
       ((= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_exited+)
        (let ((terminated (core-object "exitCode" (cri-container-info-exit-code info)
                                       "containerID" id)))
