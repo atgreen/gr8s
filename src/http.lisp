@@ -1093,6 +1093,11 @@ than wait for the next, which truncates any body that spans records in flight."
       (setf (slot-value request 'hunchentoot::raw-post-data)
             (read-complete-body (hunchentoot::content-stream request) (unless chunked content-length))))))
 
+(defun request-media-type ()
+  "Return the request's media type without parameters, or an empty string when it has none."
+  (string-trim " " (subseq (or (hunchentoot:header-in* :content-type) "")
+                           0 (position #\; (or (hunchentoot:header-in* :content-type) "")))))
+
 (defun request-route-path (path)
   "Treat /api/ as /api, as Kubernetes' path recorder does for every API route."
   (let ((trimmed (string-right-trim "/" path)))

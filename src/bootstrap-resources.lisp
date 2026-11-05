@@ -296,7 +296,7 @@
   "Return the requested Node object from a typed or JSON PUT, or a patch applied to NODE's view."
   (if (eq method :put)
       (core-resource-request-object "Node")
-      (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
+      (let* ((content-type (request-media-type))
              (patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)))
              (current (node-api-object node)))
         (cond ((equal content-type "application/json-patch+json") (apply-core-json-patch current patch))

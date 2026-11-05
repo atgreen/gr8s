@@ -187,7 +187,7 @@
 
 (defun crd-read-json ()
   "Reject protobuf for unstructured custom objects; read actual JSON requests."
-  (let ((type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;)))))
+  (let ((type (request-media-type)))
     (unless (member type '("" "application/json") :test #'equal) (core-resource-error 415 "UnsupportedMediaType" "Custom resources require JSON"))
     (require-object (crd-parse-json-content (hunchentoot:raw-post-data :force-text t)) "request")))
 
@@ -197,7 +197,7 @@
     (cond ((eq method :get) (json-response existing))
           ((member method '(:put :patch))
            (let* ((view (crd-api-view existing))
-                  (type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
+                  (type (request-media-type))
                   (input (if (eq method :put) (crd-read-json)
                              (let ((patch (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))))
                                (cond ((equal type "application/merge-patch+json") (merge-json-object view patch))

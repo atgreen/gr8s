@@ -31,7 +31,7 @@
 
 (defun core-resource-request-object (expected-kind)
   (when (and *crd-view-definition* (not (equal expected-kind "DeleteOptions"))) (return-from core-resource-request-object (crd-read-json)))
-  (let ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;)))))
+  (let ((content-type (request-media-type)))
     (cond
       ((string= content-type "application/vnd.kubernetes.protobuf")
        (decode-core-resource-protobuf (hunchentoot:raw-post-data :force-binary t) expected-kind
@@ -243,7 +243,7 @@
         finally (return object)))
 
 (defun core-resource-patch-response (store resource namespace name dry-run)
-  (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
+  (let* ((content-type (request-media-type))
          (patch nil))
     (when (string= content-type "application/apply-patch+yaml")
       (return-from core-resource-patch-response (apply-patch-response store resource namespace name dry-run)))

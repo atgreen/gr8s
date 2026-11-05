@@ -348,3 +348,21 @@
     (let* ((item "/apis/mygroup.example.com/v1/foos/mytest")
            (created (apply-request 201 item (format nil "~%apiVersion: mygroup.example.com/v1~%kind: Foo~%metadata:~%  name: mytest~%spec:~%  foo: foo1~%  cronSpec: \"* * * * */5\"~%  ports:~%  - name: x~%    containerPort: 80~%    protocol: TCP"))))
       (is (= 80 (gethash "containerPort" (aref (gethash "ports" (applied-spec created)) 0)))))))
+
+(test a-body-without-a-content-type-is-read-as-json
+  ;; client-go sends raw byte bodies with no Content-Type header at all.
+  (with-crd-api (store path)
+    (values store path)
+    (install-apply-crd *apply-test-schema*)
+    (let ((text "{\"apiVersion\":\"mygroup.example.com/v1\",\"kind\":\"Foo\",\"metadata\":{\"name\":\"bare\"}}"))
+      (multiple-value-bind (body status)
+          (drakma:http-request "http://127.0.0.1:18094/apis/mygroup.example.com/v1/foos" :method :post
+                               :content text :content-type nil)
+        (declare (ignore body))
+        (is (= 201 status))))
+    (multiple-value-bind (body status)
+        (drakma:http-request "http://127.0.0.1:18094/apis/apps/v1/namespaces/default/deployments?fieldValidation=Strict"
+                             :method :post :content-type nil
+                             :content (deployment-json :metadata-extra "\"unknownMeta\":\"foo\","))
+      (is (= 400 status))
+      (is (search "metadata.unknownMeta" (if (stringp body) body (babel:octets-to-string body)))))))
