@@ -53,12 +53,19 @@
   "Test whether SCHEMA declares a map to be owned as a whole."
   (and (hash-table-p schema) (equal "atomic" (gethash "x-kubernetes-map-type" (resolve-template-schema schema)))))
 
+(defun apply-item-key-value (item key)
+  "Read a map list key of ITEM, with the default a key field has in upstream's schemas."
+  (multiple-value-bind (value present) (gethash key item)
+    (cond (present value)
+          ((equal key "protocol") "TCP")
+          (t 'null))))
+
 (defun apply-item-key (item keys)
   "Spell a map list ITEM's identity as a FieldsV1 k: key, with its key fields sorted."
   (format nil "k:{~{~A~^,~}}"
           (loop for key in (sort (copy-list keys) #'string<)
                 collect (format nil "~A:~A" (com.inuoe.jzon:stringify key)
-                                (com.inuoe.jzon:stringify (gethash key item 'null))))))
+                                (com.inuoe.jzon:stringify (apply-item-key-value item key))))))
 
 (defun apply-set-key (value)
   "Spell a set element as a FieldsV1 v: key."
@@ -134,7 +141,7 @@
                   (position-if (lambda (item)
                                  (and (hash-table-p item)
                                       (loop for field being the hash-keys of wanted using (hash-value value)
-                                            always (crd-json-equal-p value (gethash field item 'null)))))
+                                            always (crd-json-equal-p value (apply-item-key-value item field)))))
                                items)))))
       (and position (values (aref items position) position)))))
 
@@ -214,7 +221,8 @@
                  (let ((existing (find-if (lambda (candidate)
                                             (and (hash-table-p candidate)
                                                  (every (lambda (key)
-                                                          (crd-json-equal-p (gethash key candidate 'null) (gethash key item 'null)))
+                                                          (crd-json-equal-p (apply-item-key-value candidate key)
+                                                                            (apply-item-key-value item key)))
                                                         keys)))
                                           result)))
                    (if existing
@@ -287,7 +295,9 @@
       (unless (apply-applier-p entry manager subresource)
         (dolist (theirs (apply-field-paths (gethash "fieldsV1" entry (core-object))))
           (dolist (mine paths)
-            (when (and (apply-path-related-p theirs mine) (not (equal "." (car (last theirs)))))
+            ;; Two managers may both hold a list item; only the fields inside can conflict.
+            (when (and (apply-path-related-p theirs mine)
+                       (not (equal "." (car (last theirs)))) (not (equal "." (car (last mine)))))
               (let ((shared (if (< (length theirs) (length mine)) theirs mine)))
                 (multiple-value-bind (current present) (apply-value-at live shared)
                   (unless (and present (crd-json-equal-p current (apply-value-at applied shared)))
@@ -518,7 +528,16 @@
   (cond ((custom-resource-key-p resource)
          (and *crd-view-definition*
               (crd-schema (crd-version *crd-view-definition* *crd-request-version*))))
-        ((equal resource "pods") (gethash "io.k8s.api.core.v1.Pod" (gethash "definitions" *podtemplate-schema*)))
+        ((equal resource "pods")
+         (core-object "properties"
+                      (core-object "spec" (core-object "$ref" "#/definitions/io.k8s.api.core.v1.PodSpec")
+                                   "status" (core-object
+                                             "properties"
+                                             (core-object "conditions"
+                                                          (core-object "type" "array" "x-kubernetes-list-type" "map"
+                                                                       "x-kubernetes-list-map-keys" #("type")
+                                                                       "items" (core-object "type" "object")))))))
+        ((equal resource "nodes") nil)
         (t (let ((*core-resource-view-version* (core-resource-api-version resource)))
              (typed-request-schema (core-resource-kind resource))))))
 
@@ -539,6 +558,8 @@
   "Name fields the object's schema does not declare, which Apply rejects in every mode."
   (let ((probe (copy-core-object configuration)))
     (cond
+      ;; Pods and Nodes are served apart from the stored kinds and parse their own writes.
+      ((member resource '("pods" "nodes") :test #'equal) nil)
       ((custom-resource-key-p resource)
        (crd-undeclared-fields probe (crd-schema (crd-version *crd-view-definition* *crd-request-version*))))
       (t (let ((schema (typed-request-schema (core-resource-kind resource))))

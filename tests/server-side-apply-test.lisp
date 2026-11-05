@@ -502,3 +502,42 @@
         (let ((dropped (apply-widget "first" "{\"tags\":[\"x\"]}")))
           (is (equal '("b") (map 'list (lambda (port) (gethash "name" port)) (gethash "ports" (gethash "spec" dropped)))))
           (is (equal '("x" "y") (sort (coerce (gethash "tags" (gethash "spec" dropped)) 'list) #'string<))))))))
+
+(test apply-reaches-pods-and-their-status
+  (with-core-api (store path)
+    (values store path)
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+    (let ((pod "/api/v1/namespaces/alpha/pods/one"))
+      (flet ((apply-pod (where manager body expected)
+               (check-core-status expected where :method :patch :octets body
+                                  :content-type "application/apply-patch+yaml"
+                                  :parameters (list (cons "fieldManager" manager)))))
+        (let ((created (apply-pod pod "first"
+                                  "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"one\"},\"spec\":{\"containers\":[{\"name\":\"a\",\"image\":\"i\"}]}}"
+                                  201)))
+          (is (equal "first" (gethash "manager" (aref (gethash "managedFields" (gethash "metadata" created)) 0)))))
+        (let ((status "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"one\"},\"status\":{\"conditions\":[{\"type\":\"MyStatus\",\"status\":\"True\"}]}}"))
+          ;; The Pod endpoint ignores status; the status endpoint applies it.
+          (apply-pod pod "second" status 200)
+          (flet ((has-status ()
+                   (find "MyStatus" (gethash "conditions" (gethash "status" (check-core-status 200 pod)) #())
+                         :test #'equal :key (lambda (condition) (gethash "type" condition)))))
+            (is (null (has-status)))
+            (apply-pod (concatenate 'string pod "/status") "second" status 200)
+            (is-true (has-status))))))))
+
+(test map-list-keys-default-and-shared-items-do-not-conflict
+  (let* ((gr8s::*apply-schema*
+           (com.inuoe.jzon:parse "{\"properties\":{\"ports\":{\"type\":\"array\",\"x-kubernetes-list-type\":\"map\",\"x-kubernetes-list-map-keys\":[\"containerPort\",\"protocol\"],\"items\":{\"type\":\"object\"}}}}"))
+         (live (com.inuoe.jzon:parse "{\"metadata\":{},\"ports\":[{\"containerPort\":80,\"protocol\":\"TCP\",\"name\":\"a\"}]}"))
+         (first-config (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"X\",\"metadata\":{},\"ports\":[{\"containerPort\":80,\"name\":\"a\"}]}"))
+         (second-config (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"X\",\"metadata\":{},\"ports\":[{\"containerPort\":80,\"hostPort\":9}]}"))
+         (dropped (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"X\",\"metadata\":{}}")))
+    (let* ((one (gr8s::apply-merge live first-config "configmaps" "first" nil))
+           (two (gr8s::apply-merge one second-config "configmaps" "second" nil)))
+      ;; A port without a protocol is the TCP entry, which both managers may hold.
+      (is (= 1 (length (gethash "ports" two))))
+      (is (= 9 (gethash "hostPort" (aref (gethash "ports" two) 0))))
+      (let ((alone (gr8s::apply-merge one dropped "configmaps" "first" nil)))
+        (is (not (nth-value 1 (gethash "ports" alone))))))))
