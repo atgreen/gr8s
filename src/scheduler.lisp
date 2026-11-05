@@ -45,7 +45,7 @@
       (setf (node-record-ready-p node) nil
             (node-record-last-heartbeat node) nil
             (gethash (node-record-name node) (pod-store-nodes store)) node)
-      (persist-node store node)
+      (publish-node-change-unlocked store nil node)
       ;; Desired write (the control-plane-assigned podCIDR): replicate (8ia.4).
       (note-node-desired-change store)
       node)))
@@ -78,14 +78,17 @@
                            :status-code 404
                            :reason "NotFound"
                            :message (format nil "Node ~A was not found" name)))))
-      (let ((updated (copy-node-record node)))
+      (let ((updated (copy-node-record node))
+            ;; Only the first heartbeat of a lease changes anything clients can see.
+            (old (unless (node-record-ready-p node) (node-api-object node))))
         (setf (node-record-ready-p updated) t
               (node-record-last-heartbeat updated) heartbeat
               (node-record-lease-deadline updated) (+ heartbeat lease-duration))
         (persist-node store updated)
         (setf (node-record-ready-p node) t
               (node-record-last-heartbeat node) heartbeat
-              (node-record-lease-deadline node) (node-record-lease-deadline updated)))
+              (node-record-lease-deadline node) (node-record-lease-deadline updated))
+        (when old (publish-node-change-unlocked store old node)))
       node)))
 
 (defun mark-node-not-ready (store name)
@@ -101,10 +104,12 @@
 
 (defun persist-node-unavailable (store node)
   "Checkpoint unavailable state before changing NODE under STORE's lock."
-  (let ((updated (copy-node-record node)))
+  (let ((updated (copy-node-record node))
+        (old (node-api-object node)))
     (setf (node-record-ready-p updated) nil)
     (persist-node store updated)
-    (setf (node-record-ready-p node) nil)))
+    (setf (node-record-ready-p node) nil)
+    (publish-node-change-unlocked store old node)))
 
 (defun expire-node-heartbeats (store oldest-acceptable-heartbeat &key now)
   "Mark stale ready nodes unavailable and return the records that expired."
@@ -179,12 +184,14 @@
                               (string= address (node-record-underlay-address other)))
                      (node-conflict "Underlay address ~A is already claimed" address)))
                  (pod-store-nodes store)))
-      (let ((previous (node-record-underlay-address node)))
+      (let ((previous (node-record-underlay-address node))
+            (old (node-api-object node)))
         (setf (node-record-underlay-address node) address)
         (handler-case (persist-node store node)
           (error (condition)
             (setf (node-record-underlay-address node) previous)
-            (error condition))))))
+            (error condition)))
+        (publish-node-change-unlocked store old node))))
   t)
 
 (defun allocate-node-pod-cidr (store cluster-cidr node-prefix)
@@ -248,10 +255,12 @@
     (let ((node (get-node-unlocked store node-name)))
       (when (and node capacity (plusp (hash-table-count capacity))
                  (not (equalp capacity (node-record-capacity node))))
-        (let ((updated (copy-node-record node)))
+        (let ((updated (copy-node-record node))
+              (old (node-api-object node)))
           (setf (node-record-capacity updated) capacity)
           (persist-node store updated)
-          (setf (node-record-capacity node) capacity))))))
+          (setf (node-record-capacity node) capacity)
+          (publish-node-change-unlocked store old node))))))
 
 (defun update-node-extended-resources (store node-name resources)
   "Replace the extended resources NODE-NAME advertises to the scheduler."
@@ -259,11 +268,12 @@
     (let* ((node (or (get-node-unlocked store node-name)
                      (error 'kubernetes-error :status-code 404 :reason "NotFound"
                                               :message (format nil "Node ~A was not found" node-name))))
-           (updated (copy-node-record node)))
+           (updated (copy-node-record node))
+           (old (node-api-object node)))
       (setf (node-record-extended-resources updated) resources)
       (persist-node store updated)
       (setf (node-record-extended-resources node) resources)
-      node)))
+      (publish-node-change-unlocked store old node))))
 
 (defun node-placement-better-p (store pod left right)
   "Prefer a node POD's affinity favors, then the fewest Pods, then a stable name."

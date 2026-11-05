@@ -120,6 +120,20 @@
         (item-right (if (equal "." (car (last right))) (butlast right) right)))
     (or (apply-path-prefix-p item-left item-right) (apply-path-prefix-p item-right item-left))))
 
+(defun apply-path-retains-p (holder path)
+  "Report whether a manager holding HOLDER keeps the field at PATH alive.
+Holding a list item's \".\" keeps only the item, and any field inside an item keeps its \".\"."
+  (cond ((equal "." (car (last holder))) (equal holder path))
+        ((equal "." (car (last path))) (apply-path-prefix-p (butlast path) holder))
+        (t (or (apply-path-prefix-p holder path) (apply-path-prefix-p path holder)))))
+
+(defun apply-canonical-set (set)
+  "Copy a FieldsV1 SET with its keys sorted, the order upstream serializes them in."
+  (let ((copy (core-object)))
+    (dolist (key (sort (loop for key being the hash-keys of set collect key) #'string<) copy)
+      (let ((child (gethash key set)))
+        (setf (gethash key copy) (if (hash-table-p child) (apply-canonical-set child) child))))))
+
 (defun apply-path-text (path)
   "Format a field path as Kubernetes reports it in conflicts, such as .spec.foo."
   (format nil "~{~A~}"
@@ -279,7 +293,7 @@
 (defun apply-entry (manager api-version set &key (operation "Apply") subresource)
   "Build the ownership record of one write."
   (let ((entry (core-object "manager" manager "operation" operation "apiVersion" api-version
-                            "time" (current-timestamp) "fieldsType" "FieldsV1" "fieldsV1" set)))
+                            "time" (current-timestamp) "fieldsType" "FieldsV1" "fieldsV1" (apply-canonical-set set))))
     (when subresource (setf (gethash "subresource" entry) subresource))
     entry))
 
@@ -333,7 +347,7 @@
   (let ((copy (copy-core-object set)))
     (dolist (path paths copy)
       (dolist (held (apply-field-paths copy))
-        (when (and (apply-path-related-p held path) (not (equal "." (car (last held)))))
+        (when (and (apply-path-retains-p path held) (not (equal "." (car (last held)))))
           (apply-set-remove-path copy held))))))
 
 (defun apply-merge (live configuration resource manager force &optional subresource)
@@ -364,8 +378,8 @@
         (dolist (path (stable-sort (apply-field-paths (gethash "fieldsV1" previous (core-object)))
                                    (lambda (left right)
                                      (and (equal "." (car (last left))) (not (equal "." (car (last right))))))))
-          (unless (or (some (lambda (mine) (apply-path-related-p path mine)) paths)
-                      (some (lambda (other) (apply-path-related-p other path)) held))
+          (unless (or (some (lambda (mine) (apply-path-retains-p mine path)) paths)
+                      (some (lambda (other) (apply-path-retains-p other path)) held))
             ;; An item's "." goes with the item: remove it only once nobody holds anything in it.
             (setf merged (apply-remove-path merged path)))))
       (let ((applied (copy-core-object owned)) (metadata (gethash "metadata" merged)))
@@ -538,6 +552,14 @@
                                                                        "x-kubernetes-list-map-keys" #("type")
                                                                        "items" (core-object "type" "object")))))))
         ((equal resource "nodes") nil)
+        ;; No pinned definition describes Services, whose ports upstream merges by port and protocol.
+        ((equal resource "services")
+         (core-object "properties"
+                      (core-object "spec" (core-object
+                                           "properties"
+                                           (core-object "ports" (core-object "type" "array" "x-kubernetes-list-type" "map"
+                                                                             "x-kubernetes-list-map-keys" #("port" "protocol")
+                                                                             "items" (core-object "type" "object")))))))
         (t (let ((*core-resource-view-version* (core-resource-api-version resource)))
              (typed-request-schema (core-resource-kind resource))))))
 

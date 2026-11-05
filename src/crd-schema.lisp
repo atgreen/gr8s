@@ -139,6 +139,26 @@
         ((equal type "integer") (integerp value)) ((equal type "number") (numberp value))
         ((equal type "boolean") (member value '(t nil)))))
 
+(defvar *crd-error-sink* nil
+  "While validating a whole object, a cell collecting each field's failure so all can be reported.")
+
+(defun crd-validate-all (value schema path &key old has-old prior)
+  "Validate VALUE, reporting every field's failure together with PRIOR messages, as upstream's error list does."
+  (let ((*crd-error-sink* (list (reverse prior))))
+    (handler-case (crd-validate-value value schema path 0 old has-old)
+      (kubernetes-error (condition) (push (kubernetes-error-message condition) (car *crd-error-sink*))))
+    (let ((errors (reverse (car *crd-error-sink*))))
+      (when errors
+        (core-resource-error 422 "Invalid" "~{~A~^, ~}" errors))))
+  value)
+
+(defun crd-validate-child (value schema path depth old has-old)
+  "Validate one child, adding its failure to the sink when one collects them."
+  (if *crd-error-sink*
+      (handler-case (crd-validate-value value schema path depth old has-old)
+        (kubernetes-error (condition) (push (kubernetes-error-message condition) (car *crd-error-sink*))))
+      (crd-validate-value value schema path depth old has-old)))
+
 (defun crd-map-list-entry (old-items keys item)
   "Find the entry of a map list OLD-ITEMS with ITEM's key values."
   (and (hash-table-p item)
@@ -201,7 +221,7 @@ passing even if the schema has since tightened, as upstream's ratcheting does."
                    (when sub
                      (multiple-value-bind (old-child present)
                          (if (and has-old (hash-table-p old)) (gethash key old) (values nil nil))
-                       (crd-validate-value child sub (format nil "~A.~A" path key) (1+ depth) old-child present))))) value)))
+                       (crd-validate-child child sub (format nil "~A.~A" path key) (1+ depth) old-child present))))) value)))
   (when (crd-array-p value)
     (when (and (gethash "minItems" schema) (< (length value) (gethash "minItems" schema))) (crd-schema-error path "below minItems"))
     (when (and (gethash "maxItems" schema) (> (length value) (gethash "maxItems" schema))) (crd-schema-error path "above maxItems"))
@@ -210,7 +230,7 @@ passing even if the schema has since tightened, as upstream's ratcheting does."
                ;; Only map list entries correlate with the old list, by their keys.
                (let ((old-child (and has-old (crd-array-p old) (equal "map" (gethash "x-kubernetes-list-type" schema))
                                      (crd-map-list-entry old (coerce (gethash "x-kubernetes-list-map-keys" schema #()) 'list) child))))
-                 (crd-validate-value child (gethash "items" schema) (format nil "~A[~D]" path index) (1+ depth)
+                 (crd-validate-child child (gethash "items" schema) (format nil "~A[~D]" path index) (1+ depth)
                                      old-child (and old-child t)))))
     (let ((keys (gethash "x-kubernetes-list-map-keys" schema)) (seen nil))
       (loop for child across value
@@ -223,13 +243,15 @@ passing even if the schema has since tightened, as upstream's ratcheting does."
                  (push identity seen))))
   (dolist (field '("allOf" "anyOf" "oneOf"))
     (when (gethash field schema)
-      (let ((success (loop for child across (gethash field schema)
-                           count (handler-case (progn (crd-validate-value value child path (1+ depth)) t) (kubernetes-error () nil)))))
+      (let ((success (let ((*crd-error-sink* nil))
+                       (loop for child across (gethash field schema)
+                             count (handler-case (progn (crd-validate-value value child path (1+ depth)) t) (kubernetes-error () nil))))))
         (unless (cond ((equal field "allOf") (= success (length (gethash field schema))))
                       ((equal field "oneOf") (= success 1)) (t (plusp success)))
           (crd-schema-error path "violates ~A" field)))))
   (when (and (gethash "not" schema)
-             (handler-case (progn (crd-validate-value value (gethash "not" schema) path (1+ depth)) t) (kubernetes-error () nil)))
+             (let ((*crd-error-sink* nil))
+               (handler-case (progn (crd-validate-value value (gethash "not" schema) path (1+ depth)) t) (kubernetes-error () nil))))
     (crd-schema-error path "matches forbidden not schema"))
   value)
 
