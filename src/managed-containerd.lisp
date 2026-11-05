@@ -174,10 +174,19 @@
 
 (defun managed-containerd-environment (manager)
   (let* ((prefix (managed-containerd-binary-directory manager))
+         ;; Runtime-addon bin dirs join the PATH so containerd can exec their
+         ;; shim binaries (e.g. containerd-shim-runsc-v1) by name; runc's own
+         ;; prefix stays first. With no addons this is byte-identical to the old
+         ;; "PATH=<prefix>:<inherited>" form.
+         (addon-directories
+           (loop for handler in (managed-containerd-extra-runtime-handlers manager)
+                 for directory = (getf handler :bin-dir)
+                 when directory
+                   collect (string-right-trim "/" (namestring directory))))
          (path (or (uiop:getenv "PATH") ""))
          (inherited #+sbcl (copy-list (sb-ext:posix-environ))
                     #-sbcl nil))
-    (cons (format nil "PATH=~A:~A" prefix path)
+    (cons (format nil "PATH=~{~A:~}~A" (cons prefix addon-directories) path)
           (remove-if (lambda (entry)
                        (uiop:string-prefix-p "PATH=" entry))
                      inherited))))

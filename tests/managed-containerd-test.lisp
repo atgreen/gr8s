@@ -55,6 +55,25 @@
     ;; an options-less handler emits no empty [...options] table.
     (is (not (search "runtimes.runsc.options]" config)))))
 
+(test managed-containerd-puts-addon-bin-dirs-on-the-shim-path
+  ;; podster-nhf: containerd execs a runtime's shim binary by name, so an
+  ;; addon's bin dir must be on the launched process PATH, with runc's own
+  ;; prefix still leading.
+  (let* ((manager
+           (gr8s::make-managed-containerd
+            :state-directory "/var/lib/gr8s/"
+            :executable "/opt/gr8s/bin/containerd"
+            :oci-runtime "/opt/gr8s/bin/runc"
+            :cni-bin-directory "/opt/gr8s/bin/cni/"
+            :platform "linux/amd64"
+            :extra-runtime-handlers
+            (list (list :name "runsc" :runtime-type "io.containerd.runsc.v1"
+                        :bin-dir "/var/lib/gr8s/runtime-addons/gvisor/"))))
+         (path-entry (find-if (lambda (entry) (uiop:string-prefix-p "PATH=" entry))
+                              (gr8s::managed-containerd-environment manager))))
+    (is (uiop:string-prefix-p "PATH=/opt/gr8s/bin:" path-entry))
+    (is (search "/var/lib/gr8s/runtime-addons/gvisor:" path-entry))))
+
 (test managed-containerd-keeps-all-state-under-its-private-directory
   (let* ((manager
            (gr8s::make-managed-containerd
