@@ -24,7 +24,8 @@
     ("validatingadmissionpolicies" "ValidatingAdmissionPolicy" "admissionregistration.k8s.io/v1" nil "admissionregistration" :status :generation)
     ("validatingadmissionpolicybindings" "ValidatingAdmissionPolicyBinding" "admissionregistration.k8s.io/v1" nil "admissionregistration" :generation)
     ("mutatingadmissionpolicies" "MutatingAdmissionPolicy" "admissionregistration.k8s.io/v1" nil "admissionregistration" :generation)
-    ("mutatingadmissionpolicybindings" "MutatingAdmissionPolicyBinding" "admissionregistration.k8s.io/v1" nil "admissionregistration" :generation))
+    ("mutatingadmissionpolicybindings" "MutatingAdmissionPolicyBinding" "admissionregistration.k8s.io/v1" nil "admissionregistration" :generation)
+    ("apiservices" "APIService" "apiregistration.k8s.io/v1" nil "kube-aggregator" :status :generation))
   "Each entry: resource, kind, version, namespaced, proto package segment, then its traits.")
 
 (defparameter *typed-api-groups*
@@ -54,7 +55,9 @@
   "Return the pinned structural definition for a typed RESOURCE."
   (destructuring-bind (name kind version namespaced package &rest traits) (typed-api-resource-p resource)
     (declare (ignore name version namespaced traits))
-    (format nil "io.k8s.api.~A.v1.~A" package kind)))
+    (if (equal package "kube-aggregator")
+        (format nil "io.k8s.kube-aggregator.pkg.apis.apiregistration.v1.~A" kind)
+        (format nil "io.k8s.api.~A.v1.~A" package kind))))
 
 (defun typed-api-kind-p (kind)
   "Return the table entry of a typed object KIND."
@@ -63,7 +66,11 @@
 (defun decode-typed-api-protobuf (raw kind version)
   "Decode a typed object from its pinned wire schema."
   (let* ((package (fifth (typed-api-kind-p kind)))
-         (object (template-protobuf-message (format nil "k8s.io.api.~A.v1.~A" package kind) raw))
+         (object (template-protobuf-message
+                  (if (equal package "kube-aggregator")
+                      (format nil "k8s.io.kube_aggregator.pkg.apis.apiregistration.v1.~A" kind)
+                      (format nil "k8s.io.api.~A.v1.~A" package kind))
+                  raw))
          (metadata (core-protobuf-value (core-protobuf-fields raw) 1)))
     (setf (gethash "metadata" object) (if metadata (core-protobuf-metadata metadata) (core-object))
           (gethash "apiVersion" object) version (gethash "kind" object) kind)
@@ -161,6 +168,7 @@
   "Apply RESOURCE's defaults and the validation its clients rely on."
   (let ((spec (gethash "spec" object)))
     (cond
+      ((equal resource "apiservices") (validate-apiservice object))
       ((equal resource "leases")
        (when (hash-table-p spec)
          (let ((duration (gethash "leaseDurationSeconds" spec)) (transitions (gethash "leaseTransitions" spec)))
@@ -289,6 +297,9 @@
       (unless *typed-api-status-write*
         (let ((status (and existing (gethash "status" existing))))
           (if status (setf (gethash "status" object) (copy-core-object status)) (remhash "status" object)))))
+    (when (and (equal resource "apiservices") (not existing))
+      (refuse-builtin-apiservice (gethash "name" metadata))
+      (default-local-apiservice-status object))
     (remhash "deletionTimestamp" metadata)
     (remhash "generation" metadata)
     (when existing
@@ -407,7 +418,10 @@
   "Read or replace only a typed object's status, never its spec."
   (destructuring-bind (resource namespace name) (typed-status-route path)
     (when (eq method :get)
-      (return-from dispatch-typed-status-request (json-response (get-core-resource store resource namespace name))))
+      (return-from dispatch-typed-status-request
+        (json-response (if (equal resource "apiservices")
+                           (apiservice-by-name store name)
+                           (get-core-resource store resource namespace name)))))
     (unless (member method '(:put :patch))
       (core-resource-error 405 "MethodNotAllowed" "Unsupported status method"))
     (let* ((*typed-api-status-write* t)

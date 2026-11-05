@@ -95,6 +95,35 @@
 (defmethod runtime-network-metrics ((runtime t)) (declare (ignore runtime)) "")
 
 (defgeneric runtime-observe (runtime uid))
+;; Creation can be cancelled at any instruction so that a deletion need not wait for
+;; it (see CANCEL-RUNNING-POD-CONVERGENCE). A few runtime calls must not be abandoned
+;; halfway, and run inside WITH-RUNNING-POD-CANCELLATION-DEFERRED.
+(defvar *running-pod-convergence* nil
+  "The creation whose catch this thread is inside, bound only within that catch.")
+
+(defvar *running-pod-cancellation-deferred* nil
+  "True while this thread's creation must finish its current step before being cancelled.")
+
+(defvar *running-pod-cancellation-pending* nil
+  "Set when this thread's creation was cancelled during a deferred step.")
+
+(defmacro with-running-pod-cancellation-deferred (&body body)
+  "Run BODY to completion even if this thread's creation is cancelled meanwhile, then honour it.
+containerd starts a container's task and then reads its pid. Cancelling StartContainer
+between the two leaves the task running in a container CRI reports as exited, which
+StopContainer then skips and RemoveContainer refuses, so its Pod's deletion never ends
+and, with it, every creation on the node (podster-uqb.123)."
+  (let ((step (gensym "STEP")))
+    `(flet ((,step () ,@body))
+       (if *running-pod-convergence*
+           (let ((*running-pod-cancellation-pending* nil))
+             (unwind-protect
+                  (let ((*running-pod-cancellation-deferred* t))
+                    (,step))
+               (when *running-pod-cancellation-pending*
+                 (throw *running-pod-convergence* :superseded))))
+           (,step)))))
+
 (defgeneric runtime-ensure (runtime pod))
 (defgeneric runtime-reconcile-containers (runtime pod observed)
   (:documentation "Advance container lifecycle in POD, preserving healthy siblings in native runtimes."))

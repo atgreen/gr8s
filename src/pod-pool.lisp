@@ -110,19 +110,27 @@
 (defun validate-pod-pool-host-routes
     (cidr state-directory &key (route-reader #'read-ipv4-host-routes)
                               (link-reader #'network-link-attributes-by-index))
-  "Reject overlapping host routes, allowing only exact journal-owned dataplane routes."
-  (let ((owned (persisted-node-route-identities state-directory)))
-    (dolist (route (funcall route-reader))
+  "Reject overlapping host routes, allowing only exact journal-owned dataplane routes.
+This runs while Pods come and go. A Pod's lease outlives its route both ways: ADD persists
+the lease before installing the route, and DEL removes the route before releasing the lease.
+So reading the journal on both sides of the route dump finds the lease of any Pod route in
+it, and an owned route whose link has since gone left with its link."
+  (let* ((before (persisted-node-route-identities state-directory))
+         (routes (funcall route-reader))
+         (owned (append before (persisted-node-route-identities state-directory))))
+    (dolist (route routes)
       (when (and (plusp (nth-value 1 (parse-ipv4-cidr (getf route :cidr))))
                  (ipv4-prefixes-overlap-p cidr (getf route :cidr)))
         (let ((identities (remove-if-not
                            (lambda (item) (string= (getf route :cidr) (getf item :cidr))) owned)))
           (unless (and identities (plusp (getf route :index 0))
                        (let ((attributes (handler-case (funcall link-reader (getf route :index))
-                                           (rtnetlink-error () nil))))
-                         (and attributes
-                              (some (lambda (identity) (route-link-matches-identity-p attributes identity))
-                                    identities))))
+                                           (rtnetlink-error (condition)
+                                             (if (= 19 (rtnetlink-error-errno condition)) :gone nil)))))
+                         (or (eq :gone attributes)
+                             (and attributes
+                                  (some (lambda (identity) (route-link-matches-identity-p attributes identity))
+                                        identities)))))
             (invalid-cni "Pod pool ~A overlaps host route ~A in table ~A"
                          cidr (getf route :cidr) (getf route :table)))))))
   t)

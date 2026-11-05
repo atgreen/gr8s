@@ -205,6 +205,7 @@
                              (:file "admission-http")
                              (:file "server")
                              (:file "in-cluster-api")
+                             (:file "api-aggregation")
                              (:file "services")
                              (:file "endpointslice-controller")
                              (:file "endpoints-controller")

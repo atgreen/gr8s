@@ -28,6 +28,8 @@
                                               "resources" #("watched-kind"))))))
       (cond
         ((equal resource "leases") (spec))
+        ((equal resource "apiservices")
+         (spec "group" "watched.example.test" "version" "v1" "groupPriorityMinimum" 1000 "versionPriority" 100))
         ((equal resource "prioritylevelconfigurations") (spec "type" "Exempt"))
         ((equal resource "flowschemas") (spec "priorityLevelConfiguration" (gr8s::core-object "name" "exempt")))
         ((equal resource "deviceclasses") (spec))
@@ -174,6 +176,7 @@
       (destructuring-bind (resource kind version namespaced) descriptor
         (let* ((name (cond ((equal resource "customresourcedefinitions") "watched.watch.example.test")
                            ((equal resource "ipaddresses") "192.0.2.77")
+                           ((equal resource "apiservices") "v1.watched.example.test")
                            (t "watched")))
                (namespace (and namespaced "alpha"))
                (collection (if (equal version "v1") "/api/v1" (concatenate 'string "/apis/" version)))
@@ -251,6 +254,53 @@
           (let* ((replacement (gethash "continue" (gethash "metadata" error)))
                  (resumed (gr8s::template-list-page store "alpha" "" "" :resource "secrets" :continuation replacement)))
             (is (equal "b" (gethash "name" (gethash "metadata" (aref (gethash "items" resumed) 0)))))))))))
+
+;; podster-uqb.122: ReplicaSet Replace and Patch watched from a revision 305 seconds old.
+(test watch-history-reaches-further-back-than-a-commit-writes
+  (with-temporary-store (store path)
+    (let* ((now 1000) (gr8s::*podtemplate-clock* (lambda () now)))
+      (flet ((create (name)
+               (gr8s::create-core-resource store "configmaps" (durable-watch-fixture "configmaps" name) "alpha")
+               (gr8s::pod-store-resource-revision store))
+             (names (store revision)
+               (mapcar (lambda (event) (gethash "name" (gethash "metadata" (gethash "object" event))))
+                       (gr8s::template-watch-events store "alpha" "" "" revision :resource "configmaps"))))
+        (let ((created (create "first")))
+          (setf now 1305)
+          (create "second")
+          (is (equal '("first" "second") (names store (1- created))))
+          (is (equal '("second") (names store created)))
+          ;; A commit writes only what it always wrote, and a restart resumes from that.
+          (let ((state (com.inuoe.jzon:parse (gr8s::core-resource-state-path store))))
+            (is (= 1 (length (gethash "templateHistory" state))))
+            (is (= created (gethash "templateHistoryFloor" state))))
+          (let ((reopened (open-store path)))
+            (is (equal '("second") (names reopened created)))
+            (signals gr8s::kubernetes-error (names reopened (1- created))))
+          ;; Past the window, the journal lets go of it here as well.
+          (setf now 1601)
+          (create "third")
+          (is (= created (gr8s::pod-store-template-history-floor store)))
+          (is (equal '("second" "third") (names store created)))
+          (signals gr8s::kubernetes-error (names store (1- created))))))))
+
+(test watch-history-holds-more-than-a-commit-writes-up-to-its-own-limit
+  (with-temporary-store (store path)
+    (values path)
+    (flet ((create-all (names)
+             (dolist (name names)
+               (gr8s::create-core-resource store "configmaps" (durable-watch-fixture "configmaps" name) "alpha"))))
+      (let ((gr8s::*podtemplate-history-limit* 2) (start (gr8s::pod-store-resource-revision store)))
+        (create-all '("a" "b" "c" "d" "e"))
+        (is (= 5 (length (gr8s::pod-store-template-history store))))
+        (is (= start (gr8s::pod-store-template-history-floor store)))
+        (is (= 2 (length (gethash "templateHistory"
+                                  (com.inuoe.jzon:parse (gr8s::core-resource-state-path store)))))))
+      (let ((gr8s::*resource-watch-history-limit* 3))
+        (create-all '("f"))
+        (is (= 3 (length (gr8s::pod-store-template-history store))))
+        (is (= (- (gr8s::pod-store-resource-revision store) 3)
+               (gr8s::pod-store-template-history-floor store)))))))
 
 (test legacy-template-history-upgrade-does-not-invent-other-resource-history
   (with-temporary-store (store path)

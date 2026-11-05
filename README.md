@@ -743,6 +743,12 @@ Ephemeral containers are added through `pods/ephemeralcontainers`, and `pods/res
 changes CPU and memory in place, or restarts that container under a RestartContainer
 policy. Readiness gates and a Pod's own `resources` remain unsupported.
 
+External API servers can be registered with an `APIService`. gr8s publishes the
+`extension-apiserver-authentication` ConfigMap they read from `kube-system`, with a separate
+front-proxy CA, checks each one's discovery document to set its `Available` condition, lists its
+group in discovery and proxies its requests over TLS with the caller's identity in `X-Remote-*`
+headers. OpenAPI documents aren't merged, so `kubectl explain` doesn't cover aggregated types.
+
 All ten unchanged upstream probe conformance cases pass in the
 [focused result](docs/container-probes-upstream-2026-11-04.json). The
 [native validation record](docs/container-probes-native-2026-11-04.json)
@@ -844,11 +850,15 @@ validation evidence and remaining extensions.
 Stored-resource list continuations are signed and bound to their resource type,
 namespace and selectors. A shared durable change journal preserves a consistent
 resourceVersion across
-mutations and restarts, with five-minute retention and a 4,096-change bound.
-Compacted or expired continuations return HTTP 410 with a replacement token for
+mutations and restarts, with five-minute retention and a 4,096-change bound on
+disk. Compacted or expired continuations return HTTP 410 with a replacement token for
 resuming at the last key in a newer view. Restart the list without a token when a
 consistent full snapshot is required. Watch supports revision resumption,
-selector transitions, timeouts, bookmarks and initial events. Upgrades preserve
+selector transitions, timeouts, bookmarks and initial events. A running server
+resumes a watch from up to ten minutes back, with 16,384 stored-resource, 16,384 Pod
+and 4,096 Node changes as the most it holds. A watch from further back than that is
+established and then ended by an ERROR event carrying a 410 Expired Status, which
+clients answer by relisting. Upgrades preserve
 legacy PodTemplate history and continuations; requests for older history of
 newly tracked resource types return HTTP 410. The expanded journal uses storage
 format 2, which older executables reject; downgrading requires restoring a

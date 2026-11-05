@@ -591,7 +591,8 @@ handler and never gets here. A busy host makes this race likely."
   #+sbcl
   (progn
     (sb-sys:enable-interrupt sb-unix:sigint #'request-shutdown)
-    (sb-sys:enable-interrupt sb-unix:sigterm #'request-shutdown)))
+    (sb-sys:enable-interrupt sb-unix:sigterm #'request-shutdown)
+    (sb-sys:enable-interrupt sb-unix:sigusr1 #'dump-thread-backtraces)))
 
 (defstruct reconciliation-worker
   reconciler
@@ -677,6 +678,7 @@ handler and never gets here. A busy host makes this race likely."
          (api-server nil)
          (debug-port nil)
          (service-network-created nil)
+         (aggregator nil)
          (worker nil)
          (node-server nil)
          (ha nil)
@@ -708,6 +710,8 @@ handler and never gets here. A busy host makes this race likely."
                     (when (and local-agent (equal "containerd" (getf options :runtime))
                                (equal "managed" (getf options :containerd-mode)))
                       (ensure-native-bootstrap-namespaces store)
+                      (ensure-extension-apiserver-authentication store pki)
+                      (setf aggregator (start-api-aggregator store pki))
                       (ensure-native-api-service store)
                       (setf service-network-created (ensure-in-cluster-network pki))
                       (setf api-server (start-in-cluster-api store runtime reconciler pki))
@@ -760,6 +764,7 @@ handler and never gets here. A busy host makes this race likely."
                     (finish-output)
                     (loop until *shutdown-requested* do (sleep 0.1)))
                (when debug-port (stop-debug-server debug-port))
+               (when aggregator (stop-api-aggregator aggregator))
                (when worker (stop-reconciliation-worker worker))
                (when runtime (stop-runtime-deletions runtime))
                (when server (stop-server server))
@@ -827,6 +832,8 @@ handler and never gets here. A busy host makes this race likely."
   (finish-output))
 
 (defun main-with-environment (arguments environment cni-entry)
+  (when (equal (first arguments) +cni-image-command+)
+    (write-cni-plugin-image (second arguments)))
   (if (funcall environment "CNI_COMMAND")
       (funcall cni-entry)
       (handler-case

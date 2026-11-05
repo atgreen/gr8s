@@ -83,8 +83,20 @@
       (setf *api-connection-certificate-chain* (pure-tls:tls-peer-certificate-chain tls))
       tls)))
 
-(defun kubernetes-authorization-target (path method &key watch)
-  "Return verb, group, resource, name and namespace for Kubernetes request PATH."
+(defun field-selector-exact-name (selector)
+  "Return the object name SELECTOR requires, which authorization treats as the request's name."
+  (when selector
+    (loop for term in (uiop:split-string selector :separator ",")
+          for trimmed = (string-trim " " term)
+          do (cond ((uiop:string-prefix-p "metadata.name==" trimmed)
+                    (return (subseq trimmed (length "metadata.name=="))))
+                   ((uiop:string-prefix-p "metadata.name=" trimmed)
+                    (return (subseq trimmed (length "metadata.name="))))))))
+
+(defun kubernetes-authorization-target (path method &key watch field-selector)
+  "Return verb, group, resource, name and namespace for Kubernetes request PATH.
+As upstream does, a collection request selecting one name by FIELD-SELECTOR is about that name,
+so that a rule limited by resourceNames can allow reading and watching just that object."
   (let* ((parts (remove "" (uiop:split-string path :separator '(#\/)) :test #'equal))
          (group (cond ((and (equal "api" (first parts)) (equal "v1" (second parts))) "")
                       ((and (equal "apis" (first parts)) (>= (length parts) 3)) (second parts))))
@@ -109,7 +121,11 @@
                    verb)))
     (values verb group
             (when resource (if (third resource-parts) (format nil "~A/~A" resource (third resource-parts)) resource))
-            name namespace)))
+            (or name
+                (and (member verb '("list" "watch" "deletecollection") :test #'equal)
+                     (let ((selected (field-selector-exact-name field-selector)))
+                       (and selected (path-segment-name-p selected) selected))))
+            namespace)))
 
 (defun authenticated-discovery-request-p (path method)
   "Recognize read-only discovery URLs granted to all authenticated accounts."
@@ -128,17 +144,6 @@
                       "/apis/authentication.k8s.io/v1/selfsubjectreviews")
                :test #'equal)))
 
-(defun field-selector-exact-name (selector)
-  "The object name a fieldSelector pins via metadata.name=NAME (or ==), else NIL.
-   Authorizing a name-scoped list/watch against a rule's resourceNames (KEP-4601)
-   is safe because the server enforces the same selector on the results, so the
-   caller sees only that object -- exactly what a resourceNames grant intends."
-  (when (and (stringp selector) (plusp (length selector)))
-    (dolist (raw (uiop:split-string selector :separator '(#\,)))
-      (let* ((term (string-trim " " raw)) (bang (search "!=" term)) (eq (position #\= term)))
-        (when (and eq (not bang) (string= "metadata.name" (subseq term 0 eq)))
-          (return (string-left-trim "=" (subseq term eq))))))))
-
 (defun authorize-in-cluster-request (store request)
   "Authenticate a verified certificate or live bearer token, then enforce current RBAC."
   (let* ((header (hunchentoot:header-in :authorization request))
@@ -155,11 +160,8 @@
     (unless (or (authenticated-discovery-request-p path method)
                 (authenticated-self-review-request-p path method))
       (multiple-value-bind (verb group resource name namespace)
-          (kubernetes-authorization-target path method :watch (true-parameter-p (hunchentoot:parameter "watch")))
-        ;; A name-scoped list/watch (metadata.name field selector) authorizes
-        ;; against a rule's resourceNames, as upstream does since 1.31 (KEP-4601).
-        (when (and (null name) (member verb '("list" "watch") :test #'equal))
-          (setf name (field-selector-exact-name (hunchentoot:parameter "fieldSelector"))))
+          (kubernetes-authorization-target path method :watch (true-parameter-p (hunchentoot:parameter "watch"))
+                                                       :field-selector (hunchentoot:parameter "fieldSelector"))
         (unless (service-account-authorized-p store identity verb group resource name namespace path)
           (core-resource-error 403 "Forbidden" "User ~A is not allowed to ~A ~A"
                                (api-identity-username identity) verb (or resource path)))))

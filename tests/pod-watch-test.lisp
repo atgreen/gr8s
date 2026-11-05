@@ -157,6 +157,43 @@
             (is (= (- (gr8s::pod-store-pod-revision store) floor) (length events))))
           (signals kubernetes-error (gr8s::pod-watch-events store nil "" "" (1- floor))))))))
 
+(test pod-journal-keeps-its-time-window-past-the-old-event-count
+  (with-temporary-store (store directory)
+    (declare (ignorable directory))
+    (let* ((now 1000) (gr8s::*podtemplate-clock* (lambda () now)) (revision 0))
+      (flet ((record (count)
+               (loop repeat count
+                     do (gr8s::record-pod-watch-event-unlocked store (incf revision) nil nil))))
+        (record 9000)
+        (is (= 0 (gr8s::pod-store-pod-watch-floor store)))
+        (is (= 9000 (gr8s::pod-store-pod-watch-journal-length store)))
+        ;; A quiet cluster's few old events stay, however old.
+        (setf now (+ 1000 gr8s::*watch-history-seconds* 1))
+        (record 216)
+        (let ((length (gr8s::pod-store-pod-watch-journal-length store)))
+          (is (= gr8s::+pod-watch-journal-minimum+ length))
+          (is (= (- revision length) (gr8s::pod-store-pod-watch-floor store))))
+        ;; However recent, events stop at the limit.
+        (let ((gr8s::*pod-watch-journal-limit* 5000))
+          (record 3000)
+          (is (<= (gr8s::pod-store-pod-watch-journal-length store)
+                  (+ 5000 gr8s::+revision-journal-trim-interval+))))))))
+
+(test node-journal-keeps-its-time-window-past-the-old-event-count
+  (with-temporary-store (store directory)
+    (declare (ignorable directory))
+    (let* ((now 1000) (gr8s::*podtemplate-clock* (lambda () now)))
+      (loop for revision from 1 to 3000
+            do (gr8s::record-node-watch-event-unlocked store revision nil nil))
+      (is (= 0 (gr8s::pod-store-node-watch-floor store)))
+      (is (= 3000 (gr8s::pod-store-node-watch-journal-length store)))
+      (setf now (+ 1000 gr8s::*watch-history-seconds* 1))
+      (loop for revision from 3001 to 4096
+            do (gr8s::record-node-watch-event-unlocked store revision nil nil))
+      ;; The 1096 events inside the window are more than the minimum, so only those stay.
+      (is (= 1096 (gr8s::pod-store-node-watch-journal-length store)))
+      (is (= 3000 (gr8s::pod-store-node-watch-floor store))))))
+
 (test page-selects-start-revision-and-validates-it
   (with-temporary-store (store directory)
     (declare (ignorable directory))
@@ -202,6 +239,38 @@
     (is (and metadata (plusp (length (gethash "resourceVersion" metadata)))))
     (is (equal "true" (and metadata (gethash "annotations" metadata)
                            (gethash "k8s.io/initial-events-end" (gethash "annotations" metadata)))))))
+
+;; podster-uqb.122: RetryWatcher gives up on this event, where it retried the same
+;; HTTP 410 once a second for the rest of the spec.
+(test too-old-a-revision-ends-the-watch-with-an-expired-event-on-every-storage-path
+  (with-core-api (store path)
+    (values path)
+    ;; Twice, since one below the floor must not be revision 0, which asks for the latest.
+    (dolist (name '("web" "api"))
+      (gr8s::create-core-resource store "replicasets" (durable-watch-fixture "replicasets" name) "alpha"))
+    (gr8s:register-node store (gr8s:make-node-record :id "node-a" :name "node-a" :pod-cidr "10.88.0.0/24"))
+    (create-pod store (watch-test-pod "web"))
+    (setf (gr8s::pod-store-template-history-floor store) (gr8s::pod-store-resource-revision store)
+          (gr8s::pod-store-pod-watch-floor store) (gr8s::pod-store-pod-revision store)
+          (gr8s::pod-store-node-watch-floor store) (gr8s::pod-store-pod-revision store))
+    (loop for (collection floor)
+            in `(("/apis/apps/v1/namespaces/alpha/replicasets" ,(gr8s::pod-store-template-history-floor store))
+                 ("/api/v1/pods" ,(gr8s::pod-store-pod-watch-floor store))
+                 ("/api/v1/nodes" ,(gr8s::pod-store-node-watch-floor store)))
+          do (let* ((events (collect-watch-stream collection (cons "resourceVersion" (write-to-string (1- floor)))))
+                    (event (first events))
+                    (status (and event (gethash "object" event))))
+               (is (= 1 (length events)) "~A sent ~A" collection events)
+               (is (equal "ERROR" (and event (gethash "type" event))))
+               (is (equal "v1" (and status (gethash "apiVersion" status))))
+               (is (equal "Status" (and status (gethash "kind" status))))
+               (is (equal "Failure" (and status (gethash "status" status))))
+               (is (equal "Expired" (and status (gethash "reason" status))))
+               (is (eql 410 (and status (gethash "code" status))))
+               (is (hash-table-p (and status (gethash "metadata" status))))))
+    ;; What is wrong with the request itself is still an HTTP error.
+    (is (= 400 (nth-value 1 (drakma:http-request "http://127.0.0.1:18089/api/v1/pods"
+                                                 :parameters '(("watch" . "true") ("resourceVersion" . "x"))))))))
 
 (test watch-list-ends-initial-events-with-a-bookmark-on-every-storage-path
   (with-core-api (store path)

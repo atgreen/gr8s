@@ -409,7 +409,7 @@
         (setf (gethash "status" claimed) (gr8s::core-object "currentReplicas" 3 "desiredReplicas" 3))
         (is (= 0 (gethash "currentReplicas" (gethash "status" (crd-api-request 201 v2 :method :post :object claimed)))))))))
 
-(test apiservices-describe-local-versions-and-refuse-registration
+(test apiservices-describe-local-versions-and-refuse-invalid-registration
   (with-crd-api (store path)
     (values store path)
     (let* ((collection "/apis/apiregistration.k8s.io/v1/apiservices")
@@ -419,7 +419,10 @@
         (is (member name names :test #'equal) "~A is absent" name))
       (is (equal "apps" (gethash "group" (gethash "spec" (crd-api-request 200 (concatenate 'string collection "/v1.apps"))))))
       (crd-api-request 404 (concatenate 'string collection "/v9.none"))
-      (crd-api-request 405 collection :method :post :text "{}"))))
+      ;; Registration works, but only for what upstream's rules accept.
+      (crd-api-request 422 collection :method :post :text "{}")
+      ;; A version this server describes itself is not a stored object to change.
+      (crd-api-request 405 (concatenate 'string collection "/v1.apps") :method :delete))))
 
 (defun apply-merge-patch (path text &optional manager)
   "Merge-patch PATH as a named manager."
@@ -571,3 +574,305 @@
              (entries (gethash "managedFields" (gethash "metadata" second))))
         (is (= 2 (length entries)))
         (is (gr8s::crd-json-equal-p (gethash "fieldsV1" (aref entries 0)) (gethash "fieldsV1" (aref entries 1))))))))
+
+;;; External API servers (podster-uqb.84)
+
+(defun aggregator-test-backend (pki server-name directory)
+  "Serve a small aggregated API over TLS, as sample-apiserver would, recording each request's head.
+Return its port, a function to read the records, and a function to stop it."
+  (multiple-value-bind (private public) (ironclad:generate-key-pair :secp256r1)
+    (let* ((certificate (merge-pathnames "backend.crt" directory))
+           (key (merge-pathnames "backend.key" directory))
+           (listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :element-type '(unsigned-byte 8)))
+           (lock (bt:make-lock "aggregator test backend"))
+           (seen nil)
+           (stopping nil))
+      (gr8s::write-private-text-exclusively key (pure-tls/acme::encode-ec-private-key-pem private))
+      (gr8s::write-public-text-exclusively
+       certificate
+       (pure-tls/acme::wrap-pem
+        "CERTIFICATE"
+        (gr8s::certificate-der
+         (pure-tls/acme::encode-subject gr8s::+pki-ca-common-name+)
+         (pure-tls/acme::encode-subject server-name)
+         (pure-tls/acme::encode-ec-public-key public)
+         (list (pure-tls/acme::encode-extension
+                pure-tls/acme::*oid-subject-alt-name*
+                (pure-tls/acme::encode-sequence
+                 (pure-tls/acme::encode-der #x82 (gr8s::pki-ascii-octets server-name)))))
+         (gr8s::cluster-pki-ca-private-key pki))))
+      (flet ((serve (raw)
+               (let ((tls (pure-tls:make-tls-server-stream
+                           (usocket:socket-stream raw) :certificate (namestring certificate)
+                           :key (namestring key) :verify pure-tls:+verify-peer+ :trust-store nil)))
+                 (multiple-value-bind (method target headers body) (aggregator-test-read-request tls)
+                   (bt:with-lock-held (lock)
+                     (push (list method target headers body (pure-tls:tls-peer-certificate tls)) seen))
+                   (if (search "flunders" target)
+                       ;; Two chunks: a watch's events have to arrive one at a time.
+                       (flet ((write-text (text)
+                                (write-sequence (trivial-utf-8:string-to-utf-8-bytes text) tls)
+                                (force-output tls)))
+                         (write-text (format nil "HTTP/1.1 200 OK~C~CContent-Type: application/json~C~CTransfer-Encoding: chunked~C~C~C~C"
+                                             #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed))
+                         (write-text (format nil "7~C~C{\"a\":1}~C~C" #\Return #\Linefeed #\Return #\Linefeed))
+                         (write-text (format nil "0~C~C~C~C" #\Return #\Linefeed #\Return #\Linefeed)))
+                       (let ((document (com.inuoe.jzon:stringify
+                                        (gr8s::core-object
+                                         "apiVersion" "v1" "kind" "APIResourceList"
+                                         "groupVersion" "wardle.example.com/v1alpha1"
+                                         "resources" (vector (gr8s::core-object
+                                                              "name" "flunders" "singularName" "flunder" "namespaced" t
+                                                              "kind" "Flunder" "verbs" #("get" "list")))))))
+                         (write-sequence
+                          (trivial-utf-8:string-to-utf-8-bytes
+                           (format nil "HTTP/1.1 200 OK~C~CContent-Type: application/json~C~CContent-Length: ~D~C~C~C~C~A"
+                                   #\Return #\Linefeed #\Return #\Linefeed (length document)
+                                   #\Return #\Linefeed #\Return #\Linefeed document))
+                          tls)
+                         (force-output tls)))))))
+        (let ((thread (bt:make-thread
+                       (lambda ()
+                         (handler-case
+                             (loop (let ((raw (usocket:socket-accept listener)))
+                                     (when stopping
+                                       (usocket:socket-close raw)
+                                       (return))
+                                     (bt:make-thread
+                                      (lambda ()
+                                        (unwind-protect (ignore-errors (serve raw))
+                                          (ignore-errors (usocket:socket-close raw))))
+                                      :name "aggregator test backend request")))
+                           (error () nil)))
+                       :name "aggregator test backend")))
+          (values (usocket:get-local-port listener)
+                  (lambda () (bt:with-lock-held (lock) (copy-list seen)))
+                  (lambda ()
+                    ;; Closing a listener doesn't wake its accept, so connect to it.
+                    (setf stopping t)
+                    (ignore-errors
+                     (usocket:socket-close
+                      (usocket:socket-connect "127.0.0.1" (usocket:get-local-port listener))))
+                    (ignore-errors (bt:join-thread thread))
+                    (ignore-errors (usocket:socket-close listener)))))))))
+
+(defun aggregator-test-read-request (stream)
+  "Read one request from STREAM, returning its method, target, lowercase headers and body."
+  (let* ((request-line (gr8s::admission-read-line stream))
+         (parts (uiop:split-string request-line :separator " "))
+         (headers (loop for line = (gr8s::admission-read-line stream)
+                        until (zerop (length line))
+                        for colon = (position #\: line)
+                        collect (cons (string-downcase (subseq line 0 colon))
+                                      (string-trim " " (subseq line (1+ colon))))))
+         (length (cdr (assoc "content-length" headers :test #'string=))))
+    (values (first parts) (second parts) headers
+            (when length (gr8s::admission-read-exactly stream (parse-integer length))))))
+
+(defun aggregator-test-service (store namespace port)
+  "Create a Service and one ready endpoint at PORT, which a registered APIService can name."
+  (gr8s::create-core-resource
+   store "services"
+   (gr8s::core-object "metadata" (gr8s::core-object "name" "sample-api")
+                      "spec" (gr8s::core-object "clusterIP" "None"
+                                                "ports" (vector (gr8s::core-object "port" 7443 "targetPort" port))))
+   namespace)
+  ;; The API refuses a loopback endpoint, which is the only address this backend has.
+  (gr8s::with-store-lock (store)
+    (setf (gethash (gr8s::core-resource-key "endpointslices" namespace "sample-api-1") (gr8s::pod-store-resources store))
+          (gr8s::core-object "apiVersion" "discovery.k8s.io/v1" "kind" "EndpointSlice" "addressType" "IPv4"
+                             "metadata" (gr8s::core-object "name" "sample-api-1" "namespace" namespace
+                                                           "labels" (gr8s::core-object "kubernetes.io/service-name" "sample-api"))
+                             "endpoints" (vector (gr8s::core-object "addresses" #("127.0.0.1")))
+                             "ports" (vector (gr8s::core-object "port" port "protocol" "TCP"))))))
+
+(defun aggregator-test-apiservice (pki)
+  "Return a registration of wardle.example.com/v1alpha1 trusting PKI's CA."
+  (gr8s::core-object
+   "apiVersion" "apiregistration.k8s.io/v1" "kind" "APIService"
+   "metadata" (gr8s::core-object "name" "v1alpha1.wardle.example.com")
+   "spec" (gr8s::core-object
+           "group" "wardle.example.com" "version" "v1alpha1" "groupPriorityMinimum" 2000 "versionPriority" 200
+           "caBundle" (ag-grpc:base64-encode
+                       (trivial-utf-8:string-to-utf-8-bytes
+                        (uiop:read-file-string (gr8s::cluster-pki-ca-certificate-path pki))))
+           "service" (gr8s::core-object "namespace" "alpha" "name" "sample-api" "port" 7443))))
+
+(defun apiservice-condition (object type)
+  "Return OBJECT's condition of TYPE."
+  (let ((status (gethash "status" object)))
+    (and status
+         (find type (gethash "conditions" status #()) :test #'equal
+               :key (lambda (condition) (gethash "type" condition))))))
+
+(test extension-apiserver-trust-matches-what-a-real-server-publishes
+  (with-temporary-store (store path)
+    (let ((pki (gr8s::ensure-cluster-pki (merge-pathnames "pki/" path))))
+      (gr8s::create-core-resource store "namespaces" (gr8s::core-object "metadata" (gr8s::core-object "name" "kube-system")) nil)
+      (gr8s::ensure-extension-apiserver-rbac store)
+      (dotimes (repeat 2) (gr8s::ensure-extension-apiserver-authentication store pki))
+      (let ((data (gethash "data" (gr8s::get-core-resource store "configmaps" "kube-system" "extension-apiserver-authentication")))
+            (role (gr8s::get-core-resource store "roles" "kube-system" "extension-apiserver-authentication-reader"))
+            (binding (gr8s::get-core-resource store "rolebindings" "kube-system"
+                                              "system::extension-apiserver-authentication-reader")))
+        (is (equal "[\"front-proxy-client\"]" (gethash "requestheader-allowed-names" data)))
+        (is (equal "[\"X-Remote-User\"]" (gethash "requestheader-username-headers" data)))
+        (is (equal "[\"X-Remote-Group\"]" (gethash "requestheader-group-headers" data)))
+        (is (equal "[\"X-Remote-Extra-\"]" (gethash "requestheader-extra-headers-prefix" data)))
+        (is (equal (uiop:read-file-string (gr8s::cluster-pki-ca-certificate-path pki)) (gethash "client-ca-file" data)))
+        ;; A separate CA: nothing the cluster CA signs may assert a request's identity.
+        (is-false (equal (gethash "client-ca-file" data) (gethash "requestheader-client-ca-file" data)))
+        (is (equalp #("extension-apiserver-authentication")
+                    (gethash "resourceNames" (aref (gethash "rules" role) 0))))
+        (is (equal "extension-apiserver-authentication-reader" (gethash "name" (gethash "roleRef" binding))))
+        (is (equalp '("system:kube-controller-manager" "system:kube-scheduler")
+                    (map 'list (lambda (subject) (gethash "name" subject)) (gethash "subjects" binding)))))
+      ;; The client certificate chains to the published CA and is for client authentication.
+      (multiple-value-bind (ca certificate) (gr8s::ensure-front-proxy-credentials pki)
+        (let ((leaf (first (pure-tls:load-certificate-chain certificate))))
+          (is (equal "front-proxy-client" (first (pure-tls::certificate-subject-common-names leaf))))
+          (finishes (pure-tls::verify-certificate-chain
+                     (list leaf) (list (first (pure-tls:load-certificate-chain ca)))
+                     :purpose :client-auth :trust-anchor-mode :replace)))))))
+
+(test apiservice-registration-reports-availability-and-proxies-requests
+  (with-crd-api (store path)
+    (let* ((pki (gr8s::ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (aggregator (gr8s::start-api-aggregator store pki))
+           (collection "/apis/apiregistration.k8s.io/v1/apiservices")
+           (item (concatenate 'string collection "/v1alpha1.wardle.example.com"))
+           (flunders "/apis/wardle.example.com/v1alpha1/namespaces/default/flunders"))
+      (multiple-value-bind (port records stop)
+          (aggregator-test-backend pki "sample-api.alpha.svc" path)
+        (unwind-protect
+             (progn
+               (gr8s::create-core-resource store "namespaces" (gr8s::core-object "metadata" (gr8s::core-object "name" "alpha")) nil)
+               ;; No Service yet: registered, not available, and requests get 503.
+               (is (null (gethash "status" (crd-api-request 201 collection :method :post :object (aggregator-test-apiservice pki)))))
+               (is-true (wait-until
+                         (lambda ()
+                           (let ((condition (apiservice-condition (crd-api-request 200 item) "Available")))
+                             (and condition (equal "ServiceNotFound" (gethash "reason" condition)))))
+                         :timeout 10))
+               (crd-api-request 503 flunders)
+               ;; Once it has an endpoint, its discovery check passes.
+               (aggregator-test-service store "alpha" port)
+               (is-true (wait-until
+                         (lambda ()
+                           (let ((condition (apiservice-condition (crd-api-request 200 item) "Available")))
+                             (and condition (equal "True" (gethash "status" condition)))))
+                         :timeout 15))
+               (let ((available (aref (gethash "conditions" (gethash "status" (crd-api-request 200 (concatenate 'string item "/status")))) 0)))
+                 (is (equal "all checks passed" (gethash "message" available)))
+                 (is (equal "Passed" (gethash "reason" available))))
+               ;; Proxying: the chunked answer arrives, and the caller's identity went with it.
+               (is (= 1 (gethash "a" (crd-api-request 200 flunders :parameters '(("labelSelector" . "x=y"))))))
+               (destructuring-bind (method target headers body peer) (first (funcall records))
+                 (declare (ignore body))
+                 (is (equal "GET" method))
+                 (is (equal (concatenate 'string flunders "?labelSelector=x%3Dy") target))
+                 (is (equal "system:admin" (cdr (assoc "x-remote-user" headers :test #'string=))))
+                 (is (member "system:masters" headers :test #'equal :key #'cdr))
+                 (is-true peer "the backend saw no client certificate"))
+               ;; A request's own identity headers don't reach the server, nor does its credential.
+               (multiple-value-bind (body status)
+                   (drakma:http-request (concatenate 'string "http://127.0.0.1:18094" flunders)
+                                        :additional-headers '(("X-Remote-User" . "mallory") ("Authorization" . "Bearer secret")))
+                 (declare (ignore body))
+                 (is (= 200 status)))
+               (let ((headers (third (first (funcall records)))))
+                 (is (equal '("system:admin")
+                            (loop for (name . value) in headers when (string= name "x-remote-user") collect value)))
+                 (is-false (assoc "authorization" headers :test #'string=)))
+               ;; A body is forwarded unchanged.
+               (crd-api-request 200 flunders :method :post :text "{\"b\":2}")
+               (is (equal "{\"b\":2}" (trivial-utf-8:utf-8-bytes-to-string (fourth (first (funcall records))))))
+               ;; Discovery names the group and its resources in both forms.
+               (let* ((groups (crd-api-request 200 "/apis"))
+                      (group (find "wardle.example.com" (gethash "groups" groups) :test #'equal
+                                   :key (lambda (entry) (gethash "name" entry)))))
+                 (is-true group)
+                 (is (equal "wardle.example.com/v1alpha1"
+                            (gethash "groupVersion" (gethash "preferredVersion" group)))))
+               (is (equal "wardle.example.com" (gethash "name" (crd-api-request 200 "/apis/wardle.example.com"))))
+               (let* ((document
+                        (com.inuoe.jzon:parse
+                         (drakma:http-request
+                          "http://127.0.0.1:18094/apis"
+                          :accept "application/json;g=apidiscovery.k8s.io;v=v2;as=APIGroupDiscoveryList")))
+                      (entry (find "wardle.example.com" (gethash "items" document) :test #'equal
+                                   :key (lambda (entry) (gethash "name" (gethash "metadata" entry))))))
+                 (is (equal "flunders"
+                            (gethash "resource" (aref (gethash "resources" (aref (gethash "versions" entry) 0)) 0)))))
+               ;; The object takes spec and status writes, keeping conditions it doesn't own.
+               (is (= 400 (gethash "versionPriority"
+                                   (gethash "spec" (crd-api-request 200 item :method :patch
+                                                     :text "{\"spec\":{\"versionPriority\":400}}"
+                                                     :content-type "application/merge-patch+json")))))
+               (let ((status (crd-api-request 200 (concatenate 'string item "/status"))))
+                 (setf (gethash "conditions" (gethash "status" status))
+                       (concatenate 'vector (gethash "conditions" (gethash "status" status))
+                                    (vector (gr8s::core-object "type" "StatusUpdated" "status" "True" "reason" "E2E"
+                                                               "message" "Set from e2e test"))))
+                 (crd-api-request 200 (concatenate 'string item "/status") :method :put :object status))
+               (is-true (apiservice-condition (crd-api-request 200 item) "StatusUpdated"))
+               ;; The list holds both kinds, and deleting by label leaves the local ones.
+               (crd-api-request 200 item :method :patch :text "{\"metadata\":{\"labels\":{\"e2e\":\"yes\"}}}"
+                                         :content-type "application/merge-patch+json")
+               (flet ((names (&rest parameters)
+                        (map 'list (lambda (entry) (gethash "name" (gethash "metadata" entry)))
+                             (gethash "items" (crd-api-request 200 collection :parameters parameters)))))
+                 (is (member "v1.apps" (names) :test #'equal))
+                 (is (equal '("v1alpha1.wardle.example.com") (names '("labelSelector" . "e2e=yes"))))
+                 (crd-api-request 200 collection :method :delete :parameters '(("labelSelector" . "e2e=yes")))
+                 (is (null (names '("labelSelector" . "e2e=yes"))))
+                 (is (member "v1.apps" (names) :test #'equal)))
+               ;; Gone from routing and discovery too.
+               (crd-api-request 404 flunders)
+               (is-false (find "wardle.example.com" (gethash "groups" (crd-api-request 200 "/apis")) :test #'equal
+                               :key (lambda (entry) (gethash "name" entry)))))
+          (gr8s::stop-api-aggregator aggregator)
+          (funcall stop))))))
+
+(test apiservice-validation-follows-upstreams-rules
+  (with-crd-api (store path)
+    (values store)
+    (let* ((pki (gr8s::ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (collection "/apis/apiregistration.k8s.io/v1/apiservices"))
+      (flet ((refused (code change)
+               (let ((object (aggregator-test-apiservice pki)))
+                 (funcall change object)
+                 (crd-api-request code collection :method :post :object object))))
+        (refused 422 (lambda (object) (setf (gethash "name" (gethash "metadata" object)) "wrong.name")))
+        (refused 422 (lambda (object) (setf (gethash "groupPriorityMinimum" (gethash "spec" object)) 0)))
+        (refused 422 (lambda (object) (setf (gethash "versionPriority" (gethash "spec" object)) 1001)))
+        (refused 422 (lambda (object) (remhash "caBundle" (gethash "spec" object))))
+        (refused 422 (lambda (object) (setf (gethash "insecureSkipTLSVerify" (gethash "spec" object)) t)))
+        (refused 409 (lambda (object)
+                       (setf (gethash "name" (gethash "metadata" object)) "v1.apps"
+                             (gethash "group" (gethash "spec" object)) "apps"
+                             (gethash "version" (gethash "spec" object)) "v1")))))))
+
+(test a-field-selected-name-is-the-name-authorization-sees
+  ;; A server delegating authentication reads one ConfigMap by list and watch with a field
+  ;; selector, under a rule limited to that ConfigMap by resourceNames.
+  (flet ((target-name (&rest arguments)
+           (fourth (multiple-value-list
+                    (apply #'gr8s::kubernetes-authorization-target
+                           "/api/v1/namespaces/kube-system/configmaps" :get arguments)))))
+    (is (equal "wanted" (target-name :field-selector "metadata.name=wanted")))
+    (is (equal "wanted" (target-name :field-selector "metadata.name==wanted")))
+    (is (equal "wanted" (target-name :watch t :field-selector "a=b,metadata.name=wanted")))
+    (is (null (target-name)))
+    (is (null (target-name :field-selector "metadata.name!=wanted")))
+    (is (null (target-name :field-selector "metadata.namespace=wanted")))
+    (is (null (target-name :field-selector "metadata.name=not/a/name"))))
+  ;; A request naming an object keeps that name, and a create names nothing it selects.
+  (is (equal "one" (fourth (multiple-value-list
+                            (gr8s::kubernetes-authorization-target
+                             "/api/v1/namespaces/kube-system/configmaps/one" :get
+                             :field-selector "metadata.name=other")))))
+  (is (null (fourth (multiple-value-list
+                     (gr8s::kubernetes-authorization-target
+                      "/api/v1/namespaces/kube-system/configmaps" :post
+                      :field-selector "metadata.name=other"))))))

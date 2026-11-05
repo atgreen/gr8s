@@ -97,14 +97,21 @@
                 "versions" #( "v1")
                 "serverAddressByClientCIDRs" #())))
 
-(defun api-groups-response (&optional store)
-  "Describe builtin groups and actual store-scoped custom API groups."
+(defun builtin-api-groups ()
+  "Describe the groups this server always serves, whatever its store holds."
   (let ((groups (vector (rbac-api-group)
                        (event-api-group) (workload-api-group) (batch-api-group) (budget-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group) (networking-api-group)
                        (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group) (cert-manager-api-group))))
     (setf groups (concatenate 'vector groups (typed-api-groups) (auth-review-groups)))
     (setf groups (concatenate 'vector groups (vector (autoscaling-api-group) (apiservice-api-group))))
-    (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
+    groups))
+
+(defun api-groups-response (&optional store)
+  "Describe builtin groups and actual store-scoped custom API groups."
+  (let ((groups (builtin-api-groups)))
+    (when store
+      (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector)
+                                (coerce (aggregated-api-groups store) 'vector))))
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
 (defun api-resources-response ()
@@ -1281,6 +1288,7 @@ than wait for the next, which truncates any body that spans records in flight."
         (cond
           ((and (uiop:string-prefix-p "/openapi/v3/" path) (not *openapi-v3-completing*))
            (openapi-v3-complete-response store runtime reconciler path))
+          ((nth-value 1 (aggregated-api-route store path)) (aggregated-api-response store path method))
           ((string= path "/metrics")
            (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
            (concatenate 'string (runtime-network-metrics runtime) (gateway-metrics-text) (volume-reclaim-metrics-text)
@@ -1347,7 +1355,9 @@ than wait for the next, which truncates any body that spans records in flight."
           ((string= path "/apis/autoscaling/v2") (autoscaling-discovery-response "v2"))
           ((string= path "/apis/apiregistration.k8s.io") (json-response (apiservice-api-group)))
           ((string= path "/apis/apiregistration.k8s.io/v1") (apiservice-discovery-response))
-          ((nth-value 1 (apiservice-route path)) (apiservice-response store (apiservice-route path) method))
+          ((and (nth-value 1 (apiservice-route path))
+                (or (eq method :get) (builtin-apiservice-p store (apiservice-route path))))
+           (apiservice-response store (apiservice-route path) method))
           ((string= path "/apis/apps") (json-response (workload-api-group)))
           ((string= path "/apis/batch") (json-response (batch-api-group)))
           ((string= path "/apis/batch/v1") (batch-resources-response))
