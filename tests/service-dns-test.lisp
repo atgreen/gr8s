@@ -77,6 +77,36 @@
     (setf (gethash "kind" object) "Secret")
     (signals gr8s:kubernetes-error (gr8s::service-discovery-public-object object))))
 
+(test service-dns-projects-gateway-referenced-tls-secret
+  ;; podster-045.6: a Gateway HTTPS listener's certificateRefs Secret must reach
+  ;; the node (via the service-discovery projection) so the TLS acceptor can load
+  ;; it; unreferenced Secrets must not.
+  (with-temporary-store (store directory)
+    (flet ((create (resource namespace json)
+             (gr8s::create-core-resource store resource (com.inuoe.jzon:parse json) namespace)))
+      (create "secrets" "default"
+              "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"web-tls\",\"namespace\":\"default\"},\"type\":\"kubernetes.io/tls\",\"data\":{\"tls.crt\":\"Zm9v\",\"tls.key\":\"YmFy\"}}")
+      (create "secrets" "default"
+              "{\"apiVersion\":\"v1\",\"kind\":\"Secret\",\"metadata\":{\"name\":\"unused\",\"namespace\":\"default\"},\"type\":\"kubernetes.io/tls\",\"data\":{\"tls.crt\":\"Zm9v\",\"tls.key\":\"YmFy\"}}")
+      (create "gateways" "default"
+              "{\"apiVersion\":\"gateway.networking.k8s.io/v1\",\"kind\":\"Gateway\",\"metadata\":{\"name\":\"tls-gw\",\"namespace\":\"default\"},\"spec\":{\"gatewayClassName\":\"gr8s\",\"listeners\":[{\"name\":\"https\",\"port\":18443,\"protocol\":\"HTTPS\",\"tls\":{\"mode\":\"Terminate\",\"certificateRefs\":[{\"kind\":\"Secret\",\"name\":\"web-tls\"}]}}]}}"))
+    ;; Only the referenced Secret is collected.
+    (let ((collected (mapcar (lambda (s) (gethash "name" (gethash "metadata" s)))
+                             (gr8s::gateway-referenced-tls-secrets store))))
+      (is (equal '("web-tls") collected)))
+    ;; It survives projection + install, carrying its cert and key; the
+    ;; unreferenced Secret never crosses.
+    (let* ((snapshot (gr8s::node-desired-state-snapshot store "worker-a"))
+           (projection (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json))
+           (resources (make-hash-table :test #'equal)))
+      (gr8s::install-service-discovery-projection resources projection)
+      (let ((projected (gethash (gr8s::core-resource-key "secrets" "default" "web-tls") resources)))
+        (is (not (null projected)))
+        (is (equal "kubernetes.io/tls" (gethash "type" projected)))
+        (is (equal "Zm9v" (gethash "tls.crt" (gethash "data" projected))))
+        (is (equal "YmFy" (gethash "tls.key" (gethash "data" projected)))))
+      (is (null (gethash (gr8s::core-resource-key "secrets" "default" "unused") resources))))))
+
 (test service-dns-actual-udp-tcp-reads-live-store-and-survives-recovery
   (with-temporary-store (store directory)
     (gr8s::create-core-resource store "services" (service-test-object "web") "alpha")
