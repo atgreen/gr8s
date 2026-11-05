@@ -45,7 +45,10 @@
       (setf (node-record-ready-p node) nil
             (node-record-last-heartbeat node) nil
             (gethash (node-record-name node) (pod-store-nodes store)) node)
-      (persist-node store node))))
+      (persist-node store node)
+      ;; Desired write (the control-plane-assigned podCIDR): replicate (8ia.4).
+      (note-node-desired-change store)
+      node)))
 
 (defun get-node-unlocked (store name)
   "Return NAME's node record without acquiring STORE's lock."

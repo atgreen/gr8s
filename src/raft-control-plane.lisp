@@ -34,13 +34,15 @@
                      (when (consp command)
                        (case (car command)
                          (:core-state (install-core-state-blob store (second command)))
-                         ;; The leader already applied the Pod write locally before
-                         ;; proposing; only followers install it (podster-8ia.2).
+                         ;; The leader already applied the Pod/node write locally
+                         ;; before proposing; only followers install it (8ia.2/8ia.4).
                          ;; apply-fn runs under the member lock, so use the
                          ;; lock-free role predicate, not raft-member-leader-p
                          ;; (which would re-acquire the lock and deadlock).
                          (:pod-state (unless (raft-leader-p (raft-member-node member))
-                                       (install-pod-state-blob store (second command)))))))))
+                                       (install-pod-state-blob store (second command))))
+                         (:node-state (unless (raft-leader-p (raft-member-node member))
+                                        (install-node-state-blob store (second command)))))))))
     (setf member (start-raft-member id :host host :port port :apply-fn apply-fn))
     (cond
       (init

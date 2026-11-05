@@ -30,7 +30,8 @@
                   (when (consp command)
                     (case (car command)
                       (:core-state (gr8s::install-core-state-blob store (second command)))
-                      (:pod-state (gr8s::install-pod-state-blob store (second command))))))))
+                      (:pod-state (gr8s::install-pod-state-blob store (second command)))
+                      (:node-state (gr8s::install-node-state-blob store (second command))))))))
 
 (defun wire-ha-store (store member)
   "Make STORE's durable writes replicate through MEMBER's Raft log."

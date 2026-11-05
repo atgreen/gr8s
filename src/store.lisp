@@ -77,15 +77,18 @@
            (bt:with-lock-held ((pod-store-consensus-write-lock ,s))
              (let ((*pending-consensus-commit* nil)
                    (*pending-pod-commit* nil)
+                   (*pending-node-commit* nil)
                    (*core-write-active* t))
                (multiple-value-prog1
                    (bt:with-lock-held ((pod-store-lock ,s)) ,@body)
                  ;; Replicate whatever the body committed, once the store lock is
-                 ;; released: core API resources and/or Pod desired state.
+                 ;; released: core API resources, Pod desired state, node desired state.
                  (when *pending-consensus-commit*
                    (funcall (pod-store-consensus-commit-fn ,s) :core-state *pending-consensus-commit*))
                  (when *pending-pod-commit*
-                   (funcall (pod-store-consensus-commit-fn ,s) :pod-state *pending-pod-commit*)))))
+                   (funcall (pod-store-consensus-commit-fn ,s) :pod-state *pending-pod-commit*))
+                 (when *pending-node-commit*
+                   (funcall (pod-store-consensus-commit-fn ,s) :node-state *pending-node-commit*)))))
            (bt:with-lock-held ((pod-store-lock ,s)) ,@body)))))
 
 (defvar *pending-consensus-commit* nil
@@ -103,6 +106,12 @@
   "Bound by WITH-STORE-LOCK; set to the serialized Pod desired-state index when a
    Pod desired-state write happens on an HA store, so the change replicates to
    the other members after the store lock is released (podster-8ia.2).")
+
+(defvar *pending-node-commit* nil
+  "Bound by WITH-STORE-LOCK; set to the serialized node index when a node
+   DESIRED-state write (CIDR assignment, taints, labels) happens on an HA store.
+   Node heartbeat/lease writes deliberately do NOT set this -- they are observed
+   state, re-reported by agents after they reconnect (podster-8ia.4).")
 
 (defmacro with-core-write ((store) &body body)
   "Historical alias: WITH-STORE-LOCK is now itself HA-aware, so a durable write
@@ -302,6 +311,50 @@
             unless (gethash key seen)
               do (ignore-errors (delete-file (pod-path store pod)))
                  (remhash key (pod-store-pods store))))))
+
+;;; ---------------------------------------------------------------------------
+;;; HA node desired-state replication (podster-8ia.4).
+;;;
+;;; Node records mix desired state (the control-plane-assigned podCIDR, taints,
+;;; labels) with observed state (ready/lastHeartbeat/leaseDeadline, re-reported by
+;;; the agent). Only DESIRED writes call NOTE-NODE-DESIRED-CHANGE; heartbeat
+;;; writes do not, so a node's lease churn never hits the Raft log. The critical
+;;; field is podCIDR: a control-plane allocation that is not re-derivable, so a
+;;; new leader must keep it or it could hand the node a different CIDR than the
+;;; one its agent is already running.
+
+(defun node-desired-state-json (store)
+  "Serialize every node record for replication."
+  (com.inuoe.jzon:stringify
+   (let ((table (make-hash-table :test #'equal)))
+     (setf (gethash "nodes" table)
+           (coerce (loop for node being the hash-values of (pod-store-nodes store)
+                         collect (node-record-to-object node))
+                   'vector))
+     table)))
+
+(defun note-node-desired-change (store)
+  "Stash the node index so WITH-STORE-LOCK replicates it after the lock is
+   released. Call only from node DESIRED-state writes, never heartbeat writes."
+  (when (and *core-write-active* (pod-store-consensus-commit-fn store))
+    (setf *pending-node-commit* (node-desired-state-json store))))
+
+(defun install-node-state-blob (store json)
+  "Install a replicated node desired-state blob on this replica: make the node
+   files and index match it. Uses the RAW store lock (see INSTALL-CORE-STATE-BLOB)."
+  (bt:with-lock-held ((pod-store-lock store))
+    (let ((state (com.inuoe.jzon:parse json))
+          (seen (make-hash-table :test #'equal)))
+      (loop for object across (gethash "nodes" state)
+            for node = (parse-node-record object)
+            do (setf (gethash (node-record-name node) seen) t)
+               (persist-node store node)
+               (setf (gethash (node-record-name node) (pod-store-nodes store)) node))
+      (loop for name being the hash-keys of (pod-store-nodes store)
+            for node = (gethash name (pod-store-nodes store))
+            unless (gethash name seen)
+              do (ignore-errors (delete-file (node-path store node)))
+                 (remhash name (pod-store-nodes store))))))
 
 (defun open-store (path)
   "Open or create a durable store at PATH and rebuild its in-memory indexes."
