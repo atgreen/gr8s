@@ -173,6 +173,12 @@
                        ((member resource '("issuers" "clusterissuers"
                                            "certificates" "certificaterequests") :test #'equal)
                         '("spec" "status"))
+                       ;; ClusterTrustBundle carries only a spec (signerName +
+                       ;; trustBundle PEM); it has no status subresource.
+                       ((equal resource "clustertrustbundles") '("spec"))
+                       ;; PodCertificateRequest: spec from the node, status
+                       ;; (certificateChain + conditions) from the signer.
+                       ((equal resource "podcertificaterequests") '("spec" "status"))
                        (t '("roleRef" "subjects")))))
     (unless (and (equal version (gethash "apiVersion" object version))
                  (equal kind (gethash "kind" object kind)))
@@ -217,6 +223,16 @@
       ((member resource '("issuers" "clusterissuers" "certificates" "certificaterequests")
                :test #'equal)
        (validate-cert-manager-resource resource object))
+      ((equal resource "clustertrustbundles")
+       (let ((spec (gethash "spec" object)))
+         (when (and spec (not (hash-table-p spec)))
+           (core-resource-error 422 "Invalid" "ClusterTrustBundle spec must be an object"))))
+      ((equal resource "podcertificaterequests")
+       (let ((spec (gethash "spec" object)))
+         (unless (hash-table-p spec)
+           (core-resource-error 422 "Invalid" "PodCertificateRequest spec must be an object"))
+         (unless (and (stringp (gethash "signerName" spec)) (plusp (length (gethash "signerName" spec))))
+           (core-resource-error 422 "Invalid" "PodCertificateRequest spec.signerName is required"))))
       (t (validate-rbac-binding object (equal resource "clusterrolebindings"))))
     object))
 

@@ -734,6 +734,7 @@ handler and never gets here. A busy host makes this race likely."
                                       (reconcile-flowcontrol store)
                                       (collect-orphaned-custom-resources store)
                                       (reconcile-certificate-signing-requests store pki)
+                                      (reconcile-pod-certificate-requests store pki)
                                       (reconcile-certificates store pki)
                                       (reconcile-storage-bindings store)
                                       (reconcile-volume-attachments store)

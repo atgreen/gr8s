@@ -557,11 +557,26 @@ the node from starting."
                            sandbox interface address (make-hash-table :test #'equal)
                            (princ-to-string condition)))))))))
 
+(defun pod-certificate-claim-message (claim)
+  "Encode one podCertificate claim plist as its node-protocol message (KEP-4317)."
+  (make-instance
+   'gr8s.node.v1::pod-certificate-claim
+   :name (getf claim :name) :namespace (getf claim :namespace)
+   :signer-name (or (getf claim :signer-name) "")
+   :pkix-public-key (or (getf claim :pkix-public-key) "")
+   :pod-name (getf claim :pod-name) :pod-uid (getf claim :pod-uid)
+   :service-account-name (or (getf claim :service-account-name) "")
+   :service-account-uid (or (getf claim :service-account-uid) "")
+   :max-expiration-seconds (or (getf claim :max-expiration-seconds) 0)))
+
 (defun node-runtime-status (node-runtime &key (counter-reader #'read-cni-policy-counters))
   (let ((pods (list-pods (node-runtime-store node-runtime))))
     (make-instance
      'gr8s.node.v1::node-status
      :observed-at-unix-nanos (* (- (get-universal-time) 2208988800) 1000000000)
+     :pod-certificate-requests
+     (mapcar #'pod-certificate-claim-message
+             (node-pending-pod-certificate-claims (node-runtime-store node-runtime)))
      :csi-drivers
      (when (containerd-runtime-p (node-runtime-runtime node-runtime))
        ;; Reporting runs on its own thread, so a slow driver can't delay heartbeats.
