@@ -25,6 +25,9 @@
   (:report (lambda (condition stream) (write-string (admission-call-failure-message condition) stream)))
   (:documentation "A webhook could not give a usable answer, which failurePolicy governs."))
 
+(defvar *admission-controller* nil
+  "Service account name of the in-process controller making this write, outside any HTTP request.")
+
 (defun admission-group-version (api-version)
   "Split an apiVersion into its group, empty for the core group, and version."
   (let ((slash (position #\/ api-version)))
@@ -56,7 +59,10 @@
        :subresource subresource :kind-group kind-group :kind-version kind-version
        :kind (or kind resource-kind) :namespace namespace :name name :object object :old-object old-object
        :options options :dry-run dry-run :equivalent-versions equivalent
-       :user-info (csr-http-request-actor store)))))
+       :user-info (if *admission-controller*
+                      (core-object "username" (format nil "system:serviceaccount:kube-system:~A" *admission-controller*)
+                                   "groups" #("system:serviceaccounts" "system:serviceaccounts:kube-system" "system:authenticated"))
+                      (csr-http-request-actor store))))))
 
 (defun admission-stamp-object (attributes object)
   "Give OBJECT the type and namespace metadata a decoded Kubernetes object carries."

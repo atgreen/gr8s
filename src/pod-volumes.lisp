@@ -28,10 +28,14 @@
                collect (reference "secrets" (gethash "secret" source) "name"))))))
 
 (defun pod-resource-reference-declarations (pod)
-  "Collect namespace-local resource declarations from volumes and environment sources."
+  "Collect namespace-local resource declarations from volumes, environment sources and pull secrets."
   (let* ((spec (gethash "spec" (pod-to-object pod))) (references nil))
     (loop for volume across (gethash "volumes" spec #())
           do (setf references (append (pod-volume-resource-references volume) references)))
+    ;; A missing pull secret is optional because the kubelet pulls without it.
+    (loop for reference across (gethash "imagePullSecrets" spec #())
+          when (plusp (length (gethash "name" reference "")))
+            do (push (list "secrets" (gethash "name" reference) t) references))
     (loop for container across (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec))
           do (loop for variable across (gethash "env" container #())
                    for from = (gethash "valueFrom" variable)
@@ -295,25 +299,44 @@ SHARE names a provisioned volume's export, whose own directory is created on fir
           ((equal mode "HostToContainer") gr8s.cri.v1::+mountpropagation-propagation_host_to_container+)
           (t gr8s.cri.v1::+mountpropagation-propagation_private+))))
 
+(defun container-image-volume-mount (runtime pod container mount source environment)
+  "Return the CRI mount of image volume SOURCE, once its image may be used under its pull policy.
+The runtime mounts the image itself, and it fails the container if a subPath isn't in the image."
+  (let ((reference (gethash "reference" source)))
+    (ensure-container-image runtime reference
+                            (gethash "pullPolicy" source (default-image-pull-policy reference))
+                            (lambda ()
+                              (pod-image-pull-credentials runtime pod (container-spec-name container) reference)))
+    (make-instance 'gr8s.cri.v1::mount
+                   :container-path (gethash "mountPath" mount)
+                   :image (make-instance
+                           'gr8s.cri.v1::image-spec
+                           :image (or (cri-image-id (containerd-runtime-socket-path runtime) reference) reference))
+                   :image-sub-path (container-mount-subpath mount environment)
+                   :propagation (container-mount-propagation mount)
+                   :readonly t)))
+
 (defun containerd-pod-mounts (runtime pod container &optional environment)
-  "Build CRI bind mounts from validated, materialized Pod volume declarations."
+  "Build CRI mounts from validated Pod volume declarations, materializing those the node provides."
   (let ((volumes (gethash "volumes" (gethash "spec" (pod-to-object pod)) #()))
         (object (pod-runtime-container-object pod container)))
     (loop for mount across (gethash "volumeMounts" object #()) for index from 0
           for volume = (find (gethash "name" mount) volumes :test #'equal
                              :key (lambda (volume) (gethash "name" volume)))
-          collect (multiple-value-bind (path forced-readonly) (materialize-pod-volume runtime pod volume)
-                    (let ((relative (container-mount-subpath mount environment)))
-                      (when (plusp (length relative))
-                        (setf path (stage-container-volume-subpath runtime pod container mount index path relative))))
-                    (make-instance 'gr8s.cri.v1::mount
-                                   :container-path (gethash "mountPath" mount) :host-path (namestring path)
-                                   :propagation (container-mount-propagation mount)
-                                   :readonly (or forced-readonly (not (null (gethash "configMap" volume)))
-                                                 (not (null (gethash "secret" volume)))
-                                                 (not (null (gethash "downwardAPI" volume)))
-                                                 (not (null (gethash "projected" volume)))
-                                                 (eq t (gethash "readOnly" mount))))))))
+          collect (if (gethash "image" volume)
+                      (container-image-volume-mount runtime pod container mount (gethash "image" volume) environment)
+                      (multiple-value-bind (path forced-readonly) (materialize-pod-volume runtime pod volume)
+                        (let ((relative (container-mount-subpath mount environment)))
+                          (when (plusp (length relative))
+                            (setf path (stage-container-volume-subpath runtime pod container mount index path relative))))
+                        (make-instance 'gr8s.cri.v1::mount
+                                       :container-path (gethash "mountPath" mount) :host-path (namestring path)
+                                       :propagation (container-mount-propagation mount)
+                                       :readonly (or forced-readonly (not (null (gethash "configMap" volume)))
+                                                     (not (null (gethash "secret" volume)))
+                                                     (not (null (gethash "downwardAPI" volume)))
+                                                     (not (null (gethash "projected" volume)))
+                                                     (eq t (gethash "readOnly" mount)))))))))
 
 (defun containerd-key-environment-value (runtime pod resource reference)
   "Resolve a required or optional environment key without exposing Secret data in errors."

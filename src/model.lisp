@@ -309,7 +309,7 @@
     (validate-pod-finalizers metadata)
     (reject-unsupported-fields
      spec '("containers" "initContainers" "restartPolicy" "dnsPolicy" "nodeName" "volumes"
-            "securityContext" "serviceAccountName" "automountServiceAccountToken"
+            "securityContext" "serviceAccountName" "automountServiceAccountToken" "imagePullSecrets"
             "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig"
             "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
             "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "shareProcessNamespace" "hostAliases" "ephemeralContainers") "spec")

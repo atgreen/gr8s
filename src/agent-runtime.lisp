@@ -371,6 +371,15 @@ the node from starting."
     (bt:condition-notify (node-runtime-state-changed node-runtime))))
 
 (defun start-node-runtime (node-runtime)
+  (let ((runtime (node-runtime-runtime node-runtime)) (store (node-runtime-store node-runtime)))
+    (when (typep runtime 'containerd-runtime)
+      (setf (containerd-runtime-pod-lister runtime)
+            (lambda ()
+              (remove-if (lambda (pod)
+                           (terminal-pod-phase-p
+                            (with-store-lock (store)
+                              (gethash (pod-uid pod) (pod-store-pod-observed-phases store)))))
+                         (list-pods store))))))
   (bt:with-lock-held ((node-runtime-lock node-runtime))
     (case (node-runtime-state node-runtime)
       (:running (return-from start-node-runtime node-runtime))

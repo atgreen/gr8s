@@ -182,8 +182,8 @@
     (signals kubernetes-error
       (gr8s::create-core-resource
        store "daemonsets"
-       (daemonset-fixture "surge" :strategy (gr8s::core-object "type" "RollingUpdate" "rollingUpdate"
-                                                               (gr8s::core-object "maxUnavailable" 0 "maxSurge" 1)))
+       (daemonset-fixture "stuck" :strategy (gr8s::core-object "type" "RollingUpdate" "rollingUpdate"
+                                                               (gr8s::core-object "maxUnavailable" 0 "maxSurge" 0)))
        "alpha"))
     (signals kubernetes-error
       (gr8s::create-core-resource store "daemonsets"
@@ -421,7 +421,10 @@
                                                   "controller" t "blockOwnerDeletion" t)))
                  (update-pod store (parse-pod object) (pod-resource-version (get-pod store "alpha" (pod-name pod))))))
       (is (gr8s::hold-pod-for-foreground-deletion store "alpha" "pod1" (pod-uid (first pods))))
-      (is (not (gr8s::deletion-requested-p (get-pod store "alpha" "pod1"))))
+      (gr8s::delete-reconciled-pod reconciler "alpha" "pod1")
+      (let ((held (get-pod store "alpha" "pod1")))
+        (is (gr8s::deletion-requested-p held))
+        (is (equalp #("foregroundDeletion") (gr8s::pod-finalizers held))))
       (run-workload-passes reconciler 8)
       (is (null (list-pods store "alpha")))
       (is (zerop (hash-table-count (gr8s::pod-store-workload-deletions store)))))))
@@ -485,6 +488,7 @@
                          :parameters '(("fieldValidation" . "Strict"))
                          :content-type "application/strategic-merge-patch+json"
                          :object (gr8s::core-object "updateStrategy" (gr8s::core-object "type" "RollingUpdate"))))))
+
 (test authenticated-accounts-may-read-openapi-documents
   ;; kubectl fetches these to validate manifests, whatever its account may do otherwise.
   (dolist (path '("/openapi/v2" "/openapi/v3" "/openapi/v3/api/v1" "/openapi/v3/apis/apps/v1"))
@@ -492,3 +496,35 @@
   (is (not (gr8s::authenticated-discovery-request-p "/openapi/v3/api/v1" :post)))
   (is (not (gr8s::authenticated-discovery-request-p "/openapi/secrets" :get))))
 
+(test daemonset-surge-starts-the-new-pod-before-removing-the-old
+  (with-temporary-store (store path)
+    (values path)
+    (register-test-nodes store "node-a" "node-b")
+    (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)))
+      (flet ((pods-on (node) (remove node (remove-if #'gr8s::deletion-requested-p (list-pods store "alpha"))
+                                     :test-not #'equal :key #'gr8s::pod-node-name))
+             (image (pod) (gethash "image" (aref (gethash "containers" (gethash "spec" (pod-to-object pod))) 0))))
+        (gr8s::create-core-resource
+         store "daemonsets"
+         (daemonset-fixture "ds" :strategy (gr8s::core-object "type" "RollingUpdate" "rollingUpdate"
+                                                              (gr8s::core-object "maxUnavailable" 0 "maxSurge" "50%")))
+         "alpha")
+        (run-workload-passes reconciler)
+        (mark-all-pods-ready store runtime "alpha")
+        (run-workload-passes reconciler 2)
+        (is (= 1 (length (pods-on "node-a"))))
+        (is (= 1 (length (pods-on "node-b"))))
+        (let ((original (image (first (pods-on "node-a")))))
+          (change-workload-image store "daemonsets" "ds" "busybox:updated")
+          ;; One node of two surges, and no old Pod goes while its replacement is unready.
+          (run-workload-passes reconciler 2)
+          (is (= 3 (length (remove-if #'gr8s::deletion-requested-p (list-pods store "alpha")))))
+          (let ((surged (if (= 2 (length (pods-on "node-a"))) "node-a" "node-b")))
+            (is (equal '("busybox:updated" ) (remove original (mapcar #'image (pods-on surged)) :test #'equal)))
+            (is (member original (mapcar #'image (pods-on surged)) :test #'equal)))
+          ;; Ready replacements free their old Pods, which lets the other node surge too.
+          (loop repeat 6
+                do (mark-all-pods-ready store runtime "alpha")
+                   (run-workload-passes reconciler 2))
+          (dolist (node '("node-a" "node-b"))
+            (is (equal '("busybox:updated") (mapcar #'image (pods-on node))))))))))

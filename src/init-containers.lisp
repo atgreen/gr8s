@@ -96,6 +96,10 @@
 
 (defun apply-init-container-observation (observed state)
   "Separate actual init exits and keep application statuses waiting until all init work succeeds."
+  ;; The control plane turns this report into the Pod's own condition.
+  (when (and observed (gethash "resizePending" state))
+    (setf (gethash "conditions" (runtime-pod-status observed))
+          (vector (copy-core-object (gethash "resizePending" state)))))
   (when (and observed (gethash "initDeclarations" state))
     (let* ((status (runtime-pod-status observed))
            (all (concatenate 'vector (gethash "containerStatuses" status #())
@@ -140,7 +144,7 @@
                (let ((phase (container-lifecycle-phase apps (not (equal "Unknown" (runtime-pod-phase observed))))))
                  ;; The Pod is not finished until its sidecars have stopped too.
                  (if (and sidecar-running (member phase '("Succeeded" "Failed") :test #'equal)) "Running" phase)))
-              (t (if (and failed (equal "Never" (gethash "restartPolicy" state))) "Failed" "Pending"))))))
+              (t (if (and failed (not sidecar-running) (equal "Never" (gethash "restartPolicy" state))) "Failed" "Pending"))))))
   observed)
 
 (defun container-lifecycle-all-statuses (observed)
@@ -161,8 +165,9 @@
                              (eql 0 (gethash "exitCode" terminated)))))))
 
 (defun pod-sidecar-progress-required-p (pod status)
-  "Return whether a sidecar should be restarted, or stopped because the applications finished."
-  (let ((finished (pod-applications-finished-p pod (gethash "containerStatuses" status #()))))
+  "Return whether a sidecar should be restarted, or stopped because the Pod has nothing left to run."
+  (let ((finished (or (pod-applications-finished-p pod (gethash "containerStatuses" status #()))
+                      (pod-init-failed-for-good-p pod (gethash "initContainerStatuses" status #())))))
     (loop for name in (pod-sidecar-names pod)
           for item = (find name (gethash "initContainerStatuses" status #()) :test #'equal
                            :key (lambda (entry) (gethash "name" entry)))
@@ -179,7 +184,8 @@ Sidecars stay admitted so they restart; nothing is started again once applicatio
       ;; A sidecar's startup probe decides when the next container may start.
       (apply-container-probe-observation
        runtime (make-runtime-pod :uid (pod-uid pod) :status (core-object "containerStatuses" statuses))))
-    (when (and sidecars (pod-applications-finished-p pod statuses))
+    (when (and sidecars (or (pod-applications-finished-p pod statuses)
+                            (pod-init-failed-for-good-p pod statuses)))
       (return-from next-pod-container-specs #()))
     ;; Ephemeral containers are only ever started beside a workload already underway.
     (setf statuses (separate-ephemeral-statuses statuses state))
@@ -203,15 +209,21 @@ Sidecars stay admitted so they restart; nothing is started again once applicatio
                          (t (coerce (reverse (cons spec admitted)) 'vector)))))))
     (concatenate 'vector (reverse admitted) (pod-containers pod) (pod-ephemeral-containers pod))))
 
-(defun retained-init-failure-terminal-p (pod state)
-  "Preserve a Never Pod's actual failed initialization after its CRI sandbox disappears."
+(defun pod-init-failed-for-good-p (pod statuses)
+  "Return whether an ordinary init container in STATUSES failed a Pod that will never retry it.
+A sidecar's own exit does not count: its restartPolicy restarts it whatever the Pod's says."
   (and (equal "Never" (pod-restart-policy pod))
-       (loop with statuses = (container-lifecycle-statuses nil state)
+       (loop with sidecars = (pod-sidecar-names pod)
              for spec across (pod-init-containers pod)
              for status = (find (container-spec-name spec) statuses :test #'equal
                                 :key (lambda (item) (gethash "name" item)))
              for terminated = (and status (gethash "terminated" (gethash "state" status)))
-             thereis (and terminated (not (eql 0 (gethash "exitCode" terminated)))))))
+             thereis (and terminated (not (eql 0 (gethash "exitCode" terminated)))
+                          (not (member (container-spec-name spec) sidecars :test #'equal))))))
+
+(defun retained-init-failure-terminal-p (pod state)
+  "Preserve a Never Pod's actual failed initialization after its CRI sandbox disappears."
+  (pod-init-failed-for-good-p pod (container-lifecycle-statuses nil state)))
 
 (defun reset-init-containers-for-new-sandbox (state pod)
   "Reexecute initialization on a replacement sandbox while preserving consumed attempt numbers."

@@ -25,6 +25,25 @@ Unspecified, core/v1 ReplicationControllers orphan for compatibility, as in Kube
         (core-resource-error 422 "Invalid" "Invalid workload deletion propagation policy"))
       policy)))
 
+(defun deletion-policy-finalizers (metadata policy)
+  "Return METADATA's finalizers with the one Kubernetes shows while POLICY holds an object."
+  (let ((name (if (equal policy "Orphan") "orphan" "foregroundDeletion"))
+        (finalizers (gethash "finalizers" metadata #())))
+    (if (find name finalizers :test #'equal)
+        finalizers
+        (concatenate 'vector finalizers (vector name)))))
+
+(defun core-deletion-held-p (store resource namespace name policy)
+  "Return whether an object deleted with POLICY waits for its dependents, as all but kinds
+with their own deletion lifecycle do."
+  (and (member policy '("Foreground" "Orphan") :test #'equal)
+       (not (member resource '("namespaces" "customresourcedefinitions" "persistentvolumes" "persistentvolumeclaims")
+                    :test #'equal))
+       (let ((*stored-resource-types* (append *stored-resource-types* (crd-resource-types store))))
+         (workload-deletion-blocked-p store namespace
+                                      (gethash "uid" (gethash "metadata" (get-core-resource store resource namespace name)))
+                                      policy))))
+
 (defun delete-workload-resource (store resource namespace name &key uid resource-version dry-run (policy "Background"))
   "Delete immediately in background mode or atomically checkpoint an irreversible deletion."
   (unless (member policy '("Background" "Foreground" "Orphan") :test #'equal)
@@ -48,6 +67,8 @@ Unspecified, core/v1 ReplicationControllers orphan for compatibility, as in Kube
         (t
          (let ((copy (copy-core-object existing)))
            (setf (gethash "deletionTimestamp" (workload-metadata copy)) (current-timestamp)
+                 (gethash "finalizers" (workload-metadata copy))
+                 (deletion-policy-finalizers (workload-metadata copy) policy)
                  (gethash actual-uid deletions) (core-object "resource" resource "namespace" namespace "name" name
                                                            "uid" actual-uid "policy" policy))
            (prepare-core-resource-metadata copy existing revision)
@@ -72,17 +93,29 @@ Unspecified, core/v1 ReplicationControllers orphan for compatibility, as in Kube
            (current (gethash key resources)))
       (when (gethash (gethash "uid" record) deletions)
         (when (and current (equal (gethash "uid" record) (gethash "uid" (workload-metadata current))))
-          (remhash key resources))
+          ;; A selector Service owns its Endpoints, however the Service came to be deleted.
+          (when (and (equal "services" (gethash "resource" record))
+                     (plusp (hash-table-count (gethash "selector" (gethash "spec" current) (core-object)))))
+            (remhash (core-resource-key "endpoints" (gethash "namespace" record) (gethash "name" record)) resources))
+          ;; A custom object's own finalizers go on holding it after the policy's has done its work.
+          (let ((remaining (remove-if (lambda (name) (member name '("foregroundDeletion" "orphan") :test #'equal))
+                                      (gethash "finalizers" (workload-metadata current) #()))))
+            (if (and (custom-resource-key-p (gethash "resource" record)) (plusp (length remaining)))
+                (let ((copy (copy-core-object current)) (revision (1+ (pod-store-resource-revision store))))
+                  (setf (gethash "finalizers" (workload-metadata copy)) remaining)
+                  (prepare-core-resource-metadata copy current revision)
+                  (setf (gethash key resources) copy))
+                (remhash key resources))))
         (remhash (gethash "uid" record) deletions)
         (commit-core-resources store resources (1+ (pod-store-resource-revision store)) :workload-deletions deletions)))))
 
-(defun detach-workload-dependent (store resource owner child)
+(defun detach-workload-dependent (store resource owner child &optional (owner-resource (workload-owner-resource owner)))
   "Remove OWNER's reference from CHILD, an exact stored object, retaining unrelated owners."
   (with-store-lock (store)
     (let* ((metadata (workload-metadata child))
            (current (gethash (core-resource-key resource (gethash "namespace" metadata) (gethash "name" metadata))
                              (pod-store-resources store))))
-      (when (and (workload-current-unlocked store (workload-owner-resource owner) owner :allow-deleting t)
+      (when (and (workload-current-unlocked store owner-resource owner :allow-deleting t)
                  current (equal (gethash "uid" metadata) (gethash "uid" (workload-metadata current)))
                  (dependent-owner-reference (workload-metadata current) (gethash "uid" (workload-metadata owner))))
         (let* ((copy (copy-core-object current)) (resources (copy-core-resource-index store))
@@ -121,9 +154,10 @@ Unspecified, core/v1 ReplicationControllers orphan for compatibility, as in Kube
         (gethash "ownerReferences" metadata #())))
 
 (defun workload-stored-dependents (store namespace uid)
-  "List (resource . object) for every namespaced stored object that names the owner UID."
+  "List (resource . object) for every stored object that names the owner UID.
+A namespaced owner has dependents only in its namespace; only a cluster-scoped one has cluster-scoped dependents."
   (loop for (resource nil nil namespaced) in *stored-resource-types*
-        when namespaced
+        when (or namespaced (null namespace))
           append (loop for object in (list-core-resources store resource namespace)
                        when (dependent-owner-reference (workload-metadata object) uid)
                          collect (cons resource object))))
@@ -143,7 +177,7 @@ Orphaning waits for every reference to go; foreground waits for blockOwnerDeleti
   (let ((store (reconciler-store reconciler)) (namespace (pod-namespace pod)))
     (if (dependent-has-solid-owner-p store namespace (workload-metadata (pod-to-object pod)) uid)
         (remove-pod-owner-reference store pod uid)
-        (delete-reconciled-pod reconciler namespace (pod-name pod) :uid (pod-uid pod)))))
+        (delete-controller-pod reconciler namespace (pod-name pod) "generic-garbage-collector" :uid (pod-uid pod)))))
 
 (defun advance-foreground-stored-dependent (store owner resource object)
   "Delete one dependent stored object in the foreground, or drop the reference if another owner keeps it."
@@ -151,6 +185,8 @@ Orphaning waits for every reference to go; foreground waits for blockOwnerDeleti
          (uid (gethash "uid" (workload-metadata owner))))
     (cond ((dependent-has-solid-owner-p store namespace metadata uid)
            (detach-workload-dependent store resource owner object))
+          ((not (controller-delete-allowed-p store resource namespace (gethash "name" metadata) "generic-garbage-collector"))
+           nil)
           ((or (workload-resource-p resource) (batch-resource-p resource))
            (delete-workload-resource store resource namespace (gethash "name" metadata)
                                      :uid (gethash "uid" metadata) :policy "Foreground"))
@@ -159,7 +195,8 @@ Orphaning waits for every reference to go; foreground waits for blockOwnerDeleti
 (defun release-orphaned-pod-dependent (store owner pod resource)
   "Detach POD from OWNER for an orphaning deletion, whichever kind of reference it holds."
   (let ((uid (gethash "uid" (workload-metadata owner))))
-    (if (workload-owned-p (pod-to-object pod) owner)
+    (if (and (or (workload-resource-p resource) (batch-resource-p resource))
+             (workload-owned-p (pod-to-object pod) owner))
         (change-controller-pod-owner store owner pod nil :resource resource
                                      :tracking-finalizer (when (batch-resource-p resource) +job-tracking-finalizer+))
         (remove-pod-owner-reference store pod uid))))
@@ -168,41 +205,61 @@ Orphaning waits for every reference to go; foreground waits for blockOwnerDeleti
   "Advance one durable deletion, retaining foreground owners until blocking dependents disappear."
   (let* ((store (reconciler-store reconciler)) (resource (gethash "resource" record))
          (namespace (gethash "namespace" record)) (name (gethash "name" record))
-         (policy (gethash "policy" record)) (uid (gethash "uid" record)))
+         (policy (gethash "policy" record)) (uid (gethash "uid" record))
+         (*stored-resource-types* (append *stored-resource-types* (crd-resource-types store))))
     (when (equal resource "pods")
       (return-from process-workload-deletion (process-pod-foreground-deletion reconciler record)))
-    (let ((owner (handler-case (get-core-resource store resource namespace name)
-                   (kubernetes-error (condition) (unless (= 404 (kubernetes-error-status-code condition)) (error condition))))))
-      (unless (and owner (equal uid (gethash "uid" (workload-metadata owner))))
-        (finish-workload-deletion store record)
-        (return-from process-workload-deletion nil))
-      (dolist (pod (list-pods store namespace))
-        (when (dependent-owner-reference (workload-metadata (pod-to-object pod)) uid)
+    ;; Reading a custom owner takes its definition, which the request that deleted it has gone with.
+    (multiple-value-bind (*crd-view-definition* *crd-request-version*) (custom-resource-storage-view store resource)
+      (let ((owner (handler-case (get-core-resource store resource namespace name)
+                     ;; A 410 means the definition itself went away, taking the object with it.
+                     (kubernetes-error (condition)
+                       (unless (member (kubernetes-error-status-code condition) '(404 410)) (error condition))))))
+        (unless (and owner (equal uid (gethash "uid" (workload-metadata owner))))
+          (finish-workload-deletion store record)
+          (return-from process-workload-deletion nil))
+        (dolist (pod (list-pods store namespace))
+          (when (dependent-owner-reference (workload-metadata (pod-to-object pod)) uid)
+            (if (equal policy "Orphan")
+                (release-orphaned-pod-dependent store owner pod resource)
+                (advance-foreground-pod-dependent reconciler pod uid))))
+        (dolist (entry (workload-stored-dependents store namespace uid))
           (if (equal policy "Orphan")
-              (release-orphaned-pod-dependent store owner pod resource)
-              (advance-foreground-pod-dependent reconciler pod uid))))
-      (dolist (entry (workload-stored-dependents store namespace uid))
-        (if (equal policy "Orphan")
-            (detach-workload-dependent store (car entry) owner (cdr entry))
-            (advance-foreground-stored-dependent store owner (car entry) (cdr entry))))
-      (unless (workload-deletion-blocked-p store namespace uid policy)
-        (finish-workload-deletion store record)))))
+              (detach-workload-dependent store (car entry) owner (cdr entry) resource)
+              (advance-foreground-stored-dependent store owner (car entry) (cdr entry))))
+        (unless (workload-deletion-blocked-p store namespace uid policy)
+          (finish-workload-deletion store record))))))
 
 (defun hold-pod-for-foreground-deletion (store namespace name uid)
-  "Keep a Pod with blocking dependents until they are gone, returning it; otherwise return NIL.
-The Pod starts terminating only when the hold ends, so it shows no deletionTimestamp meanwhile."
+  "Keep a Pod with blocking dependents through a foregroundDeletion finalizer and a durable intent.
+Return it when held. The caller then deletes it as usual: as with Kubernetes, its containers
+stop at once and only the API object waits for the dependents."
   (let* ((pod (get-pod store namespace name)) (actual (pod-uid pod)))
     (when (and uid (not (equal uid actual)))
       (core-resource-error 409 "Conflict" "Pod deletion precondition does not match"))
     (when (and (not (deletion-requested-p pod))
                (workload-deletion-blocked-p store namespace actual "Foreground"))
       (with-store-lock (store)
-        (let ((deletions (copy-core-object (pod-store-workload-deletions store))))
+        (let ((current (get-pod-unlocked store namespace name))
+              (deletions (copy-core-object (pod-store-workload-deletions store))))
           (setf (gethash actual deletions)
                 (core-object "resource" "pods" "namespace" namespace "name" name "uid" actual "policy" "Foreground"))
           (commit-core-resources store (copy-core-resource-index store) (1+ (pod-store-resource-revision store))
-                                 :workload-deletions deletions)))
+                                 :workload-deletions deletions)
+          (let* ((object (copy-core-object (pod-to-object current))) (metadata (workload-metadata object)))
+            (setf (gethash "finalizers" metadata) (deletion-policy-finalizers metadata "Foreground"))
+            (update-pod-unlocked store (parse-pod object) (pod-resource-version current)))))
       pod)))
+
+(defun release-foreground-pod (store namespace name uid)
+  "Drop the foregroundDeletion finalizer of the exact Pod, which lets its deletion finish."
+  (with-store-lock (store)
+    (let ((current (gethash (pod-key namespace name) (pod-store-pods store))))
+      (when (and current (equal uid (pod-uid current)))
+        (let* ((object (copy-core-object (pod-to-object current))) (metadata (workload-metadata object)))
+          (setf (gethash "finalizers" metadata)
+                (remove "foregroundDeletion" (gethash "finalizers" metadata #()) :test #'equal))
+          (update-pod-unlocked store (parse-pod object) (pod-resource-version current)))))))
 
 (defun forget-workload-deletion (store uid)
   "Durably drop the deletion intent for an owner with UID, leaving its object alone."
@@ -234,9 +291,10 @@ which is what breaks a dependency cycle."
                                  (remove uid (gethash "ownerReferences" (workload-metadata current) #()) :test #'equal
                                          :key (lambda (reference) (gethash "uid" reference))))
                            current))
-                       (delete-core-resource store resource namespace (gethash "name" metadata) :uid (gethash "uid" metadata))))
+                       (when (controller-delete-allowed-p store resource namespace (gethash "name" metadata) "generic-garbage-collector")
+                         (delete-core-resource store resource namespace (gethash "name" metadata) :uid (gethash "uid" metadata)))))
           (unless (workload-deletion-blocked-p store namespace uid "Foreground")
-            (delete-reconciled-pod reconciler namespace name :uid uid)
+            (release-foreground-pod store namespace name uid)
             (forget-workload-deletion store uid)))
         (forget-workload-deletion store uid))))
 
