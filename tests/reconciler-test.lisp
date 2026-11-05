@@ -368,3 +368,32 @@
       (gr8s::finish-reconciler-urgent-deletion reconciler (pod-uid deleting))
       (is (null (gr8s::reconciler-urgent-since reconciler)))
       (is (equal "Running" (gethash "phase" (gr8s::reconcile-pod reconciler "default" "hello")))))))
+
+;; podster-uqb.123: cancelling StartContainer halfway left a running task that CRI
+;; reported as exited, so the Pod's deletion, and every creation after it, never ended.
+(test cancelling-creation-lets-a-deferred-step-finish-first
+  (with-temporary-store (store path)
+    (create-pod store (parse-pod *valid-pod-json*))
+    (let* ((entered (bt:make-semaphore))
+           (release (bt:make-semaphore))
+           (finished nil)
+           (after nil)
+           (reconciler (make-reconciler store (make-blocking-create-runtime
+                                               (lambda ()
+                                                 (gr8s::with-running-pod-cancellation-deferred
+                                                   (bt:signal-semaphore entered)
+                                                   (bt:wait-on-semaphore release)
+                                                   (setf finished t))
+                                                 (setf after t)))))
+           (thread (bt:make-thread (lambda () (superseded-reconcile-pod reconciler)))))
+      (is-true (bt:wait-on-semaphore entered :timeout 10))
+      (gr8s::prioritize-reconciler-deletions reconciler '("other-uid"))
+      (sleep 0.2)
+      (is (bt:thread-alive-p thread))
+      (bt:signal-semaphore release)
+      (is (eq :superseded (bt:join-thread thread)))
+      (is-true finished)
+      (is-false after))))
+
+(test a-deferred-step-outside-creation-runs-normally
+  (is (eq :done (gr8s::with-running-pod-cancellation-deferred :done))))

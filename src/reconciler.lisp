@@ -27,9 +27,6 @@
 It is also the catch tag that cancellation throws to."
   thread uid)
 
-(defvar *running-pod-convergence* nil
-  "The operation whose catch this thread is inside, bound only within that catch.")
-
 (defun cancel-running-pod-convergence (reconciler)
   "Yield blocked creation to durable urgent deletion without interrupting deletion itself."
   (let ((operation (bt:with-lock-held ((reconciler-convergence-lock reconciler))
@@ -47,7 +44,9 @@ It is also the catch tag that cancellation throws to."
            ;; (podster-uqb.114). Do not acquire an ownership mutex here: an
            ;; asynchronous interrupt may arrive while its target is inside it.
            (when (eq *running-pod-convergence* operation)
-             (throw operation :superseded)))))))
+             (if *running-pod-cancellation-deferred*
+                 (setf *running-pod-cancellation-pending* t)
+                 (throw operation :superseded))))))))
   nil)
 
 (defvar *held-creation-report-seconds* 60
