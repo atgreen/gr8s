@@ -522,18 +522,33 @@ A literal value may refer to any variable defined before it, as $(NAME)."
           :selinux-options (cri-selinux-options context)
           :supplemental-groups (pod-supplemental-groups pod))))
 
-(defun containerd-pod-security-context (pod container &key target-id)
+(defun verify-run-as-non-root (user image-uid image-username)
+  "Enforce runAsNonRoot as the kubelet does: an explicit runAsUser must be
+   nonzero; otherwise the image's own configured user must be non-root. The
+   image user (IMAGE-UID, IMAGE-USERNAME) comes from its CRI record, so a Pod
+   that sets runAsNonRoot without a runAsUser still runs when its image declares
+   a non-root user (as ko-built images do)."
+  (cond
+    ((and user (plusp user)))                                 ; explicit non-root uid
+    (user (container-config-error "runAsNonRoot cannot be combined with runAsUser 0"))
+    ((and image-uid (plusp image-uid)))                       ; image's own non-root uid
+    (image-uid (container-config-error "runAsNonRoot but the image runs as root (uid 0)"))
+    ((and image-username (plusp (length image-username)) (not (equal image-username "root")))) ; non-root username
+    (t (container-config-error
+        "runAsNonRoot requires a nonzero runAsUser or an image that declares a non-root user"))))
+
+(defun containerd-pod-security-context (pod container &key target-id image-uid image-username)
   "Map effective Pod/container Linux identities, confinement and privileges to the CRI API.
-TARGET-ID names the running container whose PID namespace an ephemeral container joins."
+TARGET-ID names the running container whose PID namespace an ephemeral container joins.
+IMAGE-UID/IMAGE-USERNAME are the container image's configured user, for verifying runAsNonRoot."
   (let* ((pod-context (gethash "securityContext" (gethash "spec" (pod-to-object pod))))
          (container-context (gethash "securityContext" (pod-runtime-container-object pod container)))
          (effective (core-object)))
     (dolist (context (list pod-context container-context))
       (when context (maphash (lambda (key value) (setf (gethash key effective) value)) context)))
     (let ((user (gethash "runAsUser" effective)) (group (gethash "runAsGroup" effective)))
-      (when (and (eq t (gethash "runAsNonRoot" effective))
-                 (not (and user (plusp user))))
-        (container-config-error "runAsNonRoot requires a verified nonzero runAsUser"))
+      (when (eq t (gethash "runAsNonRoot" effective))
+        (verify-run-as-non-root user image-uid image-username))
       (make-instance
        'gr8s.cri.v1::linux-container-security-context
        :run-as-user (when user (make-instance 'gr8s.cri.v1::int64value :value user))

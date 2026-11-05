@@ -86,6 +86,21 @@
       (is (null (gr8s::authenticate-service-account-token store token)))
       (signals kubernetes-error (gr8s::ensure-service-account-credential store "alpha" "reader")))))
 
+(test field-selector-name-authorizes-list-watch-against-resourcenames
+  ;; A rule with resourceNames grants list/watch when the request pins the object
+  ;; by metadata.name (KEP-4601) -- Agent Substrate's controller watches a single
+  ;; Secret this way. Without the name the resourceNames rule must not match.
+  (is (string= "egress-mitm-ca-pool"
+               (gr8s::field-selector-exact-name "metadata.name=egress-mitm-ca-pool")))
+  (is (string= "x" (gr8s::field-selector-exact-name "status.phase=Running,metadata.name==x")))
+  (is (null (gr8s::field-selector-exact-name "metadata.name!=x")))
+  (is (null (gr8s::field-selector-exact-name "status.phase=Running")))
+  (let ((rule (gr8s::core-object "apiGroups" #("") "resources" #("secrets")
+                                 "verbs" #("get" "list" "watch") "resourceNames" #("egress-mitm-ca-pool"))))
+    (is (not (null (gr8s::rbac-rule-allows-p rule "watch" "" "secrets" "egress-mitm-ca-pool" nil))))
+    (is (not (gr8s::rbac-rule-allows-p rule "watch" "" "secrets" nil nil)))          ; no name -> denied
+    (is (not (gr8s::rbac-rule-allows-p rule "watch" "" "secrets" "other" nil)))))    ; wrong name -> denied
+
 (test service-account-rbac-grants-only-bound-resources-and-namespaces
   (with-temporary-store (store directory)
     (values directory)
