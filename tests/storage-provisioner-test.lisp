@@ -1,0 +1,586 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Verify dynamic local and NFS provisioning, NFS mounting through injected
+;;;; mount calls, safe reclamation on a real filesystem, generic ephemeral volumes
+;;;; and enforced emptyDir limits. Real kernel NFS mounts need a root test node:
+;;;; see scripts/test-storage-dynamic-native.py.
+
+(in-package #:gr8s/tests)
+(def-suite storage-provisioning :in gr8s)
+(in-suite storage-provisioning)
+
+(defun provisioning-class (name provisioner &rest fields)
+  "Build a StorageClass from alternating top-level FIELDS."
+  (let ((class (gr8s::core-object "metadata" (gr8s::core-object "name" name) "provisioner" provisioner)))
+    (loop for (key value) on fields by #'cddr do (setf (gethash key class) value))
+    class))
+
+(defun local-path-class (path &optional (name "fast"))
+  (provisioning-class name gr8s::+local-path-provisioner+
+                      "volumeBindingMode" "WaitForFirstConsumer"
+                      "allowVolumeExpansion" t
+                      "parameters" (gr8s::core-object "path" (string-right-trim "/" (namestring path)))))
+
+(defun nfs-class (&key (name "shared") (mount-options #("hard" "nconnect=2")) (on-delete "delete"))
+  (provisioning-class name gr8s::+nfs-provisioner+
+                      "mountOptions" mount-options
+                      "parameters" (gr8s::core-object "server" "10.0.0.5" "share" "/export/k8s" "onDelete" on-delete)))
+
+(defun ready-node (store name id cidr)
+  (gr8s:register-node store (make-test-node name id cidr))
+  (gr8s:mark-node-ready store name 1))
+
+(defun claim-object (store name &optional (namespace "default"))
+  (gr8s::get-core-resource store "persistentvolumeclaims" namespace name))
+
+(defun claim-volume-name (store name)
+  (gethash "volumeName" (gethash "spec" (claim-object store name))))
+
+(test local-path-waits-for-a-consumer-then-pins-a-volume-to-its-node
+  (with-temporary-store (store path)
+    (gr8s::create-core-resource store "storageclasses" (local-path-class (merge-pathnames "volumes/" path)) nil)
+    (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "claim" :class "fast") "default")
+    (gr8s::reconcile-storage-bindings store)
+    (is (equal "Pending" (storage-phase store "persistentvolumeclaims" "default" "claim")))
+    (is (null (gr8s::list-core-resources store "persistentvolumes")))
+    (ready-node store "worker-a" "a" "10.64.0.0/20")
+    (let* ((pod (create-pod store (storage-test-pod "consumer" "claim")))
+           (node (gr8s:schedule-pod store pod)))
+      (is (equal "worker-a" (gr8s:node-record-name node)))
+      (gr8s::reconcile-storage-bindings store)
+      (let* ((name (claim-volume-name store "claim"))
+             (volume (gr8s::get-core-resource store "persistentvolumes" nil name))
+             (spec (gethash "spec" volume))
+             (uid (gethash "uid" (gethash "metadata" (claim-object store "claim")))))
+        (is (equal (format nil "pvc-~A" uid) name))
+        (is (equal "Bound" (storage-phase store "persistentvolumeclaims" "default" "claim")))
+        (is (equal "DirectoryOrCreate" (gethash "type" (gethash "hostPath" spec))))
+        (is (uiop:string-suffix-p (gethash "path" (gethash "hostPath" spec)) (format nil "/volumes/~A" name)))
+        (is (equal "Delete" (gethash "persistentVolumeReclaimPolicy" spec)))
+        (is (not (gr8s::storage-node-affinity-matches-p volume (make-test-node "worker-b" "b" "10.64.16.0/20"))))
+        (is (gr8s::storage-node-affinity-matches-p volume (gr8s:get-node store "worker-a")))
+        (let ((revision (gr8s::pod-store-resource-revision store)))
+          (is-false (gr8s::reconcile-storage-bindings store))
+          (is (= revision (gr8s::pod-store-resource-revision store))))))))
+
+(test local-path-refuses-modes-one-directory-cannot-serve
+  (with-temporary-store (store path)
+    (gr8s::create-core-resource store "storageclasses" (local-path-class (merge-pathnames "volumes/" path)) nil)
+    (gr8s::create-core-resource store "persistentvolumeclaims"
+                                (storage-test-claim "wide" :class "fast" :modes #("ReadWriteMany")) "default")
+    (ready-node store "worker-a" "a" "10.64.0.0/20")
+    (is (null (gr8s:schedule-pod store (create-pod store (storage-test-pod "consumer" "wide")))))
+    (gr8s::reconcile-storage-bindings store)
+    (is (equal "Pending" (storage-phase store "persistentvolumeclaims" "default" "wide")))))
+
+(test a-matching-static-volume-is-preferred-over-provisioning
+  (with-temporary-store (store path)
+    (gr8s::create-core-resource store "storageclasses" (nfs-class) nil)
+    (gr8s::create-core-resource store "persistentvolumes"
+                                (storage-test-volume "static" (merge-pathnames "static/" path) :class "shared") nil)
+    (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "claim" :class "shared") "default")
+    (gr8s::reconcile-storage-bindings store)
+    (is (equal "static" (claim-volume-name store "claim")))))
+
+(test nfs-classes-provision-shared-volumes-immediately
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s::create-core-resource store "storageclasses" (nfs-class) nil)
+    (gr8s::create-core-resource store "persistentvolumeclaims"
+                                (storage-test-claim "claim" :class "shared" :modes #("ReadWriteMany")) "default")
+    (gr8s::reconcile-storage-bindings store)
+    (let* ((name (claim-volume-name store "claim"))
+           (volume (gr8s::get-core-resource store "persistentvolumes" nil name))
+           (spec (gethash "spec" volume))
+           (annotations (gethash "annotations" (gethash "metadata" volume))))
+      (is (equal "Bound" (storage-phase store "persistentvolumeclaims" "default" "claim")))
+      (is (equal "10.0.0.5" (gethash "server" (gethash "nfs" spec))))
+      (is (equal (format nil "/export/k8s/~A" name) (gethash "path" (gethash "nfs" spec))))
+      (is (equalp #("hard" "nconnect=2") (gethash "mountOptions" spec)))
+      (is (null (gethash "nodeAffinity" spec)))
+      (is (equal "/export/k8s" (gethash gr8s::+nfs-share-annotation+ annotations)))
+      (is-true (gr8s::storage-native-volume-p volume)))))
+
+(test claims-a-provisioner-cannot-honor-stay-pending
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s::create-core-resource store "storageclasses" (nfs-class) nil)
+    (let ((block-claim (storage-test-claim "block" :class "shared"))
+          (selected (storage-test-claim "selected" :class "shared")))
+      (setf (gethash "volumeMode" (gethash "spec" block-claim)) "Block"
+            (gethash "selector" (gethash "spec" selected))
+            (gr8s::core-object "matchLabels" (gr8s::core-object "tier" "gold")))
+      (gr8s::create-core-resource store "persistentvolumeclaims" block-claim "default")
+      (gr8s::create-core-resource store "persistentvolumeclaims" selected "default"))
+    (gr8s::reconcile-storage-bindings store)
+    (dolist (name '("block" "selected"))
+      (is (equal "Pending" (storage-phase store "persistentvolumeclaims" "default" name))))
+    (is (null (gr8s::list-core-resources store "persistentvolumes")))))
+
+(test built-in-classes-reject-what-they-cannot-honor
+  (with-temporary-store (store path)
+    (values path)
+    (flet ((rejected (class)
+             (signals kubernetes-error (gr8s::create-core-resource store "storageclasses" class nil))))
+      (rejected (provisioning-class "a" gr8s::+nfs-provisioner+))
+      (rejected (provisioning-class "b" gr8s::+nfs-provisioner+
+                                    "parameters" (gr8s::core-object "server" "bad,server" "share" "/x")))
+      (rejected (provisioning-class "c" gr8s::+nfs-provisioner+
+                                    "parameters" (gr8s::core-object "server" "s" "share" "/../x")))
+      (rejected (provisioning-class "d" gr8s::+nfs-provisioner+
+                                    "parameters" (gr8s::core-object "server" "s" "share" "/x" "unknown" "y")))
+      (rejected (nfs-class :mount-options #("sec=sys,exec=/bin/sh")))
+      (rejected (nfs-class :on-delete "shred"))
+      (rejected (provisioning-class "e" gr8s::+local-path-provisioner+
+                                    "parameters" (gr8s::core-object "path" "relative")))
+      (rejected (provisioning-class "f" gr8s::+local-path-provisioner+ "mountOptions" #("noatime"))))
+    ;; A third party's parameters remain its own business.
+    (is (gr8s::create-core-resource store "storageclasses"
+                                    (provisioning-class "g" "example.test/driver"
+                                                        "parameters" (gr8s::core-object "anything" "goes"))
+                                    nil))))
+
+(test static-nfs-volumes-validate-their-source-and-options
+  (with-temporary-store (store path)
+    (values path)
+    (flet ((volume (name server share &optional options)
+             (let ((object (storage-test-volume name "/unused")))
+               (remhash "hostPath" (gethash "spec" object))
+               (setf (gethash "nfs" (gethash "spec" object)) (gr8s::core-object "server" server "path" share))
+               (when options (setf (gethash "mountOptions" (gethash "spec" object)) options))
+               object)))
+      (is (gr8s::create-core-resource store "persistentvolumes"
+                                      (volume "good" "nas.example.test" "/share" #("vers=4.1" "soft,timeo=30")) nil))
+      (signals kubernetes-error
+        (gr8s::create-core-resource store "persistentvolumes" (volume "bad-server" "a b" "/share") nil))
+      (signals kubernetes-error
+        (gr8s::create-core-resource store "persistentvolumes" (volume "bad-path" "nas" "share") nil))
+      (signals kubernetes-error
+        (gr8s::create-core-resource store "persistentvolumes" (volume "bad-option" "nas" "/share" #("context=x")) nil))
+      (signals kubernetes-error
+        (gr8s::create-core-resource store "persistentvolumes" (volume "bad-version" "nas" "/share" #("vers=9")) nil)))))
+
+(test deleting-a-claim-releases-its-provisioned-volume-for-reclaim
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s::create-core-resource store "storageclasses" (nfs-class) nil)
+    (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "claim" :class "shared") "default")
+    (gr8s::reconcile-storage-bindings store)
+    (let ((name (claim-volume-name store "claim")))
+      (gr8s::delete-core-resource store "persistentvolumeclaims" "default" "claim")
+      (gr8s::reconcile-storage-bindings store)
+      (let ((volume (gr8s::get-core-resource store "persistentvolumes" nil name)))
+        (is (equal "Released" (gethash "phase" (gethash "status" volume))))
+        (is-true (gr8s::storage-volume-reclaimable-p volume)))
+      ;; A dead node delays the deletion: no node, nothing removed.
+      (let ((attempts (make-hash-table :test #'equal)))
+        (gr8s::reclaim-released-volumes store nil attempts)
+        (is (gethash name attempts))
+        (is (gr8s::get-core-resource store "persistentvolumes" nil name))))))
+
+(test static-delete-policy-volumes-still-report-no-deleter
+  (with-temporary-store (store path)
+    (let ((volume (storage-test-volume "static" (merge-pathnames "static/" path))))
+      (setf (gethash "persistentVolumeReclaimPolicy" (gethash "spec" volume)) "Delete")
+      (gr8s::create-core-resource store "persistentvolumes" volume nil))
+    (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "claim") "default")
+    (gr8s::reconcile-storage-bindings store)
+    (gr8s::delete-core-resource store "persistentvolumeclaims" "default" "claim")
+    (gr8s::reconcile-storage-bindings store)
+    (is (equal "Failed" (storage-phase store "persistentvolumes" nil "static")))))
+
+(test claims-grow-only-where-their-class-allows
+  (with-temporary-store (store path)
+    (gr8s::create-core-resource store "storageclasses" (nfs-class) nil)
+    (let ((class (nfs-class :name "growing")))
+      (setf (gethash "allowVolumeExpansion" class) t)
+      (gr8s::create-core-resource store "storageclasses" class nil))
+    (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "fixed" :class "shared") "default")
+    (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "grows" :class "growing") "default")
+    (gr8s::reconcile-storage-bindings store)
+    (flet ((resize (name capacity)
+             (gr8s::update-core-resource
+              store "persistentvolumeclaims" "default" name
+              (lambda (old)
+                (let ((claim (gr8s::copy-core-object old)))
+                  (setf (gethash "storage" (gethash "requests" (gethash "resources" (gethash "spec" claim)))) capacity)
+                  claim)))))
+      (signals kubernetes-error (resize "fixed" "5Gi"))
+      (resize "grows" "5Gi")
+      (gr8s::reconcile-storage-bindings store)
+      (let ((claim (claim-object store "grows")))
+        (is (equal "5Gi" (gethash "storage" (gethash "capacity" (gethash "status" claim)))))
+        (is (equal "5Gi" (gethash "storage" (gethash "capacity"
+                                                     (gethash "spec" (gr8s::get-core-resource store "persistentvolumes" nil
+                                                                                              (claim-volume-name store "grows")))))))))
+    (values path)))
+
+(test default-class-is-seeded-once-and-stays-deleted
+  (with-temporary-store (store path)
+    (gr8s::seed-default-storage-class store path :path "/srv/volumes")
+    (let ((class (gr8s::get-core-resource store "storageclasses" nil "local-path")))
+      (is (equal gr8s::+local-path-provisioner+ (gethash "provisioner" class)))
+      (is (equal "WaitForFirstConsumer" (gethash "volumeBindingMode" class)))
+      (is (equal "/srv/volumes" (gethash "path" (gethash "parameters" class)))))
+    (gr8s::create-core-resource store "persistentvolumeclaims"
+                                (gr8s::core-object "metadata" (gr8s::core-object "name" "defaulted")
+                                                   "spec" (gr8s::core-object "accessModes" #("ReadWriteOnce")
+                                                                             "resources" (gr8s::core-object "requests" (gr8s::core-object "storage" "1Gi"))))
+                                "default")
+    (is (equal "local-path" (gethash "storageClassName" (gethash "spec" (claim-object store "defaulted")))))
+    (gr8s::delete-core-resource store "storageclasses" nil "local-path")
+    (gr8s::seed-default-storage-class store path :path "/srv/volumes")
+    (signals kubernetes-error (gr8s::get-core-resource store "storageclasses" nil "local-path"))))
+
+(test mount-affinity-judges-only-what-an-agent-can-know
+  (flet ((volume (&rest expressions)
+           (gr8s::core-object
+            "spec" (gr8s::core-object
+                    "nodeAffinity"
+                    (gr8s::core-object
+                     "required"
+                     (gr8s::core-object
+                      "nodeSelectorTerms"
+                      (vector (gr8s::core-object "matchExpressions" (coerce expressions 'vector)))))))))
+    ;; An agent has no Node labels, so a custom label must not fail a scheduled mount.
+    (is-false (gr8s::storage-node-affinity-excludes-node-name-p
+               (volume (gr8s::core-object "key" "disk" "operator" "In" "values" #("ssd"))) "worker-a"))
+    (is-false (gr8s::storage-node-affinity-excludes-node-name-p
+               (volume (gr8s::core-object "key" "kubernetes.io/hostname" "operator" "In" "values" #("worker-a"))) "worker-a"))
+    (is-true (gr8s::storage-node-affinity-excludes-node-name-p
+              (volume (gr8s::core-object "key" "kubernetes.io/hostname" "operator" "In" "values" #("worker-b"))) "worker-a"))))
+
+;;; NFS mounting
+
+(test nfs-mount-attempts-negotiate-versions-and-separate-flags
+  (multiple-value-bind (attempts flags)
+      (gr8s::nfs-mount-attempts '("noatime" "ro" "hard" "timeo=30") "10.0.0.5")
+    (is (equal '(("nfs4" . "vers=4.2,addr=10.0.0.5,hard,timeo=30")
+                 ("nfs4" . "vers=4.1,addr=10.0.0.5,hard,timeo=30")
+                 ("nfs4" . "vers=4.0,addr=10.0.0.5,hard,timeo=30"))
+               attempts))
+    ;; MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOATIME: the kernel NFS parser would reject these as text.
+    (is (= (logior 1 2 4 #x400) flags)))
+  (is (equal '(("nfs" . "vers=3,addr=10.0.0.5,nolock"))
+             (gr8s::nfs-mount-attempts '("nfsvers=3") "10.0.0.5")))
+  (is (equal '(("nfs" . "vers=3,addr=10.0.0.5,lock"))
+             (gr8s::nfs-mount-attempts '("vers=3" "lock") "10.0.0.5")))
+  (is (equal '(("nfs4" . "vers=4.1,addr=10.0.0.5"))
+             (gr8s::nfs-mount-attempts '("vers=4.1") "10.0.0.5"))))
+
+(test nfs-mount-options-cannot-smuggle-other-options
+  (dolist (token '("vers=4.1" "soft" "hard" "timeo=30" "sec=krb5p" "noatime" "ro" "nconnect=4" "proto=tcp"))
+    (is-true (gr8s::nfs-mount-option-valid-p token)))
+  (dolist (token '("vers=9" "context=system_u" "timeo=" "bogus" "addr=1.2.3.4" "clientaddr=1.1.1.1" "port=1 2"))
+    (is-false (gr8s::nfs-mount-option-valid-p token)))
+  (is (equal '("a" "b" "c") (gr8s::nfs-mount-option-tokens #(" a , b" "c,,")))))
+
+(defun nfs-test-pod ()
+  (parse-pod "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"nfs\",\"uid\":\"nfs-uid\"},\"spec\":{\"volumes\":[{\"name\":\"data\",\"nfs\":{\"server\":\"10.0.0.5\",\"path\":\"/share\",\"readOnly\":true}}],\"containers\":[{\"name\":\"c\",\"image\":\"busybox\",\"volumeMounts\":[{\"name\":\"data\",\"mountPath\":\"/data\"}]}]}}"))
+
+(defmacro with-fake-nfs ((calls directory &key (mount-result '(constantly 0))) &body body)
+  "Run BODY recording NFS mount calls in CALLS, against a fake mount table in DIRECTORY."
+  (let ((table (gensym "TABLE")) (lock (gensym "LOCK")) (mounted (gensym "MOUNTED")) (result (gensym "RESULT")))
+    `(let* ((,calls nil) (,mounted nil) (,lock (bt:make-lock)) (,result ,mount-result)
+            (,table (merge-pathnames "nfs-mountinfo" ,directory)))
+       (flet ((write-table ()
+                (with-open-file (stream ,table :direction :output :if-exists :supersede)
+                  (format stream "22 1 0:21 / /proc rw - proc proc rw~%")
+                  (dolist (target ,mounted)
+                    (format stream "90 1 0:50 / ~A rw - nfs4 10.0.0.5:/share rw~%" target)))))
+         (write-table)
+         (let ((gr8s::*pod-mount-table-path* ,table)
+               (gr8s::*nfs-mount-call*
+                 (lambda (source target type flags data)
+                   (bt:with-lock-held (,lock)
+                     (push (list source target type flags data) ,calls)
+                     (let ((code (funcall ,result source target type flags data)))
+                       (when (zerop code) (push target ,mounted) (write-table))
+                       code))))
+               (gr8s::*nfs-unmount-call*
+                 (lambda (target flags)
+                   (declare (ignore flags))
+                   (bt:with-lock-held (,lock)
+                     (setf ,mounted (remove target ,mounted :test #'equal))
+                     (write-table)
+                     0))))
+           ,@body)))))
+
+(test nfs-volumes-mount-once-without-touching-the-share
+  (with-temporary-store (store directory)
+    (declare (ignorable store))
+    (with-fake-nfs (calls directory)
+      (let* ((runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))
+             (pod (nfs-test-pod))
+             (volume (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0)))
+        (multiple-value-bind (path readonly) (gr8s::materialize-pod-volume runtime pod volume)
+          (is (eq t readonly))
+          (is (= 1 (length calls)))
+          (destructuring-bind (source target type flags data) (first calls)
+            (is (equal "10.0.0.5:/share" source))
+            (is (equal "nfs4" type))
+            (is (= (logior 1 2 4) flags))
+            (is (equal "vers=4.2,addr=10.0.0.5" data))
+            (is (equal (string-right-trim "/" (namestring path)) target))))
+        ;; A restarted container reuses the live mount.
+        (gr8s::materialize-pod-volume runtime pod volume)
+        (is (= 1 (length calls)))))))
+
+(test nfs-mounts-fall-back-only-for-refused-versions
+  (with-temporary-store (store directory)
+    (declare (ignorable store))
+    (with-fake-nfs (calls directory
+                    :mount-result (lambda (source target type flags data)
+                                    (declare (ignore source target type flags))
+                                    (if (search "vers=4.0" data) 0 sb-posix:eprotonosupport)))
+      (gr8s::mount-nfs-filesystem "10.0.0.5" "/share" (namestring (merge-pathnames "t1" directory)) nil)
+      (is (= 3 (length calls))))
+    (with-fake-nfs (calls directory :mount-result (constantly sb-posix:eacces))
+      (signals gr8s::nfs-mount-error
+        (gr8s::mount-nfs-filesystem "10.0.0.5" "/share" (namestring (merge-pathnames "t2" directory)) nil))
+      (is (= 1 (length calls))))))
+
+(test a-provisioned-nfs-volume-creates-its-directory-on-first-use
+  (with-temporary-store (store directory)
+    (declare (ignorable store))
+    (let ((exists nil))
+      (with-fake-nfs (calls directory
+                      :mount-result (lambda (source target type flags data)
+                                      (declare (ignore target type flags data))
+                                      (cond ((equal source "10.0.0.5:/share") (setf exists t) 0)
+                                            (exists 0)
+                                            (t sb-posix:enoent))))
+        (let* ((runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))
+               (pod (nfs-test-pod))
+               (path (gr8s::materialize-pod-nfs-volume
+                      runtime pod "data"
+                      (gr8s::core-object "server" "10.0.0.5" "path" "/share/pvc-abc") #("hard")
+                      :share "/share")))
+          (is (equal '("10.0.0.5:/share/pvc-abc" "10.0.0.5:/share" "10.0.0.5:/share/pvc-abc")
+                     (remove-duplicates (reverse (mapcar #'first calls)) :from-end nil :test (constantly nil))))
+          (is (uiop:directory-pathname-p path))
+          ;; The share is staged briefly and the volume's own directory now exists in it.
+          (let ((staging (second (second (reverse calls)))))
+            (is (probe-file (format nil "~A/pvc-abc/" staging)))))))))
+
+(test a-blocked-nfs-server-delays-only-its-caller
+  (with-temporary-store (store directory)
+    (declare (ignorable store))
+    (let ((release nil) (attempts 0) (lock (bt:make-lock)))
+      (with-fake-nfs (calls directory
+                      :mount-result (lambda (&rest arguments)
+                                      (declare (ignore arguments))
+                                      (bt:with-lock-held (lock) (incf attempts))
+                                      0))
+        (let ((target (namestring (merge-pathnames "blocked" directory)))
+              (gr8s::*nfs-operation-wait-seconds* 0.05)
+              (gr8s::*nfs-mount-call*
+                (let ((inner gr8s::*nfs-mount-call*))
+                  (lambda (&rest arguments)
+                    (loop until release do (sleep 0.01))
+                    (apply inner arguments)))))
+          (signals runtime-error (gr8s::mount-nfs-filesystem "10.0.0.5" "/share" target nil))
+          ;; A retry joins the blocked mount instead of starting another.
+          (signals runtime-error (gr8s::mount-nfs-filesystem "10.0.0.5" "/share" target nil))
+          (setf release t)
+          (loop repeat 200
+                until (bt:with-lock-held (lock) (= attempts 1))
+                do (sleep 0.01))
+          (gr8s::mount-nfs-filesystem "10.0.0.5" "/share" target nil)
+          (is (= 1 attempts))
+          (is (= 1 (length calls))))))))
+
+(test pod-termination-unmounts-nfs-and-keeps-the-share-contents
+  (with-temporary-store (store directory)
+    (declare (ignorable store))
+    (with-fake-nfs (calls directory)
+      (let* ((runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))
+             (pod (nfs-test-pod))
+             (volume (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0))
+             (path (gr8s::materialize-pod-volume runtime pod volume))
+             (target (string-right-trim "/" (namestring path))))
+        (is (gr8s::pod-volume-nfs-mount-p target))
+        (gr8s::cleanup-pod-volumes runtime (pod-uid pod))
+        (is (not (gr8s::nfs-target-mounted-p target)))
+        (is (null (probe-file path)))
+        (is (= 1 (length calls)))))))
+
+(test pod-volume-cleanup-refuses-to-delete-beneath-a-stuck-mount
+  (with-temporary-store (store directory)
+    (declare (ignorable store))
+    (with-fake-nfs (calls directory)
+      (let* ((runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))
+             (pod (nfs-test-pod))
+             (volume (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0))
+             (path (gr8s::materialize-pod-volume runtime pod volume))
+             (kept (merge-pathnames "data-on-the-share" path)))
+        (with-open-file (stream kept :direction :output) (write-string "x" stream))
+        (let ((gr8s::*nfs-unmount-call* (lambda (target flags) (declare (ignore target flags)) 0)))
+          (signals runtime-error (gr8s::cleanup-pod-volumes runtime (pod-uid pod))))
+        (is (probe-file kept))
+        (is (= 1 (length calls)))))))
+
+;;; Reclamation on a real filesystem
+
+(defun provisioned-test-volume (name provisioner path &optional (on-delete "delete"))
+  (gr8s::core-object "metadata" (gr8s::core-object "name" name
+                                                   "annotations" (gr8s::core-object gr8s::+provisioned-by-annotation+ provisioner
+                                                                                    gr8s::+on-delete-annotation+ on-delete))
+                     "spec" (gr8s::core-object "hostPath" (gr8s::core-object "path" path))))
+
+(test reclaim-removes-only-the-volume-and-never-follows-links
+  (with-temporary-store (store directory)
+    (declare (ignorable store))
+    (let* ((root (string-right-trim "/" (namestring (truename directory))))
+           (outside (format nil "~A/outside/" root))
+           (volume (format nil "~A/volumes/pvc-1/" root))
+           (neighbor (format nil "~A/volumes/pvc-2/keep" root)))
+      (ensure-directories-exist outside)
+      (ensure-directories-exist (format nil "~Anested/" volume))
+      (ensure-directories-exist neighbor)
+      (with-open-file (stream (format nil "~Asecret" outside) :direction :output) (write-string "x" stream))
+      (with-open-file (stream (format nil "~Anested/file" volume) :direction :output) (write-string "x" stream))
+      ;; A tenant plants links to directories and files outside its volume.
+      (sb-posix:symlink outside (format nil "~Alink-dir" volume))
+      (sb-posix:symlink (format nil "~Asecret" outside) (format nil "~Anested/link-file" volume))
+      (gr8s::reclaim-provisioned-volume
+       directory (provisioned-test-volume "pvc-1" gr8s::+local-path-provisioner+
+                                          (string-right-trim "/" volume)))
+      (is (null (probe-file volume)))
+      (is (probe-file (format nil "~Asecret" outside)))
+      (is (probe-file (format nil "~A/volumes/pvc-2/" root)))
+      ;; Reclaiming again finds nothing to do.
+      (finishes (gr8s::reclaim-provisioned-volume
+                 directory (provisioned-test-volume "pvc-1" gr8s::+local-path-provisioner+
+                                                    (string-right-trim "/" volume)))))))
+
+(test reclaim-refuses-paths-that-are-not-the-volumes-own-directory
+  (with-temporary-store (store directory)
+    (declare (ignorable store))
+    (flet ((refused (name path provisioner)
+             (signals runtime-error
+               (gr8s::reclaim-provisioned-volume directory (provisioned-test-volume name provisioner path)))))
+      (refused "pvc-1" "/etc" gr8s::+local-path-provisioner+)
+      (refused "pvc-1" "/var/lib/pvc-2" gr8s::+local-path-provisioner+)
+      (refused "etc" "/etc" gr8s::+local-path-provisioner+)
+      (refused "pvc-1" "/a/../pvc-1" gr8s::+local-path-provisioner+)
+      (refused "pvc-1" "/a/pvc-1" "example.test/driver"))))
+
+(test reclaim-honors-retain-and-archive
+  (with-temporary-store (store directory)
+    (declare (ignorable store))
+    (let* ((root (string-right-trim "/" (namestring (truename directory))))
+           (path (format nil "~A/volumes/pvc-1" root)))
+      (ensure-directories-exist (format nil "~A/" path))
+      (gr8s::reclaim-provisioned-volume
+       directory (provisioned-test-volume "pvc-1" gr8s::+local-path-provisioner+ path "retain"))
+      (is (probe-file (format nil "~A/" path)))
+      (gr8s::reclaim-provisioned-volume
+       directory (provisioned-test-volume "pvc-1" gr8s::+local-path-provisioner+ path "archive"))
+      (is (null (probe-file (format nil "~A/" path))))
+      (is (probe-file (format nil "~A/volumes/archived-pvc-1/" root))))))
+
+(test reclaiming-an-nfs-volume-mounts-its-share-and-removes-its-directory
+  (with-temporary-store (store directory)
+    (declare (ignorable store))
+    (with-fake-nfs (calls directory
+                    :mount-result (lambda (source target type flags data)
+                                    (declare (ignore source type flags data))
+                                    ;; The share holds this volume and a neighbor.
+                                    (ensure-directories-exist (format nil "~A/pvc-1/inner/" target))
+                                    (ensure-directories-exist (format nil "~A/pvc-2/" target))
+                                    0))
+      (let ((volume (gr8s::core-object
+                     "metadata" (gr8s::core-object "name" "pvc-1"
+                                                   "annotations" (gr8s::core-object gr8s::+provisioned-by-annotation+ gr8s::+nfs-provisioner+
+                                                                                    gr8s::+nfs-share-annotation+ "/share"))
+                     "spec" (gr8s::core-object "nfs" (gr8s::core-object "server" "10.0.0.5" "path" "/share/pvc-1")))))
+        (gr8s::reclaim-provisioned-volume directory volume)
+        (destructuring-bind (source target &rest rest) (first calls)
+          (declare (ignore rest))
+          (is (equal "10.0.0.5:/share" source))
+          (is (null (probe-file (format nil "~A/pvc-1/" target))))
+          (is (probe-file (format nil "~A/pvc-2/" target)))
+          (is (not (gr8s::nfs-target-mounted-p target))))
+        (setf (gethash "path" (gethash "nfs" (gethash "spec" volume))) "/other/pvc-1")
+        (signals runtime-error (gr8s::reclaim-provisioned-volume directory volume))))))
+
+;;; Generic ephemeral volumes
+
+(defun ephemeral-test-pod (name)
+  (parse-pod (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"~A\"},\"spec\":{\"volumes\":[{\"name\":\"scratch\",\"ephemeral\":{\"volumeClaimTemplate\":{\"metadata\":{\"labels\":{\"a\":\"b\"}},\"spec\":{\"storageClassName\":\"shared\",\"accessModes\":[\"ReadWriteOnce\"],\"resources\":{\"requests\":{\"storage\":\"1Gi\"}}}}}}],\"containers\":[{\"name\":\"c\",\"image\":\"busybox\",\"volumeMounts\":[{\"name\":\"scratch\",\"mountPath\":\"/scratch\"}]}]}}" name)))
+
+(test generic-ephemeral-volumes-get-an-owned-claim-that-binds-and-is-collected
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s::create-core-resource store "storageclasses" (nfs-class) nil)
+    (let ((pod (create-pod store (ephemeral-test-pod "worker"))))
+      (is (equal '("worker-scratch") (gr8s::storage-pod-claim-names pod)))
+      (gr8s::reconcile-storage-bindings store)
+      (let* ((claim (claim-object store "worker-scratch"))
+             (owner (aref (gethash "ownerReferences" (gethash "metadata" claim)) 0)))
+        (is (equal (pod-uid pod) (gethash "uid" owner)))
+        (is (equal "Pod" (gethash "kind" owner)))
+        (is (equal "b" (gethash "a" (gethash "labels" (gethash "metadata" claim)))))
+        (is-true (gr8s::claim-owned-by-pod-p claim pod)))
+      (gr8s::reconcile-storage-bindings store)
+      (is (equal "Bound" (storage-phase store "persistentvolumeclaims" "default" "worker-scratch")))
+      ;; Once its Pod has gone the claim has no live owner and is collected.
+      (is (not (gr8s::api-object-orphaned-p store (claim-object store "worker-scratch"))))
+      (gr8s::remove-pod store "default" "worker")
+      (is-true (gr8s::api-object-orphaned-p store (claim-object store "worker-scratch"))))))
+
+(test generic-ephemeral-volumes-never-adopt-an-existing-claim
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s::create-core-resource store "storageclasses" (nfs-class) nil)
+    (let ((before (gr8s::create-core-resource store "persistentvolumeclaims"
+                                              (storage-test-claim "worker-scratch" :class "shared") "default"))
+          (pod (create-pod store (ephemeral-test-pod "worker"))))
+      (gr8s::reconcile-storage-bindings store)
+      (let ((claim (claim-object store "worker-scratch")))
+        (is (equal (gethash "uid" (gethash "metadata" before)) (gethash "uid" (gethash "metadata" claim))))
+        (is-false (gr8s::claim-owned-by-pod-p claim pod))))))
+
+(test pods-reject-malformed-nfs-and-ephemeral-volumes
+  (flet ((pod (volume)
+           (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"p\"},\"spec\":{\"volumes\":[~A],\"containers\":[{\"name\":\"c\",\"image\":\"busybox\"}]}}" volume)))
+    (dolist (volume '("{\"name\":\"v\",\"nfs\":{\"server\":\"a,b\",\"path\":\"/x\"}}"
+                      "{\"name\":\"v\",\"nfs\":{\"server\":\"s\",\"path\":\"x\"}}"
+                      "{\"name\":\"v\",\"nfs\":{\"server\":\"s\",\"path\":\"/x\",\"readOnly\":7}}"
+                      "{\"name\":\"v\",\"nfs\":{\"server\":\"s\",\"path\":\"/x\",\"other\":1}}"
+                      "{\"name\":\"v\",\"ephemeral\":{}}"
+                      "{\"name\":\"v\",\"ephemeral\":{\"volumeClaimTemplate\":{\"metadata\":{\"name\":\"x\"},\"spec\":{\"accessModes\":[\"ReadWriteOnce\"],\"resources\":{\"requests\":{\"storage\":\"1Gi\"}}}}}}"
+                      "{\"name\":\"v\",\"ephemeral\":{\"volumeClaimTemplate\":{\"spec\":{\"accessModes\":[\"Sometimes\"],\"resources\":{\"requests\":{\"storage\":\"1Gi\"}}}}}}"))
+      (signals kubernetes-error (parse-pod (pod volume))))
+    (is (not (null (parse-pod (pod "{\"name\":\"v\",\"nfs\":{\"server\":\"nas.example.test\",\"path\":\"/x\"}}")))))))
+
+;;; emptyDir limits
+
+(defun empty-dir-test-pod (source &optional (resources ""))
+  (parse-pod (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"e\",\"uid\":\"e-uid\"},\"spec\":{\"volumes\":[{\"name\":\"scratch\",\"emptyDir\":~A}],\"containers\":[{\"name\":\"c\",\"image\":\"busybox\"~A}]}}" source resources)))
+
+(test disk-empty-dirs-are-evicted-when-they-outgrow-their-limit
+  (let ((pod (empty-dir-test-pod "{\"sizeLimit\":\"1Mi\"}")))
+    (is-true (gr8s::pod-ephemeral-limit-p pod))
+    (is (null (gr8s::pod-empty-dir-violation pod (list (cons "scratch" 1024)))))
+    (is (search "EmptyDir volume \"scratch\""
+                (gr8s::pod-empty-dir-violation pod (list (cons "scratch" (* 2 1024 1024)))))))
+  ;; tmpfs enforces its own size, so only a disk-backed volume is measured.
+  (let ((pod (empty-dir-test-pod "{\"medium\":\"Memory\",\"sizeLimit\":\"1Mi\"}")))
+    (is-false (gr8s::pod-ephemeral-limit-p pod))
+    (is (null (gr8s::pod-empty-dir-violation pod (list (cons "scratch" (* 2 1024 1024))))))))
+
+(test memory-empty-dirs-are-sized-by-the-smaller-of-both-limits
+  (let ((limits ",\"resources\":{\"limits\":{\"memory\":\"32Mi\"}}"))
+    (is (= (* 32 1024 1024)
+           (gr8s::pod-memory-volume-bytes (empty-dir-test-pod "{\"medium\":\"Memory\",\"sizeLimit\":\"64Mi\"}" limits)
+                                          (gr8s::core-object "sizeLimit" "64Mi"))))
+    (is (= (* 16 1024 1024)
+           (gr8s::pod-memory-volume-bytes (empty-dir-test-pod "{\"medium\":\"Memory\",\"sizeLimit\":\"16Mi\"}" limits)
+                                          (gr8s::core-object "sizeLimit" "16Mi"))))
+    (is (= (* 32 1024 1024)
+           (gr8s::pod-memory-volume-bytes (empty-dir-test-pod "{\"medium\":\"Memory\"}" limits) (gr8s::core-object)))))
+  (is (null (gr8s::pod-memory-volume-bytes (empty-dir-test-pod "{\"medium\":\"Memory\"}") (gr8s::core-object)))))

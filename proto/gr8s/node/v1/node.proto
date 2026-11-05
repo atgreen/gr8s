@@ -183,6 +183,7 @@ enum OperationKind {
   OPERATION_KIND_UNSPECIFIED = 0;
   OPERATION_KIND_LOGS = 1;
   OPERATION_KIND_EXEC = 2;
+  OPERATION_KIND_RECLAIM_VOLUME = 3;
 }
 
 message OperationRequest {
@@ -198,6 +199,8 @@ message OperationRequest {
   bool stderr = 10;
   bool tty = 11;
   bool previous = 12;
+  // The PersistentVolume whose provisioned directory RECLAIM_VOLUME removes.
+  bytes volume_json = 13;
 }
 
 message OperationInput {

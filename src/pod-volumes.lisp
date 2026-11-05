@@ -6,7 +6,7 @@
 ;;;; materialize ConfigMap, Secret and emptyDir mounts in agent-owned directories.
 ;;;; Private resource data stays scoped to the Pod namespace; paths are validated
 ;;;; before touching the filesystem and fsGroup controls mounted data access.
-;;;; Memory emptyDirs are real tmpfs mounts that live until the Pod terminates.
+;;;; Memory emptyDirs and NFS volumes are real mounts that live until the Pod terminates.
 
 (in-package #:gr8s)
 
@@ -174,13 +174,53 @@
   (error 'runtime-error :message (format nil "Could not ~A Pod volume ~A: ~A" operation target
                                          (sb-int:strerror (sb-alien:get-errno)))))
 
-(defun ensure-pod-memory-volume (directory source)
+(defun pod-volume-nfs-mount-p (target)
+  "Return whether the kernel reports an NFS filesystem mounted at TARGET."
+  (loop for line in (uiop:read-file-lines *pod-mount-table-path*)
+        for fields = (uiop:split-string line :separator '(#\Space))
+        for separator = (position "-" fields :test #'equal)
+        thereis (and separator (>= (length fields) 5) (< (1+ separator) (length fields))
+                     (equal (string-right-trim "/" target) (decode-mountinfo-path (nth 4 fields)))
+                     (member (nth (1+ separator) fields) '("nfs" "nfs4") :test #'equal))))
+
+(defun materialize-pod-nfs-volume (runtime pod name source mount-options &key share)
+  "Mount SOURCE for POD once and return the path, without touching the mount itself.
+SHARE names a provisioned volume's export, whose own directory is created on first use."
+  (let* ((pod-directory (containerd-pod-log-directory runtime (pod-uid pod)))
+         (volumes (merge-pathnames "volumes/" pod-directory)))
+    (ensure-directories-exist volumes)
+    (sb-posix:chmod (namestring pod-directory) #o700)
+    (let* ((root (namestring (truename volumes)))
+           (target (concatenate 'string root name))
+           (server (gethash "server" source))
+           (path (gethash "path" source))
+           (tokens (append (nfs-mount-option-tokens mount-options)
+                           (when (eq t (gethash "readOnly" source)) (list "ro")))))
+      (unless (nfs-target-mounted-p target)
+        (ensure-directories-exist (uiop:ensure-directory-pathname target))
+        (handler-case (mount-nfs-filesystem server path target tokens)
+          (nfs-mount-error (condition)
+            (unless (and share (= sb-posix:enoent (nfs-mount-error-errno condition)))
+              (error condition))
+            (ensure-provisioned-nfs-directory server share (subseq path (1+ (position #\/ path :from-end t)))
+                                              (concatenate 'string root "." name "-share")
+                                              (remove "ro" tokens :test #'equal))
+            (mount-nfs-filesystem server path target tokens))))
+      (uiop:ensure-directory-pathname target))))
+
+(defun pod-memory-volume-bytes (pod source)
+  "Size a Memory emptyDir by its limit and the Pod's memory limit, whichever is smaller, as a kubelet does."
+  (let* ((limit (gethash "sizeLimit" source))
+         (size (unless (member limit '(nil 0 "0") :test #'equal) (storage-quantity limit "emptyDir.sizeLimit")))
+         (memory (and pod (gethash "memory" (nth-value 1 (pod-spec-resource-totals (gethash "spec" (pod-to-object pod))))))))
+    (if (and size memory) (min size memory) (or size memory))))
+
+(defun ensure-pod-memory-volume (directory source &optional pod)
   "Mount a tmpfs at DIRECTORY once, so restarted containers keep the volume's contents."
   (unless (pod-volume-mount-targets directory)
     (let* ((target (namestring (truename directory)))
-           (limit (gethash "sizeLimit" source))
-           (options (if (member limit '(nil 0 "0") :test #'equal) ""
-                        (format nil "size=~D" (ceiling (storage-quantity limit "emptyDir.sizeLimit"))))))
+           (bytes (pod-memory-volume-bytes pod source))
+           (options (if bytes (format nil "size=~D" (ceiling bytes)) "")))
       (unless (zerop (funcall *pod-tmpfs-mount* target options))
         (pod-volume-system-error "mount" target)))))
 
@@ -189,8 +229,13 @@
   (let ((directory (merge-pathnames "volumes/" (containerd-pod-log-directory runtime uid))))
     (when (probe-file directory)
       (dolist (target (pod-volume-mount-targets directory))
-        (unless (zerop (funcall *pod-tmpfs-unmount* target))
-          (pod-volume-system-error "unmount" target)))
+        (if (pod-volume-nfs-mount-p target)
+            (unmount-nfs-filesystem target)
+            (unless (zerop (funcall *pod-tmpfs-unmount* target))
+              (pod-volume-system-error "unmount" target))))
+      ;; The tree deletion below must never reach into a share that is still mounted.
+      (when (pod-volume-mount-targets directory)
+        (error 'runtime-error :message (format nil "Pod volumes under ~A are still mounted" directory)))
       (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
 
 (defun materialize-pod-volume (runtime pod volume)
@@ -198,7 +243,17 @@
   (when (gethash "hostPath" volume)
     (return-from materialize-pod-volume (materialize-host-storage-source (gethash "hostPath" volume))))
   (when (gethash "persistentVolumeClaim" volume)
-    (return-from materialize-pod-volume (materialize-persistent-claim-volume runtime pod (gethash "persistentVolumeClaim" volume))))
+    (return-from materialize-pod-volume
+      (materialize-persistent-claim-volume runtime pod (gethash "persistentVolumeClaim" volume) (gethash "name" volume))))
+  (when (gethash "ephemeral" volume)
+    (return-from materialize-pod-volume
+      (materialize-persistent-claim-volume
+       runtime pod (core-object "claimName" (ephemeral-claim-name (pod-name pod) (gethash "name" volume)))
+       (gethash "name" volume) t)))
+  (when (gethash "nfs" volume)
+    (return-from materialize-pod-volume
+      (values (materialize-pod-nfs-volume runtime pod (gethash "name" volume) (gethash "nfs" volume) nil)
+              (eq t (gethash "readOnly" (gethash "nfs" volume))))))
   (let* ((directory (pod-volume-directory runtime pod (gethash "name" volume)))
          (group (pod-fs-group pod)))
     (ensure-directories-exist directory)
@@ -207,7 +262,7 @@
     (sb-posix:chmod (namestring (containerd-pod-log-directory runtime (pod-uid pod))) #o700)
     (let ((source (gethash "emptyDir" volume)))
       (when (and source (equal "Memory" (gethash "medium" source)))
-        (ensure-pod-memory-volume directory source)))
+        (ensure-pod-memory-volume directory source pod)))
     ;; Applied after mounting because the tmpfs root replaces the directory's mode.
     (set-pod-volume-permissions directory (if group #o2770 #o777) group)
     (multiple-value-bind (files projection) (pod-volume-desired-files runtime pod volume)
