@@ -157,6 +157,84 @@
           (ignore-errors (bt:join-thread agent-thread)))
         (gr8s:stop-node-grpc-server server)))))
 
+;; Runs a persistent agent against a real server, and tears both down.
+(defun call-with-persistent-node-session (node-name function &key status-provider)
+  (with-temporary-store (store path)
+    (gr8s:register-node
+     store (gr8s:make-node-record :id node-name :name node-name :pod-cidr "10.88.3.0/24"))
+    (let* ((server (gr8s:start-node-grpc-server
+                    store :host "127.0.0.1" :port 0 :heartbeat-timeout-seconds 2))
+           (control (gr8s::make-node-session-control))
+           (agent-thread
+             (bt:make-thread
+              (lambda ()
+                (gr8s:run-node-session
+                 "127.0.0.1" (gr8s:node-grpc-server-port server)
+                 node-name (merge-pathnames "agent/identity.json" path)
+                 (lambda (snapshot) (declare (ignore snapshot)))
+                 :reconnect-delay 0.01 :control control
+                 :status-provider status-provider))
+              :name "gr8s watchdog test agent")))
+      (unwind-protect
+           (flet ((ready-p ()
+                    (gr8s:node-record-ready-p (gr8s:get-node store node-name)))
+                  (session ()
+                    (bt:with-lock-held ((gr8s::node-grpc-server-lock server))
+                      (gethash node-name (gr8s::node-grpc-server-sessions server)))))
+             (is-true (wait-until #'ready-p :timeout 5))
+             (funcall function #'ready-p #'session server))
+        (gr8s::cancel-node-session control)
+        (ignore-errors (bt:join-thread agent-thread))
+        (gr8s:stop-node-grpc-server server)))))
+
+(test blocked-status-provider-does-not-stop-node-heartbeats
+  (let ((release (bt:make-semaphore)))
+    (call-with-persistent-node-session
+     "worker-blocked-status"
+     (lambda (ready-p session server)
+       (declare (ignore session server))
+       (sleep 4)
+       (is-true (funcall ready-p))
+       (bt:signal-semaphore release :count 100))
+     :status-provider (lambda () (bt:wait-on-semaphore release) nil))))
+
+(test blocked-heartbeat-send-reconnects-the-session
+  (let ((saved gr8s::*node-session-stall-seconds*)
+        (block-next nil))
+    (let ((*error-output* (make-broadcast-stream)))
+      ;; Other threads see only the global value, so this cannot be a LET.
+      (setf gr8s::*node-session-stall-seconds* 1)
+      (sb-int:encapsulate
+       'gr8s::send-agent-session-envelope 'block-heartbeat
+       (lambda (function session variant payload)
+         (when (and block-next (eq variant :heartbeat))
+           (setf block-next nil)
+           (sleep 3600))
+         (funcall function session variant payload)))
+      (unwind-protect
+           (call-with-persistent-node-session
+            "worker-blocked-heartbeat"
+            (lambda (ready-p session server)
+              (declare (ignore server))
+              (let ((first (funcall session)))
+                (setf block-next t)
+                (is-true (wait-until (lambda () (not (eq first (funcall session)))) :timeout 10))
+                (is-true (wait-until ready-p :timeout 5)))))
+        (sb-int:unencapsulate 'gr8s::send-agent-session-envelope 'block-heartbeat)
+        (setf gr8s::*node-session-stall-seconds* saved)))))
+
+(test silent-node-session-is-evicted-so-the-agent-reconnects
+  (let ((*error-output* (make-broadcast-stream)))
+    (call-with-persistent-node-session
+     "worker-silent"
+     (lambda (ready-p session server)
+       (let ((first (funcall session)))
+         ;; Pass a later clock instead of aging the session: its next heartbeat
+         ;; can overwrite any timestamp written here.
+         (gr8s::evict-silent-node-sessions server (+ (get-universal-time) 3600))
+         (is-true (wait-until (lambda () (not (eq first (funcall session)))) :timeout 10))
+         (is-true (wait-until ready-p :timeout 5)))))))
+
 (test cancelling-persistent-node-session-wakes-blocked-read
   (with-temporary-store (store path)
     (gr8s:register-node
