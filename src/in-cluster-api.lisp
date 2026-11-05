@@ -133,6 +133,7 @@
                             (and token (authenticate-service-account-token store token))))
          (identity (and authenticated (impersonated-api-identity store authenticated request)))
          (path (request-route-path (hunchentoot:script-name request))) (method (hunchentoot:request-method request)))
+    (when identity (flowcontrol-note-request store identity path method))
     (unless identity (core-resource-error 401 "Unauthorized" "A valid client certificate or ServiceAccount bearer token is required"))
     (unless (or (authenticated-discovery-request-p path method)
                 (authenticated-self-review-request-p path method))

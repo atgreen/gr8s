@@ -10,15 +10,15 @@
 (in-package #:gr8s)
 
 (defparameter +admission-policy-variables+
-  '("object" "oldObject" "request" "params" "namespaceObject" "variables")
-  "Variables the admission policy CEL environment declares. The authorizer is not available.")
+  '("object" "oldObject" "request" "params" "namespaceObject" "variables" "authorizer")
+  "Variables the admission policy CEL environment declares.")
 
 (defun compile-admission-policy-condition (expression)
   "Compile a policy's condition. Variables are dynamically typed here, so a dyn result is checked when evaluated."
   (let ((*cel-declared-variables* +admission-policy-variables+))
     (multiple-value-bind (program type) (compile-cel-expression expression)
-      (unless (member type '(:bool :dyn))
-        (cel-check-error "must evaluate to bool, found ~(~A~)" type))
+      (unless (member (cel-type-head type) '(:bool :dyn))
+        (cel-check-error "must evaluate to bool, found ~A" (cel-type-name type)))
       program)))
 
 (defun admission-policy-rule-matches-p (rule attributes)
@@ -116,7 +116,8 @@ A second value of T means parameters are required, absent, and the binding denie
                          (cons "request" request)
                          (cons "params" parameter)
                          (cons "namespaceObject" (admission-policy-namespace-object store attributes))
-                         (cons "variables" variables))))
+                         (cons "variables" variables)
+                         (cons "authorizer" (cel-opaque :authorizer nil)))))
     (loop for variable across (let ((value (gethash "variables" (gethash "spec" policy))))
                                 (if (member value '(nil null)) #() value))
           ;; A failing variable fails only the expressions that read it, as "no such key".
@@ -159,6 +160,19 @@ A second value of T means parameters are required, absent, and the binding denie
                                     (when denied (list (list policy binding 'null t))))))))
 
 ;;; Validation
+
+(defun admission-record-audit-annotations (policy binding bindings)
+  "Evaluate POLICY's audit annotations, whose failures follow failurePolicy; a null value omits one.
+No audit backend exists to carry the values, so they go to the server log."
+  (loop for annotation across (let ((value (gethash "auditAnnotations" (gethash "spec" policy))))
+                                (if (member value '(nil null)) #() value))
+        do (let* ((*cel-declared-variables* +admission-policy-variables+)
+                  (value (evaluate-cel-value (compile-cel-expression (gethash "valueExpression" annotation)) bindings)))
+             (cond ((eq value 'null) nil)
+                   ((stringp value)
+                    (format *error-output* "~&Audit annotation ~A/~A from binding ~A: ~A~%"
+                            (object-name policy) (gethash "key" annotation) (object-name binding) value))
+                   (t (cel-fail "valueExpression must evaluate to a string or null"))))))
 
 (defun admission-policy-denial-code (reason)
   "Map a Validation's reason to its HTTP status, defaulting as upstream does."
@@ -208,7 +222,8 @@ A second value of T means parameters are required, absent, and the binding denie
                                                    (if (member value '(nil null)) #() value))
                            unless (let ((*cel-declared-variables* +admission-policy-variables+))
                                     (evaluate-cel-condition (compile-admission-policy-condition (gethash "expression" validation)) bindings))
-                             do (admission-apply-validation-failure policy binding validation bindings attributes))))
+                             do (admission-apply-validation-failure policy binding validation bindings attributes))
+                     (admission-record-audit-annotations policy binding bindings)))
                ((or cel-compile-error cel-evaluation-error) (condition)
                  (admission-policy-failure policy binding attributes condition))))))
 
@@ -251,3 +266,157 @@ A second value of T means parameters are required, absent, and the binding denie
                    (admission-policy-failure policy binding attributes condition))
                  (kubernetes-error (condition)
                    (admission-policy-failure policy binding attributes (kubernetes-error-message condition))))))))
+
+;;; Authorizer
+
+(defun admission-authorizer-check (store)
+  "Return the function that answers authorizer checks with the same RBAC a real request meets."
+  (let ((requester (request-api-identity)))
+    (lambda (attributes verb)
+      (let* ((user (getf attributes :user))
+             (identity (if user
+                           (make-api-user-identity :username user :groups (coerce (getf attributes :groups) 'vector))
+                           requester))
+             (spec (if (getf attributes :path)
+                       (core-object "nonResourceAttributes"
+                                    (core-object "path" (getf attributes :path) "verb" verb))
+                       (core-object "resourceAttributes"
+                                    (core-object "group" (or (getf attributes :group) "") "verb" verb
+                                                 "resource" (or (getf attributes :resource) "")
+                                                 "subresource" (or (getf attributes :subresource) "")
+                                                 "namespace" (or (getf attributes :namespace) "")
+                                                 "name" (or (getf attributes :name) "")))))
+             (status (access-review-status store identity spec)))
+        (values (eq t (gethash "allowed" status)) (gethash "reason" status) nil)))))
+
+(defun admission-request-resource (attributes)
+  "Describe the request's resource as authorizer.requestResource starts from."
+  (list :group (admission-group attributes) :resource (admission-plural attributes)
+        :subresource (admission-subresource attributes)
+        :namespace (admission-namespace attributes) :name (admission-name attributes)))
+
+;;; Type checking, as upstream's policy status reports it
+
+(defun admission-policy-schema-name (group version kind)
+  "Name the pinned definition of a built-in kind."
+  (format nil "io.k8s.api.~A.~A.~A"
+          (if (plusp (length group)) (subseq group 0 (or (position #\. group) (length group))) "core")
+          version kind))
+
+(defun admission-policy-built-in-type (group version resource)
+  "Return the static type and GVK text of a built-in RESOURCE, or NIL."
+  (let* ((api-version (if (plusp (length group)) (format nil "~A/~A" group version) version))
+         (entry (if (equal resource "pods")
+                    '("pods" "Pod" "v1" t)
+                    (find-if (lambda (candidate)
+                               (and (equal resource (first candidate)) (equal api-version (third candidate))))
+                             *stored-resource-types*))))
+    (when entry
+      (let ((schema (gethash (admission-policy-schema-name group version (second entry))
+                             (gethash "definitions" *podtemplate-schema*))))
+        (when schema
+          (values (cel-schema-type schema)
+                  (format nil "~A, Kind=~A" api-version (second entry))))))))
+
+(defun admission-policy-custom-type (store group version resource)
+  "Return the static type and GVK text of a custom RESOURCE established in STORE, or NIL."
+  (let ((definition
+          (loop for key being the hash-keys of (pod-store-resources store) using (hash-value candidate)
+                when (and (equal "customresourcedefinitions" (first key))
+                          (equal group (gethash "group" (gethash "spec" candidate)))
+                          (equal resource (gethash "plural" (gethash "names" (gethash "spec" candidate)))))
+                  return candidate)))
+    (when definition
+      (let ((entry (crd-version definition version)))
+        (when entry
+          (values (cel-custom-object-type (crd-schema entry))
+                  (format nil "~A/~A, Kind=~A" group version (gethash "kind" (gethash "names" (gethash "spec" definition))))))))))
+
+(defun cel-custom-object-type (schema)
+  "Type a custom object for a policy: its schema plus type fields and untyped metadata."
+  (list :object
+        (lambda (field)
+          (cond ((member field '("apiVersion" "kind") :test #'equal) '(:string nil))
+                ((equal field "metadata") :dyn)
+                (t (let ((child (cel-escape-field-candidates schema field)))
+                     (and child (cel-schema-type child))))))))
+
+(defun admission-policy-object-types (store policy)
+  "List (gvk-text . type) for every exact resource POLICY's rules name; wildcards stay untyped."
+  (let ((types nil) (rules (gethash "resourceRules" (gethash "matchConstraints" (gethash "spec" policy) (core-object)))))
+    (loop for rule across (if (crd-array-p rules) rules #())
+          do (loop for group across (gethash "apiGroups" rule #())
+                   do (loop for version across (gethash "apiVersions" rule #())
+                            do (loop for resource across (gethash "resources" rule #())
+                                     do (unless (or (equal group "*") (equal version "*") (find #\* resource) (find #\/ resource))
+                                          (multiple-value-bind (type text)
+                                              (admission-policy-built-in-type group version resource)
+                                            (unless type
+                                              (multiple-value-setq (type text)
+                                                (admission-policy-custom-type store group version resource)))
+                                            (when type (pushnew (cons text type) types :key #'car :test #'equal))))))))
+    (nreverse types)))
+
+(defun admission-policy-parameter-type (store policy)
+  "Type POLICY's params from its paramKind when that names a known kind."
+  (let ((kind (gethash "paramKind" (gethash "spec" policy))))
+    (or (when (hash-table-p kind)
+          (let* ((api-version (gethash "apiVersion" kind))
+                 (slash (and (stringp api-version) (position #\/ api-version)))
+                 (group (if slash (subseq api-version 0 slash) ""))
+                 (version (if slash (subseq api-version (1+ slash)) api-version))
+                 (schema (and (stringp version) (stringp (gethash "kind" kind))
+                              (gethash (admission-policy-schema-name group version (gethash "kind" kind))
+                                       (gethash "definitions" *podtemplate-schema*)))))
+            (and schema (cel-schema-type schema))))
+        :dyn)))
+
+(defun admission-policy-check-expression (store policy expression text object-type parameter-type)
+  "Check EXPRESSION for one object type, returning its warning text or NIL."
+  (declare (ignore store))
+  (let* ((variable-types (make-hash-table :test #'equal))
+         (*cel-declared-variables* +admission-policy-variables+)
+         (*cel-variable-types*
+           (list (cons "object" object-type) (cons "oldObject" object-type)
+                 (cons "params" parameter-type)
+                 (cons "authorizer" '(:opaque :authorizer))
+                 (cons "variables" (list :object (lambda (field) (gethash field variable-types)))))))
+    (loop for variable across (let ((value (gethash "variables" (gethash "spec" policy))))
+                                (if (member value '(nil null)) #() value))
+          do (setf (gethash (gethash "name" variable) variable-types)
+                   (handler-case (nth-value 1 (compile-cel-expression (gethash "expression" variable)))
+                     (cel-compile-error () :dyn))))
+    (handler-case (progn (compile-cel-expression expression) nil)
+      (cel-compile-error (condition)
+        (format nil "~@[~A: ~]~A" text (cel-error-message condition))))))
+
+(defun admission-policy-type-warnings (store policy)
+  "Type check POLICY's validations against the kinds its rules name, as ExpressionWarnings."
+  (let* ((types (or (admission-policy-object-types store policy) (list (cons nil :dyn))))
+         (parameter-type (admission-policy-parameter-type store policy))
+         (warnings nil))
+    (flet ((check (expression field)
+             (let ((problems (remove nil (mapcar (lambda (entry)
+                                                   (admission-policy-check-expression store policy expression (car entry) (cdr entry) parameter-type))
+                                                 types))))
+               (when problems
+                 (push (core-object "fieldRef" field "warning" (format nil "~{~A~^~%~}" problems)) warnings)))))
+      (loop for validation across (let ((value (gethash "validations" (gethash "spec" policy))))
+                                    (if (member value '(nil null)) #() value))
+            for index from 0
+            do (when (stringp (gethash "expression" validation))
+                 (check (gethash "expression" validation) (format nil "spec.validations[~D].expression" index)))
+               (let ((message (gethash "messageExpression" validation)))
+                 (when (and (stringp message) (plusp (length message)))
+                   (check message (format nil "spec.validations[~D].messageExpression" index))))))
+    (coerce (nreverse warnings) 'vector)))
+
+(defun admission-policy-status-after-check (store policy)
+  "Return POLICY's status with the current generation's type check recorded."
+  (let* ((status (let ((value (gethash "status" policy))) (if (hash-table-p value) (copy-core-object value) (core-object))))
+         (warnings (admission-policy-type-warnings store policy))
+         (checking (core-object)))
+    (when (plusp (length warnings)) (setf (gethash "expressionWarnings" checking) warnings))
+    (setf (gethash "typeChecking" status) checking
+          (gethash "observedGeneration" status) (gethash "generation" (gethash "metadata" policy)))
+    status))

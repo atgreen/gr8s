@@ -63,14 +63,14 @@
   (is (search "must evaluate to bool" (admission-test-compile-message "object.metadata.name")))
   (is (search "must evaluate to bool" (admission-test-compile-message "1 + 1")))
   (is (search "undeclared reference" (admission-test-compile-message "params.x == 1")))
-  (is (search "undeclared reference" (admission-test-compile-message "timestamp('2020') == 1")))
+  (is (search "no matching overload" (admission-test-compile-message "timestamp('2020') == 1")))
   (is (search "undefined field" (admission-test-compile-message "request.nothing == 1")))
   (is (search "no matching overload" (admission-test-compile-message "1 == 'a'")))
   (is (search "no matching overload" (admission-test-compile-message "1 + 'a' == 'a'")))
-  (is (search "not supported" (admission-test-compile-message "authorizer.path('/').check('get').allowed()")))
-  (is (search "not supported" (admission-test-compile-message "object.a.matches('b')")))
-  (is (search "not supported" (admission-test-compile-message "1u == 1u")))
-  (is (search "not supported" (admission-test-compile-message "b'x' == b'x'")))
+  (is (null (admission-test-compile-message "authorizer.path('/').check('get').allowed()")))
+  (is (null (admission-test-compile-message "object.a.matches('b')")))
+  (is (null (admission-test-compile-message "1u == 1u")))
+  (is (null (admission-test-compile-message "b'x' == b'x'")))
   (is (search "not supported" (admission-test-compile-message "Foo{a: 1} == null")))
   (is (search "nesting" (admission-test-compile-message
                          (format nil "~A1 == 1~A" (make-string 200 :initial-element #\()
@@ -113,7 +113,9 @@
     (when response
       (setf (gethash "uid" response) (gethash "uid" request))
       (admission-test-respond stream
-                              (gr8s::core-object "apiVersion" "admission.k8s.io/v1" "kind" "AdmissionReview" "response" response)
+                              (if (gethash "desiredAPIVersion" request)
+                                  (gr8s::core-object "apiVersion" "apiextensions.k8s.io/v1" "kind" "ConversionReview" "response" response)
+                                  (gr8s::core-object "apiVersion" "admission.k8s.io/v1" "kind" "AdmissionReview" "response" response))
                               :chunked (search "chunked" path)))))
 
 (defun admission-test-backend (certificate key handler)

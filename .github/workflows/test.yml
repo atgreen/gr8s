@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: 2026 Anthony Green
+# SPDX-License-Identifier: MIT
+#
+# Continuous integration for gr8s.
+#
+# The `unit` job runs on every push to main and every pull request. It builds
+# the dependency tree from the vendored OCICL lockfile and runs the unit and
+# HTTP test suite (`make test`) plus cheap static checks. It deliberately does
+# NOT run the privileged dataplane tests: loading eBPF, attaching cgroups,
+# creating veths and running containers needs real root and a real kernel,
+# which GitHub-hosted runners do not provide (see AGENTS.md, "Testing eBPF and
+# the native runtime as root"). Those run in the `privileged` job below, which
+# is opt-in and expects a self-hosted root-capable runner.
+
+name: CI
+
+on:
+  # push to main is post-merge validation; feature-branch pushes with an open
+  # PR are covered by the pull_request event, so we don't filter PR branches
+  # here (one run per change, no duplicates).
+  push:
+    branches: [main]
+  pull_request:
+  # Manual trigger, used to launch the opt-in `privileged` job on a
+  # self-hosted root runner.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: unit + HTTP suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SBCL
+        # The vendored OCICL tree is resolved by SBCL + the ocicl ASDF runtime,
+        # so SBCL is the only language toolchain this job needs. If distro SBCL
+        # proves too old for the current ocicl, pin a newer SBCL here instead.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sbcl git build-essential
+
+      - name: Install and set up ocicl
+        # ocicl's ASDF runtime lets SBCL resolve systems from the repo's
+        # committed ocicl/ tree + ocicl.csv lockfile. Dependencies are already
+        # vendored in the checkout, so no registry fetch is required here.
+        run: |
+          git clone --depth 1 https://github.com/ocicl/ocicl.git /tmp/ocicl
+          # setup.lisp builds and installs the ocicl binary to ~/.local/bin.
+          (cd /tmp/ocicl && sbcl --load setup.lisp)
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.local/bin:$PATH"
+          ocicl setup
+          ocicl version
+
+      - name: Cache ASDF build artifacts
+        # SBCL caches compiled FASLs under ~/.cache/common-lisp; caching it
+        # turns the second-and-later runs from a full recompile into a reload.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/common-lisp
+          key: asdf-fasl-${{ runner.os }}-${{ hashFiles('ocicl.csv', 'gr8s.asd') }}
+          restore-keys: |
+            asdf-fasl-${{ runner.os }}-
+
+      - name: Static checks (shell syntax)
+        run: |
+          sh -n scripts/gr8s scripts/gr8s-native scripts/install-containerd.sh \
+            scripts/verify-static-runtime.sh scripts/smoke.sh scripts/test-core-api.sh
+
+      - name: Run unit + HTTP test suite
+        # `make test` runs generate-protocol then (asdf:test-system :gr8s).
+        # asdf:test-system exits non-zero if any FiveAM test fails, so a red
+        # suite fails the job.
+        #
+        # CL_SOURCE_REGISTRY points ASDF at the repo root (for gr8s.asd) and at
+        # the vendored ocicl/ tree recursively (//) for every dependency. The
+        # recursive scan is needed because deps' secondary systems (e.g.
+        # 0conf/dns-wire, defined inside 0conf.asd) are not individual rows in
+        # ocicl.csv, so ocicl's name-keyed search can't resolve them; finding
+        # the .asd files directly does. Trailing ':' inherits the ocicl config.
+        env:
+          CL_SOURCE_REGISTRY: "${{ github.workspace }}/:${{ github.workspace }}/ocicl//:"
+        run: make test
+
+  privileged:
+    name: privileged dataplane (self-hosted, opt-in)
+    # Hosted runners cannot load BPF/cgroups/veths. Trigger this by hand
+    # (Actions tab -> CI -> Run workflow) on a root-capable self-hosted runner
+    # labelled `gr8s-root`. It is never part of the PR gate.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, gr8s-root]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Dataplane + CNI + kernel tests
+        run: |
+          make test-endpoint-policy-kernel
+          make test-service-lb
+          make smoke-service-lb
+          make smoke-service-lb-agent

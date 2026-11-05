@@ -92,8 +92,10 @@ A hostNetwork Pod has no address of its own, so it reports its node's as its Pod
       (let ((*pod-status-write* t)) (core-resource-request-object "Pod"))
       (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "")
                                                      :separator '(#\;))))
-             (patch (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t))))
-        (cond ((equal content-type "application/json-patch+json") (apply-core-json-patch current patch))
+             (applied (equal content-type "application/apply-patch+yaml"))
+             (patch (unless applied (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)))))
+        (cond (applied (apply-pod-patched-object (copy-json-object current) "status"))
+              ((equal content-type "application/json-patch+json") (apply-core-json-patch current patch))
               ((member content-type '("application/merge-patch+json" "application/strategic-merge-patch+json")
                        :test #'equal)
                (merge-json-object (copy-json-object current) (require-object patch "patch")))
@@ -134,7 +136,8 @@ A hostNetwork Pod has no address of its own, so it reports its node's as its Pod
 
 (defun write-pod-status-response (store reconciler name namespace method)
   "Apply a status write and answer with what the client wrote over the observed status."
-  (let* ((pod (get-pod store namespace name))
+  (let* ((*pod-patch-subresource* "status")
+         (pod (get-pod store namespace name))
          (current (pod-response-object pod (reconcile-pod reconciler namespace name)))
          (input (admit-subresource-write store "pods" "status" namespace name
                                          (require-object (pod-status-write-input current method) "Pod") current

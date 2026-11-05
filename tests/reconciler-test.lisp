@@ -209,6 +209,50 @@
             (is (> (slot-value snapshot 'gr8s.node.v1::revision) old-revision))
             (is (equal (pod-resource-version updated) (slot-value assignment 'gr8s.node.v1::resource-version)))))))))
 
+;; Reads of a Pod the agent has not reported go through runtime-ensure, so they run once
+;; per Pod per request. A full snapshot there made listing N Pending Pods cost N^2 JSON.
+(test reads-of-an-assigned-pod-build-no-snapshot-but-the-worker-tick-still-delivers-changes
+  (with-temporary-store (store directory)
+    (values directory)
+    (gr8s:register-node store (gr8s:make-node-record :id "worker-id" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+    (gr8s:mark-node-ready store "worker-a" (get-universal-time))
+    (gr8s::create-core-resource store "configmaps"
+      (gr8s::core-object "metadata" (gr8s::core-object "name" "settings")
+                         "data" (gr8s::core-object "key" "one"))
+      "default")
+    (let* ((server (gr8s::%make-node-grpc-server :store store))
+           (runtime (gr8s::make-control-plane-runtime store server))
+           (reconciler (make-reconciler store runtime))
+           (object (com.inuoe.jzon:parse *valid-pod-json*))
+           (builds 0))
+      (setf (gethash "volumes" (gethash "spec" object))
+            (vector (gr8s::core-object "name" "settings"
+                                       "configMap" (gr8s::core-object "name" "settings"))))
+      (create-pod store (parse-pod (com.inuoe.jzon:stringify object)))
+      (sb-int:encapsulate 'gr8s::node-desired-state-snapshot 'count-builds
+                          (lambda (function &rest arguments)
+                            (incf builds)
+                            (apply function arguments)))
+      (unwind-protect
+           (progn
+             (gr8s::reconcile-pod reconciler "default" "hello")
+             (is (= 1 builds) "the first read schedules the Pod and publishes it")
+             (let ((revision (slot-value (gr8s::current-node-snapshot server "worker-a") 'gr8s.node.v1::revision)))
+               (dotimes (iteration 20)
+                 (gr8s::reconcile-pod reconciler "default" "hello"))
+               (is (= 1 builds) "later reads find the Pod's revision already published")
+               (gr8s::update-core-resource store "configmaps" "default" "settings"
+                 (lambda (settings)
+                   (setf (gethash "data" settings) (gr8s::core-object "key" "two"))
+                   settings))
+               (gr8s::publish-service-discovery-snapshots runtime)
+               (let* ((snapshot (gr8s::current-node-snapshot server "worker-a"))
+                      (assignment (first (slot-value snapshot 'gr8s.node.v1::pods))))
+                 (is (> (slot-value snapshot 'gr8s.node.v1::revision) revision))
+                 (is (some (lambda (octets) (search "two" (trivial-utf-8:utf-8-bytes-to-string octets)))
+                           (slot-value assignment 'gr8s.node.v1::resource-objects-json))))))
+        (sb-int:unencapsulate 'gr8s::node-desired-state-snapshot 'count-builds)))))
+
 (test pending-agent-work-does-not-flood-identical-desired-state-snapshots
   (with-temporary-store (store directory)
     (values directory)

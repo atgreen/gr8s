@@ -337,6 +337,16 @@ loopback. Agents advertise the source IPv4 address of their control connection
 for VXLAN, or use an explicit `--node-address` on multi-interface hosts. The
 local node name can be changed with `--node-name`.
 
+`--containerd-no-sync` is off by default and is for disposable test machines only.
+It makes the managed containerd skip fsync on its metadata database (bbolt
+`no_sync`), which shortens Pod startup on virtual disks where a flush takes
+hundreds of milliseconds. The snapshotter and runc still sync. After a host crash or power loss, containerd's metadata can be lost
+or corrupted, and containerd may then not start until its state is removed. A gr8s
+process crash is unaffected, and the flag changes nothing about how gr8s itself
+persists state. `scripts/test-podtemplates-sonobuoy.py` passes it only when asked,
+and records the setting as `containerdNoSync` in `report.json`, so compare runs only
+when it matches.
+
 Enrollment verifies the server certificate against `--ca-pin` before sending the
 one-time join token. It generates the private key on the node and stores
 `node.key`, `node.crt`, `ca.crt`, the assigned Pod CIDR, and the last-applied
