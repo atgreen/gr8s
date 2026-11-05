@@ -295,3 +295,33 @@
         (setf (gr8s::pod-store-template-history-floor store) revision)
         (signals gr8s::kubernetes-error
           (gr8s::template-watch-events store "default" "" "" (1- revision) :resource "configmaps"))))))
+
+(test api-server-outlasts-more-open-watches-than-hunchentoots-default
+  (with-crd-api (store path)
+    (values store path)
+    (let ((acceptors (list (make-instance 'gr8s::gr8s-acceptor :address "127.0.0.1" :port 0))))
+      (dolist (acceptor acceptors)
+        (is (<= 1000 (hunchentoot::taskmaster-max-thread-count (hunchentoot::acceptor-taskmaster acceptor))))))))
+
+(defun openapi-v3-patch-for-kind (document kind)
+  "Find a patch operation for KIND in a document's paths, as kubectl's verifier does."
+  (loop for item being the hash-values of (gethash "paths" document)
+        for patch = (gethash "patch" item)
+        when (and patch (equal kind (gethash "kind" (gethash "x-kubernetes-group-version-kind" patch))))
+          return patch))
+
+(test every-patchable-resource-tells-kubectl-it-validates-fields
+  (with-crd-api (store path)
+    (values store path)
+    (let ((urls (gethash "paths" (crd-api-request 200 "/openapi/v3"))))
+      (dolist (entry '(("api/v1" "Service") ("api/v1" "Namespace") ("api/v1" "ServiceAccount")
+                       ("apis/apps/v1" "Deployment") ("apis/batch/v1" "Job")))
+        (is (gethash (first entry) urls) "~A is not advertised" (first entry))
+        (let* ((document (crd-api-request 200 (format nil "/openapi/v3/~A" (first entry))))
+               (patch (openapi-v3-patch-for-kind document (second entry))))
+          (is (hash-table-p patch) "~A has no patch operation" (second entry))
+          (when patch
+            (is (find "fieldValidation" (gethash "parameters" patch) :test #'equal
+                      :key (lambda (parameter) (gethash "name" parameter))))))))
+    ;; Paths that discovery does not back are still absent.
+    (crd-api-request 404 "/openapi/v3/apis/none.example.com/v1")))

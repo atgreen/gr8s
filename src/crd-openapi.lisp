@@ -181,9 +181,111 @@ them at its root is published as a bare object."
                             "apis/storage.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/storage.k8s.io/v1?hash=gr8s-storage-v1")
                             "api/v1" (core-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")
                             "apis/events.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1"))))
+    ;; Every group discovery advertises has a document, even one with only generic paths.
+    (loop for group across (gethash "groups" (com.inuoe.jzon:parse (api-groups-response store)))
+          do (loop for version across (gethash "versions" group)
+                   for key = (concatenate 'string "apis/" (gethash "groupVersion" version))
+                   unless (gethash key paths)
+                     do (setf (gethash key paths) (core-object "serverRelativeURL" (format nil "/openapi/v3/~A?hash=gr8s-~A" key (gethash "version" version))))))
     (dolist (group (crd-api-groups store))
       (loop for version across (gethash "versions" group)
             for key = (concatenate 'string "apis/" (gethash "groupVersion" version))
             do (setf (gethash key paths) (core-object "serverRelativeURL"
                                                      (format nil "/openapi/v3/~A?hash=~D" key (pod-store-resource-revision store))))))
     (json-response (core-object "paths" paths))))
+
+(defvar *openapi-v3-completing* nil
+  "True while a hand-written OpenAPI document is being read for completion.")
+
+(defun openapi-v3-document-group-version (path)
+  "Return the group and version a /openapi/v3/ document PATH describes, or NIL."
+  (let ((parts (rest (rest (rest (uiop:split-string path :separator '(#\/)))))))
+    (cond ((and (= 2 (length parts)) (equal "api" (first parts))) (values "" (second parts) t))
+          ((and (= 3 (length parts)) (equal "apis" (first parts))) (values (second parts) (third parts) t)))))
+
+(defun openapi-v3-kind-patched-p (paths kind group version)
+  "Report whether PATHS already offers a patch operation for this kind."
+  (loop for item being the hash-values of paths
+        for patch = (and (hash-table-p item) (gethash "patch" item))
+        for gvk = (and patch (gethash "x-kubernetes-group-version-kind" patch))
+        thereis (and (hash-table-p gvk) (equal kind (gethash "kind" gvk))
+                     (equal group (gethash "group" gvk)) (equal version (gethash "version" gvk)))))
+
+(defun openapi-v3-add-resource-paths (paths resource group version)
+  "Describe a discovered RESOURCE's operations, so that clients can see which options each takes.
+kubectl falls back to the v2 document when a kind has no patch operation here."
+  (let* ((name (gethash "name" resource)) (kind (gethash "kind" resource))
+         (namespaced (gethash "namespaced" resource))
+         (verbs (coerce (gethash "verbs" resource #()) 'list))
+         (prefix (if (equal group "") (format nil "/api/~A" version) (format nil "/apis/~A/~A" group version)))
+         (collection (format nil "~A/~:[~;namespaces/{namespace}/~]~A" prefix namespaced name))
+         (item (concatenate 'string collection "/{name}")))
+    (flet ((operation (action &optional writes)
+             (let ((operation (core-object "x-kubernetes-action" action
+                                           "operationId" (format nil "~A~A~A" action (remove #\. group) kind)
+                                           "x-kubernetes-group-version-kind" (core-object "group" group "version" version "kind" kind)
+                                           "responses" (core-object "200" (core-object "description" "OK")))))
+               (when writes
+                 (setf (gethash "parameters" operation)
+                       (vector (core-object "name" "fieldValidation" "in" "query"
+                                            "schema" (core-object "type" "string" "enum" #("Strict" "Warn" "Ignore"))))))
+               operation))
+           (parameters (&rest names)
+             (coerce (loop for parameter in names
+                           collect (core-object "name" parameter "in" "path" "required" t "schema" (core-object "type" "string")))
+                     'vector))
+           (add (path verb operation parameters)
+             (let ((entry (or (gethash path paths)
+                              (setf (gethash path paths) (core-object "parameters" parameters)))))
+               (unless (gethash verb entry) (setf (gethash verb entry) operation)))))
+      (let ((collection-parameters (if namespaced (parameters "namespace") (parameters)))
+            (item-parameters (if namespaced (parameters "namespace" "name") (parameters "name"))))
+        (when (member "list" verbs :test #'equal) (add collection "get" (operation "list") collection-parameters))
+        (when (member "create" verbs :test #'equal) (add collection "post" (operation "post" t) collection-parameters))
+        (when (member "get" verbs :test #'equal) (add item "get" (operation "get") item-parameters))
+        (when (member "update" verbs :test #'equal) (add item "put" (operation "put" t) item-parameters))
+        (when (member "patch" verbs :test #'equal) (add item "patch" (operation "patch" t) item-parameters))
+        (when (member "delete" verbs :test #'equal) (add item "delete" (operation "delete") item-parameters))))))
+
+(defun openapi-v3-declare-field-validation (paths)
+  "Declare fieldValidation on every write, since every request handler honors it."
+  (loop for item being the hash-values of paths
+        do (dolist (verb '("post" "put" "patch"))
+             (let ((operation (and (hash-table-p item) (gethash verb item))))
+               (when (and operation
+                          (not (find "fieldValidation" (gethash "parameters" operation #()) :test #'equal
+                                     :key (lambda (parameter) (gethash "name" parameter)))))
+                 (setf (gethash "parameters" operation)
+                       (concatenate 'vector (gethash "parameters" operation #())
+                                    (vector (core-object "name" "fieldValidation" "in" "query"
+                                                         "schema" (core-object "type" "string" "enum" #("Strict" "Warn" "Ignore")))))))))))
+
+(defun openapi-v3-complete-response (store runtime reconciler path)
+  "Serve an OpenAPI v3 group document covering every resource its version discovers."
+  (multiple-value-bind (group version found) (openapi-v3-document-group-version path)
+    (let* ((body (let ((*openapi-v3-completing* t)) (route-http-request store runtime reconciler path :get)))
+           (status (hunchentoot:return-code*)))
+      (unless found (return-from openapi-v3-complete-response body))
+      (let* ((discovery (com.inuoe.jzon:parse
+                         (let ((*openapi-v3-completing* t))
+                           (route-http-request store runtime reconciler
+                                               (if (equal group "") (format nil "/api/~A" version) (format nil "/apis/~A/~A" group version))
+                                               :get))))
+             (resources (gethash "resources" discovery #()))
+             (document (if (= status 200)
+                           (com.inuoe.jzon:parse body)
+                           (core-object "openapi" "3.0.0" "info" (core-object "title" "gr8s" "version" "v1")
+                                        "paths" (core-object) "components" (core-object "schemas" (core-object)))))
+             (paths (gethash "paths" document)))
+        (when (zerop (length resources))
+          (setf (hunchentoot:return-code*) status)
+          (return-from openapi-v3-complete-response body))
+        (loop for resource across resources
+              for own-group = (gethash "group" resource group)
+              unless (or (find #\/ (gethash "name" resource)) (not (equal own-group group))
+                         (openapi-v3-kind-patched-p paths (gethash "kind" resource) group version))
+                do (openapi-v3-add-resource-paths paths resource group version))
+        (openapi-v3-declare-field-validation paths)
+        (setf (hunchentoot:return-code*) 200
+              (hunchentoot:content-type*) "application/json")
+        (com.inuoe.jzon:stringify document)))))

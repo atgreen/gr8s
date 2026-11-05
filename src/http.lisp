@@ -1129,6 +1129,8 @@ Clients that can read an object as well say so with a further media range."
   "Answer the current request from whichever API handler serves PATH."
   (progn
         (cond
+          ((and (uiop:string-prefix-p "/openapi/v3/" path) (not *openapi-v3-completing*))
+           (openapi-v3-complete-response store runtime reconciler path))
           ((string= path "/metrics")
            (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
            (concatenate 'string (runtime-network-metrics runtime) (gateway-metrics-text)))
