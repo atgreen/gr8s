@@ -632,7 +632,7 @@ handler and never gets here. A busy host makes this race likely."
            (uiop:ensure-directory-pathname (getf options :state-directory)))
          (store (open-store state-directory))
          (pool (ensure-controller-node-pool store state-directory options))
-         (pki (ensure-cluster-pki (merge-pathnames "pki/" state-directory)))
+         (pki (ensure-control-plane-pki state-directory options))
          (server nil)
          (api-server nil)
          (debug-port nil)
@@ -728,6 +728,17 @@ handler and never gets here. A busy host makes this race likely."
       (when ha (stop-ha-control-plane ha))
       (when node-server (stop-node-grpc-server node-server))))
   0)
+
+(defun ensure-control-plane-pki (state-directory options)
+  "Return this control plane's PKI. One joining a Raft cluster gets the cluster's node CA first."
+  (let ((root (merge-pathnames "pki/" state-directory)))
+    (if (getf options :raft-join)
+        (multiple-value-bind (host port) (parse-agent-server (getf options :raft-join))
+          (ensure-joining-control-plane-pki root (or (getf options :raft-id) (getf options :node-name)) host port
+                                            :node-name (getf options :raft-node-name)
+                                            :token (getf options :raft-token)
+                                            :ca-pin (getf options :raft-ca-pin)))
+        (ensure-cluster-pki root))))
 
 (defun maybe-start-ha-control-plane (store pki options)
   "Start a Raft-replicated control plane when --raft-init or --raft-join was

@@ -284,8 +284,13 @@ Around the datastore:
   they come from a separate CA and token store. A joiner checks the CA against its
   pin before sending anything. Voters hold the CA key so they can admit replacements
   after a failover; witnesses don't, but their log does hold replicated state, which
-  is why it's created with mode `0600`. Member certificates last a year and aren't
-  renewed yet.
+  is why it's created with mode `0600`. Member certificates last a year and renew
+  themselves in their last 30 days: a voter signs its own, and a witness asks a
+  voter, so a witness that stays offline past expiry has to enroll again.
+- **Voters share the node CA** — a joining control plane receives the cluster's
+  node CA when it enrolls, so agents and API clients keep working after a failover.
+  Join with a new state directory, because one that already has a different CA is
+  refused rather than orphaning the certificates it issued.
 
 Three commands and a flag surface it:
 
