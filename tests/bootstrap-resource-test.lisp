@@ -366,3 +366,17 @@
                (is (search " 201 " status) "got ~A" status))
              (is (equal "chunked" (gethash "name" (gethash "metadata" (gr8s::get-core-resource store "namespaces" nil "chunked"))))))
         (usocket:socket-close socket)))))
+
+(test componentstatuses-print-their-health-as-a-table
+  (with-core-api (store directory)
+    (values store directory)
+    (multiple-value-bind (body status)
+        (drakma:http-request "http://127.0.0.1:18089/api/v1/componentstatuses"
+                             :accept "application/json;as=Table;v=v1;g=meta.k8s.io")
+      (is (= 200 status))
+      (let* ((table (com.inuoe.jzon:parse (if (stringp body) body (trivial-utf-8:utf-8-bytes-to-string body))))
+             (columns (map 'list (lambda (column) (gethash "name" column)) (gethash "columnDefinitions" table)))
+             (row (gethash "cells" (aref (gethash "rows" table) 0))))
+        (is (equal "Table" (gethash "kind" table)))
+        (is (equal '("Name" "Status" "Message" "Error") columns))
+        (is (equalp #("controller-manager" "Healthy" "ok" "") row))))))
