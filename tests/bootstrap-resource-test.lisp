@@ -152,5 +152,157 @@
             for slash = (position #\/ name)
             when slash
               do (is (discovery-entry document (subseq name 0 slash)) "~A has no parent" name))
-      (dolist (name '("nodes/status" "namespaces/status" "namespaces/finalize" "pods/attach" "pods/exec" "serviceaccounts/token"))
+      (dolist (name '("nodes/status" "namespaces/status" "namespaces/finalize" "pods/attach" "pods/exec" "pods/portforward" "serviceaccounts/token"))
         (is (discovery-entry document name) "~A is served but not discoverable" name)))))
+
+(defun node-watch-names (events)
+  "Return (type name) for Node watch EVENTS."
+  (mapcar (lambda (event) (list (gethash "type" event) (gethash "name" (gethash "metadata" (gethash "object" event))))) events))
+
+(test node-changes-clients-can-see-get-revisions-and-events
+  (with-temporary-store (store directory)
+    (values directory)
+    (let ((start (gr8s::pod-store-pod-revision store)))
+      (gr8s:register-node store (gr8s:make-node-record :id "a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+      (let ((registered (gr8s::node-record-resource-version (gr8s::get-node store "worker-a"))))
+        (gr8s:mark-node-ready store "worker-a" 100)
+        (let ((ready (gr8s::node-record-resource-version (gr8s::get-node store "worker-a"))))
+          (is (> (parse-integer ready) (parse-integer registered)))
+          ;; A later heartbeat renews the lease, which clients cannot see.
+          (gr8s:mark-node-ready store "worker-a" 110)
+          (is (equal ready (gr8s::node-record-resource-version (gr8s::get-node store "worker-a"))))))
+      (gr8s::update-node-extended-resources store "worker-a" (gr8s::core-object "example.com/gpu" "2"))
+      (gr8s::mark-node-not-ready store "worker-a")
+      (gr8s::mark-node-not-ready store "worker-a")
+      (let ((events (gr8s::node-watch-events store "" "" start)))
+        (is (equal '(("ADDED" "worker-a") ("MODIFIED" "worker-a") ("MODIFIED" "worker-a") ("MODIFIED" "worker-a"))
+                   (node-watch-names events)))
+        (is (apply #'< (mapcar (lambda (event) (parse-integer (gethash "resourceVersion" (gethash "metadata" (gethash "object" event)))))
+                               events)))
+        (is (equal "False" (gethash "status" (aref (gethash "conditions" (gethash "status" (gethash "object" (fourth events)))) 0)))))
+      ;; Resuming returns exactly what came later.
+      (let ((revision (gr8s::pod-store-pod-revision store)))
+        (is (null (gr8s::node-watch-events store "" "" revision)))
+        (gr8s:mark-node-ready store "worker-a" 120)
+        (is (equal '(("MODIFIED" "worker-a")) (node-watch-names (gr8s::node-watch-events store "" "" revision))))))))
+
+(test node-revisions-survive-restart-and-old-revisions-expire
+  (with-temporary-store (store directory)
+    (gr8s:register-node store (gr8s:make-node-record :id "a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+    (gr8s:mark-node-ready store "worker-a" 100)
+    (let* ((before (parse-integer (gr8s::node-record-resource-version (gr8s::get-node store "worker-a"))))
+           (reopened (open-store directory)))
+      (is (= before (parse-integer (gr8s::node-record-resource-version (gr8s::get-node reopened "worker-a")))))
+      (is (>= (gr8s::pod-store-pod-revision reopened) before))
+      ;; The journal is memory-only, so a client from before the restart must relist.
+      (is (= 410 (handler-case (progn (gr8s::node-list-page reopened "" "" (write-to-string (1- before))) 0)
+                   (kubernetes-error (condition) (gr8s::kubernetes-error-status-code condition))))))))
+
+(test node-selectors-turn-leaving-the-selection-into-a-deletion
+  (with-core-api (store directory)
+    (values directory)
+    (check-core-status 201 "/api/v1/nodes" :method :post
+      :object (gr8s::core-object "apiVersion" "v1" "kind" "Node"
+                                 "metadata" (gr8s::core-object "name" "api-a" "labels" (gr8s::core-object "set" "one"))))
+    (let ((revision (gr8s::pod-store-pod-revision store)))
+      (is (= 1 (length (gethash "items" (check-core-status 200 "/api/v1/nodes" :parameters '(("labelSelector" . "set=one")))))))
+      (check-core-status 200 "/api/v1/nodes/api-a" :method :patch :content-type "application/merge-patch+json"
+        :object (gr8s::core-object "metadata" (gr8s::core-object "labels" (gr8s::core-object "set" "two"))))
+      (is (= 0 (length (gethash "items" (check-core-status 200 "/api/v1/nodes" :parameters '(("labelSelector" . "set=one")))))))
+      (is (equal '(("DELETED" "api-a")) (node-watch-names (gr8s::node-watch-events store "set=one" "" revision))))
+      (is (equal '(("ADDED" "api-a")) (node-watch-names (gr8s::node-watch-events store "set=two" "" revision))))
+      (is (equal '(("MODIFIED" "api-a")) (node-watch-names (gr8s::node-watch-events store "" "metadata.name=api-a" revision)))))))
+
+(test node-list-and-watch-share-a-revision-over-http
+  (with-core-api (store directory)
+    (values directory)
+    (gr8s:register-node store (gr8s:make-node-record :id "a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+    (let* ((list (check-core-status 200 "/api/v1/nodes"))
+           (revision (gethash "resourceVersion" (gethash "metadata" list))))
+      (is (equal "NodeList" (gethash "kind" list)))
+      (is (= (gr8s::pod-store-pod-revision store) (parse-integer revision)))
+      (let ((verbs (coerce (gethash "verbs" (discovery-entry (check-core-status 200 "/api/v1") "nodes")) 'list)))
+        (is (equal '("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch") verbs)))
+      (sb-sys:with-deadline (:seconds 10)
+        (multiple-value-bind (stream code)
+            (drakma:http-request "http://127.0.0.1:18089/api/v1/nodes" :want-stream t
+                                 :parameters `(("watch" . "true") ("resourceVersion" . ,revision) ("timeoutSeconds" . "3")))
+          (unwind-protect
+               (progn
+                 (is (= 200 code))
+                 (gr8s:mark-node-ready store "worker-a" 100)
+                 (let ((event (read-template-watch-event stream)))
+                   (is (equal "MODIFIED" (gethash "type" event)))
+                   (is (equal "True" (gethash "status" (aref (gethash "conditions" (gethash "status" (gethash "object" event))) 0))))))
+            (close stream))))
+      (check-core-status 400 "/api/v1/nodes" :parameters '(("watch" . "true") ("resourceVersion" . "not-a-number")))
+      (check-core-status 504 "/api/v1/nodes" :parameters '(("watch" . "true") ("resourceVersion" . "999999"))))))
+
+(test node-delete-collection-removes-api-nodes-and-refuses-agent-nodes
+  (with-core-api (store directory)
+    (values directory)
+    (flet ((node (name label)
+             (check-core-status 201 "/api/v1/nodes" :method :post
+               :object (gr8s::core-object "apiVersion" "v1" "kind" "Node"
+                                          "metadata" (gr8s::core-object "name" name "labels" (gr8s::core-object "set" label))))))
+      (node "api-a" "one")
+      (node "api-b" "one")
+      (node "api-c" "two"))
+    (let ((revision (gr8s::pod-store-pod-revision store)))
+      (check-core-status 200 "/api/v1/nodes" :method :delete :parameters '(("labelSelector" . "set=one")))
+      (is (null (ignore-errors (gr8s::get-node store "api-a"))))
+      (is (gr8s::get-node store "api-c"))
+      (is (equal '(("DELETED" "api-a") ("DELETED" "api-b")) (node-watch-names (gr8s::node-watch-events store "" "" revision)))))
+    (gr8s:register-node store (gr8s:make-node-record :id "a" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+    ;; An agent's Node stays, and so does the rest of the selection: nothing happens by halves.
+    (check-core-status 409 "/api/v1/nodes" :method :delete)
+    (is (gr8s::get-node store "api-c"))
+    (is (gr8s::get-node store "worker-a"))))
+
+(test apiservices-watch-follows-custom-resource-versions
+  (with-crd-api (store directory)
+    (values directory)
+    ;; Revision 0 would mean "any", so give the list a real one to resume from.
+    (gr8s::create-core-resource store "configmaps" (gr8s::core-object "metadata" (gr8s::core-object "name" "one")) "alpha")
+    (let ((collection "http://127.0.0.1:18094/apis/apiregistration.k8s.io/v1/apiservices")
+          (revision (gethash "resourceVersion" (gethash "metadata" (crd-api-request 200 "/apis/apiregistration.k8s.io/v1/apiservices")))))
+      (sb-sys:with-deadline (:seconds 15)
+        (multiple-value-bind (stream code)
+            (drakma:http-request collection :want-stream t
+                                 :parameters `(("watch" . "true") ("resourceVersion" . ,revision) ("timeoutSeconds" . "5")
+                                               ("allowWatchBookmarks" . "true")))
+          (unwind-protect
+               (progn
+                 (is (= 200 code))
+                 (crd-api-request 201 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post :object (crd-fixture))
+                 (let ((event (read-template-watch-event stream)))
+                   (is (equal "ADDED" (gethash "type" event)))
+                   (is (equal (gethash "group" (gethash "spec" (crd-fixture)))
+                              (gethash "group" (gethash "spec" (gethash "object" event)))))))
+            (close stream)))
+        ;; That revision is now behind a change nothing recorded, so it must relist.
+        (is (= 410 (nth-value 1 (drakma:http-request collection :parameters `(("watch" . "true") ("resourceVersion" . ,revision) ("timeoutSeconds" . "1")))))))
+      (dolist (event (let ((*watch-test-server* "http://127.0.0.1:18094"))
+                       (apply #'collect-watch-stream "/apis/apiregistration.k8s.io/v1/apiservices" (watch-list-parameters))))
+        (is (member (gethash "type" event) '("ADDED" "BOOKMARK") :test #'equal))))))
+
+(test rbac-objects-accept-the-colons-upstream-names-use
+  (with-core-api (store directory)
+    (values store directory)
+    (loop with prefix = "/apis/rbac.authorization.k8s.io/v1/"
+          for (collection kind) in '(("clusterroles" "ClusterRole") ("clusterrolebindings" "ClusterRoleBinding")
+                                     ("namespaces/alpha/roles" "Role") ("namespaces/alpha/rolebindings" "RoleBinding"))
+          for name = "wardler:aggregator-1:auth-delegator"
+          for object = (gr8s::core-object "apiVersion" "rbac.authorization.k8s.io/v1" "kind" kind
+                                          "metadata" (gr8s::core-object "name" name))
+          do (if (search "binding" collection)
+                 (setf (gethash "roleRef" object)
+                       (gr8s::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "ClusterRole" "name" "system:auth-delegator")
+                       (gethash "subjects" object) #())
+                 (setf (gethash "rules" object) #()))
+             (check-core-status 201 (concatenate 'string prefix collection) :method :post :object object)
+             (is (equal name (gethash "name" (gethash "metadata" (check-core-status 200 (format nil "~A~A/~A" prefix collection name))))))
+             (check-core-status 200 (format nil "~A~A/~A" prefix collection name) :method :delete))
+    ;; Other kinds keep DNS names.
+    (check-core-status 422 "/api/v1/namespaces/alpha/configmaps" :method :post
+      :object (gr8s::core-object "metadata" (gr8s::core-object "name" "not:dns")))))

@@ -339,3 +339,25 @@
       (is (= 200 status))
       (is (plusp (length (cdr (assoc :x-kubernetes-pf-flowschema-uid headers)))))
       (is (plusp (length (cdr (assoc :x-kubernetes-pf-prioritylevel-uid headers))))))))
+
+(test custom-resource-failures-are-reported-together
+  (with-core-api (store path)
+    (values store path)
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "default")))
+    (check-core-status 201 +rule-crd-path+ :method :post
+      :object (rule-definition "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"enum\":[\"sentinel-a\"]},\"b\":{\"type\":\"string\",\"enum\":[\"sentinel-b\"]}}}"))
+    (let* ((object (rule-object "one" "a" "x" "b" "y"))
+           (metadata (gethash "metadata" object)))
+      (setf (gethash "labels" metadata) (gr8s::core-object "#inv/($%)/alid" ">htt$://"))
+      (let* ((status (check-core-status 422 +rule-path+ :method :post :object object))
+             (message (gethash "message" status)))
+        (is (search "sentinel-a" message) "~A" message)
+        (is (search "sentinel-b" message) "~A" message)))))
+
+(test oneof-still-judges-branches-while-collecting
+  (let ((schema (gr8s::core-object "type" "object" "properties"
+                  (gr8s::core-object "x" (gr8s::core-object "type" "integer" "anyOf"
+                                            (vector (gr8s::core-object "minimum" 5) (gr8s::core-object "maximum" 1)))))))
+    (is (hash-table-p (gr8s::crd-validate-all (gr8s::core-object "x" 7) schema "resource")))
+    (signals kubernetes-error (gr8s::crd-validate-all (gr8s::core-object "x" 3) schema "resource"))))

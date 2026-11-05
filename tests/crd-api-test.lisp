@@ -36,6 +36,8 @@
      (let ((server (start-server :address "127.0.0.1" :port 18094 :store ,store :runtime (make-fake-runtime))))
        (unwind-protect (progn ,@body) (stop-server server)))))
 
+(defvar *watch-test-server*)
+
 (defun crd-api-request (expected path &key (method :get) object text content-type parameters)
   "Issue a real HTTP request and assert its actual Kubernetes response code."
   (multiple-value-bind (body status)
@@ -362,3 +364,34 @@
         (is (find "patched" (gethash "conditions" (gethash "status" patched)) :test #'equal :key (lambda (condition) (gethash "message" condition))))))))
 
 (in-suite gr8s)
+
+(test every-api-group-document-answers-with-its-listed-preferred-version
+  ;; Upstream's Discovery spec requests each group with a trailing slash.
+  (with-crd-api (store path)
+    (values store path)
+    (crd-api-request 201 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post :object (crd-fixture))
+    (let ((groups (gethash "groups" (crd-api-request 200 "/apis"))))
+      (is (find "rbac.authorization.k8s.io" groups :test #'equal :key (lambda (group) (gethash "name" group))))
+      (is (find "widgets.example.test" groups :test #'equal :key (lambda (group) (gethash "name" group))))
+      (loop for group across groups
+            for name = (gethash "name" group)
+            do (dolist (suffix '("" "/"))
+                 (let ((document (crd-api-request 200 (format nil "/apis/~A~A" name suffix))))
+                   (is (equal "APIGroup" (gethash "kind" document)) "~A" name)
+                   (is (equal name (gethash "name" document)))
+                   (is (equal (gethash "groupVersion" (gethash "preferredVersion" group))
+                              (gethash "groupVersion" (gethash "preferredVersion" document)))
+                       "~A prefers differently in /apis" name)))))))
+
+(test watch-list-bookmark-names-the-requested-custom-version
+  (with-crd-api (store path)
+    (values store path)
+    (crd-api-request 201 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post :object (crd-fixture))
+    (let* ((events (let ((*watch-test-server* "http://127.0.0.1:18094"))
+                     (apply #'collect-watch-stream "/apis/widgets.example.test/v1/namespaces/default/widgets" (watch-list-parameters))))
+           (object (gethash "object" (first (last events)))))
+      (is (equal "BOOKMARK" (gethash "type" (first (last events)))))
+      (is (equal "Widget" (gethash "kind" object)))
+      (is (equal "widgets.example.test/v1" (gethash "apiVersion" object)))
+      ;; Nothing from the schema, such as defaults, belongs on a bookmark.
+      (is (null (gethash "spec" object))))))

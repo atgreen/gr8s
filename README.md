@@ -284,8 +284,13 @@ Around the datastore:
   they come from a separate CA and token store. A joiner checks the CA against its
   pin before sending anything. Voters hold the CA key so they can admit replacements
   after a failover; witnesses don't, but their log does hold replicated state, which
-  is why it's created with mode `0600`. Member certificates last a year and aren't
-  renewed yet.
+  is why it's created with mode `0600`. Member certificates last a year and renew
+  themselves in their last 30 days: a voter signs its own, and a witness asks a
+  voter, so a witness that stays offline past expiry has to enroll again.
+- **Voters share the node CA** — a joining control plane receives the cluster's
+  node CA when it enrolls, so agents and API clients keep working after a failover.
+  Join with a new state directory, because one that already has a different CA is
+  refused rather than orphaning the certificates it issued.
 
 Three commands and a flag surface it:
 
@@ -727,6 +732,13 @@ matched as the kubelet matches them apart from `[...]` patterns in host names. T
 no node-wide credential file or credential provider plugin. An image already on a node
 isn't checked against a Pod's credentials, so any Pod there can use it with
 `IfNotPresent`; upstream's kubelet has checked this by default since v1.35.
+`kubectl port-forward` works over its WebSocket tunnel and over plain SPDY, for Pods on
+any node. containerd reaches the port inside the Pod's network namespace, so a server
+listening only on the Pod's localhost works. Each forwarded connection is one operation
+on the node's session, with a 1 MiB window each way, so a slow client or Pod pauses its
+own connection instead of filling memory. It can still hold up the other connections
+of the same `kubectl`, as upstream's can. As with `exec` and `attach`, it takes the
+`create` verb on the subresource, even through a WebSocket's GET.
 Ephemeral containers are added through `pods/ephemeralcontainers`, and `pods/resize`
 changes CPU and memory in place, or restarts that container under a RestartContainer
 policy. Readiness gates and a Pod's own `resources` remain unsupported.

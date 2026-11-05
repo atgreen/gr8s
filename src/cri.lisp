@@ -107,6 +107,20 @@
            (gr8s.cri.v1::url response))
       (ag-grpc:channel-close channel))))
 
+(defun cri-port-forward-url (socket-path sandbox-id port &key (timeout 30))
+  "Create a one-time CRI streaming URL reaching PORT in SANDBOX-ID's network namespace."
+  (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
+    (unwind-protect
+         (multiple-value-bind (response status)
+             (gr8s.cri.v1::runtime-service-port-forward
+              (gr8s.cri.v1::make-runtime-service-stub channel)
+              (make-instance 'gr8s.cri.v1::port-forward-request
+                             :pod-sandbox-id sandbox-id :port (list port))
+              :timeout timeout)
+           (ensure-cri-status "PortForward" status)
+           (gr8s.cri.v1::url response))
+      (ag-grpc:channel-close channel))))
+
 (defparameter *cri-runtime-request-timeout* 120
   "Pinned kubelet CRI request overhead/cleanup budget, separate from command duration.")
 

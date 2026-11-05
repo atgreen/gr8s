@@ -166,3 +166,96 @@
       (is (equal (write-to-string (gr8s::pod-store-pod-revision store))
                  (gethash "resourceVersion" (gethash "metadata" page)))))
     (signals kubernetes-error (gr8s::pod-watch-page store nil "" "" "12345" nil))))
+
+;;; WatchList, as client-go's reflector asks for it.
+
+(defvar *watch-test-server* "http://127.0.0.1:18089" "The server COLLECT-WATCH-STREAM asks.")
+
+(defun collect-watch-stream (path &rest parameters)
+  "Read a watch at PATH until the server's timeoutSeconds ends it, returning its events."
+  (sb-sys:with-deadline (:seconds 20)
+    (multiple-value-bind (stream code)
+        (drakma:http-request (concatenate 'string *watch-test-server* path) :want-stream t
+                             :parameters (append '(("watch" . "true") ("timeoutSeconds" . "1")) parameters))
+      (unwind-protect
+           (progn
+             (is (= 200 code) "~A answered ~A" path code)
+             (when (= 200 code)
+               (loop for event = (handler-case (read-template-watch-event stream)
+                                   (end-of-file () nil))
+                     while event collect event)))
+        (close stream)))))
+
+(defun watch-list-parameters ()
+  (list '("sendInitialEvents" . "true") '("resourceVersionMatch" . "NotOlderThan") '("allowWatchBookmarks" . "true")))
+
+(defun check-watch-list-events (events kind added)
+  "Require ADDED names of KIND, then only the bookmark that ends the initial events."
+  (is (equal added (loop for event in (butlast events)
+                         do (is (equal "ADDED" (gethash "type" event)))
+                         collect (gethash "name" (gethash "metadata" (gethash "object" event))))))
+  (let* ((bookmark (first (last events)))
+         (object (and bookmark (gethash "object" bookmark)))
+         (metadata (and object (gethash "metadata" object))))
+    (is (equal "BOOKMARK" (and bookmark (gethash "type" bookmark))))
+    (is (equal kind (and object (gethash "kind" object))))
+    (is (and metadata (plusp (length (gethash "resourceVersion" metadata)))))
+    (is (equal "true" (and metadata (gethash "annotations" metadata)
+                           (gethash "k8s.io/initial-events-end" (gethash "annotations" metadata)))))))
+
+(test watch-list-ends-initial-events-with-a-bookmark-on-every-storage-path
+  (with-core-api (store path)
+    (values path)
+    (gr8s::create-core-resource store "configmaps" (gr8s::core-object "metadata" (gr8s::core-object "name" "one")) "alpha")
+    (gr8s::create-core-resource store "configmaps" (gr8s::core-object "metadata" (gr8s::core-object "name" "two")) "alpha")
+    (gr8s:register-node store (gr8s:make-node-record :id "node-a" :name "node-a" :pod-cidr "10.88.0.0/24"))
+    (create-pod store (watch-test-pod "web"))
+    (check-watch-list-events (apply #'collect-watch-stream "/api/v1/namespaces/alpha/configmaps" (watch-list-parameters))
+                             "ConfigMap" '("one" "two"))
+    (check-watch-list-events (apply #'collect-watch-stream "/api/v1/configmaps" (watch-list-parameters))
+                             "ConfigMap" '("one" "two"))
+    (check-watch-list-events (apply #'collect-watch-stream "/api/v1/nodes" (watch-list-parameters)) "Node" '("node-a"))
+    (check-watch-list-events (apply #'collect-watch-stream "/api/v1/pods" (watch-list-parameters)) "Pod" '("web"))
+    ;; The other projections each rewrite what they serve, which must leave the bookmark readable.
+    (check-watch-list-events (apply #'collect-watch-stream "/apis/events.k8s.io/v1/events" (watch-list-parameters)) "Event" nil)
+    (check-watch-list-events (apply #'collect-watch-stream "/apis/autoscaling/v1/horizontalpodautoscalers" (watch-list-parameters))
+                             "HorizontalPodAutoscaler" nil)
+    (check-watch-list-events (apply #'collect-watch-stream "/apis/apps/v1/deployments" (watch-list-parameters)) "Deployment" nil)))
+
+(test watch-list-sees-changes-after-the-bookmark
+  (with-core-api (store path)
+    (values path)
+    (gr8s::create-core-resource store "configmaps" (gr8s::core-object "metadata" (gr8s::core-object "name" "one")) "alpha")
+    (sb-sys:with-deadline (:seconds 10)
+      (multiple-value-bind (stream code)
+          (drakma:http-request "http://127.0.0.1:18089/api/v1/configmaps" :want-stream t
+                               :parameters (append '(("watch" . "true") ("timeoutSeconds" . "3")) (watch-list-parameters)))
+        (unwind-protect
+             (progn
+               (is (= 200 code))
+               (is (equal "ADDED" (gethash "type" (read-template-watch-event stream))))
+               (is (equal "BOOKMARK" (gethash "type" (read-template-watch-event stream))))
+               (gr8s::create-core-resource store "configmaps" (gr8s::core-object "metadata" (gr8s::core-object "name" "two")) "alpha")
+               (let ((event (read-template-watch-event stream)))
+                 (is (equal "ADDED" (gethash "type" event)))
+                 (is (equal "two" (gethash "name" (gethash "metadata" (gethash "object" event)))))))
+          (close stream))))))
+
+(test watch-options-follow-upstream-validation
+  (with-core-api (store path)
+    (values path)
+    (gr8s::create-core-resource store "configmaps" (gr8s::core-object "metadata" (gr8s::core-object "name" "one")) "alpha")
+    (flet ((status (&rest parameters)
+             (nth-value 1 (drakma:http-request "http://127.0.0.1:18089/api/v1/configmaps" :want-stream nil
+                                               :parameters (append '(("watch" . "true") ("timeoutSeconds" . "1")) parameters)))))
+      (is (= 400 (status '("sendInitialEvents" . "true"))))
+      (is (= 400 (status '("sendInitialEvents" . "false"))))
+      (is (= 400 (status '("resourceVersionMatch" . "NotOlderThan"))))
+      (is (= 400 (status '("sendInitialEvents" . "true") '("resourceVersionMatch" . "Exact"))))
+      (is (= 200 (status '("sendInitialEvents" . "true") '("resourceVersionMatch" . "NotOlderThan") '("resourceVersion" . "0")))))
+    ;; An explicit false starts at the latest state with no synthetic events, and no bookmark nobody asked for.
+    (is (null (collect-watch-stream "/api/v1/configmaps" '("sendInitialEvents" . "false") '("resourceVersionMatch" . "NotOlderThan"))))
+    (is (equal '("ADDED")
+               (mapcar (lambda (event) (gethash "type" event))
+                       (collect-watch-stream "/api/v1/configmaps" '("sendInitialEvents" . "true")
+                                             '("resourceVersionMatch" . "NotOlderThan")))))))

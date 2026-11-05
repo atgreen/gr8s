@@ -37,9 +37,11 @@
 (defun join-control-plane (founder store path id &key (node-name id)
                                                    (token (gr8s:create-join-token (member-raft-pki founder) node-name))
                                                    (ca-pin (gr8s::cluster-pki-ca-fingerprint (member-raft-pki founder))))
-  (gr8s::start-ha-control-plane store :id id :join-host "127.0.0.1" :join-port (control-plane-port founder)
-                                      :node-name node-name :token token :ca-pin ca-pin
-                                      :pki (raft-tls-test-pki path)))
+  (let ((pki (gr8s::ensure-joining-control-plane-pki
+              (merge-pathnames "pki/" (uiop:ensure-directory-pathname path)) id
+              "127.0.0.1" (control-plane-port founder) :node-name node-name :token token :ca-pin ca-pin)))
+    (gr8s::start-ha-control-plane store :id id :join-host "127.0.0.1" :join-port (control-plane-port founder)
+                                        :node-name node-name :pki pki)))
 
 (defun rejected-p (function)
   "Return true if calling FUNCTION signals, including by timing out."

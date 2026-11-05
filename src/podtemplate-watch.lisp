@@ -46,12 +46,14 @@
 (defun podtemplate-watch-response (store namespace &optional (resource "podtemplates")
                                    &key page-reader event-reader
                                      (bookmark-kind (and (null page-reader) (core-resource-kind resource)))
-                                     (bookmark-api-version (and (null page-reader) (core-resource-api-version resource))))
+                                     bookmark-api-version)
   "Serve a real Kubernetes JSON watch stream for a resource collection.
 PAGE-READER and EVENT-READER replace the durable journal for separately stored resources."
   (let* ((*table-send-columns* t)
          (rv-text (or (hunchentoot:parameter "resourceVersion") ""))
-         (initial (or (member rv-text '("" "0") :test #'equal) (true-parameter-p (hunchentoot:parameter "sendInitialEvents"))))
+         (send-initial-text (hunchentoot:parameter "sendInitialEvents"))
+         (send-initial (true-parameter-p send-initial-text))
+         (initial (if send-initial-text send-initial (member rv-text '("" "0") :test #'equal)))
          (labels (or (hunchentoot:parameter "labelSelector") ""))
          (fields (or (hunchentoot:parameter "fieldSelector") ""))
          (match (hunchentoot:parameter "resourceVersionMatch"))
@@ -62,12 +64,18 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
     (unless (or (equal rv-text "") (and (plusp (length rv-text)) (every #'digit-char-p rv-text)))
       (core-resource-error 400 "BadRequest" "Invalid resourceVersion"))
     (unless (member match '(nil "" "NotOlderThan") :test #'equal) (core-resource-error 400 "BadRequest" "Unsupported watch resourceVersionMatch"))
-    (when (and (true-parameter-p (hunchentoot:parameter "sendInitialEvents")) (not (equal match "NotOlderThan")))
-      (core-resource-error 400 "BadRequest" "sendInitialEvents requires NotOlderThan"))
+    ;; The same rules as upstream's validateWatchOptions, for what a WatchList client sends.
+    (when (and send-initial-text (not (equal match "NotOlderThan")))
+      (core-resource-error 400 "BadRequest" "sendInitialEvents requires setting resourceVersionMatch to NotOlderThan"))
+    (when (and (member match '("NotOlderThan") :test #'equal) (not send-initial-text))
+      (core-resource-error 400 "BadRequest" "resourceVersionMatch is forbidden for watch unless sendInitialEvents is provided"))
+    ;; Initial events start from a state at least this new; without them, the watch
+    ;; starts exactly at the revision given. No revision at all means the latest either way.
     (multiple-value-bind (page code)
-        (if page-reader
-            (funcall page-reader labels fields rv-text match)
-            (template-list-page store namespace labels fields :resource-version rv-text :match match :resource resource))
+        (let ((match (and initial (not (equal rv-text "")) match)))
+          (if page-reader
+              (funcall page-reader labels fields rv-text match)
+              (template-list-page store namespace labels fields :resource-version rv-text :match match :resource resource)))
       (declare (ignore code))
       (setf revision (parse-integer (gethash "resourceVersion" (gethash "metadata" page))))
       (when initial
@@ -77,22 +85,33 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
     (let* ((out (hunchentoot:send-headers))
            (deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second)))
            (last-bookmark (get-internal-real-time)))
-      (labels ((emit (event)
+      (labels ((write-event (event)
+                 (write-sequence (trivial-utf-8:string-to-utf-8-bytes
+                                  (concatenate 'string (com.inuoe.jzon:stringify event) (string #\Newline))) out)
+                 (finish-output out))
+               (emit (event)
                  (let ((view (crd-api-view (event-api-view event))))
-                   (when (and *table-request* (not (equal "BOOKMARK" (gethash "type" view))) (not (equal "ERROR" (gethash "type" view))))
+                   (when (and *table-request* (not (equal "ERROR" (gethash "type" view))))
                      (setf (gethash "object" view) (table-representation (gethash "object" view))
                            *table-send-columns* nil))
-                   (write-sequence (trivial-utf-8:string-to-utf-8-bytes
-                                    (concatenate 'string (com.inuoe.jzon:stringify view) (string #\Newline))) out))
-                 (finish-output out))
+                   (write-event view)))
                (bookmark (&optional initial-end)
+                 ;; Carries no object to project, so the views that rewrite one would only mangle it.
                  (let ((metadata (core-object "resourceVersion" (write-to-string revision))))
                    (when initial-end (setf (gethash "annotations" metadata) (core-object "k8s.io/initial-events-end" "true")))
-                   (emit (core-object "type" "BOOKMARK" "object" (core-object "apiVersion" bookmark-api-version "kind" bookmark-kind "metadata" metadata))))))
+                   (write-event
+                    (core-object "type" "BOOKMARK"
+                                 "object" (core-object "apiVersion" (cond (bookmark-api-version)
+                                                                          (*crd-view-definition*
+                                                                           (format nil "~A/~A" (gethash "group" (gethash "spec" *crd-view-definition*))
+                                                                                   *crd-request-version*))
+                                                                          (t *core-resource-view-version*))
+                                                       "kind" bookmark-kind "metadata" metadata))))))
         (handler-case
             (progn
               (dolist (event first-events) (emit event))
-              (when (true-parameter-p (hunchentoot:parameter "sendInitialEvents")) (bookmark t))
+              ;; client-go waits for this bookmark before trusting its initial state.
+              (when (and send-initial (true-parameter-p (hunchentoot:parameter "allowWatchBookmarks"))) (bookmark t))
               ;; Flush headers even for an initially empty watch.
               (finish-output out)
               (loop while (< (get-internal-real-time) deadline)

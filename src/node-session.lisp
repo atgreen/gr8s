@@ -150,6 +150,18 @@
              (pending-node-operation-finished operation)
              (pending-node-operation-lock operation)))))))
 
+(defun take-next-node-operation-message (operation)
+  "Wait for OPERATION's next message and remove it, returning it, or (values NIL T) at the end.
+What was consumed isn't kept, for streams too long to hold in memory."
+  (bt:with-lock-held ((pending-node-operation-lock operation))
+    (loop
+      (when (pending-node-operation-stream-messages operation)
+        (return (values (pop (pending-node-operation-stream-messages operation)) nil)))
+      (when (pending-node-operation-done-p operation)
+        (return (values nil t)))
+      (bt:condition-wait (pending-node-operation-finished operation)
+                         (pending-node-operation-lock operation)))))
+
 (defun wait-for-node-operation (server operation &key (timeout 10))
   (let ((deadline (+ (get-internal-real-time)
                      (* timeout internal-time-units-per-second))))
@@ -729,7 +741,13 @@
              (:constructor make-agent-node-session (stream)))
   stream
   (sequence 0)
-  (send-lock (bt:make-lock "gr8s agent node session send")))
+  (send-lock (bt:make-lock "gr8s agent node session send"))
+  ;; The thread reading this session, once other threads may be sending on it.
+  ;; It alone sees the window updates a full send waits for, so it never sends itself.
+  owner
+  (outbox nil)
+  (outbox-lock (bt:make-lock "gr8s agent node session outbox"))
+  (outbox-changed (bt:make-condition-variable :name "gr8s agent node session outbox")))
 
 (defun accept-agent-server-hello (identity identity-path hello)
   (let ((node-id (slot-value hello 'gr8s.node.v1::node-id))
@@ -748,12 +766,44 @@
           (gethash "assignedPodCIDR" identity) cidr)
     (persist-agent-identity identity-path identity)))
 
-(defun send-agent-session-envelope (session variant payload)
+(defun write-agent-session-envelope (session variant payload)
   (bt:with-lock-held ((agent-node-session-send-lock session))
     (ag-grpc:stream-send
      (agent-node-session-stream session)
      (make-agent-envelope
       variant payload :sequence (incf (agent-node-session-sequence session))))))
+
+(defun send-agent-session-envelope (session variant payload)
+  "Send on SESSION, leaving it to the outbox if this thread is the one that must keep reading."
+  (if (eq (bt:current-thread) (agent-node-session-owner session))
+      (bt:with-lock-held ((agent-node-session-outbox-lock session))
+        (setf (agent-node-session-outbox session)
+              (nconc (agent-node-session-outbox session) (list (cons variant payload))))
+        (bt:condition-notify (agent-node-session-outbox-changed session)))
+      (write-agent-session-envelope session variant payload)))
+
+(defun run-agent-session-outbox (session finished-p finish-session)
+  "Send what the session's reading thread has left, in order, until the session finishes."
+  (handler-case
+      (loop
+        (let ((entry (bt:with-lock-held ((agent-node-session-outbox-lock session))
+                       (loop until (or (agent-node-session-outbox session) (funcall finished-p))
+                             do (bt:condition-wait (agent-node-session-outbox-changed session)
+                                                   (agent-node-session-outbox-lock session) :timeout 0.2))
+                       (pop (agent-node-session-outbox session)))))
+          (unless entry (return))
+          (write-agent-session-envelope session (car entry) (cdr entry))))
+    (error (condition)
+      (format *error-output* "gr8s node session send failed: ~A~%" condition)
+      (funcall finish-session))))
+
+(defun wake-agent-session-senders (channel)
+  "End CHANNEL's connection for senders waiting on its flow control, which nothing else wakes."
+  (let ((connection (ag-grpc:channel-connection channel)))
+    (when connection
+      (setf (ag-http2:connection-state connection) :closed)
+      (bt2:with-lock-held ((ag-http2::connection-flow-control-lock connection))
+        (bt2:condition-broadcast (ag-http2::connection-flow-control-cv connection))))))
 
 (defun validate-node-snapshot-identity (identity snapshot)
   "Reject another node allocation before an arrival observer can persist any deletion intent."
@@ -848,30 +898,49 @@
 (defun node-session-cancelled-p (control)
   (cl-cancel:done-p (node-session-control-context control)))
 
-(define-condition node-session-interrupted (error) ())
+(defvar *node-session-interruption-tag* nil
+  "The catch tag of the WITH-NODE-SESSION-INTERRUPTION this thread is inside, if any.")
 
-(defvar *node-session-interruptible* nil
-  "True only where a thread has a handler for NODE-SESSION-INTERRUPTED; a late interrupt is dropped.")
+(defmacro with-node-session-interruption ((tag) &body body)
+  "Run BODY, returning :INTERRUPTED if INTERRUPT-NODE-SESSION-THREAD unwinds it.
+The binding sits inside the CATCH, so a thread that sees TAG bound still has the
+catch to throw to."
+  (let ((value (gensym "TAG")))
+    `(let ((,value ,tag))
+       (catch ,value
+         (let ((*node-session-interruption-tag* ,value))
+           ,@body)))))
 
-(defun agent-session-status-reporter (session heartbeat-interval finished-p status-provider)
+(defun interrupt-node-session-thread (thread tag)
+  "Unwind THREAD out of its WITH-NODE-SESSION-INTERRUPTION of TAG. A thread that has
+left it ignores this, so its cleanup outside runs to completion.
+Throw instead of signalling: the target may already be inside %SIGNAL for another
+error, where SBCL has rebound the handler clusters and an ERROR finds no handler
+and kills the thread. A throw also passes runtime wrappers that handle errors."
+  (when (and thread (bt:thread-alive-p thread))
+    (ignore-errors
+      (bt:interrupt-thread
+       thread
+       (lambda ()
+         (when (eq *node-session-interruption-tag* tag)
+           (throw tag :interrupted)))))))
+
+(defun agent-session-status-reporter (session heartbeat-interval finished-p status-provider tag)
   "Report status on its own thread: a slow provider must not delay the heartbeat."
-  (handler-case
-      (let ((*node-session-interruptible* t))
-       (loop until (funcall finished-p)
-            do (handler-case
-                   (let ((status (funcall status-provider)))
-                     (when status
-                       (unless (typep status 'gr8s.node.v1::node-status)
-                         (error "node status provider returned an invalid message"))
-                       (send-agent-session-envelope session :status status)))
-                 (node-session-interrupted (condition) (error condition))
-                 (error (condition)
-                   (format *error-output* "gr8s status reporting failed: ~A~%" condition)))
-               (let ((deadline (+ (get-internal-real-time)
-                                  (* (funcall heartbeat-interval) internal-time-units-per-second))))
-                 (loop until (or (funcall finished-p) (>= (get-internal-real-time) deadline))
-                       do (sleep 0.05)))))
-    (node-session-interrupted () nil)))
+  (with-node-session-interruption (tag)
+    (loop until (funcall finished-p)
+          do (handler-case
+                 (let ((status (funcall status-provider)))
+                   (when status
+                     (unless (typep status 'gr8s.node.v1::node-status)
+                       (error "node status provider returned an invalid message"))
+                     (send-agent-session-envelope session :status status)))
+               (error (condition)
+                 (format *error-output* "gr8s status reporting failed: ~A~%" condition)))
+             (let ((deadline (+ (get-internal-real-time)
+                                (* (funcall heartbeat-interval) internal-time-units-per-second))))
+               (loop until (or (funcall finished-p) (>= (get-internal-real-time) deadline))
+                     do (sleep 0.05))))))
 
 (defun agent-session-watchdog (finished-p last-progress on-stall)
   "Call ON-STALL once LAST-PROGRESS, in internal time, is too long ago."
@@ -884,44 +953,36 @@
 
 (defun agent-session-monitor
     (session control session-thread heartbeat-interval
-     stop-predicate finished-p finish-session note-progress)
+     stop-predicate finished-p finish-session note-progress tag)
   (let ((next-heartbeat
           (+ (get-internal-real-time)
              (* (funcall heartbeat-interval) internal-time-units-per-second))))
     (handler-case
-       (let ((*node-session-interruptible* t))
-        (loop until (funcall finished-p)
-              do (when (or (node-session-cancelled-p control)
-                           (funcall stop-predicate))
-                   (cancel-node-session control)
-                   (funcall finish-session)
-                   ;; POSIX does not require close(2) or shutdown(2) in one
-                   ;; thread to wake another thread already blocked in poll(2).
-                   ;; Interrupt the owner so it unwinds through the ordinary
-                   ;; gRPC cleanup path instead of destroying the thread.
-                   (when (bt:thread-alive-p session-thread)
-                     (bt:interrupt-thread
-                      session-thread
-                      (lambda () (error 'node-session-interrupted))))
-                   (return))
-                 (when (>= (get-internal-real-time) next-heartbeat)
-                   (send-agent-session-envelope
-                    session :heartbeat
-                    (make-instance 'gr8s.node.v1::heartbeat))
-                   (funcall note-progress)
-                   (setf next-heartbeat
-                         (+ (get-internal-real-time)
-                            (* (funcall heartbeat-interval)
-                               internal-time-units-per-second))))
-                 (sleep 0.05)))
-      (node-session-interrupted ()
-        (funcall finish-session))
+        (with-node-session-interruption (tag)
+          (loop until (funcall finished-p)
+                do (when (or (node-session-cancelled-p control)
+                             (funcall stop-predicate))
+                     (cancel-node-session control)
+                     (funcall finish-session)
+                     ;; POSIX does not require close(2) or shutdown(2) in one
+                     ;; thread to wake another thread already blocked in poll(2).
+                     ;; Interrupt the owner so it unwinds through the ordinary
+                     ;; gRPC cleanup path instead of destroying the thread.
+                     (interrupt-node-session-thread session-thread tag)
+                     (return))
+                   (when (>= (get-internal-real-time) next-heartbeat)
+                     (send-agent-session-envelope
+                      session :heartbeat
+                      (make-instance 'gr8s.node.v1::heartbeat))
+                     (funcall note-progress)
+                     (setf next-heartbeat
+                           (+ (get-internal-real-time)
+                              (* (funcall heartbeat-interval)
+                                 internal-time-units-per-second))))
+                   (sleep 0.05)))
       (error (condition)
-        (format *error-output* "gr8s node session heartbeat failed: ~A~%" condition)
-        (funcall finish-session)))))
-
-(define-condition node-snapshot-stopped (serious-condition) ()
-  (:documentation "Unwind snapshot application without conversion into a recoverable runtime error."))
+        (format *error-output* "gr8s node session heartbeat failed: ~A~%" condition)))
+    (funcall finish-session)))
 
 (defstruct (agent-snapshot-worker (:constructor %make-agent-snapshot-worker))
   "Apply snapshots serially while the session owner continues receiving operations."
@@ -935,7 +996,6 @@
   failure
   stopping-p
   started-p
-  finished-p
   (lock (bt:make-lock "gr8s snapshot work"))
   (changed (bt:make-condition-variable :name "gr8s snapshot work changed")))
 
@@ -954,45 +1014,40 @@
 
 (defun run-agent-snapshot-work (worker)
   "Apply ordered work and close the session on failure without acknowledging pending revisions."
-  (handler-case
-      (unwind-protect
-           (progn
-             ;; Readiness is signalled only after the outer stop handler is
-             ;; installed. It also covers the application error handler below.
-             (bt:with-lock-held ((agent-snapshot-worker-lock worker))
-               (setf (agent-snapshot-worker-started-p worker) t)
-               (bt:condition-notify (agent-snapshot-worker-changed worker)))
-             (handler-case
-                 (loop
-                   (let ((work
-                           (bt:with-lock-held ((agent-snapshot-worker-lock worker))
-                             (loop while (and (null (agent-snapshot-worker-pending worker))
-                                              (not (agent-snapshot-worker-stopping-p worker)))
-                                   do (bt:condition-wait (agent-snapshot-worker-changed worker)
-                                                        (agent-snapshot-worker-lock worker)))
-                             (when (agent-snapshot-worker-stopping-p worker)
-                               (return-from run-agent-snapshot-work nil))
-                             (pop (agent-snapshot-worker-pending worker)))))
-                     (handler-case
-                         (progn
-                           (funcall (agent-snapshot-worker-function worker) (car work) (cdr work))
-                           (bt:with-lock-held ((agent-snapshot-worker-lock worker))
-                             (when (eql (slot-value (car work) 'gr8s.node.v1::revision)
-                                        (agent-snapshot-worker-replay-revision worker))
-                               (setf (agent-snapshot-worker-replay-revision worker) nil))))
-                       ;; Durable urgent intent superseded this application.
-                       ;; Its revision was not applied and must not be acked.
-                       (pod-reconciliation-superseded () (retry-agent-snapshot-work worker work)))))
-               (error (condition)
-                 (format *error-output* "gr8s node snapshot application failed: ~A~%" condition)
-                 (bt:with-lock-held ((agent-snapshot-worker-lock worker))
-                   (setf (agent-snapshot-worker-failure worker) condition
-                         (agent-snapshot-worker-stopping-p worker) t
-                         (agent-snapshot-worker-pending worker) nil))
-                 (funcall (agent-snapshot-worker-finish-session worker)))))
-        ;; A late interrupt must not signal after the outer handler is gone.
-        (setf (agent-snapshot-worker-finished-p worker) t))
-    (node-snapshot-stopped () nil)))
+  (with-node-session-interruption (worker)
+    ;; Readiness is signalled only after the stop catch is established. It also
+    ;; covers the application error handler below.
+    (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+      (setf (agent-snapshot-worker-started-p worker) t)
+      (bt:condition-notify (agent-snapshot-worker-changed worker)))
+    (handler-case
+        (loop
+          (let ((work
+                  (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+                    (loop while (and (null (agent-snapshot-worker-pending worker))
+                                     (not (agent-snapshot-worker-stopping-p worker)))
+                          do (bt:condition-wait (agent-snapshot-worker-changed worker)
+                                               (agent-snapshot-worker-lock worker)))
+                    (when (agent-snapshot-worker-stopping-p worker)
+                      (return-from run-agent-snapshot-work nil))
+                    (pop (agent-snapshot-worker-pending worker)))))
+            (handler-case
+                (progn
+                  (funcall (agent-snapshot-worker-function worker) (car work) (cdr work))
+                  (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+                    (when (eql (slot-value (car work) 'gr8s.node.v1::revision)
+                               (agent-snapshot-worker-replay-revision worker))
+                      (setf (agent-snapshot-worker-replay-revision worker) nil))))
+              ;; Durable urgent intent superseded this application.
+              ;; Its revision was not applied and must not be acked.
+              (pod-reconciliation-superseded () (retry-agent-snapshot-work worker work)))))
+      (error (condition)
+        (format *error-output* "gr8s node snapshot application failed: ~A~%" condition)
+        (bt:with-lock-held ((agent-snapshot-worker-lock worker))
+          (setf (agent-snapshot-worker-failure worker) condition
+                (agent-snapshot-worker-stopping-p worker) t
+                (agent-snapshot-worker-pending worker) nil))
+        (funcall (agent-snapshot-worker-finish-session worker))))))
 
 (defun start-agent-snapshot-worker (function finish-session &key receive-snapshot)
   "Start a session-owned ordered snapshot executor."
@@ -1046,15 +1101,11 @@
               started-p (agent-snapshot-worker-started-p worker))
         (bt:condition-notify (agent-snapshot-worker-changed worker)))
       (when (and thread (not (eq thread (bt:current-thread))))
-        (when (and started-p (bt:thread-alive-p thread))
-          ;; Runtime wrappers catch ERROR and translate it to Pending. This
-          ;; private serious condition must unwind the whole application so
-          ;; shutdown cannot continue to another blocked Pod or persist an ack.
-          (ignore-errors
-            (bt:interrupt-thread thread
-              (lambda ()
-                (unless (agent-snapshot-worker-finished-p worker)
-                  (error 'node-snapshot-stopped))))))
+        (when started-p
+          ;; Runtime wrappers catch ERROR and translate it to Pending. This must
+          ;; unwind the whole application so shutdown cannot continue to another
+          ;; blocked Pod or persist an ack.
+          (interrupt-node-session-thread thread worker))
         (bt:join-thread thread))))
   nil)
 
@@ -1082,32 +1133,23 @@
          (monitor-thread nil)
          (status-thread nil)
          (watchdog-thread nil)
+         (outbox-thread nil)
          (snapshot-worker nil)
          (heartbeat-interval 1)
          (operation-session-p nil)
          (session-finished-p nil)
-         (session-cleanup-p nil)
+         (session-tag (list :node-session))
          (last-progress (get-internal-real-time))
          (finish-lock (bt:make-lock "gr8s agent node session finish")))
     (labels ((recover-stalled-session ()
                (log-node-session-stall "no heartbeat sent to ~A:~A; reconnecting" host port)
                (finish-session)
                ;; Closing does not reliably wake a thread already in poll(2) or a
-               ;; blocking write. Cleanup itself must run to completion, so the
-               ;; owner only takes this interrupt before it has started.
-               (flet ((interrupt (thread)
-                        (when (and thread (bt:thread-alive-p thread))
-                          (ignore-errors
-                           (bt:interrupt-thread
-                            thread
-                            (lambda ()
-                              (when (if (eq thread session-thread)
-                                        (not session-cleanup-p)
-                                        *node-session-interruptible*)
-                                (error 'node-session-interrupted))))))))
-                 (interrupt monitor-thread)
-                 (interrupt status-thread)
-                 (interrupt session-thread)))
+               ;; blocking write. Cleanup itself must run to completion, so it
+               ;; runs outside the owner's interruption scope.
+               (interrupt-node-session-thread monitor-thread session-tag)
+               (interrupt-node-session-thread status-thread session-tag)
+               (interrupt-node-session-thread session-thread session-tag))
              (finished-p ()
                (bt:with-lock-held (finish-lock) session-finished-p))
              (finish-session ()
@@ -1117,92 +1159,103 @@
                      (setf session-finished-p t
                            close-p t)))
                  (when close-p
-                   (ignore-errors (ag-grpc:channel-close channel))))))
+                   (ignore-errors (ag-grpc:channel-close channel))
+                   (ignore-errors (wake-agent-session-senders channel))))))
     (cl-cancel:with-cancellable
         (session-context (node-session-control-context control))
       (declare (ignore session-context))
       (unwind-protect
-         (let* ((stub (gr8s.node.v1::make-node-service-stub channel))
-                (stream (gr8s.node.v1::node-service-connect
-                         stub :timeout session-timeout))
-                (session (make-agent-node-session stream)))
-           (send-agent-session-envelope
-            session :hello
-             (make-instance 'gr8s.node.v1::node-hello
-                            :node-name node-name
-                            :boot-id (generate-uid)
-                            :agent-version "gr8s"
-                            :underlay-address
-                            (or underlay-address (node-channel-underlay-address channel))
-                            :capacity (node-reported-capacity-entries)
-                            :last-applied-revision
-                            (gethash "lastAppliedRevision" identity 0)))
-           (send-agent-session-envelope
-            session :heartbeat (make-instance 'gr8s.node.v1::heartbeat))
-           ;; Cancellation must also cover a peer that stalls before its
-           ;; ServerHello, not only sessions that finished the handshake.
-           (unless one-shot-p
-             (setf monitor-thread
-                   (bt:make-thread
-                    (lambda ()
-                      (agent-session-monitor
-                       session control session-thread
-                       (lambda () heartbeat-interval)
-                       stop-predicate #'finished-p #'finish-session
-                       (lambda () (setf last-progress (get-internal-real-time)))))
-                    :name "gr8s agent session heartbeat"))
-             (when status-provider
-               (setf status-thread
+         (with-node-session-interruption (session-tag)
+           (let* ((stub (gr8s.node.v1::make-node-service-stub channel))
+                  (stream (gr8s.node.v1::node-service-connect
+                           stub :timeout session-timeout))
+                  (session (make-agent-node-session stream)))
+             (send-agent-session-envelope
+              session :hello
+               (make-instance 'gr8s.node.v1::node-hello
+                              :node-name node-name
+                              :boot-id (generate-uid)
+                              :agent-version "gr8s"
+                              :underlay-address
+                              (or underlay-address (node-channel-underlay-address channel))
+                              :capacity (node-reported-capacity-entries)
+                              :last-applied-revision
+                              (gethash "lastAppliedRevision" identity 0)))
+             (send-agent-session-envelope
+              session :heartbeat (make-instance 'gr8s.node.v1::heartbeat))
+             ;; Cancellation must also cover a peer that stalls before its
+             ;; ServerHello, not only sessions that finished the handshake.
+             (unless one-shot-p
+               ;; From here this thread reads, and a sender short of flow-control window
+               ;; waits for what it reads. A sender reading too would race it for frames.
+               (setf (ag-http2:connection-reader-thread-active-p (ag-grpc:channel-connection channel)) t
+                     (agent-node-session-owner session) session-thread
+                     outbox-thread
+                     (bt:make-thread
+                      (lambda () (run-agent-session-outbox session #'finished-p #'finish-session))
+                      :name "gr8s agent session outbox"))
+               (setf monitor-thread
                      (bt:make-thread
                       (lambda ()
-                        (agent-session-status-reporter
-                         session (lambda () heartbeat-interval) #'finished-p
-                         (lambda () (when operation-session-p (funcall status-provider)))))
-                      :name "gr8s agent session status")))
-             (setf watchdog-thread
-                   (bt:make-thread
-                    (lambda ()
-                      (agent-session-watchdog
-                       #'finished-p (lambda () last-progress) #'recover-stalled-session))
-                    :name "gr8s agent session watchdog")))
-           (let ((server-hello
-                   (require-server-envelope
-                    (ag-grpc:stream-read-message stream) :hello)))
-             (accept-agent-server-hello identity identity-path server-hello)
-             (setf heartbeat-interval
-                   (max 1 (slot-value server-hello
-                                      'gr8s.node.v1::heartbeat-interval-seconds)))
-             (let* ((snapshot
-                      (require-server-envelope
-                       (ag-grpc:stream-read-message stream) :desired-state)))
-               (if one-shot-p
-                   (progn
-                     (validate-node-snapshot-identity identity snapshot)
-                     (when snapshot-observer (funcall snapshot-observer snapshot))
-                     (apply-node-snapshot-and-respond
-                      session identity identity-path snapshot apply-snapshot :replay t)
-                     (setf operation-session-p t)
-                     (ag-grpc:stream-close-send stream)
-                     (loop while (ag-grpc:stream-read-message stream)))
-                   (progn
-                     (setf snapshot-worker
-                           (start-agent-snapshot-worker
-                            (lambda (snapshot replay)
-                              (apply-node-snapshot-and-respond
-                               session identity identity-path snapshot apply-snapshot :replay replay))
-                            #'finish-session
-                            :receive-snapshot
-                            (lambda (snapshot)
-                              (validate-node-snapshot-identity identity snapshot)
-                              (when snapshot-observer (funcall snapshot-observer snapshot)))))
-                     (queue-agent-snapshot-work snapshot-worker snapshot :replay t)
-                     (setf operation-session-p t)
-                     (loop for envelope = (ag-grpc:stream-read-message stream)
-                           while envelope
-                           do (handle-node-server-envelope
-                               session envelope identity identity-path
-                               apply-snapshot operation-handler snapshot-worker)))))))
-      (setf session-cleanup-p t)
+                        (agent-session-monitor
+                         session control session-thread
+                         (lambda () heartbeat-interval)
+                         stop-predicate #'finished-p #'finish-session
+                         (lambda () (setf last-progress (get-internal-real-time)))
+                         session-tag))
+                      :name "gr8s agent session heartbeat"))
+               (when status-provider
+                 (setf status-thread
+                       (bt:make-thread
+                        (lambda ()
+                          (agent-session-status-reporter
+                           session (lambda () heartbeat-interval) #'finished-p
+                           (lambda () (when operation-session-p (funcall status-provider)))
+                           session-tag))
+                        :name "gr8s agent session status")))
+               (setf watchdog-thread
+                     (bt:make-thread
+                      (lambda ()
+                        (agent-session-watchdog
+                         #'finished-p (lambda () last-progress) #'recover-stalled-session))
+                      :name "gr8s agent session watchdog")))
+             (let ((server-hello
+                     (require-server-envelope
+                      (ag-grpc:stream-read-message stream) :hello)))
+               (accept-agent-server-hello identity identity-path server-hello)
+               (setf heartbeat-interval
+                     (max 1 (slot-value server-hello
+                                        'gr8s.node.v1::heartbeat-interval-seconds)))
+               (let* ((snapshot
+                        (require-server-envelope
+                         (ag-grpc:stream-read-message stream) :desired-state)))
+                 (if one-shot-p
+                     (progn
+                       (validate-node-snapshot-identity identity snapshot)
+                       (when snapshot-observer (funcall snapshot-observer snapshot))
+                       (apply-node-snapshot-and-respond
+                        session identity identity-path snapshot apply-snapshot :replay t)
+                       (setf operation-session-p t)
+                       (ag-grpc:stream-close-send stream)
+                       (loop while (ag-grpc:stream-read-message stream)))
+                     (progn
+                       (setf snapshot-worker
+                             (start-agent-snapshot-worker
+                              (lambda (snapshot replay)
+                                (apply-node-snapshot-and-respond
+                                 session identity identity-path snapshot apply-snapshot :replay replay))
+                              #'finish-session
+                              :receive-snapshot
+                              (lambda (snapshot)
+                                (validate-node-snapshot-identity identity snapshot)
+                                (when snapshot-observer (funcall snapshot-observer snapshot)))))
+                       (queue-agent-snapshot-work snapshot-worker snapshot :replay t)
+                       (setf operation-session-p t)
+                       (loop for envelope = (ag-grpc:stream-read-message stream)
+                             while envelope
+                             do (handle-node-server-envelope
+                                 session envelope identity identity-path
+                                 apply-snapshot operation-handler snapshot-worker))))))))
       (finish-session)
       (stop-agent-snapshot-worker snapshot-worker)
       (when (and operation-session-p operation-handler)
@@ -1213,6 +1266,8 @@
           (funcall operation-handler :session-closed nil nil)))
       (when monitor-thread
         (ignore-errors (bt:join-thread monitor-thread)))
+      (when outbox-thread
+        (ignore-errors (bt:join-thread outbox-thread)))
       ;; The status thread is not joined: a provider blocked on a runtime lock
       ;; must not hold up the replacement session. It exits once it returns.
       (when watchdog-thread
@@ -1238,21 +1293,21 @@
           do (destructuring-bind (try-host try-port)
                  (nth (mod attempt (length targets)) targets)
                (handler-case
-                   (progn
-                     (run-one-node-session try-host try-port node-name identity-path
-                                           apply-snapshot operation-handler
-                                           (not (null max-sessions)) control stop-predicate
-                                           underlay-address status-provider
-                                           ca-certificate-path certificate-path private-key-path
-                                           snapshot-observer)
+                   ;; An interrupted session was abandoned, so it does not count.
+                   (unless (eq :interrupted
+                               (run-one-node-session try-host try-port node-name identity-path
+                                                     apply-snapshot operation-handler
+                                                     (not (null max-sessions)) control stop-predicate
+                                                     underlay-address status-provider
+                                                     ca-certificate-path certificate-path private-key-path
+                                                     snapshot-observer))
                      (incf completed)
                      (when (and max-sessions (>= completed max-sessions))
                        (return completed)))
                  (error (condition)
                    (when max-sessions
                      (error condition))
-                   (unless (or (node-session-cancelled-p control)
-                               (typep condition 'node-session-interrupted))
+                   (unless (node-session-cancelled-p control)
                      (format *error-output* "gr8s node session to ~A:~A ended: ~A; reconnecting~%"
                              try-host try-port condition))))
                (incf attempt)

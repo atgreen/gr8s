@@ -99,9 +99,7 @@
 
 (defun api-groups-response (&optional store)
   "Describe builtin groups and actual store-scoped custom API groups."
-  (let ((groups (vector (json-object "name" "rbac.authorization.k8s.io"
-                                    "versions" (vector (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
-                                    "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
+  (let ((groups (vector (rbac-api-group)
                        (event-api-group) (workload-api-group) (batch-api-group) (budget-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group) (networking-api-group)
                        (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group) (cert-manager-api-group))))
     (setf groups (concatenate 'vector groups (typed-api-groups) (auth-review-groups)))
@@ -128,11 +126,13 @@
       (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
       (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "PodExecOptions" "verbs" #("create" "get"))
       (json-object "name" "pods/attach" "singularName" "" "namespaced" t "kind" "PodAttachOptions" "verbs" #("create" "get"))
+      (json-object "name" "pods/portforward" "singularName" "" "namespaced" t "kind" "PodPortForwardOptions" "verbs" #("create" "get"))
       (json-object "name" "pods/eviction" "singularName" "" "namespaced" t "kind" "Eviction"
                    "group" "policy" "version" "v1" "verbs" #("create"))
       (json-object "name" "pods/proxy" "singularName" "" "namespaced" t "kind" "PodProxyOptions"
                    "verbs" #("get" "create" "update" "patch" "delete"))
-      (resource-discovery-entry "nodes" "node" nil "Node" #("create" "delete" "get" "list" "patch" "update"))
+      (resource-discovery-entry "nodes" "node" nil "Node"
+                                #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch"))
       (json-object "name" "nodes/status" "singularName" "" "namespaced" nil "kind" "Node" "verbs" #("get" "patch" "update"))
       (json-object "name" "namespaces/status" "singularName" "" "namespaced" nil "kind" "Namespace"
                    "verbs" #("get" "patch" "update"))
@@ -1172,6 +1172,8 @@ its clients treat any other multi-byte frame as an error message."
        (pod-eviction-response store reconciler (first parts) namespace))
       ((and (= 2 (length parts)) (string= "attach" (second parts)) (member method '(:get :post)))
        (pod-attach-response store reconciler (first parts) namespace))
+      ((and (= 2 (length parts)) (string= "portforward" (second parts)) (member method '(:get :post)))
+       (pod-port-forward-response store reconciler (first parts) namespace))
       (t (status-response "Failure" "NotFound"
                           (format nil "No route for ~A ~A" method path) 404)))))
 
@@ -1296,6 +1298,7 @@ than wait for the next, which truncates any body that spans records in flight."
           ((policy-status-route path) (dispatch-policy-status-request store path method))
           ((string= path "/apis/events.k8s.io") (json-response (event-api-group)))
           ((string= path "/apis/events.k8s.io/v1") (event-discovery-response))
+          ((string= path "/apis/rbac.authorization.k8s.io") (json-response (rbac-api-group)))
           ((string= path "/apis/rbac.authorization.k8s.io/v1") (rbac-resources-response))
           ((string= path "/apis/gateway.networking.k8s.io") (json-response (gateway-api-group)))
           ((string= path "/apis/gateway.networking.k8s.io/v1") (gateway-discovery-response))
@@ -1334,6 +1337,7 @@ than wait for the next, which truncates any body that spans records in flight."
                 (dns-subdomain-p (subseq path (length "/api/v1/nodes/"))))
            (write-node-response store (subseq path (length "/api/v1/nodes/")) method))
           ((and (eq method :post) (string= path "/api/v1/nodes")) (create-node-response store))
+          ((and (eq method :delete) (string= path "/api/v1/nodes")) (delete-node-collection-response store))
           ((and (eq method :delete) (uiop:string-prefix-p "/api/v1/nodes/" path)
                 (dns-subdomain-p (subseq path (length "/api/v1/nodes/"))))
            (delete-node-response store (subseq path (length "/api/v1/nodes/"))))
