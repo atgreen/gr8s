@@ -176,8 +176,8 @@ volumes:
   retried, without using up a restart.
 - **`subPath` and `subPathExpr`:** these select a directory inside the image. The
   container fails to start if it isn't there.
-- **Private registries:** `imagePullSecrets` isn't supported yet, for containers or
-  for these volumes, so the node must be able to pull without it.
+- **Private registries:** the Pod's `imagePullSecrets` apply to these pulls, as they
+  do for its containers.
 
 ## CSI
 

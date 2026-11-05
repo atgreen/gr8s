@@ -24,16 +24,16 @@
   (jobs (make-hash-table :test #'equal))
   (lock (bt:make-lock "native image pulls")))
 
-(defun start-image-pull (runtime manager image)
-  "Replace IMAGE's pull record with a running background pull."
+(defun start-image-pull (runtime manager image credentials)
+  "Replace the pull record of IMAGE and CREDENTIALS with a running background pull."
   (let ((job (make-image-pull-job)) (clock *container-lifecycle-clock*))
-    (setf (gethash image (image-pull-manager-jobs manager)) job
+    (setf (gethash (image-pull-job-key image credentials) (image-pull-manager-jobs manager)) job
           (image-pull-job-thread job)
           (bt:make-thread
            (lambda ()
              (handler-case
                  (progn
-                   (cri-pull-image (containerd-runtime-socket-path runtime) image)
+                   (pull-image-with-credentials (containerd-runtime-socket-path runtime) image credentials)
                    (bt:with-lock-held ((image-pull-manager-lock manager))
                      (setf (image-pull-job-state job) :done
                            (image-pull-job-finished-at job) (funcall clock))))
@@ -52,8 +52,9 @@
                (not (find #\: (car (last (uiop:split-string image :separator '(#\/))))))))
       "Always" "IfNotPresent"))
 
-(defun ensure-container-image (runtime image policy)
-  "Return once IMAGE may be used under pull POLICY, or signal why its container must wait."
+(defun ensure-container-image (runtime image policy &optional (credentials (constantly nil)))
+  "Return once IMAGE may be used under pull POLICY, or signal why its container must wait.
+CREDENTIALS is called for the registry credentials only if a pull is needed."
   (let ((socket (containerd-runtime-socket-path runtime)))
     (when (or (equal policy "Never")
               (and (equal policy "IfNotPresent") (cri-image-present-p socket image)))
@@ -61,18 +62,19 @@
         (error 'container-config-error
                :message (format nil "Image ~S is not present with pull policy of Never" image)))
       (return-from ensure-container-image t))
-    (let ((manager (containerd-runtime-images runtime)) (now (funcall *container-lifecycle-clock*)))
+    (let ((manager (containerd-runtime-images runtime)) (now (funcall *container-lifecycle-clock*))
+          (credentials (funcall credentials)))
       (bt:with-lock-held ((image-pull-manager-lock manager))
-        (let* ((job (gethash image (image-pull-manager-jobs manager)))
+        (let* ((job (gethash (image-pull-job-key image credentials) (image-pull-manager-jobs manager)))
                (age (and job (image-pull-job-finished-at job) (- now (image-pull-job-finished-at job)))))
           (cond
-            ((null job) (start-image-pull runtime manager image))
+            ((null job) (start-image-pull runtime manager image credentials))
             ((eq :pulling (image-pull-job-state job)))
             ((eq :done (image-pull-job-state job))
              (when (or (equal policy "IfNotPresent") (< age +image-pull-always-freshness-seconds+))
                (return-from ensure-container-image t))
-             (start-image-pull runtime manager image))
+             (start-image-pull runtime manager image credentials))
             ((< age +image-pull-backoff-seconds+)
              (error 'container-image-pull-error :message (image-pull-job-message job)))
-            (t (start-image-pull runtime manager image)))))
+            (t (start-image-pull runtime manager image credentials)))))
       (error 'container-image-pending :message (format nil "Pulling image ~S" image)))))

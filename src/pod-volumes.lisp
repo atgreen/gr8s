@@ -28,10 +28,14 @@
                collect (reference "secrets" (gethash "secret" source) "name"))))))
 
 (defun pod-resource-reference-declarations (pod)
-  "Collect namespace-local resource declarations from volumes and environment sources."
+  "Collect namespace-local resource declarations from volumes, environment sources and pull secrets."
   (let* ((spec (gethash "spec" (pod-to-object pod))) (references nil))
     (loop for volume across (gethash "volumes" spec #())
           do (setf references (append (pod-volume-resource-references volume) references)))
+    ;; A missing pull secret is optional because the kubelet pulls without it.
+    (loop for reference across (gethash "imagePullSecrets" spec #())
+          when (plusp (length (gethash "name" reference "")))
+            do (push (list "secrets" (gethash "name" reference) t) references))
     (loop for container across (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec))
           do (loop for variable across (gethash "env" container #())
                    for from = (gethash "valueFrom" variable)
@@ -295,12 +299,14 @@ SHARE names a provisioned volume's export, whose own directory is created on fir
           ((equal mode "HostToContainer") gr8s.cri.v1::+mountpropagation-propagation_host_to_container+)
           (t gr8s.cri.v1::+mountpropagation-propagation_private+))))
 
-(defun container-image-volume-mount (runtime mount source environment)
+(defun container-image-volume-mount (runtime pod container mount source environment)
   "Return the CRI mount of image volume SOURCE, once its image may be used under its pull policy.
 The runtime mounts the image itself, and it fails the container if a subPath isn't in the image."
   (let ((reference (gethash "reference" source)))
     (ensure-container-image runtime reference
-                            (gethash "pullPolicy" source (default-image-pull-policy reference)))
+                            (gethash "pullPolicy" source (default-image-pull-policy reference))
+                            (lambda ()
+                              (pod-image-pull-credentials runtime pod (container-spec-name container) reference)))
     (make-instance 'gr8s.cri.v1::mount
                    :container-path (gethash "mountPath" mount)
                    :image (make-instance
@@ -318,7 +324,7 @@ The runtime mounts the image itself, and it fails the container if a subPath isn
           for volume = (find (gethash "name" mount) volumes :test #'equal
                              :key (lambda (volume) (gethash "name" volume)))
           collect (if (gethash "image" volume)
-                      (container-image-volume-mount runtime mount (gethash "image" volume) environment)
+                      (container-image-volume-mount runtime pod container mount (gethash "image" volume) environment)
                       (multiple-value-bind (path forced-readonly) (materialize-pod-volume runtime pod volume)
                         (let ((relative (container-mount-subpath mount environment)))
                           (when (plusp (length relative))
