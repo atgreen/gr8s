@@ -6,6 +6,10 @@
   (lock (bt:make-lock "gr8s reconciler"))
   active-convergence
   (urgent-deletions (make-hash-table :test #'equal))
+  ;; Internal real time since when URGENT-DELETIONS has been non-empty, and of the
+  ;; last report that creation is waiting on them.
+  urgent-since
+  urgent-reported
   (convergence-lock (bt:make-lock "gr8s running convergence ownership"))
   ;; Pod UID to the universal time its local storage was last measured.
   (storage-measurements (make-hash-table :test #'equal))
@@ -19,8 +23,12 @@
   (:documentation "Every other Pod was applied, but a Pod's assignment isn't durable, so this revision can't be acknowledged."))
 
 (defstruct running-pod-convergence
-  "A narrowly owned, cancellable running-Pod operation; deletion never registers here."
-  thread uid finished-p)
+  "A narrowly owned, cancellable running-Pod operation; deletion never registers here.
+It is also the catch tag that cancellation throws to."
+  thread uid)
+
+(defvar *running-pod-convergence* nil
+  "The operation whose catch this thread is inside, bound only within that catch.")
 
 (defun cancel-running-pod-convergence (reconciler)
   "Yield blocked creation to durable urgent deletion without interrupting deletion itself."
@@ -31,25 +39,64 @@
         (bt:interrupt-thread
          (running-pod-convergence-thread operation)
          (lambda ()
-           ;; This callback runs in the owner. A late callback must not escape
-           ;; after that operation's unwind-protect has released ownership.
-           ;; Only the owner changes this flag. Do not acquire an ownership
-           ;; mutex here: an asynchronous interrupt may arrive while its
-           ;; target is inside that same mutex.
-           (unless (running-pod-convergence-finished-p operation)
-             (error 'pod-reconciliation-superseded)))))))
+           ;; This callback runs in the owner. A late one finds the binding gone
+           ;; and does nothing, so it can't escape into the owner's cleanup or
+           ;; later work. Throw instead of signalling: the owner may be inside
+           ;; %SIGNAL for another error, where SBCL has rebound the handler
+           ;; clusters and an ERROR finds no handler and kills the thread
+           ;; (podster-uqb.114). Do not acquire an ownership mutex here: an
+           ;; asynchronous interrupt may arrive while its target is inside it.
+           (when (eq *running-pod-convergence* operation)
+             (throw operation :superseded)))))))
   nil)
+
+(defvar *held-creation-report-seconds* 60
+  "How long creation may wait on unfinished deletions before each report of it.")
+
+(defvar *held-creation-dump* 'dump-thread-backtraces
+  "Called with no arguments to record every thread's stack at the first such report.")
+
+(defun note-urgent-deletions-changed (reconciler)
+  "Start or end the period creation waits on urgent deletions. The caller holds the convergence lock."
+  (if (zerop (hash-table-count (reconciler-urgent-deletions reconciler)))
+      (setf (reconciler-urgent-since reconciler) nil
+            (reconciler-urgent-reported reconciler) nil)
+      (unless (reconciler-urgent-since reconciler)
+        (setf (reconciler-urgent-since reconciler) (get-internal-real-time)))))
+
+(defun report-held-creation (reconciler)
+  "Say which deletions creation has waited on for too long, with every thread's stack the first time.
+Each deletion holds back every creation on the node until it finishes, so one that never
+finishes stops the node starting Pods, and nothing else reports it (podster-uqb.123)."
+  (let ((now (get-internal-real-time)) (report nil) (first nil))
+    (bt:with-lock-held ((reconciler-convergence-lock reconciler))
+      (let ((since (reconciler-urgent-since reconciler))
+            (reported (reconciler-urgent-reported reconciler))
+            (interval (* *held-creation-report-seconds* internal-time-units-per-second)))
+        (when (and since (>= (- now since) interval)
+                   (or (null reported) (>= (- now reported) interval)))
+          (setf first (null reported)
+                (reconciler-urgent-reported reconciler) now
+                report (list (round (- now since) internal-time-units-per-second)
+                             (loop for uid being the hash-keys of (reconciler-urgent-deletions reconciler)
+                                   collect uid))))))
+    (when report
+      (format *error-output* "gr8s Pod creation has waited ~Ds for unfinished deletions of ~{~A~^, ~}~%"
+              (first report) (second report))
+      (when first (funcall *held-creation-dump*)))))
 
 (defun prioritize-reconciler-deletions (reconciler uids)
   "Reserve creation capacity for durable urgent UIDs until their physical cleanup completes."
   (bt:with-lock-held ((reconciler-convergence-lock reconciler))
-    (dolist (uid uids) (setf (gethash uid (reconciler-urgent-deletions reconciler)) t)))
+    (dolist (uid uids) (setf (gethash uid (reconciler-urgent-deletions reconciler)) t))
+    (note-urgent-deletions-changed reconciler))
   (cancel-running-pod-convergence reconciler))
 
 (defun finish-reconciler-urgent-deletion (reconciler uid)
   "Release UID's creation fence only after its actual runtime cleanup has completed."
   (bt:with-lock-held ((reconciler-convergence-lock reconciler))
-    (remhash uid (reconciler-urgent-deletions reconciler))))
+    (remhash uid (reconciler-urgent-deletions reconciler))
+    (note-urgent-deletions-changed reconciler)))
 
 (defun prune-reconciler-urgent-deletions (reconciler)
   "Discard finished exact UIDs without treating a new Pod sharing its name as old ownership."
@@ -59,38 +106,52 @@
                  (declare (ignore ignored))
                  (unless (member uid uids :test #'equal)
                    (remhash uid (reconciler-urgent-deletions reconciler))))
-               (reconciler-urgent-deletions reconciler)))))
+               (reconciler-urgent-deletions reconciler))
+      (note-urgent-deletions-changed reconciler))))
 
 (defun converge-cancellable-running-pod (reconciler pod)
   "Register cancellation only around running convergence and recheck durable deletion first."
   (let ((operation (make-running-pod-convergence :thread (bt:current-thread)
-                                                :uid (pod-uid pod))))
+                                                :uid (pod-uid pod)))
+        (cancelled t)
+        (held nil)
+        (status nil))
     (unwind-protect
-         (progn
-           (prune-reconciler-urgent-deletions reconciler)
-           (bt:with-lock-held ((reconciler-convergence-lock reconciler))
-             (setf (reconciler-active-convergence reconciler) operation)
-             ;; New or retried creation must not grab the global lock while a
-             ;; finite urgent cleanup job still needs its completion observed.
-             (when (plusp (hash-table-count (reconciler-urgent-deletions reconciler)))
-               (error 'pod-reconciliation-superseded)))
-           ;; Urgent snapshot projection uses the store lock, never this global
-           ;; reconciler lock. Register before checking so its cancellation
-           ;; cannot miss the gap between reading a Pod and entering CRI.
-           (let ((current (get-pod (reconciler-store reconciler)
-                                   (pod-namespace pod) (pod-name pod))))
-             (unless (and (equal (pod-uid current) (pod-uid pod))
-                          (not (deletion-requested-p current)))
-               (error 'pod-reconciliation-superseded)))
-           (converge-running-pod reconciler pod))
+         ;; The catch is established before the operation is registered, so a
+         ;; cancellation always has it to throw to.
+         (catch operation
+           (let ((*running-pod-convergence* operation))
+             (prune-reconciler-urgent-deletions reconciler)
+             (bt:with-lock-held ((reconciler-convergence-lock reconciler))
+               (setf (reconciler-active-convergence reconciler) operation)
+               ;; New or retried creation must not grab the global lock while a
+               ;; finite urgent cleanup job still needs its completion observed.
+               (when (plusp (hash-table-count (reconciler-urgent-deletions reconciler)))
+                 (setf held t)))
+             (when held
+               (report-held-creation reconciler)
+               (error 'pod-reconciliation-superseded))
+             ;; Urgent snapshot projection uses the store lock, never this global
+             ;; reconciler lock. Register before checking so its cancellation
+             ;; cannot miss the gap between reading a Pod and entering CRI.
+             (let ((current (get-pod (reconciler-store reconciler)
+                                     (pod-namespace pod) (pod-name pod))))
+               (unless (and (equal (pod-uid current) (pod-uid pod))
+                            (not (deletion-requested-p current)))
+                 (error 'pod-reconciliation-superseded)))
+             (setf status (converge-running-pod reconciler pod)
+                   cancelled nil)))
       (flet ((release-ownership ()
                (bt:with-lock-held ((reconciler-convergence-lock reconciler))
-                 (setf (running-pod-convergence-finished-p operation) t)
                  (when (eq operation (reconciler-active-convergence reconciler))
                    (setf (reconciler-active-convergence reconciler) nil)))))
         ;; Cancellation must not interrupt its own ownership release halfway.
         #+sbcl (sb-sys:without-interrupts (release-ownership))
-        #-sbcl (release-ownership)))))
+        #-sbcl (release-ownership)))
+    ;; Signalled here, by the owner itself, once the cancellation has unwound.
+    (when cancelled
+      (error 'pod-reconciliation-superseded))
+    status))
 
 (defun deletion-requested-p (pod)
   (nth-value 1

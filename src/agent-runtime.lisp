@@ -66,8 +66,9 @@
         ;; Rebuild the finite cleanup admission fence before the background
         ;; reconciler starts, including when the control plane is unavailable.
         (when (pod-runtime-cleanup-pending-p store pod)
-          (setf (gethash (pod-uid pod)
-                         (reconciler-urgent-deletions (node-runtime-reconciler node-runtime))) t)))
+          (let ((reconciler (node-runtime-reconciler node-runtime)))
+            (setf (gethash (pod-uid pod) (reconciler-urgent-deletions reconciler)) t)
+            (note-urgent-deletions-changed reconciler))))
       node-runtime)))
 
 (defun node-runtime-network-path (node-runtime)
