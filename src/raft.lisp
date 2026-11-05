@@ -35,6 +35,20 @@
   (snapshot-index 0 :type fixnum)
   (snapshot-term 0 :type fixnum)
   leader-id
+  ;; membership (podster-c2d.6). ROLES maps member-id -> :voter | :witness |
+  ;; :learner; PEERS stays the quorum+replication set (voters+witnesses, so the
+  ;; proven quorum/commit paths are unchanged for an all-voter cluster).
+  ;; PENDING-MEMBERS are being added: replicated to, but not counted for quorum
+  ;; until the config entry commits. A witness votes and counts for quorum but
+  ;; never starts an election; a learner neither votes-weight nor leads.
+  (roles (make-hash-table :test 'equal))
+  (self-role :voter)
+  (pending-members (make-hash-table :test 'equal))   ; id -> role
+  ;; DEPARTING-MEMBERS are peers a committed config just dropped: the leader
+  ;; keeps replicating the commit to them (id -> config-entry index) until they
+  ;; apply it and learn they are removed, so they stop disrupting the new quorum.
+  (departing-members (make-hash-table :test 'equal))
+  (removed nil)
   ;; leader volatile
   (next-index (make-hash-table :test 'equal))
   (match-index (make-hash-table :test 'equal))
@@ -143,6 +157,35 @@
 
 (defun raft-cluster-size (node) (1+ (length (raft-node-peers node))))
 
+(defun raft-member-role (node id) (gethash id (raft-node-roles node) :voter))
+
+(defun raft-replicate-ids (node)
+  "Everyone the leader replicates to: quorum peers, members being added, and
+   members being removed (until they apply the config and learn they are out)."
+  (append (raft-node-peers node)
+          (loop for id being the hash-keys of (raft-node-pending-members node) collect id)
+          (loop for id being the hash-keys of (raft-node-departing-members node) collect id)))
+
+(defun raft-configure (node members &optional (default-self-role :voter))
+  "Set NODE's membership from MEMBERS, an alist (id . role) for the whole cluster
+   (including self). PEERS becomes the voters+witnesses except self; self-role and
+   the removed flag follow MEMBERS. Not required for an all-voter cluster that
+   passed :peers to MAKE-RAFT-NODE -- it is for witnesses/learners/config change."
+  (clrhash (raft-node-roles node))
+  (dolist (m members) (setf (gethash (car m) (raft-node-roles node)) (cdr m)))
+  (let ((self (assoc (raft-node-id node) members :test #'equal)))
+    (setf (raft-node-self-role node) (if self (cdr self) default-self-role)
+          (raft-node-removed node) (not self)
+          (raft-node-peers node)
+          (loop for (id . role) in members
+                unless (equal id (raft-node-id node))
+                  when (member role '(:voter :witness)) collect id))))
+
+(defun raft-current-config (node)
+  "The current membership as an alist (id . role), including self."
+  (cons (cons (raft-node-id node) (raft-node-self-role node))
+        (loop for id in (raft-node-peers node) collect (cons id (raft-member-role node id)))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Role transitions.
 
@@ -155,6 +198,8 @@
         (raft-node-current-term node) term
         (raft-node-voted-for node) nil
         (raft-node-leader-id node) leader-id)
+  (clrhash (raft-node-pending-members node))   ; abandon any in-flight add on leadership loss
+  (clrhash (raft-node-departing-members node)) ; a new leader restarts removal delivery
   (raft-persist-hard-state node)
   (raft-reset-election-timer node))
 
@@ -195,7 +240,7 @@
         (raft-node-leader-id node) (raft-node-id node))
   (clrhash (raft-node-next-index node))
   (clrhash (raft-node-match-index node))
-  (dolist (peer (raft-node-peers node))
+  (dolist (peer (raft-replicate-ids node))
     (setf (gethash peer (raft-node-next-index node)) (1+ (raft-last-log-index node))
           (gethash peer (raft-node-match-index node)) 0))
   ;; Replicate immediately to assert leadership.
@@ -219,7 +264,16 @@
 
 (defun raft-broadcast-append (node)
   (setf (raft-node-heartbeat-elapsed node) 0)
-  (raft-broadcast node (lambda (peer) (raft-append-message node peer))))
+  (dolist (peer (raft-replicate-ids node))
+    (raft-send node peer (raft-append-message node peer)))
+  ;; A departing member that already holds its removal entry has now also been
+  ;; sent the commit for it (this append carries leader-commit), so it will apply
+  ;; the change and learn it is out. Stop tracking it. If it has not yet stored
+  ;; the entry (match below the removal index), keep sending until it does.
+  (loop for peer being the hash-keys of (raft-node-departing-members node) using (hash-value at)
+        when (>= (gethash peer (raft-node-match-index node) 0) at)
+          collect peer into done
+        finally (dolist (peer done) (remhash peer (raft-node-departing-members node)))))
 
 (defun raft-advance-commit (node)
   "Leader: advance commit-index to the highest N replicated on a majority whose
@@ -240,8 +294,14 @@
         do (incf (raft-node-last-applied node))
            (let* ((index (raft-node-last-applied node))
                   (entry (raft-log-entry node index))
-                  (result (and (raft-node-apply-fn node)
-                               (funcall (raft-node-apply-fn node) (raft-entry-command entry))))
+                  (command (raft-entry-command entry))
+                  (result
+                    (if (and (consp command) (eq (car command) :raft-config))
+                        ;; A membership change is applied to the config, not the
+                        ;; user state machine. Every member applies it in log
+                        ;; order, so all converge on the same membership.
+                        (progn (raft-adopt-config node (getf (cdr command) :members)) :configured)
+                        (and (raft-node-apply-fn node) (funcall (raft-node-apply-fn node) command))))
                   (callback (gethash index (raft-node-pending node))))
              (when callback
                (remhash index (raft-node-pending node))
@@ -264,6 +324,51 @@
         (raft-apply-committed node)
         (values (raft-entry-index entry) t))
       (values nil nil)))
+
+;;; ---------------------------------------------------------------------------
+;;; Membership change (single-member, effective on commit).
+
+(defun raft-adopt-config (node members)
+  "Adopt a committed membership MEMBERS (alist id->role). Every member runs this
+   in log order, so all converge. A member that finds itself gone steps down."
+  (let ((old-peers (raft-node-peers node))
+        (leading (eq (raft-node-role node) :leader)))
+    (raft-configure node members)
+    (clrhash (raft-node-pending-members node))  ; any added member is now a real peer
+    ;; Keep delivering this commit to peers the change just dropped, so they
+    ;; apply it, mark themselves removed, and stop holding elections. (Only the
+    ;; leader replicates; a departed member clears its own set when it steps.)
+    (when leading
+      (dolist (id old-peers)
+        (unless (member id (raft-node-peers node) :test #'equal)
+          (setf (gethash id (raft-node-departing-members node)) (raft-node-commit-index node))))))
+  (when (raft-node-removed node)
+    (clrhash (raft-node-departing-members node))
+    (when (eq (raft-node-role node) :leader)
+      (raft-become-follower node (raft-node-current-term node)))))
+
+(defun raft-propose-config (node &key add remove (role :voter) callback)
+  "Leader-only single-member change. ADD = a member id to add with ROLE (:voter
+   or :witness); REMOVE = a member id to drop (not self). Only one change may be
+   in flight. The new member is replicated to immediately but is not counted for
+   quorum until the config entry commits (effective-on-commit). Returns
+   (values index t) when the change is proposed, else (values nil reason)."
+  (cond
+    ((not (eq (raft-node-role node) :leader)) (values nil :not-leader))
+    ((plusp (hash-table-count (raft-node-pending-members node))) (values nil :change-in-flight))
+    ((and remove (equal remove (raft-node-id node))) (values nil :cannot-remove-self))
+    (t
+     (let ((members (raft-current-config node)))
+       (cond
+         (add (setf members (cons (cons add role)
+                                  (remove add members :key #'car :test #'equal)))
+              ;; Replicate to the joiner now (not yet quorum) so it receives the
+              ;; config entry that promotes it.
+              (setf (gethash add (raft-node-pending-members node)) role
+                    (gethash add (raft-node-next-index node)) (1+ (raft-last-log-index node))
+                    (gethash add (raft-node-match-index node)) 0))
+         (remove (setf members (remove remove members :key #'car :test #'equal))))
+       (raft-propose node (list :raft-config :members members) callback)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Message handling.
@@ -365,14 +470,17 @@
 ;;; Logical clock.
 
 (defun raft-tick (node)
-  "Advance one logical tick: candidates/followers may start an election, leaders
-   send heartbeats."
-  (case (raft-node-role node)
-    ((:follower :candidate)
-     (when (>= (incf (raft-node-election-elapsed node)) (raft-node-election-timeout node))
-       (raft-become-candidate node)))
-    (:leader
-     (when (>= (incf (raft-node-heartbeat-elapsed node)) (raft-node-heartbeat-timeout node))
-       (raft-broadcast-append node)))))
+  "Advance one logical tick: voter candidates/followers may start an election,
+   leaders send heartbeats. A witness or learner never starts an election (so it
+   never becomes leader); a removed member does nothing."
+  (unless (raft-node-removed node)
+    (case (raft-node-role node)
+      ((:follower :candidate)
+       (when (eq (raft-node-self-role node) :voter)
+         (when (>= (incf (raft-node-election-elapsed node)) (raft-node-election-timeout node))
+           (raft-become-candidate node))))
+      (:leader
+       (when (>= (incf (raft-node-heartbeat-elapsed node)) (raft-node-heartbeat-timeout node))
+         (raft-broadcast-append node))))))
 
 (defun raft-leader-p (node) (eq (raft-node-role node) :leader))

@@ -194,6 +194,7 @@
                              (:file "raft-transport-test")
                              (:file "raft-store-test")
                              (:file "raft-plane-test")
+                             (:file "raft-membership-test")
                              (:file "core-resources-test")
                              (:file "crd-schema-test")
                              (:file "scheduler-test")
