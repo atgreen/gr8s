@@ -56,7 +56,8 @@
     (let* ((good (gr8s::pod-assignment (create-pod store (volume-test-pod)) store))
            (bad (gr8s::pod-assignment (create-pod store (volume-test-pod-named "projection-bad")) store))
            (agent-store (open-store (merge-pathnames "agent/" directory))))
-      ;; Storage objects created from generateName once reached agents with no name.
+      ;; An object the agent would reject on arrival, as a token Secret named after an
+      ;; uppercase Pod UID once was.
       (setf (slot-value bad 'gr8s.node.v1::resource-objects-json)
             (list (trivial-utf-8:string-to-utf-8-bytes
                    "{\"kind\":\"Secret\",\"metadata\":{\"namespace\":\"sonobuoy\"}}")))
