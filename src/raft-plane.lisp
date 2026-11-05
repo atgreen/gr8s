@@ -22,10 +22,8 @@
 
 (in-package #:gr8s)
 
-(defparameter *raft-local-plane-resources*
-  '("events")
-  "Durable resource kinds that are deliberately kept OFF the consensus plane:
-   high-churn and self-expiring, so eventual consistency is acceptable.")
+;; *RAFT-LOCAL-PLANE-RESOURCES* lives in core-resources.lisp (loaded before this
+;; file) so the replication blob and INSTALL-CORE-STATE-BLOB can filter on it.
 
 (defun raft-consensus-resource-p (resource)
   "True when writes to RESOURCE (a stored-resource plural like \"configmaps\")

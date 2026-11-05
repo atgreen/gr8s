@@ -873,7 +873,11 @@
          (multiple-value-bind (body status) (request "/version")
            (is (= 200 status))
            (let ((version (response-object body)))
+             ;; Major/minor and gitVersion come from the single source of truth
+             ;; (the ASDF :version via version-string), not a hardcoded string.
              (is (string= "1" (gethash "major" version)))
              (is (string= "36" (gethash "minor" version)))
-             (is (string= "v1.36.0-gr8s.0" (gethash "gitVersion" version)))))
+             (is (string= (gr8s::kubernetes-git-version) (gethash "gitVersion" version)))
+             (is (eql 0 (search "v1.36" (gethash "gitVersion" version)))
+                 "gitVersion is the Kubernetes API version with our suffix")))
       (stop-server server))))

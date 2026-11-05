@@ -82,3 +82,75 @@
       (let ((list (check-core-status 200 "/api/v1/nodes" :parameters '(("fieldSelector" . "spec.unschedulable=true")))))
         (is (= 0 (length (gethash "items" list)))))
       (check-core-status 404 "/api/v1/nodes/absent"))))
+
+(defun discovery-entry (document name)
+  "Return the entry for NAME in a legacy discovery DOCUMENT."
+  (find name (gethash "resources" document) :test #'equal :key (lambda (entry) (gethash "name" entry))))
+
+(test discovery-publishes-upstream-short-names-and-categories
+  ;; Values read from kubernetes/kubernetes release-1.36 api/discovery.
+  (with-core-api (store directory)
+    (values store directory)
+    (loop for (path name short-names categories)
+            in '(("/api/v1" "namespaces" ("ns") nil)
+                 ("/api/v1" "serviceaccounts" ("sa") nil)
+                 ("/api/v1" "nodes" ("no") nil)
+                 ("/api/v1" "pods" ("po") ("all"))
+                 ("/api/v1" "services" ("svc") ("all"))
+                 ("/api/v1" "replicationcontrollers" ("rc") ("all"))
+                 ("/api/v1" "secrets" nil nil)
+                 ("/api/v1" "events" ("ev") nil)
+                 ("/apis/events.k8s.io/v1" "events" ("ev") nil)
+                 ("/apis/apps/v1" "deployments" ("deploy") ("all"))
+                 ("/apis/apps/v1" "statefulsets" ("sts") ("all"))
+                 ("/apis/apps/v1" "controllerrevisions" nil nil)
+                 ("/apis/batch/v1" "jobs" nil ("all"))
+                 ("/apis/batch/v1" "cronjobs" ("cj") ("all"))
+                 ("/apis/autoscaling/v1" "horizontalpodautoscalers" ("hpa") ("all"))
+                 ("/apis/autoscaling/v2" "horizontalpodautoscalers" ("hpa") ("all"))
+                 ("/apis/policy/v1" "poddisruptionbudgets" ("pdb") nil)
+                 ("/apis/networking.k8s.io/v1" "ipaddresses" ("ip") nil)
+                 ("/apis/networking.k8s.io/v1" "ingressclasses" nil nil)
+                 ("/apis/storage.k8s.io/v1" "storageclasses" ("sc") nil)
+                 ("/apis/scheduling.k8s.io/v1" "priorityclasses" ("pc") nil)
+                 ("/apis/apiextensions.k8s.io/v1" "customresourcedefinitions" ("crd" "crds") ("api-extensions"))
+                 ("/apis/apiregistration.k8s.io/v1" "apiservices" nil ("api-extensions"))
+                 ("/apis/admissionregistration.k8s.io/v1" "validatingwebhookconfigurations" nil ("api-extensions")))
+          do (let ((entry (discovery-entry (check-core-status 200 path) name)))
+               (is (hash-table-p entry) "~A ~A is not served" path name)
+               (is (equal short-names (coerce (gethash "shortNames" entry #()) 'list)) "~A ~A short names" path name)
+               (is (equal categories (coerce (gethash "categories" entry #()) 'list)) "~A ~A categories" path name)
+               (is (not (equal "" (gethash "singularName" entry))) "~A ~A singular name" path name)))))
+
+(test every-named-discovery-resource-exists
+  ;; A misspelled table entry would silently publish nothing.
+  (loop for (resource) in gr8s::*resource-discovery-names*
+        do (is (or (member resource '("pods" "nodes" "apiservices" "volumeattributesclasses") :test #'equal)
+                   (assoc resource gr8s::*stored-resource-types* :test #'equal))
+               "~A is not a served resource" resource)))
+
+(test collection-delete-discovery-matches-what-is-served
+  (with-core-api (store directory)
+    (values store directory)
+    (flet ((verbs (path name) (coerce (gethash "verbs" (discovery-entry (check-core-status 200 path) name)) 'list)))
+      ;; Served all along but undiscoverable, so clients fell back to deleting one by one.
+      (is (member "deletecollection" (verbs "/apis/batch/v1" "jobs") :test #'equal))
+      (is (member "deletecollection" (verbs "/apis/batch/v1" "cronjobs") :test #'equal))
+      (is (member "deletecollection" (verbs "/apis/policy/v1" "poddisruptionbudgets") :test #'equal))
+      (check-core-status 200 "/apis/batch/v1/namespaces/default/jobs" :method :delete)
+      ;; As upstream: a Namespace cannot be deleted through its collection.
+      (is (not (member "deletecollection" (verbs "/api/v1" "namespaces") :test #'equal))))))
+
+(test core-discovery-has-no-resource-from-another-group
+  (with-core-api (store directory)
+    (values store directory)
+    (let ((document (check-core-status 200 "/api/v1")))
+      ;; A parentless subresource surfaced as a verbless top-level kind in aggregated discovery.
+      (is (null (discovery-entry document "volumeattachments/status")))
+      (loop for entry across (gethash "resources" document)
+            for name = (gethash "name" entry)
+            for slash = (position #\/ name)
+            when slash
+              do (is (discovery-entry document (subseq name 0 slash)) "~A has no parent" name))
+      (dolist (name '("nodes/status" "namespaces/status" "namespaces/finalize" "pods/attach" "pods/exec" "serviceaccounts/token"))
+        (is (discovery-entry document name) "~A is served but not discoverable" name)))))

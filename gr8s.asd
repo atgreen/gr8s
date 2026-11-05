@@ -11,11 +11,15 @@
   :description "A small Kubernetes-compatible control plane in Common Lisp"
   :author "gr8s contributors"
   :license "MIT"
-  :version "0.1.0"
+  ;; The Kubernetes API version gr8s implements. The gr8s release itself is this
+  ;; base plus a "-gr8s.N" suffix carried in a git tag (e.g. v1.36.0-gr8s.0),
+  ;; surfaced through VERSION-STRING as +GR8S-VERSION+ (see src/version.lisp).
+  :version "1.36.0"
   :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cl-cancel"
                "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
                "pure-tls/acme" "drakma"
-               "sb-posix" "slynk" "trivial-utf-8" "usocket" "whistler/loader")
+               "sb-posix" "slynk" "trivial-utf-8" "usocket" "version-string"
+               "whistler/loader")
   :serial t
   :components ((:static-file "schema/podtemplate-v1.json")
                (:static-file "schema/crd-v1.json")
@@ -33,6 +37,7 @@
                (:module "src"
                 :serial t
                 :components ((:file "package")
+                             (:file "version")
                              (:file "grpc-close-compat")
                              (:file "cri-v1-generated")
                              (:file "csi-v1-generated")
@@ -91,6 +96,7 @@
                              (:file "pod-admission-policy")
                              (:file "resource-quota")
                              (:file "pod-resource-fit")
+                             (:file "pod-affinity")
                              (:file "node-taints")
                              (:file "pod-node-admission")
                              (:file "endpointslice-api")
@@ -234,6 +240,7 @@
                              (:file "ha-controller-write-test")
                              (:file "ha-pod-failover-test")
                              (:file "ha-node-cidr-test")
+                             (:file "ha-local-plane-test")
                              (:file "ha-redirect-http-test")
                              (:file "agent-failover-test")
                              (:file "ha-smoke-test")

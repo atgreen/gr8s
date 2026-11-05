@@ -78,16 +78,17 @@
   target)
 
 (defun version-response ()
-  (json-response
-   (json-object "major" "1"
-                "minor" "36"
-                "gitVersion" "v1.36.0-gr8s.0"
-                "gitCommit" "unknown"
-                "gitTreeState" "clean"
-                "buildDate" "1970-01-01T00:00:00Z"
-                "goVersion" "common-lisp"
-                "compiler" "sbcl"
-                "platform" "linux/amd64")))
+  (multiple-value-bind (major minor) (kubernetes-api-version-components)
+    (json-response
+     (json-object "major" major
+                  "minor" minor
+                  "gitVersion" (kubernetes-git-version)
+                  "gitCommit" "unknown"
+                  "gitTreeState" "clean"
+                  "buildDate" "1970-01-01T00:00:00Z"
+                  "goVersion" "common-lisp"
+                  "compiler" "sbcl"
+                  "platform" "linux/amd64"))))
 
 (defun api-versions-response ()
   (json-response
@@ -116,9 +117,8 @@
     (concatenate
      'vector
      (vector
-      (json-object "name" "pods" "singularName" "pod" "namespaced" t "kind" "Pod"
-                   "verbs" #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
-                   "shortNames" #("po"))
+      (resource-discovery-entry "pods" "pod" t "Pod"
+                                #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch"))
       (json-object "name" "pods/status" "singularName" "" "namespaced" t "kind" "Pod"
                    "verbs" #("get" "patch" "update"))
       (json-object "name" "pods/ephemeralcontainers" "singularName" "" "namespaced" t "kind" "Pod"
@@ -126,13 +126,19 @@
       (json-object "name" "pods/resize" "singularName" "" "namespaced" t "kind" "Pod"
                    "verbs" #("get" "patch" "update"))
       (json-object "name" "pods/log" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("get"))
-      (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "Pod" "verbs" #("create"))
+      (json-object "name" "pods/exec" "singularName" "" "namespaced" t "kind" "PodExecOptions" "verbs" #("create" "get"))
+      (json-object "name" "pods/attach" "singularName" "" "namespaced" t "kind" "PodAttachOptions" "verbs" #("create" "get"))
       (json-object "name" "pods/eviction" "singularName" "" "namespaced" t "kind" "Eviction"
                    "group" "policy" "version" "v1" "verbs" #("create"))
       (json-object "name" "pods/proxy" "singularName" "" "namespaced" t "kind" "PodProxyOptions"
                    "verbs" #("get" "create" "update" "patch" "delete"))
-      (json-object "name" "nodes" "singularName" "node" "namespaced" nil "kind" "Node"
-                   "verbs" #("create" "delete" "get" "list" "patch" "update") "shortNames" #("no"))
+      (resource-discovery-entry "nodes" "node" nil "Node" #("create" "delete" "get" "list" "patch" "update"))
+      (json-object "name" "nodes/status" "singularName" "" "namespaced" nil "kind" "Node" "verbs" #("get" "patch" "update"))
+      (json-object "name" "namespaces/status" "singularName" "" "namespaced" nil "kind" "Namespace"
+                   "verbs" #("get" "patch" "update"))
+      (json-object "name" "namespaces/finalize" "singularName" "" "namespaced" nil "kind" "Namespace" "verbs" #("update"))
+      (json-object "name" "serviceaccounts/token" "singularName" "" "namespaced" t "kind" "TokenRequest"
+                   "group" "authentication.k8s.io" "version" "v1" "verbs" #("create"))
       (json-object "name" "replicationcontrollers/status" "singularName" "" "namespaced" t
                    "kind" "ReplicationController" "verbs" #("get" "patch" "update"))
       (json-object "name" "replicationcontrollers/scale" "singularName" "" "namespaced" t

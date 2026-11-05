@@ -267,8 +267,8 @@
 
 (defun node-placement-better-p (store pod left right)
   "Prefer a node POD's affinity favors, then the fewest Pods, then a stable name."
-  (let ((left-score (pod-node-preference-score pod left))
-        (right-score (pod-node-preference-score pod right))
+  (let ((left-score (+ (pod-node-preference-score pod left) (pod-affinity-preference-score-unlocked store pod left)))
+        (right-score (+ (pod-node-preference-score pod right) (pod-affinity-preference-score-unlocked store pod right)))
         (left-count (assigned-nonterminal-pod-count store (node-record-name left)))
         (right-count (assigned-nonterminal-pod-count store (node-record-name right))))
     (cond ((/= left-score right-score) (> left-score right-score))

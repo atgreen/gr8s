@@ -373,8 +373,6 @@
                    (gr8s:node-record-name
                     (gr8s::schedule-pod store (create-pod store (policy-test-pod "label" :spec-fields (list "affinity" (funcall required "kubernetes.io/hostname" "NotIn" "beta"))))))))
         (signals kubernetes-error (policy-test-pod "bad-field" :spec-fields (list "affinity" (funcall required "metadata.labels" "In" "x"))))))
-    (signals kubernetes-error
-      (policy-test-pod "pod-affinity" :spec-fields (list "affinity" (gr8s::core-object "podAffinity" (gr8s::core-object)))))
     (let ((preferred (gr8s::core-object "nodeAffinity"
                                         (gr8s::core-object "preferredDuringSchedulingIgnoredDuringExecution"
                                                            (vector (gr8s::core-object "weight" 10
@@ -487,3 +485,138 @@
       (sb-posix:symlink "/etc/passwd" (namestring (merge-pathnames "link" root)))
       ;; The symbolic link counts only itself, never its target.
       (is (<= 4096 (gr8s::directory-disk-bytes (namestring (merge-pathnames "usage/" path))) 4200)))))
+
+(defun affinity-test-group (kind &rest terms)
+  "Return an affinity object requiring TERMS of KIND."
+  (gr8s::core-object kind (gr8s::core-object "requiredDuringSchedulingIgnoredDuringExecution" (coerce terms 'vector))))
+
+(defun affinity-test-term (app &rest fields)
+  "Return a term selecting app=APP across hostnames, plus FIELDS."
+  (let ((term (gr8s::core-object "topologyKey" "kubernetes.io/hostname"
+                                 "labelSelector" (gr8s::core-object "matchLabels" (gr8s::core-object "app" app)))))
+    (loop for (key value) on fields by #'cddr do (setf (gethash key term) value))
+    term))
+
+(defun affinity-test-pod (store name app affinity &key (namespace "team") node)
+  "Create a Pod labelled app=APP with AFFINITY; with NODE it is already assigned there."
+  (let* ((fields (append (when affinity (list "affinity" affinity))
+                         (when node (list "nodeName" node))))
+         (pod (policy-test-pod name :namespace namespace :spec-fields fields)))
+    (setf (gethash "labels" (gethash "metadata" (gr8s::pod-to-object pod))) (gr8s::core-object "app" app))
+    (create-pod store pod)))
+
+(defun affinity-test-placement (store name app affinity &key (namespace "team"))
+  "Create and schedule a Pod, returning its node's name or NIL."
+  (let ((node (gr8s::schedule-pod store (affinity-test-pod store name app affinity :namespace namespace))))
+    (and node (gr8s:node-record-name node))))
+
+(test pod-affinity-places-a-pod-beside-the-pods-it-selects
+  (with-temporary-store (store path)
+    (values path)
+    (register-test-nodes store "alpha" "beta")
+    (affinity-test-pod store "db" "db" nil :node "beta")
+    (is (equal "beta" (affinity-test-placement store "web" "web" (affinity-test-group "podAffinity" (affinity-test-term "db")))))
+    ;; No Pod matches and the Pod does not match itself, so it waits.
+    (is (null (affinity-test-placement store "lonely" "lonely" (affinity-test-group "podAffinity" (affinity-test-term "none")))))
+    ;; The first Pod of a group that selects itself may start anywhere.
+    (is-true (affinity-test-placement store "first" "group" (affinity-test-group "podAffinity" (affinity-test-term "group"))))
+    ;; A node with no such key is in no domain at all.
+    (is (null (affinity-test-placement store "regional" "regional"
+                                       (affinity-test-group "podAffinity" (affinity-test-term "regional" "topologyKey" "region")))))))
+
+(test pod-anti-affinity-keeps-pods-apart-in-both-directions
+  (with-temporary-store (store path)
+    (values path)
+    (register-test-nodes store "alpha" "beta")
+    (affinity-test-pod store "db" "db" nil :node "alpha")
+    (is (equal "beta" (affinity-test-placement store "away" "away" (affinity-test-group "podAntiAffinity" (affinity-test-term "db")))))
+    ;; "away" now refuses db Pods on its node, and alpha already holds one, so both nodes are out.
+    (is (null (affinity-test-placement store "db-2" "db" (affinity-test-group "podAntiAffinity" (affinity-test-term "db")))))
+    ;; An existing Pod's anti-affinity also refuses the newcomer on its own node.
+    (is (equal "alpha" (affinity-test-placement store "db-3" "db" nil)))
+    ;; A topology key no node has cannot be violated.
+    (is-true (affinity-test-placement store "free" "free"
+                                      (affinity-test-group "podAntiAffinity" (affinity-test-term "db" "topologyKey" "region"))))))
+
+(test pod-affinity-terms-select-by-namespace
+  (with-temporary-store (store path)
+    (values path)
+    (register-test-nodes store "alpha" "beta")
+    (gr8s::create-core-resource
+     store "namespaces"
+     (gr8s::core-object "metadata" (gr8s::core-object "name" "ads" "labels" (gr8s::core-object "team" "ads")))
+     nil)
+    (affinity-test-pod store "other" "db" nil :namespace "ads" :node "beta")
+    ;; A term looks only in its own namespace unless it says otherwise.
+    (is (null (affinity-test-placement store "own" "web" (affinity-test-group "podAffinity" (affinity-test-term "db")))))
+    (is (equal "beta" (affinity-test-placement store "named" "web"
+                                               (affinity-test-group "podAffinity" (affinity-test-term "db" "namespaces" #("ads"))))))
+    (is (equal "beta" (affinity-test-placement store "selected" "web"
+                                               (affinity-test-group "podAffinity"
+                                                                    (affinity-test-term "db" "namespaceSelector"
+                                                                                        (gr8s::core-object "matchLabels" (gr8s::core-object "team" "ads")))))))
+    (is (equal "beta" (affinity-test-placement store "everywhere" "web"
+                                               (affinity-test-group "podAffinity"
+                                                                    (affinity-test-term "db" "namespaceSelector" (gr8s::core-object))))))))
+
+(test preferred-pod-affinity-orders-nodes
+  (with-temporary-store (store path)
+    (values path)
+    (register-test-nodes store "alpha" "beta")
+    (affinity-test-pod store "db" "db" nil :node "beta")
+    (flet ((preferred (kind)
+             (gr8s::core-object kind (gr8s::core-object "preferredDuringSchedulingIgnoredDuringExecution"
+                                                        (vector (gr8s::core-object "weight" 10 "podAffinityTerm" (affinity-test-term "db")))))))
+      (is (equal "beta" (affinity-test-placement store "near" "near" (preferred "podAffinity"))))
+      (is (equal "alpha" (affinity-test-placement store "far" "far" (preferred "podAntiAffinity")))))))
+
+(test pod-affinity-validation-refuses-malformed-terms
+  (dolist (term (list (gr8s::core-object)
+                      (gr8s::core-object "topologyKey" "bad key!")
+                      (affinity-test-term "db" "unknown" t)
+                      (affinity-test-term "db" "namespaces" #("Not_A_Namespace"))
+                      (gr8s::core-object "topologyKey" "zone" "matchLabelKeys" #("app"))
+                      (affinity-test-term "db" "matchLabelKeys" #("app") "mismatchLabelKeys" #("app"))))
+    (signals kubernetes-error
+      (policy-test-pod "bad" :spec-fields (list "affinity" (affinity-test-group "podAffinity" term)))))
+  (signals kubernetes-error
+    (policy-test-pod "bad-weight"
+                     :spec-fields (list "affinity"
+                                        (gr8s::core-object "podAntiAffinity"
+                                                           (gr8s::core-object "preferredDuringSchedulingIgnoredDuringExecution"
+                                                                              (vector (gr8s::core-object "weight" 0 "podAffinityTerm" (affinity-test-term "db")))))))))
+
+(test quota-cross-namespace-affinity-scope-counts-only-reaching-pods
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s::create-core-resource
+     store "resourcequotas"
+     (gr8s::core-object "metadata" (gr8s::core-object "name" "cross")
+                        "spec" (gr8s::core-object
+                                "hard" (gr8s::core-object "pods" "5")
+                                "scopeSelector" (gr8s::core-object
+                                                 "matchExpressions"
+                                                 (vector (gr8s::core-object "scopeName" "CrossNamespacePodAffinity" "operator" "Exists")))))
+     "team")
+    (flet ((pod (name term)
+             (create-pod store (policy-test-pod name :spec-fields (list "affinity" (affinity-test-group "podAntiAffinity" term))))))
+      (pod "plain" (gr8s::core-object "topologyKey" "region"))
+      (is (equal "0" (gethash "pods" (policy-test-used store "cross"))))
+      (pod "named" (gr8s::core-object "topologyKey" "region" "namespaces" #("ns1")))
+      (is (equal "1" (gethash "pods" (policy-test-used store "cross"))))
+      (pod "selected" (gr8s::core-object "topologyKey" "region"
+                                         "namespaceSelector"
+                                         (gr8s::core-object "matchExpressions"
+                                                            (vector (gr8s::core-object "key" "team" "operator" "In" "values" #("ads"))))))
+      (is (equal "2" (gethash "pods" (policy-test-used store "cross")))))
+    (signals kubernetes-error
+      (gr8s::create-core-resource
+       store "resourcequotas"
+       (gr8s::core-object "metadata" (gr8s::core-object "name" "cross-in")
+                          "spec" (gr8s::core-object
+                                  "hard" (gr8s::core-object "pods" "5")
+                                  "scopeSelector" (gr8s::core-object
+                                                   "matchExpressions"
+                                                   (vector (gr8s::core-object "scopeName" "CrossNamespacePodAffinity"
+                                                                              "operator" "In" "values" #("x"))))))
+       "team"))))

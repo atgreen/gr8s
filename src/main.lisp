@@ -302,8 +302,6 @@
                 (setf (getf options :server) value))
                (t (error "unknown kubeconfig option: ~A" option)))
              (setf arguments (cddr arguments)))
-    (unless (getf options :output)
-      (error "kubeconfig requires --output"))
     options))
 
 (defun parse-cli-options (arguments)
@@ -311,6 +309,8 @@
     ((or (null arguments)
          (member (first arguments) '("help" "--help" "-h") :test #'string=))
      (list :command :help))
+    ((member (first arguments) '("version" "--version" "-v") :test #'string=)
+     (list :command :version))
     ((string= "serve" (first arguments))
      (parse-serve-options (rest arguments)))
     ((string= "agent" (first arguments))
@@ -337,16 +337,25 @@
                 (length (runtime-asset-octets asset))))
       (format t "runtime assets: external~%")))
 
-(defun write-kubeconfig (path server-url)
+(defun print-kubeconfig (stream server-url)
+  (format stream
+          "apiVersion: v1~%kind: Config~%clusters:~%  - name: gr8s~%    cluster:~%      server: ~A~%contexts:~%  - name: gr8s~%    context:~%      cluster: gr8s~%      namespace: default~%      user: gr8s~%current-context: gr8s~%users:~%  - name: gr8s~%    user: {}~%"
+          server-url))
+
+(defun write-kubeconfig (path server-url &key private)
+  "Write a kubeconfig to PATH, readable only by its owner when PRIVATE."
   (ensure-directories-exist path)
   (with-open-file (stream path
                           :direction :output
                           :if-exists :supersede
                           :if-does-not-exist :create)
-    (format stream
-            "apiVersion: v1~%kind: Config~%clusters:~%  - name: gr8s~%    cluster:~%      server: ~A~%contexts:~%  - name: gr8s~%    context:~%      cluster: gr8s~%      namespace: default~%      user: gr8s~%current-context: gr8s~%users:~%  - name: gr8s~%    user: {}~%"
-            server-url))
+    (print-kubeconfig stream server-url))
+  (when private (sb-posix:chmod path #o600))
   path)
+
+(defun default-kubeconfig-path (options)
+  "Return where serve writes its kubeconfig when none was named."
+  (merge-pathnames "kubeconfig" (uiop:ensure-directory-pathname (getf options :state-directory))))
 
 (defun runtime-from-options (options)
   (cond
@@ -681,10 +690,11 @@ handler and never gets here. A busy host makes this race likely."
                                       ;; in-cluster API address present.
                                       (when service-network-created
                                         (ensure-in-cluster-network pki)))))
-                    (when (getf options :kubeconfig)
-                      (write-kubeconfig
-                       (getf options :kubeconfig)
-                       (format nil "http://~A:~D" address port)))
+                    (let ((kubeconfig (or (getf options :kubeconfig) (default-kubeconfig-path options))))
+                      ;; A file the user named keeps its usual mode, as they may read it as another user.
+                      (write-kubeconfig kubeconfig (format nil "http://~A:~D" address port)
+                                        :private (null (getf options :kubeconfig)))
+                      (format t "gr8s kubeconfig: ~A~%" (namestring kubeconfig)))
                     (format t "gr8s listening on http://~A:~D~%" address port)
                     (finish-output)
                     (loop until *shutdown-requested* do (sleep 0.1)))
@@ -724,7 +734,7 @@ handler and never gets here. A busy host makes this race likely."
 
 (defun print-help ()
   (format t
-          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE] [--local-storage-path DIR]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s witness --join HOST:PORT --node-name NAME [--token TOKEN] [--listen IPV4] [--port PORT] [--state-directory DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%"))
+          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE] [--local-storage-path DIR]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s witness --join HOST:PORT --node-name NAME [--token TOKEN] [--listen IPV4] [--port PORT] [--state-directory DIR]~%  gr8s kubeconfig [--output FILE] [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%  gr8s version~%"))
 
 (defun print-gr8s-banner (role)
   "Print a startup banner (Spring-Boot style) naming the role gr8s is starting."
@@ -738,8 +748,9 @@ handler and never gets here. A busy host makes this race likely."
                   "   |___/"))
     (write-line line))
   (terpri)
-  (format t "   gr8s · a Kubernetes-compatible control plane in Common Lisp~%")
-  (format t "   Kubernetes API v1.36 · ~A · no Envoy, no kube-proxy, no etcd~%~%" role)
+  (format t "   gr8s ~A · a Kubernetes-compatible control plane in Common Lisp~%" +gr8s-version+)
+  (multiple-value-bind (major minor) (kubernetes-api-version-components)
+    (format t "   Kubernetes API v~A.~A · ~A · no Envoy, no kube-proxy, no etcd~%~%" major minor role))
   (finish-output))
 
 (defun main-with-environment (arguments environment cni-entry)
@@ -755,8 +766,11 @@ handler and never gets here. A busy host makes this race likely."
               (install-stale-timeout-guard))
             (case (getf options :command)
               (:help (print-help) 0)
+              (:version (format t "gr8s ~A~%" +gr8s-version+) 0)
               (:kubeconfig
-               (write-kubeconfig (getf options :output) (getf options :server))
+               (if (getf options :output)
+                   (write-kubeconfig (getf options :output) (getf options :server))
+                   (print-kubeconfig *standard-output* (getf options :server)))
                0)
               (:join-token (print-node-join-token options))
               (:runtime-assets

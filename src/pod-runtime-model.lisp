@@ -423,12 +423,15 @@
                (invalid-pod "matchFields only supports one metadata.name value with In or NotIn")))))
 
 (defun validate-pod-affinity (spec)
-  "Accept node affinity, which the scheduler evaluates; Pod affinity has no implementation and is refused."
+  "Validate node affinity and inter-Pod affinity, all of which the scheduler evaluates."
   (when (eq (gethash "affinity" spec) 'null) (remhash "affinity" spec))
   (let ((affinity (gethash "affinity" spec)))
     (when affinity
       (drop-null-fields (require-object affinity "spec.affinity"))
-      (reject-unsupported-fields affinity '("nodeAffinity") "spec.affinity")
+      (reject-unsupported-fields affinity '("nodeAffinity" "podAffinity" "podAntiAffinity") "spec.affinity")
+      (dolist (kind '("podAffinity" "podAntiAffinity"))
+        (when (gethash kind affinity)
+          (validate-pod-affinity-group (gethash kind affinity) kind)))
       (let ((node-affinity (gethash "nodeAffinity" affinity)))
         (when node-affinity
           (drop-null-fields (require-object node-affinity "nodeAffinity"))

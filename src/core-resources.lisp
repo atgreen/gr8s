@@ -128,10 +128,23 @@
 (defparameter +template-history-recent-limit+ 512
   "Newest journal entries kept separately, so that an idle watch reads few of them.")
 
-(defun core-state-json (store resources revision workload-deletions job-controller-states)
+(defparameter *raft-local-plane-resources*
+  '("events")
+  "Durable resource kinds kept OFF the consensus plane: high-churn and
+   self-expiring, so eventual consistency is acceptable. They publish locally on
+   each member and are excluded from the HA replication blob (podster-8ia.3); the
+   full on-disk state still includes them.")
+
+(defun local-plane-resource-p (resource)
+  (member resource *raft-local-plane-resources* :test #'equal))
+
+(defun core-state-json (store resources revision workload-deletions job-controller-states
+                        &key omit-local-plane)
   "Serialize the complete durable core-resource state to the JSON written to disk.
    Returns (values json history floor token-key event-expirations added) so the
-   direct publish path can also set the derived in-memory slots."
+   direct publish path can also set the derived in-memory slots. With
+   OMIT-LOCAL-PLANE, local-plane kinds (events) are left out -- used for the HA
+   replication blob so high-churn events never ride the Raft log."
   (multiple-value-bind (history floor added) (next-template-history store resources revision)
     (let* ((token-key (or (pod-store-template-token-key store) (secure-random-octets 32)))
            (event-expirations (next-event-expirations store resources))
@@ -143,7 +156,9 @@
                                "resourceHistoryStart" (pod-store-resource-history-start store)
                                "eventExpirations" event-expirations
                                "items" (coerce (loop for key being the hash-keys of resources using (hash-value object)
-                                                     unless (custom-resource-key-p (first key)) collect object) 'vector)
+                                                     unless (or (custom-resource-key-p (first key))
+                                                                (and omit-local-plane (local-plane-resource-p (first key))))
+                                                       collect object) 'vector)
                                "customResourceItems" (coerce (loop for key being the hash-keys of resources using (hash-value object)
                                                                    when (custom-resource-key-p (first key))
                                                                      collect (core-object "resource" (first key) "object" object)) 'vector)))))
@@ -159,13 +174,17 @@
    replica then installs it via INSTALL-CORE-STATE-BLOB."
   ;; Write the complete new state before publishing it in memory. A failed
   ;; atomic write leaves both the old disk state and the old index intact.
-  (multiple-value-bind (json history floor token-key event-expirations added)
-      (core-state-json store resources revision workload-deletions job-controller-states)
-    (cond
-      ((and *core-write-active* (pod-store-consensus-commit-fn store))
-       ;; HA: defer publication to the replicated apply path.
-       (setf *pending-consensus-commit* json))
-      (t
+  (cond
+    ;; HA consensus write: defer to the replicated apply path, keeping local-plane
+    ;; resources (events) out of the Raft log (podster-8ia.3). A local-plane-only
+    ;; write never replicates -- it falls through to the local publish below.
+    ((and *core-write-active* (not *local-plane-write*) (pod-store-consensus-commit-fn store))
+     (setf *pending-consensus-commit*
+           (core-state-json store resources revision workload-deletions job-controller-states
+                            :omit-local-plane t)))
+    (t
+     (multiple-value-bind (json history floor token-key event-expirations added)
+         (core-state-json store resources revision workload-deletions job-controller-states)
        (write-private-text-atomically (core-resource-state-path store) json)
        (setf (pod-store-resources store) resources
              (pod-store-workload-deletions store) workload-deletions
@@ -187,11 +206,19 @@
    :core-state entry commits (podster-c2d.7.2). Uses the RAW store lock, never
    WITH-STORE-LOCK: on the leader this runs while the proposing writer still holds
    the consensus-write lock during its flush, so acquiring that lock again here
-   would deadlock."
+   would deadlock. Local-plane resources (events) are not in the blob, so this
+   member's own ones are carried across the reload rather than dropped (8ia.3)."
   (bt:with-lock-held ((pod-store-lock store))
-    (write-private-text-atomically (core-resource-state-path store) json)
-    (clrhash (pod-store-resources store))
-    (load-core-resources store)))
+    (let ((local (loop for key being the hash-keys of (pod-store-resources store)
+                         using (hash-value object)
+                       when (local-plane-resource-p (first key))
+                         collect (cons key object))))
+      (write-private-text-atomically (core-resource-state-path store) json)
+      (clrhash (pod-store-resources store))
+      (load-core-resources store)
+      (loop for (key . object) in local
+            unless (gethash key (pod-store-resources store))
+              do (setf (gethash key (pod-store-resources store)) object)))))
 
 (defun copy-core-resource-index (store)
   (let ((copy (make-hash-table :test #'equal)))
@@ -456,7 +483,8 @@
          (map-equal (gethash "binaryData" left) (gethash "binaryData" right)))))
 
 (defun create-core-resource (store resource input namespace &key dry-run)
-  (with-core-write (store)
+  (let ((*local-plane-write* (local-plane-resource-p resource)))
+   (with-core-write (store)
     (expire-core-events-unlocked store)
     (unless (or (equal resource "events") *resource-quota-admission-exempt*)
       (require-namespace-accepts-content store namespace))
@@ -502,7 +530,7 @@
         (when (admission-config-resource-p resource) (prepare-admission-config-write object nil))
         (setf (gethash key resources) object)
         (unless dry-run (commit-core-resources store resources revision))
-        (copy-core-object object)))))
+        (copy-core-object object))))))
 
 (defun core-resource-update-view (resource existing)
   "Copy stored object EXISTING into the form the current request's writer sees."
@@ -512,7 +540,8 @@
         (t (copy-core-object existing))))
 
 (defun update-core-resource (store resource namespace name transform &key dry-run)
-  (with-core-write (store)
+  (let ((*local-plane-write* (local-plane-resource-p resource)))
+   (with-core-write (store)
     (expire-core-events-unlocked store)
     (let* ((existing (get-core-resource-unlocked store resource namespace name))
            (existing-metadata (gethash "metadata" existing))
@@ -565,12 +594,13 @@
             (remhash (core-resource-key resource namespace name) resources)
             (setf (gethash (core-resource-key resource namespace name) resources) object))
         (unless dry-run (commit-core-resources store resources revision)))
-      (copy-core-object object))))
+      (copy-core-object object)))))
 
 (defun delete-core-resource (store resource namespace name &key uid resource-version dry-run)
   ;; A COND (not RETURN-FROM) so WITH-CORE-WRITE's consensus flush always runs on
   ;; the delegated CRD/CSR/storage delete paths too (they stash via COMMIT-CORE-RESOURCES).
-  (with-core-write (store)
+  (let ((*local-plane-write* (local-plane-resource-p resource)))
+   (with-core-write (store)
     (expire-core-events-unlocked store)
     (let* ((existing (get-core-resource-unlocked store resource namespace name))
            (metadata (gethash "metadata" existing)))
@@ -598,4 +628,4 @@
            (when (and (equal resource "services") (plusp (hash-table-count (gethash "selector" (gethash "spec" existing) (core-object)))))
              (remhash (core-resource-key "endpoints" namespace name) resources))
            (unless dry-run (commit-core-resources store resources (1+ (pod-store-resource-revision store)))))
-         (copy-core-object existing))))))
+         (copy-core-object existing)))))))
