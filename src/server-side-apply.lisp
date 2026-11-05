@@ -552,6 +552,14 @@ Holding a list item's \".\" keeps only the item, and any field inside an item ke
                                                                        "x-kubernetes-list-map-keys" #("type")
                                                                        "items" (core-object "type" "object")))))))
         ((equal resource "nodes") nil)
+        ;; No pinned definition describes Services, whose ports upstream merges by port and protocol.
+        ((equal resource "services")
+         (core-object "properties"
+                      (core-object "spec" (core-object
+                                           "properties"
+                                           (core-object "ports" (core-object "type" "array" "x-kubernetes-list-type" "map"
+                                                                             "x-kubernetes-list-map-keys" #("port" "protocol")
+                                                                             "items" (core-object "type" "object")))))))
         (t (let ((*core-resource-view-version* (core-resource-api-version resource)))
              (typed-request-schema (core-resource-kind resource))))))
 

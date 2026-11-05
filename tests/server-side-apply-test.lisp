@@ -556,3 +556,18 @@
     ;; Upstream serializes FieldsV1 sorted, with an item's "." first.
     (let ((fields (com.inuoe.jzon:stringify (gethash "fieldsV1" (aref (gethash "managedFields" (gethash "metadata" two)) 0)))))
       (is (search "{\".\":{},\"f:image\":{},\"f:name\":{}}" fields) "~A" fields))))
+
+(test appliers-of-the-same-service-share-its-defaulted-ports
+  (with-core-api (store path)
+    (values store path)
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+    (let ((service "/api/v1/namespaces/alpha/services/one")
+          (body "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"name\":\"one\"},\"spec\":{\"ports\":[{\"port\":8080,\"protocol\":\"TCP\"}]}}"))
+      (check-core-status 201 service :method :patch :octets body :content-type "application/apply-patch+yaml"
+                         :parameters '(("fieldManager" . "first")))
+      (let* ((second (check-core-status 200 service :method :patch :octets body :content-type "application/apply-patch+yaml"
+                                        :parameters '(("fieldManager" . "second"))))
+             (entries (gethash "managedFields" (gethash "metadata" second))))
+        (is (= 2 (length entries)))
+        (is (gr8s::crd-json-equal-p (gethash "fieldsV1" (aref entries 0)) (gethash "fieldsV1" (aref entries 1))))))))
