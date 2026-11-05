@@ -130,6 +130,7 @@
             (setf (node-record-resource-version node) (write-to-string (next-pod-revision-unlocked store)))
             (persist-node store node)
             (setf (gethash name (pod-store-nodes store)) node)
+            (note-node-desired-change store)   ; desired API write (8ia.4)
             (json-response (node-api-object node) 201))))))
 
 (defun delete-node-response (store name)
