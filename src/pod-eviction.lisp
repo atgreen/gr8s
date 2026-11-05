@@ -30,7 +30,7 @@
 
 (defun eviction-request-object ()
   "Read the request's Eviction from JSON or Kubernetes protobuf."
-  (let ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;)))))
+  (let ((content-type (request-media-type)))
     (cond
       ((string= content-type "application/vnd.kubernetes.protobuf")
        (decode-eviction-protobuf (hunchentoot:raw-post-data :force-binary t)))

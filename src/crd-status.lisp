@@ -79,7 +79,7 @@
   (let ((old (get-core-resource store "customresourcedefinitions" nil name)))
     (cond ((eq method :get) (json-response old))
           ((member method '(:put :patch))
-           (let* ((type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
+           (let* ((type (request-media-type))
                   (input (if (eq method :put) (core-resource-request-object "CustomResourceDefinition")
                              (let ((patch (crd-parse-json-content (hunchentoot:raw-post-data :force-text t))))
                                (cond ((equal type "application/merge-patch+json") (merge-json-object old patch))

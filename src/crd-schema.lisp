@@ -29,7 +29,7 @@
 
 (defun crd-schema-error (path control &rest arguments)
   "Report an admission failure at a useful schema or resource field path."
-  (core-resource-error 422 "Invalid" "~A: ~A" path (apply #'format nil control arguments)))
+  (core-resource-error 422 "Invalid" "~A: ~A" (strip-field-path-root path) (apply #'format nil control arguments)))
 
 (defun crd-check-string-array (value path &key nonempty)
   "Require a unique string array with optional nonempty cardinality."
@@ -187,7 +187,9 @@
               (crd-value-type-p value (gethash "type" schema)))
     (crd-schema-error path "requires type ~A" (gethash "type" schema)))
   (when (gethash "enum" schema)
-    (unless (position value (gethash "enum" schema) :test #'crd-json-equal-p) (crd-schema-error path "value is outside enum")))
+    (unless (position value (gethash "enum" schema) :test #'crd-json-equal-p)
+      (crd-schema-error path "Unsupported value: ~A: supported values: ~{~A~^, ~}" (com.inuoe.jzon:stringify value)
+                        (map 'list #'com.inuoe.jzon:stringify (gethash "enum" schema)))))
   (when (numberp value)
     (dolist (bound '("minimum" "maximum"))
       (when (nth-value 1 (gethash bound schema))
@@ -219,7 +221,7 @@
       (when (nth-value 1 (gethash "metadata" value)) (crd-prepare-embedded-metadata (gethash "metadata" value))))
     (let ((properties (gethash "properties" schema)) (additional (gethash "additionalProperties" schema)))
       (loop for key across (gethash "required" schema #())
-            unless (nth-value 1 (gethash key value)) do (crd-schema-error path "missing required field ~A" key))
+            unless (nth-value 1 (gethash key value)) do (crd-schema-error (format nil "~A.~A" path key) "Required value"))
       (dolist (bound '("minProperties" "maxProperties"))
         (when (and (gethash bound schema)
                    (if (equal bound "minProperties") (< (hash-table-count value) (gethash bound schema))

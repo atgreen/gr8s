@@ -1,9 +1,18 @@
 (in-package #:gr8s)
 
+(defparameter +api-connection-limit+ 1024
+  "Connections served at once. Each open watch keeps one, and Hunchentoot's default of
+100 stops accepting at that point, leaving even short requests in a handshake timeout.")
+
 (defclass gr8s-acceptor (hunchentoot:easy-acceptor)
   ((store :initarg :store :reader acceptor-store)
    (runtime :initarg :runtime :reader acceptor-runtime)
-   (reconciler :initarg :reconciler :reader acceptor-reconciler)))
+   (reconciler :initarg :reconciler :reader acceptor-reconciler))
+  (:default-initargs
+   :listen-backlog 512
+   :taskmaster (make-instance 'hunchentoot:one-thread-per-connection-taskmaster
+                              :max-thread-count +api-connection-limit+
+                              :max-accept-count (+ +api-connection-limit+ 128))))
 
 (defmethod hunchentoot:acceptor-dispatch-request
     ((acceptor gr8s-acceptor) request)

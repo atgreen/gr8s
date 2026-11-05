@@ -11,10 +11,13 @@
 (defparameter *podtemplate-history-seconds* 300)
 (defparameter *podtemplate-history-limit* 4096)
 (defparameter *podtemplate-clock* #'get-universal-time)
+(defparameter +template-watch-maintenance-interval+ internal-time-units-per-second
+  "Least time between the journal and Event expiry checks that watches perform.")
 
 (defun next-template-history (store resources revision)
-  "Compute journal changes and retention floor before committing any state."
-  (let ((history (copy-list (pod-store-template-history store)))
+  "Compute journal changes and retention floor before committing any state.
+Also returns this commit's new entries, newest first."
+  (let ((history (copy-list (pod-store-template-history store))) (added nil)
         (floor (pod-store-template-history-floor store))
         (now (funcall *podtemplate-clock*)) (keys (make-hash-table :test #'equal)))
     (dolist (index (list (pod-store-resources store) resources))
@@ -24,16 +27,29 @@
                (declare (ignore present))
                (let ((old (gethash key (pod-store-resources store))) (new (gethash key resources)))
                  (unless (eq old new)
-                   (setf history (nconc history (list (core-object "revision" revision "time" now "resource" (first key)
-                                                                 "namespace" (second key) "name" (third key)
-                                                                 "old" (or old 'null) "new" (or new 'null)))))))) keys)
+                   (let ((entry (core-object "revision" revision "time" now "resource" (first key)
+                                             "namespace" (second key) "name" (third key)
+                                             "old" (or old 'null) "new" (or new 'null))))
+                     (push entry added)
+                     (setf history (nconc history (list entry))))))) keys)
     (loop while (and history
                      (or (> (length history) *podtemplate-history-limit*)
                          (> (- now (gethash "time" (first history))) *podtemplate-history-seconds*)))
           do (setf floor (max floor (gethash "revision" (pop history)))))
     ;; Never retain half of a transaction (for example a large DeleteCollection).
     (setf history (remove-if (lambda (entry) (<= (gethash "revision" entry) floor)) history))
-    (values history floor)))
+    (values history floor added)))
+
+(defun template-history-after (store revision)
+  "Return journal entries newer than REVISION, oldest first, cheaply when they are recent.
+The lists are replaced rather than changed by commits, so a caller may read them unlocked."
+  (let ((entries nil))
+    (dolist (entry (pod-store-template-history-recent store)
+                   ;; Every recent entry is newer, so older ones may exist too.
+                   (remove-if-not (lambda (entry) (> (gethash "revision" entry) revision))
+                                  (pod-store-template-history store)))
+      (when (<= (gethash "revision" entry) revision) (return entries))
+      (push entry entries))))
 
 (defun compact-template-history-unlocked (store &key checkpoint)
   "Durably compact expired history, optionally recording an expired-token checkpoint."
@@ -43,13 +59,17 @@
                                     *podtemplate-history-seconds*)) (pod-store-template-history store)))
     (commit-core-resources store (copy-core-resource-index store) (1+ (pod-store-resource-revision store)))))
 
-(defun template-index-at-revision-unlocked (store revision &optional (resource "podtemplates"))
-  "Reconstruct a real historical view; reject future or compacted revisions."
+(defun check-template-revision-unlocked (store revision &optional (resource "podtemplates"))
+  "Reject a revision that is in the future or that the journal has compacted."
   (when (> revision (pod-store-resource-revision store))
     (core-resource-error 504 "Timeout" "Requested resourceVersion is newer than the storage revision"))
   (when (< revision (max (pod-store-template-history-floor store)
                          (if (equal resource "podtemplates") 0 (pod-store-resource-history-start store))))
-    (core-resource-error 410 "Expired" "The requested resourceVersion has been compacted"))
+    (core-resource-error 410 "Expired" "The requested resourceVersion has been compacted")))
+
+(defun template-index-at-revision-unlocked (store revision &optional (resource "podtemplates"))
+  "Reconstruct a real historical view; reject future or compacted revisions."
+  (check-template-revision-unlocked store revision resource)
   (let ((index (copy-core-resource-index store)))
     (dolist (entry (reverse (pod-store-template-history store)))
       (when (> (gethash "revision" entry) revision)

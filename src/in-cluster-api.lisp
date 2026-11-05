@@ -119,7 +119,7 @@
                              (in-cluster-client-ca (hunchentoot:request-acceptor request)))
                          (kubernetes-error () nil))
                        (and token (authenticate-service-account-token store token))))
-         (path (hunchentoot:script-name request)) (method (hunchentoot:request-method request)))
+         (path (request-route-path (hunchentoot:script-name request))) (method (hunchentoot:request-method request)))
     (unless identity (core-resource-error 401 "Unauthorized" "A valid client certificate or ServiceAccount bearer token is required"))
     (unless (authenticated-discovery-request-p path method)
       (multiple-value-bind (verb group resource name namespace)

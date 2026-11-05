@@ -39,7 +39,7 @@
     (unless (member method '(:put :patch)) (core-resource-error 405 "MethodNotAllowed" "Unsupported storage status method"))
     (let* ((*storage-status-write* t)
            (dry-run (core-resource-dry-run-p))
-           (content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
+           (content-type (request-media-type))
            (input (if (eq method :put) (core-resource-request-object (core-resource-kind resource))
                       (progn
                         (unless (member content-type '("application/merge-patch+json" "application/strategic-merge-patch+json" "application/json-patch+json") :test #'equal)
