@@ -391,7 +391,9 @@
      (json-object "apiVersion" "v1" "kind" "PodList"
                   "metadata" (json-object "resourceVersion" (write-to-string revision))
                   "items" (coerce
-                           (loop for pod in (list-pods store namespace)
+                           ;; In key order, as etcd returns a list. Clients index into it.
+                           (loop for pod in (sort (list-pods store namespace) #'string<
+                                                  :key (lambda (pod) (format nil "~A/~A" (pod-namespace pod) (pod-name pod))))
                                  for object = (pod-list-observed-object store reconciler pod)
                                  when (and object (funcall labels object) (funcall fields object))
                                    collect object) 'vector)))))
