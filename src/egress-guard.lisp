@@ -30,11 +30,25 @@ prog-specs), the same shape as compile-service-lb."
   (maps nil)        ; alist (map name . map-info), populated by load
   (program nil))    ; prog-info, populated by load
 
+(defvar *egress-guard-specs* nil
+  "The compiled (map-specs . program-specs). The guard's source is fixed in the image
+and per-Pod state lives in its maps, so every Pod loads the same program.")
+
+(defvar *egress-guard-specs-lock* (bt:make-lock "gr8s egress guard compile"))
+
+(defun egress-guard-specs ()
+  "Compile the egress guard on first use; it takes about 0.5s on a test VM."
+  (bt:with-lock-held (*egress-guard-specs-lock*)
+    (or *egress-guard-specs*
+        (setf *egress-guard-specs*
+              (multiple-value-call #'cons (compile-egress-guard))))))
+
 (defun compile-egress-policy-object (&rest ignored)
-  "Compile the egress guard in-process. IGNORED absorbs the ELF path the CNI
-installer still passes; there is no ELF to open."
+  "Make a policy object for the compiled egress guard. The specs are shared: loading
+patches map fds into a copy of the instructions (session-load-progs). IGNORED absorbs
+the ELF path the CNI installer still passes; there is no ELF to open."
   (declare (ignore ignored))
-  (multiple-value-bind (map-specs program-specs) (compile-egress-guard)
+  (destructuring-bind (map-specs . program-specs) (egress-guard-specs)
     (%make-egress-policy-object map-specs program-specs)))
 
 (defun load-egress-policy-object
