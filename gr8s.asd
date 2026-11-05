@@ -288,6 +288,7 @@
                              (:file "managed-containerd-test")
                              (:file "runtime-addons-test")
                              (:file "clustertrustbundle-test")
+                             (:file "podcertificaterequest-test")
                              (:file "containerd-test")
                              (:file "container-lifecycle-test")
                              (:file "init-containers-test")

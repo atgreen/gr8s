@@ -95,7 +95,11 @@
     ;; signer publishes, consumed by the clusterTrustBundle projected volume
     ;; source. Served under certificates.k8s.io/v1beta1 (its upstream GA-track
     ;; group-version) alongside the v1 CertificateSigningRequest API.
-    ("clustertrustbundles" "ClusterTrustBundle" "certificates.k8s.io/v1beta1" nil)))
+    ("clustertrustbundles" "ClusterTrustBundle" "certificates.k8s.io/v1beta1" nil)
+    ;; KEP-4317 PodCertificateRequest: the node asks a signer for a short-lived
+    ;; pod X.509 (the podCertificate projected volume). Namespaced; the signer
+    ;; fills status.certificateChain. Served at certificates.k8s.io/v1alpha1.
+    ("podcertificaterequests" "PodCertificateRequest" "certificates.k8s.io/v1alpha1" t)))
 
 (defun stored-resource-type (resource)
   "Return the descriptor for a durable Kubernetes resource collection."

@@ -372,6 +372,10 @@
     (let ((route (core-resource-route (subseq path 0 (- (length path) 7)))))
       (when (and route (third route)
                  (or (equal "namespaces" (first route))
+                     ;; PodCertificateRequest is a loosely-validated stored
+                     ;; resource whose status (certificateChain) the external
+                     ;; signer writes via /status (KEP-4317).
+                     (equal "podcertificaterequests" (first route))
                      (and (typed-api-resource-p (first route)) (typed-api-trait-p (first route) :status))))
         route))))
 
