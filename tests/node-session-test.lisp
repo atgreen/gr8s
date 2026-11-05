@@ -223,6 +223,87 @@
         (sb-int:unencapsulate 'gr8s::send-agent-session-envelope 'block-heartbeat)
         (setf gr8s::*node-session-stall-seconds* saved)))))
 
+;; podster-uqb.121: closing the channel did not reliably wake the thread reading it, and a
+;; quiet server had nothing else to wake it with. No Pod started until something did, which
+;; took 5 minutes once. Over TLS, as every real agent's session is, and repeatedly, since
+;; the first failure can get away with it.
+(test failed-snapshots-reconnect-without-waiting-for-the-server-to-speak
+  (with-temporary-store (store path)
+    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (token (gr8s:create-join-token pki "worker-failed"))
+           (server (gr8s:start-node-grpc-server
+                    store :host "127.0.0.1" :port 0 :pki pki
+                    :cluster-pod-cidr "10.96.0.0/12" :node-prefix 20))
+           (agent-directory (merge-pathnames "worker-failed/" path))
+           (private-key (merge-pathnames "node.key" agent-directory))
+           (certificate (merge-pathnames "node.crt" agent-directory))
+           (ca-certificate (merge-pathnames "ca.crt" agent-directory))
+           (control (gr8s::make-node-session-control))
+           (lock (bt:make-lock))
+           (fail-next nil) (failed nil) (recovered 0) (revision 0)
+           (*error-output* (make-broadcast-stream))
+           (agent nil))
+      (unwind-protect
+           (progn
+             (gr8s:enroll-node-over-grpc
+              "127.0.0.1" (gr8s:node-grpc-server-port server)
+              "worker-failed" token (gr8s:cluster-pki-ca-fingerprint pki)
+              private-key certificate ca-certificate)
+             (setf agent
+                   (bt:make-thread
+                    (lambda ()
+                      (gr8s:run-node-session
+                       "127.0.0.1" (gr8s:node-grpc-server-port server)
+                       "worker-failed" (merge-pathnames "identity.json" agent-directory)
+                       (lambda (snapshot)
+                         (declare (ignore snapshot))
+                         (bt:with-lock-held (lock)
+                           (when failed (setf failed nil) (incf recovered))
+                           (when fail-next
+                             (setf fail-next nil failed t)
+                             (error "Injected snapshot failure")))
+                         nil)
+                       :ca-certificate-path ca-certificate
+                       :certificate-path certificate :private-key-path private-key
+                       :status-provider (lambda () (make-instance 'gr8s.node.v1::node-status))
+                       :control control :reconnect-delay 0.01))
+                    :name "gr8s failed snapshot test agent"))
+             (is-true (wait-until (lambda () (gr8s:node-record-ready-p (gr8s:get-node store "worker-failed")))
+                                  :timeout 10))
+             ;; Once the snapshot fails, the server stays quiet until the agent is back.
+             (loop for attempt from 1 to 8
+                   do (bt:with-lock-held (lock) (setf fail-next t))
+                      (gr8s:publish-node-desired-state
+                       server "worker-failed"
+                       (make-instance 'gr8s.node.v1::desired-state-snapshot :revision (incf revision)))
+                      (is-true (wait-until (lambda () (>= recovered attempt)) :timeout 10)
+                               "the agent did not come back after failure ~D" attempt)
+                      (unless (>= recovered attempt) (return))))
+        (gr8s::cancel-node-session control)
+        (when agent (ignore-errors (bt:join-thread agent)))
+        (gr8s:stop-node-grpc-server server)))))
+
+;; podster-uqb.104: the reading thread can reach its next read before it is interrupted.
+(test closing-a-session-leaves-the-reading-thread-a-closed-connection-to-find
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s:register-node
+     store (gr8s:make-node-record :id "worker-closed" :name "worker-closed" :pod-cidr "10.88.3.0/24"))
+    (let* ((server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0))
+           (channel (ag-grpc:make-channel "127.0.0.1" (gr8s:node-grpc-server-port server) :timeout 3)))
+      (unwind-protect
+           (let* ((stub (gr8s.node.v1::make-node-service-stub channel))
+                  (stream (gr8s.node.v1::node-service-connect stub :timeout 3)))
+             (gr8s::close-agent-session-connection channel)
+             (is-true (ag-grpc:channel-connection channel))
+             (is (eq :closed (ag-http2:connection-state (ag-grpc:channel-connection channel))))
+             (handler-case (ag-grpc:stream-read-message stream)
+               (error (condition)
+                 (is-false (search "no applicable method" (string-downcase (princ-to-string condition)))
+                           "~A" condition))))
+        (ignore-errors (ag-grpc:channel-close channel))
+        (gr8s:stop-node-grpc-server server)))))
+
 ;; podster-uqb.109: the interrupt found the session thread in %SIGNAL for a stream
 ;; error. A handler function runs with the clusters rebound to those outside it, as
 ;; a handler test does, and with none outside an ERROR killed the thread.

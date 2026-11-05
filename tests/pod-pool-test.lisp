@@ -156,6 +156,49 @@
               (gethash 1 attributes) #(2 0 0 0 0 99))
         (signals gr8s::cni-error (validate route))))))
 
+;; podster-uqb.121: this ran during CNI DEL or ADD, 12 times in run 13, and ended a node
+;; session each time. Once that session did not end for 5 minutes.
+(test host-route-validation-tolerates-pods-coming-and-going-while-it-reads
+  (with-temporary-store (store path)
+    (values store)
+    (let* ((node-root (merge-pathnames "node/" path))
+           (network (pool-test-network nil ""))
+           (ipam (gr8s::open-node-ipam (merge-pathnames "ipam/" node-root) "10.80.0.0/20"))
+           (address (gr8s::allocate-pod-address ipam "held" "eth0"))
+           (route (list :cidr (format nil "~A/32" address) :index 7 :table 254))
+           (context (gr8s::make-cni-context :container-id "added" :interface-name "eth0"))
+           (owner (gr8s::routed-cni-owner context))
+           (attributes (pool-test-link-attributes
+                        (gr8s::routed-cni-host-name context) owner
+                        (gr8s::routed-veth-mac owner "host") "veth"))
+           (link-gone (lambda (index) (declare (ignore index)) (gr8s::fail-rtnetlink "link lookup" 19))))
+      (gr8s::write-private-text-atomically (merge-pathnames "network.json" node-root)
+                                           (com.inuoe.jzon:stringify network))
+      (flet ((validate (route-reader link-reader)
+               (gr8s::validate-pod-pool-host-routes
+                "10.80.0.0/12" node-root :route-reader route-reader :link-reader link-reader)))
+        ;; DEL removed the link after the route dump, and its lease is still held.
+        (is-true (validate (lambda () (list route)) link-gone))
+        ;; DEL also released the lease by the time the journal is next read.
+        (is-true (validate (lambda ()
+                             (gr8s::release-pod-address ipam "held" "eth0")
+                             (list route))
+                           link-gone))
+        ;; ADD persisted its lease and installed its route after the journal was first read.
+        (is-true (validate (lambda ()
+                             (list (list :cidr (format nil "~A/32" (gr8s::allocate-pod-address ipam "added" "eth0"))
+                                         :index 8 :table 254)))
+                           (lambda (index) (is (= 8 index)) attributes)))
+        ;; With no lease on either side a route is foreign, whatever its link is doing.
+        (let ((foreign '(:cidr "10.80.9.9/32" :index 7 :table 254)))
+          (signals gr8s::cni-error (validate (lambda () (list foreign)) link-gone))
+          (signals gr8s::cni-error (validate (lambda () (list foreign)) (lambda (index) (declare (ignore index)) attributes))))
+        ;; Only a link that has gone is excused. Failing to read one proves nothing.
+        (let ((held (list :cidr (format nil "~A/32" (gr8s::allocate-pod-address ipam "kept" "eth0")) :index 7 :table 254)))
+          (signals gr8s::cni-error
+            (validate (lambda () (list held))
+                      (lambda (index) (declare (ignore index)) (gr8s::fail-rtnetlink "link lookup" 1)))))))))
+
 (test pending-and-applied-vxlan-identities-both-survive-host-route-validation
   (with-temporary-store (store path)
     (values store)

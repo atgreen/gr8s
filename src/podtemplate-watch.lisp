@@ -59,7 +59,7 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
          (match (hunchentoot:parameter "resourceVersionMatch"))
          (timeout-text (hunchentoot:parameter "timeoutSeconds"))
          (timeout (if timeout-text (ignore-errors (parse-integer timeout-text :junk-allowed nil)) 300))
-         (revision nil) (first-events nil))
+         (revision nil) (first-events nil) (expired nil))
     (unless (and timeout (<= 1 timeout 3600)) (core-resource-error 400 "BadRequest" "timeoutSeconds must be 1..3600"))
     (unless (or (equal rv-text "") (and (plusp (length rv-text)) (every #'digit-char-p rv-text)))
       (core-resource-error 400 "BadRequest" "Invalid resourceVersion"))
@@ -71,15 +71,21 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
       (core-resource-error 400 "BadRequest" "resourceVersionMatch is forbidden for watch unless sendInitialEvents is provided"))
     ;; Initial events start from a state at least this new; without them, the watch
     ;; starts exactly at the revision given. No revision at all means the latest either way.
-    (multiple-value-bind (page code)
-        (let ((match (and initial (not (equal rv-text "")) match)))
-          (if page-reader
-              (funcall page-reader labels fields rv-text match)
-              (template-list-page store namespace labels fields :resource-version rv-text :match match :resource resource)))
-      (declare (ignore code))
-      (setf revision (parse-integer (gethash "resourceVersion" (gethash "metadata" page))))
-      (when initial
-        (setf first-events (loop for object across (gethash "items" page) collect (core-object "type" "ADDED" "object" object)))))
+    ;; Too old a revision ends an established watch with an ERROR event, as upstream's
+    ;; does. RetryWatcher gives up on that one, but retries a failed request every second.
+    (handler-case
+        (multiple-value-bind (page code)
+            (let ((match (and initial (not (equal rv-text "")) match)))
+              (if page-reader
+                  (funcall page-reader labels fields rv-text match)
+                  (template-list-page store namespace labels fields :resource-version rv-text :match match :resource resource)))
+          (declare (ignore code))
+          (setf revision (parse-integer (gethash "resourceVersion" (gethash "metadata" page))))
+          (when initial
+            (setf first-events (loop for object across (gethash "items" page) collect (core-object "type" "ADDED" "object" object)))))
+      (kubernetes-error (condition)
+        (unless (= 410 (kubernetes-error-status-code condition)) (error condition))
+        (setf expired condition)))
     (setf (hunchentoot:content-type*) "application/json"
           (hunchentoot:header-out :cache-control) "no-cache")
     (let* ((out (hunchentoot:send-headers))
@@ -109,6 +115,7 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
                                                        "kind" bookmark-kind "metadata" metadata))))))
         (handler-case
             (progn
+              (when expired (error expired))
               (dolist (event first-events) (emit event))
               ;; client-go waits for this bookmark before trusting its initial state.
               (when (and send-initial (true-parameter-p (hunchentoot:parameter "allowWatchBookmarks"))) (bookmark t))
@@ -129,10 +136,11 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
                          (bookmark) (setf last-bookmark (get-internal-real-time)))
                        (sleep .05)))
           (kubernetes-error (condition)
-            (ignore-errors (emit (core-object "type" "ERROR" "object"
-                                  (core-object "apiVersion" "v1" "kind" "Status" "status" "Failure"
-                                               "code" (kubernetes-error-status-code condition)
-                                               "reason" (kubernetes-error-reason condition) "message" (kubernetes-error-message condition))))))
+            ;; A Status has no object to project, so the views would only mangle it.
+            (ignore-errors (write-event (core-object "type" "ERROR" "object"
+                                         (core-object "apiVersion" "v1" "kind" "Status" "metadata" (core-object) "status" "Failure"
+                                                      "code" (kubernetes-error-status-code condition)
+                                                      "reason" (kubernetes-error-reason condition) "message" (kubernetes-error-message condition))))))
           (stream-error () nil)
           (usocket:socket-error () nil))))
     nil))

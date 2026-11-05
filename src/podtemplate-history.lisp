@@ -8,11 +8,31 @@
 
 (in-package #:gr8s)
 
-(defparameter *podtemplate-history-seconds* 300)
-(defparameter *podtemplate-history-limit* 4096)
+(defparameter *podtemplate-history-seconds* 300
+  "How much history a commit writes to disk, and how long a continue token lasts.
+Every commit rewrites this history, so it is kept shorter than the watch history in memory.")
+(defparameter *podtemplate-history-limit* 4096
+  "The most history entries a commit writes to disk.")
+(defparameter *watch-history-seconds* 600
+  "Serve a watch from a resourceVersion at least this old, for every kind of resource.
+A real API server compacts etcd every 5 minutes, back to the revision of 5 minutes before,
+so its clients can see up to 10 minutes of history and specs hold revisions for over 5.")
+(defparameter *resource-watch-history-limit* 16384
+  "The most stored-resource history entries kept in memory, whatever their age.
+An entry only refers to objects, most of which the store or a neighbouring entry also holds.")
 (defparameter *podtemplate-clock* #'get-universal-time)
 (defparameter +template-watch-maintenance-interval+ internal-time-units-per-second
   "Least time between the journal and Event expiry checks that watches perform.")
+
+(defun trim-template-history (history floor now seconds limit)
+  "Drop entries older than SECONDS or beyond the newest LIMIT, returning those left and their floor."
+  (let ((excess (max 0 (- (length history) limit))))
+    (loop repeat excess
+          do (setf floor (max floor (gethash "revision" (pop history)))))
+    (loop while (and history (> (- now (gethash "time" (first history))) seconds))
+          do (setf floor (max floor (gethash "revision" (pop history)))))
+    ;; Never retain half of a transaction (for example a large DeleteCollection).
+    (values (remove-if (lambda (entry) (<= (gethash "revision" entry) floor)) history) floor)))
 
 (defun next-template-history (store resources revision)
   "Compute journal changes and retention floor before committing any state.
@@ -32,13 +52,14 @@ Also returns this commit's new entries, newest first."
                                              "old" (or old 'null) "new" (or new 'null))))
                      (push entry added)
                      (setf history (nconc history (list entry))))))) keys)
-    (loop while (and history
-                     (or (> (length history) *podtemplate-history-limit*)
-                         (> (- now (gethash "time" (first history))) *podtemplate-history-seconds*)))
-          do (setf floor (max floor (gethash "revision" (pop history)))))
-    ;; Never retain half of a transaction (for example a large DeleteCollection).
-    (setf history (remove-if (lambda (entry) (<= (gethash "revision" entry) floor)) history))
-    (values history floor added)))
+    (multiple-value-bind (history floor)
+        (trim-template-history history floor now *watch-history-seconds* *resource-watch-history-limit*)
+      (values history floor added))))
+
+(defun durable-template-history (history floor)
+  "Return the part of HISTORY a commit writes to disk, and the floor a restart resumes from."
+  (trim-template-history history floor (funcall *podtemplate-clock*)
+                         *podtemplate-history-seconds* *podtemplate-history-limit*))
 
 (defun template-history-after (store revision)
   "Return journal entries newer than REVISION, oldest first, cheaply when they are recent.
@@ -54,9 +75,11 @@ The lists are replaced rather than changed by commits, so a caller may read them
 (defun compact-template-history-unlocked (store &key checkpoint)
   "Durably compact expired history, optionally recording an expired-token checkpoint."
   (expire-core-events-unlocked store)
+  ;; The oldest entry is first, and every open watch comes here once a second.
   (when (or checkpoint
-            (some (lambda (entry) (> (- (funcall *podtemplate-clock*) (gethash "time" entry))
-                                    *podtemplate-history-seconds*)) (pod-store-template-history store)))
+            (let ((oldest (first (pod-store-template-history store))))
+              (and oldest (> (- (funcall *podtemplate-clock*) (gethash "time" oldest))
+                             *watch-history-seconds*))))
     (commit-core-resources store (copy-core-resource-index store) (1+ (pod-store-resource-revision store)))))
 
 (defun check-template-revision-unlocked (store revision &optional (resource "podtemplates"))

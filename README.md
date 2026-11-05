@@ -850,11 +850,15 @@ validation evidence and remaining extensions.
 Stored-resource list continuations are signed and bound to their resource type,
 namespace and selectors. A shared durable change journal preserves a consistent
 resourceVersion across
-mutations and restarts, with five-minute retention and a 4,096-change bound.
-Compacted or expired continuations return HTTP 410 with a replacement token for
+mutations and restarts, with five-minute retention and a 4,096-change bound on
+disk. Compacted or expired continuations return HTTP 410 with a replacement token for
 resuming at the last key in a newer view. Restart the list without a token when a
 consistent full snapshot is required. Watch supports revision resumption,
-selector transitions, timeouts, bookmarks and initial events. Upgrades preserve
+selector transitions, timeouts, bookmarks and initial events. A running server
+resumes a watch from up to ten minutes back, with 16,384 stored-resource, 16,384 Pod
+and 4,096 Node changes as the most it holds. A watch from further back than that is
+established and then ended by an ERROR event carrying a 410 Expired Status, which
+clients answer by relisting. Upgrades preserve
 legacy PodTemplate history and continuations; requests for older history of
 newly tracked resource types return HTTP 410. The expanded journal uses storage
 format 2, which older executables reject; downgrading requires restoring a
