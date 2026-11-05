@@ -593,12 +593,28 @@ handler and never gets here. A busy host makes this race likely."
   (format t
           "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--kubeconfig FILE]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--state-directory CONTROL_PLANE_DIR]~%  gr8s kubeconfig --output FILE [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%"))
 
+(defun print-gr8s-banner (role)
+  "Print a startup banner (Spring-Boot style) naming the role gr8s is starting."
+  (fresh-line)
+  (terpri)
+  (dolist (line '("     __ _ _ __ ( _ ) ___"
+                  "    / _` | '__/ _ \\/ __|"
+                  "   | (_| | | | (_) \\__ \\"
+                  "    \\__, |_|  \\___/|___/"
+                  "    |___/"))
+    (write-line line))
+  (terpri)
+  (format t "   gr8s · a Kubernetes-compatible control plane in Common Lisp~%")
+  (format t "   Kubernetes API v1.36 · ~A · no Envoy, no kube-proxy, no etcd~%~%" role)
+  (finish-output))
+
 (defun main-with-environment (arguments environment cni-entry)
   (if (funcall environment "CNI_COMMAND")
       (funcall cni-entry)
       (handler-case
           (let ((options (parse-cli-options arguments)))
             (when (member (getf options :command) '(:serve :agent))
+              (print-gr8s-banner (if (eq (getf options :command) :serve) "control plane" "node agent"))
               (install-stale-timeout-guard))
             (case (getf options :command)
               (:help (print-help) 0)
