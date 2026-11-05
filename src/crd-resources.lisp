@@ -194,7 +194,7 @@
                  (push name seen)
                  (unless (member (gethash "type" column) '("integer" "number" "string" "boolean" "date") :test #'equal)
                    (crd-schema-error path "type must be one of boolean,date,integer,number,string"))
-                 (when (gethash "format" column)
+                 (when (plusp (length (gethash "format" column "")))
                    (unless (member (gethash "format" column) '("int32" "int64" "float" "double" "byte" "date" "date-time" "password") :test #'equal)
                      (crd-schema-error path "format must be one of byte,date,date-time,double,float,int32,int64,password")))
                  (unless (and (stringp (gethash "jsonPath" column)) (plusp (length (gethash "jsonPath" column))))

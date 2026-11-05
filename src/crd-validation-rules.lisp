@@ -169,6 +169,9 @@
   (require-object rule path)
   (admission-drop-nulls rule)
   (reject-unsupported-fields rule '("rule" "message" "messageExpression" "reason" "fieldPath" "optionalOldSelf") "validation rule")
+  ;; Go's protobuf writes unset strings as empty, and upstream takes empty as unset.
+  (dolist (field '("message" "messageExpression" "fieldPath"))
+    (when (equal "" (gethash field rule)) (remhash field rule)))
   (let ((text (gethash "rule" rule)) (message (gethash "message" rule)) (expression (gethash "messageExpression" rule))
         (reason (gethash "reason" rule)) (field-path (gethash "fieldPath" rule)))
     (flet ((blank (value) (zerop (length (string-trim '(#\Space #\Tab #\Newline #\Return) value))))
@@ -346,7 +349,7 @@
 (defun crd-rule-message (rule bindings)
   "Choose a failure's message: an evaluated messageExpression, then message, then the rule."
   (let ((expression (gethash "messageExpression" rule)))
-    (or (and expression
+    (or (and (stringp expression) (plusp (length expression))
              (handler-case
                  (let ((value (crd-rule-charged (lambda () (cel-evaluate (crd-rule-program expression) bindings)))))
                    (and (stringp value)
@@ -354,7 +357,7 @@
                         (not (find #\Newline value))
                         value))
                (cel-evaluation-error () nil)))
-        (gethash "message" rule)
+        (let ((message (gethash "message" rule))) (and (stringp message) (plusp (length message)) message))
         (format nil "failed rule: ~A" (gethash "rule" rule)))))
 
 (defun crd-run-rule (rule schema value old has-old path ratchet)

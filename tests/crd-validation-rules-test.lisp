@@ -130,8 +130,9 @@
 (test rules-honor-message-fields-and-ratchet-unchanged-values
   (with-core-api (store path)
     (values store path)
+    ;; Empty strings mean unset, which is how Go's protobuf encodes them.
     (rule-simple-definition
-     "{\"rule\":\"self < 5\",\"message\":\"too big\",\"reason\":\"FieldValueForbidden\"},{\"rule\":\"self != 7\",\"messageExpression\":\"'seven is ' + 'out'\"}")
+     "{\"rule\":\"self != 8\",\"message\":\"\",\"messageExpression\":\"\",\"fieldPath\":\"\"},{\"rule\":\"self < 5\",\"message\":\"too big\",\"reason\":\"FieldValueForbidden\"},{\"rule\":\"self != 7\",\"messageExpression\":\"'seven is ' + 'out'\"}")
     (let ((status (check-core-status 422 +rule-path+ :method :post :object (rule-object "one" "spec" (rule-spec "num" 6)))))
       (is (search "Forbidden: too big" (gethash "message" status)) "~A" (gethash "message" status)))
     (let ((status (check-core-status 422 +rule-path+ :method :post :object (rule-object "one" "spec" (rule-spec "num" 7)))))
