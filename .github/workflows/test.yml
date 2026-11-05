@@ -82,7 +82,7 @@ jobs:
         # dependencies via its own search function; without this the primary
         # system isn't found and ocicl tries (and fails) to fetch it from ghcr.
         env:
-          CL_SOURCE_REGISTRY: ${{ github.workspace }}/:
+          CL_SOURCE_REGISTRY: "${{ github.workspace }}/:"
         run: make test
 
   privileged:
