@@ -4,9 +4,8 @@
 ;;;; Purpose:
 ;;;; Serve HorizontalPodAutoscalers in autoscaling/v1 and v2 from one stored v2
 ;;;; form, and describe the built-in API versions as read-only APIServices.
-;;;; No controller acts on an autoscaler yet, so its status stays empty and the
-;;;; target's replica count never changes; aggregation of external API servers is
-;;;; not implemented, which is why APIServices cannot be written.
+;;;; Aggregation of external API servers is not implemented, which is why
+;;;; APIServices cannot be written. The controller is in hpa-controller.lisp.
 
 (in-package #:gr8s)
 
@@ -51,6 +50,15 @@
          (utilization (some #'hpa-metric-cpu-utilization (gethash "metrics" spec #()))))
     (dolist (field '("metrics" "behavior")) (remhash field spec))
     (when utilization (setf (gethash "targetCPUUtilizationPercentage" spec) utilization))
+    (let* ((status (gethash "status" copy))
+           (cpu (and status (find-if (lambda (metric)
+                                       (let ((resource (gethash "resource" metric)))
+                                         (and resource (equal "cpu" (gethash "name" resource)))))
+                                     (gethash "currentMetrics" status #()))))
+           (current (and cpu (gethash "averageUtilization" (gethash "current" (gethash "resource" cpu))))))
+      (when status
+        (dolist (field '("currentMetrics" "conditions")) (remhash field status))
+        (when current (setf (gethash "currentCPUUtilizationPercentage" status) current))))
     (setf (gethash "apiVersion" copy) "autoscaling/v1")
     copy))
 

@@ -699,6 +699,7 @@ handler and never gets here. A busy host makes this race likely."
                                       (reconcile-namespace-defaults store)
                                       (collect-orphaned-api-objects reconciler)
                                       (reconcile-workloads reconciler)
+                                      (reconcile-horizontal-pod-autoscalers reconciler)
                                       (reconcile-endpointslices store)
                                       (reconcile-endpoints store)
                                       (prune-projected-tokens store)

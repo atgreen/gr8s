@@ -143,6 +143,15 @@
             (return-from decode-core-resource-protobuf (decode-crd-protobuf raw)))
           (when (typed-api-kind-p kind)
             (return-from decode-core-resource-protobuf (decode-typed-api-protobuf raw kind version)))
+          (when (equal kind "HorizontalPodAutoscaler")
+            (let ((object (template-protobuf-message
+                           (format nil "k8s.io.api.autoscaling.~A.HorizontalPodAutoscaler"
+                                   (if (equal version "autoscaling/v1") "v1" "v2"))
+                           raw))
+                  (metadata (core-protobuf-value (core-protobuf-fields raw) 1)))
+              (setf (gethash "metadata" object) (if metadata (core-protobuf-metadata metadata) (core-object))
+                    (gethash "apiVersion" object) version (gethash "kind" object) kind)
+              (return-from decode-core-resource-protobuf object)))
           (when (auth-review-kind-version kind)
             (return-from decode-core-resource-protobuf (decode-auth-review-protobuf raw kind version)))
           (when (member kind '("Endpoints" "Ingress" "IngressClass" "ServiceCIDR" "IPAddress") :test #'equal)

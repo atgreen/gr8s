@@ -137,6 +137,10 @@ list as 'nothing is running': Sonobuoy's worker takes it to mean all containers 
                      (condition "PodResizeInProgress" "True")))))
           (setf conditions (coerce (nreverse conditions) 'vector)
                 (gethash "conditions" status) conditions)
+          ;; The Pod started when it reached its node, which is when it was scheduled here.
+          (when scheduled
+            (setf (gethash "startTime" status)
+                  (gethash "lastTransitionTime" (find-pod-condition conditions "PodScheduled"))))
           (when (and (current-status-pod-p store pod) (not (equalp conditions history)))
             (persist-pod-status-state store pod :conditions conditions)
             (setf (gethash (pod-uid pod) (pod-store-pod-condition-histories store))

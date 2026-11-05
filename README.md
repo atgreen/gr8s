@@ -976,9 +976,22 @@ Owner references are preserved on Pods and stored resources. The control plane
 collects dependents after all known owners disappear, comparing UIDs so a newly
 created object cannot inherit an old object's dependents by name. Foreground
 deletion of a workload or Pod waits for `blockOwnerDeletion` dependents and only
-detaches a dependent that another owner still holds. A Pod held this way starts
-terminating when the hold ends, so it shows no `deletionTimestamp` meanwhile.
-Foreground deletion of other kinds and finalizer controllers remain unsupported.
+detaches a dependent that another owner still holds. A Pod held this way shows a
+`deletionTimestamp` and a `foregroundDeletion` finalizer: its containers stop at
+once and only the object waits. Foreground and orphan deletion hold other kinds
+too, custom resources included, and a dangling reference is removed once another
+owner keeps the dependent alive.
+
+Controllers create and delete through the admission webhooks, outside the store
+lock, as their upstream service accounts. A refused Pod shows on its owner as a
+ReplicaFailure, and a refused deletion is retried. EndpointSlices, bootstrap objects
+and status writes do not yet pass through webhooks.
+
+A node reports each container's CPU and memory from CRI statistics, from which a
+HorizontalPodAutoscaler controller scales Deployments, ReplicaSets, ReplicationControllers
+and StatefulSets on Resource and ContainerResource metrics, with upstream's tolerance,
+stabilization and rate policies. There is no metrics API or custom metrics source, so
+other metric types report a failed `ScalingActive` condition.
 
 ## Versioning
 
