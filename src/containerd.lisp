@@ -32,7 +32,7 @@
 (defun call-containerd-runtime (thunk)
   (handler-case
       (funcall thunk)
-    (runtime-error (condition)
+    ((or runtime-error kubernetes-error) (condition)
       (error condition))
     (error (condition)
       (error 'runtime-error :message (princ-to-string condition)))))
@@ -356,7 +356,7 @@ A container running as any user can write here, and a user mount at the path tak
                sum (directory-disk-bytes (namestring (pod-volume-directory runtime pod (gethash "name" volume)))))))))
 
 (defmethod runtime-logs
-    ((runtime containerd-runtime) uid container-name &key tail)
+    ((runtime containerd-runtime) uid container-name &key tail previous)
   (declare (ignore tail))
   (call-containerd-runtime
    (lambda ()
@@ -371,9 +371,13 @@ A container running as any user can write here, and a user mount at the path tak
                          (known-container-attempt entry))))
        (unless (or container (and owned-entry (<= 0 attempt)))
          (error 'runtime-error :message (format nil "Container ~A is not owned by gr8s" container-name)))
-       (let* ((path (merge-pathnames
-                     (container-attempt-log-path container-name attempt)
-                     (containerd-pod-log-directory runtime uid))))
+       (let ((path (merge-pathnames
+                    (container-attempt-log-path container-name (if previous (1- attempt) attempt))
+                    (containerd-pod-log-directory runtime uid))))
+         (when (and previous (or (zerop attempt) (not (probe-file path))))
+           (error 'kubernetes-error
+                  :status-code 400 :reason "BadRequest"
+                  :message (format nil "previous terminated container ~S not found" container-name)))
          (if (probe-file path) (uiop:read-file-string path) ""))))))
 
 (defun containerd-owned-container (runtime uid container-name)

@@ -536,12 +536,16 @@
              :reason "BadRequest"
              :message (format nil "container ~A is not valid for pod ~A"
                               container name)))
-    (let ((text (format-pod-logs-for-request (or (reconciler-logs reconciler (pod-uid pod) container) ""))))
-      (if (upgrade-request-p)
-          (serve-pod-logs-websocket text)
-          (progn
-            (setf (hunchentoot:content-type*) "text/plain; charset=utf-8")
-            text)))))
+    (let* ((previous (true-parameter-p (hunchentoot:parameter "previous")))
+           (raw (or (reconciler-logs reconciler (pod-uid pod) container :previous previous) ""))
+           (text (format-pod-logs-for-request raw)))
+      (cond
+        ((upgrade-request-p) (serve-pod-logs-websocket text))
+        ((and (true-parameter-p (hunchentoot:parameter "follow")) (not previous))
+         (serve-followed-pod-logs store reconciler pod container text (length raw)))
+        (t
+         (setf (hunchentoot:content-type*) "text/plain; charset=utf-8")
+         text)))))
 
 (defstruct exec-options
   command

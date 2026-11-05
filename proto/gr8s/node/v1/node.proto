@@ -197,6 +197,7 @@ message OperationRequest {
   bool stdout = 9;
   bool stderr = 10;
   bool tty = 11;
+  bool previous = 12;
 }
 
 message OperationInput {
