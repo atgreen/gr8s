@@ -541,3 +541,18 @@
       (is (= 9 (gethash "hostPort" (aref (gethash "ports" two) 0))))
       (let ((alone (gr8s::apply-merge one dropped "configmaps" "first" nil)))
         (is (not (nth-value 1 (gethash "ports" alone))))))))
+
+(test nested-items-go-when-dropped-while-their-parent-stays
+  (let* ((gr8s::*apply-schema*
+           (com.inuoe.jzon:parse "{\"properties\":{\"containers\":{\"type\":\"array\",\"x-kubernetes-list-type\":\"map\",\"x-kubernetes-list-map-keys\":[\"name\"],\"items\":{\"type\":\"object\",\"properties\":{\"ports\":{\"type\":\"array\",\"x-kubernetes-list-type\":\"map\",\"x-kubernetes-list-map-keys\":[\"containerPort\",\"protocol\"],\"items\":{\"type\":\"object\"}}}}}}}"))
+         (live (com.inuoe.jzon:parse "{\"metadata\":{}}"))
+         (with-port (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"X\",\"metadata\":{},\"containers\":[{\"name\":\"c\",\"image\":\"i\",\"ports\":[{\"containerPort\":80}]}]}"))
+         (without (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"X\",\"metadata\":{},\"containers\":[{\"name\":\"c\",\"image\":\"i\"}]}"))
+         (one (gr8s::apply-merge live with-port "configmaps" "m" nil))
+         (two (gr8s::apply-merge one without "configmaps" "m" nil))
+         (container (aref (gethash "containers" two) 0)))
+    (is (equal "i" (gethash "image" container)))
+    (is (not (nth-value 1 (gethash "ports" container))))
+    ;; Upstream serializes FieldsV1 sorted, with an item's "." first.
+    (let ((fields (com.inuoe.jzon:stringify (gethash "fieldsV1" (aref (gethash "managedFields" (gethash "metadata" two)) 0)))))
+      (is (search "{\".\":{},\"f:image\":{},\"f:name\":{}}" fields) "~A" fields))))
