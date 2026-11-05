@@ -132,49 +132,125 @@ A node-local directory can't serve Pods on several nodes, so it refuses shared m
                                    (gethash "required" (gethash "nodeAffinity" (gethash "spec" volume)))) 0)))
           (ready (get-node store (aref (gethash "values" (aref (gethash "matchExpressions" term) 0)) 0)))))))
 
-(defun reclaim-volume-through-agent (node-server node volume)
-  "Ask NODE's agent to remove VOLUME's backing directory, returning only once it has."
-  (let* ((operation
-           (request-node-operation
-            node-server (node-record-name node)
-            (make-instance
-             'gr8s.node.v1::operation-request
-             :operation-id (generate-uid)
-             :kind gr8s.node.v1::+operationkind-operation_kind_reclaim_volume+
-             :volume-json (trivial-utf-8:string-to-utf-8-bytes
-                           (com.inuoe.jzon:stringify volume)))
-            :timeout 300))
-         (response (pending-node-operation-response operation)))
-    (unless (= (slot-value response 'gr8s.node.v1::status)
+(defparameter +local-reclaim-lane+ "local")
+
+(defun volume-reclaim-lane (volume)
+  "Name the lane VOLUME's deletion runs in: one for local disks and one per NFS server,
+so a dead server can only hold up volumes on that server."
+  (let ((source (gethash "nfs" (gethash "spec" volume))))
+    (if source
+        (format nil "nfs/~A" (gethash "server" source))
+        +local-reclaim-lane+)))
+
+(defun volume-reclaim-lane-limit (lane)
+  "Return how many deletions one agent runs at once in LANE."
+  (if (equal lane +local-reclaim-lane+) 4 2))
+
+(defun make-volume-reclaim-queue ()
+  "Make an agent's queue of volume deletions."
+  (make-work-queue :name "volume reclaim" :lane-limit #'volume-reclaim-lane-limit))
+
+(defparameter +volume-reclaim-dispatch-limit+ 8
+  "How many requests per node and lane may be outstanding, so an agent's backlog stays small.")
+
+(defstruct (volume-reclaim-request (:constructor make-volume-reclaim-request (operation node lane)))
+  operation node lane)
+
+(defstruct (volume-reclaimer (:constructor make-volume-reclaimer (store node-server)))
+  store
+  node-server
+  (in-flight (make-hash-table :test #'equal))
+  (backoff (make-retry-backoff)))
+
+(defun volume-reclaim-failed (reclaimer name now message)
+  "Record a failed attempt, and report it with when the next one will be."
+  (format *error-output* "gr8s PersistentVolume ~A reclaim failed, retrying in ~Ds: ~A~%"
+          name (retry-backoff-failed (volume-reclaimer-backoff reclaimer) name now) message))
+
+(defun volume-reclaim-operation-failure (operation)
+  "Return why a finished OPERATION failed, or NIL if the agent removed the volume."
+  (let ((response (pending-node-operation-response operation)))
+    (cond ((pending-node-operation-error operation))
+          ((null response) "The agent gave no response")
+          ((/= (slot-value response 'gr8s.node.v1::status)
                gr8s.node.v1::+operationstatus-operation_status_complete+)
-      (error 'runtime-error :message (slot-value response 'gr8s.node.v1::error-message)))))
+           (slot-value response 'gr8s.node.v1::error-message)))))
 
-(defparameter +volume-reclaim-retry-seconds+ 30)
+(defun collect-finished-volume-reclaims (reclaimer now)
+  "Delete the PV of each volume its agent has removed, and pace retries of the rest."
+  (let ((in-flight (volume-reclaimer-in-flight reclaimer))
+        (store (volume-reclaimer-store reclaimer)))
+    (dolist (name (loop for name being the hash-keys of in-flight using (hash-value request)
+                        when (pending-node-operation-done-p (volume-reclaim-request-operation request))
+                          collect name))
+      (let* ((operation (volume-reclaim-request-operation (gethash name in-flight)))
+             (failure (volume-reclaim-operation-failure operation)))
+        (release-node-operation (volume-reclaimer-node-server reclaimer) operation)
+        (remhash name in-flight)
+        (if failure
+            (volume-reclaim-failed reclaimer name now failure)
+            (handler-case
+                (progn
+                  (optional-delete-persistent-volume store name)
+                  (retry-backoff-clear (volume-reclaimer-backoff reclaimer) name))
+              (error (condition)
+                (volume-reclaim-failed reclaimer name now condition))))))))
 
-(defun reclaim-released-volumes (store node-server attempts)
-  "Reclaim each released provisioned volume, then delete its PV; a failure waits and retries.
-ATTEMPTS maps volume names to when each was last tried, so a dead node isn't asked constantly."
-  (dolist (volume (list-core-resources store "persistentvolumes"))
-    (when (storage-volume-reclaimable-p volume)
-      (let ((name (storage-resource-name volume)) (now (get-universal-time)))
-        (when (>= (- now (gethash name attempts 0)) +volume-reclaim-retry-seconds+)
-          (setf (gethash name attempts) now)
+(defun optional-delete-persistent-volume (store name)
+  "Delete a PV an administrator may already have removed."
+  (handler-case (delete-core-resource store "persistentvolumes" nil name)
+    (kubernetes-error (condition)
+      (unless (= 404 (kubernetes-error-status-code condition)) (error condition)))))
+
+(defun dispatch-volume-reclaim (reclaimer node volume)
+  "Ask NODE's agent to remove VOLUME's directory, without waiting for it to finish."
+  (make-volume-reclaim-request
+   (queue-node-operation
+    (volume-reclaimer-node-server reclaimer) (node-record-name node)
+    (make-instance
+     'gr8s.node.v1::operation-request
+     :operation-id (generate-uid)
+     :kind gr8s.node.v1::+operationkind-operation_kind_reclaim_volume+
+     :volume-json (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify volume))))
+   (node-record-name node)
+   (volume-reclaim-lane volume)))
+
+(defun dispatch-released-volumes (reclaimer now)
+  "Request reclaim of each released volume that isn't running, backing off or over its limit.
+A request stays in flight until its agent answers or its session ends, however long
+that takes, so a slow deletion is never requested again on top of itself."
+  (let ((in-flight (volume-reclaimer-in-flight reclaimer))
+        (outstanding (make-hash-table :test #'equal)))
+    (loop for request being the hash-values of in-flight
+          do (incf (gethash (list (volume-reclaim-request-node request) (volume-reclaim-request-lane request))
+                            outstanding 0)))
+    (dolist (volume (list-core-resources (volume-reclaimer-store reclaimer) "persistentvolumes"))
+      (let ((name (storage-resource-name volume)))
+        (when (and (storage-volume-reclaimable-p volume)
+                   (not (gethash name in-flight))
+                   (retry-backoff-ready-p (volume-reclaimer-backoff reclaimer) name now))
           (handler-case
-              (let ((node (storage-volume-reclaim-node store volume)))
+              (let ((node (storage-volume-reclaim-node (volume-reclaimer-store reclaimer) volume)))
                 (unless node (error 'runtime-error :message "no Ready node can reach this volume"))
-                (reclaim-volume-through-agent node-server node volume)
-                (delete-core-resource store "persistentvolumes" nil name)
-                (remhash name attempts))
+                (let ((slot (list (node-record-name node) (volume-reclaim-lane volume))))
+                  (when (< (gethash slot outstanding 0) +volume-reclaim-dispatch-limit+)
+                    (setf (gethash name in-flight) (dispatch-volume-reclaim reclaimer node volume))
+                    (incf (gethash slot outstanding 0)))))
             (error (condition)
-              (format *error-output* "gr8s PersistentVolume ~A reclaim failed: ~A~%" name condition))))))))
+              (volume-reclaim-failed reclaimer name now condition))))))))
+
+(defun volume-reclaimer-step (reclaimer &optional (now (get-universal-time)))
+  "Run one pass: settle finished requests, then send what can now be sent."
+  (collect-finished-volume-reclaims reclaimer now)
+  (dispatch-released-volumes reclaimer now))
 
 (defun start-volume-reclaimer (store node-server stop-predicate)
-  "Reclaim on a separate thread, since deleting a large volume must not stall reconciliation."
+  "Run the reclaimer on one thread that never waits on an agent, so one slow volume holds up no other."
   (bt:make-thread
    (lambda ()
-     (let ((attempts (make-hash-table :test #'equal)))
+     (let ((reclaimer (make-volume-reclaimer store node-server)))
        (loop until (funcall stop-predicate)
-             do (handler-case (reclaim-released-volumes store node-server attempts)
+             do (handler-case (volume-reclaimer-step reclaimer)
                   (error (condition)
                     (format *error-output* "gr8s volume reclaimer failed: ~A~%" condition)))
                 (sleep 1))))

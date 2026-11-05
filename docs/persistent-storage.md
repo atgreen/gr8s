@@ -101,9 +101,17 @@ Each Pod gets its own mount, removed when the Pod ends.
 
 A provisioned volume is released when its claim is deleted and no running Pod uses
 it. With `Delete`, the control plane asks an agent to remove the directory, then
-deletes the PV. It retries every 30 seconds until that works, for example while
-the volume's node is down. Removal never follows symbolic links or crosses into
-another filesystem, and only touches a `pvc-*` directory matching the PV's name.
+deletes the PV. A failure is retried with a delay that doubles from 1 second to 5
+minutes, for example while the volume's node is down. Removal never follows symbolic
+links or crosses into another filesystem, and only touches a `pvc-*` directory
+matching the PV's name.
+
+Deletions run in lanes: one for local disks, with 4 at a time on each node, and one
+for each NFS server, with 2 at a time. A call to a dead NFS server can block
+indefinitely and can't be cancelled, so lanes keep it from holding up local volumes
+or other servers. The control plane never waits on an agent, and keeps at most 8
+requests outstanding per node and lane. A request stays outstanding until the agent
+answers or its session ends, and the agent runs each volume's deletion only once.
 
 `Retain` keeps the data and the old claim UID, so a new claim with the same name
 can't take it over. An administrator must clear the PV's `claimRef` to reuse it.

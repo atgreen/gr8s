@@ -21,6 +21,7 @@
   (stop-requested nil)
   (operations (make-hash-table :test #'equal))
   (operations-lock (bt:make-lock "gr8s node runtime operations"))
+  (reclaim-queue (make-volume-reclaim-queue))
   (lock (bt:make-lock "gr8s node runtime"))
   (state-changed (bt:make-condition-variable :name "gr8s node runtime state"))
   (apply-lock (bt:make-lock "gr8s node snapshot application"))
@@ -394,6 +395,8 @@ the node from starting."
 (defun stop-node-runtime (node-runtime)
   (let ((thread nil))
     (cancel-all-node-operations node-runtime "node runtime stopped")
+    ;; A runtime can start again, and a stopped queue can't.
+    (work-queue-stop (shiftf (node-runtime-reclaim-queue node-runtime) (make-volume-reclaim-queue)))
     (bt:with-lock-held ((node-runtime-lock node-runtime))
       (when (member (node-runtime-state node-runtime) '(:starting :running))
         (setf (node-runtime-stop-requested node-runtime) t)
@@ -1048,23 +1051,30 @@ snapshot application."
       (write-websocket-frame
        (node-exec-operation-stream operation) 2 #(255 0) :masked-p t))))
 
+(defparameter *reclaim-volume-call* #'reclaim-provisioned-volume
+  "Remove a provisioned volume's directory, taking the state directory and the PV.")
+
 (defun start-volume-reclaim-operation (node-runtime request emit)
-  "Remove a volume's directory on its own thread, since a large tree or dead server takes time."
-  (bt:make-thread
-   (lambda ()
-     (funcall
-      emit :operation-response
-      (handler-case
-          (progn
-            (reclaim-provisioned-volume
-             (node-runtime-state-directory node-runtime)
-             (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string
-                                    (slot-value request 'gr8s.node.v1::volume-json))))
-            (node-operation-response request gr8s.node.v1::+operationstatus-operation_status_complete+))
-        (error (condition)
-          (node-operation-response request gr8s.node.v1::+operationstatus-operation_status_failed+
-                                   :exit-code 1 :message (princ-to-string condition))))))
-   :name "gr8s volume reclaim"))
+  "Queue a volume's removal. A request for one already running joins it, so a control plane
+that reconnects or restarts gets the answer without a second deletion racing the first."
+  (let ((volume (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string
+                                       (slot-value request 'gr8s.node.v1::volume-json))))
+        (directory (node-runtime-state-directory node-runtime))
+        (reclaim *reclaim-volume-call*))
+    (work-queue-submit
+     (node-runtime-reclaim-queue node-runtime)
+     (storage-resource-name volume)
+     (volume-reclaim-lane volume)
+     (lambda () (funcall reclaim directory volume))
+     :on-done
+     (lambda (value condition)
+       (declare (ignore value))
+       (funcall
+        emit :operation-response
+        (if condition
+            (node-operation-response request gr8s.node.v1::+operationstatus-operation_status_failed+
+                                     :exit-code 1 :message (princ-to-string condition))
+            (node-operation-response request gr8s.node.v1::+operationstatus-operation_status_complete+)))))))
 
 (defun dispatch-node-operation (node-runtime variant payload emit)
   (handler-case
