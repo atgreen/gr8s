@@ -217,7 +217,8 @@ Configuration resources are exempt so a bad webhook can always be removed."
     (let* ((request (admission-review-request hook attributes))
            (bindings (list (cons "object" (gethash "object" request))
                            (cons "oldObject" (gethash "oldObject" request))
-                           (cons "request" request))))
+                           (cons "request" request)
+                           (cons "authorizer" (cel-opaque :authorizer nil)))))
       (loop for condition across conditions
             do (handler-case
                    (unless (evaluate-cel-condition (compile-cel-condition (gethash "expression" condition)) bindings)
@@ -529,7 +530,9 @@ vouching for another webhook that names the same host."
   "Run the mutating webhooks over the attributes' object and return the result.
 Each IfNeeded webhook runs once more when a later webhook changed the object."
   (let ((hooks (admission-hooks store "mutatingwebhookconfigurations" attributes))
-        (invoked nil) (pending nil))
+        (invoked nil) (pending nil)
+        (*cel-authorizer-check* (admission-authorizer-check store))
+        (*cel-request-resource* (admission-request-resource attributes)))
     ;; As upstream's plugin order has it, mutating policies run ahead of mutating webhooks.
     (admission-run-mutating-policies store attributes)
     (dolist (hook hooks)
@@ -558,9 +561,12 @@ Each IfNeeded webhook runs once more when a later webhook changed the object."
 
 (defun admission-validate (store attributes)
   "Run validating policies, then the selected validating webhooks concurrently, refusing on any denial or Fail-policy failure."
-  (admission-run-validating-policies store attributes)
-  (let* ((hooks (remove-if-not (lambda (hook) (admission-hook-selected-p store hook attributes))
-                               (admission-hooks store "validatingwebhookconfigurations" attributes)))
+  (let* ((*cel-authorizer-check* (admission-authorizer-check store))
+         (*cel-request-resource* (admission-request-resource attributes))
+         (hooks (progn
+                  (admission-run-validating-policies store attributes)
+                  (remove-if-not (lambda (hook) (admission-hook-selected-p store hook attributes))
+                                 (admission-hooks store "validatingwebhookconfigurations" attributes))))
          (uid (admission-uid attributes))
          (calls (mapcar (lambda (hook) (cons (hook-spec hook) (admission-review-body hook attributes))) hooks))
          (outcomes

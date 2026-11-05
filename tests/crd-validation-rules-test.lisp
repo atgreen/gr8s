@@ -227,3 +227,70 @@
       (attempt 422 "four" "word" "hello"))
     (check-core-status 422 +rule-crd-path+ :method :post
       :object (rule-definition "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"pattern\":\"(?=x)\"}}}" :plural "others"))))
+
+(test policies-report-type-checking-in-status
+  (with-core-api (store path)
+    (values store path)
+    (flet ((policy (name &rest validations)
+             (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies" :method :post
+               :object (gr8s::core-object
+                        "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicy"
+                        "metadata" (gr8s::core-object "name" name)
+                        "spec" (gr8s::core-object
+                                "matchConstraints"
+                                (gr8s::core-object
+                                 "resourceRules"
+                                 (vector (gr8s::core-object "apiGroups" #("apps") "apiVersions" #("v1")
+                                                            "operations" #("CREATE") "resources" #("deployments"))))
+                                "validations" (coerce validations 'vector))))))
+      (let* ((good (policy "good" (gr8s::core-object "expression" "object.spec.replicas > 1")))
+             (status (gethash "status" good)))
+        (is (= 1 (gethash "observedGeneration" status)))
+        (is (hash-table-p (gethash "typeChecking" status)))
+        (is (not (gethash "expressionWarnings" (gethash "typeChecking" status)))))
+      (let* ((bad (policy "bad" (gr8s::core-object "expression" "object.spec.replicas > '1'"
+                                                   "messageExpression" "'wants replicas > 1, got ' + object.spec.replicas")
+                          (gr8s::core-object "expression" "object.spec.maxRetries < 10")))
+             (warnings (gethash "expressionWarnings" (gethash "typeChecking" (gethash "status" bad)))))
+        (is (= 3 (length warnings)))
+        (is (equal "spec.validations[0].expression" (gethash "fieldRef" (aref warnings 0))))
+        (is (search "found no matching overload for '_>_' applied to '(int, string)'" (gethash "warning" (aref warnings 0))))
+        (is (equal "spec.validations[0].messageExpression" (gethash "fieldRef" (aref warnings 1))))
+        (is (search "found no matching overload for '_+_' applied to '(string, int)'" (gethash "warning" (aref warnings 1))))
+        (is (search "undefined field 'maxRetries'" (gethash "warning" (aref warnings 2))))))))
+
+(test policies-use-the-authorizer-escape-key-and-audit-annotations
+  (with-core-api (store path)
+    (values store path)
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+    (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies" :method :post
+      :object (gr8s::core-object
+               "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicy"
+               "metadata" (gr8s::core-object "name" "authz")
+               "spec" (gr8s::core-object
+                       "matchConstraints"
+                       (gr8s::core-object
+                        "resourceRules"
+                        (vector (gr8s::core-object "apiGroups" #("") "apiVersions" #("v1")
+                                                   "operations" #("CREATE") "resources" #("configmaps"))))
+                       "validations"
+                       (vector (gr8s::core-object
+                                "expression"
+                                "authorizer.group('').resource('secrets').namespace('alpha').check('get').allowed() && authorizer.requestResource.check('create').allowed() && jsonpatch.escapeKey('a/b') == 'a~1b'"
+                                "message" "denied by authorizer"))
+                       "auditAnnotations" (vector (gr8s::core-object "key" "seen" "valueExpression" "object.metadata.name")))))
+    (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings" :method :post
+      :object (gr8s::core-object
+               "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicyBinding"
+               "metadata" (gr8s::core-object "name" "authz")
+               "spec" (gr8s::core-object "policyName" "authz" "validationActions" #("Deny"))))
+    ;; The local listener acts as a cluster administrator, so every check passes.
+    (check-core-status 201 "/api/v1/namespaces/alpha/configmaps" :method :post :object (core-fixture "ConfigMap" "one"))
+    (check-core-status 422 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies" :method :post
+      :object (gr8s::core-object
+               "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicy"
+               "metadata" (gr8s::core-object "name" "bad-key")
+               "spec" (gr8s::core-object
+                       "matchConstraints" (gr8s::core-object "resourceRules" #())
+                       "auditAnnotations" (vector (gr8s::core-object "key" "NOT OK" "valueExpression" "'x'")))))))

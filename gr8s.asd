@@ -170,6 +170,7 @@
                              (:file "crd-http")
                              (:file "crd-status")
                              (:file "crd-openapi")
+                             (:file "openapi-protobuf")
                              (:file "field-validation")
                              (:file "server-side-apply")
                              (:file "admission-webhooks")

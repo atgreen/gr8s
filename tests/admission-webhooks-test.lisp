@@ -67,7 +67,7 @@
   (is (search "undefined field" (admission-test-compile-message "request.nothing == 1")))
   (is (search "no matching overload" (admission-test-compile-message "1 == 'a'")))
   (is (search "no matching overload" (admission-test-compile-message "1 + 'a' == 'a'")))
-  (is (search "undeclared reference" (admission-test-compile-message "authorizer.path('/').check('get').allowed()")))
+  (is (null (admission-test-compile-message "authorizer.path('/').check('get').allowed()")))
   (is (null (admission-test-compile-message "object.a.matches('b')")))
   (is (null (admission-test-compile-message "1u == 1u")))
   (is (null (admission-test-compile-message "b'x' == b'x'")))

@@ -183,3 +183,37 @@
       (setf (gethash "scale" (gethash "subresources" version))
             (gr8s::core-object "specReplicasPath" ".status.x" "statusReplicasPath" ".status.y"))
       (check-core-status 422 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post :object bad))))
+
+(test openapi-publishes-typed-groups-and-a-protobuf-v2-document
+  (with-core-api (store path)
+    (values store path)
+    (let* ((document (check-core-status 200 "/openapi/v3/apis/flowcontrol.apiserver.k8s.io/v1"))
+           (schemas (gethash "schemas" (gethash "components" document)))
+           (flow (gethash "io.k8s.api.flowcontrol.v1.FlowSchema" schemas)))
+      (is (hash-table-p flow))
+      (is (equal "flowcontrol.apiserver.k8s.io"
+                 (gethash "group" (aref (gethash "x-kubernetes-group-version-kind" flow) 0))))
+      (is (equal "FlowSchema" (gethash "kind" (aref (gethash "x-kubernetes-group-version-kind" flow) 0)))))
+    (dolist (entry '(("resource.k8s.io/v1" . "io.k8s.api.resource.v1.ResourceClaim")
+                     ("coordination.k8s.io/v1" . "io.k8s.api.coordination.v1.Lease")
+                     ("authorization.k8s.io/v1" . "io.k8s.api.authorization.v1.SubjectAccessReview")
+                     ("authentication.k8s.io/v1" . "io.k8s.api.authentication.v1.TokenReview")
+                     ("admissionregistration.k8s.io/v1" . "io.k8s.api.admissionregistration.v1.ValidatingAdmissionPolicy")))
+      (let* ((document (check-core-status 200 (format nil "/openapi/v3/apis/~A" (car entry))))
+             (schema (gethash (cdr entry) (gethash "schemas" (gethash "components" document)))))
+        (is (hash-table-p schema) "~A misses ~A" (car entry) (cdr entry))))
+    ;; Protobuf is what client-go asks for; anything else keeps JSON.
+    (multiple-value-bind (body status headers)
+        (drakma:http-request "http://127.0.0.1:18089/openapi/v2" :force-binary t
+                             :accept "application/com.github.proto-openapi.spec.v2@v1.0+protobuf")
+      (is (= 200 status))
+      (is (search "protobuf" (cdr (assoc :content-type headers))))
+      (is (typep body '(vector (unsigned-byte 8))))
+      ;; Document.swagger is field 1, a string.
+      (is (= 10 (aref body 0)))
+      (is (= 3 (aref body 1)))
+      (is (equal "2.0" (trivial-utf-8:utf-8-bytes-to-string (subseq body 2 5))))
+      (let ((text (map 'string #'code-char body)))
+        (is (search "io.k8s.api.flowcontrol.v1.FlowSchema" text))
+        (is (search "x-kubernetes-group-version-kind" text))))
+    (is (equal "2.0" (gethash "swagger" (check-core-status 200 "/openapi/v2"))))))

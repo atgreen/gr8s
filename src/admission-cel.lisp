@@ -44,11 +44,14 @@
 (defvar *cel-remaining-steps* 0
   "Cost left for the expression being evaluated.")
 
-(defvar *cel-declared-variables* '("object" "oldObject" "request")
+(defvar *cel-declared-variables* '("object" "oldObject" "request" "authorizer")
   "Variables the environment of the expression being compiled declares.")
 
 (defvar *cel-functions* (make-hash-table :test #'equal)
   "Overloads of the library functions, by name.")
+
+(defvar *cel-authorizer-check* nil
+  "Function from a plist of attributes and a verb to allowed, reason and error, for the current request.")
 
 (defvar *cel-request-resource* nil
   "Attributes of the request's resource, which authorizer.requestResource starts from.")
@@ -490,7 +493,7 @@
     "name" "namespace" "operation" "userInfo" "dryRun" "options" "uid")
   "Fields the upstream admission environment declares on the request variable.")
 
-(defvar *cel-variable-types* nil
+(defvar *cel-variable-types* '(("authorizer" . (:opaque :authorizer)))
   "Alist from declared variable name to a static type more precise than dyn.")
 
 (defvar *cel-node-types* nil
@@ -528,7 +531,7 @@
 
 (defun cel-overload-error (name types)
   "Report that no overload of NAME accepts TYPES."
-  (cel-check-error "found no matching overload for '~A' applied to (~{~A~^, ~})" name (mapcar #'cel-type-name types)))
+  (cel-check-error "found no matching overload for '~A' applied to '(~{~A~^, ~})'" name (mapcar #'cel-type-name types)))
 
 (defun cel-same-head-p (left right)
   "Test whether two static types share a head, or one of them is dyn."

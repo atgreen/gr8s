@@ -20,7 +20,8 @@
 
 (defun cel-schema-min-size (schema)
   "Return the fewest JSON bytes a value of SCHEMA serializes to, after apiserver's estimators."
-  (let ((type (gethash "type" schema)))
+  (let* ((schema (resolve-template-schema schema))
+         (type (gethash "type" schema)))
     (cond
       ((gethash "x-kubernetes-int-or-string" schema) 2)
       ((equal type "array")
@@ -75,7 +76,7 @@
 
 (defun cel-escape-field-candidates (schema name)
   "Find the property of SCHEMA a CEL field NAME refers to, spelled directly or escaped."
-  (let ((properties (gethash "properties" schema)))
+  (let ((properties (gethash "properties" (resolve-template-schema schema))))
     (when (hash-table-p properties)
       (or (gethash name properties)
           (and (search "__" name) (gethash (cel-unescape-field name) properties))))))
@@ -96,7 +97,8 @@
 
 (defun cel-schema-type (schema &optional root)
   "Translate a structural SCHEMA into a CEL type carrying its size bounds."
-  (let ((type (gethash "type" schema)))
+  (let* ((schema (resolve-template-schema schema))
+         (type (or (gethash "type" schema) (and (hash-table-p (gethash "properties" schema)) "object"))))
     (cond
       ((gethash "x-kubernetes-int-or-string" schema) :dyn)
       ((and (gethash "x-kubernetes-preserve-unknown-fields" schema)

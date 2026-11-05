@@ -1252,7 +1252,7 @@ than wait for the next, which truncates any body that spans records in flight."
           ((string= path "/apis/policy/v1") (budget-resources-response))
           ((string= path "/openapi/v3/apis/policy/v1") (openapi-v3-response "policy/v1"))
           ((string= path "/apis/apps/v1") (workload-resources-response))
-          ((string= path "/openapi/v2") (json-response (crd-openapi-document store nil nil nil)))
+          ((string= path "/openapi/v2") (openapi-v2-response store))
           ((string= path "/openapi/v3") (crd-openapi-discovery-response store))
           ((string= path "/openapi/v3/apis/events.k8s.io/v1") (openapi-v3-response "events.k8s.io/v1"))
           ((string= path "/openapi/v3/apis/apps/v1") (openapi-v3-response "apps/v1"))

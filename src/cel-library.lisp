@@ -1033,9 +1033,6 @@
 
 ;;; Authorizer: the check itself comes from *CEL-AUTHORIZER-CHECK*, bound by admission.
 
-(defvar *cel-authorizer-check* nil
-  "Function from a plist of attributes and a verb to allowed, reason and error, for the current request.")
-
 (defun cel-authorizer-step (kind state key value)
   "Return a copy of a builder object with KEY set."
   (cel-opaque kind (list* key value state)))
