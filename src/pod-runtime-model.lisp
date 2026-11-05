@@ -462,7 +462,53 @@
   (when (gethash "nodeSelector" spec) (validate-pod-node-selector (gethash "nodeSelector" spec)))
   (validate-pod-tolerations spec)
   (validate-pod-policy-fields spec)
+  (validate-pod-scheduler-name spec)
+  (validate-pod-readiness-gates spec)
   (validate-pod-affinity spec))
+
+(defparameter +default-scheduler-name+ "default-scheduler"
+  "The scheduler a Pod names by default, which is the one gr8s runs.")
+
+(defun validate-pod-scheduler-name (spec)
+  "Default an omitted spec.schedulerName as the API server does, and require a DNS subdomain."
+  (when (member (gethash "schedulerName" spec) '(nil null "") :test #'equal)
+    (setf (gethash "schedulerName" spec) +default-scheduler-name+))
+  (require-dns-subdomain (gethash "schedulerName" spec) "spec.schedulerName"))
+
+(defun pod-scheduler-name (pod)
+  "Return the name of the scheduler responsible for placing POD."
+  (gethash "schedulerName" (gethash "spec" (pod-to-object pod)) +default-scheduler-name+))
+
+(defun pod-for-this-scheduler-p (pod)
+  "Return whether gr8s's scheduler places POD; any other scheduler binds it through pods/binding."
+  (equal +default-scheduler-name+ (pod-scheduler-name pod)))
+
+(defun validate-pod-readiness-gates (spec)
+  "Validate spec.readinessGates: each names a qualified condition type that Ready also waits for."
+  (when (eq (gethash "readinessGates" spec) 'null) (remhash "readinessGates" spec))
+  (loop for gate across (optional-vector spec "readinessGates" "spec")
+        do (drop-null-fields (require-object gate "readinessGate"))
+           (reject-unsupported-fields gate '("conditionType") "readinessGate")
+           (unless (core-qualified-key-p (gethash "conditionType" gate))
+             (invalid-pod "spec.readinessGates.conditionType ~S must be a qualified name"
+                          (gethash "conditionType" gate)))))
+
+(defun pod-readiness-gate-types (pod)
+  "Return the condition types POD's readiness gates wait for."
+  (loop for gate across (gethash "readinessGates" (gethash "spec" (pod-to-object pod)) #())
+        collect (gethash "conditionType" gate)))
+
+(defun pod-readiness-gates-message (pod conditions)
+  "Explain, as a kubelet does, which of POD's readiness gates CONDITIONS leave unmet; NIL when all are True."
+  (let ((messages
+          (loop for type in (pod-readiness-gate-types pod)
+                for condition = (find-pod-condition conditions type)
+                unless (and condition (equal "True" (gethash "status" condition)))
+                  collect (if condition
+                              (format nil "the status of pod readiness gate ~S is not \"True\", but ~A"
+                                      type (gethash "status" condition))
+                              (format nil "corresponding condition of pod readiness gate ~S does not exist." type)))))
+    (when messages (format nil "~{~A~^, ~}" messages))))
 
 (defun validate-node-selector-term (term)
   "Validate a NodeSelectorTerm's label expressions and metadata.name field requirements."

@@ -280,6 +280,16 @@
                                (and (equal "OnFailure" (pod-restart-policy pod))
                                     (not (zerop (gethash "exitCode" terminated))))))))))
 
+(defun container-backoff-image-changed-p (entry image)
+  "Return whether ENTRY's back-off accumulated for an image other than IMAGE."
+  (let ((backoff (and entry (gethash "backoffImage" entry))))
+    (and backoff image (not (equal backoff image)))))
+
+(defun container-backoff-waiting-p (entry spec now)
+  "Return whether ENTRY still holds back the next attempt of SPEC at NOW. A changed image does not wait."
+  (and entry (< now (gethash "nextStart" entry 0))
+       (not (container-backoff-image-changed-p entry (container-spec-image spec)))))
+
 (defun prepare-container-restart (state info now)
   "Record an exit once and return its durable retry deadline and next attempt."
   (let* ((entries (gethash "containers" state)) (name (cri-container-info-name info))
@@ -287,8 +297,11 @@
     (unless (and old (equal (gethash "lastExitID" old) (cri-container-info-id info)))
       (let* ((finished (+ 2208988800 (/ (cri-container-info-finished-at info) 1000000000d0)))
              (duration (/ (- (cri-container-info-finished-at info) (cri-container-info-started-at info)) 1000000000))
+             (image (and old (gethash "appliedImage" old)))
+             ;; A kubelet keys back-off by the container's declaration, so a new image starts afresh.
              (reset (or (null old) (null (gethash "lastFailureTime" old)) (>= duration 600)
-                        (> (- now (gethash "lastFailureTime" old now)) 600)))
+                        (> (- now (gethash "lastFailureTime" old now)) 600)
+                        (container-backoff-image-changed-p old image)))
              ;; Like upstream doBackOff/Backoff.Next, the first retry creates
              ;; the backoff entry; subsequent short runs wait 10,20,...,300s.
              (delay (if reset 0 (gethash "backoff" old 10)))
@@ -302,6 +315,7 @@
                                  "lastTermination" (gethash "terminated" (gethash "state" (containerd-container-status-object info))))))
         (dolist (key '("probeState" "probeRestart"))
           (when (and old (gethash key old)) (setf (gethash key entry) (copy-core-object (gethash key old)))))
+        (when image (setf (gethash "backoffImage" entry) image))
         (setf (gethash name entries) entry)))
     (gethash name entries)))
 
@@ -499,7 +513,7 @@ A first attempt never ran, so it leaves no trace and is made again as attempt ze
                       ((missing-container-restart-suppressed-p pod entry name)
                        (setf (gethash "restartSuppressed" entry) t)
                        (save-container-lifecycle-state runtime uid state))
-                      ((and entry (< now (gethash "nextStart" entry 0)))
+                      ((container-backoff-waiting-p entry spec now)
                        (setf (gethash name waiting) entry restarting t))
                       (t
                        (let ((attempt (max (if entry (gethash "nextAttempt" entry 0) 0)
@@ -531,7 +545,7 @@ A first attempt never ran, so it leaves no trace and is made again as attempt ze
                   (let ((entry (prepare-container-restart state info now)))
                     (save-container-lifecycle-state runtime uid state)
                     (setf restarting t)
-                    (if (< now (gethash "nextStart" entry))
+                    (if (container-backoff-waiting-p entry spec now)
                         (setf (gethash name waiting) entry)
                         (handler-case
                             (progn

@@ -224,11 +224,15 @@
   (let ((old (gethash "spec" (pod-to-object existing)))
         (new (gethash "spec" (pod-to-object replacement))))
     ;; A client's GET-free PUT may omit fields only admission set.
-    (dolist (field '("priority" "preemptionPolicy" "priorityClassName" "overhead" "runtimeClassName"))
+    (dolist (field '("priority" "preemptionPolicy" "priorityClassName" "overhead" "runtimeClassName"
+                     "schedulerName" "readinessGates"))
       (multiple-value-bind (value present) (gethash field old)
         (when (and present (not (nth-value 1 (gethash field new))))
           (setf (gethash field new) (copy-core-object value))))
-      (unless (core-json-equal-p (gethash field old) (gethash field new))
+      (unless (or (core-json-equal-p (gethash field old) (gethash field new))
+                  ;; A Pod stored before schedulerName was defaulted already meant the default.
+                  (and (equal field "schedulerName") (not (nth-value 1 (gethash field old)))
+                       (equal +default-scheduler-name+ (gethash field new))))
         (invalid-pod "spec.~A is immutable" field)))
     (let ((old-annotations (gethash "annotations" (gethash "metadata" (pod-to-object existing))))
           (new-metadata (gethash "metadata" (pod-to-object replacement))))

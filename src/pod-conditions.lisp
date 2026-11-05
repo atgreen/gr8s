@@ -111,9 +111,11 @@ list as 'nothing is running': Sonobuoy's worker takes it to mean all containers 
                        (when reason (setf (gethash "reason" result) reason))
                        (when message (setf (gethash "message" result) message))
                        (push result conditions))))
-            (condition "PodScheduled" (if scheduled "True" "False")
-                       (unless scheduled "Unschedulable")
-                       (unless scheduled (pod-unschedulable-message store pod)))
+            ;; Another scheduler's Pod says nothing about scheduling until that scheduler binds it.
+            (when (or scheduled (pod-for-this-scheduler-p pod))
+              (condition "PodScheduled" (if scheduled "True" "False")
+                         (unless scheduled "Unschedulable")
+                         (unless scheduled (pod-unschedulable-message store pod))))
             (let ((initialized (and scheduled (pod-initialization-complete-p pod status)))
                   (incomplete (unless (pod-initialization-complete-p pod status)
                                 (loop for spec across (pod-init-containers pod)
@@ -129,7 +131,18 @@ list as 'nothing is running': Sonobuoy's worker takes it to mean all containers 
                          (when incomplete
                            (format nil "containers with incomplete status: [~{~A~^ ~}]" incomplete))))
             (condition "ContainersReady" readiness reason message)
-            (condition "Ready" readiness reason message)
+            ;; Ready also waits for the conditions the Pod's readiness gates name, which clients write.
+            (let ((gates (and (equal readiness "True")
+                              (pod-readiness-gates-message
+                               pod (concatenate 'vector
+                                                (or (gethash "conditions"
+                                                             (gethash (pod-uid pod) (pod-store-pod-client-statuses store)
+                                                                      (core-object)))
+                                                    #())
+                                                (if (and (vectorp incoming) (not (stringp incoming))) incoming #()))))))
+              (if gates
+                  (condition "Ready" "False" "ReadinessGatesNotReady" gates)
+                  (condition "Ready" readiness reason message)))
             (let ((pending (find-pod-condition incoming "PodResizePending")))
               (cond (pending
                      (condition "PodResizePending" "True" (gethash "reason" pending) (gethash "message" pending)))

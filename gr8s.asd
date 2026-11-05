@@ -356,6 +356,7 @@
                              (:file "pod-finalizers-test")
                              (:file "generated-pod-names-test")
                              (:file "pod-conditions-test")
+                             (:file "pod-readiness-gates-test")
                              (:file "node-log-delivery-test")
                              (:file "garbage-collection-test")
                              (:file "doctor-test")
