@@ -598,7 +598,7 @@ handler and never gets here. A busy host makes this race likely."
   (fresh-line)
   (terpri)
   (dolist (line '("               ___"
-                  "    __ _ _ __ ( _ )   ___"
+                  "    __ _ _ __ ( _ )  ___"
                   "   / _` | '__|/ _ \\ / __|"
                   "  | (_| | |  | (_) |\\__ \\"
                   "   \\__, |_|   \\___/ |___/"
