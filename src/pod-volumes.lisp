@@ -111,7 +111,7 @@
       (handler-case
           (loop for (key . object) in (assignment-resource-objects assignment)
                 do (setf (gethash key resources) object))
-        (kubernetes-error (condition)
+        (error (condition)
           (format *error-output* "gr8s Pod ~A/~A assignment rejected: ~A~%"
                   (slot-value assignment 'gr8s.node.v1::namespace)
                   (slot-value assignment 'gr8s.node.v1::name) condition))))
