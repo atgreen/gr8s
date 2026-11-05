@@ -70,9 +70,13 @@
                        (runtime-addon-binary-verified-p addon-directory binary))
                      (getf addon :binaries))
               ;; runsc-style handlers need only runtime_type; options stay empty.
+              ;; :bin-dir is carried so the managed containerd can add it to the
+              ;; shim PATH (containerd execs the shim binary by name); the config
+              ;; emitter ignores keys beyond :name/:runtime-type/:options.
               (list :name (getf addon :name)
                     :runtime-type (getf addon :runtime-type)
-                    :options nil)
+                    :options nil
+                    :bin-dir (namestring (uiop:ensure-directory-pathname addon-directory)))
               (progn
                 (warn "runtime addon ~A: a binary failed its checksum; skipping"
                       (getf addon :name))
