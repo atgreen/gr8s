@@ -426,7 +426,14 @@ A first attempt never ran, so it leaves no trace and is made again as attempt ze
   (remove-if
    (lambda (info)
      (when (container-start-cancelled-p info)
-       (cri-delete-container (containerd-runtime-socket-path runtime) (cri-container-info-id info))
+       (handler-case
+           (cri-delete-container (containerd-runtime-socket-path runtime) (cri-container-info-id info))
+         ;; An abandoned start can leave its task running in a container CRI calls exited,
+         ;; which RemoveContainer refuses (podster-uqb.126). Keep the Pod waiting, not Failed.
+         (error (condition)
+           (error 'runtime-error
+                  :message (format nil "container ~A's abandoned start cannot be removed yet: ~A"
+                                   (cri-container-info-name info) condition))))
        (when (zerop (cri-container-info-attempt info))
          (remhash (cri-container-info-name info) (gethash "containers" state))
          (let ((log (merge-pathnames (container-attempt-log-path (cri-container-info-name info) 0)

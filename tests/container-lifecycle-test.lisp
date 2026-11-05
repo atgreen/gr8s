@@ -149,6 +149,40 @@
             (is (eql 0 (gethash "restartCount" status)))
             (is (gethash "running" (gethash "state" status)))))))))
 
+(test start-abandoned-by-the-client-timeout-is-retried-too
+  (with-temporary-store (store directory)
+    (let* ((now 4000000000) (gr8s::*container-lifecycle-clock* (lambda () now))
+           (pod (lifecycle-pod store "Never"))
+           (runtime (gr8s::make-containerd-runtime :log-root directory))
+           (healthy (lifecycle-info "main" 0 gr8s.cri.v1::+containerstate-container_running+ now))
+           (abandoned (cancelled-start-info "side" now "failed to create containerd task: context deadline exceeded")))
+      (with-lifecycle-cri (fixture pod (list healthy abandoned))
+        (let ((observed (runtime-observe runtime (pod-uid pod))))
+          (is (not (equal "Failed" (gr8s::runtime-pod-phase observed))))
+          (gr8s::runtime-reconcile-containers runtime pod observed)
+          (is (member '(:create "side" 0 "same-sandbox") (lifecycle-cri-fixture-calls fixture) :test #'equal)))))))
+
+;; podster-uqb.126: the abandoned start's task may still be running, and containerd refuses
+;; to remove it. The Pod then waits with a runtime error rather than failing.
+(test abandoned-start-that-cannot-be-removed-leaves-the-pod-waiting
+  (with-temporary-store (store directory)
+    (let* ((now 4000000000) (gr8s::*container-lifecycle-clock* (lambda () now))
+           (pod (lifecycle-pod store "Never"))
+           (runtime (gr8s::make-containerd-runtime :log-root directory))
+           (healthy (lifecycle-info "main" 0 gr8s.cri.v1::+containerstate-container_running+ now))
+           (cancelled (cancelled-start-info "side" now)))
+      (with-lifecycle-cri (fixture pod (list healthy cancelled))
+        (let ((original (symbol-function 'gr8s::cri-delete-container)))
+          (setf (symbol-function 'gr8s::cri-delete-container)
+                (lambda (&rest arguments) (declare (ignore arguments))
+                  (error "failed to remove container: cannot delete running task")))
+          (unwind-protect
+               (let ((observed (runtime-observe runtime (pod-uid pod))))
+                 (is (not (equal "Failed" (gr8s::runtime-pod-phase observed))))
+                 (signals gr8s::runtime-error (gr8s::runtime-reconcile-containers runtime pod observed))
+                 (is (null (find :create (lifecycle-cri-fixture-calls fixture) :key #'first))))
+            (setf (symbol-function 'gr8s::cri-delete-container) original)))))))
+
 (test container-start-that-really-failed-stays-terminal
   (with-temporary-store (store directory)
     (let* ((now 4000000000) (gr8s::*container-lifecycle-clock* (lambda () now))
