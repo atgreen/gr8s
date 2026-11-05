@@ -164,9 +164,10 @@
             (let ((object (template-protobuf-message "k8s.io.api.discovery.v1.EndpointSlice" raw)))
               (setf (gethash "apiVersion" object) version (gethash "kind" object) kind)
               (return-from decode-core-resource-protobuf object)))
-          (when (member kind '("PersistentVolume" "PersistentVolumeClaim" "StorageClass") :test #'equal)
+          (when (member kind '("PersistentVolume" "PersistentVolumeClaim" "StorageClass"
+                               "CSIDriver" "CSINode" "VolumeAttachment" "CSIStorageCapacity") :test #'equal)
             (let ((object (template-protobuf-message
-                           (concatenate 'string (if (equal kind "StorageClass") "k8s.io.api.storage.v1." "k8s.io.api.core.v1.") kind) raw)))
+                           (concatenate 'string (if (equal version "storage.k8s.io/v1") "k8s.io.api.storage.v1." "k8s.io.api.core.v1.") kind) raw)))
               (setf (gethash "apiVersion" object) version (gethash "kind" object) kind)
               (return-from decode-core-resource-protobuf object)))
           (when (equal kind "Event")

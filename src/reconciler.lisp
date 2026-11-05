@@ -133,8 +133,25 @@
 (defun pod-ephemeral-limit-p (pod)
   "Return whether any container of POD declares an ephemeral-storage limit."
   (let ((spec (gethash "spec" (pod-to-object pod))))
-    (some (lambda (container) (gethash "ephemeral-storage" (container-resource-map container "limits")))
-          (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec)))))
+    (or (some (lambda (container) (gethash "ephemeral-storage" (container-resource-map container "limits")))
+              (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec)))
+        (some #'pod-disk-empty-dir-limit (gethash "volumes" spec #())))))
+
+(defun pod-disk-empty-dir-limit (volume)
+  "Return the byte limit of a disk-backed emptyDir VOLUME, or NIL."
+  (let* ((source (gethash "emptyDir" volume))
+         (limit (and source (not (equal "Memory" (gethash "medium" source))) (gethash "sizeLimit" source))))
+    (unless (member limit '(nil 0 "0") :test #'equal)
+      (storage-quantity limit "emptyDir.sizeLimit"))))
+
+(defun pod-empty-dir-violation (pod volume-usage)
+  "Return why a disk-backed emptyDir in the (NAME . BYTES) list VOLUME-USAGE exceeds its limit, or NIL."
+  (loop for volume across (gethash "volumes" (gethash "spec" (pod-to-object pod)) #())
+        for limit = (pod-disk-empty-dir-limit volume)
+        for used = (cdr (assoc (gethash "name" volume) volume-usage :test #'equal))
+        when (and limit used (> used limit))
+          return (format nil "Usage of EmptyDir volume ~S exceeds the limit ~S."
+                         (gethash "name" volume) (gethash "sizeLimit" (gethash "emptyDir" volume)))))
 
 (defun pod-ephemeral-violation (pod layers volume-bytes)
   "Return why measured LAYERS and VOLUME-BYTES exceed POD's ephemeral-storage limits, or NIL."
@@ -158,8 +175,11 @@
         (setf (gethash (pod-uid pod) table) now)
         ;; A failed measurement says nothing about the Pod; the next one decides.
         (handler-case
-            (multiple-value-bind (layers volume-bytes) (runtime-ephemeral-usage (reconciler-runtime reconciler) pod)
-              (when volume-bytes (pod-ephemeral-violation pod layers volume-bytes)))
+            (multiple-value-bind (layers volume-bytes volume-usage)
+                (runtime-ephemeral-usage (reconciler-runtime reconciler) pod)
+              (when volume-bytes
+                (or (pod-empty-dir-violation pod volume-usage)
+                    (pod-ephemeral-violation pod layers volume-bytes))))
           (error (condition)
             (format *error-output* "gr8s Pod ~A/~A storage measurement failed: ~A~%"
                     (pod-namespace pod) (pod-name pod) condition)

@@ -46,6 +46,16 @@
           ((equal resource "customresourcedefinitions")
            (setf object (crd-fixture :group "watch.example.test" :plural "watched"))
            (setf (gethash "labels" (gethash "metadata" object)) (gr8s::core-object "app" "watched")))
+          ((equal resource "csidrivers")
+           (setf (gethash "spec" object) (gr8s::core-object)))
+          ((equal resource "csinodes")
+           (setf (gethash "spec" object) (gr8s::core-object "drivers" #())))
+          ((equal resource "volumeattachments")
+           (setf (gethash "spec" object)
+                 (gr8s::core-object "attacher" "watched.example.test" "nodeName" "node"
+                                    "source" (gr8s::core-object "persistentVolumeName" "pv"))))
+          ((equal resource "csistoragecapacities")
+           (setf (gethash "storageClassName" object) "fast"))
           ((equal resource "horizontalpodautoscalers")
            (setf (gethash "spec" object)
                  (gr8s::core-object "maxReplicas" 2 "scaleTargetRef"

@@ -226,11 +226,12 @@
                     "\"securityContext\":{\"supplementalGroups\":[-1]}"
                     "\"securityContext\":{\"capabilities\":{\"drop\":[\"ALL\"]}}"
                     "\"volumes\":[{\"name\":\"v\",\"emptyDir\":{\"medium\":\"HugePages\"}}]"
-                    "\"volumes\":[{\"name\":\"v\",\"emptyDir\":{\"sizeLimit\":\"1Gi\"}}]"
+                    "\"volumes\":[{\"name\":\"v\",\"emptyDir\":{\"sizeLimit\":\"lots\"}}]"
                     "\"volumes\":[{\"name\":\"v\",\"emptyDir\":{\"medium\":\"Memory\",\"sizeLimit\":\"lots\"}}]"))
       (signals kubernetes-error (parse-pod (pod-with spec))))
     ;; Go clients serialize unset emptyDir fields, so these empty forms stay valid.
     (dolist (spec '("\"volumes\":[{\"name\":\"v\",\"emptyDir\":{\"medium\":\"\"}}]"
+                    "\"volumes\":[{\"name\":\"v\",\"emptyDir\":{\"sizeLimit\":\"1Gi\"}}]"
                     "\"volumes\":[{\"name\":\"v\",\"emptyDir\":{\"medium\":\"Memory\",\"sizeLimit\":null}}]"
                     "\"volumes\":[{\"name\":\"v\",\"emptyDir\":{\"medium\":\"\",\"sizeLimit\":\"0\"}}]"
                     "\"securityContext\":{\"seLinuxOptions\":null,\"seccompProfile\":null}"))

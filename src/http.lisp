@@ -103,7 +103,7 @@
                                     "preferredVersion" (json-object "groupVersion" "rbac.authorization.k8s.io/v1" "version" "v1"))
                        (event-api-group) (workload-api-group) (batch-api-group) (budget-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group) (networking-api-group)
                        (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group) (cert-manager-api-group))))
-    (setf groups (concatenate 'vector groups (vector (autoscaling-api-group) (apiservice-api-group))))
+    (setf groups (concatenate 'vector groups (vector (autoscaling-api-group) (apiservice-api-group) (coordination-api-group))))
     (when store (setf groups (concatenate 'vector groups (coerce (crd-api-groups store) 'vector))))
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
@@ -1227,6 +1227,8 @@ Clients that can read an object as well say so with a further media range."
           ((string= path "/apis/gateway.networking.k8s.io/v1") (gateway-discovery-response))
           ((string= path "/apis/cert-manager.io") (json-response (cert-manager-api-group)))
           ((string= path "/apis/cert-manager.io/v1") (cert-manager-discovery-response))
+          ((string= path "/apis/coordination.k8s.io") (json-response (coordination-api-group)))
+          ((string= path "/apis/coordination.k8s.io/v1") (coordination-discovery-response))
           ((string= path "/apis/autoscaling") (json-response (autoscaling-api-group)))
           ((string= path "/apis/autoscaling/v1") (autoscaling-discovery-response "v1"))
           ((string= path "/apis/autoscaling/v2") (autoscaling-discovery-response "v2"))

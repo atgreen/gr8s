@@ -291,6 +291,8 @@
     (return-from normalize-core-resource (normalize-budget-resource input namespace name)))
   (when (hpa-resource-p resource)
     (return-from normalize-core-resource (normalize-hpa-resource input namespace name store)))
+  (when (lease-resource-p resource)
+    (return-from normalize-core-resource (normalize-lease-resource input namespace name)))
   (when (policy-resource-p resource)
     (return-from normalize-core-resource (normalize-policy-resource resource input namespace name store)))
   (when (networking-resource-p resource)
