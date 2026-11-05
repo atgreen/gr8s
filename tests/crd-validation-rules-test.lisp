@@ -294,3 +294,47 @@
                "spec" (gr8s::core-object
                        "matchConstraints" (gr8s::core-object "resourceRules" #())
                        "auditAnnotations" (vector (gr8s::core-object "key" "NOT OK" "valueExpression" "'x'")))))))
+
+(test requests-classify-by-flow-schema-and-report-it
+  (with-core-api (store path)
+    (values store path)
+    (gr8s::reconcile-flowcontrol store)
+    (let* ((admin (gr8s::make-api-user-identity :username "system:admin" :groups #("system:masters" "system:authenticated")))
+           (user (gr8s::make-api-user-identity :username "noxu" :groups #("system:authenticated")))
+           (other (gr8s::make-api-user-identity :username "foo" :groups #("system:authenticated")))
+           (exempt (gethash "uid" (gethash "metadata" (gr8s::get-core-resource store "flowschemas" nil "exempt"))))
+           (catch-all (gethash "uid" (gethash "metadata" (gr8s::get-core-resource store "flowschemas" nil "catch-all")))))
+      (is (equal exempt (gr8s::flowcontrol-classify store admin "/api/v1/pods" :get)))
+      (is (equal catch-all (gr8s::flowcontrol-classify store other "/healthz" :get)))
+      (check-core-status 201 "/apis/flowcontrol.apiserver.k8s.io/v1/prioritylevelconfigurations" :method :post
+        :object (gr8s::core-object "apiVersion" "flowcontrol.apiserver.k8s.io/v1" "kind" "PriorityLevelConfiguration"
+                                   "metadata" (gr8s::core-object "name" "test-level")
+                                   "spec" (gr8s::core-object "type" "Limited"
+                                                             "limited" (gr8s::core-object "nominalConcurrencyShares" 1
+                                                                                          "limitResponse" (gr8s::core-object "type" "Reject")))))
+      (let* ((schema (check-core-status 201 "/apis/flowcontrol.apiserver.k8s.io/v1/flowschemas" :method :post
+                       :object (gr8s::core-object
+                                "apiVersion" "flowcontrol.apiserver.k8s.io/v1" "kind" "FlowSchema"
+                                "metadata" (gr8s::core-object "name" "test-schema")
+                                "spec" (gr8s::core-object
+                                        "matchingPrecedence" 1000
+                                        "priorityLevelConfiguration" (gr8s::core-object "name" "test-level")
+                                        "rules" (vector (gr8s::core-object
+                                                         "subjects" (vector (gr8s::core-object "kind" "User" "user" (gr8s::core-object "name" "noxu")))
+                                                         "nonResourceRules" (vector (gr8s::core-object "verbs" #("*") "nonResourceURLs" #("*")))))))))
+             (uid (gethash "uid" (gethash "metadata" schema))))
+        (setf gr8s::*flowcontrol-snapshot* nil)
+        (is (equal uid (gr8s::flowcontrol-classify store user "/healthz" :get)))
+        (is (equal catch-all (gr8s::flowcontrol-classify store user "/api/v1/pods" :get)))
+        (is (equal catch-all (gr8s::flowcontrol-classify store other "/healthz" :get)))
+        (gr8s::reconcile-flowcontrol store)
+        (let ((condition (aref (gethash "conditions" (gethash "status" (gr8s::get-core-resource store "flowschemas" nil "test-schema"))) 0)))
+          (is (equal "Dangling" (gethash "type" condition)))
+          (is (equal "False" (gethash "status" condition))))
+        (is (search "apiserver_flowcontrol_nominal_limit_seats{priority_level=\"test-level\"} 100"
+                    (gr8s::flowcontrol-metrics-text store)))))
+    (multiple-value-bind (body status headers) (drakma:http-request "http://127.0.0.1:18089/version")
+      (declare (ignore body))
+      (is (= 200 status))
+      (is (plusp (length (cdr (assoc :x-kubernetes-pf-flowschema-uid headers)))))
+      (is (plusp (length (cdr (assoc :x-kubernetes-pf-prioritylevel-uid headers))))))))

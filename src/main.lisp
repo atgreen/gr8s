@@ -565,6 +565,7 @@ handler and never gets here. A busy host makes this race likely."
                     (setf worker (start-reconciliation-worker reconciler
                                   :before-reconcile (lambda ()
                                       (reconcile-crd-deletions store)
+                                      (reconcile-flowcontrol store)
                                       (collect-orphaned-custom-resources store)
                                       (reconcile-certificate-signing-requests store pki)
                                       (reconcile-certificates store pki)

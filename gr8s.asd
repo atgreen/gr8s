@@ -156,6 +156,7 @@
                              (:file "debug-server")
                              (:file "autoscaling-api")
                              (:file "table-printing")
+                             (:file "flowcontrol")
                              (:file "http")
                              (:file "aggregated-discovery")
                              (:file "core-resource-http")
