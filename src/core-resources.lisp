@@ -172,8 +172,11 @@
 (defun install-core-state-blob (store json)
   "Install a replicated core-resource state JSON blob on this replica: write it to
    disk and reload the in-memory index from it. Runs on every member when a
-   :core-state entry commits (podster-c2d.7.2). Takes the store lock."
-  (with-store-lock (store)
+   :core-state entry commits (podster-c2d.7.2). Uses the RAW store lock, never
+   WITH-STORE-LOCK: on the leader this runs while the proposing writer still holds
+   the consensus-write lock during its flush, so acquiring that lock again here
+   would deadlock."
+  (bt:with-lock-held ((pod-store-lock store))
     (write-private-text-atomically (core-resource-state-path store) json)
     (clrhash (pod-store-resources store))
     (load-core-resources store)))

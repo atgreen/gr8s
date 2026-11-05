@@ -53,9 +53,26 @@
   (consensus-write-lock (bt:make-lock "gr8s consensus write")))
 
 (defmacro with-store-lock ((store) &body body)
-  "Evaluate BODY while holding STORE's lock."
-  `(bt:with-lock-held ((pod-store-lock ,store))
-     ,@body))
+  "Evaluate BODY while holding STORE's lock. In HA consensus mode (STORE has a
+   consensus-commit-fn) a durable write made in BODY is not published under the
+   lock; COMMIT-CORE-RESOURCES stashes the committed state, and once the store
+   lock is released the state is replicated through Raft and installed on every
+   replica. The store lock is therefore never held across the Raft round-trip, so
+   there is no deadlock with the apply path, and writers serialize on the
+   consensus-write lock. This is sound because WITH-STORE-LOCK is non-reentrant,
+   so it is never nested: every acquisition is the outermost one. Without HA this
+   is a plain lock hold, identical to the single-node path."
+  (let ((s (gensym "STORE")))
+    `(let ((,s ,store))
+       (if (pod-store-consensus-commit-fn ,s)
+           (bt:with-lock-held ((pod-store-consensus-write-lock ,s))
+             (let ((*pending-consensus-commit* nil)
+                   (*core-write-active* t))
+               (multiple-value-prog1
+                   (bt:with-lock-held ((pod-store-lock ,s)) ,@body)
+                 (when *pending-consensus-commit*
+                   (funcall (pod-store-consensus-commit-fn ,s) *pending-consensus-commit*)))))
+           (bt:with-lock-held ((pod-store-lock ,s)) ,@body)))))
 
 (defvar *pending-consensus-commit* nil
   "Bound by WITH-CORE-WRITE; COMMIT-CORE-RESOURCES stashes the committed state
@@ -69,23 +86,9 @@
    controller path) publishes locally as before.")
 
 (defmacro with-core-write ((store) &body body)
-  "Run a durable (consensus-plane) write BODY. BODY executes under the store lock
-   and returns the write's result; if STORE is in HA consensus mode, BODY's call
-   to COMMIT-CORE-RESOURCES stashes the committed state instead of publishing it,
-   and the state is then replicated through Raft with the store lock released
-   (writers serialized by the consensus-write lock). Without HA, this is exactly
-   WITH-STORE-LOCK."
-  (let ((s (gensym "STORE")) (result (gensym "RESULT")))
-    `(let ((,s ,store))
-       (if (pod-store-consensus-commit-fn ,s)
-           (bt:with-lock-held ((pod-store-consensus-write-lock ,s))
-             (let* ((*pending-consensus-commit* nil)
-                    (*core-write-active* t)
-                    (,result (with-store-lock (,s) ,@body)))
-               (when *pending-consensus-commit*
-                 (funcall (pod-store-consensus-commit-fn ,s) *pending-consensus-commit*))
-               ,result))
-           (with-store-lock (,s) ,@body)))))
+  "Historical alias: WITH-STORE-LOCK is now itself HA-aware, so a durable write
+   needs no special wrapper. Kept so existing call sites read intently."
+  `(with-store-lock (,store) ,@body))
 
 (defun pod-key (namespace name)
   "Return the stable in-memory key for NAMESPACE and Pod NAME."

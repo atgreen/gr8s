@@ -201,6 +201,7 @@
                              (:file "ha-leader-gate-test")
                              (:file "ha-store-test")
                              (:file "ha-control-plane-test")
+                             (:file "ha-controller-write-test")
                              (:file "ha-redirect-http-test")
                              (:file "agent-failover-test")
                              (:file "ha-smoke-test")
