@@ -78,16 +78,17 @@
   target)
 
 (defun version-response ()
-  (json-response
-   (json-object "major" "1"
-                "minor" "36"
-                "gitVersion" "v1.36.0-gr8s.0"
-                "gitCommit" "unknown"
-                "gitTreeState" "clean"
-                "buildDate" "1970-01-01T00:00:00Z"
-                "goVersion" "common-lisp"
-                "compiler" "sbcl"
-                "platform" "linux/amd64")))
+  (multiple-value-bind (major minor) (kubernetes-api-version-components)
+    (json-response
+     (json-object "major" major
+                  "minor" minor
+                  "gitVersion" (kubernetes-git-version)
+                  "gitCommit" "unknown"
+                  "gitTreeState" "clean"
+                  "buildDate" "1970-01-01T00:00:00Z"
+                  "goVersion" "common-lisp"
+                  "compiler" "sbcl"
+                  "platform" "linux/amd64"))))
 
 (defun api-versions-response ()
   (json-response
