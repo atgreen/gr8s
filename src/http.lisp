@@ -1066,7 +1066,11 @@ already signalling, with its handlers unbound for the handler tests, and then fi
     (#.gr8s.node.v1::+streamchannel-stream_channel_stderr+ 2)))
 
 (defun serve-agent-exec-session (reconciler uid container options &key attach)
-  "Bridge the client's WebSocket to a node exec, or with ATTACH to the container's own process."
+  "Bridge the client's WebSocket to a node exec, or with ATTACH to the container's own process.
+A client that asks for SPDY instead is served as a kubelet's streaming server serves it."
+  (when (spdy-remotecommand-requested-p)
+    (return-from serve-agent-exec-session
+      (serve-spdy-exec-session reconciler uid container options :attach attach)))
   (let* ((session
            (if attach
                (reconciler-start-attach-session
