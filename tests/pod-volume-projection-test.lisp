@@ -266,4 +266,4 @@
                   "spec" (gr8s::core-object
                           "containers"
                           (vector (gr8s::core-object "name" "main" "image" "busybox"
-                                                     "env" (vector (funcall resource "BAD" "limits.ephemeral-storage"))))))))))
+                                                     "env" (vector (funcall resource "BAD" "limits.hugepages-2Mi"))))))))))
