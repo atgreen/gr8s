@@ -1346,6 +1346,7 @@ Watches are long-running requests, which that filter leaves alone."
           ((string= path "/metrics")
            (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
            (concatenate 'string (apiserver-request-metrics-text) (process-metrics-text)
+                        (if store (scheduler-metrics-text store) "")
                         (runtime-network-metrics runtime) (gateway-metrics-text) (volume-reclaim-metrics-text)
                         (if store (flowcontrol-metrics-text store) "")))
           ((string= path "/version") (version-response))

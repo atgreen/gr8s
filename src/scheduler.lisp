@@ -362,8 +362,9 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
       (record-pod-scheduling-event store pod "Warning" "FailedScheduling" message))))
 
 (defun schedule-pod (store pod)
-  "Return POD's selected node, or preempt lower-priority Pods when no placeable node fits it."
-  (let ((node nil) (victims nil))
+  "Return POD's selected node, or preempt lower-priority Pods when no placeable node fits it.
+Each call for an unbound Pod is a scheduling attempt, measured as kube-scheduler measures one."
+  (let ((node nil) (victims nil) (started (get-internal-real-time)) (algorithm nil))
     (with-store-lock (store)
       (let ((requested-node (pod-node-name pod)))
         (when requested-node
@@ -374,7 +375,8 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
       (let* ((placeable (loop for candidate being the hash-values of (pod-store-nodes store)
                               when (pod-node-placeable-p store pod candidate) collect candidate))
              (fitting (remove-if-not (lambda (candidate) (pod-fits-node-unlocked store pod candidate)) placeable)))
-        (setf node (first (sort fitting (lambda (left right) (node-placement-better-p store pod left right)))))
+        (setf node (first (sort fitting (lambda (left right) (node-placement-better-p store pod left right))))
+              algorithm (/ (- (get-internal-real-time) started) internal-time-units-per-second))
         (if node
             (progn
               (remhash (pod-uid pod) (pod-store-nominated-nodes store))
@@ -383,6 +385,12 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
               (when plan
                 (setf victims (cdr plan)
                       (gethash (pod-uid pod) (pod-store-nominated-nodes store)) (node-record-name (car plan))))))))
+    (ignore-errors
+     (note-scheduling-attempt (pod-uid pod)
+                              (ignore-errors (pod-deletion-time (table-get (pod-to-object pod) "metadata" "creationTimestamp")))
+                              (if node "scheduled" "unschedulable")
+                              (/ (- (get-internal-real-time) started) internal-time-units-per-second)
+                              (and node algorithm)))
     ;; Deletion takes the store lock itself and is retried by reconciliation.
     (dolist (victim victims) (preempt-pod store victim))
     (if node
