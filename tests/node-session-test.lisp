@@ -1059,3 +1059,37 @@
                 :ca-certificate-path ca :certificate-path cert :private-key-path key :max-sessions 1)
                (is (gr8s:node-record-ready-p (gr8s:get-node store "tls-worker")))))
         (gr8s:stop-node-grpc-server server)))))
+
+(test node-runtime-outage-makes-the-node-not-ready-without-dropping-its-lease
+  (with-temporary-store (store path)
+    (gr8s:register-node
+     store (gr8s:make-node-record :id "node-runtime" :name "worker-a"
+                                  :pod-cidr "10.88.7.0/24"))
+    (let ((server (gr8s::%make-node-grpc-server
+                   :store store :port 0 :heartbeat-timeout-seconds 5
+                   :cluster-pod-cidr "10.88.0.0/16" :node-prefix 24)))
+      (flet ((heartbeat (message)
+               (let ((envelope (make-instance 'gr8s.node.v1::agent-envelope
+                                              :protocol-version gr8s::+node-protocol-version+
+                                              :heartbeat (make-instance 'gr8s.node.v1::heartbeat
+                                                                        :runtime-down-message message))))
+                 (setf (gr8s.node.v1::payload-case envelope) :heartbeat)
+                 ;; Through the wire, as the agent sends it.
+                 (gr8s::handle-node-agent-envelope
+                  server "worker-a"
+                  (ag-proto:deserialize-from-bytes 'gr8s.node.v1::agent-envelope
+                                                   (ag-proto:serialize-to-bytes envelope)))))
+             (ready-condition ()
+               (aref (gethash "conditions" (gethash "status" (gr8s::node-api-object (gr8s:get-node store "worker-a")))) 0)))
+        (heartbeat "")
+        (is (string= "True" (gethash "status" (ready-condition))))
+        (heartbeat "container runtime is down: managed containerd exited (exit status 2)")
+        (let ((node (gr8s:get-node store "worker-a")))
+          (is (gr8s:node-record-ready-p node))
+          (is (not (gr8s::node-record-runtime-ready-p node))))
+        (is (string= "False" (gethash "status" (ready-condition))))
+        (is (string= "KubeletNotReady" (gethash "reason" (ready-condition))))
+        (is (search "container runtime is down" (gethash "message" (ready-condition))))
+        (heartbeat "")
+        (is (string= "True" (gethash "status" (ready-condition))))
+        (is (gr8s::node-record-runtime-ready-p (gr8s:get-node store "worker-a")))))))

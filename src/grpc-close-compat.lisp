@@ -50,6 +50,26 @@ claims each callback, so this sweep cannot repeat an already invoked callback."
         (ignore-errors (usocket:socket-shutdown socket :io))
         (ignore-errors (usocket:socket-close socket))))))
 
+(defun discard-unsent-http2-output (connection)
+  "Drop bytes left in CONNECTION's output buffer by a writer that was unwound.
+Every ag-http2 frame write is followed by FORCE-OUTPUT, so nothing legitimate is
+pending at close. But SBCL's FLUSH-OUTPUT-BUFFER resets the buffer only after
+write(2) returns: an interrupt that unwinds a writer there (a superseded Pod
+creation is cancelled that way) leaves frames the peer already received, and
+the GOAWAY flush would send them again. A repeated DATA frame with END_STREAM
+crashed containerd's grpc-go server (podster-uqb.138). CLEAR-OUTPUT is a no-op
+on SBCL fd-streams, so reset the buffer itself."
+  #+sbcl
+  (let ((stream (ag-http2::connection-stream connection)))
+    (when (typep stream 'sb-sys:fd-stream)
+      (let ((buffer (sb-impl::fd-stream-obuf stream)))
+        (when buffer
+          (setf (sb-impl::buffer-head buffer) 0
+                (sb-impl::buffer-tail buffer) 0)))
+      (setf (sb-impl::fd-stream-output-queue stream) nil)))
+  #-sbcl
+  (ignore-errors (clear-output (ag-http2::connection-stream connection))))
+
 (defun ag-http2:connection-close (connection &key (error-code ag-http2::+error-no-error+) debug-data)
   "Run the pinned upstream finalizer once; never retry a potentially reused FD.
 Keep upstream cleanup callbacks, best-effort GOAWAY, bounded write-lock wait,
@@ -60,6 +80,7 @@ our own unwind protection before admitting cancellation after the claim."
     (sb-sys:without-interrupts
       (unwind-protect
            (when (setf owned (claim-http2-connection-close connection))
+             (ignore-errors (discard-unsent-http2-output connection))
              (sb-sys:with-local-interrupts
                (funcall *upstream-http2-connection-close* connection
                         :error-code error-code :debug-data debug-data)))
@@ -67,6 +88,7 @@ our own unwind protection before admitting cancellation after the claim."
     #-sbcl
     (unwind-protect
          (when (setf owned (claim-http2-connection-close connection))
+           (ignore-errors (discard-unsent-http2-output connection))
            (funcall *upstream-http2-connection-close* connection
                     :error-code error-code :debug-data debug-data))
       (when owned (finish-open-http2-socket connection)))))

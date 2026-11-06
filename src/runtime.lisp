@@ -12,6 +12,9 @@
   (:report (lambda (condition stream)
              (write-string (runtime-error-message condition) stream))))
 
+(define-condition runtime-unavailable (runtime-error) ()
+  (:documentation "Report that the container runtime itself is down, so no Pod can be observed or changed until it returns."))
+
 (define-condition container-config-error (runtime-error) ()
   (:documentation "Report a container whose configuration cannot be generated yet, which later attempts may resolve."))
 
@@ -82,6 +85,10 @@
 (defgeneric runtime-runs-containers-p (runtime)
   (:documentation "Return whether RUNTIME itself stops containers, rather than delegating to a node.")
   (:method (runtime) (declare (ignore runtime)) t))
+
+(defgeneric runtime-unavailable-message (runtime)
+  (:documentation "Return why RUNTIME cannot serve Pods right now, or NIL while it can.")
+  (:method (runtime) (declare (ignore runtime)) nil))
 
 (defgeneric runtime-ephemeral-usage (runtime pod)
   (:documentation "Return POD's writable-layer bytes as (container . bytes) entries and its emptyDir bytes, or NIL when unmeasurable.")

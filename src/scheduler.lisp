@@ -91,6 +91,21 @@
         (when old (publish-node-change-unlocked store old node)))
       node)))
 
+(defun note-node-runtime-health (store name runtime-down-message)
+  "Record whether NAME's container runtime is down, as its agent's heartbeat reported.
+NIL or an empty RUNTIME-DOWN-MESSAGE means the runtime is up. A node whose
+runtime is down keeps its lease, and so its Pods' phases, but is NotReady and
+receives no new Pods, as kubelet reports \"container runtime is down\"."
+  (let ((message (and runtime-down-message (plusp (length runtime-down-message))
+                      runtime-down-message)))
+    (with-store-lock (store)
+      (let ((node (get-node-unlocked store name)))
+        (when (and node (not (equal message (node-record-runtime-down-message node))))
+          (let ((old (node-api-object node)))
+            (setf (node-record-runtime-down-message node) message)
+            (publish-node-change-unlocked store old node)))
+        node))))
+
 (defun mark-node-not-ready (store name)
   "Mark NAME not ready while preserving its registered identity."
   (with-store-lock (store)
@@ -106,9 +121,11 @@
   "Checkpoint unavailable state before changing NODE under STORE's lock."
   (let ((updated (copy-node-record node))
         (old (node-api-object node)))
-    (setf (node-record-ready-p updated) nil)
+    (setf (node-record-ready-p updated) nil
+          (node-record-runtime-down-message updated) nil)
     (persist-node store updated)
-    (setf (node-record-ready-p node) nil)
+    (setf (node-record-ready-p node) nil
+          (node-record-runtime-down-message node) nil)
     (publish-node-change-unlocked store old node)))
 
 (defun expire-node-heartbeats (store oldest-acceptable-heartbeat &key now)

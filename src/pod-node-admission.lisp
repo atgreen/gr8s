@@ -109,7 +109,7 @@ A Pod the node has reported on is past admission, however full the node is now."
         (counts nil))
     (dolist (node nodes)
       (dolist (failure (or (mapcar #'car (node-pod-fit-failures store pod node))
-                           (unless (node-record-ready-p node) '("node(s) not ready"))
+                           (unless (node-record-runtime-ready-p node) '("node(s) not ready"))
                            (when (node-record-unschedulable node) '("node(s) were unschedulable"))
                            (unless (pod-node-taints-allow-p pod node) '("node(s) had untolerated taints"))
                            (unless (and (pod-node-selector-matches-p pod node) (pod-node-affinity-matches-p pod node))

@@ -16,14 +16,20 @@
   (lifecycle-lock (bt:make-lock "native lifecycle checkpoint writes"))
   (hooks (make-container-hook-manager))
   (images (make-image-pull-manager))
-  (deletions (make-deletion-controller)))
+  (deletions (make-deletion-controller))
+  ;; Set for a supervised managed containerd; NIL trusts an external runtime to be up.
+  availability)
+
+(defmethod runtime-unavailable-message ((runtime containerd-runtime))
+  (runtime-availability-message (containerd-runtime-availability runtime)))
 
 (defun make-containerd-runtime
     (&key (socket-path "/run/containerd/containerd.sock")
           (log-root "/var/log/gr8s/pods/")
           (host-network t)
-          dns-servers dns-searches dns-options)
+          dns-servers dns-searches dns-options availability)
   (%make-containerd-runtime
+   :availability availability
    :socket-path socket-path
    :log-root (uiop:ensure-directory-pathname log-root)
    :host-network host-network

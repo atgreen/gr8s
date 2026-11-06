@@ -468,7 +468,8 @@ bare positional state directory for backward compatibility.  A missing
              :host-network nil
              :dns-servers (list +dns-pod-server-address+)
              :dns-searches +dns-pod-searches+
-             :dns-options +dns-pod-options+)
+             :dns-options +dns-pod-options+
+             :availability (managed-containerd-availability manager))
             manager))
          (values
           (make-containerd-runtime
@@ -537,6 +538,7 @@ bare positional state directory for backward compatibility.  A missing
                 (lambda (variant payload emit)
                   (dispatch-node-operation node-runtime variant payload emit))
                 :status-provider (lambda () (node-runtime-status node-runtime))
+                :runtime-health (lambda () (runtime-unavailable-message runtime))
                 :ca-certificate-path ca-certificate
                 :certificate-path certificate :private-key-path private-key
                 :underlay-address (getf options :node-address)

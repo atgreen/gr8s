@@ -453,10 +453,13 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
                (and (node-record-api-only node)
                     (copy-core-object (or (node-record-api-status node) (core-object))))
                (core-object
-               "conditions" (vector (core-object "type" "Ready"
-                                                  "status" (if (node-record-ready-p node) "True" "False")
-                                                  "reason" (if (node-record-ready-p node) "AgentReady" "AgentNotReady")
-                                                  "message" "Readiness follows the gr8s node session lease"))
+               "conditions" (vector (if (and (node-record-ready-p node) (node-record-runtime-down-message node))
+                                        (core-object "type" "Ready" "status" "False" "reason" "KubeletNotReady"
+                                                     "message" (node-record-runtime-down-message node))
+                                        (core-object "type" "Ready"
+                                                     "status" (if (node-record-ready-p node) "True" "False")
+                                                     "reason" (if (node-record-ready-p node) "AgentReady" "AgentNotReady")
+                                                     "message" "Readiness follows the gr8s node session lease")))
                "addresses" (if (and address (plusp (length address)))
                                (vector (core-object "type" "InternalIP" "address" address)) #())
                "daemonEndpoints" (core-object "kubeletEndpoint" (core-object "Port" (node-record-kubelet-port node)))

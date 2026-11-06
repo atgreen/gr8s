@@ -704,9 +704,23 @@ snapshot application."
          :directory-fn (lambda (sandbox)
                          (nth-value 2 (cni-pin-paths root sandbox))))))))
 
+(defvar *runtime-outage-snapshot-wait-seconds* 2
+  "How long a snapshot waits for a restarting container runtime before giving up this attempt.")
+
 (defun reconcile-node-snapshot (node-runtime snapshot)
   (unless (eq :running (node-runtime-state node-runtime))
     (error 'runtime-error :message "node runtime is not running"))
+  ;; Don't start, stop or fail Pods against a runtime that is restarting. Wait a
+  ;; little for it, then leave the revision unacknowledged so it is retried.
+  (let ((runtime (node-runtime-runtime node-runtime)))
+    (when (runtime-unavailable-message runtime)
+      (let ((availability (and (containerd-runtime-p runtime) (containerd-runtime-availability runtime))))
+        (unless (and availability
+                     (wait-for-runtime-available availability *runtime-outage-snapshot-wait-seconds*)
+                     (not (runtime-unavailable-message runtime)))
+          (error 'node-snapshot-incomplete
+                 :message (format nil "skipping Pod synchronization: ~A"
+                                  (or (runtime-unavailable-message runtime) "container runtime is down")))))))
   (bt:with-lock-held ((node-runtime-apply-lock node-runtime))
     (ensure-node-snapshot-current node-runtime snapshot)
     (apply-node-runtime-network node-runtime snapshot)

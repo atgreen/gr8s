@@ -68,6 +68,10 @@ message NodeHello {
 
 message Heartbeat {
   uint64 observed_at_unix_nanos = 1;
+  // Why the node's container runtime cannot serve Pods; empty while it can.
+  // A node that reports it stays leased but is NotReady, as kubelet reports
+  // "container runtime is down".
+  string runtime_down_message = 2;
 }
 
 message SnapshotAck {
