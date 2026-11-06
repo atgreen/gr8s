@@ -587,8 +587,9 @@
   (cond ((custom-resource-key-p resource) (crd-api-view (copy-core-object existing)))
         ((equal resource "events") (event-api-view (copy-core-object existing) (or *core-resource-view-version* "v1")))
         ((and (hpa-resource-p resource) (equal *core-resource-view-version* "autoscaling/v1")) (hpa-v1-view existing))
-        ((equal resource "podcertificaterequests")
-         (pod-certificate-request-view existing (or *core-resource-view-version* "certificates.k8s.io/v1")))
+        ;; An API writer edits the version it asked for; in-process writers see the stored object.
+        ((and (equal resource "podcertificaterequests") *core-resource-view-version*)
+         (pod-certificate-request-view existing *core-resource-view-version*))
         (t (copy-core-object existing))))
 
 (defun update-core-resource (store resource namespace name transform &key dry-run)

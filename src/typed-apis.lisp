@@ -457,9 +457,13 @@
   (destructuring-bind (resource namespace name) (typed-status-route path)
     (when (eq method :get)
       (return-from dispatch-typed-status-request
-        (json-response (if (equal resource "apiservices")
-                           (apiservice-by-name store name)
-                           (get-core-resource store resource namespace name)))))
+        ;; Shown in the version the URL names; PodCertificateRequest has two.
+        (let ((*core-resource-view-version* (if (equal resource "podcertificaterequests")
+                                                (pod-certificate-request-path-version path)
+                                                *core-resource-view-version*)))
+          (json-response (if (equal resource "apiservices")
+                             (apiservice-by-name store name)
+                             (get-core-resource store resource namespace name))))))
     (unless (member method '(:put :patch))
       (core-resource-error 405 "MethodNotAllowed" "Unsupported status method"))
     (let* ((*typed-api-status-write* t)
