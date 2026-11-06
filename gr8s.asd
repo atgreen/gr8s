@@ -15,7 +15,7 @@
   ;; base plus a "-gr8s.N" suffix carried in a git tag (e.g. v1.37.2-gr8s.0),
   ;; surfaced through VERSION-STRING as +GR8S-VERSION+ (see src/version.lisp).
   :version "1.37.2"
-  :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "chipz" "cl-cancel"
+  :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cffi" "chipz" "cl-cancel"
                "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
                "pure-tls/acme" "drakma"
                "sb-posix" "slynk" "trivial-utf-8" "usocket" "version-string"
@@ -146,6 +146,9 @@
                              (:file "routed-cni")
                              (:file "managed-containerd")
                              (:file "runtime-addons")
+                             (:file "zstd")
+                             (:file "tar")
+                             (:file "runtime-install")
                              (:file "cri")
                              (:file "image-preload")
                              (:file "container-expansion")
@@ -299,6 +302,7 @@
                              (:file "managed-containerd-test")
                              (:file "image-preload-test")
                              (:file "runtime-addons-test")
+                             (:file "runtime-install-test")
                              (:file "clustertrustbundle-test")
                              (:file "podcertificaterequest-test")
                              (:file "containerd-test")
