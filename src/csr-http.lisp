@@ -12,27 +12,20 @@
   "Describe the implemented stable certificates API group."
   (core-object "apiVersion" "v1" "kind" "APIGroup" "name" "certificates.k8s.io"
                "versions" (vector (core-object "groupVersion" "certificates.k8s.io/v1" "version" "v1")
-                                  (core-object "groupVersion" "certificates.k8s.io/v1beta1" "version" "v1beta1")
-                                  (core-object "groupVersion" "certificates.k8s.io/v1alpha1" "version" "v1alpha1"))
-               ;; CertificateSigningRequest (v1) stays the preferred version; the
-               ;; v1beta1 version carries ClusterTrustBundle and v1alpha1 the
-               ;; PodCertificateRequest.
+                                  (core-object "groupVersion" "certificates.k8s.io/v1beta1" "version" "v1beta1"))
+               ;; CertificateSigningRequest and ClusterTrustBundle are GA at v1
+               ;; (the preferred version); the v1beta1 version carries
+               ;; PodCertificateRequest (KEP-4317).
                "preferredVersion" (core-object "groupVersion" "certificates.k8s.io/v1" "version" "v1")))
 
 (defun csr-v1beta1-discovery-response ()
-  "Advertise the certificates.k8s.io/v1beta1 resources (ClusterTrustBundle)."
-  (json-response (core-object "apiVersion" "v1" "kind" "APIResourceList"
-                              "groupVersion" "certificates.k8s.io/v1beta1"
-                              "resources" (stored-resource-discovery "certificates.k8s.io/v1beta1"))))
-
-(defun csr-v1alpha1-discovery-response ()
-  "Advertise certificates.k8s.io/v1alpha1 resources (PodCertificateRequest + its
+  "Advertise certificates.k8s.io/v1beta1 resources (PodCertificateRequest + its
    signer-written status subresource)."
   (json-response (core-object "apiVersion" "v1" "kind" "APIResourceList"
-                              "groupVersion" "certificates.k8s.io/v1alpha1"
+                              "groupVersion" "certificates.k8s.io/v1beta1"
                               "resources"
                               (concatenate 'vector
-                                (stored-resource-discovery "certificates.k8s.io/v1alpha1")
+                                (stored-resource-discovery "certificates.k8s.io/v1beta1")
                                 (vector (core-object "name" "podcertificaterequests/status"
                                                      "singularName" "" "namespaced" t
                                                      "kind" "PodCertificateRequest"

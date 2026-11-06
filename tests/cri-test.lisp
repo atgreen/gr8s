@@ -172,3 +172,52 @@
     (is (string= "10.88.1.2" (gr8s::cri-pod-sandbox-ip-from-response decoded))))
   (is (string= "" (gr8s::cri-pod-sandbox-ip-from-response
                     (make-instance 'gr8s.cri.v1::pod-sandbox-status-response)))))
+
+(defun running-task-removal-error (&optional (code ag-grpc:+grpc-status-failed-precondition+))
+  "The error containerd 2.4 returns when RemoveContainer meets a task CRI lost track of."
+  (make-condition 'ag-grpc::grpc-status-error
+                  :code code
+                  :message "failed to delete containerd container \"c1\": cannot delete running task c1: failed precondition"))
+
+(test removal-blocked-by-a-leftover-task-reaps-it-and-removes-again
+  (let ((removals 0) (reaped 0))
+    (gr8s::call-reaping-leftover-task
+     (lambda () (when (= 1 (incf removals)) (error (running-task-removal-error))))
+     (lambda () (incf reaped)))
+    (is (= 2 removals))
+    (is (= 1 reaped))))
+
+(test other-removal-failures-are-not-mistaken-for-a-leftover-task
+  (let ((reaped 0))
+    (dolist (condition (list (running-task-removal-error ag-grpc:+grpc-status-unavailable+)
+                             (make-condition 'ag-grpc::grpc-status-error
+                                             :code ag-grpc:+grpc-status-failed-precondition+
+                                             :message "container is in use")))
+      (signals ag-grpc::grpc-status-error
+        (gr8s::call-reaping-leftover-task (lambda () (error condition)) (lambda () (incf reaped)))))
+    (is (zerop reaped))))
+
+(test a-task-that-survives-reaping-still-fails-the-removal
+  ;; The Pod then keeps waiting and the next pass tries again; nothing loops here.
+  (let ((removals 0) (reaped 0))
+    (signals ag-grpc::grpc-status-error
+      (gr8s::call-reaping-leftover-task
+       (lambda () (incf removals) (error (running-task-removal-error)))
+       (lambda () (incf reaped))))
+    (is (= 2 removals))
+    (is (= 1 reaped))))
+
+(test containerd-task-requests-match-containerd-wire-format
+  ;; containerd.services.tasks.v1.KillRequest: container_id=1, exec_id=2, signal=3, all=4.
+  (is (equalp #(10 2 99 49 24 9 32 1)
+              (ag-proto:serialize-to-bytes (gr8s::make-containerd-kill-request "c1"))))
+  (is (equalp #(10 2 99 49)
+              (ag-proto:serialize-to-bytes
+               (make-instance 'gr8s.containerd.tasks.v1::delete-task-request :container-id "c1"))))
+  ;; DeleteResponse carries exited_at (field 4) too, which gr8s skips.
+  (let ((response (ag-proto:deserialize-from-bytes 'gr8s.containerd.tasks.v1::delete-response
+                                                  #(10 2 99 49 16 42 24 137 1 34 2 8 1))))
+    (is (string= "c1" (gr8s.containerd.tasks.v1::id response)))
+    (is (= 42 (gr8s.containerd.tasks.v1::pid response)))
+    (is (= 137 (gr8s.containerd.tasks.v1::exit-status response))))
+  (is (equal "k8s.io" (ag-grpc:metadata-get (gr8s::containerd-namespace-metadata) "containerd-namespace"))))

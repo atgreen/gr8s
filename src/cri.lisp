@@ -517,9 +517,79 @@ AUTH is a (username . password) credential for the registry."
            (ensure-cri-deletion-status "StopContainer" status)))
       (ag-grpc:channel-close channel))))
 
+(defparameter *containerd-cri-namespace* "k8s.io"
+  "The containerd namespace in which the CRI plugin keeps its containers and tasks.")
+
+(defun cri-running-task-error-p (condition)
+  "Return whether CONDITION is RemoveContainer refusing a container whose task CRI calls exited.
+containerd's tasks service can create a task and still fail the call, for example
+'failed to get task pid: context canceled' when the client abandons StartContainer.
+CRI then holds no task handle to clean up: it records the container exited, so
+StopContainer does nothing and RemoveContainer fails on the leftover task for good
+(podster-uqb.126)."
+  (and (typep condition 'ag-grpc::grpc-status-error)
+       (eql ag-grpc:+grpc-status-failed-precondition+ (ag-grpc::grpc-status-error-code condition))
+       (search "cannot delete running task" (or (ag-grpc::grpc-status-error-message condition) ""))
+       t))
+
+(defun containerd-namespace-metadata ()
+  "Return call metadata selecting the CRI plugin's containerd namespace."
+  (ag-grpc:make-grpc-metadata (list (cons "containerd-namespace" *containerd-cri-namespace*))))
+
+(defun make-containerd-kill-request (container-id)
+  "Build a request to SIGKILL every process of CONTAINER-ID's task."
+  (make-instance 'gr8s.containerd.tasks.v1::kill-request
+                 :container-id container-id :signal 9 :all t))
+
+(defun containerd-status-tolerating-absence (thunk)
+  "Call THUNK, treating a task containerd no longer has as already handled."
+  (handler-case (funcall thunk)
+    (ag-grpc::grpc-status-error (condition)
+      (unless (eql ag-grpc:+grpc-status-not-found+ (ag-grpc::grpc-status-error-code condition))
+        (error condition)))))
+
+(defun containerd-reap-task (socket-path container-id &key (timeout 30))
+  "Kill and delete CONTAINER-ID's task through containerd's own Tasks API.
+This is the cleanup CRI's StartContainer does when it holds the task, applied to a
+task it lost track of. The CRI container record itself is left for RemoveContainer."
+  (let ((channel (make-unix-grpc-channel socket-path :timeout timeout))
+        (metadata (containerd-namespace-metadata)))
+    (unwind-protect
+         (let ((stub (gr8s.containerd.tasks.v1::make-tasks-stub channel)))
+           (register-runtime-deletion-cancel (lambda () (ag-grpc:channel-close channel)))
+           (containerd-status-tolerating-absence
+            (lambda ()
+              (gr8s.containerd.tasks.v1::tasks-kill
+               stub (make-containerd-kill-request container-id) :metadata metadata :timeout timeout)))
+           ;; Delete refuses a task whose process is still exiting, so wait for it first.
+           (handler-case
+               (containerd-status-tolerating-absence
+                (lambda ()
+                  (gr8s.containerd.tasks.v1::tasks-wait
+                   stub (make-instance 'gr8s.containerd.tasks.v1::wait-request :container-id container-id)
+                   :metadata metadata :timeout (min timeout 10))))
+             ;; An unfinished wait leaves Delete to report what is still wrong.
+             (ag-grpc::grpc-status-error () nil))
+           (containerd-status-tolerating-absence
+            (lambda ()
+              (gr8s.containerd.tasks.v1::tasks-delete
+               stub (make-instance 'gr8s.containerd.tasks.v1::delete-task-request :container-id container-id)
+               :metadata metadata :timeout timeout))))
+      (ag-grpc:channel-close channel))))
+
+(defun call-reaping-leftover-task (remove reap)
+  "Call REMOVE; if a leftover task blocks it, call REAP and then REMOVE once more."
+  (handler-case (funcall remove)
+    (ag-grpc::grpc-status-error (condition)
+      (unless (cri-running-task-error-p condition)
+        (error condition))
+      (funcall reap)
+      (funcall remove))))
+
 (defun cri-delete-container (socket-path container-id &key (grace-period 0)
                                                         (timeout (+ grace-period 30)))
-  "Stop and remove CONTAINER-ID through the CRI runtime service."
+  "Stop and remove CONTAINER-ID through the CRI runtime service.
+A task CRI lost track of is killed through containerd so the removal can finish."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
          (let ((stub (gr8s.cri.v1::make-runtime-service-stub channel)))
@@ -535,14 +605,20 @@ AUTH is a (username . password) credential for the registry."
              (ensure-cri-deletion-status "StopContainer" status))
            ;; Register again to reject a superseded job between Stop and Remove.
            (register-runtime-deletion-cancel (lambda () (ag-grpc:channel-close channel)))
-           (multiple-value-bind (response status)
-               (gr8s.cri.v1::runtime-service-remove-container
-                stub
-                (make-instance 'gr8s.cri.v1::remove-container-request
-                               :container-id container-id)
-                :timeout timeout)
-             (declare (ignore response))
-             (ensure-cri-deletion-status "RemoveContainer" status)))
+           (call-reaping-leftover-task
+            (lambda ()
+              (multiple-value-bind (response status)
+                  (gr8s.cri.v1::runtime-service-remove-container
+                   stub
+                   (make-instance 'gr8s.cri.v1::remove-container-request
+                                  :container-id container-id)
+                   :timeout timeout)
+                (declare (ignore response))
+                (ensure-cri-deletion-status "RemoveContainer" status)))
+            (lambda ()
+              (format *error-output* "gr8s reaping container ~A's task CRI no longer tracks~%" container-id)
+              (finish-output *error-output*)
+              (containerd-reap-task socket-path container-id :timeout timeout))))
       (ag-grpc:channel-close channel))))
 
 (defun cri-local-image (socket-path image timeout)
@@ -559,12 +635,6 @@ AUTH is a (username . password) credential for the registry."
            (gr8s.cri.v1::image response))
       (ag-grpc:channel-close channel))))
 
-(defun cri-image-user (socket-path image &key (timeout 30))
-  "Return the numeric user IMAGE runs as, or NIL, and its user name, from the node's image record."
-  (let* ((record (cri-local-image socket-path image timeout))
-         (uid (and record (gr8s.cri.v1::uid record))))
-    (values (and uid (gr8s.cri.v1::value uid)) (if record (gr8s.cri.v1::username record) ""))))
-
 (defun cri-image-present-p (socket-path image &key (timeout 30))
   "Query the CRI image service without contacting a registry."
   (not (null (cri-local-image socket-path image timeout))))
@@ -573,3 +643,13 @@ AUTH is a (username . password) credential for the registry."
   "Return the ID of the local image IMAGE currently names, or NIL when the node lacks it."
   (let ((record (cri-local-image socket-path image timeout)))
     (when record (gr8s.cri.v1::id record))))
+
+(defun cri-image-user (socket-path image &key (timeout 30))
+  "Return the user a local IMAGE is configured to run as, for verifying
+   runAsNonRoot when a Pod sets no explicit runAsUser (as the kubelet does):
+   (values UID-or-NIL USERNAME), both NIL/\"\" when the node lacks the image."
+  (let ((record (cri-local-image socket-path image timeout)))
+    (when record
+      (let ((uid (gr8s.cri.v1::uid record)))
+        (values (when uid (gr8s.cri.v1::value uid))
+                (gr8s.cri.v1::username record))))))
