@@ -294,7 +294,8 @@ Anything but Disabled needs a read-only mount whose propagation is None."
     (when (gethash "metadata" template)
       (let ((metadata (require-object (gethash "metadata" template) "ephemeral.volumeClaimTemplate.metadata")))
         (drop-null-fields metadata)
-        (when (or (gethash "name" metadata) (gethash "generateName" metadata))
+        ;; As in Kubernetes, only a non-empty name counts: Go always sends name "".
+        (when (or (plusp (length (gethash "name" metadata ""))) (plusp (length (gethash "generateName" metadata ""))))
           (invalid-pod "ephemeral.volumeClaimTemplate.metadata cannot set a name"))))
     (validate-storage-access-modes (gethash "accessModes" spec))
     (storage-quantity

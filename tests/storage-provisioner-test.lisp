@@ -651,3 +651,12 @@
         (when agent-thread (ignore-errors (bt:join-thread agent-thread)))
         (gr8s::stop-node-runtime node-runtime)
         (gr8s:stop-node-grpc-server server)))))
+
+
+(test ephemeral-claim-templates-accept-the-empty-name-go-sends
+  ;; Go sends name "" and generateName "" in a template's metadata; only a real name is refused.
+  (flet ((pod-with (metadata)
+           (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"p\"},\"spec\":{\"volumes\":[{\"name\":\"scratch\",\"ephemeral\":{\"volumeClaimTemplate\":{\"metadata\":~A,\"spec\":{\"accessModes\":[\"ReadWriteOnce\"],\"resources\":{\"requests\":{\"storage\":\"1Gi\"}}}}}}],\"containers\":[{\"name\":\"c\",\"image\":\"busybox\"}]}}" metadata)))
+    (is-true (parse-pod (pod-with "{\"name\":\"\",\"generateName\":\"\",\"labels\":{\"a\":\"b\"}}")))
+    (signals kubernetes-error (parse-pod (pod-with "{\"name\":\"fixed\"}")))
+    (signals kubernetes-error (parse-pod (pod-with "{\"generateName\":\"fixed-\"}")))))
