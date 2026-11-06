@@ -282,6 +282,24 @@
       (gr8s::update-node-csi-registrations store "worker-a" nil)
       (is (zerop (length (gethash "drivers" (gethash "spec" (gr8s::get-core-resource store "csinodes" nil "worker-a")))))))))
 
+(test driver-topology-labels-its-node-as-a-kubelet-does
+  ;; external-provisioner looks for a driver's topology keys on Node labels.
+  (with-temporary-store (store path)
+    (values path)
+    (ready-node store "worker-a" "a" "10.64.0.0/20")
+    (flet ((registration (name topology)
+             (make-instance 'gr8s.node.v1::csi-driver-registration :name name :node-id "n1" :topology topology))
+           (labels-of () (gr8s::node-record-labels (gr8s::get-node store "worker-a"))))
+      (gr8s::update-node-csi-registrations store "worker-a"
+                                           (list (registration "csi.example.test" (list (cons "topology.example.test/node" "worker-a")))))
+      (is (equal "worker-a" (gethash "topology.example.test/node" (labels-of))))
+      (is (equal "worker-a" (gethash "topology.example.test/node"
+                                     (gethash "labels" (gethash "metadata" (gr8s::node-api-object (gr8s::get-node store "worker-a")))))))
+      ;; A colliding value is reported, never written over the existing label.
+      (gr8s::update-node-csi-registrations store "worker-a"
+                                           (list (registration "other.example.test" (list (cons "topology.example.test/node" "elsewhere")))))
+      (is (equal "worker-a" (gethash "topology.example.test/node" (labels-of)))))))
+
 ;;; Pods
 
 (defun csi-pod-json (volume &key (propagation "") (context ""))

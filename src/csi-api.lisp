@@ -207,8 +207,35 @@ Kubernetes' attach/detach controller leaves them."
       (setf (gethash "allocatable" entry) (core-object "count" limit)))
     entry))
 
+(defun add-csi-topology-node-labels (store node-name registrations)
+  "Label NODE-NAME with the topology segments its drivers report, as a kubelet does when it
+registers a driver, so that external-provisioner finds the keys on a node. A label already
+holding a different value is left alone and reported, as the kubelet refuses a collision."
+  (let ((segments (loop for registration in registrations
+                        append (slot-value registration 'gr8s.node.v1::topology))))
+    (when segments
+      (with-store-lock (store)
+        (let* ((current (get-node-unlocked store node-name))
+               (labels (copy-core-object (or (and current (node-record-labels current)) (core-object))))
+               (changed nil))
+          (when current
+            (loop for (key . value) in segments
+                  for existing = (gethash key labels)
+                  do (cond ((null existing) (setf (gethash key labels) value changed t))
+                           ((not (equal existing value))
+                            (format *error-output* "gr8s CSI topology ~A=~A collides with Node ~A's label ~A=~A~%"
+                                    key value node-name key existing))))
+            (when changed
+              (let ((old (node-api-object current)) (updated (copy-node-record current)))
+                (setf (node-record-labels updated) labels)
+                (persist-node store updated)
+                (setf (node-record-labels current) labels)
+                (publish-node-change-unlocked store old current)
+                (note-node-desired-change store)))))))))
+
 (defun update-node-csi-registrations (store node-name registrations)
   "Publish the drivers NODE-NAME reports, writing only when they have changed."
+  (add-csi-topology-node-labels store node-name registrations)
   (let* ((drivers (coerce (sort (mapcar #'csi-node-driver-entry registrations) #'string<
                                 :key (lambda (entry) (gethash "name" entry)))
                           'vector))
