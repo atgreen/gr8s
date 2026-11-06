@@ -10,12 +10,12 @@
 (def-suite typed-apis :in gr8s)
 (in-suite typed-apis)
 
-(defparameter +typed-test-port+ 18094)
+(defvar *typed-test-port* nil "The kernel-assigned port of the current WITH-TYPED-HTTP server.")
 
 (defun typed-http (path &key (method :get) object (content-type "application/json") parameters)
   "Make one request to the typed API test server, returning its parsed body and code."
   (multiple-value-bind (body code)
-      (drakma:http-request (format nil "http://127.0.0.1:~D~A" +typed-test-port+ path)
+      (drakma:http-request (format nil "http://127.0.0.1:~D~A" *typed-test-port* path)
                            :method method :content-type content-type :parameters parameters
                            :content (when object (com.inuoe.jzon:stringify object)))
     (values (com.inuoe.jzon:parse (if (stringp body) body (trivial-utf-8:utf-8-bytes-to-string body))) code)))
@@ -30,8 +30,9 @@
   "Run an API-only test against a fresh store."
   (let ((path (gensym "PATH")))
     `(with-temporary-store (,store ,path)
-       (let ((server (start-server :address "127.0.0.1" :port +typed-test-port+ :store ,store
-                                   :runtime (make-fake-runtime))))
+       (let* ((server (start-server :address "127.0.0.1" :port 0 :store ,store
+                                    :runtime (make-fake-runtime)))
+              (*typed-test-port* (hunchentoot:acceptor-port server)))
          (unwind-protect (progn ,path ,@body) (stop-server server))))))
 
 (defun typed-discovery-names (path)
@@ -492,7 +493,7 @@
     (typed-check 201 "/api/v1/namespaces/watched/serviceaccounts" :method :post
       :object (gr8s::core-object "metadata" (gr8s::core-object "name" "seen")))
     (multiple-value-bind (stream code)
-        (drakma:http-request (format nil "http://127.0.0.1:~D/api/v1/namespaces/watched/serviceaccounts" +typed-test-port+)
+        (drakma:http-request (format nil "http://127.0.0.1:~D/api/v1/namespaces/watched/serviceaccounts" *typed-test-port*)
                              :want-stream t :parameters '(("watch" . "true") ("timeoutSeconds" . "2")))
       (unwind-protect
            (progn
