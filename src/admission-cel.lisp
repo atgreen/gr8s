@@ -658,6 +658,13 @@ each expression has only its own per-call limit.")
         (when (equal variable second-variable)
           (cel-check-error "duplicate variable name: ~A" variable)))
       (let* ((list-source (eq :list (cel-type-head source)))
+             ;; A comprehension visits every element once, so its result holds
+             ;; at most as many entries as the source. Carrying that bound keeps
+             ;; a later size-sensitive operation (==, in, a nested macro) from
+             ;; costing as if the mapped/filtered list were unbounded.
+             (source-bound (cond (list-source (and (consp source) (third source)))
+                                 ((eq :map (cel-type-head source)) (and (consp source) (fourth source)))
+                                 (t nil)))
              (first-type (cond ((and second-variable list-source) :int)
                                (list-source (cel-list-element source))
                                ((consp source) (cel-map-key source))
@@ -681,11 +688,11 @@ each expression has only its own per-call limit.")
            (unless (cel-compatible-p type :bool)
              (cel-check-error "comprehension predicate must be bool"))
            (if (eq kind :filter)
-               (list :list (cel-list-element source) (and (consp source) (eq :list (first source)) (third source)))
+               (list :list (cel-list-element source) source-bound)
                :bool))
-          (:map (list :list type nil))
-          (:transform-list (list :list type nil))
-          (:transform-map (list :map first-type type nil)))))))
+          (:map (list :list type source-bound))
+          (:transform-list (list :list type source-bound))
+          (:transform-map (list :map first-type type source-bound)))))))
 
 (defun cel-check-node (node scope)
   "Compute NODE's static type."

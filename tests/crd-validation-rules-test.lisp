@@ -56,6 +56,20 @@
   "Build a spec object from FIELDS."
   (apply #'gr8s::core-object fields))
 
+(test comprehension-results-carry-their-source-size-bound
+  ;; A map/filter/transform result holds at most as many entries as its source,
+  ;; so a size-sensitive operation over it (here ==) is affordable when the
+  ;; source is bounded. Regression: these results were typed as unbounded, which
+  ;; inflated the estimate to ~9e17 and refused WorkerPool's immutability rule
+  ;; self.map(c, c.name) == oldSelf.map(c, c.name) over a maxItems:1 array.
+  (let* ((item (gr8s::core-object "type" "object" "required" #("name")
+                                  "properties" (gr8s::core-object "name" (gr8s::core-object "type" "string"))))
+         (bounded (gr8s::core-object "type" "array" "maxItems" 1 "items" item)))
+    (flet ((cost (schema)
+             (nth-value 2 (gr8s::crd-compile-rule-expression
+                           "self.map(c, c.name) == oldSelf.map(c, c.name)" schema nil nil))))
+      (is (< (cost bounded) gr8s::+crd-rule-cost-limit+)))))
+
 (test rules-are-compiled-when-a-definition-is-admitted
   (with-core-api (store path)
     (values store path)

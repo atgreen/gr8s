@@ -264,7 +264,7 @@
     (values directory)
     ;; Revision 0 would mean "any", so give the list a real one to resume from.
     (gr8s::create-core-resource store "configmaps" (gr8s::core-object "metadata" (gr8s::core-object "name" "one")) "alpha")
-    (let ((collection "http://127.0.0.1:18094/apis/apiregistration.k8s.io/v1/apiservices")
+    (let ((collection (crd-api-url "/apis/apiregistration.k8s.io/v1/apiservices"))
           (revision (gethash "resourceVersion" (gethash "metadata" (crd-api-request 200 "/apis/apiregistration.k8s.io/v1/apiservices")))))
       (sb-sys:with-deadline (:seconds 15)
         (multiple-value-bind (stream code)
@@ -289,7 +289,7 @@
                  (is (equal "ERROR" (gethash "type" event)))
                  (is (= 410 (gethash "code" (gethash "object" event)))))
             (close stream))))
-      (dolist (event (let ((*watch-test-server* "http://127.0.0.1:18094"))
+      (dolist (event (let ((*watch-test-server* (crd-api-url "")))
                        (apply #'collect-watch-stream "/apis/apiregistration.k8s.io/v1/apiservices" (watch-list-parameters))))
         (is (member (gethash "type" event) '("ADDED" "BOOKMARK") :test #'equal))))))
 

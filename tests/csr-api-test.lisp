@@ -42,16 +42,19 @@
     "metadata" (gr8s::core-object "name" name)
     "spec" (gr8s::core-object "request" (ag-grpc:base64-encode request) "signerName" signer "expirationSeconds" 3600 "usages" usages)))
 
+(defvar *csr-api-port* nil "The kernel-assigned port of the current WITH-CSR-API server.")
+
 (defmacro with-csr-api ((store directory) &body body)
-  "Run focused CSR HTTP tests on their own port."
+  "Run focused CSR HTTP tests on a kernel-assigned port of their own."
   `(with-temporary-store (,store ,directory)
-     (let ((server (start-server :address "127.0.0.1" :port 18095 :store ,store :runtime (make-fake-runtime))))
+     (let* ((server (start-server :address "127.0.0.1" :port 0 :store ,store :runtime (make-fake-runtime)))
+            (*csr-api-port* (hunchentoot:acceptor-port server)))
        (unwind-protect (progn ,@body) (stop-server server)))))
 
 (defun csr-api-request (code path &key (method :get) object text bytes (content-type "application/json") headers)
   "Make an actual request and check the precise HTTP code without hiding response details."
   (multiple-value-bind (body status response-headers)
-      (drakma:http-request (concatenate 'string "http://127.0.0.1:18095" path) :method method :content-type content-type
+      (drakma:http-request (format nil "http://127.0.0.1:~D~A" *csr-api-port* path) :method method :content-type content-type
                           :additional-headers headers :content (or bytes text (when object (com.inuoe.jzon:stringify object))))
     (is (= code status) "~A returned ~D: ~A" path status body)
     (values (com.inuoe.jzon:parse body) response-headers)))
@@ -113,7 +116,11 @@
       (is (equal "Wire-CSR" (gethash "name" (gethash "metadata" created))))
       (csr-api-request 200 "/apis/certificates.k8s.io")
       (let ((resources (gethash "resources" (csr-api-request 200 "/apis/certificates.k8s.io/v1"))))
-        (is (= 3 (length resources))))
+        ;; certificatesigningrequests (+/approval, +/status) and the GA
+        ;; ClusterTrustBundle, all under certificates.k8s.io/v1 (k8s 1.37).
+        (is (= 4 (length resources)))
+        (is (find "clustertrustbundles" resources :test #'equal
+                  :key (lambda (r) (gethash "name" r)))))
       (let ((listed (csr-api-request 200 (concatenate 'string collection "?fieldSelector=spec.signerName=example.test/wire"))))
         (is (= 1 (length (gethash "items" listed)))))
       (setf (gethash "finalizers" (gethash "metadata" created)) #("example.test/retain"))
