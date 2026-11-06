@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Privileged verification for the ClusterIP socket load-balancer dataplane
 ;;;; (podster-7q2.2).  Requires real root (CAP_BPF plus a writable cgroup2 and a

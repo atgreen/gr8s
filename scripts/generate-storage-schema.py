@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Generate typed storage schemas from checksum-pinned Kubernetes v1.36 inputs."""
 import argparse
 import importlib.util

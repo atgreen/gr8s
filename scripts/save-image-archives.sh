@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 #
 # Save images as OCI archives that a gr8s agent imports at startup from
 # <state>/agent/images/ (or <agent state>/images/). Each archive keeps the image's

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Generate checksum-pinned apiextensions v1 protobuf descriptors and JSON tags."""
 import argparse
 import importlib.util

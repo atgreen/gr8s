@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
 ;;;; Reconcile StatefulSets with the semantics of the Kubernetes controller: stable
@@ -170,14 +170,18 @@ A template equal to an older revision makes that revision the newest again, whic
   (when (statefulset-ensure-claims store set ordinal)
     (let ((pod (admit-controller-pod store (statefulset-pod-object set template ordinal revision-name)
                                      "statefulset-controller")))
-      (with-store-lock (store)
-        (when (workload-current-unlocked store "statefulsets" set :generation t)
-          (create-pod-unlocked store pod))))))
+      (record-pod-created-event
+       store set
+       (with-store-lock (store)
+         (when (workload-current-unlocked store "statefulsets" set :generation t)
+           (create-pod-unlocked store pod)))))))
 
-(defun statefulset-delete-pod (reconciler member)
+(defun statefulset-delete-pod (reconciler member &optional set)
   "Start deleting one exact member Pod, tolerating one that is already gone."
   (let ((pod (statefulset-member-pod member)))
-    (handler-case (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod) "statefulset-controller" :uid (pod-uid pod))
+    (handler-case (when (and (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod) "statefulset-controller" :uid (pod-uid pod))
+                             set)
+                    (record-pod-deleted-event (reconciler-store reconciler) set pod))
       (kubernetes-error (condition)
         (unless (member (kubernetes-error-status-code condition) '(404 409)) (error condition))))))
 
@@ -217,7 +221,7 @@ A template equal to an older revision makes that revision the newest again, whic
                ((deletion-requested-p (statefulset-member-pod member))
                 (when ordered (return t)))
                ((member (gethash "phase" (statefulset-member-status member)) '("Failed" "Succeeded") :test #'equal)
-                (statefulset-delete-pod reconciler member)
+                (statefulset-delete-pod reconciler member set)
                 (when ordered (return t)))
                (t
                 (statefulset-repair-identity store member)
@@ -239,23 +243,45 @@ A template equal to an older revision makes that revision the newest again, whic
          (when ordered (return t)))
         ((and ordered (not (statefulset-member-healthy-p member)) (not (eq member first-unhealthy)))
          (return t))
-        (t (statefulset-delete-pod reconciler member)
+        (t (statefulset-delete-pod reconciler member set)
            (when ordered (return t)))))))
 
+(defun statefulset-max-unavailable (spec)
+  "Return how many of SPEC's Pods a rolling update may have unavailable, at least one."
+  (let ((rolling (gethash "rollingUpdate" (gethash "updateStrategy" spec))))
+    (max 1 (workload-rollout-count (or (and (hash-table-p rolling) (gethash "maxUnavailable" rolling)) 1)
+                                   (gethash "replicas" spec)))))
+
 (defun statefulset-roll (reconciler set update members)
-  "Replace one out-of-date Pod at a time from the highest ordinal down to the partition."
+  "Replace out-of-date Pods from the highest ordinal down to the partition, within maxUnavailable.
+As upstream does, an ordered set spends what the budget leaves on the highest old Pods,
+while a parallel one first replaces old Pods that are already unavailable."
   (let* ((spec (gethash "spec" set)) (start (statefulset-start-ordinal spec))
-         (lowest (+ start (statefulset-update-minimum spec))) (name (gethash "name" (workload-metadata update))))
-    (when (equal "RollingUpdate" (gethash "type" (gethash "updateStrategy" spec)))
-      (loop for ordinal from (1- (+ start (gethash "replicas" spec))) downto lowest
-            for member = (assoc ordinal members)
-            do (cond
-                 ((null member) (return))
-                 ((and (not (equal name (statefulset-member-revision member)))
-                       (not (deletion-requested-p (statefulset-member-pod member))))
-                  (statefulset-delete-pod reconciler member)
-                  (return))
-                 ((not (statefulset-member-healthy-p member)) (return)))))))
+         (lowest (+ start (statefulset-update-minimum spec))) (name (gethash "name" (workload-metadata update)))
+         (minimum (gethash "minReadySeconds" spec)) (parallel (equal "Parallel" (gethash "podManagementPolicy" spec)))
+         (maximum (statefulset-max-unavailable spec))
+         (ordinals (loop for ordinal from (1- (+ start (gethash "replicas" spec))) downto start collect ordinal)))
+    (flet ((available-p (member)
+             (and member (statefulset-member-healthy-p member)
+                  (workload-pod-available-p (statefulset-member-status member) minimum)))
+           (old-p (member)
+             (and member (not (equal name (statefulset-member-revision member)))
+                  (not (deletion-requested-p (statefulset-member-pod member))))))
+      (when (equal "RollingUpdate" (gethash "type" (gethash "updateStrategy" spec)))
+        (let* ((unavailable (count-if-not (lambda (ordinal) (available-p (assoc ordinal members))) ordinals))
+               (stale (count-if (lambda (ordinal) (let ((member (assoc ordinal members)))
+                                                    (and parallel (old-p member) (not (available-p member)))))
+                                ordinals))
+               (budget (- maximum unavailable)))
+          (unless (and (>= unavailable maximum) (zerop stale))
+            (dolist (ordinal ordinals)
+              (let ((member (assoc ordinal members)))
+                (when (and (>= ordinal lowest) (old-p member))
+                  (cond ((and parallel (not (available-p member)))
+                         (statefulset-delete-pod reconciler member set))
+                        ((and (plusp budget) (or (not parallel) (available-p member)))
+                         (statefulset-delete-pod reconciler member set)
+                         (decf budget))))))))))))
 
 (defun statefulset-delete-scaled-claims (store set members)
   "Delete the claims of ordinals scaled away once their Pods are gone, when retention asks for it."

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Kill the managed containerd under a running workload and observe its recovery.
 
 Run as root inside a disposable Linux guest with bpffs mounted (podster-uqb.138).

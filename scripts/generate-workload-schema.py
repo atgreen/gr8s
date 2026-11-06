@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Generate pinned apps/v1 workload, core/v1 ReplicationController and autoscaling/v1 Scale schema additions."""
 
 import argparse

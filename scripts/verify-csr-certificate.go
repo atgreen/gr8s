@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Anthony Green
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 //
 // Purpose:
 // Verify an issued CSR leaf and its policy using the independent Go X.509/TLS

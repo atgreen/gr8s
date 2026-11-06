@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 #
 # Stage a gVisor (runsc) runtime addon for a gr8s node: download the pinned
 # release tarball, verify it against gVisor's published SHA-512, extract it into

@@ -19,6 +19,22 @@
 (asdf:load-system :gr8s)
 (gr8s::embed-runtime-assets #P"build/containerd/")
 
+;; Embed a gzip of the collected third-party NOTICES (produced by `make
+;; notices`) so the full attribution ships inside the single binary; `gr8s
+;; notices` decompresses and prints it. salza2 is only needed here, at build.
+(let ((notices #P"NOTICES"))
+  (if (probe-file notices)
+      (progn
+        (asdf:load-system :salza2)
+        (setf gr8s::*embedded-notices-gz*
+              (uiop:symbol-call
+               :salza2 :compress-data
+               (trivial-utf-8:string-to-utf-8-bytes (uiop:read-file-string notices))
+               (uiop:find-symbol* :gzip-compressor :salza2)))
+        (format t "build-native: embedded NOTICES (~D bytes gzipped)~%"
+                (length gr8s::*embedded-notices-gz*)))
+      (warn "build-native: NOTICES missing; `gr8s notices` will be empty. Run `make notices`.")))
+
 ;; Bake the git-augmented version into the image. This build dumps with
 ;; save-lisp-and-die rather than asdf:program-op, so VERSION-STRING's program-op
 ;; hook never fires; set +GR8S-VERSION+ here instead, while the git repo is present.

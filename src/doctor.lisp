@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; `gr8s doctor`: inspect and validate the host environment, turning the
 ;;;; cryptic failures we hit in practice (EHOSTUNREACH from a default-deny

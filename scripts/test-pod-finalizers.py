@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Prove finalizer-retained Pods preserve real native exits after physical cleanup.
 
 Run only in an isolated privileged guest. State reuse requires an explicitly

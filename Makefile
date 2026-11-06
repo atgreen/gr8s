@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 #
 # Purpose:
 # Define reproducible developer entry points for generating protocol bindings,
@@ -22,7 +22,7 @@ NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
 NODE_PROTOCOL_LISP := src/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 
-.PHONY: all help containerd-bundle generate-protocol test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api check smoke smoke-two-node run kubeconfig native clean
+.PHONY: all help containerd-bundle generate-protocol test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api check smoke smoke-two-node run kubeconfig notices native clean
 
 all: native
 
@@ -110,7 +110,7 @@ test-core-api:
 test-whistler-cni: containerd-bundle test
 
 check: containerd-bundle test-whistler-cni test-endpoint-policy
-	sh -n scripts/gr8s scripts/install-containerd.sh \
+	sh -n scripts/gr8s scripts/install-containerd.sh scripts/collect-notices.sh \
 	  scripts/verify-static-runtime.sh scripts/smoke.sh scripts/test-core-api.sh
 	scripts/verify-static-runtime.sh build/containerd
 
@@ -148,6 +148,9 @@ run: containerd-bundle
 kubeconfig:
 	scripts/gr8s kubeconfig --output "$(KUBECONFIG)" \
 	  --server "http://127.0.0.1:$(PORT)"
+
+notices:
+	scripts/collect-notices.sh NOTICES
 
 native: build/gr8s
 

@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 #
 # Stage a Kata Containers (microVM) runtime addon for a gr8s node: download the
 # pinned kata-static release bundle, verify it against a pinned SHA-256, extract
