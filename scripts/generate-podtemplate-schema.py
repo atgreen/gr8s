@@ -44,6 +44,9 @@ def load_sources(cache):
     return result
 
 
+JSON_NAMES = {"aPIGroup": "apiGroup"}
+
+
 def proto_messages(sources):
     """Extract flat go-to-protobuf message fields, checking every field declaration."""
     messages = {}
@@ -66,7 +69,8 @@ def proto_messages(sources):
                 cardinality, field_type, field_name, number = item.groups() if item else mapping.groups()
                 if field_type not in SCALARS:
                     field_type = field_type.lstrip(".") if field_type.startswith(".") else package + "." + field_type
-                field = {"name": field_name, "type": field_type}
+                # go-to-protobuf lowercases only the first letter of a Go name; JSON spells it apiGroup.
+                field = {"name": JSON_NAMES.get(field_name, field_name), "type": field_type}
                 if item and cardinality == "repeated":
                     field["repeated"] = True
                 if mapping:
