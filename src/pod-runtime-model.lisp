@@ -169,7 +169,7 @@ such as the security-profiles-operator put them.")
     (invalid-pod "env.value and env.valueFrom are mutually exclusive"))
   (let* ((from (require-object (gethash "valueFrom" variable) "env.valueFrom"))
          (sources (loop for key being the hash-keys of from collect key)))
-    (reject-unsupported-fields from '("fieldRef" "resourceFieldRef" "secretKeyRef" "configMapKeyRef") "env.valueFrom")
+    (reject-unsupported-fields from '("fieldRef" "resourceFieldRef" "secretKeyRef" "configMapKeyRef" "fileKeyRef") "env.valueFrom")
     (unless (= 1 (length sources)) (invalid-pod "env.valueFrom requires exactly one source"))
     (let* ((kind (first sources)) (ref (require-object (gethash kind from) "environment source")))
       (cond
@@ -183,6 +183,7 @@ such as the security-profiles-operator put them.")
            (invalid-pod "unsupported downward API field reference")))
         ;; Unlike in a volume, an unnamed container here means the variable's own.
         ((equal kind "resourceFieldRef") (validate-resource-field-reference ref))
+        ((equal kind "fileKeyRef") (validate-file-key-selector ref))
         (t
          (reject-unsupported-fields ref '("name" "key" "optional") "environment key reference")
          (require-dns-subdomain (gethash "name" ref) "environment source name")
@@ -509,6 +510,7 @@ such as the security-profiles-operator put them.")
 
 (defun validate-runtime-pod-spec (spec)
   "Validate Pod-level volume, security, service account and scheduling fields."
+  (validate-file-key-ref-volumes spec)
   (validate-linux-security-context (gethash "securityContext" spec) :pod t)
   ;; A Pod that declares itself Linux cannot carry Windows settings, as upstream validates.
   (when (and (equal "linux" (gethash "name" (gethash "os" spec (core-object))))

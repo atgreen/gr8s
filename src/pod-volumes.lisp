@@ -467,6 +467,8 @@ A literal value may refer to any variable defined before it, as $(NAME)."
                   (containerd-key-environment-value runtime pod "secrets" (gethash "secretKeyRef" from)))
                  ((gethash "configMapKeyRef" from)
                   (containerd-key-environment-value runtime pod "configmaps" (gethash "configMapKeyRef" from)))
+                 ((gethash "fileKeyRef" from)
+                  (containerd-file-key-environment-value runtime pod (gethash "fileKeyRef" from)))
                  ((gethash "resourceFieldRef" from)
                   (let ((reference (copy-core-object (gethash "resourceFieldRef" from))))
                     (when (member (gethash "containerName" reference) '(nil "") :test #'equal)

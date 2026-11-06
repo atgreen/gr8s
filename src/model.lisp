@@ -325,7 +325,9 @@
             "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
             "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "shareProcessNamespace" "hostAliases" "ephemeralContainers"
             "readinessGates" "schedulerName" "hostnameOverride" "setHostnameAsFQDN" "serviceAccount"
-            "topologySpreadConstraints" "schedulingGates") "spec")
+            "topologySpreadConstraints" "schedulingGates" "schedulingGroup") "spec")
+    ;; GenericWorkload is beta and off by default in v1.37, so the API server drops the field.
+    (remhash "schedulingGroup" spec)
     (dolist (field '("hostname" "subdomain"))
       (when (eq (gethash field spec) 'null) (remhash field spec))
       (let ((value (gethash field spec "")))

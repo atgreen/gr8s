@@ -53,6 +53,9 @@
   (let ((lifecycle (gethash "lifecycle" container)))
     (when lifecycle
       (drop-null-fields (require-object lifecycle "lifecycle"))
+      ;; ContainerStopSignals is alpha and off by default in v1.37, so the API server drops
+      ;; stopSignal from a new Pod rather than refusing it.
+      (remhash "stopSignal" lifecycle)
       (reject-unsupported-fields lifecycle '("postStart" "preStop") "lifecycle")
       (dolist (kind '("postStart" "preStop"))
         (when (gethash kind lifecycle)
