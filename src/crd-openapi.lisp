@@ -85,27 +85,30 @@ them at its root is published as a bare object."
          (crd-openapi-add-embedded-fields (if v3 (copy-core-object schema) (crd-openapi-v2-schema schema)) v3)
          v3))))
 
-(defun crd-add-openapi-version (document definition version v3)
-  "Publish an admitted version's schemas and real collection/item/status paths."
+(defun crd-add-openapi-version (document definition version v3 &key schema-names)
+  "Publish an admitted version's schemas and real collection/item/status paths.
+SCHEMA-NAMES, the kind's and its list's, name schemas the document already has, which are
+then used as they stand."
   (let* ((spec (gethash "spec" definition)) (names (gethash "names" spec))
          (group (gethash "group" spec)) (version-name (gethash "name" version))
-         (schema-name (crd-openapi-definition-name definition version-name))
-         (list-name (crd-openapi-definition-name definition version-name t))
-         (schema (crd-openapi-kind-schema version v3))
+         (schema-name (or (first schema-names) (crd-openapi-definition-name definition version-name)))
+         (list-name (or (second schema-names) (crd-openapi-definition-name definition version-name t)))
+         (schema (unless schema-names (crd-openapi-kind-schema version v3)))
          (definitions (if v3 (gethash "schemas" (gethash "components" document)) (gethash "definitions" document)))
          (paths (gethash "paths" document)) (namespaced (equal "Namespaced" (gethash "scope" spec)))
          (collection (format nil "/apis/~A/~A/~A~A" group version-name
                              (if namespaced "namespaces/{namespace}/" "") (gethash "plural" names)))
          (item (concatenate 'string collection "/{name}")))
-    (setf (gethash "x-kubernetes-group-version-kind" schema)
-          (vector (core-object "group" group "version" version-name "kind" (gethash "kind" names))))
-    (setf (gethash schema-name definitions) schema
+    (unless schema-names
+      (setf (gethash "x-kubernetes-group-version-kind" schema)
+            (vector (core-object "group" group "version" version-name "kind" (gethash "kind" names))))
+      (setf (gethash schema-name definitions) schema
           (gethash list-name definitions)
           (core-object "type" "object" "properties"
                        (core-object "apiVersion" (core-object "type" "string") "kind" (core-object "type" "string")
                                     "metadata" (core-object "type" "object" "properties" (core-object "resourceVersion" (core-object "type" "string") "continue" (core-object "type" "string")))
                                     "items" (core-object "type" "array" "items" (reference-schema schema-name)))
-                       "x-kubernetes-group-version-kind" (vector (core-object "group" group "version" version-name "kind" (gethash "listKind" names)))))
+                       "x-kubernetes-group-version-kind" (vector (core-object "group" group "version" version-name "kind" (gethash "listKind" names))))))
     (labels ((operation (action response &optional body)
                (let ((value (core-object "operationId" (format nil "~A_~A_~A_~A" action group version-name (gethash "kind" names))
                                          "x-kubernetes-action" action
@@ -143,26 +146,21 @@ them at its root is published as a bare object."
                            "put" (operation "updateStatus" schema-name t) "patch" (operation "patchStatus" schema-name t)))))
     document))
 
+(defparameter +crd-openapi-builtin-schema-names+
+  '("io.k8s.apiextensions-apiserver.pkg.apis.apiextensions.v1.CustomResourceDefinition"
+    "io.k8s.apiextensions-apiserver.pkg.apis.apiextensions.v1.CustomResourceDefinitionList")
+  "Upstream's schemas for the CRD API itself, which the vendored schemas include.")
+
 (defun crd-openapi-document (store group version v3)
   "Build a current OpenAPI document from genuinely served durable definitions."
   (let* ((*schema-reference-prefix* (if v3 "#/components/schemas/" "#/definitions/"))
          (document (if v3 (core-object "openapi" "3.0.0" "info" (core-object "title" "gr8s custom APIs" "version" "v1")
-                                      "paths" (core-object) "components" (core-object "schemas" (openapi-definitions)))
+                                      "paths" (core-object) "components" (core-object "schemas" (openapi-definitions group version)))
                        (openapi-document))))
-    (let* ((definitions (if v3 (gethash "schemas" (gethash "components" document)) (gethash "definitions" document)))
-           (metadata (gethash "properties" (gethash "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta" definitions))))
-      (setf (gethash "finalizers" metadata) (core-object "type" "array" "items" (core-object "type" "string"))
-            (gethash "ownerReferences" metadata) (core-object "type" "array" "items" (core-object "type" "object" "properties"
-                 (core-object "apiVersion" (core-object "type" "string") "kind" (core-object "type" "string")
-                              "name" (core-object "type" "string") "uid" (core-object "type" "string")
-                              "controller" (core-object "type" "boolean") "blockOwnerDeletion" (core-object "type" "boolean"))))
-            (gethash "io.k8s.apimachinery.pkg.apis.meta.v1.Status" definitions)
-            (core-object "type" "object" "properties" (core-object "apiVersion" (core-object "type" "string") "kind" (core-object "type" "string")
-                          "status" (core-object "type" "string") "message" (core-object "type" "string") "reason" (core-object "type" "string")
-                          "code" (core-object "type" "integer")))))
     (when (or (null group) (equal group "apiextensions.k8s.io"))
       (crd-add-openapi-version document (crd-openapi-builtin-definition)
-                               (core-object "name" "v1" "schema" (core-object "openAPIV3Schema" *crd-definition-schema*) "subresources" (core-object "status" (core-object))) v3))
+                               (core-object "name" "v1" "schema" (core-object "openAPIV3Schema" *crd-definition-schema*) "subresources" (core-object "status" (core-object))) v3
+                               :schema-names +crd-openapi-builtin-schema-names+))
     (dolist (definition (list-core-resources store "customresourcedefinitions"))
       (when (or (null group) (equal group (gethash "group" (gethash "spec" definition))))
         (loop for entry across (gethash "versions" (gethash "spec" definition))
@@ -172,28 +170,23 @@ them at its root is published as a bare object."
 
 (defun crd-openapi-discovery-response (store)
   "Expose current schema URLs for every actually served group/version."
-  (let ((paths (core-object "apis/admissionregistration.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/admissionregistration.k8s.io/v1?hash=gr8s-admissionregistration-v1")
-                            "apis/discovery.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/discovery.k8s.io/v1?hash=gr8s-endpointslices-v1")
-                            "apis/networking.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/networking.k8s.io/v1?hash=gr8s-networking-v1")
-                            "apis/certificates.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/certificates.k8s.io/v1?hash=gr8s-certificates-v1")
-                            "apis/apps/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/apps/v1?hash=gr8s-apps-v1")
-                            "apis/node.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/node.k8s.io/v1?hash=gr8s-node-v1")
-                            "apis/scheduling.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/scheduling.k8s.io/v1?hash=gr8s-scheduling-v1")
-                            "apis/storage.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/storage.k8s.io/v1?hash=gr8s-storage-v1")
-                            "api/v1" (core-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")
-                            "apis/events.k8s.io/v1" (core-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1"))))
+  (let ((paths (core-object)))
+    (dolist (key '("apis/admissionregistration.k8s.io/v1" "apis/discovery.k8s.io/v1" "apis/networking.k8s.io/v1"
+                   "apis/certificates.k8s.io/v1" "apis/apps/v1" "apis/node.k8s.io/v1" "apis/scheduling.k8s.io/v1"
+                   "apis/storage.k8s.io/v1" "api/v1" "apis/events.k8s.io/v1"))
+      (setf (gethash key paths) (core-object "serverRelativeURL" (openapi-builtin-document-url key))))
     ;; Every group discovery advertises has a document, even one with only generic paths.
     (loop for group across (gethash "groups" (com.inuoe.jzon:parse (api-groups-response store)))
           do (loop for version across (gethash "versions" group)
                    for key = (concatenate 'string "apis/" (gethash "groupVersion" version))
                    unless (or (gethash key paths)
                               (aggregated-apiservice store (gethash "name" group) (gethash "version" version)))
-                     do (setf (gethash key paths) (core-object "serverRelativeURL" (format nil "/openapi/v3/~A?hash=gr8s-~A" key (gethash "version" version))))))
+                     do (setf (gethash key paths) (core-object "serverRelativeURL" (openapi-builtin-document-url key)))))
     (dolist (group (crd-api-groups store))
       (loop for version across (gethash "versions" group)
             for key = (concatenate 'string "apis/" (gethash "groupVersion" version))
             do (setf (gethash key paths) (core-object "serverRelativeURL"
-                                                     (format nil "/openapi/v3/~A?hash=~D" key (pod-store-resource-revision store))))))
+                                                     (format nil "/openapi/v3/~A?hash=~A-~D" key +openapi-schema-hash+ (pod-store-resource-revision store))))))
     ;; An aggregated version is listed while its server is available, as upstream's aggregator lists it.
     (dolist (apiservice (stored-apiservices store))
       (when (and (apiservice-service apiservice) (apiservice-available-p apiservice))
@@ -315,7 +308,7 @@ so that a client's decode and re-encode of the document gives back an equal docu
                                         "components" (core-object
                                                       "schemas"
                                                       (let ((*schema-reference-prefix* "#/components/schemas/"))
-                                                        (openapi-definitions))))))
+                                                        (openapi-definitions group version))))))
              (paths (gethash "paths" document)))
         (when (zerop (length resources))
           (setf (hunchentoot:return-code*) status)

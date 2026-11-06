@@ -1,0 +1,1986 @@
+{
+ "apiVersion": "v1",
+ "kind": "List",
+ "items": [
+  {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "validate-pod",
+    "labels": {
+     "app": "validate"
+    },
+    "annotations": {
+     "example.com/note": "a"
+    }
+   },
+   "spec": {
+    "restartPolicy": "Always",
+    "terminationGracePeriodSeconds": 30,
+    "activeDeadlineSeconds": 600,
+    "dnsPolicy": "ClusterFirst",
+    "dnsConfig": {
+     "nameservers": [
+      "10.0.0.10"
+     ],
+     "searches": [
+      "svc.cluster.local"
+     ],
+     "options": [
+      {
+       "name": "ndots",
+       "value": "2"
+      }
+     ]
+    },
+    "hostAliases": [
+     {
+      "ip": "127.0.0.1",
+      "hostnames": [
+       "foo.local"
+      ]
+     }
+    ],
+    "serviceAccountName": "default",
+    "automountServiceAccountToken": false,
+    "enableServiceLinks": false,
+    "priority": 0,
+    "schedulerName": "default-scheduler",
+    "nodeSelector": {
+     "kubernetes.io/os": "linux"
+    },
+    "hostname": "validate",
+    "subdomain": "sub",
+    "shareProcessNamespace": false,
+    "imagePullSecrets": [
+     {
+      "name": "registry"
+     }
+    ],
+    "securityContext": {
+     "runAsNonRoot": true,
+     "runAsUser": 1000,
+     "fsGroup": 2000,
+     "seccompProfile": {
+      "type": "RuntimeDefault"
+     }
+    },
+    "tolerations": [
+     {
+      "key": "example.com/taint",
+      "operator": "Exists",
+      "effect": "NoSchedule",
+      "tolerationSeconds": 60
+     }
+    ],
+    "affinity": {
+     "nodeAffinity": {
+      "requiredDuringSchedulingIgnoredDuringExecution": {
+       "nodeSelectorTerms": [
+        {
+         "matchExpressions": [
+          {
+           "key": "kubernetes.io/os",
+           "operator": "In",
+           "values": [
+            "linux"
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     },
+     "podAntiAffinity": {
+      "preferredDuringSchedulingIgnoredDuringExecution": [
+       {
+        "weight": 10,
+        "podAffinityTerm": {
+         "topologyKey": "kubernetes.io/hostname",
+         "labelSelector": {
+          "matchLabels": {
+           "app": "validate"
+          }
+         }
+        }
+       }
+      ]
+     }
+    },
+    "topologySpreadConstraints": [
+     {
+      "maxSkew": 1,
+      "topologyKey": "kubernetes.io/hostname",
+      "whenUnsatisfiable": "ScheduleAnyway",
+      "labelSelector": {
+       "matchLabels": {
+        "app": "validate"
+       }
+      }
+     }
+    ],
+    "initContainers": [
+     {
+      "name": "init",
+      "image": "busybox:1.36",
+      "imagePullPolicy": "IfNotPresent",
+      "command": [
+       "sh",
+       "-c",
+       "true"
+      ]
+     }
+    ],
+    "containers": [
+     {
+      "name": "main",
+      "image": "busybox:1.36",
+      "imagePullPolicy": "IfNotPresent",
+      "command": [
+       "sh",
+       "-c"
+      ],
+      "args": [
+       "sleep 3600"
+      ],
+      "workingDir": "/",
+      "ports": [
+       {
+        "name": "http",
+        "containerPort": 8080,
+        "protocol": "TCP"
+       }
+      ],
+      "env": [
+       {
+        "name": "PLAIN",
+        "value": "x"
+       },
+       {
+        "name": "FROM_FIELD",
+        "valueFrom": {
+         "fieldRef": {
+          "fieldPath": "metadata.name"
+         }
+        }
+       },
+       {
+        "name": "FROM_RESOURCE",
+        "valueFrom": {
+         "resourceFieldRef": {
+          "resource": "limits.memory",
+          "divisor": "1Mi"
+         }
+        }
+       },
+       {
+        "name": "FROM_SECRET",
+        "valueFrom": {
+         "secretKeyRef": {
+          "name": "s",
+          "key": "k",
+          "optional": true
+         }
+        }
+       }
+      ],
+      "envFrom": [
+       {
+        "configMapRef": {
+         "name": "cm",
+         "optional": true
+        },
+        "prefix": "CM_"
+       }
+      ],
+      "resources": {
+       "requests": {
+        "cpu": "100m",
+        "memory": "64Mi"
+       },
+       "limits": {
+        "cpu": 1,
+        "memory": "128Mi"
+       }
+      },
+      "readinessProbe": {
+       "exec": {
+        "command": [
+         "true"
+        ]
+       },
+       "initialDelaySeconds": 1,
+       "periodSeconds": 5
+      },
+      "livenessProbe": {
+       "httpGet": {
+        "path": "/healthz",
+        "port": "http",
+        "scheme": "HTTP",
+        "httpHeaders": [
+         {
+          "name": "X-Probe",
+          "value": "1"
+         }
+        ]
+       },
+       "failureThreshold": 3,
+       "timeoutSeconds": 2
+      },
+      "startupProbe": {
+       "tcpSocket": {
+        "port": 8080
+       }
+      },
+      "lifecycle": {
+       "preStop": {
+        "exec": {
+         "command": [
+          "sh",
+          "-c",
+          "sleep 1"
+         ]
+        }
+       },
+       "postStart": {
+        "sleep": {
+         "seconds": 1
+        }
+       }
+      },
+      "securityContext": {
+       "allowPrivilegeEscalation": false,
+       "readOnlyRootFilesystem": true,
+       "capabilities": {
+        "drop": [
+         "ALL"
+        ]
+       }
+      },
+      "volumeMounts": [
+       {
+        "name": "data",
+        "mountPath": "/data"
+       },
+       {
+        "name": "config",
+        "mountPath": "/etc/config",
+        "readOnly": true
+       }
+      ],
+      "terminationMessagePath": "/dev/termination-log",
+      "terminationMessagePolicy": "FallbackToLogsOnError",
+      "stdin": false,
+      "tty": false
+     }
+    ],
+    "volumes": [
+     {
+      "name": "data",
+      "emptyDir": {
+       "sizeLimit": "1Gi"
+      }
+     },
+     {
+      "name": "config",
+      "projected": {
+       "sources": [
+        {
+         "configMap": {
+          "name": "cm",
+          "items": [
+           {
+            "key": "a",
+            "path": "a"
+           }
+          ],
+          "optional": true
+         }
+        },
+        {
+         "downwardAPI": {
+          "items": [
+           {
+            "path": "labels",
+            "fieldRef": {
+             "fieldPath": "metadata.labels"
+            }
+           }
+          ]
+         }
+        },
+        {
+         "serviceAccountToken": {
+          "path": "token",
+          "expirationSeconds": 3600,
+          "audience": "api"
+         }
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "ConfigMap",
+   "metadata": {
+    "name": "validate-cm"
+   },
+   "data": {
+    "key": "value"
+   },
+   "binaryData": {
+    "blob": "aGVsbG8="
+   },
+   "immutable": false
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Secret",
+   "metadata": {
+    "name": "validate-secret"
+   },
+   "type": "Opaque",
+   "data": {
+    "password": "cGFzcw=="
+   },
+   "stringData": {
+    "user": "admin"
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Service",
+   "metadata": {
+    "name": "validate-svc"
+   },
+   "spec": {
+    "type": "ClusterIP",
+    "selector": {
+     "app": "validate"
+    },
+    "sessionAffinity": "None",
+    "ports": [
+     {
+      "name": "http",
+      "port": 80,
+      "targetPort": "http",
+      "protocol": "TCP"
+     }
+    ],
+    "ipFamilyPolicy": "SingleStack",
+    "internalTrafficPolicy": "Cluster"
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "ServiceAccount",
+   "metadata": {
+    "name": "validate-sa"
+   },
+   "automountServiceAccountToken": false,
+   "imagePullSecrets": [
+    {
+     "name": "registry"
+    }
+   ]
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Endpoints",
+   "metadata": {
+    "name": "validate-ep"
+   },
+   "subsets": [
+    {
+     "addresses": [
+      {
+       "ip": "10.1.2.3"
+      }
+     ],
+     "ports": [
+      {
+       "name": "http",
+       "port": 8080,
+       "protocol": "TCP"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Event",
+   "metadata": {
+    "name": "validate-event"
+   },
+   "involvedObject": {
+    "kind": "Pod",
+    "name": "validate-pod",
+    "namespace": "default",
+    "apiVersion": "v1"
+   },
+   "reason": "Validated",
+   "message": "validation fixture",
+   "type": "Normal",
+   "source": {
+    "component": "kubectl"
+   },
+   "count": 1,
+   "firstTimestamp": "2026-01-01T00:00:00Z",
+   "lastTimestamp": "2026-01-01T00:00:00Z"
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "LimitRange",
+   "metadata": {
+    "name": "validate-lr"
+   },
+   "spec": {
+    "limits": [
+     {
+      "type": "Container",
+      "default": {
+       "cpu": "500m",
+       "memory": "256Mi"
+      },
+      "defaultRequest": {
+       "cpu": "100m"
+      },
+      "max": {
+       "cpu": 2
+      }
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "ResourceQuota",
+   "metadata": {
+    "name": "validate-rq"
+   },
+   "spec": {
+    "hard": {
+     "pods": "10",
+     "requests.cpu": "4",
+     "requests.memory": "8Gi"
+    },
+    "scopeSelector": {
+     "matchExpressions": [
+      {
+       "scopeName": "PriorityClass",
+       "operator": "In",
+       "values": [
+        "high"
+       ]
+      }
+     ]
+    }
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Namespace",
+   "metadata": {
+    "name": "validate-ns",
+    "labels": {
+     "team": "a"
+    }
+   },
+   "spec": {
+    "finalizers": [
+     "kubernetes"
+    ]
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Node",
+   "metadata": {
+    "name": "validate-node",
+    "labels": {
+     "kubernetes.io/hostname": "validate-node"
+    }
+   },
+   "spec": {
+    "podCIDR": "10.250.0.0/24",
+    "unschedulable": true,
+    "taints": [
+     {
+      "key": "example.com/t",
+      "value": "v",
+      "effect": "NoSchedule"
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "PersistentVolume",
+   "metadata": {
+    "name": "validate-pv"
+   },
+   "spec": {
+    "capacity": {
+     "storage": "1Gi"
+    },
+    "accessModes": [
+     "ReadWriteOnce"
+    ],
+    "persistentVolumeReclaimPolicy": "Retain",
+    "storageClassName": "manual",
+    "volumeMode": "Filesystem",
+    "hostPath": {
+     "path": "/tmp/validate-pv",
+     "type": "DirectoryOrCreate"
+    }
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "PersistentVolumeClaim",
+   "metadata": {
+    "name": "validate-pvc"
+   },
+   "spec": {
+    "accessModes": [
+     "ReadWriteOnce"
+    ],
+    "storageClassName": "manual",
+    "volumeMode": "Filesystem",
+    "resources": {
+     "requests": {
+      "storage": "1Gi"
+     }
+    },
+    "selector": {
+     "matchLabels": {
+      "tier": "a"
+     }
+    }
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "PodTemplate",
+   "metadata": {
+    "name": "validate-podtemplate"
+   },
+   "template": {
+    "metadata": {
+     "labels": {
+      "app": "validate"
+     }
+    },
+    "spec": {
+     "containers": [
+      {
+       "name": "c",
+       "image": "busybox:1.36",
+       "imagePullPolicy": "Always",
+       "readinessProbe": {
+        "exec": {
+         "command": [
+          "true"
+         ]
+        }
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "ReplicationController",
+   "metadata": {
+    "name": "validate-rc"
+   },
+   "spec": {
+    "replicas": 0,
+    "minReadySeconds": 1,
+    "selector": {
+     "app": "validate-rc"
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "app": "validate-rc"
+      }
+     },
+     "spec": {
+      "containers": [
+       {
+        "name": "c",
+        "image": "busybox:1.36",
+        "imagePullPolicy": "IfNotPresent",
+        "resources": {
+         "limits": {
+          "memory": "64Mi"
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "apiVersion": "apps/v1",
+   "kind": "Deployment",
+   "metadata": {
+    "name": "validate-deploy"
+   },
+   "spec": {
+    "replicas": 0,
+    "revisionHistoryLimit": 2,
+    "progressDeadlineSeconds": 60,
+    "strategy": {
+     "type": "RollingUpdate",
+     "rollingUpdate": {
+      "maxSurge": "25%",
+      "maxUnavailable": 0
+     }
+    },
+    "selector": {
+     "matchLabels": {
+      "app": "validate-deploy"
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "app": "validate-deploy"
+      }
+     },
+     "spec": {
+      "containers": [
+       {
+        "name": "c",
+        "image": "busybox:1.36",
+        "imagePullPolicy": "IfNotPresent",
+        "readinessProbe": {
+         "grpc": {
+          "port": 9000
+         }
+        },
+        "resizePolicy": [
+         {
+          "resourceName": "cpu",
+          "restartPolicy": "NotRequired"
+         }
+        ]
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "apiVersion": "apps/v1",
+   "kind": "ReplicaSet",
+   "metadata": {
+    "name": "validate-rs"
+   },
+   "spec": {
+    "replicas": 0,
+    "selector": {
+     "matchExpressions": [
+      {
+       "key": "app",
+       "operator": "In",
+       "values": [
+        "validate-rs"
+       ]
+      }
+     ]
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "app": "validate-rs"
+      }
+     },
+     "spec": {
+      "containers": [
+       {
+        "name": "c",
+        "image": "busybox:1.36",
+        "imagePullPolicy": "Never"
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "apiVersion": "apps/v1",
+   "kind": "StatefulSet",
+   "metadata": {
+    "name": "validate-sts"
+   },
+   "spec": {
+    "replicas": 0,
+    "serviceName": "validate-svc",
+    "podManagementPolicy": "Parallel",
+    "updateStrategy": {
+     "type": "RollingUpdate",
+     "rollingUpdate": {
+      "partition": 0
+     }
+    },
+    "persistentVolumeClaimRetentionPolicy": {
+     "whenDeleted": "Delete",
+     "whenScaled": "Retain"
+    },
+    "selector": {
+     "matchLabels": {
+      "app": "validate-sts"
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "app": "validate-sts"
+      }
+     },
+     "spec": {
+      "containers": [
+       {
+        "name": "c",
+        "image": "busybox:1.36",
+        "imagePullPolicy": "IfNotPresent",
+        "volumeMounts": [
+         {
+          "name": "data",
+          "mountPath": "/data"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    "volumeClaimTemplates": [
+     {
+      "metadata": {
+       "name": "data"
+      },
+      "spec": {
+       "accessModes": [
+        "ReadWriteOnce"
+       ],
+       "resources": {
+        "requests": {
+         "storage": "1Gi"
+        }
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "apps/v1",
+   "kind": "DaemonSet",
+   "metadata": {
+    "name": "validate-ds"
+   },
+   "spec": {
+    "selector": {
+     "matchLabels": {
+      "app": "validate-ds"
+     }
+    },
+    "updateStrategy": {
+     "type": "RollingUpdate",
+     "rollingUpdate": {
+      "maxUnavailable": 1
+     }
+    },
+    "template": {
+     "metadata": {
+      "labels": {
+       "app": "validate-ds"
+      }
+     },
+     "spec": {
+      "nodeSelector": {
+       "example.com/none": "true"
+      },
+      "containers": [
+       {
+        "name": "c",
+        "image": "busybox:1.36",
+        "imagePullPolicy": "IfNotPresent",
+        "livenessProbe": {
+         "exec": {
+          "command": [
+           "true"
+          ]
+         }
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "apiVersion": "apps/v1",
+   "kind": "ControllerRevision",
+   "metadata": {
+    "name": "validate-cr"
+   },
+   "revision": 1,
+   "data": {
+    "spec": {
+     "template": {
+      "metadata": {
+       "labels": {
+        "a": "b"
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "apiVersion": "batch/v1",
+   "kind": "Job",
+   "metadata": {
+    "name": "validate-job"
+   },
+   "spec": {
+    "suspend": true,
+    "parallelism": 1,
+    "completions": 1,
+    "backoffLimit": 2,
+    "ttlSecondsAfterFinished": 60,
+    "completionMode": "NonIndexed",
+    "podFailurePolicy": {
+     "rules": [
+      {
+       "action": "FailJob",
+       "onExitCodes": {
+        "operator": "In",
+        "values": [
+         42
+        ]
+       }
+      }
+     ]
+    },
+    "template": {
+     "spec": {
+      "restartPolicy": "Never",
+      "containers": [
+       {
+        "name": "c",
+        "image": "busybox:1.36",
+        "imagePullPolicy": "IfNotPresent",
+        "command": [
+         "true"
+        ]
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "apiVersion": "batch/v1",
+   "kind": "CronJob",
+   "metadata": {
+    "name": "validate-cronjob"
+   },
+   "spec": {
+    "schedule": "*/5 * * * *",
+    "suspend": true,
+    "concurrencyPolicy": "Forbid",
+    "successfulJobsHistoryLimit": 1,
+    "failedJobsHistoryLimit": 1,
+    "jobTemplate": {
+     "spec": {
+      "template": {
+       "spec": {
+        "restartPolicy": "OnFailure",
+        "containers": [
+         {
+          "name": "c",
+          "image": "busybox:1.36",
+          "imagePullPolicy": "IfNotPresent",
+          "readinessProbe": {
+           "exec": {
+            "command": [
+             "true"
+            ]
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "apiVersion": "autoscaling/v2",
+   "kind": "HorizontalPodAutoscaler",
+   "metadata": {
+    "name": "validate-hpa"
+   },
+   "spec": {
+    "scaleTargetRef": {
+     "apiVersion": "apps/v1",
+     "kind": "Deployment",
+     "name": "validate-deploy"
+    },
+    "minReplicas": 1,
+    "maxReplicas": 3,
+    "metrics": [
+     {
+      "type": "Resource",
+      "resource": {
+       "name": "cpu",
+       "target": {
+        "type": "Utilization",
+        "averageUtilization": 80
+       }
+      }
+     }
+    ],
+    "behavior": {
+     "scaleDown": {
+      "stabilizationWindowSeconds": 60,
+      "policies": [
+       {
+        "type": "Pods",
+        "value": 1,
+        "periodSeconds": 60
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "apiVersion": "autoscaling/v1",
+   "kind": "HorizontalPodAutoscaler",
+   "metadata": {
+    "name": "validate-hpa-v1"
+   },
+   "spec": {
+    "scaleTargetRef": {
+     "apiVersion": "apps/v1",
+     "kind": "Deployment",
+     "name": "validate-deploy"
+    },
+    "minReplicas": 1,
+    "maxReplicas": 2,
+    "targetCPUUtilizationPercentage": 70
+   }
+  },
+  {
+   "apiVersion": "policy/v1",
+   "kind": "PodDisruptionBudget",
+   "metadata": {
+    "name": "validate-pdb"
+   },
+   "spec": {
+    "minAvailable": 1,
+    "selector": {
+     "matchLabels": {
+      "app": "validate"
+     }
+    },
+    "unhealthyPodEvictionPolicy": "AlwaysAllow"
+   }
+  },
+  {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "NetworkPolicy",
+   "metadata": {
+    "name": "validate-netpol"
+   },
+   "spec": {
+    "podSelector": {
+     "matchLabels": {
+      "app": "validate"
+     }
+    },
+    "policyTypes": [
+     "Ingress",
+     "Egress"
+    ],
+    "ingress": [
+     {
+      "from": [
+       {
+        "namespaceSelector": {
+         "matchLabels": {
+          "kubernetes.io/metadata.name": "default"
+         }
+        },
+        "podSelector": {
+         "matchExpressions": [
+          {
+           "key": "role",
+           "operator": "In",
+           "values": [
+            "client"
+           ]
+          }
+         ]
+        }
+       },
+       {
+        "ipBlock": {
+         "cidr": "10.0.0.0/8",
+         "except": [
+          "10.1.0.0/16"
+         ]
+        }
+       }
+      ],
+      "ports": [
+       {
+        "protocol": "TCP",
+        "port": "http"
+       },
+       {
+        "protocol": "TCP",
+        "port": 8000,
+        "endPort": 8080
+       }
+      ]
+     }
+    ],
+    "egress": [
+     {
+      "to": [
+       {
+        "ipBlock": {
+         "cidr": "0.0.0.0/0"
+        }
+       }
+      ],
+      "ports": [
+       {
+        "protocol": "UDP",
+        "port": 53
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "Ingress",
+   "metadata": {
+    "name": "validate-ingress"
+   },
+   "spec": {
+    "ingressClassName": "validate-class",
+    "tls": [
+     {
+      "hosts": [
+       "example.com"
+      ],
+      "secretName": "tls"
+     }
+    ],
+    "rules": [
+     {
+      "host": "example.com",
+      "http": {
+       "paths": [
+        {
+         "path": "/",
+         "pathType": "Prefix",
+         "backend": {
+          "service": {
+           "name": "validate-svc",
+           "port": {
+            "number": 80
+           }
+          }
+         }
+        }
+       ]
+      }
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "IngressClass",
+   "metadata": {
+    "name": "validate-class"
+   },
+   "spec": {
+    "controller": "example.com/ingress"
+   }
+  },
+  {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "ServiceCIDR",
+   "metadata": {
+    "name": "validate-servicecidr"
+   },
+   "spec": {
+    "cidrs": [
+     "10.250.0.0/24"
+    ]
+   }
+  },
+  {
+   "apiVersion": "networking.k8s.io/v1",
+   "kind": "IPAddress",
+   "metadata": {
+    "name": "10.250.0.10"
+   },
+   "spec": {
+    "parentRef": {
+     "group": "",
+     "resource": "services",
+     "namespace": "default",
+     "name": "validate-svc"
+    }
+   }
+  },
+  {
+   "apiVersion": "discovery.k8s.io/v1",
+   "kind": "EndpointSlice",
+   "metadata": {
+    "name": "validate-eps",
+    "labels": {
+     "kubernetes.io/service-name": "validate-svc"
+    }
+   },
+   "addressType": "IPv4",
+   "endpoints": [
+    {
+     "addresses": [
+      "10.1.2.3"
+     ],
+     "conditions": {
+      "ready": true,
+      "serving": true,
+      "terminating": false
+     }
+    }
+   ],
+   "ports": [
+    {
+     "name": "http",
+     "port": 8080,
+     "protocol": "TCP"
+    }
+   ]
+  },
+  {
+   "apiVersion": "events.k8s.io/v1",
+   "kind": "Event",
+   "metadata": {
+    "name": "validate-event2"
+   },
+   "eventTime": "2026-01-01T00:00:00.000000Z",
+   "reportingController": "example.com/validate",
+   "reportingInstance": "validate-1",
+   "action": "Validate",
+   "reason": "Validated",
+   "type": "Normal",
+   "note": "validation fixture",
+   "regarding": {
+    "kind": "Pod",
+    "name": "validate-pod",
+    "namespace": "default",
+    "apiVersion": "v1"
+   }
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "Role",
+   "metadata": {
+    "name": "validate-role"
+   },
+   "rules": [
+    {
+     "apiGroups": [
+      ""
+     ],
+     "resources": [
+      "pods"
+     ],
+     "verbs": [
+      "get",
+      "list"
+     ]
+    }
+   ]
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "RoleBinding",
+   "metadata": {
+    "name": "validate-rolebinding"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "Role",
+    "name": "validate-role"
+   },
+   "subjects": [
+    {
+     "kind": "ServiceAccount",
+     "name": "validate-sa",
+     "namespace": "default"
+    }
+   ]
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRole",
+   "metadata": {
+    "name": "validate-clusterrole"
+   },
+   "rules": [
+    {
+     "nonResourceURLs": [
+      "/healthz"
+     ],
+     "verbs": [
+      "get"
+     ]
+    }
+   ],
+   "aggregationRule": {
+    "clusterRoleSelectors": [
+     {
+      "matchLabels": {
+       "example.com/aggregate": "true"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "rbac.authorization.k8s.io/v1",
+   "kind": "ClusterRoleBinding",
+   "metadata": {
+    "name": "validate-clusterrolebinding"
+   },
+   "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "ClusterRole",
+    "name": "validate-clusterrole"
+   },
+   "subjects": [
+    {
+     "apiGroup": "rbac.authorization.k8s.io",
+     "kind": "User",
+     "name": "alice"
+    }
+   ]
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "StorageClass",
+   "metadata": {
+    "name": "validate-sc"
+   },
+   "provisioner": "kubernetes.io/no-provisioner",
+   "reclaimPolicy": "Delete",
+   "volumeBindingMode": "WaitForFirstConsumer",
+   "allowVolumeExpansion": true,
+   "parameters": {
+    "type": "local"
+   }
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "CSIDriver",
+   "metadata": {
+    "name": "validate.csi.example.com"
+   },
+   "spec": {
+    "attachRequired": false,
+    "podInfoOnMount": true,
+    "volumeLifecycleModes": [
+     "Persistent",
+     "Ephemeral"
+    ],
+    "fsGroupPolicy": "File"
+   }
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "CSINode",
+   "metadata": {
+    "name": "validate-node"
+   },
+   "spec": {
+    "drivers": [
+     {
+      "name": "validate.csi.example.com",
+      "nodeID": "n1",
+      "topologyKeys": [
+       "topology.example.com/zone"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "CSIStorageCapacity",
+   "metadata": {
+    "name": "validate-capacity"
+   },
+   "storageClassName": "validate-sc",
+   "capacity": "10Gi",
+   "nodeTopology": {
+    "matchLabels": {
+     "topology.example.com/zone": "a"
+    }
+   }
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "VolumeAttachment",
+   "metadata": {
+    "name": "validate-va"
+   },
+   "spec": {
+    "attacher": "validate.csi.example.com",
+    "nodeName": "validate-node",
+    "source": {
+     "persistentVolumeName": "validate-pv"
+    }
+   }
+  },
+  {
+   "apiVersion": "storage.k8s.io/v1",
+   "kind": "VolumeAttributesClass",
+   "metadata": {
+    "name": "validate-vac"
+   },
+   "driverName": "validate.csi.example.com",
+   "parameters": {
+    "iops": "100"
+   }
+  },
+  {
+   "apiVersion": "node.k8s.io/v1",
+   "kind": "RuntimeClass",
+   "metadata": {
+    "name": "validate-runtimeclass"
+   },
+   "handler": "runc",
+   "overhead": {
+    "podFixed": {
+     "cpu": "10m"
+    }
+   },
+   "scheduling": {
+    "nodeSelector": {
+     "kubernetes.io/os": "linux"
+    }
+   }
+  },
+  {
+   "apiVersion": "scheduling.k8s.io/v1",
+   "kind": "PriorityClass",
+   "metadata": {
+    "name": "validate-priority"
+   },
+   "value": 1000,
+   "globalDefault": false,
+   "preemptionPolicy": "Never",
+   "description": "validation fixture"
+  },
+  {
+   "apiVersion": "coordination.k8s.io/v1",
+   "kind": "Lease",
+   "metadata": {
+    "name": "validate-lease"
+   },
+   "spec": {
+    "holderIdentity": "a",
+    "leaseDurationSeconds": 15,
+    "renewTime": "2026-01-01T00:00:00.000000Z",
+    "leaseTransitions": 0
+   }
+  },
+  {
+   "apiVersion": "certificates.k8s.io/v1",
+   "kind": "CertificateSigningRequest",
+   "metadata": {
+    "name": "validate-csr"
+   },
+   "spec": {
+    "signerName": "example.com/validate",
+    "usages": [
+     "digital signature",
+     "key encipherment",
+     "client auth"
+    ],
+    "expirationSeconds": 3600,
+    "request": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURSBSRVFVRVNULS0tLS0KTUlHU01FWUNBUUF3RXpFUk1BOEdBMVVFQXd3SWRtRnNhV1JoZEdVd0tqQUZCZ01yWlhBRElRREtBS3M3ampVcQpzdVhCRHMrM2NTYjFqRWk2TFVYcExyOWk2cXFKdndjNHNLQUFNQVVHQXl0bGNBTkJBQnNma21mRDd0VERvUHVsCmhsME1WVkRrVjhCNzNUbEZZRURLb2IyUGdjM2p5RnVqcTVNQmVpRUdraGpRdVk3akt6N3QvMUNjZ091NmJ2N28Kd3lMTGxBUT0KLS0tLS1FTkQgQ0VSVElGSUNBVEUgUkVRVUVTVC0tLS0tCg=="
+   }
+  },
+  {
+   "apiVersion": "certificates.k8s.io/v1",
+   "kind": "ClusterTrustBundle",
+   "metadata": {
+    "name": "example.com:validate:bundle"
+   },
+   "spec": {
+    "signerName": "example.com/validate",
+    "trustBundle": "-----BEGIN CERTIFICATE-----\nMIIBQjCB9aADAgECAhRrf4DLt6x97V54TydmbbHGLe4EJjAFBgMrZXAwFjEUMBIG\nA1UEAwwLdmFsaWRhdGUtY2EwIBcNMjYxMTA2MTMwNDEzWhgPMjEyNjEwMTMxMzA0\nMTNaMBYxFDASBgNVBAMMC3ZhbGlkYXRlLWNhMCowBQYDK2VwAyEAygCrO441KrLl\nwQ7Pt3Em9YxIui1F6S6/Yuqqib8HOLCjUzBRMB0GA1UdDgQWBBTBPYJADaGGugsi\n+AqADygz1Pu9XTAfBgNVHSMEGDAWgBTBPYJADaGGugsi+AqADygz1Pu9XTAPBgNV\nHRMBAf8EBTADAQH/MAUGAytlcANBAPR2Ek7uxbLi4QIS6wtGy9gOb1nanNGnioZa\n5jy+3Cjb0smihAXOCRKWRtybFNBFSHerPD/tVNV7CL2lUh2chwc=\n-----END CERTIFICATE-----\n"
+   }
+  },
+  {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "ValidatingWebhookConfiguration",
+   "metadata": {
+    "name": "validate-vwc"
+   },
+   "webhooks": [
+    {
+     "name": "validate.example.com",
+     "admissionReviewVersions": [
+      "v1"
+     ],
+     "sideEffects": "None",
+     "failurePolicy": "Ignore",
+     "timeoutSeconds": 5,
+     "matchPolicy": "Equivalent",
+     "clientConfig": {
+      "url": "https://validate.example.com/validate"
+     },
+     "rules": [
+      {
+       "apiGroups": [
+        ""
+       ],
+       "apiVersions": [
+        "v1"
+       ],
+       "operations": [
+        "CREATE"
+       ],
+       "resources": [
+        "configmaps"
+       ],
+       "scope": "Namespaced"
+      }
+     ],
+     "namespaceSelector": {
+      "matchLabels": {
+       "validate": "true"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "MutatingWebhookConfiguration",
+   "metadata": {
+    "name": "validate-mwc"
+   },
+   "webhooks": [
+    {
+     "name": "mutate.example.com",
+     "admissionReviewVersions": [
+      "v1"
+     ],
+     "sideEffects": "None",
+     "failurePolicy": "Ignore",
+     "reinvocationPolicy": "Never",
+     "clientConfig": {
+      "service": {
+       "name": "validate-svc",
+       "namespace": "default",
+       "path": "/mutate",
+       "port": 443
+      }
+     },
+     "rules": [
+      {
+       "apiGroups": [
+        ""
+       ],
+       "apiVersions": [
+        "v1"
+       ],
+       "operations": [
+        "CREATE"
+       ],
+       "resources": [
+        "configmaps"
+       ]
+      }
+     ],
+     "objectSelector": {
+      "matchLabels": {
+       "validate": "true"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "ValidatingAdmissionPolicy",
+   "metadata": {
+    "name": "validate-vap"
+   },
+   "spec": {
+    "failurePolicy": "Ignore",
+    "matchConstraints": {
+     "resourceRules": [
+      {
+       "apiGroups": [
+        "apps"
+       ],
+       "apiVersions": [
+        "v1"
+       ],
+       "operations": [
+        "CREATE",
+        "UPDATE"
+       ],
+       "resources": [
+        "deployments"
+       ]
+      }
+     ]
+    },
+    "validations": [
+     {
+      "expression": "object.spec.replicas <= 5",
+      "message": "too many replicas"
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "ValidatingAdmissionPolicyBinding",
+   "metadata": {
+    "name": "validate-vapb"
+   },
+   "spec": {
+    "policyName": "validate-vap",
+    "validationActions": [
+     "Warn"
+    ]
+   }
+  },
+  {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "MutatingAdmissionPolicy",
+   "metadata": {
+    "name": "validate-map"
+   },
+   "spec": {
+    "failurePolicy": "Ignore",
+    "reinvocationPolicy": "Never",
+    "matchConstraints": {
+     "resourceRules": [
+      {
+       "apiGroups": [
+        ""
+       ],
+       "apiVersions": [
+        "v1"
+       ],
+       "operations": [
+        "CREATE"
+       ],
+       "resources": [
+        "configmaps"
+       ]
+      }
+     ]
+    },
+    "mutations": [
+     {
+      "patchType": "ApplyConfiguration",
+      "applyConfiguration": {
+       "expression": "Object{metadata: Object.metadata{labels: {\"validated\": \"true\"}}}"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "admissionregistration.k8s.io/v1",
+   "kind": "MutatingAdmissionPolicyBinding",
+   "metadata": {
+    "name": "validate-mapb"
+   },
+   "spec": {
+    "policyName": "validate-map"
+   }
+  },
+  {
+   "apiVersion": "apiextensions.k8s.io/v1",
+   "kind": "CustomResourceDefinition",
+   "metadata": {
+    "name": "widgets.validate.example.com"
+   },
+   "spec": {
+    "group": "validate.example.com",
+    "scope": "Namespaced",
+    "names": {
+     "plural": "widgets",
+     "singular": "widget",
+     "kind": "Widget",
+     "listKind": "WidgetList",
+     "shortNames": [
+      "wd"
+     ]
+    },
+    "versions": [
+     {
+      "name": "v1",
+      "served": true,
+      "storage": true,
+      "subresources": {
+       "status": {}
+      },
+      "additionalPrinterColumns": [
+       {
+        "name": "Size",
+        "type": "integer",
+        "jsonPath": ".spec.size"
+       }
+      ],
+      "schema": {
+       "openAPIV3Schema": {
+        "type": "object",
+        "properties": {
+         "spec": {
+          "type": "object",
+          "properties": {
+           "size": {
+            "type": "integer",
+            "minimum": 0
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "apiregistration.k8s.io/v1",
+   "kind": "APIService",
+   "metadata": {
+    "name": "v1alpha1.validate.example.com"
+   },
+   "spec": {
+    "group": "validate.example.com",
+    "version": "v1alpha1",
+    "groupPriorityMinimum": 1000,
+    "versionPriority": 15,
+    "insecureSkipTLSVerify": true,
+    "service": {
+     "name": "validate-svc",
+     "namespace": "default",
+     "port": 443
+    }
+   }
+  },
+  {
+   "apiVersion": "flowcontrol.apiserver.k8s.io/v1",
+   "kind": "PriorityLevelConfiguration",
+   "metadata": {
+    "name": "validate-plc"
+   },
+   "spec": {
+    "type": "Limited",
+    "limited": {
+     "nominalConcurrencyShares": 5,
+     "lendablePercent": 0,
+     "limitResponse": {
+      "type": "Queue",
+      "queuing": {
+       "queues": 8,
+       "handSize": 4,
+       "queueLengthLimit": 50
+      }
+     }
+    }
+   }
+  },
+  {
+   "apiVersion": "flowcontrol.apiserver.k8s.io/v1",
+   "kind": "FlowSchema",
+   "metadata": {
+    "name": "validate-fs"
+   },
+   "spec": {
+    "priorityLevelConfiguration": {
+     "name": "validate-plc"
+    },
+    "matchingPrecedence": 9000,
+    "distinguisherMethod": {
+     "type": "ByUser"
+    },
+    "rules": [
+     {
+      "subjects": [
+       {
+        "kind": "Group",
+        "group": {
+         "name": "system:authenticated"
+        }
+       }
+      ],
+      "resourceRules": [
+       {
+        "verbs": [
+         "get"
+        ],
+        "apiGroups": [
+         ""
+        ],
+        "resources": [
+         "configmaps"
+        ],
+        "namespaces": [
+         "*"
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "resource.k8s.io/v1",
+   "kind": "DeviceClass",
+   "metadata": {
+    "name": "validate-deviceclass"
+   },
+   "spec": {
+    "selectors": [
+     {
+      "cel": {
+       "expression": "device.driver == \"validate.example.com\""
+      }
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "resource.k8s.io/v1",
+   "kind": "ResourceClaim",
+   "metadata": {
+    "name": "validate-claim"
+   },
+   "spec": {
+    "devices": {
+     "requests": [
+      {
+       "name": "gpu",
+       "exactly": {
+        "deviceClassName": "validate-deviceclass",
+        "allocationMode": "ExactCount",
+        "count": 1
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "apiVersion": "resource.k8s.io/v1",
+   "kind": "ResourceClaimTemplate",
+   "metadata": {
+    "name": "validate-claimtemplate"
+   },
+   "spec": {
+    "spec": {
+     "devices": {
+      "requests": [
+       {
+        "name": "gpu",
+        "exactly": {
+         "deviceClassName": "validate-deviceclass"
+        }
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "apiVersion": "resource.k8s.io/v1",
+   "kind": "ResourceSlice",
+   "metadata": {
+    "name": "validate-slice"
+   },
+   "spec": {
+    "driver": "validate.example.com",
+    "nodeName": "validate-node",
+    "pool": {
+     "name": "pool",
+     "generation": 1,
+     "resourceSliceCount": 1
+    },
+    "devices": [
+     {
+      "name": "dev0",
+      "attributes": {
+       "model": {
+        "string": "x1"
+       }
+      }
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "resource.k8s.io/v1",
+   "kind": "DeviceTaintRule",
+   "metadata": {
+    "name": "validate-taintrule"
+   },
+   "spec": {
+    "deviceSelector": {
+     "driver": "validate.example.com"
+    },
+    "taint": {
+     "key": "example.com/broken",
+     "value": "true",
+     "effect": "NoSchedule"
+    }
+   }
+  },
+  {
+   "apiVersion": "storagemigration.k8s.io/v1",
+   "kind": "StorageVersionMigration",
+   "metadata": {
+    "name": "validate-svm"
+   },
+   "spec": {
+    "resource": {
+     "group": "apps",
+     "resource": "deployments"
+    }
+   }
+  },
+  {
+   "apiVersion": "certificates.k8s.io/v1",
+   "kind": "PodCertificateRequest",
+   "metadata": {
+    "name": "validate-pcr"
+   },
+   "spec": {
+    "signerName": "example.com/validate",
+    "podName": "validate-pod",
+    "podUID": "00000000-0000-0000-0000-000000000001",
+    "serviceAccountName": "default",
+    "serviceAccountUID": "00000000-0000-0000-0000-000000000002",
+    "nodeName": "validate-node",
+    "nodeUID": "00000000-0000-0000-0000-000000000003",
+    "stubPKCS10Request": "MIGSMEYCAQAwEzERMA8GA1UEAwwIdmFsaWRhdGUwKjAFBgMrZXADIQDKAKs7jjUqsuXBDs+3cSb1jEi6LUXpLr9i6qqJvwc4sKAAMAUGAytlcANBABsfkmfD7tTDoPulhl0MVVDkV8B73TlFYEDKob2Pgc3jyFujq5MBeiEGkhjQuY7jKz7t/1CcgOu6bv7owyLLlAQ=",
+    "maxExpirationSeconds": 86400
+   }
+  },
+  {
+   "apiVersion": "certificates.k8s.io/v1beta1",
+   "kind": "PodCertificateRequest",
+   "metadata": {
+    "name": "validate-pcr-beta"
+   },
+   "spec": {
+    "signerName": "example.com/validate",
+    "podName": "validate-pod",
+    "podUID": "00000000-0000-0000-0000-000000000001",
+    "serviceAccountName": "default",
+    "serviceAccountUID": "00000000-0000-0000-0000-000000000002",
+    "nodeName": "validate-node",
+    "nodeUID": "00000000-0000-0000-0000-000000000003",
+    "stubPKCS10Request": "MIGSMEYCAQAwEzERMA8GA1UEAwwIdmFsaWRhdGUwKjAFBgMrZXADIQDKAKs7jjUqsuXBDs+3cSb1jEi6LUXpLr9i6qqJvwc4sKAAMAUGAytlcANBABsfkmfD7tTDoPulhl0MVVDkV8B73TlFYEDKob2Pgc3jyFujq5MBeiEGkhjQuY7jKz7t/1CcgOu6bv7owyLLlAQ=",
+    "maxExpirationSeconds": 86400
+   }
+  },
+  {
+   "apiVersion": "authorization.k8s.io/v1",
+   "kind": "SelfSubjectAccessReview",
+   "spec": {
+    "resourceAttributes": {
+     "verb": "get",
+     "resource": "pods",
+     "namespace": "default"
+    }
+   }
+  },
+  {
+   "apiVersion": "authorization.k8s.io/v1",
+   "kind": "SelfSubjectRulesReview",
+   "spec": {
+    "namespace": "default"
+   }
+  },
+  {
+   "apiVersion": "authorization.k8s.io/v1",
+   "kind": "SubjectAccessReview",
+   "spec": {
+    "user": "alice",
+    "groups": [
+     "system:authenticated"
+    ],
+    "resourceAttributes": {
+     "verb": "list",
+     "resource": "pods",
+     "namespace": "default"
+    }
+   }
+  },
+  {
+   "apiVersion": "authorization.k8s.io/v1",
+   "kind": "LocalSubjectAccessReview",
+   "metadata": {
+    "namespace": "default"
+   },
+   "spec": {
+    "user": "alice",
+    "resourceAttributes": {
+     "verb": "list",
+     "resource": "pods",
+     "namespace": "default"
+    }
+   }
+  },
+  {
+   "apiVersion": "authentication.k8s.io/v1",
+   "kind": "SelfSubjectReview"
+  },
+  {
+   "apiVersion": "authentication.k8s.io/v1",
+   "kind": "TokenReview",
+   "spec": {
+    "token": "not-a-token",
+    "audiences": [
+     "api"
+    ]
+   }
+  }
+ ]
+}

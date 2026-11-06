@@ -121,10 +121,8 @@ class Cluster:
         return result.stdout
 
     def apply(self, *objects):
-        """Apply OBJECTS as one List."""
-        # The server validates what it accepts; kubectl's client-side check of List items rejects
-        # ordinary Container fields (imagePullPolicy, readinessProbe) against gr8s's OpenAPI, so skip it.
-        self.kubectl("apply", "--validate=false", "-f", "-",
+        """Apply OBJECTS as one List, which kubectl validates against the published schemas."""
+        self.kubectl("apply", "-f", "-",
                      stdin=json.dumps({"apiVersion": "v1", "kind": "List", "items": list(objects)}))
 
     def get(self, *arguments):
