@@ -138,7 +138,7 @@
              (setf health 2)
              (is-false (gr8s::execute-container-probe (gr8s::make-containerd-runtime) (gr8s::core-object "name" "app") "id" "127.0.0.1" probe))
              (is (equal '("application" "application") services))
-             (is (every (lambda (agent) (equal "kube-probe/1.36" agent)) agents))))
+             (is (every (lambda (agent) (equal "kube-probe/1.37" agent)) agents))))
       (ag-grpc:server-stop server)
       (when thread (bt:join-thread thread)))))
 
