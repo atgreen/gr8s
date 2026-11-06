@@ -372,7 +372,9 @@ PREFIX is the metadata's field path, which differs for an embedded resource's."
                                   ;; A root that keeps unknown fields keeps an undeclared status too.
                                   (and (eq t (gethash "x-kubernetes-preserve-unknown-fields" (crd-schema version)))
                                        (core-object "type" "object" "x-kubernetes-preserve-unknown-fields" t)))))
-          (dolist (field '("resourceVersion" "uid"))
+          ;; managedFields come from the write, which tracked the status fields it changed,
+          ;; as upstream's status strategy keeps them.
+          (dolist (field '("resourceVersion" "uid" "managedFields"))
             (when (nth-value 1 (gethash field metadata)) (setf (gethash field copy-meta) (gethash field metadata))))
           (if (and (nth-value 1 (gethash "status" object)) status-schema)
               (let* ((*crd-track-pruning* t) (*crd-pruned-fields* nil)

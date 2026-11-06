@@ -8,7 +8,6 @@
 (defvar *resource-quota-admission-exempt* nil
   "True while the server creates its own bootstrap objects, which are counted but never refused.")
 
-(defvar *apply-update-manager* nil)
 (defvar *crd-view-definition* nil)
 (defvar *crd-request-version* nil)
 (defvar *crd-view-store* nil
@@ -850,6 +849,15 @@ lifecycle of their own are excluded."
            (custom-resource-key-p resource) (typed-api-resource-p resource)
            (storage-resource-p resource) (csr-resource-p resource))))
 
+(defun core-write-unchanged-p (existing object)
+  "Report whether OBJECT, a prepared write, stores exactly what EXISTING holds apart from its
+revision. Upstream's storage skips such a write: the object keeps its resourceVersion and no
+watch event is sent, so a repeated apply or update shows no drift."
+  (let ((candidate (copy-core-object object)))
+    (setf (gethash "resourceVersion" (gethash "metadata" candidate))
+          (gethash "resourceVersion" (gethash "metadata" existing)))
+    (crd-json-equal-p candidate existing)))
+
 (defun update-core-resource (store resource namespace name transform &key dry-run)
   (let ((*local-plane-write* (local-plane-resource-p resource)))
    (with-crd-deferred-conversions
@@ -907,20 +915,26 @@ lifecycle of their own are excluded."
       (when (csr-resource-p resource) (prepare-csr-write object existing))
       (when (endpointslice-resource-p resource) (prepare-endpointslice-write object existing))
       (when (admission-config-resource-p resource) (prepare-admission-config-write object existing))
-      (let ((resources (copy-core-resource-index store)))
-        (if (or (and (csr-resource-p resource) (csr-finalized-p object))
-                (and (or (custom-resource-key-p resource) (typed-api-resource-p resource) (core-finalizer-lifecycle-p resource))
-                     (gethash "deletionTimestamp" metadata) (zerop (length (gethash "finalizers" metadata #())))))
-            (progn
-              (remhash (core-resource-key resource namespace name) resources)
-              ;; A selector Service owns the Endpoints of its name, as on any other deletion.
-              (when (and (equal resource "services") (plusp (hash-table-count (gethash "selector" (gethash "spec" existing) (core-object)))))
-                (remhash (core-resource-key "endpoints" namespace name) resources)))
-            (setf (gethash (core-resource-key resource namespace name) resources) object))
-        (when (equal resource "services")
-          (setf revision (prepare-service-ip-address-writes resources object existing revision)))
-        (unless dry-run (commit-core-resources store resources revision)))
-      (copy-core-object object))))))
+      (let ((resources (copy-core-resource-index store))
+            (removed (or (and (csr-resource-p resource) (csr-finalized-p object))
+                         (and (or (custom-resource-key-p resource) (typed-api-resource-p resource) (core-finalizer-lifecycle-p resource))
+                              (gethash "deletionTimestamp" metadata) (zerop (length (gethash "finalizers" metadata #())))))))
+        ;; A COND (not RETURN-FROM) so WITH-CORE-WRITE's consensus flush still runs.
+        (cond
+          ((and (not removed) (core-write-unchanged-p existing object))
+           (copy-core-object existing))
+          (t
+           (if removed
+               (progn
+                 (remhash (core-resource-key resource namespace name) resources)
+                 ;; A selector Service owns the Endpoints of its name, as on any other deletion.
+                 (when (and (equal resource "services") (plusp (hash-table-count (gethash "selector" (gethash "spec" existing) (core-object)))))
+                   (remhash (core-resource-key "endpoints" namespace name) resources)))
+               (setf (gethash (core-resource-key resource namespace name) resources) object))
+           (when (equal resource "services")
+             (setf revision (prepare-service-ip-address-writes resources object existing revision)))
+           (unless dry-run (commit-core-resources store resources revision))
+           (copy-core-object object)))))))))
 
 (defun delete-core-resource (store resource namespace name &key uid resource-version dry-run)
   ;; A COND (not RETURN-FROM) so WITH-CORE-WRITE's consensus flush always runs on

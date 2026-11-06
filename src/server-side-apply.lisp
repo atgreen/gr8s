@@ -392,14 +392,27 @@ Holding a list item's \".\" keeps only the item, and any field inside an item ke
         (apply-overlay merged applied)
         (setf metadata (gethash "metadata" merged))
         (setf (gethash "apiVersion" merged) (gethash "apiVersion" configuration)
-              (gethash "kind" merged) (gethash "kind" configuration)
-              (gethash "managedFields" metadata)
-              (apply-sorted-entries
-               (cons (if (and previous (crd-json-equal-p set (gethash "fieldsV1" previous)))
-                         previous
-                         (apply-entry manager (gethash "apiVersion" configuration) set :subresource subresource))
-                     others))))
+              (gethash "kind" merged) (gethash "kind" configuration))
+        ;; A manager that declares no owned fields keeps no entry, as upstream's stripMetaManager.
+        (let ((entries (if (zerop (hash-table-count set))
+                           others
+                           (cons (if (and previous (crd-json-equal-p set (gethash "fieldsV1" previous)))
+                                     previous
+                                     (apply-entry manager (gethash "apiVersion" configuration) set :subresource subresource))
+                                 others))))
+          (if entries
+              (setf (gethash "managedFields" metadata) (apply-sorted-entries entries))
+              (remhash "managedFields" metadata))))
       merged)))
+
+(defun apply-set-created-entry (input configuration manager resource)
+  "Record MANAGER's ownership on INPUT, the object an apply creates, unless it owns no fields."
+  (let ((set (apply-field-set (apply-owned-configuration configuration resource))))
+    (if (zerop (hash-table-count set))
+        (remhash "managedFields" (gethash "metadata" input))
+        (setf (gethash "managedFields" (gethash "metadata" input))
+              (vector (apply-entry manager (gethash "apiVersion" configuration) set))))
+    input))
 
 (defun apply-sorted-entries (entries)
   "Order managedFields as upstream does: Apply operations first, then by time and manager."
@@ -639,10 +652,7 @@ Holding a list item's \".\" keeps only the item, and any field inside an item ke
           store resource namespace name
           (lambda (old) (apply-merge old configuration resource manager force))
           :dry-run dry-run))
-        (let ((input (copy-core-object configuration)))
-          (setf (gethash "managedFields" (gethash "metadata" input))
-                (vector (apply-entry manager (gethash "apiVersion" configuration)
-                                     (apply-field-set (apply-owned-configuration configuration resource)))))
+        (let ((input (apply-set-created-entry (copy-core-object configuration) configuration manager resource)))
           (json-response
            (complete-created-bootstrap-resource
             store resource
@@ -663,7 +673,4 @@ Holding a list item's \".\" keeps only the item, and any field inside an item ke
   (let* ((*apply-schema* (apply-resource-schema "pods")) (*apply-update-manager* nil)
          (configuration (apply-read-configuration "pods" namespace name))
          (input (copy-core-object configuration)))
-    (setf (gethash "managedFields" (gethash "metadata" input))
-          (vector (apply-entry (apply-field-manager) (gethash "apiVersion" configuration)
-                               (apply-field-set (apply-owned-configuration configuration "pods")))))
-    input))
+    (apply-set-created-entry input configuration (apply-field-manager) "pods")))

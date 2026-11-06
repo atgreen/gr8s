@@ -93,9 +93,11 @@
           (multiple-value-bind (value present) (gethash field metadata)
             (when (and present (not (eq value 'null)))
               (setf (gethash field (workload-metadata copy)) (copy-core-object value)))))
-        (prepare-core-resource-metadata copy existing revision)
-        (setf (gethash (core-resource-key resource namespace name) resources) copy)
-        (unless dry-run (commit-core-resources store resources revision))
+        ;; An unchanged status keeps its revision and sends no watch event, as upstream.
+        (unless (crd-json-equal-p copy existing)
+          (prepare-core-resource-metadata copy existing revision)
+          (setf (gethash (core-resource-key resource namespace name) resources) copy)
+          (unless dry-run (commit-core-resources store resources revision)))
         copy))))
 
 (defun dispatch-workload-subresource (store path method)

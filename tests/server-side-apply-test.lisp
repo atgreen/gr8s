@@ -530,6 +530,84 @@
             (apply-pod (concatenate 'string pod "/status") "second" status 200)
             (is-true (has-status))))))))
 
+(test unchanged-writes-keep-their-revision-and-send-no-watch-events
+  ;; Upstream's storage skips a write whose result equals the stored object, so a repeated
+  ;; apply (kubectl diff --server-side, GitOps) sees no new resourceVersion and no event.
+  (with-core-api (store path)
+    (values path)
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+    (let ((config "/api/v1/namespaces/alpha/configmaps/one")
+          (service "/api/v1/namespaces/alpha/services/web")
+          (pod "/api/v1/namespaces/alpha/pods/one")
+          (documents
+            '(("/api/v1/namespaces/alpha/configmaps/one"
+               . "{\"apiVersion\":\"v1\",\"kind\":\"ConfigMap\",\"metadata\":{\"name\":\"one\",\"labels\":{\"a\":\"b\"}},\"data\":{\"a\":\"1\"}}")
+              ("/api/v1/namespaces/alpha/services/web"
+               . "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"name\":\"web\"},\"spec\":{\"selector\":{\"app\":\"web\"},\"ports\":[{\"port\":80}]}}")
+              ("/api/v1/namespaces/alpha/pods/one"
+               . "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"one\",\"labels\":{\"a\":\"b\"}},\"spec\":{\"containers\":[{\"name\":\"a\",\"image\":\"i\"}]}}"))))
+      (flet ((apply-all (expected)
+               (loop for (where . body) in documents
+                     do (check-core-status expected where :method :patch :octets body
+                                           :content-type "application/apply-patch+yaml"
+                                           :parameters '(("fieldManager" . "applier")))))
+             (version (where) (gethash "resourceVersion" (gethash "metadata" (check-core-status 200 where))))
+             (pod-version () (gr8s::pod-resource-version (gr8s::get-pod store "alpha" "one"))))
+        (apply-all 201)
+        (let ((revision (gr8s::pod-store-resource-revision store))
+              (config-version (version config)) (service-version (version service)) (pod-revision (pod-version)))
+          (apply-all 200)
+          (dolist (where (list config service pod))
+            (apply-merge-patch where "{}" "patcher")
+            (check-core-status 200 where :method :patch :octets "[]" :content-type "application/json-patch+json")
+            ;; A read-modify-write that leaves out managedFields keeps them, as upstream's decodeLiveOrNew.
+            (let ((current (check-core-status 200 where)))
+              (remhash "managedFields" (gethash "metadata" current))
+              (check-core-status 200 where :method :put :object current)))
+          (apply-all 200)
+          (is (equal config-version (version config)))
+          (is (equal service-version (version service)))
+          (is (equal pod-revision (pod-version)))
+          (is (= revision (gr8s::pod-store-resource-revision store)))
+          (dolist (resource '("configmaps" "services"))
+            (is (null (gr8s::template-watch-events store "alpha" "" "" revision :resource resource))))
+          (is (equal "applier" (gethash "manager" (aref (gethash "managedFields" (gethash "metadata" (check-core-status 200 pod))) 0))))
+          ;; A real change still writes.
+          (apply-merge-patch config "{\"data\":{\"a\":\"2\"}}" "patcher")
+          (is (not (equal config-version (version config))))
+          (is (equal '("MODIFIED")
+                     (mapcar (lambda (event) (gethash "type" event))
+                             (gr8s::template-watch-events store "alpha" "" "" revision :resource "configmaps")))))))))
+
+(test unchanged-custom-status-writes-keep-their-revision
+  (with-crd-api (store path)
+    (values store path)
+    (let ((definition (apply-crd-fixture
+                       (apply-schema-from-json
+                        "{\"type\":\"object\",\"properties\":{\"spec\":{\"type\":\"object\",\"properties\":{\"foo\":{\"type\":\"string\"}}},
+                          \"status\":{\"type\":\"object\",\"properties\":{\"ready\":{\"type\":\"boolean\"}}}}}"))))
+      (setf (gethash "subresources" (aref (gethash "versions" (gethash "spec" definition)) 0))
+            (gr8s::core-object "status" (gr8s::core-object)))
+      (crd-api-request 201 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post :object definition))
+    (let* ((item "/apis/mygroup.example.com/v1/foos/one")
+           (status (concatenate 'string item "/status"))
+           (status-document (format nil "apiVersion: mygroup.example.com/v1~%kind: Foo~%metadata:~%  name: one~%status:~%  ready: true~%")))
+      (flet ((version (object) (gethash "resourceVersion" (gethash "metadata" object))))
+        (let ((created (apply-request 201 item (apply-document "one" "foo: a"))))
+          (is (equal (version created) (version (apply-request 200 item (apply-document "one" "foo: a")))))
+          (let* ((applied (apply-request 200 status status-document :manager "status-applier"))
+                 (entry (find "status-applier" (gethash "managedFields" (gethash "metadata" applied))
+                              :test #'equal :key (lambda (entry) (gethash "manager" entry)))))
+            ;; The status write records its manager, as upstream's status strategy keeps managedFields.
+            (is (not (equal (version created) (version applied))))
+            (is (equal "status" (gethash "subresource" entry)))
+            (is (hash-table-p (gethash "f:ready" (gethash "f:status" (gethash "fieldsV1" entry)))))
+            (is (equal (version applied) (version (apply-request 200 status status-document :manager "status-applier"))))
+            (is (equal (version applied)
+                       (version (crd-api-request 200 status :method :patch :text "{\"status\":{\"ready\":true}}"
+                                                 :content-type "application/merge-patch+json"))))))))))
+
 (test map-list-keys-default-and-shared-items-do-not-conflict
   (let* ((gr8s::*apply-schema*
            (com.inuoe.jzon:parse "{\"properties\":{\"ports\":{\"type\":\"array\",\"x-kubernetes-list-type\":\"map\",\"x-kubernetes-list-map-keys\":[\"containerPort\",\"protocol\"],\"items\":{\"type\":\"object\"}}}}"))
