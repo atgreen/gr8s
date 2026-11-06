@@ -305,12 +305,15 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
       (publish-node-change-unlocked store old node))))
 
 (defun node-placement-better-p (store pod left right)
-  "Prefer a node POD's affinity favors, then the fewest Pods, then a stable name."
+  "Prefer a node POD's affinity favors, then its least crowded spread domains, then the fewest Pods, then a stable name."
   (let ((left-score (+ (pod-node-preference-score pod left) (pod-affinity-preference-score-unlocked store pod left)))
         (right-score (+ (pod-node-preference-score pod right) (pod-affinity-preference-score-unlocked store pod right)))
+        (left-spread (pod-topology-spread-penalty-unlocked store pod left))
+        (right-spread (pod-topology-spread-penalty-unlocked store pod right))
         (left-count (assigned-nonterminal-pod-count store (node-record-name left)))
         (right-count (assigned-nonterminal-pod-count store (node-record-name right))))
     (cond ((/= left-score right-score) (> left-score right-score))
+          ((/= left-spread right-spread) (< left-spread right-spread))
           ((/= left-count right-count) (< left-count right-count))
           (t (string< (node-record-name left) (node-record-name right))))))
 

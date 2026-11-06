@@ -459,6 +459,7 @@
              :reason "AlreadyExists"
              :message (format nil "Pod ~A already exists" (pod-name pod))))
     (enforce-resource-quotas-unlocked store "pods" (pod-namespace pod) (pod-to-object pod))
+    (merge-topology-spread-match-label-keys pod)
     (let ((metadata (gethash "metadata" (pod-to-object pod))))
       (remhash "deletionTimestamp" metadata)
       (remhash "deletionGracePeriodSeconds" metadata)

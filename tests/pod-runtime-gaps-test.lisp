@@ -33,8 +33,8 @@
   ;; which binds it through pods/binding; gr8s's scheduler leaves it alone.
   (is (gr8s::pod-name (parse-pod (gap-pod-object "schedulerName" "default-scheduler"))))
   (is (not (gr8s::pod-for-this-scheduler-p (parse-pod (gap-pod-object "schedulerName" "custom-scheduler")))))
-  ;; topologySpreadConstraints is admitted (unhonored on a single node) rather
-  ;; than blocking an otherwise valid Pod.
+  ;; topologySpreadConstraints is admitted, and the scheduler honours it
+  ;; (pod-topology-spread-test).
   (is (gr8s::pod-name
        (parse-pod (gap-pod-object "topologySpreadConstraints"
                                   (vector (gr8s::core-object "maxSkew" 1 "topologyKey" "kubernetes.io/hostname"
