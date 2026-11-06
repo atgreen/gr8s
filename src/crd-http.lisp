@@ -219,7 +219,9 @@ group/version/kind, base64 encoded, with the core group spelled core."
           ((member method '(:put :patch))
            (let* ((view (crd-api-view existing))
                   (type (request-media-type))
-                  (*apply-update-manager* (list (apply-default-manager) "status"))
+                  ;; An apply records its own ownership; only other writes are Update managers.
+                  (*apply-update-manager* (unless (equal type "application/apply-patch+yaml")
+                                            (list (apply-default-manager) "status")))
                   (input (if (eq method :put) (crd-read-json)
                              (let ((patch (if (equal type "application/apply-patch+yaml")
                                               nil
@@ -231,6 +233,15 @@ group/version/kind, base64 encoded, with the core group spelled core."
                                      ((equal type "application/merge-patch+json") (merge-json-object view patch))
                                      ((equal type "application/json-patch+json") (apply-core-json-patch view patch))
                                      (t (core-resource-error 415 "UnsupportedMediaType" "Custom status supports JSON/merge patches and apply"))))))
+                  ;; A subresource write cannot set managedFields: tracking starts from the live
+                  ;; ones, as upstream's decodeLiveOrNew does for subresources.
+                  (input (let ((metadata (and (hash-table-p input) (gethash "metadata" input)))
+                               (live (gethash "managedFields" (gethash "metadata" existing))))
+                           (when (and (hash-table-p metadata) (not (equal type "application/apply-patch+yaml")))
+                             (if live
+                                 (setf (gethash "managedFields" metadata) (copy-core-object live))
+                                 (remhash "managedFields" metadata)))
+                           input))
                   (input (admit-subresource-write store resource "status" namespace name input view
                                                   :dry-run (core-resource-dry-run-p)))
                   (*crd-status-write* t))

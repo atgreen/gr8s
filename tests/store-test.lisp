@@ -57,10 +57,19 @@ which goes through WRITE-PRIVATE-TEXT-ATOMICALLY, and a journal append."
         (is (string= (pod-uid created)
                      (pod-uid (get-pod reopened "default" "hello"))))))))
 
+(defun labelled-pod-json (json)
+  "Return the Pod JSON text with a label added, so that writing it changes the Pod."
+  (let ((object (com.inuoe.jzon:parse json)))
+    (setf (gethash "labels" (gethash "metadata" object)) (gr8s::core-object "changed" "yes"))
+    (com.inuoe.jzon:stringify object)))
+
 (test store-updates-with-optimistic-concurrency
   (with-temporary-store (store path)
     (create-pod store (parse-pod *valid-pod-json*))
-    (let ((updated (update-pod store (parse-pod *valid-pod-json*) "1")))
+    ;; An unchanged update keeps the revision, as upstream's GuaranteedUpdate
+    ;; (k8s.io/apiserver pkg/storage/etcd3/store.go) skips a write that changes nothing.
+    (is (string= "1" (pod-resource-version (update-pod store (parse-pod *valid-pod-json*) "1"))))
+    (let ((updated (update-pod store (parse-pod (labelled-pod-json *valid-pod-json*)) "1")))
       (is (string= "2" (pod-resource-version updated))))
     (handler-case
         (progn

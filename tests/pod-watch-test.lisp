@@ -31,7 +31,9 @@
     (declare (ignorable directory))
     (let* ((first (create-pod store (watch-test-pod "first")))
            (second (create-pod store (watch-test-pod "second")))
-           (replacement (parse-pod (com.inuoe.jzon:stringify (pod-to-object first)))))
+           ;; A changed Pod: an unchanged write sends no event (upstream's GuaranteedUpdate in
+           ;; k8s.io/apiserver pkg/storage/etcd3/store.go skips it).
+           (replacement (parse-pod (labelled-pod-json (com.inuoe.jzon:stringify (pod-to-object first))))))
       (is (< (parse-integer (pod-resource-version first)) (parse-integer (pod-resource-version second))))
       (update-pod store replacement (pod-resource-version first))
       (gr8s::mark-pod-deleting store "default" "second")
@@ -116,7 +118,9 @@
            (copy (lambda (source) (parse-pod (com.inuoe.jzon:stringify (pod-to-object source))))))
       (observe-status store pod (gr8s::core-object "phase" "Running"))
       (let* ((seen (write-to-string (gr8s::pod-store-pod-revision store)))
-             (updated (update-pod store (funcall copy pod) seen)))
+             ;; A real spec write: an unchanged one keeps the revision, as upstream's
+             ;; GuaranteedUpdate (k8s.io/apiserver pkg/storage/etcd3/store.go) skips it.
+             (updated (update-pod store (parse-pod (labelled-pod-json (com.inuoe.jzon:stringify (pod-to-object pod)))) seen)))
         ;; The read predates a real spec write, so it is now truly stale.
         (signals kubernetes-error (update-pod store (funcall copy updated) original))
         (signals kubernetes-error (update-pod store (funcall copy updated) "not-a-revision"))

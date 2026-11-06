@@ -63,7 +63,13 @@
           (is (equal "rbac.authorization.k8s.io/v1" (gethash "apiVersion" created)))
           (is (equal kind (gethash "kind" created)))
           (let ((updated (check-core-status 200 item :method :put :content-type "application/vnd.kubernetes.protobuf" :octets update)))
-            (is (equal (gethash "uid" metadata) (gethash "uid" (gethash "metadata" updated)))))
+            (is (equal (gethash "uid" metadata) (gethash "uid" (gethash "metadata" updated))))
+            ;; An unchanged update keeps the revision, as upstream's GuaranteedUpdate
+            ;; (k8s.io/apiserver pkg/storage/etcd3/store.go) skips a write that changes nothing.
+            (is (equal (gethash "resourceVersion" metadata) (gethash "resourceVersion" (gethash "metadata" updated)))))
+          ;; A real change makes the update's revision stale.
+          (check-core-status 200 item :method :patch :content-type "application/merge-patch+json"
+                             :octets "{\"metadata\":{\"labels\":{\"changed\":\"yes\"}}}")
           (check-core-status 409 item :method :put :content-type "application/vnd.kubernetes.protobuf" :octets update)
           (check-core-status 400 collection :method :post :content-type "application/vnd.kubernetes.protobuf"
                              :octets (bootstrap-wire-fixture kind "wrong" :version "v1" :role-kind role-kind))

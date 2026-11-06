@@ -497,19 +497,23 @@ not be changed; add or replace entries instead."
     (json-response
      (pod-response-object pod (reconcile-pod reconciler namespace name)))))
 
-(defun pod-dry-run-object (store replacement existing)
-  "Return what a Pod write would store, with EXISTING's identity, having stored nothing."
+(defun pod-dry-run-object (store replacement existing &optional reconciler)
+  "Return what a Pod write would store, with EXISTING's identity, having stored nothing.
+With RECONCILER, an existing Pod shows the status and revision a read of it would."
   (let* ((object (copy-json-object (pod-to-object replacement)))
-         (metadata (gethash "metadata" object)))
+         (metadata (gethash "metadata" object))
+         (current (and existing reconciler
+                       (pod-response-object existing (reconcile-pod reconciler (pod-namespace existing) (pod-name existing))))))
     (when existing
-      (let ((old (gethash "metadata" (pod-to-object existing))))
+      (let ((old (gethash "metadata" (or current (pod-to-object existing)))))
         (dolist (field '("uid" "creationTimestamp" "resourceVersion" "generation"))
           (setf (gethash field metadata) (gethash field old)))))
     (when (or (null existing) (pod-spec-defaulted-p (gethash "spec" (pod-to-object existing))))
       (default-pod-spec-object (gethash "spec" object)))
     (setf (gethash "status" object)
-          (or (and existing (copy-json-object (or (pod-observed-status store existing) (pod-status "Pending"))))
-              (pod-status "Pending")))
+          (cond (current (gethash "status" current))
+                (existing (copy-json-object (or (pod-observed-status store existing) (pod-status "Pending"))))
+                (t (pod-status "Pending"))))
     object))
 
 (defun apply-pod-response (store reconciler name &optional (namespace "default"))
@@ -518,6 +522,8 @@ not be changed; add or replace entries instead."
          (structured (member content-type '("application/json-patch+json" "application/strategic-merge-patch+json" "application/apply-patch+yaml")
                              :test #'equal))
          (patch (unless structured (request-json-object)))
+         ;; A patch comes to own the fields it changes; an apply records its own ownership.
+         (*apply-update-manager* (unless applied (list (apply-default-manager) nil)))
          (existing (handler-case (get-pod store namespace name)
                      (kubernetes-error (error)
                        (if (= 404 (kubernetes-error-status-code error))
@@ -537,7 +543,7 @@ not be changed; add or replace entries instead."
         (admit-pod-result store attributes replacement)
         (when (core-resource-dry-run-p)
           (return-from apply-pod-response
-            (json-response (pod-dry-run-object store replacement existing) (if existing 200 201))))
+            (json-response (pod-dry-run-object store replacement existing reconciler) (if existing 200 201))))
         (let ((pod (if existing
                        (update-pod store replacement
                                    (pod-resource-version existing))
@@ -547,7 +553,8 @@ not be changed; add or replace entries instead."
            (if existing 200 201)))))))
 
 (defun replace-pod-response (store reconciler name &optional (namespace "default"))
-  (let ((raw (core-resource-request-object "Pod")))
+  (let ((raw (core-resource-request-object "Pod"))
+        (*apply-update-manager* (list (apply-default-manager) nil)))
     ;; The API server defaults a request as it decodes it, so admission sees the defaults.
     (when (hash-table-p raw) (default-pod-spec-object (gethash "spec" raw)))
     (multiple-value-bind (admitted attributes)
@@ -558,7 +565,7 @@ not be changed; add or replace entries instead."
         (admit-pod-result store attributes replacement)
         (when (core-resource-dry-run-p)
           (return-from replace-pod-response
-            (json-response (pod-dry-run-object store replacement (get-pod store namespace name)))))
+            (json-response (pod-dry-run-object store replacement (get-pod store namespace name) reconciler))))
         ;; An omitted revision is an unconditional update.
         (let ((pod (update-pod store replacement
                                (or (pod-resource-version replacement)

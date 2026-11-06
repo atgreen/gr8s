@@ -75,7 +75,11 @@
         (is-false (gethash "uid" spec))
         (is (= 0 (length (gethash "conditions" (gethash "status" created)))))
         (setf (gethash "spec" created) (gr8s::core-object "request" "forged")
-              (gethash "status" created) (gr8s::core-object "certificate" "forged"))
+              (gethash "status" created) (gr8s::core-object "certificate" "forged")
+              ;; A real change, so the next PUT's revision is stale: with only the ignored spec and
+              ;; status the update changes nothing, and upstream's GuaranteedUpdate
+              ;; (k8s.io/apiserver pkg/storage/etcd3/store.go) keeps the revision.
+              (gethash "labels" (gethash "metadata" created)) (gr8s::core-object "changed" "yes"))
         (let ((updated (csr-api-request 200 item :method :put :object created)))
           (is (gr8s::core-json-equal-p spec (gethash "spec" updated)))
           (is-false (gethash "certificate" (gethash "status" updated))))

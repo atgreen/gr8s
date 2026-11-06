@@ -10,6 +10,8 @@
 
 (in-package #:gr8s)
 
+(defvar *apply-update-manager* nil)
+
 (defstruct (pod-store (:constructor make-pod-store (path)))
   "Hold durable paths, in-memory indexes, observed status, and the store lock."
   path
@@ -527,6 +529,18 @@
               (+ (gethash "generation" existing-metadata 1)
                  (if (equalp (gethash "spec" (pod-to-object existing))
                              (gethash "spec" (pod-to-object replacement))) 0 1)))
+        ;; A client's write comes to own what it changed, and one that omits managedFields keeps them.
+        (when *apply-update-manager*
+          (let ((before (copy-json-object (pod-to-object existing))))
+            (remhash "status" before)
+            (apply-track-write before (pod-to-object replacement) "pods")))
+        ;; An unchanged Pod keeps its revision and sends no watch event, as upstream.
+        (setf (pod-uid replacement) (pod-uid existing)
+              (gethash "namespace" metadata) (pod-namespace replacement)
+              (gethash "uid" metadata) (pod-uid replacement)
+              (gethash "creationTimestamp" metadata) (gethash "creationTimestamp" existing-metadata))
+        (when (core-write-unchanged-p (pod-to-object existing) (pod-to-object replacement))
+          (return-from update-pod-unlocked existing))
         (setf (pod-uid replacement) (pod-uid existing)
               (pod-resource-version replacement)
               (write-to-string (next-pod-revision-unlocked store))
