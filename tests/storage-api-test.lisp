@@ -255,4 +255,35 @@
                    (mount (first (gr8s::containerd-pod-mounts runtime pod (aref (pod-containers pod) 0)))))
               (is (eql expected (gr8s.cri.v1::readonly mount))))))))))
 
+(test prebound-pairs-bind-as-given-and-unschedulable-pods-say-why
+  ;; The SchedulerPredicates spec pre-binds a local PV whose class differs from the
+  ;; claim's defaulted one, with node affinity naming nodes that don't exist.
+  (with-temporary-store (store path)
+    (ready-node store "worker-a" "a" "10.64.0.0/20")
+    (gr8s::seed-default-storage-class store path :path (namestring (merge-pathnames "local-path" path)))
+    (let ((volume (storage-test-volume "pv-prebound" (merge-pathnames "local/" path))))
+      (remhash "hostPath" (gethash "spec" volume))
+      (setf (gethash "local" (gethash "spec" volume)) (gr8s::core-object "path" "/tmp")
+            (gethash "nodeAffinity" (gethash "spec" volume))
+            (gr8s::core-object "required" (gr8s::core-object "nodeSelectorTerms"
+                                           (vector (gr8s::core-object "matchExpressions"
+                                                    (vector (gr8s::core-object "key" "kubernetes.io/hostname" "operator" "In"
+                                                                               "values" #("worker-a" "absent-1" "absent-2")))))))
+            (gethash "claimRef" (gethash "spec" volume)) (gr8s::core-object "name" "data" "namespace" "default"))
+      (gr8s::create-core-resource store "persistentvolumes" volume nil))
+    (let ((claim (storage-test-claim "data")))
+      (remhash "storageClassName" (gethash "spec" claim))
+      (setf (gethash "volumeName" (gethash "spec" claim)) "pv-prebound")
+      (is (equal "local-path" (gethash "storageClassName" (gethash "spec" (gr8s::create-core-resource store "persistentvolumeclaims" claim "default"))))))
+    (gr8s::reconcile-storage-bindings store)
+    (is (equal "Bound" (storage-phase store "persistentvolumeclaims" "default" "data")))
+    (is (equal "Bound" (storage-phase store "persistentvolumes" nil "pv-prebound")))
+    (let ((pod (create-pod store (storage-test-pod "consumer" "data"))))
+      (is (equal "worker-a" (gr8s::node-record-name (gr8s:schedule-pod store pod)))))
+    ;; A missing claim is reported as the scheduler reports it.
+    (let ((pod (create-pod store (storage-test-pod "orphan" "missing"))))
+      (is (null (gr8s:schedule-pod store pod)))
+      (is (equal "0/1 nodes are available: 1 persistentvolumeclaim \"missing\" not found."
+                 (gr8s::with-store-lock (store) (gr8s::pod-unschedulable-message store pod)))))))
+
 (in-suite gr8s)
