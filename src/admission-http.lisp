@@ -24,6 +24,18 @@
   "Run BODY's writes through the webhooks as the in-process CONTROLLER, which has no HTTP request."
   `(let ((*admission-controller* ,controller)) ,@body))
 
+(defun controller-create-core-resource (store resource input namespace controller)
+  "Create INPUT as the in-process CONTROLLER does through the API, past admission. Call
+without STORE's lock, because webhooks answer over the network."
+  (with-controller-admission (controller)
+    (admitted-create-core-resource store resource input namespace)))
+
+(defun controller-update-core-resource (store resource namespace name transform controller)
+  "Update as the in-process CONTROLLER does through the API, past admission. Call without
+STORE's lock, because webhooks answer over the network."
+  (with-controller-admission (controller)
+    (admitted-update-core-resource store resource namespace name transform)))
+
 (defun admit-controller-pod (store object controller)
   "Run a Pod OBJECT that CONTROLLER is creating through the webhooks and in-cluster admission.
 Call without STORE's lock, because webhooks answer over the network. Return the POD to commit."
