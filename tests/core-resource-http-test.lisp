@@ -319,3 +319,28 @@
     (let ((text (drakma:http-request "http://127.0.0.1:18089/openapi/v3/apis/rbac.authorization.k8s.io/v1")))
       (setf text (if (stringp text) text (flexi-streams:octets-to-string text :external-format :utf-8)))
       (is (not (search "\"parameters\":[]" text))))))
+
+(test lists-and-bookmarks-take-upstream-shapes
+  ;; A built-in list's items carry no apiVersion or kind, so a typed client decodes them as
+  ;; it decodes a single object; the list itself is left as it was.
+  (let* ((item (gr8s::core-object "apiVersion" "v1" "kind" "Secret" "metadata" (gr8s::core-object "name" "a")))
+         (list (gr8s::core-object "apiVersion" "v1" "kind" "SecretList" "items" (vector item)))
+         (shown (gr8s::list-items-without-type-meta list)))
+    (is (null (gethash "kind" (aref (gethash "items" shown) 0))))
+    (is (equal "a" (gethash "name" (gethash "metadata" (aref (gethash "items" shown) 0)))))
+    (is (equal "Secret" (gethash "kind" item)))
+    ;; Custom resource lists keep them, as upstream's unstructured encoding does.
+    (let ((gr8s::*crd-view-definition* (gr8s::core-object)))
+      (is (eq list (gr8s::list-items-without-type-meta list)))))
+  ;; A watch's bookmark becomes a one-row Table when Tables were asked for.
+  (let* ((bookmark (gr8s::core-object "apiVersion" "v1" "kind" "Secret"
+                                      "metadata" (gr8s::core-object "resourceVersion" "7"
+                                                                    "annotations" (gr8s::core-object "k8s.io/initial-events-end" "true"))))
+         (gr8s::*table-api-version* "meta.k8s.io/v1"))
+    (let ((table (let ((gr8s::*table-request* :table)) (gr8s::watch-bookmark-representation bookmark))))
+      (is (equal "Table" (gethash "kind" table)))
+      (is (= 1 (length (gethash "rows" table))))
+      (is (eq bookmark (gethash "object" (aref (gethash "rows" table) 0)))))
+    (is (equal "PartialObjectMetadata"
+               (gethash "kind" (let ((gr8s::*table-request* :partial)) (gr8s::watch-bookmark-representation bookmark)))))
+    (is (eq bookmark (let ((gr8s::*table-request* nil)) (gr8s::watch-bookmark-representation bookmark))))))

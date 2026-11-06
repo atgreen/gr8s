@@ -427,3 +427,79 @@
                                             (vector (gr8s::core-object "minimum" 5) (gr8s::core-object "maximum" 1)))))))
     (is (hash-table-p (gr8s::crd-validate-all (gr8s::core-object "x" 7) schema "resource")))
     (signals kubernetes-error (gr8s::crd-validate-all (gr8s::core-object "x" 3) schema "resource"))))
+
+;; As the per-node policy spec needs: a binding selects its namespace by the name label,
+;; and a policy's denial comes before storage refuses a create that carries a resourceVersion.
+(test policies-select-namespaces-by-name-and-deny-before-storage-checks
+  (with-core-api (store path)
+    (values store path)
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+    (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies" :method :post
+      :object (gr8s::core-object
+               "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicy"
+               "metadata" (gr8s::core-object "name" "by-node")
+               "spec" (gr8s::core-object
+                       "failurePolicy" "Fail"
+                       "matchConstraints"
+                       (gr8s::core-object
+                        "resourceRules"
+                        (vector (gr8s::core-object "apiGroups" #("") "apiVersions" #("v1")
+                                                   "operations" #("CREATE" "UPDATE" "DELETE") "resources" #("configmaps"))))
+                       "validations"
+                       (vector (gr8s::core-object "expression" "object.metadata.name != 'stale'"
+                                                  "message" "no node association found for user")))))
+    (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings" :method :post
+      :object (gr8s::core-object
+               "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicyBinding"
+               "metadata" (gr8s::core-object "name" "by-node")
+               "spec" (gr8s::core-object
+                       "policyName" "by-node" "validationActions" #("Deny")
+                       "matchResources" (gr8s::core-object
+                                         "namespaceSelector"
+                                         (gr8s::core-object "matchLabels"
+                                                            (gr8s::core-object "kubernetes.io/metadata.name" "alpha"))))))
+    (let ((object (core-fixture "ConfigMap" "stale")))
+      (setf (gethash "resourceVersion" (gethash "metadata" object)) "12")
+      (let ((status (check-core-status 422 "/api/v1/namespaces/alpha/configmaps" :method :post :object object)))
+        (is (search "no node association found for user" (gethash "message" status)) "~A" (gethash "message" status))))
+    ;; Another namespace is not selected, so storage refuses the revision itself.
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "beta")))
+    (let ((object (core-fixture "ConfigMap" "stale")))
+      (setf (gethash "resourceVersion" (gethash "metadata" object)) "12")
+      (check-core-status 400 "/api/v1/namespaces/beta/configmaps" :method :post :object object))))
+
+(test priority-levels-share-seats-and-queue-or-refuse-the-rest
+  (flet ((level (name shares response)
+           (gr8s::core-object "metadata" (gr8s::core-object "name" name "uid" name)
+                              "spec" (gr8s::core-object "type" "Limited"
+                                                        "limited" (gr8s::core-object "nominalConcurrencyShares" shares
+                                                                                     "limitResponse" response)))))
+    ;; Nominal seats are each level's share of 600; exempt levels have no limit.
+    (let ((limits (gr8s::flowcontrol-level-limits
+                   (list (level "big" 100 (gr8s::core-object "type" "Reject"))
+                         (level "small" 20 (gr8s::core-object "type" "Queue"
+                                                              "queuing" (gr8s::core-object "queues" 2 "queueLengthLimit" 3)))
+                         (gr8s::core-object "metadata" (gr8s::core-object "name" "exempt" "uid" "exempt")
+                                            "spec" (gr8s::core-object "type" "Exempt"))))))
+      (is (equal '(500 . 0) (gethash "big" limits)))
+      (is (equal '(100 . 6) (gethash "small" limits)))
+      (is (null (gethash "exempt" limits)))))
+  ;; One seat and no queue: the second request is refused with 429. The waiter below runs
+  ;; in its own thread, so the level is a fresh one in the shared table.
+  (let ((level (format nil "test-level-~A" (gr8s::generate-uid))))
+    (gr8s::flowcontrol-acquire-seat level 1 0)
+    (handler-case (progn (gr8s::flowcontrol-acquire-seat level 1 0) (is-false t "a second seat was given"))
+      (gr8s::kubernetes-error (condition) (is (= 429 (gr8s::kubernetes-error-status-code condition)))))
+    ;; With room in the queue, a waiter takes the seat when it is given back.
+    (let* ((taken nil)
+           (waiter (bt:make-thread (lambda () (gr8s::flowcontrol-acquire-seat level 1 1) (setf taken t)))))
+      (is-true (wait-until (lambda () (= 1 (cdr (gethash level gr8s::*flowcontrol-seats*)))) :timeout 5))
+      (is-false taken)
+      (gr8s::flowcontrol-release-seat level)
+      (bt:join-thread waiter)
+      (is-true taken)
+      (is (equal '(1 . 0) (gethash level gr8s::*flowcontrol-seats*)))
+      (gr8s::flowcontrol-release-seat level)
+      (remhash level gr8s::*flowcontrol-seats*))))
