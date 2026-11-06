@@ -60,6 +60,26 @@
            (if (equal argv '("firewall-cmd" "--state")) (values "" 1) (values "" 0))))
     (is (null (gr8s::ensure-control-plane-firewall 7443 :runner #'runner)))))
 
+(test remove-overlay-firewall-withdraws-all-three-when-active
+  (let ((ran '()))
+    (flet ((runner (argv) (push argv ran) (values "" 0)))
+      (is (eq t (gr8s::remove-overlay-firewall "10.80.0.0/20" :runner #'runner)))
+      (let ((applied (reverse ran)))
+        (is (member '("firewall-cmd" "--zone" "trusted" "--remove-interface" "gr8s-vxlan") applied :test #'equal))
+        (is (member '("firewall-cmd" "--zone" "trusted" "--remove-source" "10.80.0.0/20") applied :test #'equal))
+        (is (member '("firewall-cmd" "--remove-port=4789/udp") applied :test #'equal))))))
+
+(test remove-control-plane-firewall-withdraws-the-node-port
+  (let ((ran '()))
+    (flet ((runner (argv) (push argv ran) (values "" 0)))
+      (is (eq t (gr8s::remove-control-plane-firewall 7443 :runner #'runner)))
+      (is (member '("firewall-cmd" "--remove-port=7443/tcp") (reverse ran) :test #'equal)))))
+
+(test remove-overlay-firewall-is-a-noop-without-firewalld
+  (flet ((runner (argv)
+           (if (equal argv '("firewall-cmd" "--state")) (values "" 1) (values "" 0))))
+    (is (null (gr8s::remove-overlay-firewall "10.80.0.0/20" :runner #'runner)))))
+
 (test ensure-overlay-firewall-is-fail-soft-on-command-error
   ;; A failing firewall-cmd is logged, not raised: ensure still returns T (active).
   (flet ((runner (argv)

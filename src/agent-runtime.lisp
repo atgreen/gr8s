@@ -238,7 +238,11 @@
   ;; Keep the gateway while Pods or partially installed leases outlive us.
   (when (and (node-runtime-manager node-runtime) (node-runtime-ipam node-runtime)
              (not (node-runtime-has-allocations-p node-runtime)))
-    (remove-node-gateway)))
+    (remove-node-gateway)
+    ;; The node is going away with no Pods left; withdraw the overlay firewall
+    ;; accepts we programmed (podster-vwy) so the host firewall is left as we
+    ;; found it. Fail-soft; a no-op without an active firewalld.
+    (ignore-errors (remove-overlay-firewall (node-ipam-cidr (node-runtime-ipam node-runtime))))))
 
 (defun reconcile-cached-node-network (node-runtime)
   ;; Kernel link events can flush permanent VXLAN FDB entries even when the

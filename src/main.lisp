@@ -845,7 +845,13 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                (setf (pod-store-in-cluster-config store) nil))))
       (when local-agent (stop-local-node-agent local-agent))
       (when ha (stop-ha-control-plane ha))
-      (when node-server (stop-node-grpc-server node-server))
+      (when node-server
+        (stop-node-grpc-server node-server)
+        ;; Withdraw the node-server port we opened for remote agents (podster-vwy),
+        ;; mirroring the open in startup. Fail-soft; a no-op without firewalld or
+        ;; for a 127.0.0.1 listener (which was never opened).
+        (unless (string= "127.0.0.1" (getf options :node-listen "127.0.0.1"))
+          (ignore-errors (remove-control-plane-firewall (getf options :node-port)))))
       (when memory-monitor (stop-memory-monitor memory-monitor))))
   0)
 

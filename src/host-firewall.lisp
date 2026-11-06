@@ -95,6 +95,30 @@
      :runner runner)
     t))
 
+(defun remove-overlay-firewall
+    (node-pod-cidr &key (runner #'host-firewall-run)
+                        (vxlan-interface +node-vxlan-interface+)
+                        (vxlan-port +node-vxlan-udp-port+))
+  "Withdraw this node's overlay ACCEPTs from an active firewalld, the inverse of
+   ensure-overlay-firewall. Called when the node's dataplane is torn down (no
+   remaining Pods), so the host firewall returns to its prior state rather than
+   keeping orphaned rules. No-op without firewalld; fail-soft."
+  (when (and node-pod-cidr (host-firewalld-active-p :runner runner))
+    (apply-overlay-firewall-commands
+     (overlay-firewall-commands node-pod-cidr :vxlan-interface vxlan-interface
+                                              :vxlan-port vxlan-port :verb "--remove")
+     :runner runner)
+    t))
+
+(defun remove-control-plane-firewall (node-port &key (runner #'host-firewall-run))
+  "Withdraw the node-server port opened by ensure-control-plane-firewall. No-op
+   without firewalld; fail-soft."
+  (when (and node-port (plusp node-port) (host-firewalld-active-p :runner runner))
+    (apply-overlay-firewall-commands
+     (list (list "firewall-cmd" (format nil "--remove-port=~D/tcp" node-port)))
+     :runner runner)
+    t))
+
 (defun overlay-firewall-present-p
     (node-pod-cidr &key (runner #'host-firewall-run)
                         (vxlan-interface +node-vxlan-interface+)
