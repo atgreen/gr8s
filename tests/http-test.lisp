@@ -1066,3 +1066,11 @@
              (ignore-errors (usocket:socket-close client))))
       (dolist (socket spares) (ignore-errors (usocket:socket-close socket)))
       (usocket:socket-close listener))))
+
+(test status-lines-use-go-reason-phrases
+  ;; net/http's StatusText; upstream's in-cluster config spec matches "401 Unauthorized".
+  (loop for (code phrase) in '((302 "Found") (401 "Unauthorized") (408 "Request Timeout")
+                               (414 "Request URI Too Long") (416 "Requested Range Not Satisfiable")
+                               (504 "Gateway Timeout") (505 "HTTP Version Not Supported")
+                               (403 "Forbidden") (422 "Unprocessable Entity"))
+        do (is (equal phrase (hunchentoot:reason-phrase code)) "~D" code)))
