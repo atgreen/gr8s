@@ -189,8 +189,9 @@
              values))
   totals)
 
-(defun pod-spec-resource-totals (spec &key (overhead t))
-  "Return a Pod's exact effective requests and limits: containers summed, each init container a floor."
+(defun pod-spec-resource-totals (spec &key (overhead t) (pod-level t))
+  "Return a Pod's exact effective requests and limits: containers summed, each init container a floor.
+Unless POD-LEVEL is false, the Pod's own spec.resources replace those sums for what they declare."
   (let ((requests (make-hash-table :test #'equal)) (limits (make-hash-table :test #'equal)))
     (flet ((list-of (container kind)
              (let ((resources (gethash "resources" container)))
@@ -204,6 +205,7 @@
                           (maphash (lambda (name value)
                                      (when (> value (gethash name totals 0)) (setf (gethash name totals) value)))
                                    own)))))
+    (when pod-level (apply-pod-level-resources spec requests limits))
     (when (and overhead (gethash "overhead" spec))
       (add-resource-list requests (gethash "overhead" spec))
       (maphash (lambda (name value)

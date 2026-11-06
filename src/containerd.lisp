@@ -328,7 +328,10 @@ A container running as any user can write here, and a user mount at the path tak
                                         :host-path (namestring (car termination)))))
                          mounts)
              :security-context security
-             :resources (cri-linux-container-resources (pod-runtime-container-object pod spec))
+             :resources (cri-linux-container-resources
+                         ;; Without a pod cgroup of its own, a container is bounded by the Pod's limits.
+                         (container-with-pod-level-limits (gethash "spec" (pod-to-object pod))
+                                                          (pod-runtime-container-object pod spec)))
              :working-directory (gethash "workingDir" (pod-runtime-container-object pod spec))
              :stdin (gethash "stdin" (pod-runtime-container-object pod spec))
              :stdin-once (gethash "stdinOnce" (pod-runtime-container-object pod spec))

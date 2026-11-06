@@ -325,7 +325,7 @@
             "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
             "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "shareProcessNamespace" "hostAliases" "ephemeralContainers"
             "readinessGates" "schedulerName" "hostnameOverride" "setHostnameAsFQDN" "serviceAccount"
-            "topologySpreadConstraints" "schedulingGates") "spec")
+            "topologySpreadConstraints" "schedulingGates" "resources") "spec")
     (dolist (field '("hostname" "subdomain"))
       (when (eq (gethash field spec) 'null) (remhash field spec))
       (let ((value (gethash field spec "")))
@@ -368,6 +368,8 @@
                                    (optional-vector spec "initContainers" "spec")))
              (ephemeral-containers (parse-pod-ephemeral-containers spec))
              (all-containers (concatenate 'vector init-containers parsed-containers ephemeral-containers)))
+        ;; Pod-level resources are checked against the containers' normalized ones.
+        (validate-pod-level-resources spec)
         (unless (= (length all-containers)
                    (length (remove-duplicates
                             (map 'list #'container-spec-name all-containers)
