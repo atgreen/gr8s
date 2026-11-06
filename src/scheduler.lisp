@@ -382,9 +382,14 @@ Each call for an unbound Pod is a scheduling attempt, measured as kube-scheduler
               (remhash (pod-uid pod) (pod-store-nominated-nodes store))
               (persist-pod-assignment store pod (node-record-name node)))
             (let ((plan (choose-preemption-unlocked store pod placeable)))
-              (when plan
-                (setf victims (cdr plan)
-                      (gethash (pod-uid pod) (pod-store-nominated-nodes store)) (node-record-name (car plan))))))))
+              (cond (plan
+                     (setf victims (cdr plan)
+                           (gethash (pod-uid pod) (pod-store-nominated-nodes store)) (node-record-name (car plan))))
+                    ;; As upstream, a Pod still waiting for its victims keeps its nomination, while
+                    ;; one whose preemption now finds nothing gives it up, so its reservation stops
+                    ;; holding room against Pods of its own priority.
+                    ((not (pod-awaiting-preemption-p store pod))
+                     (remhash (pod-uid pod) (pod-store-nominated-nodes store))))))))
     (ignore-errors
      (note-scheduling-attempt (pod-uid pod)
                               (ignore-errors (pod-deletion-time (table-get (pod-to-object pod) "metadata" "creationTimestamp")))

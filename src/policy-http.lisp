@@ -77,11 +77,17 @@
 
 (defun node-status-extended-resources (status)
   "Select the valid extended resources a written Node STATUS advertises.
-As with a kubelet, measured CPU, memory, storage and conditions are never taken from clients."
-  (let ((source (or (gethash "allocatable" status) (gethash "capacity" status)))
-        (resources (core-object)))
+As with a kubelet, measured CPU, memory, storage and conditions are never taken from clients.
+Capacity names the resources, as a kubelet derives allocatable from it, so a client that
+adds or removes one in capacity alone, as upstream's e2e helpers do, is followed; an
+allocatable amount given for one of them is the one charged."
+  (let* ((capacity (gethash "capacity" status)) (allocatable (gethash "allocatable" status))
+         (source (or capacity allocatable))
+         (resources (core-object)))
     (when source
       (maphash (lambda (name value)
+                 (when (and (hash-table-p allocatable) (nth-value 1 (gethash name allocatable)))
+                   (setf value (gethash name allocatable)))
                  (when (extended-resource-name-p name)
                    (let ((quantity (policy-quantity value (format nil "status.allocatable[~A]" name))))
                      (when (or (minusp (container-quantity-coefficient quantity))

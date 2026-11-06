@@ -660,3 +660,35 @@
         (is (null (gr8s::schedule-pod store (get-pod store "team" "medium-0"))))
         (is-true (gr8s::schedule-pod store high))
         (is (null (gr8s::schedule-pod store (get-pod store "team" "medium-0"))))))))
+
+(test node-status-capacity-names-the-extended-resources
+  ;; Upstream's overhead spec adds a resource to status.capacity alone and later
+  ;; removes it from there alone, leaving the copy GET returned in allocatable.
+  (flet ((advertised (status)
+           (let ((table (gr8s::node-status-extended-resources (com.inuoe.jzon:parse status))))
+             (sort (loop for name being the hash-keys of table using (hash-value value)
+                         collect (format nil "~A=~A" name value))
+                   #'string<))))
+    (is (equal '("example.com/beardsecond=1k")
+               (advertised "{\"capacity\":{\"cpu\":\"4\",\"example.com/beardsecond\":\"1000\"},\"allocatable\":{\"cpu\":\"4\"}}")))
+    (is (null (advertised "{\"capacity\":{\"cpu\":\"4\"},\"allocatable\":{\"cpu\":\"4\",\"example.com/beardsecond\":\"1000\"}}")))
+    (is (equal '("example.com/dongle=3")
+               (advertised "{\"capacity\":{\"example.com/dongle\":\"4\"},\"allocatable\":{\"example.com/dongle\":\"3\"}}")))
+    (is (equal '("example.com/dongle=3") (advertised "{\"allocatable\":{\"example.com/dongle\":\"3\"}}")))))
+
+(test a-nomination-that-no-longer-preempts-is-given-up
+  ;; In upstream's async preemption spec ten medium Pods each preempt a low one; once
+  ;; the lows are gone and high Pods have taken half the room, five mediums must fit,
+  ;; which they cannot while every medium still reserves the node against the others.
+  (with-temporary-store (store path)
+    (values path)
+    (policy-test-node store "only" :extended (gr8s::core-object "example.com/dongle" "4"))
+    (loop for (name value) in '(("low" 1) ("medium" 2) ("high" 3)) do (policy-test-class store name value))
+    (loop for index below 4 do (is-true (gr8s::schedule-pod store (policy-test-priority-pod store (format nil "low-~D" index) "low" 1))))
+    (let ((mediums (loop for index below 4 collect (policy-test-priority-pod store (format nil "medium-~D" index) "medium" 1)))
+          (highs (loop for index below 2 collect (policy-test-priority-pod store (format nil "high-~D" index) "high" 1))))
+      (dolist (pod (append mediums highs)) (is (null (gr8s::schedule-pod store pod))))
+      (loop for index below 4 do (gr8s::remove-pod store "team" (format nil "low-~D" index)))
+      (dolist (pod highs) (is-true (gr8s::schedule-pod store pod)))
+      (is (= 2 (count-if (lambda (pod) (loop repeat 2 thereis (gr8s::schedule-pod store (get-pod store "team" (pod-name pod)))))
+                         mediums))))))
