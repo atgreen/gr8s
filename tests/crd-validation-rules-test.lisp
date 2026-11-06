@@ -208,6 +208,72 @@
   (is (eq t (rule-cel "format.dns1123Label().validate('NOT OK').hasValue()")))
   (is (equal "a~1b~0c" (rule-cel "jsonpatch.escapeKey('a/b~c')"))))
 
+;; sortBy is the lists extension's macro: a stable sort on the key the expression computes.
+(test cel-sort-by-orders-on-a-computed-key
+  (is (equalp #(3 2 1) (rule-cel "[1,2,3].sortBy(x, -x)")))
+  (is (equalp #("bb" "a" "cc") (rule-cel "['a','bb','cc'].sortBy(s, s == 'bb' ? 0 : 1)")))
+  (is (eq t (rule-cel "[{'n': 2}, {'n': 1}].sortBy(m, m.n)[0].n == 1")))
+  (signals gr8s::cel-compile-error (gr8s::compile-cel-expression "[1,2].sortBy(x, [x])"))
+  (signals gr8s::cel-evaluation-error (rule-cel "[dyn(1), dyn('a')].sortBy(x, x)")))
+
+(test cel-time-zone-names-read-the-zone-database
+  (let* ((switch (cron-at 2026 3 1 0 0))
+         (zone (gr8s::parse-tzif (synthetic-tzif (- switch gr8s::+unix-epoch-universal+)) switch)))
+    (bt:with-lock-held (gr8s::*cron-zones-lock*)
+      (setf (gethash "Test/CelZone" gr8s::*cron-zones*) zone))
+    ;; UTC+1 until 2026-03-01T00:00Z, UTC+2 after it.
+    (is (= 0 (rule-cel "timestamp('2026-02-10T23:30:00Z').getHours('Test/CelZone')")))
+    (is (= 11 (rule-cel "timestamp('2026-02-10T23:30:00Z').getDate('Test/CelZone')")))
+    (is (= 1 (rule-cel "timestamp('2026-03-10T23:30:00Z').getHours('Test/CelZone')")))
+    (is (= 23 (rule-cel "timestamp('2026-03-10T23:30:00Z').getHours('UTC')")))
+    (is (= 18 (rule-cel "timestamp('2026-03-10T23:30:00Z').getHours('-05:00')")))
+    (signals gr8s::cel-evaluation-error (rule-cel "timestamp('2026-03-10T23:30:00Z').getHours('No/SuchZone')"))))
+
+(test set-and-map-lists-compare-without-order
+  (with-core-api (store path)
+    (values store path)
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "default")))
+    (check-core-status 201 +rule-crd-path+ :method :post
+      :object (rule-definition
+               "{\"type\":\"object\",\"properties\":{\"spec\":{\"type\":\"object\",
+                 \"x-kubernetes-validations\":[{\"rule\":\"self.tags == ['a','b']\"},
+                   {\"rule\":\"self.ports == [{'name':'x','port':'1'},{'name':'y','port':'2'}]\"},
+                   {\"rule\":\"(self.tags + ['b','c']).size() == 3\"},
+                   {\"rule\":\"(self.ports + [{'name':'x','port':'9'}]).exists(p, p.port == '9') && (self.ports + [{'name':'x','port':'9'}]).size() == 2\"}],
+                 \"properties\":{
+                   \"tags\":{\"type\":\"array\",\"x-kubernetes-list-type\":\"set\",\"items\":{\"type\":\"string\"}},
+                   \"ports\":{\"type\":\"array\",\"x-kubernetes-list-type\":\"map\",\"x-kubernetes-list-map-keys\":[\"name\"],
+                     \"items\":{\"type\":\"object\",\"required\":[\"name\"],
+                       \"properties\":{\"name\":{\"type\":\"string\"},\"port\":{\"type\":\"string\"}}}}}}}}"))
+    (check-core-status 201 +rule-path+ :method :post
+      :object (rule-object "unordered" "spec"
+                           (rule-spec "tags" #("b" "a")
+                                      "ports" (vector (gr8s::core-object "name" "y" "port" "2")
+                                                      (gr8s::core-object "name" "x" "port" "1")))))
+    (let ((status (check-core-status 422 +rule-path+ :method :post
+                    :object (rule-object "different" "spec"
+                                         (rule-spec "tags" #("b" "c")
+                                                    "ports" (vector (gr8s::core-object "name" "y" "port" "3")
+                                                                    (gr8s::core-object "name" "x" "port" "1")))))))
+      (is (search "self.tags == ['a','b']" (gethash "message" status)) "~A" (gethash "message" status))
+      (is (search "self.ports ==" (gethash "message" status)) "~A" (gethash "message" status)))))
+
+(test policy-expressions-share-a-runtime-budget
+  (let ((program (gr8s::compile-cel-expression "[1,2,3].all(x, x > 0)")))
+    ;; Alone each expression has only its per-call limit.
+    (is (eq t (gr8s::evaluate-cel-condition program nil)))
+    ;; A shared budget runs down across expressions, and once spent none of the rest runs.
+    (let ((cell (list 1000)))
+      (let ((gr8s::*cel-shared-budget* cell)) (gr8s::evaluate-cel-condition program nil))
+      (let ((used (- 1000 (car cell))))
+        (is (plusp used))
+        (gr8s::with-cel-budget ((+ (* 2 used) (floor used 2)))
+          (is (eq t (gr8s::evaluate-cel-condition program nil)))
+          (is (eq t (gr8s::evaluate-cel-condition program nil)))
+          (signals gr8s::cel-budget-exhausted (gr8s::evaluate-cel-condition program nil))
+          (signals gr8s::cel-budget-exhausted (gr8s::evaluate-cel-condition program nil)))))))
+
 (test custom-resource-formats-and-patterns-are-enforced
   (with-core-api (store path)
     (values store path)

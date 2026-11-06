@@ -225,13 +225,17 @@ Configuration resources are exempt so a bad webhook can always be removed."
                            (cons "oldObject" (gethash "oldObject" request))
                            (cons "request" request)
                            (cons "authorizer" (cel-opaque :authorizer nil)))))
-      (loop for condition across conditions
-            do (handler-case
-                   (unless (evaluate-cel-condition (compile-cel-condition (gethash "expression" condition)) bindings)
-                     (return-from admission-conditions-result (values nil nil)))
-                 ((or cel-compile-error cel-evaluation-error) (failure)
-                   (push (format nil "failed to evaluate matchCondition ~S: ~A" (gethash "name" condition) failure)
-                         errors)))))
+      (with-cel-budget (+cel-match-conditions-budget+)
+        (loop for condition across conditions
+              do (handler-case
+                     (unless (evaluate-cel-condition (compile-cel-condition (gethash "expression" condition)) bindings)
+                       (return-from admission-conditions-result (values nil nil)))
+                   ;; Once the shared budget is gone no further condition runs, and that is the error.
+                   (cel-budget-exhausted (failure)
+                     (return-from admission-conditions-result (values nil (princ-to-string failure))))
+                   ((or cel-compile-error cel-evaluation-error) (failure)
+                     (push (format nil "failed to evaluate matchCondition ~S: ~A" (gethash "name" condition) failure)
+                           errors))))))
     (if errors (values nil (format nil "~{~A~^; ~}" (nreverse errors))) (values t nil))))
 
 (defun admission-hook-selected-p (store hook attributes)
