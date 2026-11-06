@@ -3,7 +3,8 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Make a container's hostPort and a Service's node port real. The agent listens
-;;;; on the node's address and relays each TCP connection or UDP flow to a Pod, for
+;;;; on the node's address and relays each TCP connection, SCTP association or UDP
+;;;; flow to a Pod, for
 ;;;; as long as that Pod is a current target. The relay is in userspace, so a Pod
 ;;;; sees the node rather than the original client as the source. Node ports honour
 ;;;; externalTrafficPolicy as kube-proxy does, and a Local LoadBalancer's
@@ -41,9 +42,16 @@ or a (plan . chooser) whose function maps the client's address to one."
       (error () nil))
     (ignore-errors (sb-bsd-sockets:socket-shutdown destination :direction :output))))
 
-(defun host-port-serve-connection (client address port)
-  "Connect CLIENT to the Pod at ADDRESS:PORT and relay both directions until both end."
-  (let ((server (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+(defun host-port-socket-protocol (protocol)
+  "The socket protocol keyword for a Kubernetes PROTOCOL."
+  (cond ((equal protocol "UDP") :udp) ((equal protocol "SCTP") :sctp) (t :tcp)))
+
+(defun host-port-serve-connection (client address port &optional (protocol "TCP"))
+  "Connect CLIENT to the Pod at ADDRESS:PORT over PROTOCOL, TCP or SCTP, and relay both
+directions until both end. An SCTP association is relayed as a stream: the octets arrive
+in order, but not divided into the messages the client sent."
+  (let ((server (make-instance 'sb-bsd-sockets:inet-socket :type :stream
+                                                           :protocol (host-port-socket-protocol protocol))))
     (unwind-protect
          (handler-case
              (progn
@@ -68,7 +76,8 @@ or a (plan . chooser) whose function maps the client's address to one."
                    (let ((target (forwarder-target-for
                                   forwarder (ignore-errors (sb-bsd-sockets:socket-peername client)))))
                      (if target
-                         (bt:make-thread (lambda () (host-port-serve-connection client (car target) (cdr target)))
+                         (bt:make-thread (lambda () (host-port-serve-connection client (car target) (cdr target)
+                                                                               (host-port-forwarder-protocol forwarder)))
                                          :name "gr8s host port connection")
                          (ignore-errors (sb-bsd-sockets:socket-close client))))))))))
 
@@ -130,7 +139,7 @@ or a (plan . chooser) whose function maps the client's address to one."
   "Listen on IP:PORT/PROTOCOL, or every address when IP is unset, relaying to TARGET."
   (let* ((udp (equal protocol "UDP"))
          (listener (make-instance 'sb-bsd-sockets:inet-socket :type (if udp :datagram :stream)
-                                                              :protocol (if udp :udp :tcp))))
+                                                              :protocol (host-port-socket-protocol protocol))))
     (handler-case
         (progn
           (setf (sb-bsd-sockets:sockopt-reuse-address listener) t
@@ -155,8 +164,7 @@ or a (plan . chooser) whose function maps the client's address to one."
   (ignore-errors (sb-bsd-sockets:socket-close (host-port-forwarder-listener forwarder))))
 
 (defun desired-host-port-targets (store)
-  "Map (protocol ip . port) to (pod-address . container-port) for STORE's addressed, undeleted Pods.
-SCTP host ports are scheduled but not relayed: this userspace relay carries only TCP and UDP."
+  "Map (protocol ip . port) to (pod-address . container-port) for STORE's addressed, undeleted Pods."
   (let ((targets (make-hash-table :test #'equal)))
     (dolist (pod (list-pods store) targets)
       (let* ((status (with-store-lock (store) (gethash (pod-uid pod) (pod-store-pod-observed-statuses store))))
@@ -170,7 +178,7 @@ SCTP host ports are scheduled but not relayed: this userspace relay carries only
                          for host-port = (gethash "hostPort" port)
                          for protocol = (gethash "protocol" port "TCP")
                          do (when (and (integerp host-port) (plusp host-port)
-                                       (member protocol '("TCP" "UDP") :test #'equal))
+                                       (member protocol '("TCP" "UDP" "SCTP") :test #'equal))
                               (setf (gethash (list* protocol (gethash "hostIP" port "") host-port) targets)
                                     (cons address (gethash "containerPort" port)))))))))))
 
@@ -265,7 +273,7 @@ With neither there is no listener, so a client is refused exactly as at a Cluste
         (loop for port across (gethash "ports" (gethash "spec" service) #())
               for node-port = (gethash "nodePort" port)
               for protocol = (gethash "protocol" port "TCP")
-              do (when (and (integerp node-port) (member protocol '("TCP" "UDP") :test #'equal))
+              do (when (and (integerp node-port) (member protocol '("TCP" "UDP" "SCTP") :test #'equal))
                    (multiple-value-bind (internal external local-origin)
                        (service-port-backends store service port :node-name node-name :zone zone)
                      (declare (ignore internal))

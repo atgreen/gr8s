@@ -660,3 +660,63 @@
       (gr8s::delete-core-resource store "ipaddresses" nil address)
       (gr8s::reconcile-service-ip-addresses store)
       (is (equal '("alpha" "old") (gr8s::ip-address-parent-service (service-ip-claim store address)))))))
+
+(defun sctp-available-p ()
+  "True when this kernel can open an SCTP socket."
+  (handler-case
+      (progn (sb-bsd-sockets:socket-close (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :sctp)) t)
+    (error () nil)))
+
+(test sctp-port-forwarder-relays-an-association
+  ;; SCTP host ports and node ports are relayed like TCP ones, as one-to-one associations.
+  (if (not (sctp-available-p))
+      (skip "this kernel has no SCTP")
+      (let ((server (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :sctp)))
+        (sb-bsd-sockets:socket-bind server #(127 0 0 1) 0)
+        (sb-bsd-sockets:socket-listen server 4)
+        (let* ((backend (nth-value 1 (sb-bsd-sockets:socket-name server)))
+               (echo (bt:make-thread
+                      (lambda ()
+                        (let ((peer (sb-bsd-sockets:socket-accept server))
+                              (buffer (make-array 64 :element-type '(unsigned-byte 8))))
+                          (unwind-protect
+                               (multiple-value-bind (data length) (sb-bsd-sockets:socket-receive peer buffer nil)
+                                 (declare (ignore data))
+                                 (sb-bsd-sockets:socket-send peer buffer length))
+                            (sb-bsd-sockets:socket-close peer))))))
+               (forwarder (gr8s::start-host-port-forwarder "127.0.0.1" 0 (cons "127.0.0.1" backend) "SCTP"))
+               (port (nth-value 1 (sb-bsd-sockets:socket-name (gr8s::host-port-forwarder-listener forwarder))))
+               (client (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :sctp))
+               (buffer (make-array 16 :element-type '(unsigned-byte 8))))
+          (unwind-protect
+               (progn
+                 (sb-bsd-sockets:socket-connect client #(127 0 0 1) port)
+                 (sb-bsd-sockets:socket-send client (coerce #(4 5 6) '(vector (unsigned-byte 8))) 3)
+                 (is (sb-sys:wait-until-fd-usable (sb-bsd-sockets:socket-file-descriptor client) :input 5))
+                 (multiple-value-bind (data length) (sb-bsd-sockets:socket-receive client buffer nil)
+                   (declare (ignore data))
+                   (is (eql 3 length))
+                   (is (equalp #(4 5 6) (subseq buffer 0 3)))))
+            (ignore-errors (sb-bsd-sockets:socket-close client))
+            (gr8s::stop-host-port-forwarder forwarder)
+            (ignore-errors (bt:join-thread echo :timeout 2))
+            (ignore-errors (sb-bsd-sockets:socket-close server)))))))
+
+(test sctp-node-ports-and-host-ports-are-planned
+  (with-temporary-store (store directory)
+    (values directory)
+    (let ((service (network-service "sctp" "type" "NodePort")))
+      (setf (gethash "protocol" (aref (gethash "ports" (gethash "spec" service)) 0)) "SCTP")
+      (let* ((created (gr8s::create-core-resource store "services" service "alpha"))
+             (node-port (service-node-port created)))
+        (gr8s::create-core-resource
+         store "endpointslices"
+         (gr8s::core-object "metadata" (gr8s::core-object "name" "sctp-manual"
+                                                          "labels" (gr8s::core-object "kubernetes.io/service-name" "sctp"))
+                            "addressType" "IPv4"
+                            "ports" (vector (gr8s::core-object "name" "http" "port" 8080 "protocol" "SCTP"))
+                            "endpoints" (vector (gr8s::core-object "addresses" (vector "192.0.2.5")
+                                                                   "conditions" (gr8s::core-object "ready" t))))
+         "alpha")
+        (let ((plan (gethash (list* "SCTP" "" node-port) (gr8s::desired-node-port-targets store))))
+          (is (equal '(("192.0.2.5" . 8080)) (first plan))))))))
