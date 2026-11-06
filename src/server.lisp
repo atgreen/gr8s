@@ -4,6 +4,14 @@
   "Connections served at once. Each open watch keeps one, and Hunchentoot's default of
 100 stops accepting at that point, leaving even short requests in a handshake timeout.")
 
+;; Clients read the status line, and some match its text: a kubectl request with a bad token
+;; logs it, and upstream's in-cluster config conformance spec expects "401 Unauthorized". These
+;; are the phrases Go's net/http (http.StatusText) sends where Hunchentoot's differ.
+(loop for (code phrase) in '((302 "Found") (401 "Unauthorized") (408 "Request Timeout")
+                             (414 "Request URI Too Long") (416 "Requested Range Not Satisfiable")
+                             (504 "Gateway Timeout") (505 "HTTP Version Not Supported"))
+      do (setf (gethash code hunchentoot::*http-reason-phrase-map*) phrase))
+
 (defclass gr8s-acceptor (hunchentoot:easy-acceptor)
   ((store :initarg :store :reader acceptor-store)
    (runtime :initarg :runtime :reader acceptor-runtime)
@@ -17,6 +25,24 @@
    :taskmaster (make-instance 'hunchentoot:one-thread-per-connection-taskmaster
                               :max-thread-count +api-connection-limit+
                               :max-accept-count (+ +api-connection-limit+ 128))))
+
+(defvar *api-connection-socket* nil
+  "The socket of the API connection this thread serves, for a stream that outlives its request.")
+
+(defmethod hunchentoot:process-connection :around ((acceptor gr8s-acceptor) socket)
+  (let ((*api-connection-socket* socket)) (call-next-method)))
+
+(defparameter +stream-idle-timeout-seconds+ (* 4 60 60)
+  "How long an upgraded exec or attach stream may wait for its client: kubelet's default
+StreamIdleTimeout. The connection's ordinary read timeout is Hunchentoot's 20 seconds.")
+
+(defun extend-api-connection-idle-timeout (&optional (seconds +stream-idle-timeout-seconds+))
+  "Let the current connection's client stay quiet for SECONDS. A command can run for minutes
+without input, and a client without WebSocket pings (any before v5.channel.k8s.io) sends none."
+  (let ((socket *api-connection-socket*))
+    (when socket
+      (ignore-errors (setf (sb-impl::fd-stream-timeout (usocket:socket-stream socket))
+                           (coerce seconds 'single-float))))))
 
 (defun ha-redirect-response (acceptor request)
   "When this member is not the Raft leader and REQUEST mutates, return a redirect

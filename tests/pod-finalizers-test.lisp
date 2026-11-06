@@ -335,3 +335,54 @@
       ;; A snapshot taken before the removal still carries the finalizer.
       (is (equal "Terminating"
                  (gethash "reason" (gr8s::converge-finalized-pod-deletion reconciler stale)))))))
+
+(test releasing-the-last-finalizer-succeeds-when-another-reconciliation-retires-the-pod
+  ;; Upstream's OrderedNamespaceDeletion spec removes the finalizer with an Update.
+  ;; Any reconciliation may retire the Pod once that write lands, and one that wins
+  ;; the reconciler lock first must not turn the successful write into a 404.
+  (with-core-api (store path)
+    (values path)
+    (let* ((created (create-pod store (finalized-test-pod)))
+           (deleting (mark-pod-deleting store "default" "hello" :grace-period 0))
+           (object (gr8s::copy-core-object (pod-to-object deleting)))
+           (other (make-reconciler store (make-fake-runtime)))
+           (update (symbol-function 'gr8s::update-pod)))
+      (setf (gethash "finalizers" (gethash "metadata" object)) #())
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s::update-pod)
+                   (lambda (&rest arguments)
+                     (prog1 (apply update arguments)
+                       (reconcile-pod other "default" "hello"))))
+             (multiple-value-bind (body code)
+                 (core-api-request "/api/v1/namespaces/default/pods/hello" :method :put :object object)
+               (is (= 200 code) "The update answered ~A: ~A" code (com.inuoe.jzon:stringify body))
+               (is (equal (pod-uid created) (gethash "uid" (gethash "metadata" body))))
+               (is (zerop (length (gethash "finalizers" (gethash "metadata" body) #()))))))
+        (setf (symbol-function 'gr8s::update-pod) update))
+      (signals kubernetes-error (get-pod store "default" "hello")))))
+
+(test a-pod-is-retained-while-a-finalizer-remains-even-after-runtime-cleanup
+  ;; Physical cleanup, a forced zero grace and repeated reconciliation release
+  ;; capacity, but only removing the last finalizer releases the API object.
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let* ((reconciler (make-reconciler store (make-fake-runtime)))
+           (created (create-pod store (finalized-test-pod #("example.com/one" "example.com/two")))))
+      (gr8s::delete-reconciled-pod reconciler "default" "hello" :grace-period 0)
+      (dotimes (i 3) (reconcile-pod reconciler "default" "hello"))
+      (is-true (gethash "runtimeDeleted" (gr8s::pod-finalization-state store created)))
+      (let* ((retained (get-pod store "default" "hello"))
+             (object (gr8s::copy-core-object (pod-to-object retained))))
+        (is (equal (pod-uid created) (pod-uid retained)))
+        (is-true (gr8s::deletion-requested-p retained))
+        (setf (gethash "finalizers" (gethash "metadata" object)) #("example.com/two"))
+        (update-pod store (parse-pod object) (pod-resource-version retained)))
+      (reconcile-pod reconciler "default" "hello")
+      (let* ((retained (get-pod store "default" "hello"))
+             (object (gr8s::copy-core-object (pod-to-object retained))))
+        (is (equal (pod-uid created) (pod-uid retained)))
+        (setf (gethash "finalizers" (gethash "metadata" object)) #())
+        (update-pod store (parse-pod object) (pod-resource-version retained)))
+      (reconcile-pod reconciler "default" "hello")
+      (signals kubernetes-error (get-pod store "default" "hello")))))

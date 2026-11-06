@@ -96,6 +96,7 @@ list as 'nothing is running': Sonobuoy's worker takes it to mean all containers 
 (defun add-pod-status-conditions (store pod status)
   "Attach truthful conditions and checkpoint their history without acknowledging a revision."
   (add-declared-container-statuses pod status)
+  (retain-terminated-container-statuses store pod status)
   (setf (gethash "qosClass" status) (pod-spec-qos-class (gethash "spec" (pod-to-object pod))))
   (let* ((scheduled (not (null (pod-node-name pod))))
          (incoming (gethash "conditions" status))

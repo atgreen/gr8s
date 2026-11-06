@@ -152,10 +152,20 @@ An agent doesn't hold its own Node labels; the control plane already matched tho
                                    always (find (gethash (gethash "key" expression) labels)
                                                 (gethash "values" expression) :test #'equal))))))))
 
+(defun storage-prebound-pair-p (volume claim)
+  "Return whether CLAIM names VOLUME and VOLUME's claimRef names CLAIM. Kubernetes binds such a
+pair as given, without comparing class, size or modes, as e2epv's pre-bound pairs require."
+  (and (equal (gethash "volumeName" (gethash "spec" claim)) (storage-resource-name volume))
+       (storage-claim-ref-matches-p volume claim :allow-unbound t)))
+
 (defun storage-volume-matches-claim-p (volume claim &optional node)
   "Check capacity, class, modes, reservation UID and affinity before allocating a PV."
   (let* ((spec (gethash "spec" volume)) (wanted (gethash "spec" claim))
          (ref (gethash "claimRef" spec)) (requested-name (gethash "volumeName" wanted)))
+    (when (storage-prebound-pair-p volume claim)
+      (return-from storage-volume-matches-claim-p
+        (and (not (gethash "deletionTimestamp" (gethash "metadata" volume)))
+             (storage-node-affinity-matches-p volume node))))
     (and (not (gethash "deletionTimestamp" (gethash "metadata" volume)))
          ;; Only a sidecar that was asked to clone or restore can have filled this volume.
          (or (not (or (gethash "dataSource" wanted) (gethash "dataSourceRef" wanted)))
@@ -197,31 +207,63 @@ An agent doesn't hold its own Node labels; the control plane already matched tho
              (cond ((and a (not b)) t) ((and b (not a)) nil) ((/= ac bc) (< ac bc))
                    (t (string< (storage-resource-name left) (storage-resource-name right)))))))))
 
-(defun pod-node-storage-compatible-p (store pod node)
-  "Filter scheduler candidates using real claim/PV state while STORE is locked."
+(defun pod-node-storage-failure (store pod node)
+  "Return why POD's claims rule out NODE, in the scheduler's VolumeBinding and VolumeRestrictions
+wording, or NIL when they allow it. Call with STORE locked."
   (let ((index (pod-store-resources store)) (used nil))
-    (dolist (name (storage-pod-claim-names pod) t)
+    (dolist (name (storage-pod-claim-names pod) nil)
       (let* ((claim (gethash (core-resource-key "persistentvolumeclaims" (pod-namespace pod) name) index))
+             (delayed (and claim (storage-claim-delayed-p index claim)))
+             (requested (and claim (gethash "volumeName" (gethash "spec" claim))))
              (bound (and claim (storage-bound-volume index claim)))
-             (candidate (or bound (and claim (storage-claim-delayed-p index claim) (storage-candidate-volume index claim node used))))
-             (provisionable (and claim (not candidate) (storage-claim-delayed-p index claim)
+             (candidate (or bound (and delayed (storage-candidate-volume index claim node used))))
+             (provisionable (and claim (not candidate) delayed
                                  (or (storage-claim-provisionable-p (storage-claim-class index claim) claim)
                                      (storage-claim-awaits-external-provisioner-p (storage-claim-class index claim) claim)))))
-        (unless (and claim (or candidate provisionable) (not (gethash "deletionTimestamp" (gethash "metadata" claim)))
-                     (or provisionable (storage-node-affinity-matches-p candidate node))
-                     (storage-class-topology-matches-p (storage-claim-class index claim) node))
-          (return-from pod-node-storage-compatible-p nil))
+        (cond
+          ((null claim) (return (format nil "persistentvolumeclaim ~S not found" name)))
+          ((gethash "deletionTimestamp" (gethash "metadata" claim))
+           (return (format nil "persistentvolumeclaim ~S is being deleted" name)))
+          ((and requested (not (gethash (core-resource-key "persistentvolumes" nil requested) index)))
+           (return "node(s) unavailable due to one or more pvc(s) bound to non-existent pv(s)"))
+          ((and (not candidate) (not delayed)) (return "pod has unbound immediate PersistentVolumeClaims"))
+          ((not (or candidate provisionable)) (return "node(s) didn't find available persistent volumes to bind"))
+          ((not (or provisionable (storage-node-affinity-matches-p candidate node)))
+           (return "node(s) had volume node affinity conflict"))
+          ((not (storage-class-topology-matches-p (storage-claim-class index claim) node))
+           (return "node(s) didn't find available persistent volumes to bind")))
         (let* ((modes (gethash "accessModes" (gethash "spec" claim)))
                (others (storage-claim-consumers-unlocked store claim (pod-uid pod))))
-          (when (or (and (find "ReadWriteOncePod" modes :test #'equal) others)
-                    (and (find "ReadWriteOnce" modes :test #'equal)
-                         (some (lambda (other) (and (pod-node-name other) (not (equal (pod-node-name other) (node-record-name node))))) others)))
-            (return-from pod-node-storage-compatible-p nil)))
+          (when (and (find "ReadWriteOncePod" modes :test #'equal) others)
+            (return "node has pod using PersistentVolumeClaim with the same name and ReadWriteOncePod access mode"))
+          ;; Kubernetes leaves this to attachment; gr8s refuses the node up front.
+          (when (and (find "ReadWriteOnce" modes :test #'equal)
+                     (some (lambda (other) (and (pod-node-name other) (not (equal (pod-node-name other) (node-record-name node))))) others))
+            (return "node(s) unavailable due to a ReadWriteOnce PersistentVolumeClaim in use on another node")))
         (when candidate (push (storage-resource-name candidate) used))))))
+
+(defun pod-node-storage-compatible-p (store pod node)
+  "Filter scheduler candidates using real claim/PV state while STORE is locked."
+  (null (pod-node-storage-failure store pod node)))
+
+(defun storage-attributes-class-in-use-p (index name)
+  "Return whether a PV or PVC in INDEX names the VolumeAttributesClass NAME, as current,
+requested or target class, which Kubernetes' vac-protection controller also checks."
+  (loop for key being the hash-keys of index using (hash-value object)
+          thereis (let ((spec (gethash "spec" object (core-object))) (status (gethash "status" object (core-object))))
+                    (cond ((equal "persistentvolumes" (first key))
+                           (equal name (gethash "volumeAttributesClassName" spec)))
+                          ((equal "persistentvolumeclaims" (first key))
+                           (or (equal name (gethash "volumeAttributesClassName" spec))
+                               (equal name (gethash "currentVolumeAttributesClassName" status))
+                               (equal name (gethash "targetVolumeAttributesClassName"
+                                                    (gethash "modifyVolumeStatus" status (core-object))))))))))
 
 (defun storage-object-in-use-unlocked (store resource object)
   "Enforce implemented PV and PVC protection using exact persisted references."
   (cond ((equal resource "persistentvolumeclaims") (not (null (storage-claim-consumers-unlocked store object))))
+        ((equal resource "volumeattributesclasses")
+         (storage-attributes-class-in-use-p (pod-store-resources store) (storage-resource-name object)))
         ((equal resource "persistentvolumes")
          (let* ((ref (gethash "claimRef" (gethash "spec" object)))
                 (claim (and ref (gethash (core-resource-key "persistentvolumeclaims" (gethash "namespace" ref) (gethash "name" ref))
@@ -231,7 +273,8 @@ An agent doesn't hold its own Node labels; the control plane already matched tho
 (defun storage-protection-finalizer (resource)
   "Return the storage controller's own protection finalizer for RESOURCE."
   (cond ((equal resource "persistentvolumes") "kubernetes.io/pv-protection")
-        ((equal resource "persistentvolumeclaims") "kubernetes.io/pvc-protection")))
+        ((equal resource "persistentvolumeclaims") "kubernetes.io/pvc-protection")
+        ((equal resource "volumeattributesclasses") "kubernetes.io/vac-protection")))
 
 (defun prepare-storage-deletion-unlocked (store resource object)
   "Mark deletion and drop our finalizer only when the underlying reservation is unused."

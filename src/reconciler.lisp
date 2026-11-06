@@ -290,31 +290,218 @@ finishes stops the node starting Pods, and nothing else reports it (podster-uqb.
               (gethash "generation" (gethash "metadata" (pod-to-object pod)) 1)))
       status)))
 
+(defparameter +pod-status-container-fields+
+  '("initContainerStatuses" "containerStatuses" "ephemeralContainerStatuses"))
+
+(defun container-status-state-p (status state)
+  "Return whether container STATUS is in STATE, \"running\", \"terminated\" or \"waiting\"."
+  (and (hash-table-p status) (hash-table-p (gethash "state" status))
+       (hash-table-p (gethash state (gethash "state" status)))))
+
+(defun vanished-container-status (status)
+  "Report a container last seen running whose Pod's containers are now gone, as a kubelet does.
+The kubelet calls it ContainerStatusUnknown with exit code 137; any other STATUS is kept."
+  (if (container-status-state-p status "running")
+      (let ((copy (copy-core-object status)))
+        (setf (gethash "state" copy)
+              (core-object "terminated"
+                           (core-object "exitCode" 137 "reason" "ContainerStatusUnknown"
+                                        "message" "The container could not be located when the pod was terminated"))
+              (gethash "ready" copy) nil
+              (gethash "started" copy) nil)
+        copy)
+      status))
+
+(defun terminating-container-statuses (current last gone)
+  "Merge CURRENT container statuses with the LAST ones reported for a Pod that is shutting down.
+Nothing restarts during shutdown, so a container last seen terminated stays terminated and one
+the runtime no longer lists keeps its last status. When GONE, no container runs any more."
+  (let ((merged (map 'list (lambda (item)
+                             (let ((before (find (gethash "name" item) last :test #'equal
+                                                 :key (lambda (entry) (gethash "name" entry)))))
+                               (if (and (container-status-state-p before "terminated")
+                                        (not (container-status-state-p item "terminated")))
+                                   before item)))
+                     (remove-if-not #'hash-table-p current))))
+    (loop for entry across last
+          unless (find (gethash "name" entry) merged :test #'equal :key (lambda (item) (gethash "name" item)))
+            do (setf merged (append merged (list entry))))
+    (coerce (if gone (mapcar #'vanished-container-status merged) merged) 'vector)))
+
+(defun add-gone-declared-container-statuses (pod status)
+  "List every declared container of a Pod whose containers are gone, waiting where none was seen.
+The kubelet reports a container that never started as waiting, PodInitializing when init containers come first."
+  (let ((reason (if (plusp (length (pod-init-containers pod))) "PodInitializing" "ContainerCreating")))
+    (loop for (field specs) in (list (list "initContainerStatuses" (pod-init-containers pod))
+                                     (list "containerStatuses" (pod-containers pod)))
+          for reported = (gethash field status #())
+          when (plusp (length specs))
+            do (setf (gethash field status)
+                     (map 'vector
+                          (lambda (spec)
+                            (or (find (container-spec-name spec) reported :test #'equal
+                                      :key (lambda (item) (and (hash-table-p item) (gethash "name" item))))
+                                (core-object "name" (container-spec-name spec) "image" (container-spec-image spec)
+                                             "imageID" "" "restartCount" 0 "ready" nil "started" nil
+                                             "state" (core-object "waiting" (core-object "reason" reason)))))
+                          specs))))
+  status)
+
+(defun kubelet-pod-phase (pod status terminal)
+  "Derive POD's phase from container STATUS as the kubelet's getPhase does, TERMINAL once it has stopped.
+A failed init container that won't run again fails the Pod; a container yet to start keeps it Pending."
+  (flet ((entry (field name)
+           (find name (gethash field status #()) :test #'equal
+                 :key (lambda (item) (and (hash-table-p item) (gethash "name" item)))))
+         (exit-code (item)
+           (let ((exit (or (and (container-status-state-p item "terminated") (gethash "terminated" (gethash "state" item)))
+                           (and (container-status-state-p item "waiting")
+                                (hash-table-p (gethash "lastState" item))
+                                (gethash "terminated" (gethash "lastState" item))))))
+             (and (hash-table-p exit) (gethash "exitCode" exit 0)))))
+    (let ((pending-init 0) (pending-sidecars 0) (init-failed nil)
+          (running 0) (waiting 0) (stopped 0) (restartable 0) (succeeded 0) (unknown 0))
+      (loop for spec across (pod-init-containers pod)
+            for name = (container-spec-name spec)
+            for item = (entry "initContainerStatuses" name)
+            do (cond ((pod-sidecar-p pod name)
+                      (cond ((null item) (incf unknown) (incf pending-sidecars))
+                            ((container-status-state-p item "running") (incf running))
+                            ((exit-code item))
+                            (t (incf pending-sidecars) (incf waiting))))
+                     ((or (null item) (container-status-state-p item "running") (null (exit-code item)))
+                      (incf pending-init))
+                     ((and (/= 0 (exit-code item)) (not (container-restarts-after-exit-p pod name (exit-code item))))
+                      (setf init-failed t))))
+      (loop for spec across (pod-containers pod)
+            for name = (container-spec-name spec)
+            for item = (entry "containerStatuses" name)
+            for code = (and item (exit-code item))
+            do (cond ((null item) (incf unknown))
+                     ((container-status-state-p item "running") (incf running))
+                     (code (incf stopped)
+                           (when (container-restarts-after-exit-p pod name code) (incf restartable))
+                           (when (and (zerop code) (container-status-state-p item "terminated")) (incf succeeded)))
+                     (t (incf waiting))))
+      (cond (init-failed "Failed")
+            ((or (plusp pending-init) (plusp waiting)
+                 (and (plusp pending-sidecars)
+                      (notany #'container-status-ever-ran-p (gethash "containerStatuses" status #()))))
+             "Pending")
+            ((and (plusp running) (zerop unknown)) "Running")
+            ((and (zerop running) (plusp stopped) (zerop unknown))
+             (cond ((and (not terminal) (plusp restartable)) "Running")
+                   ((= stopped succeeded) "Succeeded")
+                   (t "Failed")))
+            (t "Pending")))))
+
+(defun terminating-pod-status (pod current last &key gone)
+  "Return the status of POD while it shuts down, from the CURRENT observation and the LAST status reported.
+Shutdown never forgets a container or reverts a terminal phase. Once the containers are GONE, as when
+the runtime finds none or has removed them, the status is the terminal one a kubelet sends last."
+  (let ((status (copy-core-object (or current last (pod-status "Pending")))))
+    (when (or current last)
+      (dolist (field +pod-status-container-fields+)
+        (let ((merged (terminating-container-statuses (gethash field (or current status) #())
+                                                      (if last (gethash field last #()) #()) gone)))
+          (if (plusp (length merged)) (setf (gethash field status) merged) (remhash field status)))))
+    (when gone (add-gone-declared-container-statuses pod status))
+    (let ((previous (and last (gethash "phase" last))))
+      (cond ((member previous '("Succeeded" "Failed") :test #'equal)
+             (setf (gethash "phase" status) previous))
+            ((or gone (member (gethash "phase" status) '(nil "Unknown") :test #'equal))
+             (setf (gethash "phase" status) (kubelet-pod-phase pod status gone)))))
+    status))
+
+(defun retain-terminated-container-statuses (store pod status)
+  "Keep each container clients last saw terminated terminated, unless a new attempt of it now exists,
+and a terminal phase terminal. The kubelet's status manager refuses both transitions too: a report
+without the container, or one still describing the exited attempt, can't make it waiting or running."
+  (let ((published (with-store-lock (store) (gethash (pod-uid pod) (pod-store-pod-published-statuses store)))))
+    (when (hash-table-p published)
+      (when (and (member (gethash "phase" published) '("Succeeded" "Failed") :test #'equal)
+                 (not (member (gethash "phase" status) '("Succeeded" "Failed") :test #'equal)))
+        (setf (gethash "phase" status) (gethash "phase" published)))
+      (dolist (field +pod-status-container-fields+)
+        (let ((before (gethash field published)) (current (gethash field status)))
+          (when (and (vectorp before) (not (stringp before)) (vectorp current) (not (stringp current)))
+            (setf (gethash field status)
+                  (map 'vector
+                       (lambda (item)
+                         (let ((old (and (hash-table-p item)
+                                         (find (gethash "name" item) before :test #'equal
+                                               :key (lambda (entry) (and (hash-table-p entry) (gethash "name" entry)))))))
+                           (if (and old (container-status-state-p old "terminated")
+                                    (not (container-status-state-p item "terminated"))
+                                    (member (gethash "containerID" item "") (list "" (gethash "containerID" old ""))
+                                            :test #'equal))
+                               (copy-core-object old)
+                               item)))
+                       current)))))))
+  status)
+
+(defun pod-published-status (store pod)
+  "Return the status clients last saw for POD, or NIL."
+  (with-store-lock (store)
+    (copy-pod-status-value (gethash (pod-uid pod) (pod-store-pod-published-statuses store)))))
+
+(defun deleted-pod-final-status (reconciler pod last)
+  "Return the status to publish for POD as it is removed, or NIL.
+A runtime that stops containers itself reports what it last saw, with its containers gone. A
+delegating one publishes its node's last report over what clients last saw, as an API server keeps
+the kubelet's last status write: with the containers gone once the node acknowledged removal, and
+unchanged when the deletion needed no acknowledgement. Neither forgets a container or reverts a
+terminal phase clients saw, even when a node rebuilt its acknowledgement from less."
+  (let ((store (reconciler-store reconciler)))
+    (cond ((runtime-runs-containers-p (reconciler-runtime reconciler))
+           (terminating-pod-status pod nil last :gone t))
+          (last
+           (terminating-pod-status pod last (pod-published-status store pod)
+                                   :gone (and (equal "Deleted" (gethash "reason" last))
+                                              (equal (pod-resource-version pod)
+                                                     (pod-observed-resource-version store pod))))))))
+
 (defun converge-deleting-pod (reconciler pod)
   (when (or (pod-finalizers-present-p pod) (pod-finalization-state (reconciler-store reconciler) pod))
     (return-from converge-deleting-pod (converge-finalized-pod-deletion reconciler pod)))
-  (if (runtime-delete-pod (reconciler-runtime reconciler) pod)
-      (progn
-        (runtime-forget-pod-finalization (reconciler-runtime reconciler) (pod-uid pod))
-        (finish-reconciler-urgent-deletion reconciler (pod-uid pod))
-        (remove-pod (reconciler-store reconciler)
-                    (pod-namespace pod) (pod-name pod) :uid (pod-uid pod))
-        (pod-status "Succeeded" :reason "Deleted"))
-      (let* ((runtime (reconciler-runtime reconciler))
-             (observed (handler-case (runtime-observe runtime (pod-uid pod))
-                         ;; Concurrent container removal may invalidate a CRI
-                         ;; status lookup. The deletion remains accepted.
-                         (runtime-error () nil)))
-             (status (if observed (observed-status observed) (pod-status "Unknown"))))
-        ;; Shutdown intent does not prove that a still-running container has
-        ;; become unready. Keep actual container observations during grace;
-        ;; the Service controller separately excludes terminating endpoints.
-        (when (and observed (runtime-pod-spec-fingerprint observed)
-                   (equal (runtime-pod-spec-fingerprint observed) (pod-runtime-spec-fingerprint pod)))
-          (setf (gethash "observedGeneration" status)
-                (gethash "generation" (gethash "metadata" (pod-to-object pod)) 1)))
-        (setf (gethash "reason" status) "Terminating")
-        status)))
+  (let* ((store (reconciler-store reconciler))
+         (runtime (reconciler-runtime reconciler))
+         (last (pod-observed-status store pod)))
+    (if (runtime-delete-pod runtime pod)
+        (let ((final (deleted-pod-final-status reconciler pod last)))
+          (runtime-forget-pod-finalization runtime (pod-uid pod))
+          (finish-reconciler-urgent-deletion reconciler (pod-uid pod))
+          ;; Clients watching the Pod see the terminal status before it goes, as a kubelet's
+          ;; last status update precedes its removal.
+          (when final
+            (let ((published (copy-core-object final)))
+              (remhash "reason" published)
+              (add-pod-status-conditions store pod published)))
+          (remove-pod store (pod-namespace pod) (pod-name pod) :uid (pod-uid pod))
+          (let ((status (or final (pod-status "Succeeded"))))
+            (setf (gethash "reason" status) "Deleted")
+            status))
+        (let* ((failed nil)
+               (observed (handler-case (runtime-observe runtime (pod-uid pod))
+                           ;; Concurrent container removal may invalidate a CRI
+                           ;; status lookup. The deletion remains accepted.
+                           (runtime-error () (setf failed t) nil)))
+               (status (cond ((runtime-runs-containers-p runtime)
+                              ;; A runtime that finds no sandbox has no container left running.
+                              (terminating-pod-status pod (and observed (observed-status observed)) last
+                                                      :gone (not (or observed failed))))
+                             ;; A delegating runtime reports what its node did.
+                             (observed (observed-status observed))
+                             (t (pod-status "Unknown")))))
+          ;; Shutdown intent does not prove that a still-running container has
+          ;; become unready. Keep actual container observations during grace;
+          ;; the Service controller separately excludes terminating endpoints.
+          (when (and observed (runtime-pod-spec-fingerprint observed)
+                     (equal (runtime-pod-spec-fingerprint observed) (pod-runtime-spec-fingerprint pod)))
+            (setf (gethash "observedGeneration" status)
+                  (gethash "generation" (gethash "metadata" (pod-to-object pod)) 1)))
+          (setf (gethash "reason" status) "Terminating")
+          status))))
 
 (defun reconcile-pod (reconciler namespace name)
   (bt:with-lock-held ((reconciler-lock reconciler))
@@ -355,6 +542,18 @@ finishes stops the node starting Pods, and nothing else reports it (podster-uqb.
                            :reason "RuntimeError"
                            :message (runtime-error-message error)))))))))
 
+(defun reconcile-written-pod (reconciler pod)
+  "Reconcile POD, which a request has just written, for that request's response.
+A write that releases the last finalizer of a deleting Pod lets any reconciliation
+retire it, and another one can win the reconciler lock first. The write still
+succeeded, so answer as if this request had retired the Pod itself."
+  (handler-case (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))
+    (kubernetes-error (condition)
+      (if (and (= 404 (kubernetes-error-status-code condition)) (deletion-requested-p pod)
+               (not (pod-finalizers-present-p pod)))
+          (pod-status "Succeeded" :reason "Deleted")
+          (error condition)))))
+
 (defun delete-reconciled-pod (reconciler namespace name &key uid resource-version
                                                       (grace-period nil grace-supplied-p)
                                                       dry-run)
@@ -390,30 +589,39 @@ finishes stops the node starting Pods, and nothing else reports it (podster-uqb.
                            (pod-namespace pod) (pod-name pod) condition)
                    nil))))
 
+(defun call-with-runtime-serialized (reconciler function)
+  "Call FUNCTION under the reconciler lock when the runtime runs containers itself and so shares
+its state with reconciliation. A runtime that delegates to nodes only exchanges messages with
+them, and a node operation's wait, as long as a log read or an exec, must not stall every Pod
+read and write behind it."
+  (if (runtime-runs-containers-p (reconciler-runtime reconciler))
+      (bt:with-lock-held ((reconciler-lock reconciler)) (funcall function))
+      (funcall function)))
+
 (defun reconciler-logs (reconciler uid container &key tail previous)
-  (bt:with-lock-held ((reconciler-lock reconciler))
-    (runtime-logs (reconciler-runtime reconciler)
-                  uid container :tail tail :previous previous)))
+  (call-with-runtime-serialized
+   reconciler
+   (lambda ()
+     (runtime-logs (reconciler-runtime reconciler)
+                   uid container :tail tail :previous previous))))
 
 (defun reconciler-exec-url
     (reconciler uid container command &key stdin stdout stderr tty)
-  (bt:with-lock-held ((reconciler-lock reconciler))
-    (runtime-exec-url
-     (reconciler-runtime reconciler) uid container command
-     :stdin stdin :stdout stdout :stderr stderr :tty tty)))
-
-(defun reconciler-exec-sync
-    (reconciler uid container command &key (timeout 30))
-  (bt:with-lock-held ((reconciler-lock reconciler))
-    (runtime-exec-sync
-     (reconciler-runtime reconciler) uid container command :timeout timeout)))
+  (call-with-runtime-serialized
+   reconciler
+   (lambda ()
+     (runtime-exec-url
+      (reconciler-runtime reconciler) uid container command
+      :stdin stdin :stdout stdout :stderr stderr :tty tty))))
 
 (defun reconciler-start-exec-session
     (reconciler uid container command &key stdin stdout stderr tty)
-  (bt:with-lock-held ((reconciler-lock reconciler))
-    (runtime-start-exec-session
-     (reconciler-runtime reconciler) uid container command
-     :stdin stdin :stdout stdout :stderr stderr :tty tty)))
+  (call-with-runtime-serialized
+   reconciler
+   (lambda ()
+     (runtime-start-exec-session
+      (reconciler-runtime reconciler) uid container command
+      :stdin stdin :stdout stdout :stderr stderr :tty tty))))
 
 (defun reconciler-start-attach-session (reconciler uid container &key stdin stdout stderr tty)
   (runtime-start-attach-session (reconciler-runtime reconciler) uid container

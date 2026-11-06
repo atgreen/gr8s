@@ -44,11 +44,6 @@ with their own deletion lifecycle do."
                                       (gethash "uid" (gethash "metadata" (get-core-resource store resource namespace name)))
                                       policy))))
 
-(defun deletion-held-by-finalizers-p (metadata)
-  "Return whether METADATA names finalizers besides the ones a propagation policy adds."
-  (find-if-not (lambda (name) (member name '("foregroundDeletion" "orphan") :test #'equal))
-               (gethash "finalizers" metadata #())))
-
 (defun delete-workload-resource (store resource namespace name &key uid resource-version dry-run (policy "Background"))
   "Delete immediately in background mode or atomically checkpoint an irreversible deletion."
   (unless (member policy '("Background" "Foreground" "Orphan") :test #'equal)

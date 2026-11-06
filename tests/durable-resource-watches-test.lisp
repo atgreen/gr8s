@@ -103,6 +103,9 @@
                  (gr8s::core-object "resources" (gr8s::core-object "requests" (gr8s::core-object "storage" "1Gi"))
                                     "accessModes" #("ReadWriteOnce") "storageClassName" "")))
           ((equal resource "storageclasses") (setf (gethash "provisioner" object) "kubernetes.io/no-provisioner"))
+          ((equal resource "volumeattributesclasses")
+           (setf (gethash "driverName" object) "watched.example.test"
+                 (gethash "parameters" object) (gr8s::core-object "iops" "100")))
           ((equal resource "events") (setf (gethash "involvedObject" object) (gr8s::core-object)))
           ((equal resource "resourcequotas")
            (setf (gethash "spec" object) (gr8s::core-object "hard" (gr8s::core-object "pods" "1"))))

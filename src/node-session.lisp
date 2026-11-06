@@ -214,17 +214,25 @@ concurrent publications cannot reorder a delta ahead of its base."
              (pending-node-operation-finished operation)
              (pending-node-operation-lock operation)))))))
 
-(defun take-next-node-operation-message (operation)
+(defun take-next-node-operation-message (operation &key timeout)
   "Wait for OPERATION's next message and remove it, returning it, or (values NIL T) at the end.
-What was consumed isn't kept, for streams too long to hold in memory."
-  (bt:with-lock-held ((pending-node-operation-lock operation))
-    (loop
-      (when (pending-node-operation-stream-messages operation)
-        (return (values (pop (pending-node-operation-stream-messages operation)) nil)))
-      (when (pending-node-operation-done-p operation)
-        (return (values nil t)))
-      (bt:condition-wait (pending-node-operation-finished operation)
-                         (pending-node-operation-lock operation)))))
+What was consumed isn't kept, for streams too long to hold in memory. With TIMEOUT seconds and
+nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does."
+  (let ((deadline (and timeout (+ (get-internal-real-time) (* timeout internal-time-units-per-second)))))
+    (bt:with-lock-held ((pending-node-operation-lock operation))
+      (loop
+        (when (pending-node-operation-stream-messages operation)
+          (return (values (pop (pending-node-operation-stream-messages operation)) nil)))
+        (when (pending-node-operation-done-p operation)
+          (return (values nil t)))
+        (if deadline
+            (let ((remaining (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)))
+              (when (<= remaining 0)
+                (error 'runtime-error :message "Timed out waiting for node operation output"))
+              (bt:condition-wait (pending-node-operation-finished operation)
+                                 (pending-node-operation-lock operation) :timeout remaining))
+            (bt:condition-wait (pending-node-operation-finished operation)
+                               (pending-node-operation-lock operation)))))))
 
 (defun wait-for-node-operation (server operation &key (timeout 10))
   (let ((deadline (+ (get-internal-real-time)

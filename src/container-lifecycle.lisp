@@ -258,6 +258,12 @@
 
 (defun native-container-progress-required-p (pod observed)
   "Avoid repeated CRI work for complete healthy or deliberately terminal observations."
+  ;; An exit that restarts every container needs the node to act, whatever else the Pod shows.
+  (when (loop for status across (concatenate 'vector (gethash "initContainerStatuses" (runtime-pod-status observed) #())
+                                             (gethash "containerStatuses" (runtime-pod-status observed) #()))
+              for terminated = (and (hash-table-p (gethash "state" status)) (gethash "terminated" (gethash "state" status)))
+              thereis (and terminated (container-exit-restarts-all-p pod (gethash "name" status) (gethash "exitCode" terminated))))
+    (return-from native-container-progress-required-p t))
   (when (and (plusp (length (pod-init-containers pod)))
              (not (pod-initialization-complete-p pod (runtime-pod-status observed))))
     (return-from native-container-progress-required-p
@@ -333,6 +339,7 @@
      :hostname (pod-sandbox-hostname pod)
      :security (containerd-pod-sandbox-security pod)
      :sysctls (pod-sysctls pod) :pid-mode (pod-pid-namespace-mode pod) :host-ipc (pod-spec-flag-p pod "hostIPC")
+     :userns (containerd-pod-user-namespace runtime pod)
      :dns-servers servers :dns-searches searches :dns-options options)))
 
 (defun containerd-start-sandbox (runtime pod)
@@ -351,6 +358,7 @@
             :security (containerd-pod-sandbox-security pod)
             :runtime-handler (pod-runtime-handler pod)
             :sysctls (pod-sysctls pod) :pid-mode (pod-pid-namespace-mode pod) :host-ipc (pod-spec-flag-p pod "hostIPC")
+            :userns (containerd-pod-user-namespace runtime pod)
             :dns-servers servers :dns-searches searches :dns-options options)))))
 
 (defun containerd-prune-old-attempts (runtime infos &optional created-names)
@@ -499,6 +507,14 @@ A first attempt never ran, so it leaves no trace and is made again as attempt ze
       (remember-container-lifecycle-statuses state
         (map 'vector (lambda (info) (container-lifecycle-status info state)) current))
       (save-container-lifecycle-state runtime uid state)
+      (let ((trigger (restart-all-containers-trigger pod current state)))
+        (when trigger
+          (restart-all-pod-containers runtime pod current state trigger)
+          (setf infos (containerd-discard-cancelled-starts
+                       runtime uid state
+                       (mapcar (lambda (summary) (cri-container-status socket (cri-container-summary-id summary)))
+                               (containerd-containers runtime sandbox)))
+                current (containerd-stop-unknown-attempts runtime (current-container-infos infos state)))))
       (loop for spec across (next-pod-container-specs pod current state runtime)
             for name = (container-spec-name spec)
             for info = (find name current :key #'cri-container-info-name :test #'equal)

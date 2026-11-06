@@ -44,6 +44,7 @@
                                 (node-record-pod-cidr node))))
       (setf (node-record-ready-p node) nil
             (node-record-last-heartbeat node) nil
+            (node-record-creation-timestamp node) (or (node-record-creation-timestamp node) (current-timestamp))
             (gethash (node-record-name node) (pod-store-nodes store)) node)
       (publish-node-change-unlocked store nil node)
       ;; Desired write (the control-plane-assigned podCIDR): replicate (8ia.4).
@@ -88,6 +89,10 @@
         (setf (node-record-ready-p node) t
               (node-record-last-heartbeat node) heartbeat
               (node-record-lease-deadline node) (node-record-lease-deadline updated))
+        ;; A node an older gr8s registered has no creation time until its agent returns.
+        (when (and old (null (node-record-creation-timestamp node)))
+          (setf (node-record-creation-timestamp node) (current-timestamp))
+          (note-node-desired-change store))
         (when old (publish-node-change-unlocked store old node)))
       node)))
 
@@ -305,12 +310,15 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
       (publish-node-change-unlocked store old node))))
 
 (defun node-placement-better-p (store pod left right)
-  "Prefer a node POD's affinity favors, then the fewest Pods, then a stable name."
+  "Prefer a node POD's affinity favors, then its least crowded spread domains, then the fewest Pods, then a stable name."
   (let ((left-score (+ (pod-node-preference-score pod left) (pod-affinity-preference-score-unlocked store pod left)))
         (right-score (+ (pod-node-preference-score pod right) (pod-affinity-preference-score-unlocked store pod right)))
+        (left-spread (pod-topology-spread-penalty-unlocked store pod left))
+        (right-spread (pod-topology-spread-penalty-unlocked store pod right))
         (left-count (assigned-nonterminal-pod-count store (node-record-name left)))
         (right-count (assigned-nonterminal-pod-count store (node-record-name right))))
     (cond ((/= left-score right-score) (> left-score right-score))
+          ((/= left-spread right-spread) (< left-spread right-spread))
           ((/= left-count right-count) (< left-count right-count))
           (t (string< (node-record-name left) (node-record-name right))))))
 
@@ -382,9 +390,14 @@ Each call for an unbound Pod is a scheduling attempt, measured as kube-scheduler
               (remhash (pod-uid pod) (pod-store-nominated-nodes store))
               (persist-pod-assignment store pod (node-record-name node)))
             (let ((plan (choose-preemption-unlocked store pod placeable)))
-              (when plan
-                (setf victims (cdr plan)
-                      (gethash (pod-uid pod) (pod-store-nominated-nodes store)) (node-record-name (car plan))))))))
+              (cond (plan
+                     (setf victims (cdr plan)
+                           (gethash (pod-uid pod) (pod-store-nominated-nodes store)) (node-record-name (car plan))))
+                    ;; As upstream, a Pod still waiting for its victims keeps its nomination, while
+                    ;; one whose preemption now finds nothing gives it up, so its reservation stops
+                    ;; holding room against Pods of its own priority.
+                    ((not (pod-awaiting-preemption-p store pod))
+                     (remhash (pod-uid pod) (pod-store-nominated-nodes store))))))))
     (ignore-errors
      (note-scheduling-attempt (pod-uid pod)
                               (ignore-errors (pod-deletion-time (table-get (pod-to-object pod) "metadata" "creationTimestamp")))
@@ -392,7 +405,8 @@ Each call for an unbound Pod is a scheduling attempt, measured as kube-scheduler
                               (/ (- (get-internal-real-time) started) internal-time-units-per-second)
                               (and node algorithm)))
     ;; Deletion takes the store lock itself and is retried by reconciliation.
-    (dolist (victim victims) (preempt-pod store victim))
+    (dolist (victim victims)
+      (unless (deletion-requested-p victim) (preempt-pod store victim)))
     (if node
         (progn
           (with-store-lock (store) (remhash (pod-uid pod) (pod-store-scheduling-notes store)))

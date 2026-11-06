@@ -72,7 +72,16 @@ and when each assigned Pod was first seen and at what version, until it first ru
   (pod-start (make-bucketed-histogram +kubelet-pod-start-buckets+))
   (pod-workers (make-hash-table :test #'equal))
   (pods (make-hash-table :test #'equal))
+  ;; Sandboxes started for Pods with hostUsers false, and those whose start then failed.
+  (user-namespaced-starts 0)
+  (user-namespaced-start-errors 0)
   (lock (bt:make-lock "gr8s kubelet metrics")))
+
+(defun note-user-namespaced-pod-start (succeeded &key (metrics *kubelet-instrumentation*))
+  "Count one sandbox started for a user-namespaced Pod, and an error unless its sync SUCCEEDED."
+  (bt:with-lock-held ((kubelet-instrumentation-lock metrics))
+    (incf (kubelet-instrumentation-user-namespaced-starts metrics))
+    (unless succeeded (incf (kubelet-instrumentation-user-namespaced-start-errors metrics)))))
 
 (defvar *kubelet-instrumentation* (make-kubelet-instrumentation)
   "This process's node agent measurements.")
@@ -171,6 +180,12 @@ operation_type, list_podsandbox, or NIL for anything that isn't a CRI call."
         (write-prometheus-family out "kubelet_runtime_operations_errors_total"
                                  "[ALPHA] Cumulative number of runtime operation errors by operation type." "counter"
                                  (counts (kubelet-instrumentation-errors metrics)))
+        (write-prometheus-family out "kubelet_started_user_namespaced_pods_total"
+                                 "[ALPHA] Cumulative number of pods with user namespaces started" "counter"
+                                 (list (list nil (kubelet-instrumentation-user-namespaced-starts metrics))))
+        (write-prometheus-family out "kubelet_started_user_namespaced_pods_errors_total"
+                                 "[ALPHA] Cumulative number of errors when starting pods with user namespaces. This does not consider errors for non user namespace pods" "counter"
+                                 (list (list nil (kubelet-instrumentation-user-namespaced-start-errors metrics))))
         (write-prometheus-family out "kubelet_runtime_operations_total"
                                  "[ALPHA] Cumulative number of runtime operations by operation type." "counter"
                                  (counts (kubelet-instrumentation-operations metrics)))))))
@@ -215,6 +230,58 @@ operation_type, list_podsandbox, or NIL for anything that isn't a CRI call."
 (defmethod runtime-container-state-counts ((runtime containerd-runtime))
   "Ask the CRI runtime what it runs."
   (call-containerd-runtime (lambda () (cri-container-state-counts (containerd-runtime-socket-path runtime)))))
+
+(defgeneric runtime-claim-volume-paths (runtime)
+  (:documentation "Return (namespace claim host-path) for each claim volume RUNTIME's containers mount."))
+
+(defmethod runtime-claim-volume-paths ((runtime t))
+  "A runtime without containers mounts no claims."
+  (declare (ignore runtime))
+  nil)
+
+(defmethod runtime-claim-volume-paths ((runtime containerd-runtime))
+  "Report the claim volumes recorded as the runtime's containers mounted them."
+  (loop for record in (directory (merge-pathnames "*/volumes/.claims/*.*" (containerd-runtime-log-root runtime)))
+        for entry = (ignore-errors (coerce (com.inuoe.jzon:parse (uiop:read-file-string record)) 'list))
+        when (and (= 3 (length entry)) (every #'stringp entry)) collect entry))
+
+(defun filesystem-statistics (path)
+  "Measure the filesystem holding PATH as the kubelet's statfs metrics do: capacity, available
+and used bytes, then inodes, free inodes and used inodes. NIL when it cannot be measured."
+  (sb-alien:with-alien ((fields (array sb-alien:unsigned-long 32)))
+    (when (zerop (sb-alien:alien-funcall
+                  (sb-alien:extern-alien "statvfs" (function sb-alien:int sb-alien:c-string (* t)))
+                  path (sb-alien:addr fields)))
+      ;; struct statvfs: f_bsize, f_frsize, f_blocks, f_bfree, f_bavail, f_files, f_ffree.
+      (let ((size (sb-alien:deref fields 1)) (blocks (sb-alien:deref fields 2))
+            (free (sb-alien:deref fields 3)) (available (sb-alien:deref fields 4))
+            (inodes (sb-alien:deref fields 5)) (free-inodes (sb-alien:deref fields 6)))
+        (list (* blocks size) (* available size) (* (- blocks free) size)
+              inodes free-inodes (- inodes free-inodes))))))
+
+(defun kubelet-volume-stats-text (volumes)
+  "Render kubelet_volume_stats_* for VOLUMES, (namespace claim host-path) lists. As upstream,
+a claim several Pods mount is reported once, and one that can't be measured is left out."
+  (let ((seen nil) (rows nil))
+    (loop for (namespace claim path) in volumes
+          for key = (cons namespace claim)
+          unless (member key seen :test #'equal)
+            do (let ((statistics (filesystem-statistics path)))
+                 (when statistics
+                   (push key seen)
+                   (push (cons (list (cons "namespace" namespace) (cons "persistentvolumeclaim" claim)) statistics) rows))))
+    (with-output-to-string (out)
+      (loop for (suffix help) in '(("available_bytes" "Number of available bytes in the volume")
+                                   ("capacity_bytes" "Capacity in bytes of the volume")
+                                   ("inodes" "Maximum number of inodes in the volume")
+                                   ("inodes_free" "Number of free inodes in the volume")
+                                   ("inodes_used" "Number of used inodes in the volume")
+                                   ("used_bytes" "Number of used bytes in the volume"))
+            for index = (position suffix '("capacity_bytes" "available_bytes" "used_bytes" "inodes" "inodes_free" "inodes_used")
+                                  :test #'equal)
+            do (write-prometheus-family out (concatenate 'string "kubelet_volume_stats_" suffix)
+                                        (concatenate 'string "[ALPHA] " help) "gauge"
+                                        (mapcar (lambda (row) (list (car row) (nth index (cdr row)))) rows))))))
 
 ;;; The process collector
 

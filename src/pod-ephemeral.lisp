@@ -129,7 +129,7 @@
             (json-response (pod-response-object replacement (reconcile-pod reconciler namespace name)))
             (let ((updated (let ((*pod-ephemeral-update* t))
                              (update-pod store replacement (pod-resource-version pod)))))
-              (json-response (pod-response-object updated (reconcile-pod reconciler namespace name)))))))))
+              (json-response (pod-response-object updated (reconcile-written-pod reconciler updated)))))))))
 
 (defun remember-pod-ephemeral-declarations (state pod)
   "Checkpoint which names are ephemeral, since an observation of them knows only a UID."

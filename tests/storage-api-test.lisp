@@ -180,7 +180,15 @@
       (is-true (probe-file file))
       (signals gr8s::runtime-error (gr8s::materialize-host-storage-source (gr8s::core-object "path" (namestring directory) "type" "File")))
       (signals gr8s::runtime-error (gr8s::materialize-host-storage-source (gr8s::core-object "path" (namestring file) "type" "Directory")))
-      (signals gr8s::runtime-error (gr8s::materialize-host-storage-source (gr8s::core-object "path" (namestring (merge-pathnames "absent/" path)) "type" "Directory"))))))
+      (signals gr8s::runtime-error (gr8s::materialize-host-storage-source (gr8s::core-object "path" (namestring (merge-pathnames "absent/" path)) "type" "Directory")))
+      ;; Untyped, a missing source is left for the CRI runtime to create, as upstream StatefulSet tests expect.
+      (let ((untyped (merge-pathnames "untyped/" path)))
+        (is (equal (namestring untyped)
+                   (namestring (gr8s::materialize-host-storage-source (gr8s::core-object "path" (namestring untyped))))))
+        (is-false (uiop:directory-exists-p untyped)))
+      ;; A local PV's directory must already exist.
+      (signals gr8s::runtime-error
+        (gr8s::materialize-host-storage-source (gr8s::core-object "path" (namestring (merge-pathnames "absent/" path))) :local t)))))
 
 (test retroactive-default-class-respects-explicit-opt-out
   (with-temporary-store (store path)
@@ -247,4 +255,74 @@
                    (mount (first (gr8s::containerd-pod-mounts runtime pod (aref (pod-containers pod) 0)))))
               (is (eql expected (gr8s.cri.v1::readonly mount))))))))))
 
+(test prebound-pairs-bind-as-given-and-unschedulable-pods-say-why
+  ;; The SchedulerPredicates spec pre-binds a local PV whose class differs from the
+  ;; claim's defaulted one, with node affinity naming nodes that don't exist.
+  (with-temporary-store (store path)
+    (ready-node store "worker-a" "a" "10.64.0.0/20")
+    (gr8s::seed-default-storage-class store path :path (namestring (merge-pathnames "local-path" path)))
+    (let ((volume (storage-test-volume "pv-prebound" (merge-pathnames "local/" path))))
+      (remhash "hostPath" (gethash "spec" volume))
+      (setf (gethash "local" (gethash "spec" volume)) (gr8s::core-object "path" "/tmp")
+            (gethash "nodeAffinity" (gethash "spec" volume))
+            (gr8s::core-object "required" (gr8s::core-object "nodeSelectorTerms"
+                                           (vector (gr8s::core-object "matchExpressions"
+                                                    (vector (gr8s::core-object "key" "kubernetes.io/hostname" "operator" "In"
+                                                                               "values" #("worker-a" "absent-1" "absent-2")))))))
+            (gethash "claimRef" (gethash "spec" volume)) (gr8s::core-object "name" "data" "namespace" "default"))
+      (gr8s::create-core-resource store "persistentvolumes" volume nil))
+    (let ((claim (storage-test-claim "data")))
+      (remhash "storageClassName" (gethash "spec" claim))
+      (setf (gethash "volumeName" (gethash "spec" claim)) "pv-prebound")
+      (is (equal "local-path" (gethash "storageClassName" (gethash "spec" (gr8s::create-core-resource store "persistentvolumeclaims" claim "default"))))))
+    (gr8s::reconcile-storage-bindings store)
+    (is (equal "Bound" (storage-phase store "persistentvolumeclaims" "default" "data")))
+    (is (equal "Bound" (storage-phase store "persistentvolumes" nil "pv-prebound")))
+    (let ((pod (create-pod store (storage-test-pod "consumer" "data"))))
+      (is (equal "worker-a" (gr8s::node-record-name (gr8s:schedule-pod store pod)))))
+    ;; A missing claim is reported as the scheduler reports it.
+    (let ((pod (create-pod store (storage-test-pod "orphan" "missing"))))
+      (is (null (gr8s:schedule-pod store pod)))
+      (is (equal "0/1 nodes are available: 1 persistentvolumeclaim \"missing\" not found."
+                 (gr8s::with-store-lock (store) (gr8s::pod-unschedulable-message store pod)))))))
+
+
+(test local-volumes-take-the-pods-fs-group-without-following-links
+  (with-temporary-store (store path)
+    (let* ((runtime (gr8s::%make-containerd-runtime :log-root (merge-pathnames "logs/" path) :resource-store store))
+           (backing (merge-pathnames "local/" path)) (outside (merge-pathnames "outside" path))
+           (gid (sb-posix:getgid)) (volume (storage-test-volume "local-pv" backing)))
+      (ensure-directories-exist (merge-pathnames "nested/" backing))
+      (dolist (file (list (merge-pathnames "file" backing) outside))
+        (with-open-file (out file :direction :output) (write-string "x" out))
+        (sb-posix:chmod (namestring file) #o600))
+      (sb-posix:chmod (namestring backing) #o755)
+      (sb-posix:chmod (namestring (merge-pathnames "nested/" backing)) #o755)
+      (sb-posix:symlink (namestring outside) (namestring (merge-pathnames "escape" backing)))
+      (remhash "hostPath" (gethash "spec" volume))
+      (setf (gethash "local" (gethash "spec" volume)) (gr8s::core-object "path" (string-right-trim "/" (namestring backing)))
+            (gethash "nodeAffinity" (gethash "spec" volume))
+            (gr8s::core-object "required" (gr8s::core-object "nodeSelectorTerms"
+                                           (vector (gr8s::core-object "matchExpressions"
+                                                    (vector (gr8s::core-object "key" "kubernetes.io/hostname" "operator" "In" "values" #("worker-a"))))))))
+      (gr8s::create-core-resource store "persistentvolumes" volume nil)
+      (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "data") "default")
+      (gr8s::reconcile-storage-bindings store)
+      (let* ((object (pod-to-object (storage-test-pod "consumer" "data" "worker-a"))))
+        (setf (gethash "securityContext" (gethash "spec" object)) (gr8s::core-object "fsGroup" gid))
+        (let* ((pod (create-pod store (parse-pod object)))
+               (source (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0)))
+          (flet ((mode (file) (logand #o7777 (sb-posix:stat-mode (sb-posix:lstat (namestring file))))))
+            (gr8s::materialize-pod-volume runtime pod source)
+            (is (= #o2775 (mode (string-right-trim "/" (namestring backing)))))
+            (is (= #o2775 (mode (merge-pathnames "nested" backing))))
+            (is (= #o660 (mode (merge-pathnames "file" backing))))
+            (is (= gid (sb-posix:stat-gid (sb-posix:stat (namestring (merge-pathnames "file" backing))))))
+            ;; The link is re-owned but never followed.
+            (is (= #o600 (mode outside)))
+            ;; OnRootMismatch leaves a matching root's contents alone.
+            (sb-posix:chmod (namestring (merge-pathnames "file" backing)) #o600)
+            (setf (gethash "fsGroupChangePolicy" (gethash "securityContext" (gethash "spec" (pod-to-object pod)))) "OnRootMismatch")
+            (gr8s::materialize-pod-volume runtime pod source)
+            (is (= #o600 (mode (merge-pathnames "file" backing))))))))))
 (in-suite gr8s)

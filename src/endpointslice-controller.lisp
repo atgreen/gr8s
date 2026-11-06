@@ -53,6 +53,17 @@
                                 "targetRef" (core-object "apiVersion" "v1" "kind" "Pod" "namespace" (pod-namespace pod)
                                                          "name" (pod-name pod) "uid" (pod-uid pod)))))
     (when (pod-node-name pod) (setf (gethash "nodeName" endpoint) (pod-node-name pod)))
+    (let ((zone (and node (gethash "topology.kubernetes.io/zone" (node-labels node))))
+          (distribution (gethash "trafficDistribution" (gethash "spec" service))))
+      (when (and (stringp zone) (plusp (length zone))) (setf (gethash "zone" endpoint) zone))
+      ;; Hints for a ready endpoint, as upstream's preferClose heuristic writes them.
+      (when (and ready (member distribution '("PreferClose" "PreferSameZone" "PreferSameNode") :test #'equal))
+        (let ((hints (core-object)))
+          (when (gethash "zone" endpoint)
+            (setf (gethash "forZones" hints) (vector (core-object "name" (gethash "zone" endpoint)))))
+          (when (and (equal distribution "PreferSameNode") (pod-node-name pod))
+            (setf (gethash "forNodes" hints) (vector (core-object "name" (pod-node-name pod)))))
+          (when (plusp (hash-table-count hints)) (setf (gethash "hints" endpoint) hints)))))
     (let* ((spec (gethash "spec" (pod-to-object pod))) (hostname (gethash "hostname" spec))
            (subdomain (gethash "subdomain" spec)) (name (gethash "name" (gethash "metadata" service))))
       (when (and hostname (plusp (length hostname)) (equal name subdomain)) (setf (gethash "hostname" endpoint) hostname)))
@@ -210,8 +221,12 @@ While admission is configured, each Service's writes are admitted first, outside
           (reconcile-service-endpointslices store service))))
   store)
 
-(defun service-slice-endpoints (store service port)
-  "Resolve real forwarding backends for PORT's protocol from matching slices, including selectorless manual Services."
+(defun service-slice-endpoint-records (store service port &key proxy)
+  "Read every endpoint of PORT's protocol from the Service's IPv4 slices, ready or not, as kube-proxy does.
+For the PROXY, as kube-proxy's informer does, a slice labelled service.kubernetes.io/headless is ignored.
+Returns (values records found). Each record is a plist with :address, :port, :ready, :serving,
+:terminating, :node, :zone, :zone-hints and :node-hints; an unset condition counts as true, except
+terminating, as upstream's proxy reads them."
   (let* ((metadata (gethash "metadata" service)) (name (gethash "name" metadata))
          (port-name (gethash "name" port "")) (result nil) (found nil))
     (dolist (slice (list-core-resources store "endpointslices" (gethash "namespace" metadata)))
@@ -222,10 +237,111 @@ While admission is configured, each Service's writes are admitted first, outside
                                  (and (equal port-name (gethash "name" candidate ""))
                                       (equal (gethash "protocol" port "TCP") (gethash "protocol" candidate "TCP"))))
                                (gethash "ports" slice #()))))
-          (when (and target (integerp (gethash "port" target)))
+          (when (and target (integerp (gethash "port" target))
+                     (not (and proxy (nth-value 1 (gethash "service.kubernetes.io/headless"
+                                                            (gethash "labels" (gethash "metadata" slice) (core-object)))))))
             (loop for endpoint across (gethash "endpoints" slice #())
                   for conditions = (gethash "conditions" endpoint (core-object))
-                  when (not (and (nth-value 1 (gethash "ready" conditions)) (null (gethash "ready" conditions))))
-                    do (loop for address across (gethash "addresses" endpoint)
-                             do (pushnew (list address (gethash "port" target)) result :test #'equal)))))))
+                  for hints = (gethash "hints" endpoint)
+                  do (flet ((condition-true-p (key default)
+                              (multiple-value-bind (value present) (gethash key conditions)
+                                (if (and present (not (eq value 'null))) (eq value t) default)))
+                            (hint-names (key)
+                              (and (hash-table-p hints)
+                                   (loop for hint across (gethash key hints #()) collect (gethash "name" hint)))))
+                       (let ((record (list :port (gethash "port" target)
+                                           :ready (condition-true-p "ready" t)
+                                           :serving (condition-true-p "serving" t)
+                                           :terminating (condition-true-p "terminating" nil)
+                                           :node (gethash "nodeName" endpoint)
+                                           :zone (gethash "zone" endpoint)
+                                           :zone-hints (hint-names "forZones")
+                                           :node-hints (hint-names "forNodes"))))
+                         (loop for address across (gethash "addresses" endpoint)
+                               unless (find-if (lambda (seen) (and (equal address (getf seen :address))
+                                                                   (eql (getf record :port) (getf seen :port))))
+                                               result)
+                                 do (push (list* :address address record) result)))))))))
     (values (nreverse result) found)))
+
+(defun service-slice-endpoints (store service port)
+  "Resolve real forwarding backends for PORT's protocol from matching slices, including selectorless manual Services."
+  (multiple-value-bind (records found) (service-slice-endpoint-records store service port)
+    (values (loop for record in records
+                  when (getf record :ready) collect (list (getf record :address) (getf record :port)))
+            found)))
+
+(defun service-topology-mode (records node-name zone)
+  "Choose, as kube-proxy does, which topology hints to follow: :node when every ready endpoint has
+a node hint and one names NODE-NAME, else :zone likewise for ZONE, else NIL to ignore hints."
+  (let ((ready (remove-if-not (lambda (record) (getf record :ready)) records)))
+    (cond ((null ready) nil)
+          ((and node-name (every (lambda (record) (getf record :node-hints)) ready)
+                (some (lambda (record) (member node-name (getf record :node-hints) :test #'equal)) ready))
+           :node)
+          ((and zone (every (lambda (record) (getf record :zone-hints)) ready)
+                (some (lambda (record) (member zone (getf record :zone-hints) :test #'equal)) ready))
+           :zone))))
+
+(defun categorize-service-endpoints (records spec &key node-name zone)
+  "Split endpoint RECORDS for Service SPEC as kube-proxy's CategorizeEndpoints does.
+Returns (values cluster local local-ready-count any), ANY being kube-proxy's hasAnyEndpoints: the ready endpoints the topology hints allow,
+or failing those every serving terminating one; this node's ready endpoints, or failing those its
+serving terminating ones; and how many ready endpoints are on this node. An endpoint without a
+node, as a selectorless manual one, is never local. Each list holds (address port) pairs."
+  (let* ((local-p (lambda (record) (and node-name (equal node-name (getf record :node)))))
+         (external (service-externally-accessible-p spec))
+         (uses-cluster (or (equal "Cluster" (gethash "internalTrafficPolicy" spec "Cluster"))
+                           (and external (equal "Cluster" (gethash "externalTrafficPolicy" spec "Cluster")))))
+         (uses-local (or (equal "Local" (gethash "internalTrafficPolicy" spec))
+                         (and external (equal "Local" (gethash "externalTrafficPolicy" spec)))))
+         (fallback-p (lambda (record) (and (getf record :serving) (getf record :terminating))))
+         (cluster nil) (local nil))
+    (when uses-cluster
+      (let ((mode (service-topology-mode records node-name zone)))
+        (setf cluster (remove-if-not (lambda (record)
+                                       (and (getf record :ready)
+                                            (case mode
+                                              (:node (member node-name (getf record :node-hints) :test #'equal))
+                                              (:zone (member zone (getf record :zone-hints) :test #'equal))
+                                              (t t))))
+                                     records))
+        (unless cluster (setf cluster (remove-if-not fallback-p records)))))
+    (when uses-local
+      (setf local (or (remove-if-not (lambda (record) (and (funcall local-p record) (getf record :ready))) records)
+                      (remove-if-not (lambda (record) (and (funcall local-p record) (funcall fallback-p record))) records))))
+    (flet ((pairs (list) (mapcar (lambda (record) (list (getf record :address) (getf record :port))) list)))
+      (values (pairs cluster) (pairs local)
+              (count-if (lambda (record) (and (funcall local-p record) (getf record :ready))) records)
+              (and (or cluster
+                       (some (lambda (record) (or (getf record :ready) (funcall fallback-p record))) records))
+                   t)))))
+
+(defun service-node-zone (store node-name)
+  "This node's zone as its own endpoints report it, or NIL. The agent has no Node objects, and
+without a zone kube-proxy, too, ignores zone hints."
+  (when node-name
+    (dolist (slice (list-core-resources store "endpointslices"))
+      (loop for endpoint across (gethash "endpoints" slice #())
+            when (and (equal node-name (gethash "nodeName" endpoint)) (stringp (gethash "zone" endpoint)))
+              do (return-from service-node-zone (gethash "zone" endpoint))))))
+
+(defun service-port-backends (store service port &key node-name zone)
+  "Resolve the backends SERVICE's PORT sends each kind of traffic to on node NODE-NAME.
+Returns (values internal external local-origin local-ready-count any) as (address port) lists:
+INTERNAL for the ClusterIP, which internalTrafficPolicy governs; EXTERNAL for node ports,
+external IPs and load balancer addresses reached from elsewhere, which externalTrafficPolicy
+governs; LOCAL-ORIGIN for those reached from this node itself, which kube-proxy short-circuits to
+every endpoint while the Service uses any; the ready local endpoint count a health check reports;
+and whether the port has any usable endpoint anywhere, without which kube-proxy rejects traffic."
+  (let ((spec (gethash "spec" service)))
+    (multiple-value-bind (records found) (service-slice-endpoint-records store service port :proxy t)
+      (if (not found)
+          ;; No slices yet: the agent's own selector-matched Pods, all on this node.
+          (let ((endpoints (service-pod-endpoints store service port)))
+            (values endpoints endpoints endpoints (length endpoints) (and endpoints t)))
+          (multiple-value-bind (cluster local ready-local any)
+              (categorize-service-endpoints records spec :node-name node-name :zone zone)
+            (let ((internal (if (equal "Local" (gethash "internalTrafficPolicy" spec)) local cluster))
+                  (external (if (equal "Local" (gethash "externalTrafficPolicy" spec)) local cluster)))
+              (values internal external (or cluster local) ready-local any)))))))

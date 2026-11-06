@@ -87,7 +87,10 @@
   unschedulable
   ;; A Node created through the API has no agent: its status is whatever was written.
   api-only
-  api-status)
+  api-status
+  ;; When the node was first registered, as an RFC 3339 timestamp; NIL for a node an older
+  ;; gr8s registered until its agent registers again.
+  creation-timestamp)
 
 (defun node-record-runtime-ready-p (node)
   "Return whether NODE's agent holds its lease and its container runtime can run Pods."
@@ -154,8 +157,9 @@
 
 (defun dns-subdomain-p (value)
   "Return true when VALUE is a valid Kubernetes-style DNS subdomain."
+  ;; UIOP splits "" into no labels at all, which EVERY would accept.
   (and (stringp value)
-       (<= (length value) 253)
+       (<= 1 (length value) 253)
        (every (lambda (label) (dns-label-p label 253))
               (uiop:split-string value :separator '(#\.)))))
 
@@ -323,9 +327,11 @@
             "securityContext" "serviceAccountName" "automountServiceAccountToken" "imagePullSecrets"
             "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig"
             "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
-            "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "shareProcessNamespace" "hostAliases" "ephemeralContainers"
+            "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "hostUsers" "shareProcessNamespace" "hostAliases" "ephemeralContainers"
             "readinessGates" "schedulerName" "hostnameOverride" "setHostnameAsFQDN" "serviceAccount"
-            "topologySpreadConstraints" "schedulingGates") "spec")
+            "topologySpreadConstraints" "schedulingGates" "resources" "schedulingGroup") "spec")
+    ;; GenericWorkload is beta and off by default in v1.37, so the API server drops the field.
+    (remhash "schedulingGroup" spec)
     (dolist (field '("hostname" "subdomain"))
       (when (eq (gethash field spec) 'null) (remhash field spec))
       (let ((value (gethash field spec "")))
@@ -368,6 +374,8 @@
                                    (optional-vector spec "initContainers" "spec")))
              (ephemeral-containers (parse-pod-ephemeral-containers spec))
              (all-containers (concatenate 'vector init-containers parsed-containers ephemeral-containers)))
+        ;; Pod-level resources are checked against the containers' normalized ones.
+        (validate-pod-level-resources spec)
         (unless (= (length all-containers)
                    (length (remove-duplicates
                             (map 'list #'container-spec-name all-containers)

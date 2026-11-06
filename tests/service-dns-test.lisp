@@ -357,3 +357,16 @@
           (is (= 1 (length remaining)))
           (is (equal (gethash "uid" (gethash "metadata" manual))
                      (gethash "uid" (gethash "metadata" (first remaining))))))))))
+
+(test service-dns-srv-headless-reads-ports-from-slices-not-the-spec
+  ;; A selectorless headless Service's slices may name ports its spec lacks; CoreDNS answers them.
+  (with-temporary-store (store directory)
+    (let* ((object (service-test-object "web" "http"))
+           (slice (endpointslice-test-object "two" "192.0.2.21" 443)))
+      (setf (gethash "clusterIP" (gethash "spec" object)) "None"
+            (gethash "name" (aref (gethash "ports" (gethash "spec" object)) 0)) "http")
+      (gr8s::create-core-resource store "services" object "alpha")
+      (setf (gethash "name" (aref (gethash "ports" slice) 0)) "https")
+      (gr8s::create-core-resource store "endpointslices" slice "alpha")
+      (is (equal '((443 "192-0-2-21.web.alpha.svc.cluster.local"))
+                 (dns-srv-tuples (service-dns-test-message store "_https._tcp.web.alpha.svc.cluster.local" 0conf:+type-srv+)))))))

@@ -102,6 +102,10 @@ def main():
     if os.geteuid() != 0:
         parser.error("Run this privileged integration test inside a disposable Linux guest")
     root = Path(tempfile.mkdtemp(prefix="gr8s-conformance." if args.certified_conformance else "gr8s-podtemplates.", dir=args.state_parent))
+    # mkdtemp makes the directory 0700. A container in a user namespace of its own (hostUsers: false)
+    # runs as an unprivileged host ID, which must traverse it to reach its rootfs, as it traverses
+    # /var/lib on an ordinary node. Searching is all it gets; listing stays private.
+    root.chmod(0o711)
     state = args.state_directory or root / "state"
     base = f"http://127.0.0.1:{args.api_port}"
     report = {"focus": None if args.certified_conformance else args.focus,

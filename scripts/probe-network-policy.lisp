@@ -162,7 +162,7 @@
              ;; (3) Attach the compiled policy from the real manifest and resend all three.
              (let* ((spec (parse-network-policy *policy-manifest*))
                     (pod (make-np-pod :name "probe" :namespace "default"
-                                      :labels '(("app" . "web")) :ip "10.99.0.2")))
+                                      :labels (np-labels "app" "web") :ip "10.99.0.2")))
                (multiple-value-bind (isolated policy) (resolve-pod-policy pod (list spec) (list pod) :egress)
                  (unless isolated (error "policy did not select the probe Pod"))
                  (attach-policy policy)))

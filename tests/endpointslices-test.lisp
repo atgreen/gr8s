@@ -262,3 +262,17 @@
       (gr8s::delete-core-resource store "validatingadmissionpolicybindings" nil "one-address")
       (gr8s::reconcile-endpoints store)
       (is (= 2 (addresses))))))
+
+(test named-target-ports-resolve-on-sidecar-init-containers
+  ;; Upstream's FindPort also looks at restartable init containers, so a Service can name a sidecar's port.
+  (let* ((object (com.inuoe.jzon:parse *valid-pod-json*))
+         (spec (gethash "spec" object)))
+    (setf (gethash "initContainers" spec)
+          (vector (gr8s::core-object "name" "sidecar" "image" "busybox" "restartPolicy" "Always"
+                                     "ports" (vector (gr8s::core-object "name" "http-sidecar" "containerPort" 8080)))
+                  (gr8s::core-object "name" "setup" "image" "busybox"
+                                     "ports" (vector (gr8s::core-object "name" "setup-port" "containerPort" 9090)))))
+    (let ((pod (parse-pod object)))
+      (is (eql 8080 (gr8s::service-port-target pod (gr8s::core-object "port" 80 "targetPort" "http-sidecar"))))
+      ;; An ordinary init container has finished by the time traffic arrives.
+      (is (null (gr8s::service-port-target pod (gr8s::core-object "port" 80 "targetPort" "setup-port")))))))

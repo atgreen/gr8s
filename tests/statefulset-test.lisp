@@ -419,3 +419,14 @@
     (gr8s::reconcile-workloads reconciler)
     (is (gr8s::get-core-resource store "persistentvolumeclaims" "alpha" "data-web-0"))
     (is (get-pod store "alpha" "web-0"))))
+
+(test an-empty-service-name-is-accepted-as-no-service
+  ;; Go sends serviceName "" when it is unset, as the PersistentVolumes Default StorageClass spec does.
+  (with-temporary-store (store directory)
+    (values directory)
+    (let ((object (stateful-fixture "no-service")))
+      (setf (gethash "serviceName" (gethash "spec" object)) "")
+      (is (null (gethash "serviceName" (gethash "spec" (gr8s::create-core-resource store "statefulsets" object "default"))))))
+    (let ((object (stateful-fixture "bad-service")))
+      (setf (gethash "serviceName" (gethash "spec" object)) "Not_A_Label")
+      (signals kubernetes-error (gr8s::create-core-resource store "statefulsets" object "default")))))

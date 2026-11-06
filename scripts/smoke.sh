@@ -250,9 +250,7 @@ spec:
     - port: 8080
       targetPort: 8080
 YAML
-# --validate=false: kubectl's client-side OpenAPI (protobuf) validation is flaky
-# against gr8s's schema document; we control this manifest, so skip it.
-kubectl --kubeconfig "$work_directory/kubeconfig" apply --validate=false -f "$work_directory/gw-web.yaml"
+kubectl --kubeconfig "$work_directory/kubeconfig" apply -f "$work_directory/gw-web.yaml"
 
 attempt=0
 until [ "$(kubectl --kubeconfig "$work_directory/kubeconfig" get pod gw-web \

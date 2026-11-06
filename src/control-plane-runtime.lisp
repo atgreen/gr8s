@@ -382,9 +382,14 @@ direction waits for acknowledgements, so a long download neither piles up here n
 (defmethod runtime-next-exec-session-output
     ((runtime control-plane-runtime) (session control-plane-exec-session)
      cursor &key timeout)
+  "Return the next output, consuming it: an exec's output can be far too long to hold."
   (declare (ignore runtime))
-  (wait-for-next-node-operation-message
-   (control-plane-exec-session-operation session) cursor :timeout timeout))
+  (multiple-value-bind (message done-p)
+      (take-next-node-operation-message
+       (control-plane-exec-session-operation session) :timeout timeout)
+    (if done-p
+        (values nil cursor t)
+        (values message (1+ cursor) nil))))
 
 (defmethod runtime-exec-session-exit-code
     ((runtime control-plane-runtime) (session control-plane-exec-session))

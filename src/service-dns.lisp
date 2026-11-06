@@ -20,7 +20,10 @@
     (when (equal kind "EndpointSlice")
       (setf (gethash "labels" metadata)
             (core-object "kubernetes.io/service-name"
-                         (gethash "kubernetes.io/service-name" (gethash "labels" source (core-object))))))
+                         (gethash "kubernetes.io/service-name" (gethash "labels" source (core-object)))))
+      ;; kube-proxy ignores a slice labelled headless, so the node's proxy must see the label.
+      (multiple-value-bind (value present) (gethash "service.kubernetes.io/headless" (gethash "labels" source (core-object)))
+        (when present (setf (gethash "service.kubernetes.io/headless" (gethash "labels" metadata)) value))))
     (setf (gethash "kind" result) kind
           (gethash "apiVersion" result) (cond ((equal kind "Service") "v1")
                                               ((equal kind "Secret") "v1")
@@ -34,14 +37,37 @@
     (cond
       ((equal kind "Service")
        (let ((spec (core-object)))
+         ;; What the node's Service proxy needs, as kube-proxy reads it.
          (dolist (key '("clusterIP" "clusterIPs" "ipFamilies" "ports" "type" "externalName"
-                        "sessionAffinity" "sessionAffinityConfig"))
+                        "sessionAffinity" "sessionAffinityConfig" "internalTrafficPolicy"
+                        "externalTrafficPolicy" "externalIPs" "healthCheckNodePort" "trafficDistribution"))
            (when (gethash key (gethash "spec" object))
              (setf (gethash key spec) (copy-core-object (gethash key (gethash "spec" object))))))
-         (setf (gethash "spec" result) spec)))
+         (setf (gethash "spec" result) spec)
+         ;; kube-proxy ignores a Service either label is on, and serves load balancer addresses.
+         (let ((labels (gethash "labels" source)) (kept (core-object)))
+           (dolist (key '("service.kubernetes.io/service-proxy-name" "service.kubernetes.io/headless"))
+             (multiple-value-bind (value present) (and (hash-table-p labels) (gethash key labels))
+               (when present (setf (gethash key kept) value))))
+           (when (plusp (hash-table-count kept)) (setf (gethash "labels" metadata) kept)))
+         (let* ((status (gethash "status" object))
+                (balancer (and (hash-table-p status) (gethash "loadBalancer" status)))
+                (ingress (and (hash-table-p balancer) (gethash "ingress" balancer))))
+           (when (and (vectorp ingress) (plusp (length ingress)))
+             (setf (gethash "status" result)
+                   (core-object "loadBalancer"
+                                (core-object "ingress"
+                                             (map 'vector (lambda (entry)
+                                                            (let ((kept (core-object)))
+                                                              (when (hash-table-p entry)
+                                                                (dolist (key '("ip" "ipMode"))
+                                                                  (when (stringp (gethash key entry))
+                                                                    (setf (gethash key kept) (gethash key entry)))))
+                                                              kept))
+                                                  ingress))))))))
       ((equal kind "NetworkPolicy")
-       ;; The whole spec (podSelector, policyTypes, ingress/egress rules) is what
-       ;; the agent needs to resolve and compile the per-Pod classifier.
+       ;; The spec as network-policy-projection resolved it: podSelector, defaulted
+       ;; policyTypes, and rules whose peers are addresses. The node needs nothing else.
        (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
       ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
        ;; The agent's Gateway controller reconciles these into L7 proxy listeners,
@@ -115,7 +141,8 @@
              (endpointslice-canonical-json (service-discovery-public-object object))))
           (sort (append (list-core-resources store "services")
                         (list-core-resources store "endpointslices")
-                        (list-core-resources store "networkpolicies")
+                        ;; Resolved against the cluster's Pods and Namespaces, which nodes do not see.
+                        (network-policy-projection store)
                         (list-core-resources store "gatewayclasses")
                         (list-core-resources store "gateways")
                         (list-core-resources store "httproutes")
@@ -254,7 +281,10 @@
                                   (and (equal port-name (gethash "name" candidate))
                                        (equal protocol (gethash "protocol" candidate "TCP"))))
                                 (gethash "ports" spec #()))))
-            (when (or (service-external-name-p service) (null port))
+            ;; A headless Service's named ports are its endpoints', as CoreDNS reads them from the
+            ;; slices: a selectorless one's slices may name ports its spec does not.
+            (when (or (service-external-name-p service)
+                      (and (null port) (not (equal "None" (gethash "clusterIP" spec)))))
               (return-from resolve-store-service-srv (values nil nil)))
             (unless (equal "None" (gethash "clusterIP" spec))
               (return-from resolve-store-service-srv

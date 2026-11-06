@@ -2,6 +2,7 @@
 
 (defstruct (node-runtime (:constructor %make-node-runtime))
   state-directory
+  (node-name nil)   ; the Node this agent runs, for Service traffic policies
   runtime
   manager
   network
@@ -36,6 +37,7 @@
   (host-port-forwarders (make-hash-table :test #'equal))
   ;; Listening Service node ports by (protocol ip . port), likewise.
   (node-port-forwarders (make-hash-table :test #'equal))
+  (health-check-servers (make-hash-table))
   ;; Gateway API L7 proxy listeners, reconciled from stored Gateway/HTTPRoute
   ;; objects. NIL until the first reconcile creates it.
   gateway-controller)
@@ -309,6 +311,7 @@
       (setf (node-runtime-worker node-runtime) nil))
     (stop-host-port-forwarders (node-runtime-host-port-forwarders node-runtime))
     (stop-host-port-forwarders (node-runtime-node-port-forwarders node-runtime))
+    (stop-health-check-servers (node-runtime-health-check-servers node-runtime))
     (stop-runtime-deletions (node-runtime-runtime node-runtime))))
 
 (defun call-with-agent-cni-server
@@ -349,7 +352,8 @@ the node from starting."
     (when dataplane
       (setf (node-runtime-service-lb node-runtime) dataplane
             (node-runtime-service-lb-controller node-runtime)
-            (make-service-lb-controller (node-runtime-store node-runtime) dataplane)))
+            (make-service-lb-controller (node-runtime-store node-runtime) dataplane
+                                        (node-runtime-node-name node-runtime))))
     (unwind-protect
          (funcall function)
       (when (node-runtime-gateway-controller node-runtime)
@@ -538,7 +542,17 @@ the node from starting."
 
 (defun cache-node-observation (node-runtime pod status)
   "Persist actual status and transport Events without confusing runtime deletion with public phase."
-  (save-pod-observation (node-runtime-store node-runtime) pod status)
+  (let* ((store (node-runtime-store node-runtime))
+         (before (pod-observed-status store pod))
+         (address (gethash "podIP" status)))
+    (save-pod-observation store pod status)
+    ;; A Pod's policy can only be written once it has an address. Policies that
+    ;; select it may not change when it gets one, so no snapshot would follow.
+    (when (and (stringp address) (plusp (length address))
+               (not (equal address (and (hash-table-p before) (gethash "podIP" before)))))
+      (handler-case (converge-node-network-policies node-runtime)
+        (error (condition)
+          (format *error-output* "gr8s: NetworkPolicy convergence failed: ~A~%" condition)))))
   (let* ((finalization (pod-finalization-state (node-runtime-store node-runtime) pod))
          (message (pod-observed-status-message
                    pod status (runtime-events (node-runtime-runtime node-runtime) (pod-uid pod))
@@ -685,24 +699,31 @@ the node from starting."
     (error 'pod-reconciliation-superseded)))
 
 (defun pod-ip-identity-map (store)
-  "Map each known Pod IP -> (cons namespace label-alist), for policy selection."
+  "Map each local Pod's IP to the np-pod its NetworkPolicy is resolved for."
   (let ((map (make-hash-table :test #'equal)))
     (dolist (pod (list-pods store) map)
       (let* ((status (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)))
              (ip (and status (gethash "podIP" status)))
-             (metadata (gethash "metadata" (pod-object pod) (make-hash-table :test #'equal)))
-             (labels (gethash "labels" metadata)))
+             (object (pod-object pod))
+             (metadata (gethash "metadata" object (make-hash-table :test #'equal))))
         (when (and (stringp ip) (plusp (length ip)))
-          (let ((alist '()))
-            (when (hash-table-p labels)
-              (maphash (lambda (k v) (push (cons k v) alist)) labels))
-            (setf (gethash ip map) (cons (pod-namespace pod) alist))))))))
+          (setf (gethash ip map)
+                (make-np-pod :name (pod-name pod) :namespace (pod-namespace pod)
+                             :labels (gethash "labels" metadata (make-hash-table :test #'equal))
+                             :ip ip :ports (np-container-ports object))))))))
+
+(defvar *node-network-policy-lock* (bt:make-lock "gr8s node network policy")
+  "Serializes writes of Pods' policies from snapshots and from new Pod addresses.")
 
 (defun converge-node-network-policies (node-runtime)
-  "Write each local Pod's resolved egress NetworkPolicy into its pinned maps
-(data-only; the egress guard enforces it, no recompile/re-attach). Always runs,
-so clearing the last policy resets a Pod's mode to open. Fail-soft: never aborts
+  "Write each local Pod's resolved NetworkPolicy into its pinned maps (data only; its
+guards enforce it, no recompile or re-attach). Runs for every snapshot, so removing the
+last policy opens a Pod again, and when a Pod gets its address. Fail-soft: never aborts
 snapshot application."
+  (bt:with-lock-held (*node-network-policy-lock*)
+    (converge-node-network-policies-unlocked node-runtime)))
+
+(defun converge-node-network-policies-unlocked (node-runtime)
   (let ((manager (node-runtime-manager node-runtime))
         (ipam (node-runtime-ipam node-runtime))
         (store (node-runtime-store node-runtime)))
@@ -735,14 +756,15 @@ snapshot application."
          (ignore-errors (containerd-node-address (node-runtime-runtime node-runtime)))
          :directory-fn (lambda (sandbox)
                          (nth-value 2 (cni-pin-paths root sandbox))))
+        ;; NetworkPolicy, both directions (origin/main). Spec resolution can throw
+        ;; on an unsupported policy, so it stays after the delivery tables above,
+        ;; which must populate regardless.
         (let ((specs (network-policy-specs-from-objects
                       (list-core-resources store "networkpolicies")))
               (ip-map (pod-ip-identity-map store)))
-          (converge-pod-egress-policies
+          (converge-pod-network-policies
            specs endpoints
-           :pod-finder (lambda (address)
-                         (let ((id (gethash address ip-map)))
-                           (if id (values (car id) (cdr id)) (values nil nil))))
+           :pod-finder (lambda (address) (gethash address ip-map))
            :directory-fn (lambda (sandbox)
                            (nth-value 2 (cni-pin-paths root sandbox)))))))))
 
@@ -797,8 +819,13 @@ snapshot application."
           (error (condition)
             (format *error-output* "gr8s: Service LB convergence failed: ~A~%" condition))))
       (handler-case
-          (converge-node-port-forwarders (node-runtime-node-port-forwarders node-runtime)
-                                         (node-runtime-store node-runtime))
+          (progn
+            (converge-node-port-forwarders (node-runtime-node-port-forwarders node-runtime)
+                                           (node-runtime-store node-runtime)
+                                           :node-name (node-runtime-node-name node-runtime))
+            (converge-health-check-servers (node-runtime-health-check-servers node-runtime)
+                                           (node-runtime-store node-runtime)
+                                           :node-name (node-runtime-node-name node-runtime)))
         (error (condition)
           (format *error-output* "gr8s: node port convergence failed: ~A~%" condition)))
       ;; Attach per-Pod NetworkPolicy classifiers from the just-installed policy
@@ -1220,12 +1247,11 @@ that reconnects or restarts gets the answer without a second deletion racing the
            ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_port_forward+)
             (start-node-port-forward-operation node-runtime payload emit))
-           ((or (= (slot-value payload 'gr8s.node.v1::kind)
-                   gr8s.node.v1::+operationkind-operation_kind_attach+)
-                (and (= (slot-value payload 'gr8s.node.v1::kind)
-                        gr8s.node.v1::+operationkind-operation_kind_exec+)
-                     (or (slot-value payload 'gr8s.node.v1::stdin)
-                         (slot-value payload 'gr8s.node.v1::tty))))
+           ;; Every exec streams through the runtime's streaming server, as kubelet's do: a
+           ;; synchronous one would hold this session's reader until the command ended.
+           ((member (slot-value payload 'gr8s.node.v1::kind)
+                    (list gr8s.node.v1::+operationkind-operation_kind_attach+
+                          gr8s.node.v1::+operationkind-operation_kind_exec+))
             (start-node-exec-operation node-runtime payload emit))
            (t
             (dolist (reply (handle-node-operation node-runtime payload))

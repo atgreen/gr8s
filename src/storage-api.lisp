@@ -2,8 +2,8 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
-;;;; Validate typed PV, PVC and StorageClass objects independently of runtime
-;;;; volume capabilities. Controller-owned binding/status is preserved on writes;
+;;;; Validate typed PV, PVC, StorageClass and VolumeAttributesClass objects
+;;;; independently of runtime volume capabilities. Controller-owned binding/status is preserved on writes;
 ;;;; filesystem access happens only in the assigned node's volume implementation.
 
 (in-package #:gr8s)
@@ -15,7 +15,8 @@
 (eval-when (:load-toplevel :execute)
   (dolist (type '(("persistentvolumes" "PersistentVolume" "v1" nil)
                   ("persistentvolumeclaims" "PersistentVolumeClaim" "v1" t)
-                  ("storageclasses" "StorageClass" "storage.k8s.io/v1" nil)))
+                  ("storageclasses" "StorageClass" "storage.k8s.io/v1" nil)
+                  ("volumeattributesclasses" "VolumeAttributesClass" "storage.k8s.io/v1" nil)))
     (setf *stored-resource-types* (append (remove (first type) *stored-resource-types* :key #'first :test #'equal) (list type))))
   (dolist (section '("definitions" "messages"))
     (maphash (lambda (name value) (setf (gethash name (gethash section *podtemplate-schema*)) value))
@@ -23,7 +24,7 @@
 
 (defun storage-resource-p (resource)
   "Return whether RESOURCE belongs to the implemented persistent storage APIs."
-  (or (member resource '("persistentvolumes" "persistentvolumeclaims" "storageclasses") :test #'equal)
+  (or (member resource '("persistentvolumes" "persistentvolumeclaims" "storageclasses" "volumeattributesclasses") :test #'equal)
       (csi-storage-resource-p resource)))
 
 (defun storage-resource-schema-name (resource)
@@ -72,6 +73,27 @@
     (core-resource-error 422 "Invalid" "accessModes must be unique"))
   (when (and (find "ReadWriteOncePod" modes :test #'equal) (/= (length modes) 1))
     (core-resource-error 422 "Invalid" "ReadWriteOncePod cannot be combined with another access mode")))
+
+(defun validate-storage-parameters (parameters &key allow-empty)
+  "Validate class parameters within the limits Kubernetes sets for provisioners and drivers."
+  (let ((total 0) (count 0))
+    (when parameters
+      (validate-core-string-map parameters "parameters")
+      (maphash (lambda (key value)
+                 (incf count)
+                 (when (zerop (length key)) (core-resource-error 422 "Invalid" "parameters keys can not be empty"))
+                 (incf total (+ (length key) (length value))))
+               parameters))
+    (when (> count 512) (core-resource-error 422 "Invalid" "parameters may have at most 512 entries"))
+    (when (> total (* 256 1024)) (core-resource-error 422 "Invalid" "parameters may not exceed 256 KiB"))
+    (when (and (zerop count) (not allow-empty))
+      (core-resource-error 422 "Invalid" "parameters must contain at least one key/value pair"))))
+
+(defun validate-storage-driver-name (name context)
+  "Validate a provisioner or driver name as a qualified name, as Kubernetes does."
+  (require-nonempty-string name context)
+  (unless (and (<= (length name) 253) (core-qualified-key-p (string-downcase name)))
+    (core-resource-error 422 "Invalid" "~A must be a qualified name" context)))
 
 (defun storage-absolute-path-p (path)
   "Return whether PATH names an absolute host path without NUL or traversal."
@@ -165,6 +187,10 @@
          (existing (and store (gethash (core-resource-key resource namespace (gethash "name" metadata)) (pod-store-resources store)))))
     (dolist (field '("finalizers" "deletionTimestamp"))
       (when (eq 'null (gethash field metadata)) (remhash field metadata)))
+    ;; Go sends a CSINode without drivers as drivers: null, or omits it in protobuf.
+    (when (and (equal resource "csinodes") (hash-table-p (gethash "spec" object))
+               (member (gethash "drivers" (gethash "spec" object)) '(nil null)))
+      (setf (gethash "drivers" (gethash "spec" object)) (vector)))
     (dolist (target (list object (gethash "spec" object)))
       (when (hash-table-p target)
         (dolist (field '("storageClassName" "volumeName" "volumeMode" "nodeAffinity" "claimRef" "mountOptions" "selector" "dataSource" "dataSourceRef" "reclaimPolicy" "volumeBindingMode" "parameters" "allowedTopologies"))
@@ -177,11 +203,13 @@
     (validate-template-shape object (template-schema (storage-resource-schema-name resource)) kind)
     (cond
       ((csi-storage-resource-p resource) (normalize-csi-storage-object resource object existing))
+      ((equal resource "volumeattributesclasses")
+       (validate-storage-driver-name (gethash "driverName" object) "driverName")
+       (validate-storage-parameters (gethash "parameters" object))
+       (storage-ensure-protection-finalizer metadata "kubernetes.io/vac-protection"))
       ((equal resource "storageclasses")
-       (require-nonempty-string (gethash "provisioner" object) "provisioner")
-       (unless (and (<= (length (gethash "provisioner" object)) 253) (core-qualified-key-p (gethash "provisioner" object)))
-         (core-resource-error 422 "Invalid" "provisioner must be a qualified name"))
-       (when (gethash "parameters" object) (validate-core-string-map (gethash "parameters" object) "parameters"))
+       (validate-storage-driver-name (gethash "provisioner" object) "provisioner")
+       (validate-storage-parameters (gethash "parameters" object) :allow-empty t)
        (unless (gethash "reclaimPolicy" object) (setf (gethash "reclaimPolicy" object) "Delete"))
        (unless (gethash "volumeBindingMode" object) (setf (gethash "volumeBindingMode" object) "Immediate"))
        (storage-string-enum (gethash "reclaimPolicy" object) '("Retain" "Delete") "reclaimPolicy")
@@ -254,10 +282,16 @@
   (when (csi-storage-resource-p resource)
     (return-from validate-storage-update (validate-csi-storage-update resource before after)))
   (unless *storage-status-write*
-    (if (equal resource "storageclasses")
+    (cond
+      ((equal resource "storageclasses")
         (dolist (field '("provisioner" "parameters" "reclaimPolicy" "volumeBindingMode"))
           (unless (core-json-equal-p (gethash field before) (gethash field after))
-            (core-resource-error 422 "Invalid" "StorageClass ~A is immutable" field)))
+            (core-resource-error 422 "Invalid" "StorageClass ~A is immutable" field))))
+      ((equal resource "volumeattributesclasses")
+       (dolist (field '("driverName" "parameters"))
+         (unless (core-json-equal-p (gethash field before) (gethash field after))
+           (core-resource-error 422 "Invalid" "VolumeAttributesClass ~A is immutable" field))))
+      (t
         (let ((old (gethash "spec" before)) (new (gethash "spec" after)))
           (if (equal resource "persistentvolumes")
               (progn
@@ -282,4 +316,4 @@
                            (> (storage-quantity (gethash "storage" (gethash "requests" (gethash "resources" new))) "storage request")
                               (storage-quantity (gethash "storage" (gethash "requests" (gethash "resources" old))) "storage request"))
                            (not (storage-claim-expandable-p store after)))
-                  (core-resource-error 403 "Forbidden" "Only a claim whose StorageClass sets allowVolumeExpansion can be resized"))))))))
+                  (core-resource-error 403 "Forbidden" "Only a claim whose StorageClass sets allowVolumeExpansion can be resized")))))))))

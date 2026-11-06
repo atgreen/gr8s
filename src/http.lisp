@@ -187,120 +187,155 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
 (defun reference-schema (name)
   (json-object "$ref" (format nil "~A~A" *schema-reference-prefix* name)))
 
-(defun string-array-schema ()
-  (json-object "type" "array"
-               "items" (json-object "type" "string")))
+(defparameter *upstream-openapi*
+  (com.inuoe.jzon:parse (asdf:system-relative-pathname :gr8s "schema/openapi-v1.json"))
+  "The component schemas Kubernetes publishes for the group versions gr8s serves, and the
+schema names each of its documents lists, from scripts/generate-openapi-schema.py.")
 
-(defun openapi-definitions ()
+(defparameter +openapi-registered-everywhere+
+  '("io.k8s.apimachinery.pkg.apis.meta.v1.DeleteOptions" "io.k8s.apimachinery.pkg.apis.meta.v1.WatchEvent")
+  "Schemas that every group version registers, so each document lists its own GVKs on them.")
+
+(defparameter +openapi-common-schemas+
+  '("io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta" "io.k8s.apimachinery.pkg.apis.meta.v1.ListMeta"
+    "io.k8s.apimachinery.pkg.apis.meta.v1.Status" "io.k8s.apimachinery.pkg.apis.meta.v1.Patch"
+    "io.k8s.apimachinery.pkg.apis.meta.v1.DeleteOptions" "io.k8s.apimachinery.pkg.apis.meta.v1.WatchEvent")
+  "What a document for a group version Kubernetes does not publish starts from, as upstream's
+custom resource documents do.")
+
+(defparameter +openapi-schema-hash+
+  (subseq (ironclad:byte-array-to-hex-string
+           (ironclad:digest-file :sha256 (asdf:system-relative-pathname :gr8s "schema/openapi-v1.json")))
+          0 16)
+  "Changes whenever the vendored schemas do, so that clients caching a document by its
+discovery URL fetch the new one.")
+
+(defun openapi-document-key (group version)
+  "Name the /openapi/v3 document of GROUP and VERSION: api/v1 or apis/GROUP/VERSION."
+  (if (equal group "") (format nil "api/~A" version) (format nil "apis/~A/~A" group version)))
+
+(defun openapi-builtin-document-url (key)
+  "The discovery URL of a document served from the vendored schemas."
+  (format nil "/openapi/v3/~A?hash=~A" key +openapi-schema-hash+))
+
+(defun openapi-key-group-version (key)
+  "Split a document key back into (group . version)."
+  (let ((parts (uiop:split-string key :separator '(#\/))))
+    (if (equal (first parts) "api") (cons "" (second parts)) (cons (second parts) (third parts)))))
+
+(defun openapi-registered-everywhere-schema (name group-versions)
+  "Copy NAME's vendored schema with a GVK for the core group and each of GROUP-VERSIONS."
+  (let ((schema (shallow-copy-object (gethash name (gethash "schemas" *upstream-openapi*))))
+        (kind (car (last (uiop:split-string name :separator '(#\.))))))
+    (setf (gethash "x-kubernetes-group-version-kind" schema)
+          (coerce (loop for (group . version) in (remove-duplicates (cons (cons "" "v1") group-versions)
+                                                                    :test #'equal :from-end t)
+                        collect (json-object "group" group "kind" kind "version" version))
+                  'vector))
+    schema))
+
+(defun openapi-schema-references (schema)
+  "Collect the schema names SCHEMA refers to, at any depth."
+  (let ((names '()))
+    (labels ((walk (value)
+               (cond ((hash-table-p value)
+                      (maphash (lambda (key child)
+                                 (if (and (equal key "$ref") (stringp child))
+                                     (push (car (last (uiop:split-string child :separator '(#\/)))) names)
+                                     (walk child)))
+                               value))
+                     ((and (vectorp value) (not (stringp value))) (map nil #'walk value)))))
+      (walk schema))
+    names))
+
+(defun openapi-schema-closure (roots)
+  "Return ROOTS and every vendored schema they refer to, directly or not."
+  (let ((schemas (gethash "schemas" *upstream-openapi*)) (seen (make-hash-table :test #'equal)))
+    (labels ((visit (name)
+               (unless (gethash name seen)
+                 (let ((schema (gethash name schemas)))
+                   (when schema
+                     (setf (gethash name seen) t)
+                     (mapc #'visit (openapi-schema-references schema)))))))
+      (mapc #'visit roots))
+    (loop for name being the hash-keys of seen collect name)))
+
+(defun openapi-v2-schema (schema)
+  "Write a v3 component SCHEMA as kube-openapi writes it in a v2 document: references lose
+their allOf wrapper and defaults, int-or-string and quantities become strings, and nullable
+goes. scripts/generate-openapi-schema.py checks this gives upstream's swagger.json."
+  (if (not (hash-table-p schema))
+      schema
+      (let ((result (shallow-copy-object schema)))
+        (remhash "default" result)
+        (remhash "nullable" result)
+        (let ((all-of (gethash "allOf" result)))
+          (when (and (vectorp all-of) (= 1 (length all-of)) (hash-table-p (aref all-of 0))
+                     (gethash "$ref" (aref all-of 0)))
+            (remhash "allOf" result)
+            (setf (gethash "$ref" result) (gethash "$ref" (aref all-of 0)))))
+        (let ((reference (gethash "$ref" result)))
+          (when (and (stringp reference) (uiop:string-prefix-p "#/components/schemas/" reference))
+            (setf (gethash "$ref" result)
+                  (concatenate 'string "#/definitions/" (subseq reference (length "#/components/schemas/"))))))
+        (let ((one-of (gethash "oneOf" result)))
+          (when (and (vectorp one-of)
+                     (member (map 'list (lambda (entry) (and (hash-table-p entry) (gethash "type" entry))) one-of)
+                             '(("integer" "string") ("string" "number")) :test #'equal))
+            (remhash "oneOf" result)
+            (setf (gethash "type" result) "string")))
+        (let ((properties (gethash "properties" result)))
+          (when (hash-table-p properties)
+            (let ((converted (make-hash-table :test #'equal)))
+              (maphash (lambda (key value) (setf (gethash key converted) (openapi-v2-schema value))) properties)
+              (setf (gethash "properties" result) converted))))
+        (dolist (key '("items" "additionalProperties"))
+          (multiple-value-bind (value found) (gethash key result)
+            (when found (setf (gethash key result) (openapi-v2-schema value)))))
+        result)))
+
+(defvar *openapi-v2-definitions* nil
+  "Every vendored schema written for OpenAPI v2, built on first use.")
+
+(defun openapi-v2-definitions ()
+  "Return the vendored schemas as v2 definitions. Callers must not change the schemas."
+  (or *openapi-v2-definitions*
+      (setf *openapi-v2-definitions*
+            (let ((definitions (make-hash-table :test #'equal))
+                  (group-versions (loop for key being the hash-keys of (gethash "documents" *upstream-openapi*)
+                                        collect (openapi-key-group-version key))))
+              (maphash (lambda (name schema)
+                         (setf (gethash name definitions)
+                               (openapi-v2-schema
+                                (if (member name +openapi-registered-everywhere+ :test #'equal)
+                                    (openapi-registered-everywhere-schema name (sort group-versions #'string< :key #'car))
+                                    schema))))
+                       (gethash "schemas" *upstream-openapi*))
+              definitions))))
+
+(defun openapi-definitions (&optional group version)
+  "Return a fresh table of the schemas a document publishes, as Kubernetes v1.37.2 publishes
+them. Under the v2 reference prefix this is every vendored definition. Otherwise it is the v3
+components of GROUP and VERSION's upstream document, or, for a version Kubernetes does not
+publish, the object metadata and status schemas. The schemas themselves are shared and must
+not be changed; add or replace entries instead."
   (let ((definitions (make-hash-table :test #'equal)))
-    (setf
-     (gethash "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta" definitions)
-     (json-object
-      "type" "object"
-      "description" "ObjectMeta is metadata that all persisted resources must have, which includes all objects users must create."
-      "properties"
-      (json-object "name" (json-object "type" "string" "description" "Name must be unique within a namespace.")
-                   "generateName" (json-object "type" "string" "description" "GenerateName is an optional prefix, used by the server to generate a unique name only if the Name field has not been provided.")
-                   "namespace" (json-object "type" "string" "description" "Namespace defines the space within which each name must be unique.")
-                   "uid" (json-object "type" "string" "description" "UID is the unique in time and space value for this object.")
-                   "resourceVersion" (json-object "type" "string" "description" "An opaque value that represents the internal version of this object.")
-                   "generation" (json-object "type" "integer" "format" "int64" "description" "A sequence number representing a specific generation of the desired state.")
-                   "creationTimestamp" (json-object "type" "string" "format" "date-time" "description" "CreationTimestamp is a timestamp representing the server time when this object was created.")
-                   "deletionTimestamp" (json-object "type" "string" "format" "date-time" "description" "DeletionTimestamp is the time at which this resource will be deleted.")
-                   "deletionGracePeriodSeconds" (json-object "type" "integer" "format" "int64" "description" "Number of seconds allowed for this object to gracefully terminate before it is removed.")
-                   "labels" (json-object "type" "object"
-                                         "description" "Map of string keys and values that can be used to organize and categorize objects."
-                                         "additionalProperties"
-                                         (json-object "type" "string"))
-                   "annotations" (json-object "type" "object"
-                                              "description" "Annotations is an unstructured key value map stored with a resource."
-                                              "additionalProperties"
-                                              (json-object "type" "string"))))
-     (gethash "io.k8s.api.core.v1.EnvVar" definitions)
-     (json-object "type" "object"
-                  "required" #( "name" "value")
-                  "properties"
-                  (json-object "name" (json-object "type" "string")
-                               "value" (json-object "type" "string")))
-     (gethash "io.k8s.api.core.v1.ContainerPort" definitions)
-     (json-object "type" "object"
-                  "required" #( "containerPort")
-                  "properties"
-                  (json-object "containerPort" (json-object "type" "integer"
-                                                             "format" "int32")
-                               "name" (json-object "type" "string")
-                               "protocol" (json-object "type" "string")))
-     (gethash "io.k8s.api.core.v1.Container" definitions)
-     (json-object
-      "type" "object"
-      "required" #( "name" "image")
-      "properties"
-      (json-object
-       "name" (json-object "type" "string")
-       "image" (json-object "type" "string")
-       "command" (string-array-schema)
-       "args" (string-array-schema)
-       "env" (json-object "type" "array"
-                          "items" (reference-schema "io.k8s.api.core.v1.EnvVar"))
-       "ports" (json-object
-                "type" "array"
-                "items" (reference-schema "io.k8s.api.core.v1.ContainerPort"))))
-     (gethash "io.k8s.api.core.v1.PodSpec" definitions)
-     (json-object
-      "type" "object"
-      "required" #( "containers")
-      "properties"
-      (json-object
-       "containers" (json-object
-                     "type" "array"
-                     "items" (reference-schema "io.k8s.api.core.v1.Container"))
-       "restartPolicy" (json-object "type" "string")
-       "terminationGracePeriodSeconds" (json-object "type" "integer" "format" "int64" "minimum" 0)))
-     (gethash "io.k8s.api.core.v1.Pod" definitions)
-     (json-object
-      "type" "object"
-      "required" #( "apiVersion" "kind" "metadata" "spec")
-      "x-kubernetes-group-version-kind"
-      (vector (json-object "group" "" "version" "v1" "kind" "Pod"))
-      "properties"
-      (json-object
-       "apiVersion" (json-object "type" "string")
-       "kind" (json-object "type" "string")
-       "metadata" (reference-schema
-                   "io.k8s.apimachinery.pkg.apis.meta.v1.ObjectMeta")
-       "spec" (reference-schema "io.k8s.api.core.v1.PodSpec"))))
-    (add-core-resource-openapi-definitions definitions)))
+    (if (equal *schema-reference-prefix* "#/definitions/")
+        (maphash (lambda (name schema) (setf (gethash name definitions) schema)) (openapi-v2-definitions))
+        (let* ((listed (and group (gethash (openapi-document-key group version) (gethash "documents" *upstream-openapi*))))
+               (schemas (gethash "schemas" *upstream-openapi*)))
+          (dolist (name (if listed (coerce listed 'list) (openapi-schema-closure +openapi-common-schemas+)))
+            (setf (gethash name definitions)
+                  (if (member name +openapi-registered-everywhere+ :test #'equal)
+                      (openapi-registered-everywhere-schema name (and group (list (cons group version))))
+                      (gethash name schemas))))))
+    definitions))
 
 (defun openapi-document ()
   (json-object "swagger" "2.0"
                "info" (json-object "title" "gr8s" "version" "v1")
                "paths" (add-csr-openapi-v2-paths (make-hash-table :test #'equal))
                "definitions" (openapi-definitions)))
-
-(defun openapi-response ()
-  (json-response (openapi-document)))
-
-(defun openapi-v3-discovery-response ()
-  (json-response
-   (json-object
-    "paths"
-    (json-object
-     "api/v1"
-     (json-object "serverRelativeURL" "/openapi/v3/api/v1?hash=gr8s-v1")
-     "apis/certificates.k8s.io/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/certificates.k8s.io/v1?hash=gr8s-certificates-v1")
-     "apis/admissionregistration.k8s.io/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/admissionregistration.k8s.io/v1?hash=gr8s-admissionregistration-v1")
-     "apis/discovery.k8s.io/v1"
-     (json-object "serverRelativeURL" "/openapi/v3/apis/discovery.k8s.io/v1?hash=gr8s-endpointslices-v1")
-     "apis/networking.k8s.io/v1"
-     (json-object "serverRelativeURL" "/openapi/v3/apis/networking.k8s.io/v1?hash=gr8s-networking-v1")
-     "apis/storage.k8s.io/v1"
-     (json-object "serverRelativeURL" "/openapi/v3/apis/storage.k8s.io/v1?hash=gr8s-storage-v1")
-     "apis/events.k8s.io/v1"
-     (json-object "serverRelativeURL" "/openapi/v3/apis/events.k8s.io/v1?hash=gr8s-events-v1")
-     "apis/policy/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/policy/v1?hash=gr8s-policy-v1")
-     "apis/node.k8s.io/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/node.k8s.io/v1?hash=gr8s-node-v1")
-     "apis/scheduling.k8s.io/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/scheduling.k8s.io/v1?hash=gr8s-scheduling-v1")
-     "apis/apps/v1" (json-object "serverRelativeURL" "/openapi/v3/apis/apps/v1?hash=gr8s-apps-v1")))))
 
 (defun pod-group-version-kind ()
   (json-object "group" "" "version" "v1" "kind" "Pod"))
@@ -397,11 +432,17 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
                      (add-policy-openapi-paths (core-object) version))
                     (t (add-policy-openapi-paths
                         (add-storage-openapi-paths (add-core-resource-openapi-paths (openapi-v3-pod-paths))) "v1")))
-      "components" (json-object "schemas" (openapi-definitions))))))
+      "components" (json-object "schemas"
+                                (let ((slash (position #\/ version)))
+                                  (if slash
+                                      (openapi-definitions (subseq version 0 slash) (subseq version (1+ slash)))
+                                      (openapi-definitions "" version))))))))
 
 (defun create-pod-response (store reconciler &optional (namespace "default"))
   "Admit a new Pod; a dry run runs every admission and quota check but stores nothing."
   (let ((raw (core-resource-request-object "Pod")))
+    ;; The API server defaults a request as it decodes it, so admission sees the defaults.
+    (when (hash-table-p raw) (default-pod-spec-object (gethash "spec" raw)))
     (multiple-value-bind (admitted attributes)
         (admit-pod-input store "CREATE" namespace
                          (let ((metadata (gethash "metadata" raw))) (and (hash-table-p metadata) (gethash "name" metadata)))
@@ -415,7 +456,7 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
             (progn
               (with-store-lock (store)
                 (enforce-resource-quotas-unlocked store "pods" namespace (pod-to-object final)))
-              (json-response (pod-response-object final (pod-status "Pending")) 201))
+              (json-response (pod-response-object (default-created-pod final) (pod-status "Pending")) 201))
             (let* ((pod (create-pod store final))
                    (status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
               (json-response (pod-response-object pod status) 201)))))))
@@ -464,6 +505,8 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
       (let ((old (gethash "metadata" (pod-to-object existing))))
         (dolist (field '("uid" "creationTimestamp" "resourceVersion" "generation"))
           (setf (gethash field metadata) (gethash field old)))))
+    (when (or (null existing) (pod-spec-defaulted-p (gethash "spec" (pod-to-object existing))))
+      (default-pod-spec-object (gethash "spec" object)))
     (setf (gethash "status" object)
           (or (and existing (copy-json-object (or (pod-observed-status store existing) (pod-status "Pending"))))
               (pod-status "Pending")))
@@ -500,12 +543,13 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
                                    (pod-resource-version existing))
                        (create-pod store (admit-in-cluster-pod store replacement)))))
           (json-response
-           (pod-response-object
-            pod (reconcile-pod reconciler namespace name))
+           (pod-response-object pod (reconcile-written-pod reconciler pod))
            (if existing 200 201)))))))
 
 (defun replace-pod-response (store reconciler name &optional (namespace "default"))
   (let ((raw (core-resource-request-object "Pod")))
+    ;; The API server defaults a request as it decodes it, so admission sees the defaults.
+    (when (hash-table-p raw) (default-pod-spec-object (gethash "spec" raw)))
     (multiple-value-bind (admitted attributes)
         (admit-pod-input store "UPDATE" namespace name raw (get-pod store namespace name))
       (let ((replacement (request-pod-in-namespace admitted namespace)))
@@ -520,8 +564,7 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
                                (or (pod-resource-version replacement)
                                    (pod-resource-version (get-pod store namespace name))))))
           (json-response
-           (pod-response-object
-            pod (reconcile-pod reconciler namespace name))))))))
+           (pod-response-object pod (reconcile-written-pod reconciler pod))))))))
 
 (defun pod-delete-request-arguments ()
   "Decode JSON/protobuf DeleteOptions and query options without mutating desired state."
@@ -823,6 +866,7 @@ belong to another connection, so it must not shut SOCKET down after it has been 
               ;; octets belong to WebSocket/SPDY and must remain untouched.
               (let ((client (hunchentoot::start-output 101 nil)))
                 (finish-output client)
+                (extend-api-connection-idle-timeout)
                 (relay-runtime-stream client upstream socket))))
         (error (condition)
           (ignore-errors (usocket:socket-close socket))
@@ -901,34 +945,6 @@ its clients treat any other multi-byte frame as an error message."
        (com.inuoe.jzon:stringify
         (json-object "apiVersion" "v1" "kind" "Status" "status" "Failure" "message" message
                      "reason" "InternalError" "code" 500)))))
-
-(defun serve-runtime-exec-sync (result stdout-p stderr-p)
-  (let ((key (hunchentoot:header-in* :sec-websocket-key))
-        (protocol (requested-kubernetes-websocket-protocol)))
-    (unless (and key (plusp (length key)))
-      (bad-exec-request "Pod exec requires Sec-WebSocket-Key"))
-    (unless protocol
-      (bad-exec-request "Pod exec requires a supported channel protocol"))
-    (setf (hunchentoot:return-code*) 101
-          (hunchentoot:content-type*) nil
-          (hunchentoot:header-out :connection) "Upgrade"
-          (hunchentoot:header-out :upgrade) "websocket"
-          (hunchentoot:header-out :sec-websocket-accept)
-          (websocket-accept-value key)
-          (hunchentoot:header-out :sec-websocket-protocol) protocol)
-    (let ((client (hunchentoot::start-output 101 nil)))
-      (finish-output client)
-      (when stdout-p
-        (write-kubernetes-channel-frame
-         client 1 (runtime-exec-result-stdout result)))
-      (when stderr-p
-        (write-kubernetes-channel-frame
-         client 2 (runtime-exec-result-stderr result)))
-      (let ((status (exec-status-frame-bytes (runtime-exec-result-exit-code result))))
-        (when status (write-kubernetes-channel-frame client 3 status)))
-      (write-websocket-frame
-       client 8 (make-array 2 :element-type '(unsigned-byte 8)
-                            :initial-contents '(3 232))))))
 
 (defvar *exec-input-reader-tag* nil
   "The catch tag of this thread's exec input reader, set only while its catch is established.")
@@ -1058,7 +1074,7 @@ already signalling, with its handlers unbound for the handler tests, and then fi
                 :stdout (exec-options-stdout options)
                 :stderr (exec-options-stderr options)
                 :tty (exec-options-tty options))))
-         (client (begin-kubernetes-websocket))
+         (client (prog1 (begin-kubernetes-websocket) (extend-api-connection-idle-timeout)))
          (write-lock (bt:make-lock "gr8s kubectl exec websocket writer"))
          (finished-lock (bt:make-lock "gr8s kubectl exec finished"))
          (finished-p nil)
@@ -1130,29 +1146,26 @@ already signalling, with its handlers unbound for the handler tests, and then fi
                (container-spec-name (aref (pod-containers pod) 0)))))
     (unless (exec-options-command options)
       (bad-exec-request "Pod exec requires at least one command argument"))
+    ;; kubelet's remotecommand.NewOptions refuses a stream with nothing to carry.
+    (unless (or (exec-options-stdin options) (exec-options-stdout options) (exec-options-stderr options))
+      (bad-exec-request "you must specify at least 1 of stdin, stdout, stderr"))
     (admit-pod-exec store namespace name options)
     (unless (find container (pod-all-containers pod)
                   :key #'container-spec-name :test #'string=)
       (bad-exec-request
        (format nil "container ~A is not valid for pod ~A" container name)))
-    (if (and (not (exec-options-stdin options))
-             (not (exec-options-tty options)))
-        (serve-runtime-exec-sync
-         (reconciler-exec-sync
+    ;; kubelet streams every exec, with or without input or a terminal, through the runtime's
+    ;; streaming server: output arrives as it is written and the command has no deadline.
+    (if (typep (reconciler-runtime reconciler) 'control-plane-runtime)
+        (serve-agent-exec-session
+         reconciler (pod-uid pod) container options)
+        (proxy-runtime-stream
+         (reconciler-exec-url
           reconciler (pod-uid pod) container (exec-options-command options)
-          :timeout 30)
-         (exec-options-stdout options)
-         (exec-options-stderr options))
-        (if (typep (reconciler-runtime reconciler) 'control-plane-runtime)
-            (serve-agent-exec-session
-             reconciler (pod-uid pod) container options)
-            (proxy-runtime-stream
-             (reconciler-exec-url
-              reconciler (pod-uid pod) container (exec-options-command options)
-              :stdin (exec-options-stdin options)
-              :stdout (exec-options-stdout options)
-              :stderr (exec-options-stderr options)
-              :tty (exec-options-tty options)))))))
+          :stdin (exec-options-stdin options)
+          :stdout (exec-options-stdout options)
+          :stderr (exec-options-stderr options)
+          :tty (exec-options-tty options))))))
 
 (defun attach-container-tty-p (pod container)
   "Return the TTY the container was created with, which an attach cannot change."

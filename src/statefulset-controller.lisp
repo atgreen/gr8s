@@ -99,7 +99,7 @@
   "Return SET's revision history, oldest first, and its revision for the current template.
 A template equal to an older revision makes that revision the newest again, which is a rollback."
   (let* ((revisions (daemonset-revisions store set)) (data (daemonset-revision-data set))
-         (matching (remove-if-not (lambda (revision) (workload-equal-p (gethash "data" revision) data)) revisions))
+         (matching (remove-if-not (lambda (revision) (revision-data-equal-p (gethash "data" revision) data)) revisions))
          (newest (reduce #'max revisions :key (lambda (revision) (gethash "revision" revision)) :initial-value 0))
          (match (car (last matching)))
          (update (cond ((null match) (create-daemonset-revision store set data (1+ newest)))

@@ -19,22 +19,36 @@
   (error 'cni-error :message (apply #'format nil control arguments)))
 
 (defparameter +cni-policy-map-specs+
-  ;; (name bpf-map-type key-size value-size max-entries flags). Types: 1=HASH,
-  ;; 2=ARRAY, 11=LPM_TRIE. The netpol_* maps hold the per-Pod NetworkPolicy and
+  ;; (name bpf-map-type key-size value-size max-entries flags). Types: 2=ARRAY,
+  ;; 9=LRU_HASH, 11=LPM_TRIE. The netpol_* maps hold the per-Pod NetworkPolicy and
   ;; are updated as data by the agent (no program recompile).
-  '(("rejected_spoofs"     2 4 8  1    0)
-    ("endpoint_identity"   2 4 16 1    128)
-    ("traffic_stats"       2 4 8  7    0)
-    ("netpol_egress_mode"  2 4 4  1    0)
-    ("netpol_egress_cidr" 11 8 4  1024 1)
-    ("netpol_egress_port"  1 8 1  1024 0)
+  '(("rejected_spoofs"      2 4  8  1     0)
+    ("endpoint_identity"    2 4  16 1     128)
+    ("traffic_stats"        2 4  8  7     0)
+    ("netpol_mode"          2 4  4  2     0)
+    ("netpol_egress_cidr"  11 8  4  16384 1)
+    ("netpol_egress_ports" 11 12 1  4096  1)
+    ("netpol_ingress_cidr" 11 8  4  16384 1)
+    ("netpol_ingress_ports" 11 12 1 4096  1)
+    ("netpol_flows"         9 12 8  4096  0)
     ;; Same-node Pod delivery table: dest Pod IPv4 (network order) -> 16-byte
     ;; {ifindex, Pod MAC, veth MAC}. Agent-populated on reconcile. LPM /32 keys,
     ;; NO_PREALLOC -- same shape as netpol_egress_cidr.
-    ("local_pod_v4"       11 8 16 4096 1)
+    ("local_pod_v4"        11 8  16 4096  1)
     ;; Host-local destinations (API server 10.96.0.1, node IP) -> presence byte.
     ;; Agent-populated on reconcile. HASH, NO_PREALLOC.
-    ("host_redirect_v4"    1 4 1  64   1)))
+    ("host_redirect_v4"     1 4  1  64    1)))
+
+(defparameter +cni-legacy-policy-maps+ '("netpol_egress_mode" "netpol_egress_port")
+  "Pins that endpoints created by earlier agents may still hold, removed with the endpoint.")
+
+(defun cni-opposite-direction (direction)
+  (if (string= direction "egress") "ingress" "egress"))
+
+(defun cni-ingress-guard-link-path (link-path direction)
+  "Where the ingress guard's link is pinned, beside the egress guard's LINK-PATH."
+  (namestring (merge-pathnames (concatenate 'string "tcx-" (cni-opposite-direction direction))
+                               (uiop:pathname-directory-pathname link-path))))
 
 (defstruct cni-configuration
   version name type direction program map-pin-root previous-result endpoint-address policy-interface-name)
@@ -247,8 +261,8 @@
        (close-object #'close-egress-policy-object))
   (let ((directory (namestring (uiop:pathname-directory-pathname map-path)))
         (opened nil) (object nil) (new-pins nil) (link-fd nil)
-        ;; bpffs rejects pin basenames containing a dot (EPERM).
-        (staging (format nil "~A_pending_~36R" link-path (random (expt 36 12))))
+        ;; A link pinned but not yet renamed into place.
+        (staging nil)
         (committed nil))
     (funcall ensure-directory directory)
     (unwind-protect
@@ -272,21 +286,31 @@
                (unless (assoc name opened :test #'string=)
                  (funcall pin-object (funcall map-fd (funcall object-map object name)) path)
                  (push path new-pins))))
-           (let ((program (funcall object-program object "gr8s_egress_guard")))
-             (unless program (invalid-cni "Whistler object has no gr8s_egress_guard program"))
-             (setf link-fd
-                   (call-with-cni-policy-interface
-                    configuration context
-                    (lambda (index)
-                      (funcall attach-tcx (funcall program-fd program) index
-                               (cni-configuration-direction configuration)))
-                    call-in-netns interface-index))
-             ;; Keep the old pinned link live until a replacement is attached
-             ;; and pinned. Atomic rename also preserves it if pinning fails.
-             (funcall pin-object link-fd staging)
-             (funcall rename-pin staging link-path)
-             (setf committed t)
-             (dolist (old (funcall staged-links link-path)) (funcall remove-path old))))
+           ;; The egress guard runs where Pod traffic leaves (the configured
+           ;; direction), the ingress guard where traffic to the Pod arrives.
+           (loop for (name direction path) in
+                 (list (list "gr8s_egress_guard" (cni-configuration-direction configuration) link-path)
+                       (list "gr8s_ingress_guard" (cni-opposite-direction (cni-configuration-direction configuration))
+                             (cni-ingress-guard-link-path link-path (cni-configuration-direction configuration))))
+                 for program = (funcall object-program object name)
+                 ;; bpffs rejects pin basenames containing a dot (EPERM).
+                 for stage = (format nil "~A_pending_~36R" path (random (expt 36 12)))
+                 do (unless program (invalid-cni "Whistler object has no ~A program" name))
+                    (setf link-fd (call-with-cni-policy-interface
+                                   configuration context
+                                   (lambda (index) (funcall attach-tcx (funcall program-fd program) index direction))
+                                   call-in-netns interface-index))
+                    ;; Keep the old pinned link live until a replacement is attached
+                    ;; and pinned. Atomic rename also preserves it if pinning fails.
+                    (funcall pin-object link-fd stage)
+                    (setf staging stage)
+                    (funcall rename-pin stage path)
+                    (setf staging nil
+                          ;; A pinned link uses the maps, so they stay pinned from here.
+                          committed t)
+                    (funcall close-fd link-fd)
+                    (setf link-fd nil)
+                    (dolist (old (funcall staged-links path)) (funcall remove-path old))))
       (when link-fd (funcall close-fd link-fd))
       (let ((owned (when object
                      (loop for spec in +cni-policy-map-specs+
@@ -295,8 +319,8 @@
         (when object (funcall close-object object))
         (dolist (entry opened)
           (unless (member (cdr entry) owned) (funcall close-fd (cdr entry)))))
+      (when staging (funcall remove-path staging))
       (unless committed
-        (funcall remove-path staging)
         (dolist (path new-pins) (funcall remove-path path)))))
   nil)
 
@@ -317,14 +341,17 @@
              (when (string= name "endpoint_identity")
                (funcall check-identity map configuration context)))
         (funcall close-fd fd))))
-  (let ((fd (funcall open-pinned link-path)))
-    (unwind-protect
-         (call-with-cni-policy-interface
-          configuration context
-          (lambda (index)
-            (funcall check-link fd index (cni-configuration-direction configuration)))
-          call-in-netns interface-index)
-      (funcall close-fd fd)))
+  (let ((direction (cni-configuration-direction configuration)))
+    (loop for (path link-direction) in (list (list link-path direction)
+                                             (list (cni-ingress-guard-link-path link-path direction)
+                                                   (cni-opposite-direction direction)))
+          do (let ((fd (funcall open-pinned path)))
+               (unwind-protect
+                    (call-with-cni-policy-interface
+                     configuration context
+                     (lambda (index) (funcall check-link fd index link-direction))
+                     call-in-netns interface-index)
+                 (funcall close-fd fd)))))
   nil)
 
 (defun remove-cni-policy
@@ -332,11 +359,14 @@
      &key (remove-path #'remove-cni-path)
        (staged-links #'cni-policy-staged-links)
        (remove-directory #'remove-empty-cni-directory))
-  (declare (ignore configuration context))
-  (funcall remove-path link-path)
-  (dolist (path (funcall staged-links link-path)) (funcall remove-path path))
-  (dolist (spec +cni-policy-map-specs+)
-    (funcall remove-path (cni-policy-map-path map-path (first spec))))
+  (declare (ignore context))
+  (dolist (link (list link-path (cni-ingress-guard-link-path
+                                 link-path (if configuration (cni-configuration-direction configuration)
+                                               (subseq (file-namestring link-path) (length "tcx-"))))))
+    (funcall remove-path link)
+    (dolist (path (funcall staged-links link)) (funcall remove-path path)))
+  (dolist (name (append (mapcar #'first +cni-policy-map-specs+) +cni-legacy-policy-maps+))
+    (funcall remove-path (cni-policy-map-path map-path name)))
   (funcall remove-directory directory)
   nil)
 
