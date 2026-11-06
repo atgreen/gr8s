@@ -132,8 +132,7 @@
            (setf (gethash "roleRef" object) (gr8s::core-object "apiGroup" "rbac.authorization.k8s.io" "kind" "ClusterRole" "name" "reader")))
           ((equal resource "clustertrustbundles")
            (setf (gethash "spec" object)
-                 (gr8s::core-object "signerName" "servicedns.podcert.ate.dev/identity"
-                                    "trustBundle" (format nil "-----BEGIN CERTIFICATE-----~%MIIBtest~%-----END CERTIFICATE-----~%"))))
+                 (gr8s::core-object "trustBundle" (ctb-test-ca-pem "watched"))))
           ((equal resource "podcertificaterequests")
            (setf (gethash "spec" object)
                  (gr8s::core-object "signerName" "podidentity.podcert.ate.dev/identity"

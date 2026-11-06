@@ -17,6 +17,39 @@
   "Report Kubernetes admission failure without exposing private PKI material."
   (apply #'core-resource-error 422 "Invalid" control arguments))
 
+(defun der-element-end (bytes start limit depth)
+  "Return where the DER element at START ends, or NIL unless it lies within LIMIT
+   with every nested element inside its parent."
+  (when (or (> depth 64) (>= start limit)) (return-from der-element-end nil))
+  (let ((position (1+ start)) (constructed (logbitp 5 (aref bytes start))))
+    (when (= 31 (logand (aref bytes start) 31))
+      (loop (when (>= position limit) (return-from der-element-end nil))
+            (unless (logbitp 7 (aref bytes position)) (incf position) (return))
+            (incf position)))
+    (when (>= position limit) (return-from der-element-end nil))
+    (let ((first (aref bytes position)) (length 0))
+      (incf position)
+      (cond ((< first #x80) (setf length first))
+            ((or (= first #x80) (> (logand first #x7f) 4)) (return-from der-element-end nil))
+            (t (dotimes (i (logand first #x7f))
+                 (when (>= position limit) (return-from der-element-end nil))
+                 (setf length (logior (ash length 8) (aref bytes position)))
+                 (incf position))))
+      (let ((end (+ position length)))
+        (when (> end limit) (return-from der-element-end nil))
+        (when constructed
+          (loop while (< position end)
+                do (setf position (or (der-element-end bytes position end (1+ depth))
+                                      (return-from der-element-end nil)))))
+        end))))
+
+(defun der-well-formed-p (bytes)
+  "True when BYTES is exactly one DER element whose nested lengths all fit.
+   pure-tls's DER parser loops without end on a truncated constructed element,
+   so untrusted DER is checked here before it is parsed."
+  (and (plusp (length bytes))
+       (eql (length bytes) (der-element-end bytes 0 (length bytes) 0))))
+
 (defun csr-pem-blocks (bytes)
   "Decode actual complete PEM blocks, retaining labels and rejecting PEM headers."
   (let ((text (trivial-utf-8:utf-8-bytes-to-string bytes)) (offset 0) (blocks nil))
@@ -167,6 +200,7 @@
       (let* ((blocks (csr-pem-blocks bytes)) (block (first blocks)))
         (unless (and block (equal "CERTIFICATE REQUEST" (car block)))
           (csr-invalid "spec.request must contain a CERTIFICATE REQUEST PEM block"))
+        (unless (der-well-formed-p (cdr block)) (csr-invalid "Invalid PKCS#10 request structure"))
         (let* ((der (cdr block)) (root (pure-tls::parse-der der))
                (children (pure-tls::asn1-children root))
                (info (first children)) (parts (and info (pure-tls::asn1-children info)))
@@ -210,7 +244,10 @@
 (defun validate-csr-certificate-der (bytes)
   "Validate each actual X.509 DER object, including SAN forms and complete consumption."
   (loop with offset = 0 while (< offset (length bytes))
-        do (let* ((remaining (subseq bytes offset)) (root (pure-tls::parse-der remaining))
+        do (let* ((remaining (subseq bytes offset))
+                  (root (if (der-element-end remaining 0 (length remaining) 0)
+                            (pure-tls::parse-der remaining)
+                            (csr-invalid "Invalid certificate DER structure")))
                   (raw (pure-tls::asn1-node-raw-bytes root))
                   (parts (pure-tls::asn1-children root))
                   (tbs (and (first parts) (pure-tls::asn1-children (first parts))))
