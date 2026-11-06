@@ -1,0 +1,84 @@
+# High availability (pure-Lisp Raft)
+
+The control plane can run multi-master on a Raft consensus layer written from
+scratch in Common Lisp — **no etcd, no external database**. Members talk over the
+same ag-gRPC transport as everything else. The Raft core (leader election, log
+replication, the §5.4.2 commit rule, apply-once-in-order) runs under a
+deterministic in-process simulator for failover/partition tests *and* under real
+gRPC, from one implementation. The log is a durable write-ahead log with
+snapshot/compaction and crash recovery.
+
+## The consistency plane
+
+gr8s splits state along a **consistency plane**: durable desired state (the
+stored API resources) is proposed through Raft so every member converges, while
+observed status, endpoint telemetry, node heartbeats/leases, and self-expiring
+Events stay off the log — each member keeps its own and agents re-report after a
+failover.
+
+What is replicated, and verified to survive a leader kill with its identity
+intact: core API resources (including controller-written status, Job accounting,
+EndpointSlices, CSR/certificate issuance state), **Pods**, and a Node's assigned
+PodCIDR. Events are deliberately local.
+
+## Around the datastore
+
+- **Controllers are leader-gated** — reconciliation runs only on the leader; a
+  follower idles until promoted.
+- **Leader-aware HTTP** — a follower answers a mutating API request with a 307 to
+  the current leader (preserving path and query), or 503 when no leader is known;
+  reads are served locally.
+- **Agents reconnect across failover** — given more than one control-plane
+  endpoint, a node agent rotates through them on reconnect and resumes against the
+  new leader.
+- **Membership is dynamic** — single-member, effective-on-commit changes grow or
+  shrink the cluster; a **witness** votes for quorum but never leads, so a
+  two-node + witness topology survives one node loss. New members enroll with a
+  one-time token, then join with the certificate they receive (a follower
+  redirects to the leader).
+- **Members use mutual TLS** — replication carries every Secret, so each member
+  needs a certificate from the cluster's own Raft CA, and a message must come from
+  the member it names. Worker certificates and tokens aren't accepted, because
+  they come from a separate CA and token store. A joiner checks the CA against its
+  pin before sending anything. Voters hold the CA key so they can admit
+  replacements after a failover; witnesses don't, but their log does hold
+  replicated state, which is why it's created with mode `0600`. Member certificates
+  last a year and renew themselves in their last 30 days: a voter signs its own,
+  and a witness asks a voter, so a witness that stays offline past expiry has to
+  enroll again.
+- **Voters share the node CA** — a joining control plane receives the cluster's
+  node CA when it enrolls, so agents and API clients keep working after a failover.
+  Join with a new state directory, because one that already has a different CA is
+  refused rather than orphaning the certificates it issued.
+
+## Commands
+
+```sh
+# Found a cluster.
+gr8s serve --raft-init --raft-id cp1 --raft-port 7000 ...
+
+# On cp1, create a token for each new member. This prints its token and caPin.
+gr8s join-token --role control-plane --node-name cp2
+
+# Join through the member that created the token.
+gr8s serve --raft-join 10.0.0.1:7000 --raft-id cp2 --raft-port 7000 \
+  --raft-node-name cp2 --raft-token "$TOKEN" --raft-ca-pin "$CA_PIN" ...
+
+# A headless quorum tie-breaker (no API, no workloads).
+gr8s witness --join 10.0.0.1:7000 --node-name arb --token "$TOKEN" --ca-pin "$CA_PIN"
+```
+
+HA is **opt-in**: with no `--raft-*` flag, `gr8s serve` runs exactly as the
+single-node path always has — no Raft member starts. An HA acceptance smoke test
+stands up a three-member cluster over HTTP, creates a resource through the leader,
+kills the leader, and requires the survivors to keep serving the committed data
+and accept new writes.
+
+## Honest about scope
+
+gr8s has not passed Kubernetes conformance, and HA does not change that. Pod
+desired state uses a leader-applies-then-replicate model (so a multi-step
+controller transaction sees its own writes), which leaves a narrow window on a
+leader crash mid-commit; and replication currently ships the whole resource index
+per write rather than per-key deltas. Both are tracked as refinements, not
+correctness gaps — no *committed* desired state is lost on failover.
