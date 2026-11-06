@@ -368,7 +368,10 @@ PREFIX is the metadata's field path, which differs for an embedded resource's."
     (if namespace (setf (gethash "namespace" metadata) namespace) (remhash "namespace" metadata))
     (if (and status-p *crd-status-write* existing)
         (let* ((copy (crd-object-at-version definition existing version-name)) (copy-meta (gethash "metadata" copy))
-               (status-schema (gethash "status" (gethash "properties" (crd-schema version) (core-object)))))
+               (status-schema (or (gethash "status" (gethash "properties" (crd-schema version) (core-object)))
+                                  ;; A root that keeps unknown fields keeps an undeclared status too.
+                                  (and (eq t (gethash "x-kubernetes-preserve-unknown-fields" (crd-schema version)))
+                                       (core-object "type" "object" "x-kubernetes-preserve-unknown-fields" t)))))
           (dolist (field '("resourceVersion" "uid"))
             (when (nth-value 1 (gethash field metadata)) (setf (gethash field copy-meta) (gethash field metadata))))
           (if (and (nth-value 1 (gethash "status" object)) status-schema)
