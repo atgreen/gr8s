@@ -530,6 +530,31 @@ operation streams cross the node-agent gRPC boundary.
 Runtime objects are labeled with gr8s ownership metadata so reconciliation and
 deletion can avoid unrelated workloads.
 
+### Preloaded images
+
+An agent with its own (managed) containerd imports every `*.tar` image archive in
+`images/` under its state directory when it starts, before any Pod can start, as
+k3s does with its airgap images. For `serve`'s local agent that directory is
+`<state>/agent/images/`; for `gr8s agent` it is `<state>/images/`. Archives may be
+OCI image layouts or `docker save` output. They go into containerd's `k8s.io`
+namespace under the names they carry, unpacked for the node's platform, so a Pod
+that asks for one by that name doesn't pull it (with the default `IfNotPresent`
+policy for tagged images). Use this for nodes without registry access, or to
+skip slow pulls:
+
+```sh
+sudo mkdir -p /var/lib/gr8s-worker-b/images
+skopeo copy docker://docker.io/library/nginx:1.27 \
+  oci-archive:nginx.tar:docker.io/library/nginx:1.27
+sudo mv nginx.tar /var/lib/gr8s-worker-b/images/
+```
+
+Keep the full reference after the archive path: a bare tag would be stored as
+`import-gr8s:TAG`. `scripts/save-image-archives.sh DIRECTORY` saves the images the
+upstream conformance selection uses. Each archive's import is logged, and one
+that fails to import is logged and skipped. Archives are imported again on every
+start; re-importing an image already present is quick but still reads the archive.
+
 The pinned containerd 2.4.2 daemon, shim, and baseline CNI plugins 1.9.1 are
 built from Go source with cgo disabled; the pinned static runc release is
 checksum-verified. The dumped Common Lisp image is exposed to containerd under
@@ -886,6 +911,11 @@ The runner preserves the official Sonobuoy archive, native and worker logs, and
 individual executed specs in its printed report directory. A timeout preserves
 partial worker logs. A passing result requires every selected spec to execute
 and pass; running this command alone does not establish certification.
+
+`--image-archives DIRECTORY` stages the archives there (for example from
+`scripts/save-image-archives.sh`) as [preloaded images](#preloaded-images), so specs
+don't wait on cold pulls. The report records `preloadedImages` and each archive's
+name, size and SHA-256 under `imageArchives`, so compare runs only when they match.
 
 ### Debugging a running cluster
 
