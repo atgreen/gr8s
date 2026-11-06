@@ -24,6 +24,12 @@
   (resource-history-start 0)
   template-token-key
   (event-expirations (make-hash-table :test #'equal))
+  ;; The core-resource state on disk is a checkpoint plus a journal of later
+  ;; commits (podster-uqb.140). These size the journal against the checkpoint;
+  ;; CHECKPOINT-NEEDED makes the next commit write a checkpoint instead.
+  (core-journal-bytes 0)
+  (core-checkpoint-bytes 0)
+  (core-checkpoint-needed t)
   in-cluster-config
   (credential-lock (bt:make-lock "gr8s ServiceAccount credentials"))
   service-account-signing-key
