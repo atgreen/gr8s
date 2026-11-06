@@ -44,12 +44,14 @@
                                             (ldb (byte 8 8) low)   (ldb (byte 8 0) low))))))
 
 (defun local-pod-ipv4-key (address)
-  "The 4-byte network-order key the egress guard looks up (it uses the raw
-   on-the-wire destination address)."
+  "The 8-byte LPM-trie /32 key the egress guard looks up: prefixlen 32 (host
+   order) then the destination address in network byte order -- the same shape
+   as netpol-cidr-lpm-key, which the program resolves identically."
   (let ((n (parse-ipv4-integer address)))
-    (make-array 4 :element-type '(unsigned-byte 8)
-                  :initial-contents (list (ldb (byte 8 24) n) (ldb (byte 8 16) n)
-                                          (ldb (byte 8 8) n)  (ldb (byte 8 0) n)))))
+    (concatenate '(vector (unsigned-byte 8))
+                 (%netpol-u32-le 32)
+                 (vector (ldb (byte 8 24) n) (ldb (byte 8 16) n)
+                         (ldb (byte 8 8) n)  (ldb (byte 8 0) n)))))
 
 (defun local-pod-endpoint-value
     (sandbox interface

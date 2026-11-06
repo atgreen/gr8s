@@ -38,8 +38,8 @@
       (is (and cidr (= 8 (getf cidr :key-size)) (= 4 (getf cidr :value-size))
                (= 1 (getf cidr :flags))))                 ; LPM_TRIE, NO_PREALLOC
       (is (and port (= 8 (getf port :key-size)) (= 1 (getf port :value-size))))
-      (is (and local-pod (= 4 (getf local-pod :key-size)) (= 16 (getf local-pod :value-size))
-               (= 4096 (getf local-pod :max-entries)))))
+      (is (and local-pod (= 8 (getf local-pod :key-size)) (= 16 (getf local-pod :value-size))
+               (= 4096 (getf local-pod :max-entries)) (= 1 (getf local-pod :flags)))))
     ;; One TC classifier with real, 8-byte-aligned instructions and the map-fd
     ;; relocations the loader patches in.
     (is (= 1 (length prog-specs)))

@@ -29,8 +29,9 @@
     ("netpol_egress_cidr" 11 8 4  1024 1)
     ("netpol_egress_port"  1 8 1  1024 0)
     ;; Same-node Pod delivery table: dest Pod IPv4 (network order) -> 16-byte
-    ;; {ifindex, Pod MAC, veth MAC}. Agent-populated on reconcile. HASH.
-    ("local_pod_v4"        1 4 16 4096 0)))
+    ;; {ifindex, Pod MAC, veth MAC}. Agent-populated on reconcile. LPM /32 keys,
+    ;; NO_PREALLOC -- same shape as netpol_egress_cidr.
+    ("local_pod_v4"       11 8 16 4096 1)))
 
 (defstruct cni-configuration
   version name type direction program map-pin-root previous-result endpoint-address policy-interface-name)

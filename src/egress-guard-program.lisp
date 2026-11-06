@@ -38,8 +38,9 @@
 ;; the port key ties an allowed (proto, port) to the CIDR's rule group.
 (defstruct netpol-lpm-key (prefixlen u32) (addr u32))
 (defstruct netpol-port-key (group u32) (proto u8) (pad u8) (port u16))
-;; Key for the same-node Pod delivery table: destination IPv4 in network order.
-(defstruct local-pod-key (addr u32))
+;; Key for the same-node Pod delivery table: an LPM /32, same {prefixlen, addr}
+;; shape as netpol-lpm-key (which the program resolves identically and works).
+(defstruct local-pod-key (prefixlen u32) (addr u32))
 
 (defparameter gr8s::*egress-guard-map-forms*
   '((defmap rejected-spoofs :type :array
@@ -66,8 +67,8 @@
     ;; dest Pod MAC (6 bytes, wire order), dest host-veth MAC (6 bytes, wire order)}.
     ;; A hit means the destination Pod lives on this node, so the packet can be
     ;; delivered straight to its veth, bypassing the kernel forward path.
-    (defmap local-pod-v4 :type :hash
-      :key-size 4 :value-size 16 :max-entries 4096)))
+    (defmap local-pod-v4 :type :lpm-trie
+      :key-size 8 :value-size 16 :max-entries 4096 :map-flags 1))) ; /32 keys, like netpol-egress-cidr
 
 (defparameter gr8s::*egress-guard-program-forms*
   '((defprog gr8s-egress-guard (:type :tc :section "classifier" :license "GPL")
@@ -148,7 +149,10 @@
                          (let ((lkey (make-netpol-lpm-key)))
                            (setf (netpol-lpm-key-prefixlen lkey) 32
                                  (netpol-lpm-key-addr lkey) dst)
-                           (let ((hit (map-lookup netpol-egress-cidr lkey)))
+                           ;; lkey is a variable (fields setf'd), so pass it with
+                           ;; the -ptr helper; a bare map-lookup would key off the
+                           ;; pointer value, not {prefixlen,addr}. See local-pod-v4.
+                           (let ((hit (map-lookup-ptr netpol-egress-cidr lkey)))
                              (if (/= hit 0)
                                  (let ((grp u32 (load u32 hit 0)))
                                    (when (/= grp #xffffffff)
@@ -158,7 +162,7 @@
                                                  (netpol-port-key-proto pkey) proto
                                                  (netpol-port-key-pad pkey) 0
                                                  (netpol-port-key-port pkey) dport)
-                                           (when (= (map-lookup netpol-egress-port pkey) 0)
+                                           (when (= (map-lookup-ptr netpol-egress-port pkey) 0)
                                              (drop-pod-packet :policy)))
                                          (drop-pod-packet :policy))))
                                  (drop-pod-packet :policy))))))
@@ -170,8 +174,13 @@
                    ;; re-prove the L2 bounds before rewriting the MAC header.
                    (when (> (+ data 34) data-end) (drop-pod-packet :malformed))
                    (let ((lpk (make-local-pod-key)))
-                     (setf (local-pod-key-addr lpk) (load u32 ip 16))
-                     (let ((ep (map-lookup local-pod-v4 lpk)))
+                     (setf (local-pod-key-prefixlen lpk) 32
+                           (local-pod-key-addr lpk) (load u32 ip 16))
+                     ;; lpk is a variable (we setf its fields), so the key expr
+                     ;; is not a literal make- form -- lower-map-lookup can't see
+                     ;; it is a struct pointer and would spill the POINTER value
+                     ;; as the key. Use map-lookup-ptr so R2 = &lpk (its contents).
+                     (let ((ep (map-lookup-ptr local-pod-v4 lpk)))
                        (when (/= ep 0)
                          (when (> (+ data 14) data-end) (drop-pod-packet :malformed))
                          (store u32 data 0 (load u32 ep 4))    ; dst MAC [0:4] = Pod MAC

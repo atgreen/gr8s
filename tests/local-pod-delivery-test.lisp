@@ -20,9 +20,11 @@
     (is (equalp #(1 2 3 4 5 6) (subseq v 4 10)))          ; dest Pod MAC, wire order
     (is (equalp #(7 8 9 10 11 12) (subseq v 10 16)))))    ; dest veth MAC, wire order
 
-(test local-pod-key-is-the-network-order-destination
-  (is (equalp #(1 2 3 4) (gr8s::local-pod-ipv4-key "1.2.3.4")))
-  (is (equalp #(10 96 0 1) (gr8s::local-pod-ipv4-key "10.96.0.1"))))
+(test local-pod-key-is-the-lpm-slash32-destination
+  ;; An LPM /32 key: prefixlen 32 (host order, little-endian u32) then the
+  ;; destination address in network byte order -- same shape as netpol-cidr-lpm-key.
+  (is (equalp #(32 0 0 0 1 2 3 4) (gr8s::local-pod-ipv4-key "1.2.3.4")))
+  (is (equalp #(32 0 0 0 10 96 0 1) (gr8s::local-pod-ipv4-key "10.96.0.1"))))
 
 (test local-pod-mac-round-trips-through-the-pinned-identity-value
   ;; The agent reads a Pod's own MAC back from its pinned endpoint_identity map;
@@ -52,5 +54,5 @@
     (dolist (w writes)
       (let ((keys (mapcar #'car (cdr w))))
         (is (= 2 (length keys)))
-        (is (member #(10 80 0 2) keys :test #'equalp))
-        (is (member #(10 80 0 3) keys :test #'equalp))))))
+        (is (member #(32 0 0 0 10 80 0 2) keys :test #'equalp))
+        (is (member #(32 0 0 0 10 80 0 3) keys :test #'equalp))))))
