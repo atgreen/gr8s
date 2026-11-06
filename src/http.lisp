@@ -441,6 +441,8 @@ not be changed; add or replace entries instead."
 (defun create-pod-response (store reconciler &optional (namespace "default"))
   "Admit a new Pod; a dry run runs every admission and quota check but stores nothing."
   (let ((raw (core-resource-request-object "Pod")))
+    ;; The API server defaults a request as it decodes it, so admission sees the defaults.
+    (when (hash-table-p raw) (default-pod-spec-object (gethash "spec" raw)))
     (multiple-value-bind (admitted attributes)
         (admit-pod-input store "CREATE" namespace
                          (let ((metadata (gethash "metadata" raw))) (and (hash-table-p metadata) (gethash "name" metadata)))
@@ -454,7 +456,7 @@ not be changed; add or replace entries instead."
             (progn
               (with-store-lock (store)
                 (enforce-resource-quotas-unlocked store "pods" namespace (pod-to-object final)))
-              (json-response (pod-response-object final (pod-status "Pending")) 201))
+              (json-response (pod-response-object (default-created-pod final) (pod-status "Pending")) 201))
             (let* ((pod (create-pod store final))
                    (status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
               (json-response (pod-response-object pod status) 201)))))))
@@ -503,6 +505,8 @@ not be changed; add or replace entries instead."
       (let ((old (gethash "metadata" (pod-to-object existing))))
         (dolist (field '("uid" "creationTimestamp" "resourceVersion" "generation"))
           (setf (gethash field metadata) (gethash field old)))))
+    (when (or (null existing) (pod-spec-defaulted-p (gethash "spec" (pod-to-object existing))))
+      (default-pod-spec-object (gethash "spec" object)))
     (setf (gethash "status" object)
           (or (and existing (copy-json-object (or (pod-observed-status store existing) (pod-status "Pending"))))
               (pod-status "Pending")))
@@ -544,6 +548,8 @@ not be changed; add or replace entries instead."
 
 (defun replace-pod-response (store reconciler name &optional (namespace "default"))
   (let ((raw (core-resource-request-object "Pod")))
+    ;; The API server defaults a request as it decodes it, so admission sees the defaults.
+    (when (hash-table-p raw) (default-pod-spec-object (gethash "spec" raw)))
     (multiple-value-bind (admitted attributes)
         (admit-pod-input store "UPDATE" namespace name raw (get-pod store namespace name))
       (let ((replacement (request-pod-in-namespace admitted namespace)))

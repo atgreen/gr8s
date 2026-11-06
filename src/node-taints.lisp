@@ -116,7 +116,7 @@
                             nil nil)
     (let ((taints (validate-node-taints spec))
           (node (make-node-record
-                 :id (generate-uid) :name name :pod-cidr "" :api-only t
+                 :id (generate-uid) :name name :pod-cidr "" :api-only t :creation-timestamp (current-timestamp)
                  :labels (and (hash-table-p (gethash "labels" metadata)) (copy-core-object (gethash "labels" metadata)))
                  :annotations (and (hash-table-p (gethash "annotations" metadata)) (copy-core-object (gethash "annotations" metadata)))
                  :unschedulable (eq t (gethash "unschedulable" spec))

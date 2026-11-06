@@ -44,6 +44,7 @@
                                 (node-record-pod-cidr node))))
       (setf (node-record-ready-p node) nil
             (node-record-last-heartbeat node) nil
+            (node-record-creation-timestamp node) (or (node-record-creation-timestamp node) (current-timestamp))
             (gethash (node-record-name node) (pod-store-nodes store)) node)
       (publish-node-change-unlocked store nil node)
       ;; Desired write (the control-plane-assigned podCIDR): replicate (8ia.4).
@@ -88,6 +89,10 @@
         (setf (node-record-ready-p node) t
               (node-record-last-heartbeat node) heartbeat
               (node-record-lease-deadline node) (node-record-lease-deadline updated))
+        ;; A node an older gr8s registered has no creation time until its agent returns.
+        (when (and old (null (node-record-creation-timestamp node)))
+          (setf (node-record-creation-timestamp node) (current-timestamp))
+          (note-node-desired-change store))
         (when old (publish-node-change-unlocked store old node)))
       node)))
 

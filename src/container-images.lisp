@@ -46,11 +46,14 @@
     job))
 
 (defun default-image-pull-policy (image)
-  "Return the pull policy Kubernetes defaults to for IMAGE: Always for an untagged or latest image."
-  (if (or (uiop:string-suffix-p image ":latest")
-          (and (not (find #\@ image))
-               (not (find #\: (car (last (uiop:split-string image :separator '(#\/))))))))
-      "Always" "IfNotPresent"))
+  "Return the pull policy SetDefaults_Container gives IMAGE: Always when its tag is latest,
+which an image naming neither a tag nor a digest has (parsers.ParseImageName), else IfNotPresent."
+  (let* ((at (position #\@ image))
+         (name (if at (subseq image 0 at) image))
+         (slash (position #\/ name :from-end t))
+         (colon (position #\: name :start (if slash (1+ slash) 0)))
+         (tag (and colon (subseq name (1+ colon)))))
+    (if (or (equal tag "latest") (and (null tag) (null at))) "Always" "IfNotPresent")))
 
 (defun ensure-container-image (runtime image policy &optional (credentials (constantly nil)))
   "Return once IMAGE may be used under pull POLICY, or signal why its container must wait.

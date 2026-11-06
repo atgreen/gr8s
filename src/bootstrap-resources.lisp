@@ -439,6 +439,8 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
      "metadata" (let ((metadata (core-object "name" (node-record-name node) "uid" (node-record-id node)
                                              "resourceVersion" (node-record-resource-version node)
                                              "labels" (node-labels node))))
+                  (when (node-record-creation-timestamp node)
+                    (setf (gethash "creationTimestamp" metadata) (node-record-creation-timestamp node)))
                   (when (node-record-annotations node)
                     (setf (gethash "annotations" metadata) (copy-core-object (node-record-annotations node))))
                   metadata)

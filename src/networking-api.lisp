@@ -209,6 +209,10 @@ here are single-stack IPv4."
   (let ((spec (require-object (gethash "spec" object) "IngressClass.spec")))
     (unless (and (core-qualified-key-p (gethash "controller" spec)) (position #\/ (gethash "controller" spec)))
       (core-resource-error 422 "Invalid" "IngressClass.spec.controller must be a domain-prefixed path"))
+    ;; SetDefaults_IngressClass: parameters are cluster-scoped unless they say otherwise.
+    (let ((parameters (gethash "parameters" spec)))
+      (when (and (hash-table-p parameters) (member (gethash "scope" parameters) '(nil null)))
+        (setf (gethash "scope" parameters) "Cluster")))
     object))
 
 (defun normalize-networking-resource (resource input namespace name store)
