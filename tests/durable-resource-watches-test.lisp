@@ -226,7 +226,7 @@
         (lambda (object) (setf (gethash "data" object) (gr8s::core-object "mode" "updated")) object))
       (gr8s::create-core-resource store "configmaps" (durable-watch-fixture "configmaps" "aa") "alpha")
       (gr8s::delete-core-resource store "secrets" "alpha" "b")
-      (is (= 2 (gethash "version" (com.inuoe.jzon:parse (gr8s::core-resource-state-path store)))))
+      (is (= 2 (gethash "version" (gr8s::read-durable-core-state store))))
       (let* ((reopened (open-store path))
              (next (gr8s::template-list-page reopened "alpha" "" "" :resource "configmaps" :limit 10 :continuation token))
              (items (gethash "items" next)))
@@ -272,7 +272,7 @@
           (is (equal '("first" "second") (names store (1- created))))
           (is (equal '("second") (names store created)))
           ;; A commit writes only what it always wrote, and a restart resumes from that.
-          (let ((state (com.inuoe.jzon:parse (gr8s::core-resource-state-path store))))
+          (let ((state (gr8s::read-durable-core-state store)))
             (is (= 1 (length (gethash "templateHistory" state))))
             (is (= created (gethash "templateHistoryFloor" state))))
           (let ((reopened (open-store path)))
@@ -296,7 +296,7 @@
         (is (= 5 (length (gr8s::pod-store-template-history store))))
         (is (= start (gr8s::pod-store-template-history-floor store)))
         (is (= 2 (length (gethash "templateHistory"
-                                  (com.inuoe.jzon:parse (gr8s::core-resource-state-path store)))))))
+                                  (gr8s::read-durable-core-state store))))))
       (let ((gr8s::*resource-watch-history-limit* 3))
         (create-all '("f"))
         (is (= 3 (length (gr8s::pod-store-template-history store))))
@@ -338,7 +338,7 @@
     (dolist (name '("a" "b"))
       (gr8s::create-core-resource store "podtemplates" (podtemplate-fixture name) "alpha"))
     (let* ((state-path (gr8s::core-resource-state-path store))
-           (state (com.inuoe.jzon:parse state-path))
+           (state (gr8s::read-durable-core-state store))
            (revision (gethash "revision" state))
            (token-object (gr8s::core-object "namespace" "alpha" "labels" "" "fields" "" "revision" revision
                                            "lastKey" "alpha/a" "issuedAt" (get-universal-time)))
@@ -351,7 +351,9 @@
             (coerce (loop for entry across (gethash "templateHistory" state)
                           when (equal "podtemplates" (gethash "resource" entry))
                             collect (progn (remhash "resource" entry) entry)) 'vector))
+      ;; Those versions wrote everything to the one file and kept no journal.
       (gr8s::write-private-text-atomically state-path (com.inuoe.jzon:stringify state))
+      (uiop:delete-file-if-exists (gr8s::core-journal-path store))
       (let* ((reopened (open-store path))
              (page (gr8s::template-list-page reopened "alpha" "" "" :continuation token)))
         (is (equal "b" (gethash "name" (gethash "metadata" (aref (gethash "items" page) 0)))))
@@ -364,3 +366,70 @@
           (is (equal '("MODIFIED") (mapcar (lambda (event) (gethash "type" event)) events))))))))
 
 (in-suite gr8s)
+
+;; podster-uqb.140: a commit appends what it changed; the store is rebuilt from
+;; the last checkpoint and the journal of later commits.
+(test core-commits-journal-their-changes-and-replay-on-reopen
+  (with-temporary-store (store path)
+    (gr8s::create-core-resource store "configmaps" (durable-watch-fixture "configmaps" "kept") "alpha")
+    (let ((checkpoint (uiop:read-file-string (gr8s::core-resource-state-path store))))
+      (dotimes (index 5)
+        (gr8s::create-core-resource store "configmaps" (durable-watch-fixture "configmaps" (format nil "c~D" index)) "alpha"))
+      (gr8s::update-core-resource store "configmaps" "alpha" "kept"
+        (lambda (object) (setf (gethash "data" object) (gr8s::core-object "mode" "journaled")) object))
+      (gr8s::delete-core-resource store "configmaps" "alpha" "c0")
+      ;; The checkpoint was not rewritten; each commit added one journal line.
+      (is (equal checkpoint (uiop:read-file-string (gr8s::core-resource-state-path store))))
+      (is (= 7 (length (uiop:read-file-lines (gr8s::core-journal-path store)))))
+      (let ((reopened (open-store path)))
+        (is (= (gr8s::pod-store-resource-revision store) (gr8s::pod-store-resource-revision reopened)))
+        (is (equal (sort (mapcar (lambda (object) (gethash "name" (gethash "metadata" object)))
+                                 (gr8s::list-core-resources reopened "configmaps" "alpha")) #'string<)
+                   '("c1" "c2" "c3" "c4" "kept")))
+        (is (equal "journaled" (gethash "mode" (gethash "data" (gr8s::get-core-resource reopened "configmaps" "alpha" "kept")))))
+        ;; The history a watch resumes from was rebuilt too.
+        (flet ((entries (store)
+                 (mapcar (lambda (entry)
+                           (list (gethash "revision" entry) (gethash "resource" entry) (gethash "name" entry)
+                                 (hash-table-p (gethash "old" entry)) (hash-table-p (gethash "new" entry))))
+                         (gr8s::pod-store-template-history store))))
+          (is (equal (entries store) (entries reopened))))
+        (is (= (gr8s::pod-store-template-history-floor store) (gr8s::pod-store-template-history-floor reopened)))))))
+
+(test core-journal-checkpoints-when-it-outgrows-the-checkpoint
+  (with-temporary-store (store path)
+    (let ((gr8s::*core-journal-checkpoint-bytes* 2000))
+      (dotimes (index 40)
+        (gr8s::create-core-resource store "configmaps" (durable-watch-fixture "configmaps" (format nil "c~D" index)) "alpha"))
+      ;; The journal never grows far past the larger of the limit and the checkpoint.
+      (is (<= (gr8s::pod-store-core-journal-bytes store)
+              (+ 2000 (gr8s::pod-store-core-checkpoint-bytes store) 2000)))
+      (is (= 40 (length (gr8s::list-core-resources (open-store path) "configmaps" "alpha")))))))
+
+(test torn-core-journal-record-is-dropped-and-never-followed
+  (with-temporary-store (store path)
+    (dolist (name '("a" "b"))
+      (gr8s::create-core-resource store "configmaps" (durable-watch-fixture "configmaps" name) "alpha"))
+    (let ((revision (gr8s::pod-store-resource-revision store)))
+      ;; A crash while appending leaves part of a record at the end.
+      (with-open-file (stream (gr8s::core-journal-path store) :direction :output :if-exists :append)
+        (write-string "{\"revision\":99,\"changes\":[{\"resou" stream))
+      (let ((reopened (open-store path)))
+        (is (= revision (gr8s::pod-store-resource-revision reopened)))
+        (is (gr8s::pod-store-core-checkpoint-needed reopened))
+        ;; The next commit writes a checkpoint, so nothing follows the torn record.
+        (gr8s::create-core-resource reopened "configmaps" (durable-watch-fixture "configmaps" "c") "alpha")
+        (is (null (probe-file (gr8s::core-journal-path reopened))))
+        (gr8s::create-core-resource reopened "configmaps" (durable-watch-fixture "configmaps" "d") "alpha")
+        (is (equal '("a" "b" "c" "d")
+                   (sort (mapcar (lambda (object) (gethash "name" (gethash "metadata" object)))
+                                 (gr8s::list-core-resources (open-store path) "configmaps" "alpha"))
+                         #'string<))))))
+  ;; Damage before the end is not a crash and is refused.
+  (with-temporary-store (store path)
+    (dolist (name '("a" "b" "c"))
+      (gr8s::create-core-resource store "configmaps" (durable-watch-fixture "configmaps" name) "alpha"))
+    (let ((lines (uiop:read-file-lines (gr8s::core-journal-path store))))
+      (with-open-file (stream (gr8s::core-journal-path store) :direction :output :if-exists :supersede)
+        (format stream "~A~%{damaged~%" (first lines))))
+    (signals error (open-store path))))

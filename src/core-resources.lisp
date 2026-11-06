@@ -129,8 +129,134 @@
 (defun core-resource-state-path (store)
   (merge-pathnames "objects/state.json" (pod-store-path store)))
 
-(defun load-core-resources (store)
-  (let ((path (core-resource-state-path store)))
+(defun core-journal-path (store)
+  "The journal of commits made after the checkpoint at CORE-RESOURCE-STATE-PATH."
+  (merge-pathnames "objects/journal.jsonl" (pod-store-path store)))
+
+(defparameter *core-journal-checkpoint-bytes* (* 8 1024 1024)
+  "Journal size past which the next commit writes a checkpoint and starts a new journal.
+A journal may also grow to the size of the checkpoint, so writing checkpoints costs
+each commit a bounded multiple of what it changed, whatever the size of the store.")
+
+(defun core-resource-key-from-object (resource object)
+  (let ((metadata (gethash "metadata" object)))
+    (core-resource-key resource (gethash "namespace" metadata) (gethash "name" metadata))))
+
+(defun core-state-index (state)
+  "Index a checkpoint's objects by key, as (resource . object) values, refusing duplicates."
+  (let ((index (make-hash-table :test #'equal)))
+    (flet ((add (resource object)
+             (let ((key (core-resource-key-from-object resource object)))
+               (when (gethash key index) (error "Duplicate persisted core resource ~S" key))
+               (setf (gethash key index) object))))
+      (loop for object across (gethash "items" state #())
+            do (add (or (first (find (gethash "kind" object) *stored-resource-types* :key #'second :test #'equal))
+                        (error "Invalid stored resource kind"))
+                    object))
+      (loop for entry across (gethash "customResourceItems" state #())
+            do (add (gethash "resource" entry) (gethash "object" entry))))
+    index))
+
+(defun apply-core-map-delta (map delta)
+  "Return a copy of MAP with a journal record's map DELTA applied."
+  (let ((result (make-hash-table :test #'equal)))
+    (maphash (lambda (key value) (setf (gethash key result) value)) map)
+    (maphash (lambda (key value) (setf (gethash key result) value)) (gethash "set" delta (core-object)))
+    (loop for key across (gethash "delete" delta #()) do (remhash key result))
+    result))
+
+(defun read-core-journal-records (path)
+  "Return PATH's complete journal records in order, whether a torn final record was
+dropped, and the bytes the complete records occupy. Only the last record can be torn,
+by a crash while it was appended; damage anywhere else is an error."
+  (let ((records nil) (torn nil) (bytes 0))
+    (with-open-file (stream path :element-type '(unsigned-byte 8))
+      (let* ((length (file-length stream))
+             (octets (make-array length :element-type '(unsigned-byte 8))))
+        (read-sequence octets stream)
+        (loop with start = 0
+              while (< start length)
+              do (let ((end (position 10 octets :start start)))
+                   (if (null end)
+                       (progn (setf torn t) (return))
+                       (let ((record (handler-case
+                                         (com.inuoe.jzon:parse
+                                          (trivial-utf-8:utf-8-bytes-to-string octets :start start :end end)
+                                          :max-string-length (* 2 1024 1024))
+                                       (error (condition)
+                                         (error "Damaged core resource journal record at byte ~D of ~A: ~A"
+                                                start path condition)))))
+                         (push record records)
+                         (setf start (1+ end) bytes start)))))))
+    (values (nreverse records) torn bytes)))
+
+(defun replay-core-journal (state records)
+  "Apply journal RECORDS newer than STATE's revision to STATE, a parsed checkpoint,
+rebuilding the history a commit used to write. Return STATE, now in checkpoint form."
+  (let* ((index (core-state-index state))
+         (history (coerce (gethash "templateHistory" state #()) 'list))
+         (floor (gethash "templateHistoryFloor" state (gethash "revision" state)))
+         (expirations (gethash "eventExpirations" state (make-hash-table :test #'equal)))
+         (time nil))
+    (dolist (record records)
+      (let ((revision (gethash "revision" record)))
+        (when (> revision (gethash "revision" state))
+          (setf time (gethash "time" record))
+          (loop for change across (gethash "changes" record #())
+                for key = (core-resource-key (gethash "resource" change)
+                                             (let ((namespace (gethash "namespace" change)))
+                                               (unless (eq namespace 'null) namespace))
+                                             (gethash "name" change))
+                for old = (gethash key index)
+                for new = (let ((object (gethash "object" change))) (unless (eq object 'null) object))
+                do (setf history
+                         (nconc history
+                                (list (core-object "revision" revision "time" time "resource" (first key)
+                                                   "namespace" (second key) "name" (third key)
+                                                   "old" (or old 'null) "new" (or new 'null)
+                                                   "bytes" (template-history-old-bytes old)))))
+                   (if new (setf (gethash key index) new) (remhash key index)))
+          (maphash (lambda (uid expiry) (setf (gethash uid expirations) expiry))
+                   (gethash "eventExpirations" record (core-object)))
+          (dolist (field '("workloadDeletions" "jobControllerStates"))
+            (let ((delta (gethash field record)))
+              (when delta
+                (setf (gethash field state)
+                      (apply-core-map-delta (gethash field state (make-hash-table :test #'equal)) delta)))))
+          (setf (gethash "revision" state) revision
+                (gethash "resourceHistoryStart" state)
+                (gethash "resourceHistoryStart" record (gethash "resourceHistoryStart" state revision))))))
+    (when time
+      ;; Trim as the last replayed commit would have when it wrote everything.
+      (multiple-value-bind (durable durable-floor)
+          (let ((*podtemplate-clock* (constantly time)))
+            (durable-template-history history floor))
+        (setf history durable floor durable-floor))
+      (let ((events (make-hash-table :test #'equal)))
+        (maphash (lambda (key object)
+                   (when (equal "events" (first key))
+                     (let ((uid (gethash "uid" (gethash "metadata" object))))
+                       (when (gethash uid expirations) (setf (gethash uid events) (gethash uid expirations))))))
+                 index)
+        (setf expirations events))
+      (setf (gethash "version" state) 2
+            (gethash "templateHistory" state) (coerce history 'vector)
+            (gethash "templateHistoryFloor" state) floor
+            (gethash "eventExpirations" state) expirations
+            (gethash "items" state)
+            (coerce (loop for key being the hash-keys of index using (hash-value object)
+                          unless (custom-resource-key-p (first key)) collect object) 'vector)
+            (gethash "customResourceItems" state)
+            (coerce (loop for key being the hash-keys of index using (hash-value object)
+                          when (custom-resource-key-p (first key))
+                            collect (core-object "resource" (first key) "object" object)) 'vector)))
+    state))
+
+(defun read-durable-core-state (store)
+  "Return STORE's durable core-resource state in checkpoint form, the checkpoint with
+its journal replayed, or NIL when nothing was committed. Second and third values:
+whether the journal must be rewritten (a torn record) and its complete bytes."
+  (let ((path (core-resource-state-path store)) (journal (core-journal-path store)))
     (when (probe-file path)
       (let ((state (com.inuoe.jzon:parse path :max-string-length (* 2 1024 1024))))
         (unless (and (member (gethash "version" state) '(1 2))
@@ -139,34 +265,44 @@
         (when (and (eql 2 (gethash "version" state))
                    (not (typep (gethash "resourceHistoryStart" state) `(integer 0 ,(gethash "revision" state)))))
           (error "Invalid resource history start at ~A" path))
-        (setf (pod-store-resource-revision store) (gethash "revision" state)
-              (pod-store-workload-deletions store) (gethash "workloadDeletions" state (make-hash-table :test #'equal))
-              (pod-store-job-controller-states store) (gethash "jobControllerStates" state (make-hash-table :test #'equal))
-              (pod-store-event-expirations store) (gethash "eventExpirations" state (make-hash-table :test #'equal))
-              (pod-store-template-history store) (coerce (gethash "templateHistory" state #()) 'list)
-              (pod-store-template-history-floor store) (gethash "templateHistoryFloor" state (gethash "revision" state))
-              (pod-store-resource-history-start store) (gethash "resourceHistoryStart" state (gethash "revision" state))
-              (pod-store-template-token-key store) (when (gethash "templateTokenKey" state)
-                                                     (ag-grpc:base64-decode (gethash "templateTokenKey" state))))
-        (loop for object across (gethash "items" state)
-              for metadata = (gethash "metadata" object)
-              for resource = (or (first (find (gethash "kind" object) *stored-resource-types*
-                                             :key #'second :test #'equal))
-                                 (error "Invalid stored resource kind"))
-              for key = (core-resource-key resource (gethash "namespace" metadata)
-                                           (gethash "name" metadata))
-              do (when (gethash key (pod-store-resources store))
-                   (error "Duplicate persisted core resource ~S" key))
-                 (setf (gethash key (pod-store-resources store)) object))
-        (loop for entry across (gethash "customResourceItems" state #())
-              for resource = (gethash "resource" entry)
-              for object = (gethash "object" entry)
-              for metadata = (gethash "metadata" object)
-              for key = (core-resource-key resource (gethash "namespace" metadata) (gethash "name" metadata))
-              do (unless (and (custom-resource-key-p resource) (crd-definition-unlocked store resource))
-                   (error "Persisted custom resource has no matching definition"))
-                 (when (gethash key (pod-store-resources store)) (error "Duplicate persisted custom resource"))
-                 (setf (gethash key (pod-store-resources store)) object)))))
+        (if (probe-file journal)
+            (multiple-value-bind (records torn bytes) (read-core-journal-records journal)
+              (values (replay-core-journal state records) torn bytes))
+            (values state nil 0))))))
+
+(defun load-core-resources (store)
+  (multiple-value-bind (state torn journal-bytes) (read-durable-core-state store)
+    (when state
+      (setf (pod-store-resource-revision store) (gethash "revision" state)
+            (pod-store-workload-deletions store) (gethash "workloadDeletions" state (make-hash-table :test #'equal))
+            (pod-store-job-controller-states store) (gethash "jobControllerStates" state (make-hash-table :test #'equal))
+            (pod-store-event-expirations store) (gethash "eventExpirations" state (make-hash-table :test #'equal))
+            (pod-store-template-history store) (coerce (gethash "templateHistory" state #()) 'list)
+            (pod-store-template-history-floor store) (gethash "templateHistoryFloor" state (gethash "revision" state))
+            (pod-store-resource-history-start store) (gethash "resourceHistoryStart" state (gethash "revision" state))
+            (pod-store-template-token-key store) (when (gethash "templateTokenKey" state)
+                                                   (ag-grpc:base64-decode (gethash "templateTokenKey" state)))
+            (pod-store-core-checkpoint-bytes store) (with-open-file (stream (core-resource-state-path store))
+                                                      (file-length stream))
+            (pod-store-core-journal-bytes store) journal-bytes
+            ;; A torn record must not end up in the middle of the journal.
+            (pod-store-core-checkpoint-needed store) torn)
+      (loop for object across (gethash "items" state)
+            for resource = (or (first (find (gethash "kind" object) *stored-resource-types*
+                                           :key #'second :test #'equal))
+                               (error "Invalid stored resource kind"))
+            for key = (core-resource-key-from-object resource object)
+            do (when (gethash key (pod-store-resources store))
+                 (error "Duplicate persisted core resource ~S" key))
+               (setf (gethash key (pod-store-resources store)) object))
+      (loop for entry across (gethash "customResourceItems" state #())
+            for resource = (gethash "resource" entry)
+            for object = (gethash "object" entry)
+            for key = (core-resource-key-from-object resource object)
+            do (unless (and (custom-resource-key-p resource) (crd-definition-unlocked store resource))
+                 (error "Persisted custom resource has no matching definition"))
+               (when (gethash key (pod-store-resources store)) (error "Duplicate persisted custom resource"))
+               (setf (gethash key (pod-store-resources store)) object))))
   store)
 
 (defparameter +template-history-recent-limit+ 512
@@ -182,9 +318,28 @@
 (defun local-plane-resource-p (resource)
   (member resource *raft-local-plane-resources* :test #'equal))
 
+(defun core-checkpoint-object (store resources revision workload-deletions job-controller-states
+                               history floor token-key event-expirations &key omit-local-plane)
+  "Return the complete durable core-resource state, as a checkpoint or HA state blob holds it."
+  (multiple-value-bind (durable durable-floor) (durable-template-history history floor)
+    (progn
+     (core-object "version" 2 "revision" revision "workloadDeletions" workload-deletions
+                  "jobControllerStates" job-controller-states
+                  "templateHistory" (coerce durable 'vector) "templateHistoryFloor" durable-floor
+                  "templateTokenKey" (ag-grpc:base64-encode token-key)
+                  "resourceHistoryStart" (pod-store-resource-history-start store)
+                  "eventExpirations" event-expirations
+                  "items" (coerce (loop for key being the hash-keys of resources using (hash-value object)
+                                        unless (or (custom-resource-key-p (first key))
+                                                   (and omit-local-plane (local-plane-resource-p (first key))))
+                                          collect object) 'vector)
+                  "customResourceItems" (coerce (loop for key being the hash-keys of resources using (hash-value object)
+                                                      when (custom-resource-key-p (first key))
+                                                        collect (core-object "resource" (first key) "object" object)) 'vector)))))
+
 (defun core-state-json (store resources revision workload-deletions job-controller-states
                         &key omit-local-plane)
-  "Serialize the complete durable core-resource state to the JSON written to disk.
+  "Serialize the complete durable core-resource state, as a checkpoint is written.
    Returns (values json history floor token-key event-expirations added) so the
    direct publish path can also set the derived in-memory slots: HISTORY and FLOOR
    are what watches read, which reaches further back than what is written. With
@@ -192,34 +347,111 @@
    replication blob so high-churn events never ride the Raft log."
   (multiple-value-bind (history floor added) (next-template-history store resources revision)
     (let* ((token-key (or (pod-store-template-token-key store) (secure-random-octets 32)))
-           (event-expirations (next-event-expirations store resources))
-           (json (multiple-value-bind (durable durable-floor) (durable-template-history history floor)
-              (com.inuoe.jzon:stringify
-                  (core-object "version" 2 "revision" revision "workloadDeletions" workload-deletions
-                               "jobControllerStates" job-controller-states
-                               "templateHistory" (coerce durable 'vector) "templateHistoryFloor" durable-floor
-                               "templateTokenKey" (ag-grpc:base64-encode token-key)
-                               "resourceHistoryStart" (pod-store-resource-history-start store)
-                               "eventExpirations" event-expirations
-                               "items" (coerce (loop for key being the hash-keys of resources using (hash-value object)
-                                                     unless (or (custom-resource-key-p (first key))
-                                                                (and omit-local-plane (local-plane-resource-p (first key))))
-                                                       collect object) 'vector)
-                               "customResourceItems" (coerce (loop for key being the hash-keys of resources using (hash-value object)
-                                                                   when (custom-resource-key-p (first key))
-                                                                     collect (core-object "resource" (first key) "object" object)) 'vector))))))
-      (values json history floor token-key event-expirations added))))
+           (event-expirations (next-event-expirations store resources)))
+      (values (com.inuoe.jzon:stringify
+               (core-checkpoint-object store resources revision workload-deletions job-controller-states
+                                       history floor token-key event-expirations
+                                       :omit-local-plane omit-local-plane))
+              history floor token-key event-expirations added))))
+
+(defun core-map-delta (old new)
+  "Describe how the string-keyed JSON map NEW differs from OLD, or NIL when it does not."
+  (unless (eq old new)
+    (let ((set (core-object)) (deleted nil))
+      (maphash (lambda (key value)
+                 (multiple-value-bind (previous present) (gethash key old)
+                   (unless (and present (core-json-equal-p previous value))
+                     (setf (gethash key set) value))))
+               new)
+      (maphash (lambda (key value)
+                 (declare (ignore value))
+                 (unless (nth-value 1 (gethash key new)) (push key deleted)))
+               old)
+      (when (or (plusp (hash-table-count set)) deleted)
+        (core-object "set" set "delete" (coerce deleted 'vector))))))
+
+(defun core-journal-record-json (store revision added workload-deletions job-controller-states event-expirations)
+  "Serialize one commit as a journal line: only what it changed. ADDED are its history entries."
+  (let ((changes nil) (expirations (core-object)) (record (core-object "revision" revision)))
+    (dolist (entry added)
+      (let ((new (gethash "new" entry)))
+        (push (core-object "resource" (gethash "resource" entry) "namespace" (or (gethash "namespace" entry) 'null)
+                           "name" (gethash "name" entry) "object" new)
+              changes)
+        (when (and (equal "events" (gethash "resource" entry)) (hash-table-p new))
+          (let ((uid (gethash "uid" (gethash "metadata" new))))
+            (setf (gethash uid expirations) (gethash uid event-expirations))))))
+    (setf (gethash "time" record) (if added (gethash "time" (first added)) (funcall *podtemplate-clock*))
+          ;; ADDED is newest first, so CHANGES is in the order history holds them.
+          (gethash "changes" record) (coerce changes 'vector)
+          (gethash "resourceHistoryStart" record) (pod-store-resource-history-start store))
+    (when (plusp (hash-table-count expirations))
+      (setf (gethash "eventExpirations" record) expirations))
+    (let ((delta (core-map-delta (pod-store-workload-deletions store) workload-deletions)))
+      (when delta (setf (gethash "workloadDeletions" record) delta)))
+    (let ((delta (core-map-delta (pod-store-job-controller-states store) job-controller-states)))
+      (when delta (setf (gethash "jobControllerStates" record) delta)))
+    (com.inuoe.jzon:stringify record)))
+
+(defun append-core-journal-record (store json)
+  "Append one commit's JSON line to STORE's journal, removing any part of it on failure,
+so that only a crash can leave a torn record, and only at the end."
+  (let* ((path (core-journal-path store))
+         (octets (trivial-utf-8:string-to-utf-8-bytes (concatenate 'string json (string #\Newline))))
+         (start (pod-store-core-journal-bytes store))
+         (done nil))
+    (unwind-protect
+         (progn
+           ;; It holds Secrets, like the checkpoint: create it private.
+           (unless (probe-file path)
+             (sb-posix:close (sb-posix:open (namestring path)
+                                            (logior sb-posix:o-wronly sb-posix:o-creat sb-posix:o-excl)
+                                            #o600)))
+           (with-open-file (stream path :direction :output :element-type '(unsigned-byte 8)
+                                        :if-exists :append :if-does-not-exist :error)
+             (write-sequence octets stream)
+             (finish-output stream))
+           (setf done t))
+      (unless done
+        (ignore-errors (sb-posix:truncate (namestring path) start))))
+    (incf (pod-store-core-journal-bytes store) (length octets))))
+
+(defun write-core-checkpoint (store state)
+  "Replace STORE's checkpoint with STATE, a JSON string or object, and start an empty journal after it.
+An object is streamed to the file, never held as one string as large as the store."
+  (write-private-text-atomically (core-resource-state-path store)
+                                 (if (stringp state)
+                                     state
+                                     (lambda (stream) (com.inuoe.jzon:stringify state :stream stream))))
+  ;; The checkpoint holds everything the journal did. Should deleting the journal
+  ;; fail, replay still skips its records, all at or below the checkpoint's
+  ;; revision, and the next commit tries another checkpoint rather than append.
+  (let ((deleted (ignore-errors
+                  (let ((journal (core-journal-path store)))
+                    (when (probe-file journal) (delete-file journal)))
+                  t)))
+    (setf (pod-store-core-checkpoint-bytes store)
+          (sb-posix:stat-size (sb-posix:stat (namestring (core-resource-state-path store))))
+          (pod-store-core-journal-bytes store) 0
+          (pod-store-core-checkpoint-needed store) (not deleted))))
+
+(defun core-checkpoint-due-p (store)
+  (or (pod-store-core-checkpoint-needed store)
+      (null (pod-store-template-token-key store))
+      (> (pod-store-core-journal-bytes store)
+         (max *core-journal-checkpoint-bytes* (pod-store-core-checkpoint-bytes store)))))
 
 (defun commit-core-resources (store resources revision
                               &key (workload-deletions (pod-store-workload-deletions store))
                                 (job-controller-states (pod-store-job-controller-states store)))
   "Commit a durable core-resource transition. Normally (and always without HA)
-   writes the complete new state to disk and publishes it in memory. Inside a
+   appends what changed to the journal, or now and then writes a complete
+   checkpoint, and then publishes the new state in memory. Inside a
    WITH-CORE-WRITE on an HA store, instead stashes the committed state blob so the
    caller can replicate it through Raft once the store lock is released; every
    replica then installs it via INSTALL-CORE-STATE-BLOB."
-  ;; Write the complete new state before publishing it in memory. A failed
-  ;; atomic write leaves both the old disk state and the old index intact.
+  ;; Write the new state durably before publishing it in memory. A failed write
+  ;; leaves both the old disk state and the old index intact.
   (cond
     ;; HA consensus write: defer to the replicated apply path, keeping local-plane
     ;; resources (events) out of the Raft log (podster-8ia.3). A local-plane-only
@@ -229,22 +461,29 @@
            (core-state-json store resources revision workload-deletions job-controller-states
                             :omit-local-plane t)))
     (t
-     (multiple-value-bind (json history floor token-key event-expirations added)
-         (core-state-json store resources revision workload-deletions job-controller-states)
-       (write-private-text-atomically (core-resource-state-path store) json)
-       (setf (pod-store-resources store) resources
-             (pod-store-workload-deletions store) workload-deletions
-             (pod-store-job-controller-states store) job-controller-states
-             (pod-store-resource-revision store) revision
-             (pod-store-template-history store) history
-             (pod-store-template-history-recent store)
-             (let ((recent (append added (pod-store-template-history-recent store))))
-               (if (nthcdr +template-history-recent-limit+ recent)
-                   (subseq recent 0 +template-history-recent-limit+)
-                   recent))
-             (pod-store-template-history-floor store) floor
-             (pod-store-template-token-key store) token-key
-             (pod-store-event-expirations store) event-expirations)))))
+     (multiple-value-bind (history floor added) (next-template-history store resources revision)
+       (let ((token-key (or (pod-store-template-token-key store) (secure-random-octets 32)))
+             (event-expirations (next-event-expirations store resources)))
+         (if (core-checkpoint-due-p store)
+             (write-core-checkpoint store (core-checkpoint-object store resources revision workload-deletions
+                                                                  job-controller-states history floor
+                                                                  token-key event-expirations))
+             (append-core-journal-record
+              store (core-journal-record-json store revision added workload-deletions
+                                              job-controller-states event-expirations)))
+         (setf (pod-store-resources store) resources
+               (pod-store-workload-deletions store) workload-deletions
+               (pod-store-job-controller-states store) job-controller-states
+               (pod-store-resource-revision store) revision
+               (pod-store-template-history store) history
+               (pod-store-template-history-recent store)
+               (let ((recent (append added (pod-store-template-history-recent store))))
+                 (if (nthcdr +template-history-recent-limit+ recent)
+                     (subseq recent 0 +template-history-recent-limit+)
+                     recent))
+               (pod-store-template-history-floor store) floor
+               (pod-store-template-token-key store) token-key
+               (pod-store-event-expirations store) event-expirations))))))
 
 (defun install-core-state-blob (store json)
   "Install a replicated core-resource state JSON blob on this replica: write it to
@@ -259,12 +498,15 @@
                          using (hash-value object)
                        when (local-plane-resource-p (first key))
                          collect (cons key object))))
-      (write-private-text-atomically (core-resource-state-path store) json)
+      ;; The blob replaces the checkpoint, so no older journal may be replayed over it.
+      (write-core-checkpoint store json)
       (clrhash (pod-store-resources store))
       (load-core-resources store)
       (loop for (key . object) in local
             unless (gethash key (pod-store-resources store))
-              do (setf (gethash key (pod-store-resources store)) object)))))
+              do (setf (gethash key (pod-store-resources store)) object))
+      ;; The carried objects are only in memory: the next commit writes them all.
+      (setf (pod-store-core-checkpoint-needed store) t))))
 
 (defun copy-core-resource-index (store)
   (let ((copy (make-hash-table :test #'equal)))
