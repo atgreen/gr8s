@@ -2,151 +2,278 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
-;;;; Prove NetworkPolicy resolution: selectors, peer expansion (ipBlock +
-;;;; podSelector), per-direction isolation (default-deny), rule union across
-;;;; policies, and that a resolved Pod policy JIT-compiles to a classifier.
+;;;; Prove NetworkPolicy resolution: LabelSelectors with matchExpressions, the
+;;;; control plane's resolution of Pod and Namespace selector peers and egress
+;;;; named ports into addresses, a node's per-direction isolation and allowed
+;;;; entries, the longest-prefix tables that give ipBlock.except and port ranges
+;;;; exactly, and how a Pod's maps are rewritten as data.
 
 (in-package #:gr8s/tests)
 (def-suite network-policy-resolution :in gr8s)
 (in-suite network-policy-resolution)
 
-(defun npr-cidrs (policy)
-  "The CIDR strings of a resolved network-policy's rules."
-  (mapcar #'gr8s::netpol-rule-cidr (gr8s::network-policy-rules policy)))
+(defun npr-json (text) (com.inuoe.jzon:parse text))
 
-(test npr-label-selector-matches-subset-and-empty
-  ;; matchLabels is a subset test; an empty selector matches everything.
-  (is (gr8s::label-selector-match-p '(("app" . "web")) '(("app" . "web") ("tier" . "fe"))))
-  (is (not (gr8s::label-selector-match-p '(("app" . "web")) '(("app" . "db")))))
-  (is (not (gr8s::label-selector-match-p '(("app" . "web")) '())))
-  (is (gr8s::label-selector-match-p '() '(("app" . "web"))))
-  (is (gr8s::label-selector-match-p '() '())))
+(defun npr-pod (name namespace ip &rest labels)
+  (gr8s::make-np-pod :name name :namespace namespace :ip ip :labels (apply #'gr8s::np-labels labels)))
 
-(test npr-spec-selects-only-same-namespace-matching-pods
-  (let ((spec (gr8s::make-np-spec :namespace "prod" :pod-selector '(("app" . "web"))
-                                  :policy-types '("Egress")))
-        (web-prod (gr8s::make-np-pod :name "w" :namespace "prod" :labels '(("app" . "web")) :ip "10.0.0.1"))
-        (web-dev  (gr8s::make-np-pod :name "w" :namespace "dev"  :labels '(("app" . "web")) :ip "10.0.0.2"))
-        (db-prod  (gr8s::make-np-pod :name "d" :namespace "prod" :labels '(("app" . "db"))  :ip "10.0.0.3")))
-    (is (gr8s::np-spec-selects-pod-p spec web-prod))
-    (is (not (gr8s::np-spec-selects-pod-p spec web-dev)))   ; wrong namespace
-    (is (not (gr8s::np-spec-selects-pod-p spec db-prod))))) ; wrong labels
+(defun npr-policy (namespace spec)
+  "A NetworkPolicy object in NAMESPACE with SPEC (JSON text)."
+  (npr-json (format nil "{\"apiVersion\":\"networking.k8s.io/v1\",\"kind\":\"NetworkPolicy\",
+                          \"metadata\":{\"namespace\":\"~A\",\"name\":\"p\"},\"spec\":~A}" namespace spec)))
 
-(test npr-peer-ipblock-and-podselector-expand
-  (let ((pods (list (gr8s::make-np-pod :name "a" :namespace "prod" :labels '(("app" . "api")) :ip "10.0.1.5")
-                    (gr8s::make-np-pod :name "b" :namespace "prod" :labels '(("app" . "api")) :ip "10.0.1.6")
-                    (gr8s::make-np-pod :name "c" :namespace "other" :labels '(("app" . "api")) :ip "10.0.1.7"))))
-    ;; ipBlock peer -> its CIDR verbatim.
-    (is (equal '("172.16.0.0/12")
-               (gr8s::resolve-peer-cidrs (gr8s::make-np-peer :cidr "172.16.0.0/12") "prod" pods)))
-    ;; podSelector peer -> matching pods' /32s, restricted to the policy namespace.
-    (let ((cidrs (gr8s::resolve-peer-cidrs
-                  (gr8s::make-np-peer :pod-selector '(("app" . "api"))) "prod" pods)))
-      (is (= 2 (length cidrs)))
-      (is (member "10.0.1.5/32" cidrs :test #'string=))
-      (is (member "10.0.1.6/32" cidrs :test #'string=))
-      (is (not (member "10.0.1.7/32" cidrs :test #'string=)))))) ; other namespace excluded
+(defun npr-peers (rule key)
+  "The cidr strings of a resolved rule's ipBlock peers."
+  (map 'list (lambda (peer) (gethash "cidr" (gethash "ipBlock" peer))) (gethash key rule #())))
 
-(test npr-empty-peers-is-allow-all
-  (let ((rule (gr8s::make-np-rule :peers '() :ports (list (gr8s::make-np-port :tcp 80)))))
-    (is (equal '("0.0.0.0/0")
-               (mapcar #'gr8s::netpol-rule-cidr (gr8s::np-rule->netpol-rules rule "prod" '()))))))
+(test npr-label-selectors-apply-match-labels-and-expressions
+  (let ((labels (gr8s::np-labels "app" "web" "tier" "fe")))
+    (is (gr8s::np-selector-matches-p (npr-json "{}") labels))
+    (is (gr8s::np-selector-matches-p (npr-json "{\"matchLabels\":{\"app\":\"web\"}}") labels))
+    (is (not (gr8s::np-selector-matches-p (npr-json "{\"matchLabels\":{\"app\":\"db\"}}") labels)))
+    (is (gr8s::np-selector-matches-p
+         (npr-json "{\"matchExpressions\":[{\"key\":\"tier\",\"operator\":\"In\",\"values\":[\"fe\",\"be\"]}]}") labels))
+    (is (not (gr8s::np-selector-matches-p
+              (npr-json "{\"matchExpressions\":[{\"key\":\"tier\",\"operator\":\"NotIn\",\"values\":[\"fe\"]}]}") labels)))
+    (is (gr8s::np-selector-matches-p
+         (npr-json "{\"matchExpressions\":[{\"key\":\"team\",\"operator\":\"DoesNotExist\"}]}") labels))
+    (is (not (gr8s::np-selector-matches-p
+              (npr-json "{\"matchExpressions\":[{\"key\":\"team\",\"operator\":\"Exists\"}]}") labels)))))
 
-(test npr-not-selected-is-unrestricted
-  ;; A Pod no policy selects for a direction is not isolated -> nothing attaches.
-  (let ((pod (gr8s::make-np-pod :name "x" :namespace "prod" :labels '(("app" . "web")) :ip "10.0.0.9")))
-    (multiple-value-bind (isolated policy) (gr8s::resolve-pod-policy pod '() '() :egress)
-      (is (not isolated))
-      (is (null policy)))))
+(test npr-parse-defaults-policy-types-and-reads-every-peer-and-port-form
+  (let ((spec (gr8s::parse-network-policy-json
+               (npr-policy "prod" "{\"podSelector\":{\"matchLabels\":{\"app\":\"web\"}},
+                  \"ingress\":[{}, {\"from\":[{\"ipBlock\":{\"cidr\":\"10.0.0.0/8\",\"except\":[\"10.1.0.0/16\"]}},
+                                              {\"namespaceSelector\":{},\"podSelector\":{\"matchLabels\":{\"r\":\"c\"}}}],
+                                     \"ports\":[{\"port\":\"http\"},{\"protocol\":\"UDP\"},{\"port\":8000,\"endPort\":8080}]}]}"))))
+    (is (equal '("Ingress") (gr8s::np-spec-policy-types spec)))
+    (is (eq :all (gr8s::np-rule-peers (first (gr8s::np-spec-ingress spec)))))
+    (is (null (gr8s::np-rule-ports (first (gr8s::np-spec-ingress spec)))))
+    (destructuring-bind (block selectors) (gr8s::np-rule-peers (second (gr8s::np-spec-ingress spec)))
+      (is (equal "10.0.0.0/8" (gr8s::np-peer-cidr block)))
+      (is (equal '("10.1.0.0/16") (gr8s::np-peer-except block)))
+      (is (hash-table-p (gr8s::np-peer-namespace-selector selectors)))
+      (is (hash-table-p (gr8s::np-peer-pod-selector selectors))))
+    (destructuring-bind (named protocol range) (gr8s::np-rule-ports (second (gr8s::np-spec-ingress spec)))
+      (is (equal '(:tcp "http" nil) (list (gr8s::np-port-protocol named) (gr8s::np-port-port named) (gr8s::np-port-end-port named))))
+      (is (equal '(:udp nil nil) (list (gr8s::np-port-protocol protocol) (gr8s::np-port-port protocol) (gr8s::np-port-end-port protocol))))
+      (is (equal '(:tcp 8000 8080) (list (gr8s::np-port-protocol range) (gr8s::np-port-port range) (gr8s::np-port-end-port range))))))
+  ;; Egress rules add Egress to the defaulted types; explicit types stand as written.
+  (is (equal '("Ingress" "Egress")
+             (gr8s::np-spec-policy-types (gr8s::parse-network-policy-json (npr-policy "a" "{\"podSelector\":{},\"egress\":[{}]}")))))
+  (is (equal '("Egress")
+             (gr8s::np-spec-policy-types (gr8s::parse-network-policy-json (npr-policy "a" "{\"podSelector\":{},\"policyTypes\":[\"Egress\"]}"))))))
 
-(test npr-selected-is-default-deny-with-union-of-rules
-  ;; Two egress policies select the Pod; its effective egress allow-list is the
-  ;; union, and the Pod is isolated (default-deny).
-  (let* ((pod (gr8s::make-np-pod :name "web" :namespace "prod" :labels '(("app" . "web")) :ip "10.0.0.1"))
-         (dns (gr8s::make-np-pod :name "dns" :namespace "prod" :labels '(("app" . "dns")) :ip "10.0.9.9"))
-         (p1 (gr8s::make-np-spec
-              :namespace "prod" :pod-selector '(("app" . "web")) :policy-types '("Egress")
-              :egress (list (gr8s::make-np-rule :peers (list (gr8s::make-np-peer :cidr "8.8.8.8/32"))
-                                                :ports (list (gr8s::make-np-port :udp 53))))))
-         (p2 (gr8s::make-np-spec
-              :namespace "prod" :pod-selector '(("app" . "web")) :policy-types '("Egress")
-              :egress (list (gr8s::make-np-rule :peers (list (gr8s::make-np-peer :pod-selector '(("app" . "dns")))))))))
-    (multiple-value-bind (isolated policy) (gr8s::resolve-pod-policy pod (list p1 p2) (list pod dns) :egress)
-      (is (not (null isolated)))
-      (is (eq :egress (gr8s::network-policy-direction policy)))
-      (let ((cidrs (npr-cidrs policy)))
-        (is (member "8.8.8.8/32" cidrs :test #'string=))     ; from p1 ipBlock
-        (is (member "10.0.9.9/32" cidrs :test #'string=))))  ; from p2 podSelector
+(defparameter *npr-pods*
+  (list (npr-pod "a" "prod" "10.0.1.5" "app" "api" "tier" "be")
+        (npr-pod "b" "prod" "10.0.1.6" "app" "api")
+        (npr-pod "c" "dev" "10.0.1.7" "app" "api")
+        (npr-pod "d" "dev" "10.0.1.8" "app" "web")))
 
-    ;; Ingress is not governed here -> unrestricted.
-    (multiple-value-bind (isolated policy) (gr8s::resolve-pod-policy pod (list p1 p2) (list pod dns) :ingress)
-      (is (not isolated))
-      (is (null policy)))))
+(defun npr-namespaces ()
+  (let ((labels (make-hash-table :test #'equal)))
+    (setf (gethash "prod" labels) (gr8s::np-labels "kubernetes.io/metadata.name" "prod" "env" "production")
+          (gethash "dev" labels) (gr8s::np-labels "kubernetes.io/metadata.name" "dev"))
+    labels))
+
+(defun npr-resolve (namespace spec &optional (pods *npr-pods*))
+  (gethash "spec" (gr8s::resolve-network-policy-object (npr-policy namespace spec) pods (npr-namespaces))))
+
+(test npr-control-plane-resolves-pod-and-namespace-selectors-to-addresses
+  ;; A podSelector alone selects in the policy's namespace.
+  (let ((spec (npr-resolve "prod" "{\"podSelector\":{},\"ingress\":[{\"from\":[{\"podSelector\":{\"matchLabels\":{\"app\":\"api\"}}}]}]}")))
+    (is (equal '("Ingress") (coerce (gethash "policyTypes" spec) 'list)))
+    (is (equal '("10.0.1.5/32" "10.0.1.6/32") (npr-peers (aref (gethash "ingress" spec) 0) "from"))))
+  ;; A namespaceSelector by the automatic name label selects every Pod there; with a
+  ;; podSelector, only the matching ones; matchExpressions work in both.
+  (let ((spec (npr-resolve "prod" "{\"podSelector\":{},\"ingress\":[{\"from\":[
+                 {\"namespaceSelector\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"dev\"}}},
+                 {\"namespaceSelector\":{\"matchExpressions\":[{\"key\":\"env\",\"operator\":\"Exists\"}]},
+                  \"podSelector\":{\"matchExpressions\":[{\"key\":\"tier\",\"operator\":\"In\",\"values\":[\"be\"]}]}}]}]}")))
+    (is (equal '("10.0.1.7/32" "10.0.1.8/32" "10.0.1.5/32") (npr-peers (aref (gethash "ingress" spec) 0) "from"))))
+  ;; ipBlocks pass through with their exceptions.
+  (let* ((spec (npr-resolve "prod" "{\"podSelector\":{},\"policyTypes\":[\"Egress\"],
+                  \"egress\":[{\"to\":[{\"ipBlock\":{\"cidr\":\"10.0.0.0/8\",\"except\":[\"10.0.1.0/24\"]}}]}]}"))
+         (block (gethash "ipBlock" (aref (gethash "to" (aref (gethash "egress" spec) 0)) 0))))
+    (is (equal "10.0.0.0/8" (gethash "cidr" block)))
+    (is (equal '("10.0.1.0/24") (coerce (gethash "except" block) 'list))))
+  ;; A rule whose selectors select nothing allows nothing: it must not become "every peer".
+  (let ((spec (npr-resolve "prod" "{\"podSelector\":{},\"ingress\":[{\"from\":[{\"podSelector\":{\"matchLabels\":{\"app\":\"none\"}}}]}]}")))
+    (is (zerop (length (gethash "ingress" spec)))))
+  ;; A rule naming no peers stays one that allows every peer.
+  (let ((spec (npr-resolve "prod" "{\"podSelector\":{},\"ingress\":[{\"ports\":[{\"port\":80}]}]}")))
+    (is (= 1 (length (gethash "ingress" spec))))
+    (is (not (nth-value 1 (gethash "from" (aref (gethash "ingress" spec) 0)))))))
+
+(test npr-control-plane-resolves-egress-named-ports-per-destination-pod
+  (let* ((pods (list (gr8s::make-np-pod :name "s1" :namespace "prod" :ip "10.0.2.1" :labels (gr8s::np-labels "app" "srv")
+                                        :ports '(("serve-80" :tcp 80)))
+                     (gr8s::make-np-pod :name "s2" :namespace "prod" :ip "10.0.2.2" :labels (gr8s::np-labels "app" "srv")
+                                        :ports '(("serve-80" :tcp 8080) ("serve-80" :udp 9090)))
+                     (gr8s::make-np-pod :name "s3" :namespace "prod" :ip "10.0.2.3" :labels (gr8s::np-labels "app" "srv"))))
+         (spec (npr-resolve "prod" "{\"podSelector\":{},\"policyTypes\":[\"Egress\"],
+                  \"egress\":[{\"to\":[{\"podSelector\":{\"matchLabels\":{\"app\":\"srv\"}}}],
+                               \"ports\":[{\"port\":\"serve-80\"},{\"port\":53,\"protocol\":\"UDP\"}]}]}" pods))
+         (rules (coerce (gethash "egress" spec) 'list)))
+    ;; The numbered port keeps every selected peer; each Pod defining the name gets its own rule.
+    (is (= 3 (length rules)))
+    (is (equal '("10.0.2.1/32" "10.0.2.2/32" "10.0.2.3/32") (npr-peers (first rules) "to")))
+    (is (equal '(53) (map 'list (lambda (port) (gethash "port" port)) (gethash "ports" (first rules)))))
+    (is (equal '("10.0.2.1/32") (npr-peers (second rules) "to")))
+    (is (equal '(80) (map 'list (lambda (port) (gethash "port" port)) (gethash "ports" (second rules)))))
+    (is (equal '("10.0.2.2/32") (npr-peers (third rules) "to")))
+    (is (equal '(8080) (map 'list (lambda (port) (gethash "port" port)) (gethash "ports" (third rules))))))
+  ;; Ingress named ports name the selected Pod's own ports, which its node resolves.
+  (let ((spec (npr-resolve "prod" "{\"podSelector\":{},\"ingress\":[{\"ports\":[{\"port\":\"serve-80\"}]}]}")))
+    (is (equal "serve-80" (gethash "port" (aref (gethash "ports" (aref (gethash "ingress" spec) 0)) 0))))))
+
+(test npr-node-isolates-and-collects-entries-per-direction
+  (let* ((pod (gr8s::make-np-pod :name "web" :namespace "prod" :ip "10.0.0.1"
+                                 :labels (gr8s::np-labels "app" "web") :ports '(("http" :tcp 8080))))
+         (specs (gr8s::network-policy-specs-from-objects
+                 (list (npr-policy "prod" "{\"podSelector\":{\"matchLabels\":{\"app\":\"web\"}},\"policyTypes\":[\"Ingress\"],
+                          \"ingress\":[{\"from\":[{\"ipBlock\":{\"cidr\":\"10.1.0.0/16\",\"except\":[\"10.1.2.0/24\"]}}],
+                                        \"ports\":[{\"port\":\"http\"},{\"port\":\"missing\"},{\"protocol\":\"UDP\",\"port\":5000,\"endPort\":5003}]},
+                                       {\"ports\":[{\"port\":\"missing\"}]}]}")
+                       (npr-policy "prod" "{\"podSelector\":{},\"policyTypes\":[\"Egress\"]}")
+                       (npr-policy "dev" "{\"podSelector\":{},\"ingress\":[{}]}")))))
+    (multiple-value-bind (isolated entries) (gr8s::pod-network-policy-entries pod specs :ingress)
+      (is-true isolated)
+      ;; The named port resolves against the Pod; the rule whose only port is undefined allows nothing.
+      (is (equal '(("10.1.0.0/16" ("10.1.2.0/24") ((6 8080 8080) (17 5000 5003)))) entries)))
+    (multiple-value-bind (isolated entries) (gr8s::pod-network-policy-entries pod specs :egress)
+      (is-true isolated)
+      (is (null entries)))
+    (multiple-value-bind (isolated entries)
+        (gr8s::pod-network-policy-entries (npr-pod "x" "other" "10.0.0.9") specs :ingress)
+      (is-false isolated)
+      (is (null entries)))))
+
+(test npr-tables-give-exceptions-and-overlapping-rules-exactly
+  ;; Everything in 10/8 except 10.1/16; TCP 80 to 10.1.2/24; UDP to 10.1.2.3.
+  (multiple-value-bind (cidrs ports)
+      (gr8s::network-policy-tables '(("10.0.0.0/8" ("10.1.0.0/16") :all)
+                                     ("10.1.2.0/24" () ((6 80 80)))
+                                     ("10.1.2.3/32" () ((17 nil nil)))))
+    (flet ((group (cidr) (cdr (assoc (gr8s::np-prefix cidr) cidrs :test #'equal))))
+      (is (= 4 (length cidrs)))
+      (is (= 0 (group "10.1.0.0/16")))
+      (let ((all (group "10.0.0.0/8")) (http (group "10.1.2.0/24")) (both (group "10.1.2.3/32")))
+        (is (equal (list (list all nil nil 0)) (remove all ports :key #'first :test-not #'eql)))
+        (is (equal (list (list http 6 80 16)) (remove http ports :key #'first :test-not #'eql)))
+        ;; The /32 inherits TCP 80 from the /24 and adds every UDP port.
+        (is (equal (list (list both 6 80 16) (list both 17 nil 0)) (remove both ports :key #'first :test-not #'eql))))))
+  ;; Equal port sets share a group.
+  (multiple-value-bind (cidrs ports)
+      (gr8s::network-policy-tables '(("10.0.0.1/32" () ((6 443 443))) ("10.0.0.2/32" () ((6 443 443)))))
+    (is (= 1 (length (remove-duplicates (mapcar #'cdr cidrs)))))
+    (is (= 1 (length ports)))))
+
+(test npr-port-ranges-become-exact-prefix-covers
+  (dolist (range '((8000 8080) (1 65535) (0 65535) (80 80) (1024 2047) (5000 5003) (65535 65535)))
+    (destructuring-bind (first last) range
+      (let ((covered (loop for (port . bits) in (gr8s::np-port-prefixes first last)
+                           do (is (zerop (mod port (ash 1 (- 16 bits)))) "~A/~A is not aligned" port bits)
+                           sum (ash 1 (- 16 bits)))))
+        (is (= (1+ (- last first)) covered) "~A-~A covers ~A ports" first last covered))))
+  (is (equal '((0 . 0)) (gr8s::np-port-prefixes 0 65535)))
+  (is (equal '((8000 . 10) (8064 . 12) (8080 . 16)) (gr8s::np-port-prefixes 8000 8080))))
+
+(test npr-map-keys-encode-the-guard-structs
+  ;; LPM key = u32 prefixlen (host/LE) ++ masked network address (network order).
+  (is (equalp #(16 0 0 0 10 123 0 0) (gr8s::netpol-cidr-lpm-key "10.123.0.0/16")))
+  (is (equalp #(32 0 0 0 192 168 5 5) (gr8s::netpol-cidr-lpm-key "192.168.5.5/32")))
+  (is (equalp #(16 0 0 0 10 123 0 0) (gr8s::netpol-cidr-lpm-key "10.123.4.5/16")))
+  ;; Port key = prefixlen, group (LE), protocol, pad, port (network order).
+  (is (equalp #(32 0 0 0 2 0 0 0 0 0 0 0) (gr8s::netpol-port-lpm-key 2 nil nil 0)))
+  (is (equalp #(40 0 0 0 2 0 0 0 17 0 0 0) (gr8s::netpol-port-lpm-key 2 17 nil 0)))
+  (is (equalp #(64 0 0 0 1 0 0 0 6 0 31 144) (gr8s::netpol-port-lpm-key 1 6 8080 16)))
+  (is (equalp #(58 0 0 0 1 0 0 0 6 0 31 64) (gr8s::netpol-port-lpm-key 1 6 8000 10))))
+
+(defun npr-capture-writes (egress ingress &key existing (exists t))
+  "Run write-pod-network-policy against in-memory maps holding EXISTING (name . keys).
+Return (values result final-contents events)."
+  (let ((maps (make-hash-table :test #'equal)) (events '()))
+    (loop for (name . keys) in existing
+          do (dolist (key keys) (setf (gethash key (gethash name maps (setf (gethash name maps) (make-hash-table :test #'equalp)))) #(1))))
+    (let ((result (gr8s::write-pod-network-policy
+                   "/pin/sand/" egress ingress
+                   :exists (lambda (path) (declare (ignore path)) exists)
+                   :open (lambda (path) (subseq path (length "/pin/sand/")))
+                   :map-info (lambda (fd name) (declare (ignore fd))
+                               (or (gethash name maps) (setf (gethash name maps) (make-hash-table :test #'equalp))))
+                   :update (lambda (map key value) (push (list :update map) events) (setf (gethash key map) value))
+                   :delete (lambda (map key) (push (list :delete map) events) (remhash key map))
+                   :keys (lambda (map) (loop for key being the hash-keys of map collect key))
+                   :close (constantly nil))))
+      (values result maps (nreverse events)))))
+
+(test npr-pod-maps-hold-exactly-the-new-policy-and-mode-goes-last
+  (let ((stale (gr8s::netpol-cidr-lpm-key "192.168.0.0/16")))
+    (multiple-value-bind (result maps events)
+        (npr-capture-writes (list t (list "10.0.0.0/8" '() '((6 443 443))))
+                            (list nil)
+                            :existing (list (list "netpol_egress_cidr" stale)))
+      (is-true result)
+      (let ((cidr (gethash "netpol_egress_cidr" maps)))
+        (is (= 1 (hash-table-count cidr)))
+        (is (equalp #(1 0 0 0) (gethash (gr8s::netpol-cidr-lpm-key "10.0.0.0/8") cidr)))
+        (is (null (gethash stale cidr))))
+      (is (equalp #(1) (gethash (gr8s::netpol-port-lpm-key 1 6 443 16) (gethash "netpol_egress_ports" maps))))
+      (is (zerop (hash-table-count (gethash "netpol_ingress_cidr" maps))))
+      (let ((mode (gethash "netpol_mode" maps)))
+        (is (equalp #(1 0 0 0) (gethash (gr8s::%netpol-u32-le 0) mode)))
+        (is (equalp #(0 0 0 0) (gethash (gr8s::%netpol-u32-le 1) mode)))
+        ;; The mode map is written after every trie.
+        (is (eq mode (second (car (last events)))))
+        (is (eq mode (second (car (last events 2))))))))
+  ;; An endpoint created before these maps existed is left alone.
+  (is (null (npr-capture-writes (list t) (list t) :exists nil))))
+
+(test npr-converge-writes-changed-policies-and-skips-failures
+  (let* ((specs (gr8s::network-policy-specs-from-objects
+                 (list (npr-policy "prod" "{\"podSelector\":{\"matchLabels\":{\"app\":\"web\"}},\"policyTypes\":[\"Egress\"],
+                                            \"egress\":[{\"to\":[{\"ipBlock\":{\"cidr\":\"10.0.0.0/8\"}}]}]}"))))
+         (pods (list (cons "10.0.0.1" (npr-pod "web" "prod" "10.0.0.1" "app" "web"))
+                     (cons "10.0.0.2" (npr-pod "db" "prod" "10.0.0.2" "app" "db"))))
+         (endpoints '(("web" "eth0" "10.0.0.1") ("db" "eth0" "10.0.0.2") ("boom" "eth0" "10.0.0.3")))
+         (writes '()))
+    (flet ((converge ()
+             (gr8s::converge-pod-network-policies
+              specs endpoints
+              :pod-finder (lambda (address)
+                            (when (equal address "10.0.0.3") (error "boom"))
+                            (cdr (assoc address pods :test #'equal)))
+              :directory-fn (lambda (sandbox) (format nil "/npr-test/~A/" sandbox))
+              :writer (lambda (directory egress ingress) (push (list directory egress ingress) writes) t))))
+      (is (equal '("web" "db") (converge)))
+      (is (equal '(t ("10.0.0.0/8" () :all)) (second (find "/npr-test/web/" writes :key #'first :test #'equal))))
+      (is (equal '(nil) (second (find "/npr-test/db/" writes :key #'first :test #'equal))))
+      ;; Nothing changed, so nothing is rewritten.
+      (setf writes '())
+      (is (null (converge)))
+      (is (null writes))
+      ;; The record forgets Pods that have gone.
+      (setf endpoints '(("db" "eth0" "10.0.0.2")))
+      (converge)
+      (is (not (gethash "/npr-test/web/" gr8s::*pod-network-policy-written*))))))
 
 (test npr-resolved-policy-compiles-to-a-classifier
-  (let* ((pod (gr8s::make-np-pod :name "web" :namespace "prod" :labels '(("app" . "web")) :ip "10.0.0.1"))
-         (spec (gr8s::make-np-spec
-                :namespace "prod" :pod-selector '(("app" . "web")) :policy-types '("Egress")
-                :egress (list (gr8s::make-np-rule :peers (list (gr8s::make-np-peer :cidr "10.0.0.0/8"))
-                                                  :ports (list (gr8s::make-np-port :tcp 443)))))))
-    (multiple-value-bind (isolated maps progs) (gr8s::compile-pod-policy pod (list spec) (list pod) :egress)
-      (is (not (null isolated)))
+  ;; The per-Pod compiled classifier (network-policy-program.lisp) still takes a flat policy.
+  (let* ((pod (npr-pod "web" "prod" "10.0.0.1" "app" "web"))
+         (dns (npr-pod "dns" "prod" "10.0.9.9" "app" "dns"))
+         (spec (gr8s::parse-network-policy-json
+                (npr-policy "prod" "{\"podSelector\":{\"matchLabels\":{\"app\":\"web\"}},\"policyTypes\":[\"Egress\"],
+                  \"egress\":[{\"to\":[{\"ipBlock\":{\"cidr\":\"10.0.0.0/8\"}},{\"podSelector\":{\"matchLabels\":{\"app\":\"dns\"}}}],
+                               \"ports\":[{\"protocol\":\"UDP\",\"port\":53}]}]}"))))
+    (multiple-value-bind (isolated policy) (gr8s::resolve-pod-policy pod (list spec) (list pod dns) :egress)
+      (is-true isolated)
+      (is (equal '("10.0.0.0/8" "10.0.9.9/32") (mapcar #'gr8s::netpol-rule-cidr (gr8s::network-policy-rules policy)))))
+    (multiple-value-bind (isolated maps progs) (gr8s::compile-pod-policy pod (list spec) (list pod dns) :egress)
+      (is-true isolated)
       (is (null maps))
-      (is (= 1 (length progs)))
       (is (plusp (length (getf (first progs) :insns)))))
-    ;; Not isolated -> compile short-circuits with nothing to attach.
-    (multiple-value-bind (isolated maps progs) (gr8s::compile-pod-policy pod (list spec) (list pod) :ingress)
-      (is (not isolated))
-      (is (null maps))
-      (is (null progs)))))
-
-(defparameter +npr-manifest+
-  "{\"apiVersion\":\"networking.k8s.io/v1\",\"kind\":\"NetworkPolicy\",
-    \"metadata\":{\"namespace\":\"prod\",\"name\":\"web-egress\"},
-    \"spec\":{\"podSelector\":{\"matchLabels\":{\"app\":\"web\"}},
-             \"policyTypes\":[\"Egress\"],
-             \"egress\":[{\"to\":[{\"ipBlock\":{\"cidr\":\"10.0.0.0/8\"}},
-                                  {\"podSelector\":{\"matchLabels\":{\"app\":\"dns\"}}}],
-                          \"ports\":[{\"protocol\":\"UDP\",\"port\":53}]}]}}")
-
-(test npr-parses-k8s-manifest-into-spec
-  (let ((spec (gr8s::parse-network-policy +npr-manifest+)))
-    (is (string= "prod" (gr8s::np-spec-namespace spec)))
-    (is (equal '(("app" . "web")) (gr8s::np-spec-pod-selector spec)))
-    (is (equal '("Egress") (gr8s::np-spec-policy-types spec)))
-    (is (= 1 (length (gr8s::np-spec-egress spec))))
-    (let* ((rule (first (gr8s::np-spec-egress spec)))
-           (peers (gr8s::np-rule-peers rule))
-           (ports (gr8s::np-rule-ports rule)))
-      (is (= 2 (length peers)))
-      (is (string= "10.0.0.0/8" (gr8s::np-peer-cidr (first peers))))
-      (is (equal '(("app" . "dns")) (gr8s::np-peer-pod-selector (second peers))))
-      (is (= 1 (length ports)))
-      (is (eq :udp (gr8s::np-port-protocol (first ports))))
-      (is (= 53 (gr8s::np-port-port (first ports)))))))
-
-(test npr-manifest-end-to-end-resolves-and-compiles
-  ;; Parse a real manifest, resolve for a selected Pod, and compile -- the whole
-  ;; API-object -> compiled-firewall path.
-  (let* ((spec (gr8s::parse-network-policy +npr-manifest+))
-         (web (gr8s::make-np-pod :name "web" :namespace "prod" :labels '(("app" . "web")) :ip "10.1.0.1"))
-         (dns (gr8s::make-np-pod :name "dns" :namespace "prod" :labels '(("app" . "dns")) :ip "10.9.9.9")))
-    (multiple-value-bind (isolated policy) (gr8s::resolve-pod-policy web (list spec) (list web dns) :egress)
-      (is (not (null isolated)))
-      (let ((cidrs (npr-cidrs policy)))
-        (is (member "10.0.0.0/8" cidrs :test #'string=))
-        (is (member "10.9.9.9/32" cidrs :test #'string=))))   ; dns Pod resolved from podSelector
-    (multiple-value-bind (isolated maps progs) (gr8s::compile-pod-policy web (list spec) (list web dns) :egress)
-      (is (not (null isolated)))
-      (is (null maps))
-      (is (plusp (length (getf (first progs) :insns)))))))
-
-(test npr-manifest-rejects-unsupported-ports-closed
-  ;; A protocol-only (all-port) rule must error, never silently widen to allow-all.
-  (let ((json "{\"metadata\":{\"namespace\":\"prod\"},
-                \"spec\":{\"podSelector\":{},\"policyTypes\":[\"Egress\"],
-                         \"egress\":[{\"ports\":[{\"protocol\":\"TCP\"}]}]}}"))
-    (signals error (gr8s::parse-network-policy json))))
+    (is (null (gr8s::compile-pod-policy pod (list spec) (list pod) :ingress)))))
 
 (test npr-registered-as-stored-resource
   ;; NetworkPolicy is a stored core resource: the generic store path accepts it,
@@ -159,90 +286,67 @@
     (is (string= "NetworkPolicy" (gethash "kind" normalized)))
     (is (string= "networking.k8s.io/v1" (gethash "apiVersion" normalized)))
     (is (string= "prod" (gethash "namespace" (gethash "metadata" normalized))))
-    (is (not (null (gethash "spec" normalized))))
     (let ((spec (gr8s::parse-network-policy-json normalized)))
-      (is (equal '(("app" . "web")) (gr8s::np-spec-pod-selector spec))))))
+      (is (equal "web" (gethash "app" (gethash "matchLabels" (gr8s::np-spec-pod-selector spec))))))))
 
-(test npr-specs-project-from-stored-objects
-  (let* ((j1 "{\"apiVersion\":\"networking.k8s.io/v1\",\"kind\":\"NetworkPolicy\",\"metadata\":{\"namespace\":\"a\"},\"spec\":{\"podSelector\":{},\"policyTypes\":[\"Egress\"]}}")
-         (j2 "{\"apiVersion\":\"networking.k8s.io/v1\",\"kind\":\"NetworkPolicy\",\"metadata\":{\"namespace\":\"b\"},\"spec\":{\"podSelector\":{},\"policyTypes\":[\"Ingress\"]}}")
-         (specs (gr8s::network-policy-specs-from-objects
-                 (list (com.inuoe.jzon:parse j1) (com.inuoe.jzon:parse j2)))))
-    (is (= 2 (length specs)))
-    (is (string= "a" (gr8s::np-spec-namespace (first specs))))
-    (is (string= "b" (gr8s::np-spec-namespace (second specs))))))
+(test npr-projection-resolves-stored-policies-against-pods-with-addresses
+  (with-temporary-store (store path)
+    (values path)
+    (dolist (name '("prod" "dev"))
+      (gr8s::create-core-resource store "namespaces" (gr8s::core-object "metadata" (gr8s::core-object "name" name)) nil))
+    ;; No policy, no projection: nodes are not sent every Pod for nothing.
+    (is (null (gr8s::network-policy-projection store)))
+    (flet ((pod (namespace name labels ip &optional (phase "Running"))
+             (let ((pod (create-pod store (parse-pod (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",
+                           \"metadata\":{\"name\":\"~A\",\"namespace\":\"~A\",\"labels\":~A},
+                           \"spec\":{\"containers\":[{\"name\":\"c\",\"image\":\"busybox\",
+                                     \"ports\":[{\"name\":\"http\",\"containerPort\":8080}]}]}}" name namespace labels)))))
+               (when ip
+                 (setf (gethash (pod-uid pod) (gr8s::pod-store-pod-observed-statuses store))
+                       (gr8s::core-object "podIP" ip "phase" phase))))))
+      (pod "prod" "client" "{\"role\":\"client\"}" "10.0.1.5")
+      (pod "dev" "client" "{\"role\":\"client\"}" "10.0.1.6")
+      (pod "prod" "pending" "{\"role\":\"client\"}" nil)
+      (pod "prod" "done" "{\"role\":\"client\"}" "10.0.1.7" "Succeeded"))
+    (gr8s::create-core-resource
+     store "networkpolicies"
+     (npr-policy "prod" "{\"podSelector\":{\"matchLabels\":{\"app\":\"server\"}},
+                          \"ingress\":[{\"from\":[{\"podSelector\":{\"matchLabels\":{\"role\":\"client\"}},
+                                                   \"namespaceSelector\":{}}],
+                                        \"ports\":[{\"port\":\"http\"}]}],
+                          \"egress\":[{\"to\":[{\"namespaceSelector\":{\"matchLabels\":{\"kubernetes.io/metadata.name\":\"dev\"}}}],
+                                       \"ports\":[{\"port\":\"http\"}]}]}")
+     "prod")
+    (let* ((projected (gr8s::network-policy-projection store))
+           (spec (gethash "spec" (first projected))))
+      (is (= 1 (length projected)))
+      (is (equal '("Ingress" "Egress") (coerce (gethash "policyTypes" spec) 'list)))
+      ;; Only Pods with an address that are not finished are peers.
+      (is (equal '("10.0.1.5/32" "10.0.1.6/32") (npr-peers (aref (gethash "ingress" spec) 0) "from")))
+      ;; The egress named port is the destination Pod's own number.
+      (let ((egress (aref (gethash "egress" spec) 0)))
+        (is (equal '("10.0.1.6/32") (npr-peers egress "to")))
+        (is (equal '(8080) (map 'list (lambda (port) (gethash "port" port)) (gethash "ports" egress))))))))
 
-(test npr-lpm-key-encodes-prefix-and-network-order-addr
-  ;; LPM key = u32 prefixlen (host/LE) ++ masked network address (network order).
-  (is (equalp #(16 0 0 0 10 123 0 0) (gr8s::netpol-cidr-lpm-key "10.123.0.0/16")))
-  (is (equalp #(8 0 0 0 10 0 0 0) (gr8s::netpol-cidr-lpm-key "10.0.0.0/8")))
-  (is (equalp #(32 0 0 0 192 168 5 5) (gr8s::netpol-cidr-lpm-key "192.168.5.5/32")))
-  ;; A non-aligned address is masked to its network before encoding.
-  (is (equalp #(16 0 0 0 10 123 0 0) (gr8s::netpol-cidr-lpm-key "10.123.4.5/16"))))
-
-(test npr-port-hash-key-encodes-group-proto-port
-  (is (equalp #(2 0 0 0 6 0 80 0) (gr8s::netpol-port-hash-key 2 6 80)))
-  (is (equalp #(1 0 0 0 17 0 53 0) (gr8s::netpol-port-hash-key 1 17 53))))
-
-(defun npr-capture-writes (directory isolated policy)
-  "Run write-pod-egress-policy with injected seams; return (values mode-value
-cidr-updates port-updates), where updates are (key . value) pairs."
-  (let ((updates '()))
-    (gr8s::write-pod-egress-policy
-     directory isolated policy
-     :open (lambda (path) path)
-     :map-info (lambda (fd name) (declare (ignore fd)) name)
-     :update (lambda (map key value) (push (list map key value) updates))
-     :close (lambda (fd) (declare (ignore fd)) nil))
-    (let ((u (nreverse updates)))
-      (values (third (find "netpol_egress_mode" u :key #'first :test #'string=))
-              (remove "netpol_egress_cidr" u :key #'first :test (complement #'string=))
-              (remove "netpol_egress_port" u :key #'first :test (complement #'string=))))))
-
-(test npr-write-pod-egress-policy-populates-maps
-  ;; Isolated Pod: mode=1; an all-ports CIDR -> LPM sentinel; a port rule -> LPM
-  ;; group id plus a ports-hash entry.
-  (let ((policy (gr8s::make-network-policy
-                 :rules (list (gr8s::make-netpol-rule "10.0.0.0/8")
-                              (gr8s::make-netpol-rule "192.168.0.0/16" '((:tcp . 8080)))))))
-    (multiple-value-bind (mode cidr port) (npr-capture-writes "/pin/sand/" t policy)
-      (is (equalp #(1 0 0 0) mode))                       ; isolated
-      (is (= 2 (length cidr)))
-      ;; all-ports CIDR carries the #xffffffff sentinel.
-      (let ((all (find #(8 0 0 0 10 0 0 0) cidr :key #'second :test #'equalp)))
-        (is (and all (equalp #(255 255 255 255) (third all)))))
-      ;; port-restricted CIDR carries a group id (1) and a matching ports entry.
-      (let ((grp (find #(16 0 0 0 192 168 0 0) cidr :key #'second :test #'equalp)))
-        (is (and grp (equalp #(1 0 0 0) (third grp)))))
-      (is (= 1 (length port)))
-      (is (equalp (gr8s::netpol-port-hash-key 1 6 8080) (second (first port)))))))
-
-(test npr-write-pod-egress-policy-open-mode-when-not-isolated
-  ;; Not isolated: mode=0 and the CIDR/ports maps are never touched.
-  (let ((policy (gr8s::make-network-policy :rules '())))
-    (multiple-value-bind (mode cidr port) (npr-capture-writes "/pin/sand/" nil policy)
-      (is (equalp #(0 0 0 0) mode))
-      (is (null cidr))
-      (is (null port)))))
-
-(test npr-converge-writes-isolated-and-open-skips-errors
-  ;; converge resolves each endpoint and writes its policy: selected Pod isolated,
-  ;; unselected Pod open (mode 0), and an endpoint whose finder errors is skipped.
-  (let* ((spec (gr8s::make-np-spec
-                :namespace "prod" :pod-selector '(("app" . "web")) :policy-types '("Egress")
-                :egress (list (gr8s::make-np-rule :peers (list (gr8s::make-np-peer :cidr "10.0.0.0/8"))))))
-         (writes '()))
-    (let ((written
-            (gr8s::converge-pod-egress-policies
-             (list spec) '(("web" "eth0" "10.0.0.1") ("db" "eth0" "10.0.0.2") ("boom" "eth0" "10.0.0.3"))
-             :pod-finder (lambda (addr)
-                           (cond ((string= addr "10.0.0.3") (error "boom"))
-                                 ((string= addr "10.0.0.1") (values "prod" '(("app" . "web"))))
-                                 (t (values "prod" '(("app" . "db"))))))
-             :directory-fn (lambda (sandbox) (format nil "/pin/~A/" sandbox))
-             :writer (lambda (dir isolated policy)
-                       (declare (ignore policy))
-                       (push (list dir isolated) writes)))))
-      (is (equal '("web" "db") written))               ; boom skipped (fail-soft)
-      (is (equal "/pin/web/" (first (find t writes :key #'second))))    ; web isolated
-      (is (equal "/pin/db/" (first (find nil writes :key #'second)))))))  ; db open
+(test npr-a-pod-getting-its-address-has-its-policy-written
+  ;; Policies that only select a Pod do not change when it gets an address, so no
+  ;; snapshot follows; the address itself must lead to the Pod's policy being written.
+  (let ((directory (uiop:ensure-directory-pathname
+                    (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-test-XXXXXX" (uiop:temporary-directory))))))
+        (converged 0))
+    (sb-int:encapsulate 'gr8s::converge-node-network-policies-unlocked 'npr-count
+                        (lambda (function &rest arguments) (declare (ignore function arguments)) (incf converged)))
+    (unwind-protect
+         (let* ((runtime (gr8s::make-node-runtime directory (gr8s::make-fake-runtime) nil))
+                (store (gr8s::node-runtime-store runtime))
+                (pod (create-pod store (parse-pod *valid-pod-json*))))
+           (gr8s::cache-node-observation runtime pod (gr8s::core-object "phase" "Pending"))
+           (is (= 0 converged))
+           (gr8s::cache-node-observation runtime pod (gr8s::core-object "phase" "Running" "podIP" "10.88.0.7"))
+           (is (= 1 converged))
+           ;; The same address again changes nothing.
+           (gr8s::cache-node-observation runtime pod (gr8s::core-object "phase" "Running" "podIP" "10.88.0.7"
+                                                                        "message" "still"))
+           (is (= 1 converged)))
+      (sb-int:unencapsulate 'gr8s::converge-node-network-policies-unlocked 'npr-count)
+      (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
