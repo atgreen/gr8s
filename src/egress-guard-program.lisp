@@ -68,7 +68,13 @@
     ;; A hit means the destination Pod lives on this node, so the packet can be
     ;; delivered straight to its veth, bypassing the kernel forward path.
     (defmap local-pod-v4 :type :lpm-trie
-      :key-size 8 :value-size 16 :max-entries 4096 :map-flags 1))) ; /32 keys, like netpol-egress-cidr
+      :key-size 8 :value-size 16 :max-entries 4096 :map-flags 1) ; /32 keys, like netpol-egress-cidr
+    ;; Host-local destinations (agent-populated): destination IPv4 (network order)
+    ;; that lives on this node -- the API server 10.96.0.1, this node's own IP --
+    ;; and must be delivered via the loopback ingress to dodge the host firewall's
+    ;; INPUT path (iif=lo is trusted), extending the DNS gateway lo-trick.
+    (defmap host-redirect-v4 :type :hash
+      :key-size 4 :value-size 1 :max-entries 64 :map-flags 1))) ; NO_PREALLOC
 
 (defparameter gr8s::*egress-guard-program-forms*
   '((defprog gr8s-egress-guard (:type :tc :section "classifier" :license "GPL")
@@ -130,6 +136,29 @@
                        (store u32 data 0 0)                        ; zero dst MAC bytes 0-3
                        (store u16 data 4 0)                        ; zero dst MAC bytes 4-5
                        (return (redirect 1 1))))                   ; lo = ifindex 1, BPF_F_INGRESS
+                   ;; Pod->host fast path (podster-9b1): a packet to a host-local
+                   ;; address -- the API server at 10.96.0.1:443, or this node's
+                   ;; own IP after the socket LB rewrote a ClusterIP to a host
+                   ;; backend -- would otherwise cross the host firewall's INPUT
+                   ;; path. Redirect it to the loopback ingress (iif=lo, which
+                   ;; firewalld trusts), exactly like the DNS gateway trick above:
+                   ;; zeroing the dst MAC makes lo classify it PACKET_HOST, and the
+                   ;; host service's reply is OUTPUT-routed back to the Pod. The
+                   ;; agent populates host-redirect-v4 with the node's host-local
+                   ;; destinations. The scalar u32 key is the dst in network order,
+                   ;; the same bytes the agent writes (see host-redirect-key).
+                   (when (/= (map-lookup host-redirect-v4 (load u32 ip 16)) 0)
+                     ;; The lookup reset the verifier's proven packet range; re-prove
+                     ;; the L2 bounds before rewriting the MAC header.
+                     (when (> (+ data 14) data-end) (drop-pod-packet :malformed))
+                     (add-pod-counter allowed-packets 1)
+                     (add-pod-counter allowed-bytes (ctx u32 0))
+                     (store u32 data 0 0)
+                     (store u16 data 4 0)
+                     (return (redirect 1 1)))
+                   ;; The host-redirect lookup above reset the proven packet range;
+                   ;; re-prove the IPv4 header bounds before the reads below.
+                   (when (> (+ data 34) data-end) (drop-pod-packet :malformed))
                    ;; NetworkPolicy egress (map-driven; agent updates the maps on
                    ;; policy change, no recompile). When the Pod is egress-isolated
                    ;; (mode=1): the destination must match an allowed CIDR, and for

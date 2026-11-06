@@ -703,6 +703,15 @@ snapshot application."
          endpoints
          :directory-fn (lambda (sandbox)
                          (nth-value 2 (cni-pin-paths root sandbox))))
+        ;; Pod->host delivery table (podster-9b1): every local Pod gets the node's
+        ;; host-local destinations (the API server 10.96.0.1, this node's own IP)
+        ;; so the egress guard redirects that traffic to lo, past the host
+        ;; firewall's INPUT reject. Independent and fail-soft, like the table above.
+        (converge-node-host-redirect
+         (mapcar #'first endpoints)
+         (ignore-errors (containerd-node-address (node-runtime-runtime node-runtime)))
+         :directory-fn (lambda (sandbox)
+                         (nth-value 2 (cni-pin-paths root sandbox))))
         (let ((specs (network-policy-specs-from-objects
                       (list-core-resources store "networkpolicies")))
               (ip-map (pod-ip-identity-map store)))
