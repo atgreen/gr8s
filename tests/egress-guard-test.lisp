@@ -17,14 +17,16 @@
 (test egress-guard-compiles-in-process-to-the-policy-maps
   (multiple-value-bind (map-specs prog-specs) (gr8s::compile-egress-guard)
     ;; The policy maps the CNI pins, with the sizes endpoint-policy checks: the
-    ;; three guard maps plus the three map-driven NetworkPolicy maps.
-    (is (= 6 (length map-specs)))
+    ;; three guard maps, the three map-driven NetworkPolicy maps, and the
+    ;; same-node Pod delivery table.
+    (is (= 7 (length map-specs)))
     (let ((spoofs (egress-map-spec map-specs "rejected_spoofs"))
           (identity (egress-map-spec map-specs "endpoint_identity"))
           (stats (egress-map-spec map-specs "traffic_stats"))
           (mode (egress-map-spec map-specs "netpol_egress_mode"))
           (cidr (egress-map-spec map-specs "netpol_egress_cidr"))
-          (port (egress-map-spec map-specs "netpol_egress_port")))
+          (port (egress-map-spec map-specs "netpol_egress_port"))
+          (local-pod (egress-map-spec map-specs "local_pod_v4")))
       (is (and spoofs (= 4 (getf spoofs :key-size)) (= 8 (getf spoofs :value-size))
                (= 1 (getf spoofs :max-entries)) (= 0 (getf spoofs :flags))))
       (is (and identity (= 4 (getf identity :key-size)) (= 16 (getf identity :value-size))
@@ -35,7 +37,9 @@
                (= 1 (getf mode :max-entries))))
       (is (and cidr (= 8 (getf cidr :key-size)) (= 4 (getf cidr :value-size))
                (= 1 (getf cidr :flags))))                 ; LPM_TRIE, NO_PREALLOC
-      (is (and port (= 8 (getf port :key-size)) (= 1 (getf port :value-size)))))
+      (is (and port (= 8 (getf port :key-size)) (= 1 (getf port :value-size))))
+      (is (and local-pod (= 4 (getf local-pod :key-size)) (= 16 (getf local-pod :value-size))
+               (= 4096 (getf local-pod :max-entries)))))
     ;; One TC classifier with real, 8-byte-aligned instructions and the map-fd
     ;; relocations the loader patches in.
     (is (= 1 (length prog-specs)))
@@ -73,17 +77,17 @@
                                   (whistler/loader::make-prog-info
                                    :name "gr8s_egress_guard" :section-name "classifier"
                                    :type 3 :insns #() :fd 901)))))
-    ;; Every map except the reused endpoint_identity was created (6 maps total:
-    ;; the 3 guard maps plus the 3 NetworkPolicy maps).
-    (is (= 5 (length created)))
+    ;; Every map except the reused endpoint_identity was created (7 maps total:
+    ;; the 3 guard maps, the 3 NetworkPolicy maps, and local_pod_v4).
+    (is (= 6 (length created)))
     (is (not (member "endpoint_identity" created :test #'string=)))
     (is (member "rejected_spoofs" created :test #'string=))
     (is (member "traffic_stats" created :test #'string=))
     (is (member "netpol_egress_cidr" created :test #'string=))
-    ;; The reused map keeps its pinned fd; the program loads against all 6 maps.
+    ;; The reused map keeps its pinned fd; the program loads against all 7 maps.
     (is (= 555 (whistler/loader:map-info-fd
                 (gr8s::egress-policy-object-find-map object "endpoint_identity"))))
-    (is (= 6 (length loaded-with)))
+    (is (= 7 (length loaded-with)))
     (is (= 901 (whistler/loader:prog-info-fd
                 (gr8s::egress-policy-object-find-program object "gr8s_egress_guard"))))))
 
@@ -121,6 +125,6 @@
                                    :name "gr8s_egress_guard" :section-name "classifier"
                                    :type 3 :insns #() :fd 901)))))
     (gr8s::close-egress-policy-object object :close-fd (lambda (fd) (push fd closed)))
-    ;; Program fd plus all six map fds are closed.
+    ;; Program fd plus all seven map fds are closed.
     (is (member 901 closed))
-    (is (= 7 (length closed)))))
+    (is (= 8 (length closed)))))

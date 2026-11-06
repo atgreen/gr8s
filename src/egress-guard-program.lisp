@@ -38,6 +38,8 @@
 ;; the port key ties an allowed (proto, port) to the CIDR's rule group.
 (defstruct netpol-lpm-key (prefixlen u32) (addr u32))
 (defstruct netpol-port-key (group u32) (proto u8) (pad u8) (port u16))
+;; Key for the same-node Pod delivery table: destination IPv4 in network order.
+(defstruct local-pod-key (addr u32))
 
 (defparameter gr8s::*egress-guard-map-forms*
   '((defmap rejected-spoofs :type :array
@@ -58,7 +60,14 @@
       :key-size 8 :value-size 4 :max-entries 1024 :map-flags 1) ; BPF_F_NO_PREALLOC
     ;; Allowed (group, proto, port) tuples for port-restricted rules.
     (defmap netpol-egress-port :type :hash
-      :key-size 8 :value-size 1 :max-entries 1024)))
+      :key-size 8 :value-size 1 :max-entries 1024)
+    ;; Same-node Pod delivery table (agent-populated): destination Pod IPv4
+    ;; (network order) -> 16-byte value {dest host-veth ifindex (u32, host order),
+    ;; dest Pod MAC (6 bytes, wire order), dest host-veth MAC (6 bytes, wire order)}.
+    ;; A hit means the destination Pod lives on this node, so the packet can be
+    ;; delivered straight to its veth, bypassing the kernel forward path.
+    (defmap local-pod-v4 :type :hash
+      :key-size 4 :value-size 16 :max-entries 4096)))
 
 (defparameter gr8s::*egress-guard-program-forms*
   '((defprog gr8s-egress-guard (:type :tc :section "classifier" :license "GPL")
@@ -152,7 +161,26 @@
                                            (when (= (map-lookup netpol-egress-port pkey) 0)
                                              (drop-pod-packet :policy)))
                                          (drop-pod-packet :policy))))
-                                 (drop-pod-packet :policy)))))))))
+                                 (drop-pod-packet :policy))))))
+                   ;; Same-node Pod->Pod fast path. Policy has allowed the packet
+                   ;; above; if the destination is a Pod on this node, deliver it
+                   ;; straight to that Pod's veth via bpf_redirect, bypassing the
+                   ;; kernel forward path and the host firewall's FORWARD reject.
+                   ;; A map lookup resets the verifier's proven packet range, so
+                   ;; re-prove the L2 bounds before rewriting the MAC header.
+                   (when (> (+ data 34) data-end) (drop-pod-packet :malformed))
+                   (let ((lpk (make-local-pod-key)))
+                     (setf (local-pod-key-addr lpk) (load u32 ip 16))
+                     (let ((ep (map-lookup local-pod-v4 lpk)))
+                       (when (/= ep 0)
+                         (when (> (+ data 14) data-end) (drop-pod-packet :malformed))
+                         (store u32 data 0 (load u32 ep 4))    ; dst MAC [0:4] = Pod MAC
+                         (store u16 data 4 (load u16 ep 8))    ; dst MAC [4:6]
+                         (store u32 data 6 (load u32 ep 10))   ; src MAC [0:4] = veth MAC
+                         (store u16 data 10 (load u16 ep 14))  ; src MAC [4:6]
+                         (add-pod-counter allowed-packets 1)
+                         (add-pod-counter allowed-bytes (ctx u32 0))
+                         (return (redirect (load u32 ep 0) 0))))))))
                 ((= protocol #x0806)
                  (when (> (+ data 42) data-end) (drop-pod-packet :malformed))
                  (let ((arp u64 (+ data 14)))
