@@ -154,3 +154,9 @@
                        "{\"seccompProfile\":{\"type\":\"RuntimeDefault\",\"localhostProfile\":\"x.json\"}}"
                        "{\"seccompProfile\":{\"type\":\"Other\"}}"))
     (signals kubernetes-error (parse-pod (security-context-test-object :container container)))))
+
+(test an-absent-pod-security-context-defaults-to-an-empty-one
+  ;; As the API server's SetDefaults_PodSpec does; kubectl debug dereferences it.
+  (let ((pod (parse-pod (security-context-test-object))))
+    (is (hash-table-p (gethash "securityContext" (gethash "spec" (pod-to-object pod)))))
+    (is (zerop (hash-table-count (gethash "securityContext" (gethash "spec" (pod-to-object pod))))))))
