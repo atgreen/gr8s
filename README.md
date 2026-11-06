@@ -659,12 +659,13 @@ make clean         remove build outputs
 See [`docs/design.md`](docs/design.md) for the compatibility and architecture
 boundary.
 
-The Kubernetes API compatibility target is **1.36** (`/version` reports
-`v1.36.0-gr8s.0`). This selects the upstream client and conformance test version;
-it is not a claim that gr8s passes Kubernetes conformance. The gr8s project release
-version is maintained separately in `gr8s.asd`.
+The Kubernetes API compatibility target is **1.37** (`/version` reports
+`v1.37.2` plus the gr8s suffix). This selects the upstream client and conformance
+test version, `registry.k8s.io/conformance:v1.37.2`, whose certified selection is
+462 specs; it is not a claim that gr8s passes Kubernetes conformance. The gr8s
+project release version is maintained separately in `gr8s.asd`.
 
-The [fourth complete native conformance run](docs/conformance-full-fourth-2026-11-04.json)
+The runs below predate the move to 1.37. The [fourth complete native conformance run](docs/conformance-full-fourth-2026-11-04.json)
 ran all **446** selected v1.36 conformance specs: **64 passed, 382 failed**.
 Compared with the [third run](docs/conformance-full-third-2026-11-04.json),
 16 previously failing cases passed and none regressed. The official JUnit archive,
@@ -1019,17 +1020,17 @@ other metric types report a failed `ScalingActive` condition.
 
 gr8s versions itself as the **Kubernetes API version it implements plus a gr8s
 release suffix**, following the k3s/k0s convention (k3s's `v1.31.4+k3s1`). The
-ASDF `:version` in `gr8s.asd` is the Kubernetes API version (`1.36.0`) and the
+ASDF `:version` in `gr8s.asd` is the Kubernetes API version (`1.37.2`) and the
 single source of truth for the `/version` endpoint's `major`/`minor`, a Node's
 `kubeletVersion`, and the startup banner. The release suffix lives in a git tag
-(`v1.36.0-gr8s.0`), surfaced through the `version-string` library as
+(`v1.37.2-gr8s.0`), surfaced through the `version-string` library as
 `+gr8s-version+` and reported by `gr8s version`:
 
-- a tagged release prints the tag verbatim (`v1.36.0-gr8s.0`, `+dirty` if the
+- a tagged release prints the tag verbatim (`v1.37.2-gr8s.0`, `+dirty` if the
   tree has uncommitted changes);
-- an untagged build prints the base version with the commit (`v1.36.0-g1a2b3c4`);
+- an untagged build prints the base version with the commit (`v1.37.2-g1a2b3c4`);
 - the native binary bakes the string in at build time.
 
-Cutting a release is therefore just a tag — `git tag v1.36.0-gr8s.1` — and the
+Cutting a release is therefore just a tag — `git tag v1.37.2-gr8s.1` — and the
 binary, `/version`, `kubeletVersion`, and banner all report it with no code
 change.
