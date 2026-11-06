@@ -149,7 +149,7 @@
           (json-response (pod-response-object replacement (reconcile-pod reconciler namespace name)))
           (let ((updated (let ((*pod-resize-update* t))
                            (update-pod store replacement (pod-resource-version pod)))))
-            (json-response (pod-response-object updated (reconcile-pod reconciler namespace name))))))))
+            (json-response (pod-response-object updated (reconcile-written-pod reconciler updated))))))))
 
 (defun container-resize-restart-required-p (container before after)
   "Return whether changing resources BEFORE to AFTER requires a restart under CONTAINER's policy."
