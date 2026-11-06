@@ -117,7 +117,8 @@
                 (setf (gethash field spec) value))))
           (unless (core-json-equal-p stored spec)
             (core-resource-error 422 "Invalid" "PodCertificateRequest spec: Invalid value: field is immutable")))))
-    (unless *typed-api-status-write*
+    ;; Only an API request is held to that; in-process writers set status directly.
+    (when (and *core-resource-view-version* (not *typed-api-status-write*))
       (let ((status (and existing (gethash "status" existing))))
         (if (hash-table-p status)
             (setf (gethash "status" object) (copy-core-object status))
