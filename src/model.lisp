@@ -231,8 +231,10 @@
    object '("name" "image" "command" "args" "env" "envFrom" "ports" "resources"
             "imagePullPolicy" "volumeMounts" "securityContext" "workingDir"
             "startupProbe" "readinessProbe" "livenessProbe"
-            "terminationMessagePath" "terminationMessagePolicy" "stdin" "stdinOnce" "tty" "lifecycle" "resizePolicy")
+            "terminationMessagePath" "terminationMessagePolicy" "stdin" "stdinOnce" "tty" "lifecycle" "resizePolicy"
+            "restartPolicy" "restartPolicyRules")
    "container")
+  (validate-container-restart-rules object)
   (default-container-termination-message object)
   (normalize-container-resources object)
   (validate-runtime-container object)

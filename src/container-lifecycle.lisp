@@ -204,11 +204,12 @@
                                                (concatenate 'string "containerd://" (gethash "containerID" probe))))))
     (and entry
          (or (gethash "restartSuppressed" entry)
-             (and probe-killed (equal "Never" policy))
+             (and probe-killed (equal "Never" policy)
+                  (not (and terminated (container-restarts-after-exit-p
+                                        pod (gethash "name" saved) (gethash "exitCode" terminated) t))))
              (and terminated (= (gethash "restartCount" saved 0) (known-container-attempt entry))
-                  (or (equal "Never" policy)
-                      (and (equal "OnFailure" policy)
-                           (not probe-killed) (zerop (gethash "exitCode" terminated)))))))))
+                  (not (container-restarts-after-exit-p
+                        pod (or name (gethash "name" saved)) (gethash "exitCode" terminated) probe-killed)))))))
 
 (defun latest-container-infos (infos)
   "Select one current CRI attempt per container name, independently of list order."
@@ -246,16 +247,14 @@
 
 (defun container-restart-eligible-p (pod info &optional state)
   "Apply policy to actual exits, including a completed probe-requested stop."
-  (let ((policy (container-effective-restart-policy pod (and info (cri-container-info-name info)))))
-    (and info (= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_exited+)
-       (or (equal "Always" policy)
-           ;; A changed declaration restarts the container whatever the Pod's policy.
+  (and info (= (cri-container-info-state info) gr8s.cri.v1::+containerstate-container_exited+)
+       (or ;; A changed declaration restarts the container whatever the Pod's policy.
            (container-update-restart-requested-p info state)
-           (and (equal "OnFailure" policy)
-                (or (not (zerop (cri-container-info-exit-code info)))
-                    (let* ((entry (and state (gethash (cri-container-info-name info) (gethash "containers" state))))
-                           (request (and entry (gethash "probeRestart" entry))))
-                      (and request (equal (cri-container-info-id info) (gethash "containerID" request))))))))))
+           (container-restarts-after-exit-p
+            pod (cri-container-info-name info) (cri-container-info-exit-code info)
+            (let* ((entry (and state (gethash (cri-container-info-name info) (gethash "containers" state))))
+                   (request (and entry (gethash "probeRestart" entry))))
+              (and request (equal (cri-container-info-id info) (gethash "containerID" request))))))))
 
 (defun native-container-progress-required-p (pod observed)
   "Avoid repeated CRI work for complete healthy or deliberately terminal observations."
@@ -276,9 +275,8 @@
           for terminated = (and state (gethash "terminated" state))
           thereis (or (null state) (gethash "waiting" state)
                       (and terminated
-                           (or (equal "Always" (pod-restart-policy pod))
-                               (and (equal "OnFailure" (pod-restart-policy pod))
-                                    (not (zerop (gethash "exitCode" terminated))))))))))
+                           (container-restarts-after-exit-p
+                            pod (container-spec-name spec) (gethash "exitCode" terminated)))))))
 
 (defun container-backoff-image-changed-p (entry image)
   "Return whether ENTRY's back-off accumulated for an image other than IMAGE."
