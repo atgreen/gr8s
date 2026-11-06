@@ -340,5 +340,5 @@
                                                                  :parameters '(("fieldSelector" . "spec.signerName=example.com/other")))))))
           (check-core-status 200 "/apis/certificates.k8s.io/v1/clustertrustbundles"
                              :parameters '(("fieldSelector" . "spec.signerName=example.com/e2e")))
-          (check-core-status 200 (concatenate 'string collection "?labelSelector=e2e%3Dpcr") :method :delete)
+          (check-core-status 200 collection :method :delete :parameters '(("labelSelector" . "e2e=pcr")))
           (check-core-status 404 item))))))
