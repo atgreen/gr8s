@@ -198,6 +198,13 @@
            (com.inuoe.jzon:stringify network)))
         (when (node-runtime-network-reconciler node-runtime)
           (funcall (node-runtime-network-reconciler node-runtime) network previous))
+        ;; Admit this node's overlay through an active host firewalld (podster-vwy):
+        ;; cross-node traffic is kernel-routed (conntrack-tracked), so firewalld
+        ;; would drop the forwarded/encapsulated packets without a scoped ACCEPT.
+        ;; No-op without firewalld; fail-soft. Only meaningful for a managed node.
+        (when (and (node-runtime-manager node-runtime)
+                   (plusp (length (gethash "underlayAddress" network ""))))
+          (ignore-errors (ensure-overlay-firewall (gethash "nodePodCIDR" network))))
         (when persist
           (write-private-text-atomically
            (node-runtime-network-path node-runtime)
@@ -724,17 +731,6 @@ snapshot application."
          (ignore-errors (containerd-node-address (node-runtime-runtime node-runtime)))
          :directory-fn (lambda (sandbox)
                          (nth-value 2 (cni-pin-paths root sandbox))))
-        ;; Cross-node Pod->Pod send table (podster-xuc): every local Pod gets the
-        ;; peer Pod CIDRs so the egress guard redirects remote-bound traffic to
-        ;; gr8s-vxlan (kernel encaps to the peer VTEP), past the FORWARD reject.
-        ;; The peer CIDRs are the VXLAN routes already driving the tunnel.
-        (let ((network (node-runtime-network node-runtime)))
-          (when network
-            (converge-node-remote-pod-delivery
-             (mapcar #'first endpoints)
-             (mapcar #'car (node-vxlan-route-pairs network))
-             :directory-fn (lambda (sandbox)
-                             (nth-value 2 (cni-pin-paths root sandbox))))))
         (let ((specs (network-policy-specs-from-objects
                       (list-core-resources store "networkpolicies")))
               (ip-map (pod-ip-identity-map store)))

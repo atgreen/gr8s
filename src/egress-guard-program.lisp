@@ -41,9 +41,6 @@
 ;; Key for the same-node Pod delivery table: an LPM /32, same {prefixlen, addr}
 ;; shape as netpol-lpm-key (which the program resolves identically and works).
 (defstruct local-pod-key (prefixlen u32) (addr u32))
-;; Key for the remote-node Pod table: an LPM lookup (prefixlen 32 + dst addr)
-;; that longest-prefix-matches a peer's Pod CIDR, same shape as netpol-lpm-key.
-(defstruct remote-pod-key (prefixlen u32) (addr u32))
 
 (defparameter gr8s::*egress-guard-map-forms*
   '((defmap rejected-spoofs :type :array
@@ -77,16 +74,7 @@
     ;; and must be delivered via the loopback ingress to dodge the host firewall's
     ;; INPUT path (iif=lo is trusted), extending the DNS gateway lo-trick.
     (defmap host-redirect-v4 :type :hash
-      :key-size 4 :value-size 1 :max-entries 64 :map-flags 1) ; NO_PREALLOC
-    ;; Remote-node Pod CIDRs (agent-populated from the node's VXLAN routes):
-    ;; an LPM key per peer Pod CIDR -> 16-byte value {gr8s-vxlan ifindex (u32,
-    ;; host order), VXLAN router dst MAC (6 bytes, = vxlan-router-mac of the peer
-    ;; CIDR), gr8s-vxlan src MAC (6 bytes)}. A hit means the destination Pod lives
-    ;; on another node: rewrite L2 to the router MAC and redirect to gr8s-vxlan so
-    ;; the kernel VXLAN driver FDB-resolves the peer VTEP and encapsulates, past
-    ;; the host firewall's FORWARD reject.
-    (defmap remote-pod-v4 :type :lpm-trie
-      :key-size 8 :value-size 16 :max-entries 4096 :map-flags 1)))
+      :key-size 4 :value-size 1 :max-entries 64 :map-flags 1))) ; NO_PREALLOC
 
 (defparameter gr8s::*egress-guard-program-forms*
   '((defprog gr8s-egress-guard (:type :tc :section "classifier" :license "GPL")
@@ -207,27 +195,6 @@
                                              (drop-pod-packet :policy)))
                                          (drop-pod-packet :policy))))
                                  (drop-pod-packet :policy))))))
-                   ;; Remote-node Pod->Pod (podster-xuc): if the destination is a
-                   ;; Pod on another node, rewrite L2 to that node's VXLAN router
-                   ;; MAC and redirect to gr8s-vxlan; the kernel VXLAN driver FDB-
-                   ;; resolves the peer VTEP and encapsulates, past the FORWARD
-                   ;; reject. The NetworkPolicy lookup above reset the verifier's
-                   ;; packet range, so re-prove the IPv4 bounds first.
-                   (when (> (+ data 34) data-end) (drop-pod-packet :malformed))
-                   (let ((rk (make-remote-pod-key)))
-                     (setf (remote-pod-key-prefixlen rk) 32
-                           (remote-pod-key-addr rk) (load u32 ip 16))
-                     (let ((rep (map-lookup-ptr remote-pod-v4 rk)))
-                       (when (/= rep 0)
-                         ;; The lookup reset the range; re-prove before the rewrite.
-                         (when (> (+ data 14) data-end) (drop-pod-packet :malformed))
-                         (store u32 data 0 (load u32 rep 4))   ; dst MAC [0:4] = VXLAN router MAC
-                         (store u16 data 4 (load u16 rep 8))   ; dst MAC [4:6]
-                         (store u32 data 6 (load u32 rep 10))  ; src MAC [0:4] = gr8s-vxlan MAC
-                         (store u16 data 10 (load u16 rep 14)) ; src MAC [4:6]
-                         (add-pod-counter allowed-packets 1)
-                         (add-pod-counter allowed-bytes (ctx u32 0))
-                         (return (redirect (load u32 rep 0) 0))))) ; gr8s-vxlan ifindex, egress
                    ;; Same-node Pod->Pod fast path. Policy has allowed the packet
                    ;; above; if the destination is a Pod on this node, deliver it
                    ;; straight to that Pod's veth via bpf_redirect, bypassing the

@@ -757,6 +757,12 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                   :port (getf options :node-port)
                   :pki pki :cluster-pod-cidr (gethash "clusterPodCIDR" pool)
                   :node-prefix (gethash "nodePrefix" pool)))
+           ;; When the node server is exposed for remote agents, open its port in
+           ;; an active host firewalld so agents can enroll (podster-vwy). A
+           ;; 127.0.0.1 listener (single-node) needs nothing. No-op without
+           ;; firewalld; fail-soft.
+           (unless (string= "127.0.0.1" (getf options :node-listen "127.0.0.1"))
+             (ignore-errors (ensure-control-plane-firewall (getf options :node-port))))
            (let* ((runtime (make-control-plane-runtime store node-server))
                   (reconciler (make-reconciler store runtime)))
              (unless (getf options :disable-agent)
