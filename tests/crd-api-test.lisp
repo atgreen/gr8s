@@ -145,13 +145,8 @@
       (gr8s::create-core-resource store resource (crd-instance) "alpha")
       (let ((events (gr8s::template-watch-events store "alpha" "" "" revision :resource resource)))
         (is (equal "ADDED" (gethash "type" (first events)))))
-      (let ((original (symbol-function 'gr8s::write-private-text-atomically)))
-        (unwind-protect
-             (progn
-               (setf (symbol-function 'gr8s::write-private-text-atomically)
-                     (lambda (&rest arguments) (declare (ignore arguments)) (error "injected storage failure")))
-               (signals error (gr8s::delete-core-resource store "customresourcedefinitions" nil "widgets.widgets.example.test")))
-          (setf (symbol-function 'gr8s::write-private-text-atomically) original)))
+      (with-failing-core-writes ("injected storage failure")
+        (signals error (gr8s::delete-core-resource store "customresourcedefinitions" nil "widgets.widgets.example.test")))
       (dolist (current (list store (open-store path)))
         (is (= 1 (length (gr8s::list-core-resources current resource "alpha"))))
         (is (null (gethash "deletionTimestamp" (gethash "metadata" (gr8s::get-core-resource current "customresourcedefinitions" nil "widgets.widgets.example.test")))))))))
