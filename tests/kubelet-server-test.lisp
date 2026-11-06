@@ -102,7 +102,8 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
                       :address "127.0.0.1" :port 18250 :certificate certificate :key key :node-name "node-a"
                       :auth (gr8s::make-kubelet-auth :client-ca (gr8s::cluster-pki-ca-certificate pki)
                                                      :review (kubelet-test-review calls))
-                      :stats-function #'kubelet-test-node-stats)))
+                      :stats-function #'kubelet-test-node-stats
+                      :states-function (lambda () (values 1 '(("running" . 2) ("exited" . 1)))))))
         (unwind-protect
              (progn
                (is (= 401 (kubelet-test-get pki 18250 "/metrics/resource")))
@@ -139,7 +140,9 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
                    (is (= 200 code))
                    (is (search "kubelet_node_name{node=\"node-a\"} 1" text))
                    (is (search (format nil "kubelet_running_containers{container_state=\"running\"} 2~%") text))
+                   (is (search (format nil "kubelet_running_containers{container_state=\"exited\"} 1~%") text))
                    (is (search "kubelet_running_pods 1" text))
+                   (is (search "# TYPE process_resident_memory_bytes gauge" text))
                    (is (search "# TYPE process_start_time_seconds gauge" text)))))
           (gr8s::stop-kubelet-server server))))))
 
@@ -244,3 +247,28 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
           (setf gr8s::*tls-handshake-seconds* limit)
           (when stalled (ignore-errors (usocket:socket-close stalled)))
           (gr8s::stop-kubelet-server server))))))
+
+(test probe-metrics-follow-the-kubelet-prober
+  (let* ((manager (gr8s::make-container-probe-manager))
+         (ready (gr8s::make-container-probe-worker :kind "readinessProbe" :successes 2 :failures 0
+                                                   :latencies (let ((histogram (gr8s::make-bucketed-histogram
+                                                                                gr8s::+prometheus-default-buckets+)))
+                                                                (gr8s::observe-histogram histogram 0.003)
+                                                                (gr8s::observe-histogram histogram 0.2))))
+         (live (gr8s::make-container-probe-worker :kind "livenessProbe" :failures 1))
+         (target (gr8s::make-container-probe-target :uid "u-1" :name "app" :pod-name "web" :namespace "default"
+                                                    :workers (list ready live))))
+    (setf (gethash '("u-1" "app") (gr8s::container-probe-manager-targets manager)) target)
+    (let ((text (gr8s::kubelet-probe-metrics-text manager)))
+      (is (search "prober_probe_total{container=\"app\",namespace=\"default\",pod=\"web\",pod_uid=\"u-1\",probe_type=\"Readiness\",result=\"successful\"} 2" text))
+      (is (search "prober_probe_total{container=\"app\",namespace=\"default\",pod=\"web\",pod_uid=\"u-1\",probe_type=\"Liveness\",result=\"failed\"} 1" text))
+      ;; A result that never happened has no series.
+      (is (not (search "result=\"failed\"} 0" text)))
+      (is (search "# HELP prober_probe_total [BETA] Cumulative number of a liveness, readiness or startup probe for a container by result." text))
+      (is (search "prober_probe_duration_seconds_bucket{container=\"app\",namespace=\"default\",pod=\"web\",probe_type=\"Readiness\",le=\"0.005\"} 1" text))
+      (is (search "prober_probe_duration_seconds_bucket{container=\"app\",namespace=\"default\",pod=\"web\",probe_type=\"Readiness\",le=\"0.25\"} 2" text))
+      (is (search "prober_probe_duration_seconds_count{container=\"app\",namespace=\"default\",pod=\"web\",probe_type=\"Readiness\"} 2" text))
+      (is (not (search "probe_type=\"Liveness\",le=" text)))
+      (is (search "# TYPE process_start_time_seconds gauge" text)))
+    (is (search "process_start_time_seconds" (gr8s::kubelet-probe-metrics-text nil)))
+    (is (not (search "prober_probe_total" (gr8s::kubelet-probe-metrics-text nil))))))

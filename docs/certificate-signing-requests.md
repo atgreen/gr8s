@@ -94,7 +94,7 @@ optional controller extension.
 Run the focused native proof with strict validation enabled:
 
 ```sh
-python3 scripts/test-csr-api.py --executable build/gr8s.bin --go /path/to/go
+python3 scripts/test-csr-api.py --executable build/gr8s --go /path/to/go
 ```
 
 That proof uses the fake workload runtime because it creates no Pods. Its API,

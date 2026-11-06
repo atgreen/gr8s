@@ -15,7 +15,7 @@
   ;; base plus a "-gr8s.N" suffix carried in a git tag (e.g. v1.37.2-gr8s.0),
   ;; surfaced through VERSION-STRING as +GR8S-VERSION+ (see src/version.lisp).
   :version "1.37.2"
-  :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "chipz" "cl-cancel"
+  :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cffi" "chipz" "cl-cancel"
                "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
                "pure-tls/acme" "drakma"
                "sb-posix" "slynk" "trivial-utf-8" "usocket" "version-string"
@@ -147,11 +147,16 @@
                              (:file "routed-cni")
                              (:file "managed-containerd")
                              (:file "runtime-addons")
+                             (:file "zstd")
+                             (:file "tar")
+                             (:file "runtime-install")
                              (:file "cri")
                              (:file "image-preload")
                              (:file "container-expansion")
                              (:file "containerd")
                              (:file "kubelet-stats")
+                             (:file "kubelet-cadvisor")
+                             (:file "kubelet-metrics")
                              (:file "pod-hostname")
                              (:file "pod-dns-config")
                              (:file "container-lifecycle")
@@ -300,6 +305,7 @@
                              (:file "managed-containerd-test")
                              (:file "image-preload-test")
                              (:file "runtime-addons-test")
+                             (:file "runtime-install-test")
                              (:file "clustertrustbundle-test")
                              (:file "podcertificaterequest-test")
                              (:file "containerd-test")
@@ -316,6 +322,8 @@
                              (:file "hpa-controller-test")
                              (:file "kubelet-stats-test")
                              (:file "kubelet-server-test")
+                             (:file "kubelet-cadvisor-test")
+                             (:file "kubelet-metrics-test")
                              (:file "crd-api-test")
                              (:file "server-side-apply-test")
                              (:file "crd-protobuf-test")

@@ -99,13 +99,13 @@ Build on the host, copy the binary in, and run it as root. It starts its own
 containerd, so no system container runtime is involved.
 
 ```bash
-sbcl --noinform --non-interactive --load scripts/build-native.lisp   # build/gr8s.bin
+sbcl --noinform --non-interactive --load scripts/build-native.lisp   # build/gr8s
 K=~/.cache/gr8s-vm
 SSH="ssh -i $K/id_ed25519 -o BatchMode=yes -o UserKnownHostsFile=$K/grace_known_hosts"
-scp -i $K/id_ed25519 -o UserKnownHostsFile=$K/grace_known_hosts -P 22292 build/gr8s.bin root@127.0.0.1:/root/gr8s.bin
+scp -i $K/id_ed25519 -o UserKnownHostsFile=$K/grace_known_hosts -P 22292 build/gr8s root@127.0.0.1:/root/gr8s
 $SSH -p 22292 root@127.0.0.1 'pgrep -af "/root/[t]est-|[.]bin serve"'   # must print nothing
 $SSH -p 22292 root@127.0.0.1 \
-  '/root/gr8s.bin serve --runtime containerd --state-directory /var/tmp/gr8s-manual/state \
+  '/root/gr8s serve --runtime containerd --state-directory /var/tmp/gr8s-manual/state \
      --port 18191 --node-port 17448 --containerd-log-root /var/tmp/gr8s-manual/pods \
      --kubeconfig /var/tmp/gr8s-manual/kubeconfig'
 ```

@@ -3,7 +3,8 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Serve a node's kubelet endpoints over HTTPS, as the kubelet does on port 10250:
-;;;; /metrics/resource, /stats/summary, /metrics and /healthz, for metrics-server and the API
+;;;; /metrics/resource, /metrics/cadvisor, /stats/summary, /metrics, /metrics/probes and /healthz, for
+;;;; metrics-server, Prometheus and the API
 ;;;; server's Node proxy. The serving certificate is signed by the cluster CA for the
 ;;;; node's address, so clients that trust the in-cluster CA verify it. Requests are
 ;;;; authenticated by a client certificate from that CA or by a bearer token checked
@@ -311,7 +312,10 @@ own subresource and fall back to proxy; /stats and /metrics have only theirs."
    (private-key :initarg :private-key :reader kubelet-acceptor-private-key)
    (node-name :initarg :node-name :reader kubelet-acceptor-node-name)
    (auth :initarg :auth :reader kubelet-acceptor-auth)
-   (stats-function :initarg :stats-function :reader kubelet-acceptor-stats-function))
+   (stats-function :initarg :stats-function :reader kubelet-acceptor-stats-function)
+   (cadvisor-function :initarg :cadvisor-function :initform (constantly nil) :reader kubelet-acceptor-cadvisor-function)
+   (probes-function :initarg :probes-function :initform (constantly nil) :reader kubelet-acceptor-probes-function)
+   (states-function :initarg :states-function :initform (lambda () (values 0 nil)) :reader kubelet-acceptor-states-function))
   (:documentation "Serve a node's kubelet endpoints to authenticated, authorized callers over TLS.")
   (:default-initargs
    :taskmaster (make-instance 'hunchentoot:one-thread-per-connection-taskmaster :max-thread-count 64
@@ -340,30 +344,73 @@ own subresource and fall back to proxy; /stats and /metrics have only theirs."
   (setf (hunchentoot:return-code*) code (hunchentoot:content-type*) content-type)
   text)
 
+(defun kubelet-own-metrics-text (states node-name)
+  "Render the kubelet's own /metrics: STATES, the running Pod count and container states, the
+instrumented runtime operations and Pod latencies, its identity and the process collector."
+  (with-output-to-string (out)
+    (write-string (kubelet-instrumentation-text) out)
+    (write-prometheus-family out "kubelet_node_name" "[ALPHA] The node's name. The count is always 1." "gauge"
+                             (list (list (list (cons "node" node-name)) 1)))
+    (when states
+      (write-prometheus-family out "kubelet_running_containers" "[ALPHA] Number of containers currently running" "gauge"
+                               (loop for (state . count) in (second states)
+                                     collect (list (list (cons "container_state" state)) count)))
+      (write-prometheus-family out "kubelet_running_pods" "[ALPHA] Number of pods that have a running pod sandbox" "gauge"
+                               (list (list nil (first states)))))
+    (write-string (process-metrics-text) out)))
+
 (defvar *kubelet-process-start-time* (get-universal-time)
   "When this process started serving, in universal time.")
 
-(defun kubelet-own-metrics-text (stats node-name)
-  "Render the kubelet's own /metrics: what it runs, from STATS, and its identity."
-  (with-output-to-string (out)
-    (write-prometheus-family out "kubelet_node_name" "[ALPHA] The node's name. The count is always 1." "gauge"
-                             (list (list (list (cons "node" node-name)) 1)))
-    (when stats
-      (write-prometheus-family out "kubelet_running_containers" "[ALPHA] Number of containers currently running" "gauge"
-                               (list (list (list (cons "container_state" "running"))
-                                           (reduce #'+ (kubelet-node-stats-pods stats)
-                                                   :key (lambda (pod) (length (kubelet-pod-stats-containers pod)))))))
-      (write-prometheus-family out "kubelet_running_pods" "[ALPHA] Number of pods that have a running pod sandbox" "gauge"
-                               (list (list nil (length (kubelet-node-stats-pods stats))))))
-    (write-prometheus-family out "process_start_time_seconds" "[ALPHA] Start time of the process since unix epoch in seconds." "gauge"
-                             (list (list nil (- *kubelet-process-start-time* 2208988800))))))
+(defun kubelet-probe-metrics-text (manager)
+  "Render the kubelet's /metrics/probes from the probe workers of MANAGER, which may be NIL.
+As upstream's workers do, each result series appears once that result has happened, and
+goes with its worker."
+  (let ((totals nil) (durations nil))
+    (when manager
+      (bt:with-lock-held ((container-probe-manager-lock manager))
+        (loop for target being the hash-values of (container-probe-manager-targets manager)
+              do (dolist (worker (container-probe-target-workers target))
+                   (let ((labels (list (cons "container" (container-probe-target-name target))
+                                       (cons "namespace" (or (container-probe-target-namespace target) ""))
+                                       (cons "pod" (or (container-probe-target-pod-name target) ""))))
+                         (type (container-probe-worker-type worker)))
+                     (loop for (result count) in (list (list "successful" (container-probe-worker-successes worker))
+                                                       (list "failed" (container-probe-worker-failures worker)))
+                           when (plusp count)
+                             do (push (list (append labels (list (cons "pod_uid" (container-probe-target-uid target))
+                                                                 (cons "probe_type" type) (cons "result" result)))
+                                            count)
+                                      totals))
+                     (let ((histogram (container-probe-worker-latencies worker)))
+                       (when histogram
+                         (push (cons (append labels (list (cons "probe_type" type))) (copy-histogram histogram))
+                               durations))))))))
+    (with-output-to-string (out)
+      (write-prometheus-histograms out "prober_probe_duration_seconds" "[ALPHA] Duration in seconds for a probe response."
+                                   durations)
+      (write-prometheus-family out "prober_probe_total"
+                               "[BETA] Cumulative number of a liveness, readiness or startup probe for a container by result."
+                               "counter" totals)
+      (write-prometheus-family out "process_start_time_seconds" "[ALPHA] Start time of the process since unix epoch in seconds." "gauge"
+                               (list (list nil (- *kubelet-process-start-time* 2208988800)))))))
 
 (defun kubelet-endpoint-response (acceptor path method)
   "Serve PATH for a caller already allowed to read it."
   (cond
+    ((and (equal path "/metrics/probes") (member method '(:get :head)))
+     (kubelet-text-response 200 (kubelet-probe-metrics-text (funcall (kubelet-acceptor-probes-function acceptor)))
+                            "text/plain; version=0.0.4; charset=utf-8"))
+    ((and (equal path "/metrics/cadvisor") (member method '(:get :head)))
+     (kubelet-text-response
+      200 (handler-case (kubelet-cadvisor-metrics-text (funcall (kubelet-acceptor-cadvisor-function acceptor)))
+            (error (condition)
+              (format *error-output* "gr8s kubelet cadvisor metrics: ~A~%" condition)
+              (kubelet-cadvisor-metrics-text nil)))
+      "text/plain; version=0.0.4; charset=utf-8"))
     ((and (equal path "/metrics") (member method '(:get :head)))
      (kubelet-text-response
-      200 (kubelet-own-metrics-text (ignore-errors (funcall (kubelet-acceptor-stats-function acceptor)))
+      200 (kubelet-own-metrics-text (ignore-errors (multiple-value-list (funcall (kubelet-acceptor-states-function acceptor))))
                                     (kubelet-acceptor-node-name acceptor))
       "text/plain; version=0.0.4; charset=utf-8"))
     ((and (equal path "/metrics/resource") (member method '(:get :head)))
@@ -407,7 +454,8 @@ own subresource and fall back to proxy; /stats and /metrics have only theirs."
         (kubelet-text-response 500 (format nil "Internal Error: ~A~%" condition))))))
 
 (defun start-kubelet-server (&key (address "0.0.0.0") (port +kubelet-default-port+) certificate key
-                                  node-name auth stats-function)
+                                  node-name auth stats-function (cadvisor-function (constantly nil))
+                                  (states-function (lambda () (values 0 nil))) (probes-function (constantly nil)))
   "Start serving NODE-NAME's kubelet endpoints. STATS-FUNCTION returns a fresh KUBELET-NODE-STATS."
   (hunchentoot:start
    (make-instance 'kubelet-acceptor :address address :port port
@@ -415,6 +463,8 @@ own subresource and fall back to proxy; /stats and /metrics have only theirs."
                                     :certificate (pure-tls:load-certificate-chain certificate)
                                     :private-key (pure-tls:load-private-key key)
                                     :node-name node-name :auth auth :stats-function stats-function
+                                    :cadvisor-function cadvisor-function :states-function states-function
+                                    :probes-function probes-function
                                     :access-log-destination nil :message-log-destination *error-output*)))
 
 (defun stop-kubelet-server (server)
@@ -472,7 +522,11 @@ returning it, or NIL. A port another process holds leaves the node without one, 
                  :auth (make-kubelet-auth :client-ca ca :api-address api-host :api-port api-port
                                           :trust-certificates (list ca)
                                           :client-certificate client-certificate :client-key client-key)
-                 :stats-function (lambda () (collect-kubelet-node-stats runtime node-name)))))
+                 :stats-function (lambda () (collect-kubelet-node-stats runtime node-name))
+                 :cadvisor-function (lambda () (runtime-cadvisor-entries runtime))
+                 :states-function (lambda () (runtime-container-state-counts runtime))
+                 :probes-function (lambda () (and (typep runtime 'containerd-runtime)
+                                                  (containerd-runtime-probes runtime))))))
           (error (condition)
             (format *error-output* "gr8s kubelet endpoints on port ~D are unavailable: ~A~%" port condition)
             nil))))))

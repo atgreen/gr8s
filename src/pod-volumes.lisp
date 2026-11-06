@@ -148,8 +148,8 @@
                                  (core-base64-bytes value field)))) values)))))
     data))
 
-(defun write-projected-volume-file (target bytes mode group)
-  "Atomically publish BYTES with final permissions, starting with a private file."
+(defun write-projected-volume-file (target bytes mode group &optional owner)
+  "Atomically publish BYTES with final permissions and optional OWNER, starting with a private file."
   (let ((temporary (private-temporary-path target)))
     (ensure-directories-exist target)
     (unwind-protect
@@ -160,6 +160,7 @@
                   (stream (sb-sys:make-fd-stream descriptor :output t
                                                :element-type '(unsigned-byte 8) :auto-close t)))
              (unwind-protect (write-sequence bytes stream) (close stream)))
+           (when owner (sb-posix:chown (namestring temporary) owner #xffffffff))
            (set-pod-volume-permissions temporary mode group)
            (sb-posix:rename (namestring temporary) (namestring target)))
       (when (probe-file temporary) (delete-file temporary)))))

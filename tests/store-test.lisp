@@ -16,6 +16,22 @@
      (unwind-protect (let ((,store (open-store ,path))) ,@body)
        (uiop:delete-directory-tree ,path :validate t :if-does-not-exist :ignore))))
 
+(defmacro with-failing-core-writes ((message) &body body)
+  "Run BODY while every durable core-resource write fails with MESSAGE: a checkpoint,
+which goes through WRITE-PRIVATE-TEXT-ATOMICALLY, and a journal append."
+  (let ((checkpoint (gensym "CHECKPOINT")) (journal (gensym "JOURNAL")))
+    `(let ((,checkpoint (symbol-function 'gr8s::write-private-text-atomically))
+           (,journal (symbol-function 'gr8s::append-core-journal-record)))
+       (unwind-protect
+            (progn
+              (setf (symbol-function 'gr8s::write-private-text-atomically)
+                    (lambda (&rest arguments) (declare (ignore arguments)) (error ,message))
+                    (symbol-function 'gr8s::append-core-journal-record)
+                    (lambda (&rest arguments) (declare (ignore arguments)) (error ,message)))
+              ,@body)
+         (setf (symbol-function 'gr8s::write-private-text-atomically) ,checkpoint
+               (symbol-function 'gr8s::append-core-journal-record) ,journal)))))
+
 (test temporary-stores-remain-isolated-with-identical-random-states
   (let ((seed (make-random-state nil)) (first-path nil))
     (let ((*random-state* (make-random-state seed)))

@@ -72,7 +72,8 @@
 (test help-documents-every-node-role-option
   (let ((help (with-output-to-string (*standard-output*)
                 (gr8s::print-help))))
-    (dolist (word '("gr8s serve" "gr8s agent" "--node-port"
+    ;; #161 lists commands in sections ("  serve  ..."), not as "gr8s serve" lines.
+    (dolist (word '("  serve " "  agent " "--node-port"
                     "--disable-agent" "--server" "--token" "--ca-pin"
                     "--node-name" "--state-directory"))
       (is (search word help)))))
@@ -89,15 +90,17 @@
               27))))
     (is (eq t called))))
 
-(test runtime-assets-command-reports-the-dumped-payload
-  (is (eq :runtime-assets
-          (getf (parse-cli-options '("runtime-assets")) :command)))
+(test runtime-list-command-reports-the-dumped-payload
+  ;; #161 replaced the runtime-assets command with `runtime list`.
+  (let ((options (parse-cli-options '("runtime" "list" "--state-directory" "/tmp/gr8s-runtime-list-test/"))))
+    (is (eq :runtime-list (getf options :command)))
+    (is (equal "/tmp/gr8s-runtime-list-test/" (getf options :state-directory))))
   (let ((gr8s::*embedded-runtime-assets*
           (list (gr8s::make-runtime-asset
                  :name "containerd"
                  :octets (make-array 42 :element-type '(unsigned-byte 8))))))
     (let ((output (with-output-to-string (*standard-output*)
-                    (gr8s::print-runtime-assets))))
+                    (gr8s::print-runtime-list (uiop:temporary-directory)))))
       (is (search "containerd" output))
       (is (search "42 bytes" output)))))
 

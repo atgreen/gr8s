@@ -90,7 +90,8 @@
   name)
 
 (defun write-private-text-exclusively (path text)
-  "Create a new UTF-8 credential file with mode0600 and refuse existing paths."
+  "Create a new UTF-8 credential file with mode0600 and refuse existing paths.
+TEXT is a string, or a function that writes the text to the stream it is given."
   (ensure-directories-exist path)
   (let ((descriptor
           (sb-posix:open (namestring path)
@@ -102,7 +103,7 @@
                                          :external-format :utf-8
                                          :auto-close t)))
       (unwind-protect
-           (write-string text stream)
+           (if (functionp text) (funcall text stream) (write-string text stream))
         (close stream))))
   path)
 

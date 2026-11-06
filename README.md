@@ -660,7 +660,8 @@ working CRI plugin, snapshotter, OCI runtime, pause image, and CNI configuration
 
 SBCL dumps the loaded system and all seven runtime artifacts into a native
 image, avoiding an ASDF load and external runtime installation on startup.
-`build/gr8s` forwards arguments to the dumped `build/gr8s.bin` payload:
+`make native` dumps the loaded system and its runtime artifacts straight into
+the executable `build/gr8s` (no launcher script):
 
 ```sh
 make native
@@ -899,14 +900,14 @@ Linux guest with:
 
 ```sh
 python3 scripts/test-podtemplates-sonobuoy.py \
-  --gr8s /path/to/gr8s.bin --sonobuoy /path/to/sonobuoy
+  --gr8s /path/to/gr8s --sonobuoy /path/to/sonobuoy
 ```
 
 Run the entire upstream certified selection with the same disposable harness:
 
 ```sh
 python3 scripts/test-podtemplates-sonobuoy.py \
-  --gr8s /path/to/gr8s.bin --sonobuoy /path/to/sonobuoy \
+  --gr8s /path/to/gr8s --sonobuoy /path/to/sonobuoy \
   --certified-conformance --timeout 21600
 ```
 
@@ -1042,11 +1043,31 @@ lock, as their upstream service accounts. A refused Pod shows on its owner as a
 ReplicaFailure, and a refused deletion is retried. EndpointSlices, bootstrap objects
 and status writes do not yet pass through webhooks.
 
-A node reports each container's CPU and memory from CRI statistics, from which a
-HorizontalPodAutoscaler controller scales Deployments, ReplicaSets, ReplicationControllers
-and StatefulSets on Resource and ContainerResource metrics, with upstream's tolerance,
-stabilization and rate policies. There is no metrics API or custom metrics source, so
-other metric types report a failed `ScalingActive` condition.
+The local agent serves the kubelet's endpoints on port 10250 (`serve --kubelet-port`,
+0 to turn them off): `/metrics/resource`, `/metrics/cadvisor`, `/stats/summary`, `/metrics` and
+`/healthz`, measured from CRI container statistics and the cgroup v2 files of each container,
+sandbox and the root. `/metrics/cadvisor` has cAdvisor's `container_*` and `machine_*` series
+with its labels (`container`, `id`, `image`, `name`, `namespace`, `pod`). `/metrics` has the
+kubelet's own series: CRI runtime operations, errors and latency by `operation_type`, Pod start
+and Pod sync latency, running Pods and containers by state, and `process_*`. `/metrics/probes`
+has `prober_probe_total` and `prober_probe_duration_seconds`. They are served over TLS
+with a cluster-CA certificate for the node's address. Callers authenticate with a
+cluster-CA client certificate or a bearer token checked by TokenReview, and are authorized
+by SubjectAccessReview on `nodes/metrics`, `nodes/stats`, `nodes/healthz` or
+`nodes/proxy`, as the kubelet maps them. The Node advertises the port in
+`status.daemonEndpoints.kubeletEndpoint`, and `/api/v1/nodes/<name>/proxy/...` reaches it.
+So unmodified metrics-server, installed from its release `components.yaml`, provides
+`metrics.k8s.io`, which serves `kubectl top` and the CPU and MEM columns of k9s and
+Headlamp. A Pod's usage is the sum of its containers', since gr8s gives Pods no cgroup
+of their own. A standalone `gr8s agent` doesn't serve these endpoints yet.
+
+A HorizontalPodAutoscaler controller scales Deployments, ReplicaSets,
+ReplicationControllers and StatefulSets on Resource and ContainerResource metrics, with
+upstream's tolerance, stabilization and rate policies. When a `v1beta1.metrics.k8s.io`
+APIService is registered, it reads PodMetrics from it, as upstream does. Otherwise each
+node reports its containers' CPU and memory from CRI statistics, and the controller
+derives rates from those. There is no custom or external metrics source, so other metric
+types report a failed `ScalingActive` condition.
 
 ## Versioning
 

@@ -54,8 +54,14 @@
       (is (null (gethash "stringData" secret)))
       (is (string= "bmV3" (gethash "password" (gethash "data" secret))))
       (is (string= "AP8=" (gethash "bytes" (gethash "data" secret))))
-      (is (null (search "stringData" (uiop:read-file-string (gr8s::core-resource-state-path store)))))
-      (is (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat (gr8s::core-resource-state-path store)))))))))
+      ;; Neither the checkpoint nor the journal of later commits keeps stringData, and both are private.
+      (gr8s::update-core-resource store "secrets" "default" "credentials"
+        (lambda (object) (setf (gethash "stringData" object) (gr8s::core-object "other" "plain")) object))
+      (is (probe-file (gr8s::core-journal-path store)))
+      (dolist (path (list (gr8s::core-resource-state-path store) (gr8s::core-journal-path store)))
+        (is (null (search "stringData" (uiop:read-file-string path))))
+        (is (null (search "plain" (uiop:read-file-string path))))
+        (is (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat path)))))))))
 
 (test invalid-core-resource-input-is-rejected-without-changing-state
   (with-temporary-store (store path)

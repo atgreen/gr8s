@@ -299,13 +299,8 @@
 (test foreground-deletion-does-not-publish-a-failed-checkpoint
   (with-temporary-store (store path)
     (gr8s::create-core-resource store "replicasets" (workload-fixture "ReplicaSet" "web") "alpha")
-    (let ((original (symbol-function 'gr8s::write-private-text-atomically)))
-      (unwind-protect
-           (progn
-             (setf (symbol-function 'gr8s::write-private-text-atomically)
-                   (lambda (&rest arguments) (declare (ignore arguments)) (error "injected disk failure")))
-             (signals error (gr8s::delete-workload-resource store "replicasets" "alpha" "web" :policy "Foreground")))
-        (setf (symbol-function 'gr8s::write-private-text-atomically) original)))
+    (with-failing-core-writes ("injected disk failure")
+      (signals error (gr8s::delete-workload-resource store "replicasets" "alpha" "web" :policy "Foreground")))
     (dolist (current (list store (open-store path)))
       (is (zerop (hash-table-count (gr8s::pod-store-workload-deletions current))))
       (is (not (gethash "deletionTimestamp" (gethash "metadata" (gr8s::get-core-resource current "replicasets" "alpha" "web"))))))))

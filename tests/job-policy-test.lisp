@@ -68,6 +68,8 @@
              (persist (symbol-function 'gr8s::write-private-text-atomically))
              (next (gr8s::copy-core-object states)))
         (setf (gethash "failuresAfterLastSuccess" (gethash "owner-uid" next)) 3)
+        ;; A failed checkpoint ...
+        (setf (gr8s::pod-store-core-checkpoint-needed store) t)
         (unwind-protect
              (progn
                (setf (symbol-function 'gr8s::write-private-text-atomically)
@@ -77,7 +79,17 @@
                (is (= 2 (gethash "failuresAfterLastSuccess" (gethash "owner-uid" (gr8s::pod-store-job-controller-states store)))))
                (is (= 1 (gr8s::pod-store-resource-revision store))))
           (setf (symbol-function 'gr8s::write-private-text-atomically) persist))
-        (is (equal before (uiop:read-file-string (gr8s::core-resource-state-path store)))))
+        (is (equal before (uiop:read-file-string (gr8s::core-resource-state-path store))))
+        ;; ... and a failed journal append change neither memory nor the durable state.
+        (setf (gr8s::pod-store-core-checkpoint-needed store) nil)
+        (ensure-directories-exist (uiop:ensure-directory-pathname (gr8s::core-journal-path store)))
+        (signals error
+          (gr8s::commit-core-resources store (gr8s::copy-core-resource-index store) 2 :job-controller-states next))
+        (is (= 2 (gethash "failuresAfterLastSuccess" (gethash "owner-uid" (gr8s::pod-store-job-controller-states store)))))
+        (is (= 1 (gr8s::pod-store-resource-revision store)))
+        (uiop:delete-directory-tree (uiop:ensure-directory-pathname (gr8s::core-journal-path store)) :validate t)
+        (is (equal before (uiop:read-file-string (gr8s::core-resource-state-path store))))
+        (is (null (probe-file (gr8s::core-journal-path store)))))
       (let* ((reopened (open-store directory))
              (record (gethash "owner-uid" (gr8s::pod-store-job-controller-states reopened))))
         (is (= 2 (gethash "failuresAfterLastSuccess" record)))
