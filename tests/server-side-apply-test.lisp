@@ -530,6 +530,88 @@
             (apply-pod (concatenate 'string pod "/status") "second" status 200)
             (is-true (has-status))))))))
 
+(defun status-entry (object manager)
+  "Return MANAGER's managedFields entry for the status subresource of OBJECT."
+  (find-if (lambda (entry) (and (equal manager (gethash "manager" entry)) (equal "status" (gethash "subresource" entry))))
+           (gethash "managedFields" (gethash "metadata" object) #())))
+
+(test apply-reaches-workload-and-service-status
+  ;; kubectl apply --server-side --subresource=status, as upstream serves it on every status.
+  (with-core-api (store path)
+    (values store path)
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+    (check-core-status 201 "/apis/apps/v1/namespaces/alpha/deployments" :method :post :octets (deployment-json))
+    (check-core-status 201 "/api/v1/namespaces/alpha/services" :method :post
+      :octets "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"name\":\"web\"},\"spec\":{\"type\":\"LoadBalancer\",\"selector\":{\"app\":\"web\"},\"ports\":[{\"port\":80}]}}")
+    (flet ((apply-status (where manager body)
+             (check-core-status 200 where :method :patch :octets body :content-type "application/apply-patch+yaml"
+                                          :parameters (list (cons "fieldManager" manager))))
+           (patch-status (where body)
+             (check-core-status 200 where :method :patch :octets body :content-type "application/merge-patch+json"
+                                          :parameters '(("fieldManager" . "patcher")))))
+      (let* ((deployment "/apis/apps/v1/namespaces/alpha/deployments/my-dep")
+             (status (concatenate 'string deployment "/status"))
+             (applied (apply-status status "status-applier"
+                                    "{\"apiVersion\":\"apps/v1\",\"kind\":\"Deployment\",\"metadata\":{\"name\":\"my-dep\"},\"spec\":{\"replicas\":9},\"status\":{\"conditions\":[{\"type\":\"Custom\",\"status\":\"True\"}]}}"))
+             (entry (status-entry applied "status-applier")))
+        (is (equal "Custom" (gethash "type" (aref (gethash "conditions" (gethash "status" applied)) 0))))
+        (is (equal "Apply" (gethash "operation" entry)))
+        (is (hash-table-p (gethash "f:conditions" (gethash "f:status" (gethash "fieldsV1" entry (gr8s::core-object)) (gr8s::core-object)))))
+        ;; The status endpoint ignores spec, and keeps the stored object's managers.
+        (let ((stored (check-core-status 200 deployment)))
+          (is (= 2 (gethash "replicas" (gethash "spec" stored))))
+          (is (status-entry stored "status-applier"))
+          (is (find "status-applier" (gethash "managedFields" (gethash "metadata" stored)) :test #'equal
+                    :key (lambda (entry) (gethash "manager" entry)))))
+        ;; Any other status write's manager comes to own what it changed.
+        (let ((entry (status-entry (patch-status status "{\"status\":{\"observedGeneration\":7}}") "patcher")))
+          (is (equal "Update" (gethash "operation" entry)))
+          (is (hash-table-p (gethash "f:observedGeneration" (gethash "f:status" (gethash "fieldsV1" entry (gr8s::core-object)) (gr8s::core-object)))))))
+      (let* ((status "/api/v1/namespaces/alpha/services/web/status")
+             (applied (apply-status status "lb-controller"
+                                    "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"name\":\"web\"},\"status\":{\"loadBalancer\":{\"ingress\":[{\"ip\":\"192.0.2.7\"}]}}}"))
+             (entry (status-entry applied "lb-controller")))
+        (is (equal "192.0.2.7" (gethash "ip" (aref (gethash "ingress" (gethash "loadBalancer" (gethash "status" applied))) 0))))
+        (is (equal "Apply" (gethash "operation" entry)))
+        (is (equal "Update" (gethash "operation" (status-entry (patch-status status "{\"status\":{\"conditions\":[{\"type\":\"Ready\",\"status\":\"True\",\"reason\":\"R\",\"message\":\"m\",\"lastTransitionTime\":\"2026-01-01T00:00:00Z\"}]}}")
+                                                                  "patcher"))))
+        (is (status-entry (check-core-status 200 "/api/v1/namespaces/alpha/services/web") "lb-controller"))))))
+
+(test pod-creates-record-their-update-manager
+  ;; Upstream records the creating client, or kube-controller-manager for a controller's Pod,
+  ;; as an Update manager of every field it set, defaults included and status excluded.
+  (with-core-api (store path)
+    (values path)
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+    (flet ((entry (object manager)
+             (find manager (gethash "managedFields" (gethash "metadata" object) #()) :test #'equal
+                   :key (lambda (entry) (gethash "manager" entry)))))
+      (let* ((created (check-core-status 201 "/api/v1/namespaces/alpha/pods" :method :post
+                                         :parameters '(("fieldManager" . "kubectl-create"))
+                                         :octets "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"one\",\"labels\":{\"a\":\"b\"}},\"spec\":{\"containers\":[{\"name\":\"a\",\"image\":\"i\"}]}}"))
+             (entry (entry created "kubectl-create"))
+             (fields (and entry (gethash "fieldsV1" entry))))
+        (is (equal "Update" (and entry (gethash "operation" entry))))
+        (is (equal "v1" (and entry (gethash "apiVersion" entry))))
+        (is (null (and entry (gethash "subresource" entry))))
+        (is (hash-table-p (gethash "f:a" (gethash "f:labels" (gethash "f:metadata" fields (gr8s::core-object)) (gr8s::core-object)))))
+        (is (hash-table-p (gethash "k:{\"name\":\"a\"}" (gethash "f:containers" (gethash "f:spec" fields (gr8s::core-object)) (gr8s::core-object)))))
+        (is (hash-table-p (gethash "f:restartPolicy" (gethash "f:spec" fields (gr8s::core-object)))))
+        (is (not (nth-value 1 (gethash "f:status" fields))))
+        (is (entry (check-core-status 200 "/api/v1/namespaces/alpha/pods/one") "kubectl-create")))
+      (check-core-status 201 "/apis/apps/v1/namespaces/alpha/replicasets" :method :post
+                         :object (workload-fixture "ReplicaSet" "web" 1))
+      (gr8s::reconcile-workloads (make-reconciler store (make-fake-runtime)))
+      (let ((pod (find "web" (list-pods store "alpha") :test #'equal
+                       :key (lambda (pod) (gethash "app" (gethash "labels" (gethash "metadata" (pod-to-object pod)) (gr8s::core-object)))))))
+        (is (not (null pod)))
+        (when pod
+          (let ((entry (entry (pod-to-object pod) "kube-controller-manager")))
+            (is (equal "Update" (and entry (gethash "operation" entry))))
+            (is (hash-table-p (gethash "f:ownerReferences" (gethash "f:metadata" (gethash "fieldsV1" entry (gr8s::core-object)) (gr8s::core-object)))))))))))
+
 (test unchanged-writes-keep-their-revision-and-send-no-watch-events
   ;; Upstream's storage skips a write whose result equals the stored object, so a repeated
   ;; apply (kubectl diff --server-side, GitOps) sees no new resourceVersion and no event.
