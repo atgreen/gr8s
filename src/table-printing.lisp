@@ -568,12 +568,60 @@
         (let ((value (table-get object "spec" "maxUnavailable"))) (if value (format nil "~A" value) "N/A"))
         (table-count object "status" "disruptionsAllowed") (table-age object)))
 
+(defun table-hpa-target (spec status)
+  "Print one autoscaler metric as upstream's formatHPAMetrics does: current/target, averages marked."
+  (let* ((type (gethash "type" spec))
+         (key (cdr (assoc type '(("Resource" . "resource") ("ContainerResource" . "containerResource")
+                                 ("Pods" . "pods") ("Object" . "object") ("External" . "external"))
+                          :test #'equal)))
+         (source (and key (gethash key spec)))
+         (target (and source (gethash "target" source)))
+         (current (and key (hash-table-p status) (equal type (gethash "type" status)) (table-get status key "current"))))
+    (flet ((value (table field)
+             (let ((value (and (hash-table-p table) (gethash field table))))
+               (and value (format nil "~A" value)))))
+      (cond
+        ((null source) "<unknown type>")
+        ((member type '("Resource" "ContainerResource") :test #'equal)
+         (if (gethash "averageValue" target)
+             (format nil "~A: ~A/~A" (gethash "name" source) (or (value current "averageValue") "<unknown>")
+                     (value target "averageValue"))
+             (format nil "~A: ~A/~A" (gethash "name" source)
+                     (let ((utilization (value current "averageUtilization")))
+                       (if utilization (format nil "~A%" utilization) "<unknown>"))
+                     (let ((utilization (value target "averageUtilization")))
+                       (if utilization (format nil "~A%" utilization) "<auto>")))))
+        ((equal type "Pods")
+         (format nil "~A/~A" (or (value current "averageValue") "<unknown>") (value target "averageValue")))
+        ((gethash "averageValue" target)
+         (format nil "~A/~A (avg)" (or (value current "averageValue") "<unknown>") (value target "averageValue")))
+        (t (format nil "~A/~A" (or (value current "value") "<unknown>") (value target "value")))))))
+
+(defun table-hpa-targets (object)
+  "Print an autoscaler's Targets cell: at most two metrics, then how many more."
+  (let ((specs (coerce (or (table-get object "spec" "metrics") #()) 'list))
+        (statuses (coerce (or (table-get object "status" "currentMetrics") #()) 'list)))
+    ;; autoscaling/v1 keeps only a CPU utilization target.
+    (when (and (null specs) (table-get object "spec" "targetCPUUtilizationPercentage"))
+      (return-from table-hpa-targets
+        (format nil "cpu: ~A/~A%"
+                (let ((current (table-get object "status" "currentCPUUtilizationPercentage")))
+                  (if current (format nil "~A%" current) "<unknown>"))
+                (table-get object "spec" "targetCPUUtilizationPercentage"))))
+    (if (null specs)
+        "<none>"
+        (let ((cells (loop for spec in specs for index from 0
+                           collect (table-hpa-target spec (nth index statuses)))))
+          (if (> (length cells) 2)
+              (format nil "~{~A~^, ~} + ~D more..." (subseq cells 0 2) (- (length cells) 2))
+              (format nil "~{~A~^, ~}" cells))))))
+
 (define-table-printer "HorizontalPodAutoscaler"
     (("Reference" "string") ("Targets" "string") ("MinPods" "string") ("MaxPods" "string") ("Replicas" "string") ("Age" "string"))
     (object)
   (let ((reference (table-get object "spec" "scaleTargetRef")))
     (list (format nil "~A/~A" (table-get reference "kind") (table-get reference "name"))
-          "<unknown>"
+          (table-hpa-targets object)
           (or (table-get object "spec" "minReplicas") "<unset>")
           (table-get object "spec" "maxReplicas")
           (table-count object "status" "currentReplicas") (table-age object))))

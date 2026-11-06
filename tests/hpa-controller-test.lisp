@@ -263,3 +263,34 @@
       (let ((patched (check-core-status 200 v2 :method :patch :content-type "application/json-patch+json"
                                         :object (vector (gr8s::core-object "op" "replace" "path" "/status/desiredReplicas" "value" 4)))))
         (is (= 4 (gethash "desiredReplicas" (gethash "status" patched))))))))
+
+(test hpa-targets-print-as-kubectl-shows-them
+  (flet ((targets (spec-metrics current &optional extra)
+           (gr8s::table-hpa-targets
+            (gr8s::core-object "spec" (let ((spec (gr8s::core-object "metrics" spec-metrics)))
+                                        (loop for (key value) on extra by #'cddr do (setf (gethash key spec) value))
+                                        spec)
+                               "status" (gr8s::core-object "currentMetrics" current)))))
+    (let ((cpu (gr8s::hpa-cpu-metric 50))
+          (memory (gr8s::core-object "type" "Resource"
+                                     "resource" (gr8s::core-object "name" "memory"
+                                                                   "target" (gr8s::core-object "type" "AverageValue"
+                                                                                               "averageValue" "64Mi"))))
+          (external (gr8s::core-object "type" "External"
+                                       "external" (gr8s::core-object "metric" (gr8s::core-object "name" "queue")
+                                                                     "target" (gr8s::core-object "type" "Value" "value" "1")))))
+      (is (equal "cpu: <unknown>/50%" (targets (vector cpu) #())))
+      (is (equal "cpu: 286%/50%"
+                 (targets (vector cpu)
+                          (vector (gr8s::core-object "type" "Resource"
+                                                     "resource" (gr8s::core-object "name" "cpu"
+                                                                                   "current" (gr8s::core-object "averageUtilization" 286
+                                                                                                                "averageValue" "285m")))))))
+      (is (equal "cpu: <unknown>/50%, memory: <unknown>/64Mi" (targets (vector cpu memory) #())))
+      (is (equal "cpu: <unknown>/50%, memory: <unknown>/64Mi + 1 more..." (targets (vector cpu memory external) #())))
+      (is (equal "<unknown>/1" (targets (vector external) #())))
+      (is (equal "<none>" (targets #() #())))
+      ;; autoscaling/v1 objects carry only a CPU target.
+      (is (equal "cpu: 30%/80%"
+                 (gr8s::table-hpa-targets (gr8s::core-object "spec" (gr8s::core-object "targetCPUUtilizationPercentage" 80)
+                                                             "status" (gr8s::core-object "currentCPUUtilizationPercentage" 30))))))))
