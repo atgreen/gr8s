@@ -12,9 +12,9 @@
 (in-suite apiserver-metrics)
 
 (defun apiserver-metrics-request (path &rest options)
-  "Call the real listener on 18080, returning the body as text and the status."
+  "Call the real listener on its kernel-assigned port, returning the body as text and the status."
   (multiple-value-bind (body code)
-      (apply #'drakma:http-request (concatenate 'string "http://127.0.0.1:18080" path) :proxy nil :redirect nil options)
+      (apply #'drakma:http-request (format nil "http://127.0.0.1:~D~A" *http-test-port* path) :proxy nil :redirect nil options)
     (values (if (stringp body) body (trivial-utf-8:utf-8-bytes-to-string body)) code)))
 
 (test apiserver-requests-are-counted-as-upstream-labels-them
@@ -24,7 +24,7 @@
       (setf gr8s::*apiserver-request-metrics* (gr8s::make-apiserver-request-metrics))
       (unwind-protect
            (progn
-             (setf server (start-server :address "127.0.0.1" :port 18080 :store store :runtime (make-fake-runtime)))
+             (setf server (start-http-test-server :store store :runtime (make-fake-runtime)))
              (gr8s::create-core-resource store "namespaces" (gr8s::core-object "metadata" (gr8s::core-object "name" "alpha")) nil)
              (apiserver-metrics-request "/api/v1/namespaces/alpha/configmaps")
              (apiserver-metrics-request "/api/v1/namespaces/alpha/configmaps" :method :post :content-type "application/json"
