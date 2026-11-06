@@ -110,7 +110,7 @@ test-core-api:
 test-whistler-cni: containerd-bundle test
 
 check: containerd-bundle test-whistler-cni test-endpoint-policy
-	sh -n scripts/gr8s scripts/gr8s-native scripts/install-containerd.sh \
+	sh -n scripts/gr8s scripts/install-containerd.sh \
 	  scripts/verify-static-runtime.sh scripts/smoke.sh scripts/test-core-api.sh
 	scripts/verify-static-runtime.sh build/containerd
 
@@ -151,11 +151,7 @@ kubeconfig:
 
 native: build/gr8s
 
-build/gr8s: build/gr8s.bin scripts/gr8s-native
-	cp -f scripts/gr8s-native build/gr8s
-	chmod +x build/gr8s
-
-build/gr8s.bin: containerd-bundle generate-protocol scripts/build-native.lisp $(LISP_SOURCES)
+build/gr8s: containerd-bundle generate-protocol scripts/build-native.lisp $(LISP_SOURCES)
 	$(SBCL) --noinform --non-interactive --load scripts/build-native.lisp
 
 clean:

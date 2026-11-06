@@ -91,7 +91,7 @@ hit-list: biggest buckets first.
 # Full certified suite (hours); requires root in a disposable guest,
 # a native gr8s binary, and the sonobuoy CLI.
 python3 scripts/test-podtemplates-sonobuoy.py \
-  --gr8s /path/to/gr8s.bin --sonobuoy /path/to/sonobuoy \
+  --gr8s /path/to/gr8s --sonobuoy /path/to/sonobuoy \
   --certified-conformance --timeout 21600
 ```
 

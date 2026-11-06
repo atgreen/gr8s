@@ -63,7 +63,7 @@ def first_party_sources() -> list[Path]:
         for path in (ROOT / directory).rglob("*"):
             if path.is_file() and path.suffix in suffixes:
                 paths.add(path.relative_to(ROOT))
-    for name in ("scripts/gr8s", "scripts/gr8s-native"):
+    for name in ("scripts/gr8s",):
         path = Path(name)
         if (ROOT / path).is_file():
             paths.add(path)

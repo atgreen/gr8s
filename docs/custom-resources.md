@@ -51,7 +51,7 @@ real streamed watches, version identity, restart persistence and finalizer
 cleanup without disabling validation. Run it against a dumped executable with:
 
 ```sh
-python3 scripts/test-crd-api.py --executable build/gr8s.bin
+python3 scripts/test-crd-api.py --executable build/gr8s
 ```
 
 The unchanged upstream Kubernetes v1.36 five-case CRD resource focus passes

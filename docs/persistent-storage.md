@@ -233,8 +233,8 @@ Run these as root on a disposable Linux node with kubectl, as described in
 `AGENTS.md`:
 
 ```sh
-python3 scripts/test-storage-native.py --executable /path/to/gr8s.bin
-python3 scripts/test-storage-dynamic-native.py --executable /path/to/gr8s.bin \
+python3 scripts/test-storage-native.py --executable /path/to/gr8s
+python3 scripts/test-storage-dynamic-native.py --executable /path/to/gr8s \
   --nfs-server 192.0.2.5 --nfs-share /export/k8s
 ```
 

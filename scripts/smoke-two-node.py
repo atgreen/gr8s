@@ -40,7 +40,7 @@ def wait_for(description, predicate, timeout=90):
 class Smoke:
     def __init__(self):
         self.root = Path(tempfile.mkdtemp(prefix='gr8s-two-node.'))
-        self.binary = Path(__file__).resolve().parents[1] / 'build/gr8s.bin'
+        self.binary = Path(__file__).resolve().parents[1] / 'build/gr8s'
         self.prefix = f'g8t{os.getpid():x}'
         self.table = self.prefix
         self.api_port = int(os.environ.get('GR8S_TWO_NODE_PORT', '18084'))

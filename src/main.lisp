@@ -10,8 +10,18 @@
         (merge-pathnames ".local/state/" (user-homedir-pathname))))))
 
 (defun gr8s-root-directory ()
+  "The gr8s tree root (holding build/containerd etc.). GR8S_ROOT wins; otherwise
+   the dumped executable derives it from its own location -- <root>/build/gr8s
+   -> <root> -- the way the old launcher script did from $0. In a dev image
+   (sbcl.core, not our executable) that derivation is skipped and we fall back to
+   the current directory."
   (uiop:ensure-directory-pathname
    (or (uiop:getenv "GR8S_ROOT")
+       (let ((core sb-ext:*core-pathname*))
+         (when (and core (equal (pathname-name core) "gr8s"))
+           (ignore-errors
+            (uiop:pathname-parent-directory-pathname
+             (uiop:pathname-directory-pathname (truename core))))))
        (uiop:getcwd))))
 
 (defun default-containerd-executable ()
