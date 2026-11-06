@@ -116,6 +116,64 @@
         (is (equal "Always" (json-path (pod-to-object updated) "spec" "containers" 0 "imagePullPolicy")))
         (is (eql 1 (gethash "generation" (gethash "metadata" (pod-to-object updated)))))))))
 
+(defun pod-tolerations-of (object)
+  "Return (key effect seconds) for each toleration of a Pod OBJECT."
+  (map 'list (lambda (toleration)
+               (list (gethash "key" toleration) (gethash "effect" toleration) (gethash "tolerationSeconds" toleration)))
+       (gethash "tolerations" (gethash "spec" object) #())))
+
+(defparameter *default-tolerations*
+  '(("node.kubernetes.io/not-ready" "NoExecute" 300) ("node.kubernetes.io/unreachable" "NoExecute" 300))
+  "What upstream's DefaultTolerationSeconds admission (plugin/pkg/admission/defaulttolerationseconds)
+appends to a Pod that does not already tolerate those taints.")
+
+(test created-pods-tolerate-not-ready-and-unreachable-nodes-for-five-minutes
+  (with-core-api (store path)
+    (values store path)
+    (flet ((create (name tolerations)
+             (let ((object (com.inuoe.jzon:parse *valid-pod-json*)))
+               (setf (gethash "name" (gethash "metadata" object)) name)
+               (when tolerations (setf (gethash "tolerations" (gethash "spec" object)) (com.inuoe.jzon:parse tolerations)))
+               (check-core-status 201 "/api/v1/namespaces/default/pods" :method :post :object object)
+               (check-core-status 200 (format nil "/api/v1/namespaces/default/pods/~A" name)))))
+      (let ((plain (create "plain" nil)))
+        (is (equal *default-tolerations* (pod-tolerations-of plain)))
+        (is (equal "Exists" (json-path plain "spec" "tolerations" 0 "operator"))))
+      ;; A toleration of the not-ready taint, or of every NoExecute taint, is left alone.
+      (is (equal '(("node.kubernetes.io/not-ready" "NoExecute" 60) ("node.kubernetes.io/unreachable" "NoExecute" 300))
+                 (pod-tolerations-of (create "own" "[{\"key\":\"node.kubernetes.io/not-ready\",\"operator\":\"Exists\",\"effect\":\"NoExecute\",\"tolerationSeconds\":60}]"))))
+      (is (equal '((nil "NoExecute" nil))
+                 (pod-tolerations-of (create "every" "[{\"operator\":\"Exists\",\"effect\":\"NoExecute\"}]"))))
+      (is (equal '(("dedicated" "NoSchedule" nil) ("node.kubernetes.io/not-ready" "NoExecute" 300)
+                   ("node.kubernetes.io/unreachable" "NoExecute" 300))
+                 (pod-tolerations-of (create "other" "[{\"key\":\"dedicated\",\"operator\":\"Exists\",\"effect\":\"NoSchedule\"}]"))))
+      ;; Upstream admits updates too: a PUT that leaves them out keeps them.
+      (let ((current (check-core-status 200 "/api/v1/namespaces/default/pods/plain")))
+        (remhash "tolerations" (gethash "spec" current))
+        (is (equal *default-tolerations*
+                   (pod-tolerations-of (check-core-status 200 "/api/v1/namespaces/default/pods/plain" :method :put :object current))))))))
+
+(test controller-and-template-pods-follow-the-toleration-admission
+  (with-temporary-store (store path)
+    (values path)
+    ;; Pods created in process, as controllers do, are admitted the same way.
+    (is (equal *default-tolerations* (pod-tolerations-of (pod-to-object (create-pod store (parse-pod *valid-pod-json*))))))
+    ;; The plugin admits Pods, not the templates of the workloads that make them.
+    (is (null (pod-tolerations-of (gr8s::defaulted-pod-template (com.inuoe.jzon:parse *valid-pod-json*)))))))
+
+(test updating-a-pod-stored-without-default-tolerations-keeps-its-spec
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((pod (create-pod store (parse-pod *valid-pod-json*))))
+      ;; As an older gr8s stored it, with no admitted tolerations.
+      (remhash "tolerations" (gethash "spec" (pod-to-object pod)))
+      (let* ((fingerprint (gr8s::pod-runtime-spec-fingerprint pod))
+             (replacement (parse-pod (com.inuoe.jzon:stringify (pod-to-object pod)))))
+        (setf (gethash "labels" (gethash "metadata" (pod-to-object replacement))) (gr8s::core-object "edited" "yes"))
+        (let ((updated (update-pod store replacement (pod-resource-version pod))))
+          (is (equal fingerprint (gr8s::pod-runtime-spec-fingerprint updated)))
+          (is (null (pod-tolerations-of (pod-to-object updated)))))))))
+
 (test nodes-carry-a-durable-creation-timestamp
   (with-temporary-store (store path)
     (gr8s:register-node store (gr8s:make-node-record :id "created-node" :name "worker-created" :pod-cidr "10.88.9.0/24"))
