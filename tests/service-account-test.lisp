@@ -416,3 +416,25 @@
       (is (gr8s::get-core-resource store "serviceaccounts" "guarded" "default"))
       (is (equal "the-cluster-ca"
                  (gethash "ca.crt" (gethash "data" (gr8s::get-core-resource store "configmaps" "guarded" "kube-root-ca.crt"))))))))
+
+(test authenticated-users-hold-upstreams-default-grants
+  ;; Without any binding: system:discovery, system:public-info-viewer and system:basic-user,
+  ;; so a SubjectAccessReview an aggregated server sends agrees with what the API itself allows.
+  (with-temporary-store (store directory)
+    (values directory)
+    (let ((user (gr8s::make-api-user-identity :username "someone" :groups #("system:authenticated")))
+          (anonymous (gr8s::make-api-user-identity :username "system:anonymous" :groups #("system:unauthenticated"))))
+      (flet ((url (identity verb path) (gr8s::service-account-authorized-p store identity verb "" nil nil nil path))
+             (resource (identity verb group resource)
+               (gr8s::service-account-authorized-p store identity verb group resource nil nil)))
+        (dolist (path '("/api" "/api/v1" "/apis/wardle.example.com/v1beta1" "/openapi/v3"
+                        "/openapi/v3/apis/wardle.example.com/v1beta1" "/version" "/healthz" "/readyz"))
+          (is-true (url user "get" path) "~A" path))
+        (is-false (url user "post" "/openapi/v3"))
+        (is-false (url user "get" "/metrics"))
+        (is-false (url user "get" "/logs"))
+        (is-false (url anonymous "get" "/openapi/v3"))
+        (is-true (resource user "create" "authorization.k8s.io" "selfsubjectaccessreviews"))
+        (is-true (resource user "create" "authentication.k8s.io" "selfsubjectreviews"))
+        (is-false (resource user "create" "authorization.k8s.io" "subjectaccessreviews"))
+        (is-false (resource user "get" "" "pods"))))))

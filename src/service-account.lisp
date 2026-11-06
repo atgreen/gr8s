@@ -213,9 +213,35 @@
                             (uiop:string-prefix-p (subseq pattern 0 (1- (length pattern))) url))))
                  (gethash "nonResourceURLs" rule)))))
 
+(defparameter +discovery-url-patterns+
+  '("/api" "/api/*" "/apis" "/apis/*" "/openapi" "/openapi/*" "/version" "/version/"
+    "/healthz" "/livez" "/readyz")
+  "The URLs upstream's system:discovery and system:public-info-viewer roles grant to every
+authenticated user, which gr8s answers without stored RBAC objects.")
+
+(defun authenticated-default-grant-p (identity verb group resource url)
+  "Report what upstream's default bindings grant every authenticated user: reading the
+discovery and health URLs, and creating self reviews (system:basic-user)."
+  (and (find "system:authenticated" (api-identity-groups identity) :test #'equal)
+       (if url
+           (and (member verb '("get" "head") :test #'equal)
+                (some (lambda (pattern)
+                        (if (uiop:string-suffix-p pattern "*")
+                            (uiop:string-prefix-p (subseq pattern 0 (1- (length pattern))) url)
+                            (equal pattern url)))
+                      +discovery-url-patterns+))
+           (and (equal verb "create")
+                (or (and (equal group "authorization.k8s.io")
+                         (member resource '("selfsubjectaccessreviews" "selfsubjectrulesreviews") :test #'equal))
+                    (and (equal group "authentication.k8s.io") (equal resource "selfsubjectreviews")))))
+       t))
+
 (defun service-account-authorized-p (store identity verb group resource name namespace &optional url)
-  "Honor the verified system:masters group, then evaluate applicable live RoleBindings and ClusterRoleBindings."
+  "Honor the verified system:masters group and the grants every authenticated user has, then
+evaluate applicable live RoleBindings and ClusterRoleBindings."
   (when (find "system:masters" (api-identity-groups identity) :test #'equal)
+    (return-from service-account-authorized-p t))
+  (when (authenticated-default-grant-p identity verb group resource url)
     (return-from service-account-authorized-p t))
   (when (node-authorizer-allows-p store identity verb group resource name namespace)
     (return-from service-account-authorized-p t))
