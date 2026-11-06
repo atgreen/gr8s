@@ -27,6 +27,49 @@
   "Return a Pod security context requesting sysctls NAMES, each set to 1."
   (gr8s::core-object "sysctls" (map 'vector (lambda (name) (gr8s::core-object "name" name "value" "1")) names)))
 
+(test scheduler-name-default-and-custom-ones-are-accepted
+  ;; Controller-generated specs routinely set schedulerName: default-scheduler,
+  ;; which gr8s's scheduler is. As upstream, a Pod may name another scheduler,
+  ;; which binds it through pods/binding; gr8s's scheduler leaves it alone.
+  (is (gr8s::pod-name (parse-pod (gap-pod-object "schedulerName" "default-scheduler"))))
+  (is (not (gr8s::pod-for-this-scheduler-p (parse-pod (gap-pod-object "schedulerName" "custom-scheduler")))))
+  ;; topologySpreadConstraints is admitted (unhonored on a single node) rather
+  ;; than blocking an otherwise valid Pod.
+  (is (gr8s::pod-name
+       (parse-pod (gap-pod-object "topologySpreadConstraints"
+                                  (vector (gr8s::core-object "maxSkew" 1 "topologyKey" "kubernetes.io/hostname"
+                                                             "whenUnsatisfiable" "ScheduleAnyway")))))))
+
+(test fs-group-change-policy-is-accepted
+  ;; A standard pod securityContext knob controller-generated StatefulSets set
+  ;; (ate's postgres); gr8s applies fsGroup ownership and accepts the policy.
+  (is (gr8s::pod-name (parse-pod (gap-pod-object "securityContext"
+                                 (gr8s::core-object "fsGroup" 2000 "fsGroupChangePolicy" "OnRootMismatch")))))
+  (signals kubernetes-error
+    (parse-pod (gap-pod-object "securityContext"
+               (gr8s::core-object "fsGroupChangePolicy" "Sometimes")))))
+
+(test run-as-non-root-is-verified-against-the-image-user
+  ;; runAsNonRoot with an explicit runAsUser only needs that uid nonzero; without
+  ;; one, the image's own user decides -- a non-root image (ko builds run as
+  ;; 65532) passes, a root image is refused. This is what let ate's
+  ;; podcertcontroller (runAsNonRoot, no runAsUser, image user 65532) run.
+  ;; As the kubelet's verifyRunAsNonRoot, a user name alone cannot prove non-root.
+  (let* ((pod (parse-pod (gap-pod-object))) (container (aref (pod-containers pod) 0)))
+    (flet ((verify (user uid name)
+             (gr8s::verify-run-as-non-root
+              pod container (if user (gr8s::core-object "runAsNonRoot" t "runAsUser" user) (gr8s::core-object "runAsNonRoot" t))
+              (lambda () (values uid name)))))
+      (flet ((ok (user uid name) (finishes (verify user uid name)))
+             (bad (user uid name) (signals gr8s::container-config-error (verify user uid name))))
+        (ok 1000 nil nil)          ; explicit non-root uid
+        (bad 0 nil nil)            ; explicit uid 0
+        (ok nil 65532 "")          ; image's non-root uid
+        (bad nil 0 "")             ; image runs as root uid 0
+        (bad nil nil "nonroot")    ; a non-numeric user name cannot be verified
+        (bad nil nil "root")       ; image username root
+        (bad nil nil "")))))       ; nothing proves non-root
+
 (test sysctl-names-are-validated-together-and-either-separator-means-the-same-variable
   (is (gr8s::pod-name (parse-pod (gap-pod-object "securityContext" (gap-sysctl-security "kernel.shm_rmid_forced")))))
   (let ((message (handler-case

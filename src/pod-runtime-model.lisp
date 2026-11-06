@@ -336,12 +336,21 @@
    Returns the paths it contributes, so the caller can keep them conflict-free."
   (drop-null-fields (require-object source "podCertificate"))
   (reject-unsupported-fields source '("signerName" "keyType" "maxExpirationSeconds"
-                                      "credentialBundlePath" "keyPath" "certificateChainPath")
+                                      "credentialBundlePath" "keyPath" "certificateChainPath"
+                                      "userAnnotations" "user")
                              "podCertificate")
   (require-nonempty-string (gethash "signerName" source) "podCertificate.signerName")
   (let ((key-type (gethash "keyType" source)))
     (unless (equal key-type "ECDSAP256")
       (invalid-pod "podCertificate.keyType must be ECDSAP256 (the only type gr8s issues)")))
+  ;; userAnnotations (copied verbatim into the request's unverifiedUserAnnotations
+  ;; for the signer) must be a string map; user is the file owner UID gr8s honors
+  ;; via fsGroup/ownership already.
+  (let ((annotations (gethash "userAnnotations" source)))
+    (when annotations (validate-core-string-map annotations "podCertificate.userAnnotations")))
+  (let ((user (gethash "user" source)))
+    (when (and user (not (typep user '(integer 0 4294967294))))
+      (invalid-pod "podCertificate.user must be a Linux UID")))
   (let ((seconds (gethash "maxExpirationSeconds" source)))
     (when (and seconds (not (and (integerp seconds) (<= 3600 seconds (expt 2 31)))))
       (invalid-pod "podCertificate.maxExpirationSeconds must be between 3600 and 2^31 seconds")))
