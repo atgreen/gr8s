@@ -17,7 +17,9 @@ load balancer governs, so it is itself a node-local client:
 * a Local LoadBalancer's healthCheckNodePort answers 200 with this node's ready
   endpoints and 503 without them, as kube-proxy's does;
 * a Local node port still serves this node's own clients;
-* a ClusterIP from an extra ServiceCIDR is claimed by an IPAddress and serves.
+* a ClusterIP from an extra ServiceCIDR is claimed by an IPAddress and serves;
+* a client outside the node, in its own network namespace, keeps its address through an
+  externalTrafficPolicy Local node port (TCP and UDP) and is seen as the node through a Cluster one.
 
 It accepts and ignores the arguments gr8s-upstream passes, so that tool can run it.
 """
@@ -37,6 +39,38 @@ from pathlib import Path
 AGNHOST = "registry.k8s.io/e2e-test-images/agnhost:2.66.1"
 UNREACHABLE = "192.0.2.1"   # TEST-NET-1: nothing answers, so a connection there fails.
 EXTERNAL_IP = "203.0.113.77"
+OUTSIDE = "gr8s-traffic-ext"           # network namespace standing in for a client elsewhere
+OUTSIDE_NODE, OUTSIDE_CLIENT = "192.168.251.1", "192.168.251.2"
+
+
+def run(*command):
+    """Run COMMAND, failing loudly."""
+    subprocess.run(command, check=True, capture_output=True, text=True)
+
+
+def make_outside_client():
+    """Create a namespace joined to the host by a veth, as a client on another machine."""
+    run("ip", "netns", "add", OUTSIDE)
+    run("ip", "link", "add", "gr8s-ext0", "type", "veth", "peer", "name", "gr8s-ext1")
+    run("ip", "link", "set", "gr8s-ext1", "netns", OUTSIDE)
+    run("ip", "addr", "add", OUTSIDE_NODE + "/30", "dev", "gr8s-ext0")
+    run("ip", "link", "set", "gr8s-ext0", "up")
+    for command in (["ip", "addr", "add", OUTSIDE_CLIENT + "/30", "dev", "gr8s-ext1"],
+                    ["ip", "link", "set", "gr8s-ext1", "up"], ["ip", "link", "set", "lo", "up"]):
+        run("ip", "netns", "exec", OUTSIDE, *command)
+
+
+def outside_clientip(port, protocol):
+    """Ask agnhost, from outside, which client address it saw; return it or an error string."""
+    if protocol == "TCP":
+        program = ("import urllib.request,sys;print(urllib.request.urlopen("
+                   f"'http://{OUTSIDE_NODE}:{port}/clientip',timeout=3).read().decode())")
+    else:
+        program = ("import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.settimeout(3);"
+                   f"s.sendto(b'clientip',('{OUTSIDE_NODE}',{port}));print(s.recvfrom(256)[0].decode())")
+    result = subprocess.run(["ip", "netns", "exec", OUTSIDE, "python3", "-c", program],
+                            capture_output=True, text=True, check=False)
+    return result.stdout.strip() if result.returncode == 0 else "error: " + result.stderr.strip()[-200:]
 
 
 class Cluster:
@@ -284,9 +318,27 @@ def main():
         served = wait_for("extra-range ClusterIP answers", 60, lambda: (lambda r: r if r[0] == 200 else None)(
             http_get("198.51.100.10", 80, "/hostname")))
         check("extraRangeClusterIPServes", served[1] in ("web-0", "web-1", "web-2"), served)
+
+        # A client elsewhere: its address is kept through a Local node port, not a Cluster one.
+        make_outside_client()
+        for policy in ("Local", "Cluster"):
+            name = "edge-" + policy.lower()
+            cluster.apply(service(name, [HTTP, UDP], type="NodePort", externalTrafficPolicy=policy,
+                                  selector={"app": "web"}))
+            ports = {port["protocol"]: port["nodePort"] for port in cluster.get("service", name)["spec"]["ports"]}
+            for protocol in ("TCP", "UDP"):
+                seen = wait_for(f"{policy} {protocol} node port from outside", 60, lambda: (
+                    lambda answer: answer if not answer.startswith("error") else None)(
+                        outside_clientip(ports[protocol], protocol)))
+                address = seen.rsplit(":", 1)[0]
+                if policy == "Local":
+                    check(f"localNodePortKeepsOutsideClient{protocol}", address == OUTSIDE_CLIENT, seen)
+                else:
+                    check(f"clusterNodePortShowsTheNode{protocol}", address != OUTSIDE_CLIENT, seen)
     except Exception as error:  # Every failure is still reported with partial observations.
         failures.append(f"exception: {error}")
     finally:
+        subprocess.run(["ip", "netns", "del", OUTSIDE], capture_output=True, check=False)
         cluster.stop()
         cluster.remove()
         report["failures"] = failures

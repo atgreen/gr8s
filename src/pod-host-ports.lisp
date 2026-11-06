@@ -6,7 +6,8 @@
 ;;;; on the node's address and relays each TCP connection, SCTP association or UDP
 ;;;; flow to a Pod, for
 ;;;; as long as that Pod is a current target. The relay is in userspace, so a Pod
-;;;; sees the node rather than the original client as the source. Node ports honour
+;;;; sees the node rather than the original client as the source, except where an
+;;;; externalTrafficPolicy Local node port keeps it. Node ports honour
 ;;;; externalTrafficPolicy as kube-proxy does, and a Local LoadBalancer's
 ;;;; healthCheckNodePort answers whether this node has ready endpoints.
 
@@ -46,23 +47,124 @@ or a (plan . chooser) whose function maps the client's address to one."
   "The socket protocol keyword for a Kubernetes PROTOCOL."
   (cond ((equal protocol "UDP") :udp) ((equal protocol "SCTP") :sctp) (t :tcp)))
 
-(defun host-port-serve-connection (client address port &optional (protocol "TCP"))
+;;; Keeping the client's address for externalTrafficPolicy Local
+;;;
+;;; kube-proxy keeps an outside client's source address when a node port's policy is
+;;; Local. A userspace relay can too: its upstream socket is IP_TRANSPARENT and bound to
+;;; the client's address, so the Pod sees the client. The Pod's replies are addressed to
+;;; that non-local address, so a policy rule matching exactly the relayed flow (Pod
+;;; address and port to the client address and the relay's port) sends them to a table
+;;; whose only route makes every address local, and the transparent socket receives
+;;; them. Without CAP_NET_ADMIN, or on a kernel without port-matching rules, the relay
+;;; falls back to the node's own address.
+
+(sb-alien:define-alien-routine ("setsockopt" %relay-setsockopt) sb-alien:int
+  (fd sb-alien:int) (level sb-alien:int) (option sb-alien:int)
+  (value (* sb-alien:int)) (length sb-alien:unsigned-int))
+
+(defparameter +transparent-reply-table+ 231
+  "The routing table whose one route delivers relayed replies to the relay's transparent sockets.")
+
+(defparameter +transparent-reply-priority+ 90
+  "The policy rule priority of relayed reply rules, ahead of the main table's 32766.")
+
+(defvar *transparent-relay-state* nil
+  "NIL until first needed, then :ready once the reply table is in place or :unavailable.")
+
+(defvar *transparent-relay-lock* (bt:make-lock "gr8s transparent relay"))
+
+(defun ensure-transparent-reply-route ()
+  "Install the reply table's route, once; return true when transparent relaying can work."
+  (bt:with-lock-held (*transparent-relay-lock*)
+    (unless *transparent-relay-state*
+      (setf *transparent-relay-state*
+            (handler-case
+                (progn
+                  ;; RTM_NEWROUTE, CREATE | REPLACE: local 0.0.0.0/0 dev lo in the reply table.
+                  (call-rtnetlink 24 #x500
+                                  (netlink-octets (vector 2 0 0 0 +transparent-reply-table+ 4 254 2)
+                                                  (netlink-integer 0 4)
+                                                  (netlink-attribute 4 (netlink-integer (cni-interface-index "lo") 4))))
+                  :ready)
+              (error (condition)
+                (format *error-output* "gr8s: node ports cannot keep client addresses: ~A~%" condition)
+                :unavailable))))
+    (eq *transparent-relay-state* :ready)))
+
+(defun transparent-reply-rule (add pod-address pod-port client-address client-port protocol)
+  "Add (ADD true) or delete the rule sending POD-ADDRESS:POD-PORT's PROTOCOL replies to
+CLIENT-ADDRESS:CLIENT-PORT, dotted strings and port numbers, to the reply table."
+  (call-rtnetlink (if add 32 33) (if add #x600 0) ; RTM_NEWRULE CREATE|EXCL, or RTM_DELRULE
+                  (transparent-reply-rule-message pod-address pod-port client-address client-port protocol)))
+
+(defun transparent-reply-rule-message (pod-address pod-port client-address client-port protocol)
+  "The fib rule message matching exactly one relayed flow's replies; see transparent-reply-rule."
+  (netlink-octets
+                   ;; fib_rule_hdr: AF_INET, dst/src lengths 32, tos, table, reserved, FR_ACT_TO_TBL, flags.
+                   (vector 2 32 32 0 +transparent-reply-table+ 0 0 1) (netlink-integer 0 4)
+                   (netlink-attribute 1 (ipv4-network-octets client-address)) ; FRA_DST
+                   (netlink-attribute 2 (ipv4-network-octets pod-address))    ; FRA_SRC
+                   (netlink-attribute 6 (netlink-integer +transparent-reply-priority+ 4)) ; FRA_PRIORITY
+                   (netlink-attribute 15 (netlink-integer +transparent-reply-table+ 4))  ; FRA_TABLE
+                   (netlink-attribute 22 (vector (if (equal protocol "UDP") 17 6)))       ; FRA_IP_PROTO
+                   (netlink-attribute 23 (netlink-octets (netlink-integer pod-port 2) (netlink-integer pod-port 2)))
+                   (netlink-attribute 24 (netlink-octets (netlink-integer client-port 2) (netlink-integer client-port 2)))))
+
+(defun open-relay-upstream (protocol address port &key source)
+  "Open a socket to the Pod at ADDRESS:PORT over PROTOCOL (TCP, UDP or SCTP), connected.
+With SOURCE, the client's address as four octets, and when the node can, the socket keeps the
+client's address as its source. Returns the socket and a function that releases what keeping
+the address took."
+  (let* ((udp (equal protocol "UDP"))
+         (socket (make-instance 'sb-bsd-sockets:inet-socket :type (if udp :datagram :stream)
+                                                            :protocol (host-port-socket-protocol protocol)))
+         (release (lambda ())))
+    (handler-case
+        (progn
+          (when (and source (not (equal protocol "SCTP")) (ensure-transparent-reply-route))
+            (handler-case
+                (let ((client (format nil "~{~D~^.~}" (coerce source 'list))))
+                  (sb-alien:with-alien ((one sb-alien:int 1))
+                    (unless (zerop (%relay-setsockopt (sb-bsd-sockets:socket-file-descriptor socket)
+                                                      0 19 (sb-alien:addr one) 4)) ; SOL_IP, IP_TRANSPARENT
+                      (error "IP_TRANSPARENT: ~A" (sb-int:strerror (sb-alien:get-errno)))))
+                  (sb-bsd-sockets:socket-bind socket source 0)
+                  (let ((local-port (nth-value 1 (sb-bsd-sockets:socket-name socket))))
+                    (transparent-reply-rule t address port client local-port protocol)
+                    (setf release (lambda ()
+                                    (ignore-errors
+                                     (transparent-reply-rule nil address port client local-port protocol))))))
+              (error (condition)
+                ;; This flow goes out from the node's address instead.
+                (format *error-output* "gr8s: relay to ~A:~D cannot keep the client address: ~A~%"
+                        address port condition)
+                (ignore-errors (sb-bsd-sockets:socket-close socket))
+                (setf socket (make-instance 'sb-bsd-sockets:inet-socket :type (if udp :datagram :stream)
+                                                                        :protocol (host-port-socket-protocol protocol))))))
+          (sb-bsd-sockets:socket-connect socket (sb-bsd-sockets:make-inet-address address) port)
+          (values socket release))
+      (error (condition)
+        (funcall release)
+        (ignore-errors (sb-bsd-sockets:socket-close socket))
+        (error condition)))))
+
+(defun host-port-serve-connection (client address port &optional (protocol "TCP") source)
   "Connect CLIENT to the Pod at ADDRESS:PORT over PROTOCOL, TCP or SCTP, and relay both
-directions until both end. An SCTP association is relayed as a stream: the octets arrive
-in order, but not divided into the messages the client sent."
-  (let ((server (make-instance 'sb-bsd-sockets:inet-socket :type :stream
-                                                           :protocol (host-port-socket-protocol protocol))))
+directions until both end, keeping the client's SOURCE address when given. An SCTP association
+is relayed as a stream: the octets arrive in order, but not divided into the client's messages."
+  (let ((server nil) (release (lambda ())))
     (unwind-protect
          (handler-case
              (progn
-               (sb-bsd-sockets:socket-connect server (sb-bsd-sockets:make-inet-address address) port)
+               (multiple-value-setq (server release) (open-relay-upstream protocol address port :source source))
                (let ((reverse (bt:make-thread (lambda () (host-port-relay server client))
                                               :name "gr8s host port relay")))
                  (host-port-relay client server)
                  (bt:join-thread reverse)))
            (error (condition)
              (format *error-output* "gr8s host port relay to ~A:~D failed: ~A~%" address port condition)))
-      (ignore-errors (sb-bsd-sockets:socket-close server))
+      (funcall release)
+      (when server (ignore-errors (sb-bsd-sockets:socket-close server)))
       (ignore-errors (sb-bsd-sockets:socket-close client)))))
 
 (defun host-port-accept-loop (forwarder)
@@ -73,16 +175,18 @@ in order, but not divided into the messages the client sent."
           do (when (sb-sys:wait-until-fd-usable descriptor :input 0.25)
                (let ((client (ignore-errors (sb-bsd-sockets:socket-accept listener))))
                  (when client
-                   (let ((target (forwarder-target-for
-                                  forwarder (ignore-errors (sb-bsd-sockets:socket-peername client)))))
+                   (let ((peer (ignore-errors (sb-bsd-sockets:socket-peername client))))
+                    (multiple-value-bind (target keep-source) (forwarder-target-for forwarder peer)
                      (if target
                          (bt:make-thread (lambda () (host-port-serve-connection client (car target) (cdr target)
-                                                                               (host-port-forwarder-protocol forwarder)))
+                                                                               (host-port-forwarder-protocol forwarder)
+                                                                               (and keep-source peer)))
                                          :name "gr8s host port connection")
-                         (ignore-errors (sb-bsd-sockets:socket-close client))))))))))
+                         (ignore-errors (sb-bsd-sockets:socket-close client)))))))))))
 
-(defun udp-flow-relay (forwarder flows key upstream)
-  "Return a client's replies from UPSTREAM through the listener until the flow goes idle."
+(defun udp-flow-relay (forwarder flows key upstream &optional (release (lambda ())))
+  "Return a client's replies from UPSTREAM through the listener until the flow goes idle,
+then RELEASE what keeping the client's address took."
   (let ((buffer (make-array 65535 :element-type '(unsigned-byte 8)))
         (descriptor (sb-bsd-sockets:socket-file-descriptor upstream)))
     (unwind-protect
@@ -97,27 +201,26 @@ in order, but not divided into the messages the client sent."
                        (sb-bsd-sockets:socket-send (host-port-forwarder-listener forwarder) buffer length
                                                    :address (list (car key) (cdr key)))))))
       (bt:with-lock-held ((car flows)) (remhash key (cdr flows)))
+      (funcall release)
       (ignore-errors (sb-bsd-sockets:socket-close upstream)))))
 
 (defun udp-flow-socket (forwarder flows key)
   "Return the relay socket of the client flow KEY, opening one to the current target if needed."
   (bt:with-lock-held ((car flows))
     (or (gethash key (cdr flows))
-        (let ((target (forwarder-target-for forwarder (car key))))
+        (multiple-value-bind (target keep-source) (forwarder-target-for forwarder (car key))
           (when target
-            (let ((upstream (make-instance 'sb-bsd-sockets:inet-socket :type :datagram :protocol :udp)))
-              (handler-case
-                  (progn
-                    (setf (sb-bsd-sockets:non-blocking-mode upstream) t)
-                    (sb-bsd-sockets:socket-connect upstream (sb-bsd-sockets:make-inet-address (car target)) (cdr target))
-                    (setf (gethash key (cdr flows)) upstream)
-                    (bt:make-thread (lambda () (udp-flow-relay forwarder flows key upstream))
-                                    :name "gr8s UDP port flow")
-                    upstream)
-                (error (condition)
-                  (ignore-errors (sb-bsd-sockets:socket-close upstream))
-                  (format *error-output* "gr8s UDP relay to ~A:~D failed: ~A~%" (car target) (cdr target) condition)
-                  nil))))))))
+            (handler-case
+                (multiple-value-bind (upstream release)
+                    (open-relay-upstream "UDP" (car target) (cdr target) :source (and keep-source (car key)))
+                  (setf (sb-bsd-sockets:non-blocking-mode upstream) t)
+                  (setf (gethash key (cdr flows)) upstream)
+                  (bt:make-thread (lambda () (udp-flow-relay forwarder flows key upstream release))
+                                  :name "gr8s UDP port flow")
+                  upstream)
+              (error (condition)
+                (format *error-output* "gr8s UDP relay to ~A:~D failed: ~A~%" (car target) (cdr target) condition)
+                nil)))))))
 
 (defun udp-port-receive-loop (forwarder)
   "Relay each datagram to its client's flow until FORWARDER stops."
@@ -216,41 +319,44 @@ in order, but not divided into the messages the client sent."
                (error () nil))
           (ignore-errors (sb-bsd-sockets:socket-close socket))))))
 
-(defun make-node-port-target (backends affinity-timeout &key local-origin local-addresses)
+(defun make-node-port-target (backends affinity-timeout &key local-origin local-addresses keep-source)
   "Return a chooser spreading clients over (address . port) BACKENDS.
 A client on this node itself, at one of LOCAL-ADDRESSES (dotted Pod addresses) or one of the
 host's own addresses, is spread over LOCAL-ORIGIN instead when that is given, as kube-proxy
 short-circuits node-local traffic to an externalTrafficPolicy Local node port. A nonnil
-AFFINITY-TIMEOUT holds each client address on one backend while it stays active and still serves."
+AFFINITY-TIMEOUT holds each client address on one backend while it stays active and still serves.
+The chooser returns the backend and, with KEEP-SOURCE, whether the relay should keep this
+client's address: true for a client elsewhere, as kube-proxy keeps it for a Local policy."
   (let ((clients (make-hash-table :test #'equalp)) (lock (bt:make-lock "gr8s node port affinity"))
         (locality (make-hash-table :test #'equalp)))
-    (flet ((choices (client)
-             (if (and local-origin client
-                      (bt:with-lock-held (lock)
-                        (multiple-value-bind (known present) (gethash client locality)
-                          (if present known
-                              (setf (gethash client locality)
-                                    (or (and (member (format nil "~{~D~^.~}" (coerce client 'list)) local-addresses
-                                                     :test #'equal)
-                                             t)
-                                        (host-local-address-p client)))))))
-                 local-origin
-                 backends)))
+    (flet ((local-client-p (client)
+             (and client
+                  (bt:with-lock-held (lock)
+                    (multiple-value-bind (known present) (gethash client locality)
+                      (if present known
+                          (setf (gethash client locality)
+                                (or (and (member (format nil "~{~D~^.~}" (coerce client 'list)) local-addresses
+                                                 :test #'equal)
+                                         t)
+                                    (host-local-address-p client)))))))))
       (lambda (client)
-        (let ((candidates (choices client)))
+        (let* ((local (and (or local-origin keep-source) (local-client-p client)))
+               (candidates (if (and local local-origin) local-origin backends)))
           (when candidates
             (flet ((any-backend () (nth (random (length candidates)) candidates)))
-              (if (and affinity-timeout client)
-                  (bt:with-lock-held (lock)
-                    (let* ((now (get-universal-time))
-                           (held (gethash client clients))
-                           (backend (if (and held (<= (- now (cdr held)) affinity-timeout)
-                                             (member (car held) candidates :test #'equal))
-                                        (car held)
-                                        (any-backend))))
-                      (setf (gethash client clients) (cons backend now))
-                      backend))
-                  (any-backend)))))))))
+              (values
+               (if (and affinity-timeout client)
+                   (bt:with-lock-held (lock)
+                     (let* ((now (get-universal-time))
+                            (held (gethash client clients))
+                            (backend (if (and held (<= (- now (cdr held)) affinity-timeout)
+                                              (member (car held) candidates :test #'equal))
+                                         (car held)
+                                         (any-backend))))
+                       (setf (gethash client clients) (cons backend now))
+                       backend))
+                   (any-backend))
+               (and keep-source client (not local) t)))))))))
 
 (defun node-local-pod-addresses (store)
   "The addresses of the Pods this node runs, whose traffic to a node port is node-local."
@@ -263,8 +369,9 @@ AFFINITY-TIMEOUT holds each client address on one backend while it stays active 
 
 (defun desired-node-port-targets (store &key node-name)
   "Map (protocol \"\" . node-port) to a plan for each of STORE's proxied Services with backends:
-(external local-origin affinity-timeout), where EXTERNAL are the backends for clients elsewhere,
-which externalTrafficPolicy governs, and LOCAL-ORIGIN those for this node's own clients.
+(external local-origin affinity-timeout keep-source), where EXTERNAL are the backends for clients
+elsewhere, which externalTrafficPolicy governs, LOCAL-ORIGIN those for this node's own clients, and
+KEEP-SOURCE whether the policy is Local, which keeps an outside client's address.
 With neither there is no listener, so a client is refused exactly as at a ClusterIP."
   (let ((targets (make-hash-table :test #'equal))
         (zone (service-node-zone store node-name)))
@@ -283,7 +390,9 @@ With neither there is no listener, so a client is refused exactly as at a Cluste
                        (let ((external (ordered external)) (local-origin (ordered local-origin)))
                          (when (or external local-origin)
                            (setf (gethash (list* protocol "" node-port) targets)
-                                 (list external local-origin (service-affinity-timeout service)))))))))))))
+                                 (list external local-origin (service-affinity-timeout service)
+                                       (equal "Local" (gethash "externalTrafficPolicy"
+                                                               (gethash "spec" service)))))))))))))))
 
 (defun converge-node-port-forwarders (forwarders store &key node-name)
   "Relay STORE's Service node ports, replacing a chooser only when its Service's plan changes,
@@ -298,11 +407,12 @@ so a client's affinity survives unrelated changes."
                  (setf (gethash key targets)
                        (if (and (consp current) (equal (car current) identity))
                            current
-                           (destructuring-bind (external local-origin timeout) plan
+                           (destructuring-bind (external local-origin timeout keep-source) plan
                              (cons identity
                                    (make-node-port-target external timeout
                                                           :local-origin local-origin
-                                                          :local-addresses local-addresses)))))))
+                                                          :local-addresses local-addresses
+                                                          :keep-source keep-source)))))))
              plans)
     (converge-port-forwarders forwarders targets)))
 

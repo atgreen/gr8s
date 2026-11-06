@@ -561,6 +561,13 @@
                (loop repeat 50 collect (funcall chooser #(198 51 100 4)))))
     (is (= 2 (length (remove-duplicates (loop repeat 200 collect (funcall chooser #(10 0 0 7))) :test #'equal))))
     (is (= 2 (length (remove-duplicates (loop repeat 200 collect (funcall chooser #(127 0 0 1))) :test #'equal)))))
+  ;; Only a Local policy keeps the client's address, and only for a client elsewhere.
+  (let ((keeping (gr8s::make-node-port-target '(("10.0.0.1" . 80)) nil :local-origin '(("10.0.0.1" . 80))
+                                              :keep-source t))
+        (cluster (gr8s::make-node-port-target '(("10.0.0.1" . 80)) nil :local-origin '(("10.0.0.1" . 80)))))
+    (is (eq t (nth-value 1 (funcall keeping #(198 51 100 4)))))
+    (is (null (nth-value 1 (funcall keeping #(127 0 0 1)))))
+    (is (null (nth-value 1 (funcall cluster #(198 51 100 4))))))
   ;; With no local endpoint an outside client is not relayed at all.
   (let ((chooser (gr8s::make-node-port-target nil nil :local-origin '(("10.0.1.1" . 80)))))
     (is (null (funcall chooser #(198 51 100 4))))
@@ -720,3 +727,15 @@
          "alpha")
         (let ((plan (gethash (list* "SCTP" "" node-port) (gr8s::desired-node-port-targets store))))
           (is (equal '(("192.0.2.5" . 8080)) (first plan))))))))
+
+(test transparent-reply-rules-match-exactly-one-relayed-flow
+  ;; fib_rule_hdr for AF_INET /32 to /32 in the reply table, then the client as destination, the
+  ;; Pod as source, and the Pod's and relay's ports as one-port ranges.
+  (let ((message (gr8s::transparent-reply-rule-message "10.88.0.5" 8080 "192.0.2.7" 40001 "TCP")))
+    (is (equalp (vector 2 32 32 0 gr8s::+transparent-reply-table+ 0 0 1) (subseq message 0 8)))
+    (is (search #(8 0 1 0 192 0 2 7) message))
+    (is (search #(8 0 2 0 10 88 0 5) message))
+    (is (search (gr8s::netlink-octets #(8 0 23 0) (gr8s::netlink-integer 8080 2) (gr8s::netlink-integer 8080 2)) message))
+    (is (search (gr8s::netlink-octets #(8 0 24 0) (gr8s::netlink-integer 40001 2) (gr8s::netlink-integer 40001 2)) message))
+    (is (search #(5 0 22 0 6) message)))
+  (is (search #(5 0 22 0 17) (gr8s::transparent-reply-rule-message "10.88.0.5" 53 "192.0.2.7" 40001 "UDP"))))
