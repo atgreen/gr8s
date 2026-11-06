@@ -313,7 +313,7 @@
             "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig"
             "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
             "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "shareProcessNamespace" "hostAliases" "ephemeralContainers"
-            "readinessGates" "schedulerName") "spec")
+            "readinessGates" "schedulerName" "hostnameOverride" "setHostnameAsFQDN" "serviceAccount") "spec")
     (dolist (field '("hostname" "subdomain"))
       (when (eq (gethash field spec) 'null) (remhash field spec))
       (let ((value (gethash field spec "")))
@@ -325,6 +325,7 @@
         (invalid-pod "spec.terminationGracePeriodSeconds must be a nonnegative int64"))
       (setf (gethash "terminationGracePeriodSeconds" spec) grace))
     (validate-pod-host-settings spec)
+    (validate-pod-hostname-fields spec)
     (validate-runtime-pod-spec spec)
     (validate-pod-dns-spec spec)
     (default-host-network-ports spec)

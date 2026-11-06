@@ -435,6 +435,17 @@
 (defun validate-runtime-pod-spec (spec)
   "Validate Pod-level volume, security, service account and scheduling fields."
   (validate-linux-security-context (gethash "securityContext" spec) :pod t)
+  ;; serviceAccount is the deprecated alias: it names the account when serviceAccountName
+  ;; does not, and otherwise mirrors it, as the API server's conversion does.
+  (multiple-value-bind (alias present) (gethash "serviceAccount" spec)
+    (when present
+      (when (member alias '(null "") :test #'equal) (setf alias nil))
+      (when (and alias (not (stringp alias))) (invalid-pod "spec.serviceAccount must be a string"))
+      (when (and alias (member (gethash "serviceAccountName" spec) '(nil null "") :test #'equal))
+        (setf (gethash "serviceAccountName" spec) alias))
+      (if (stringp (gethash "serviceAccountName" spec))
+          (setf (gethash "serviceAccount" spec) (gethash "serviceAccountName" spec))
+          (remhash "serviceAccount" spec))))
   (when (gethash "serviceAccountName" spec)
     (require-dns-subdomain (gethash "serviceAccountName" spec) "serviceAccountName"))
   (multiple-value-bind (value present) (gethash "automountServiceAccountToken" spec)

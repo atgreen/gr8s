@@ -131,7 +131,9 @@
                                          :key (lambda (mount) (gethash "mountPath" mount))))
                                  containers))
            (volume (when (and mount-p (plusp (length unmounted))) (automount-api-access-volume))))
-      (setf (gethash "serviceAccountName" spec) account-name)
+      ;; The API server reports the deprecated serviceAccount alias alongside the name.
+      (setf (gethash "serviceAccountName" spec) account-name
+            (gethash "serviceAccount" spec) account-name)
       ;; A Pod naming no pull secrets uses its account's, and later edits to the account don't change it.
       (when (and (zerop (length (gethash "imagePullSecrets" spec #())))
                  (plusp (length (gethash "imagePullSecrets" account #()))))

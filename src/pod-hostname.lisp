@@ -7,23 +7,62 @@
 
 (in-package #:gr8s)
 
+(defun pod-hostname-override (pod)
+  "Return POD's spec.hostnameOverride, which replaces its hostname and drops its domain, or NIL."
+  (let ((override (gethash "hostnameOverride" (gethash "spec" (pod-to-object pod)))))
+    (and (stringp override) override)))
+
 (defun pod-runtime-hostname (pod)
-  "Choose the explicit DNS-label hostname or the existing bounded Pod-name default."
+  "Choose hostnameOverride, the explicit DNS-label hostname or the Pod name, bounded as a kubelet does."
   (let* ((spec (gethash "spec" (pod-to-object pod)))
-         (hostname (gethash "hostname" spec)))
-    (if (and (stringp hostname) (plusp (length hostname))) hostname
-        (let ((name (pod-name pod)))
-          (if (> (length name) 63) (string-right-trim "-." (subseq name 0 63)) name)))))
+         (hostname (gethash "hostname" spec))
+         (chosen (cond ((pod-hostname-override pod))
+                       ((and (stringp hostname) (plusp (length hostname))) hostname)
+                       (t (pod-name pod)))))
+    (if (> (length chosen) 63) (string-right-trim "-." (subseq chosen 0 63)) chosen)))
 
 (defun pod-runtime-domain (pod)
-  "Return the Pod's DNS subdomain namespace suffix, independent of Service existence."
+  "Return the Pod's DNS subdomain namespace suffix, independent of Service existence.
+A hostnameOverride leaves the Pod without one."
   (let ((subdomain (gethash "subdomain" (gethash "spec" (pod-to-object pod)) "")))
-    (when (plusp (length subdomain))
+    (when (and (plusp (length subdomain)) (not (pod-hostname-override pod)))
       (format nil "~A.~A.svc.cluster.local" subdomain (pod-namespace pod)))))
+
+(defun pod-sandbox-hostname (pod)
+  "Return the kernel hostname of POD's sandbox: its FQDN under setHostnameAsFQDN, else its hostname."
+  (let ((hostname (pod-runtime-hostname pod)) (domain (pod-runtime-domain pod)))
+    (if (and domain (eq t (gethash "setHostnameAsFQDN" (gethash "spec" (pod-to-object pod)))))
+        (let ((fqdn (format nil "~A.~A" hostname domain)))
+          (when (> (length fqdn) 64)
+            (error 'runtime-error
+                   :message (format nil "failed to construct FQDN from pod hostname and cluster domain, FQDN ~A is too long (64 characters is the max, ~D characters requested)"
+                                    fqdn (length fqdn))))
+          fqdn)
+        hostname)))
+
+(defun validate-pod-hostname-fields (spec)
+  "Validate setHostnameAsFQDN and hostnameOverride, which the kernel hostname is derived from."
+  (dolist (field '("setHostnameAsFQDN" "hostnameOverride"))
+    (when (eq (gethash field spec) 'null) (remhash field spec)))
+  (multiple-value-bind (value present) (gethash "setHostnameAsFQDN" spec)
+    (when (and present (not (member value '(t nil))))
+      (invalid-pod "spec.setHostnameAsFQDN must be boolean")))
+  (multiple-value-bind (override present) (gethash "hostnameOverride" spec)
+    (when present
+      (when (eq t (gethash "setHostnameAsFQDN" spec))
+        (invalid-pod "spec.hostnameOverride: Forbidden: may not be specified when setHostnameAsFQDN is true"))
+      (when (eq t (gethash "hostNetwork" spec))
+        (invalid-pod "spec.hostnameOverride: Forbidden: may not be specified when hostNetwork is true"))
+      (unless (stringp override) (invalid-pod "spec.hostnameOverride must be a string"))
+      (when (> (length override) 64)
+        (invalid-pod "spec.hostnameOverride: Too long: may not be more than 64 bytes"))
+      (unless (and (plusp (length override)) (dns-subdomain-p override))
+        (invalid-pod "spec.hostnameOverride: Invalid value: ~S: a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.'"
+                     override)))))
 
 (defun validate-pod-hostname-update (existing replacement)
   "Keep Pod hostname/subdomain immutable after creation, including before scheduling."
-  (dolist (field '("hostname" "subdomain"))
+  (dolist (field '("hostname" "subdomain" "hostnameOverride" "setHostnameAsFQDN"))
     (unless (equal (gethash field (gethash "spec" (pod-to-object existing)) "")
                    (gethash field (gethash "spec" (pod-to-object replacement)) ""))
       (error 'kubernetes-error :status-code 422 :reason "Invalid"
