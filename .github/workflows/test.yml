@@ -69,7 +69,7 @@ jobs:
 
       - name: Static checks (shell syntax)
         run: |
-          sh -n scripts/gr8s scripts/gr8s-native scripts/install-containerd.sh \
+          sh -n scripts/gr8s scripts/install-containerd.sh \
             scripts/verify-static-runtime.sh scripts/smoke.sh scripts/test-core-api.sh
 
       - name: Run unit + HTTP test suite

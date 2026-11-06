@@ -35,8 +35,12 @@
 (ensure-directories-exist #P"build/")
 
 #+sbcl
+;; Dump the executable as build/gr8s itself -- no launcher script. :accept-runtime-options
+;; still honours a leading --dynamic-space-size/--control-stack-size and passes the rest to
+;; gr8s, and gr8s-native-main tolerates a legacy --end-runtime-options prefix. gr8s-root-directory
+;; derives GR8S_ROOT from this executable's own path.
 (sb-ext:save-lisp-and-die
- #P"build/gr8s.bin"
+ #P"build/gr8s"
  :toplevel #'gr8s-native-main
  :executable t
  :save-runtime-options :accept-runtime-options

@@ -660,7 +660,8 @@ working CRI plugin, snapshotter, OCI runtime, pause image, and CNI configuration
 
 SBCL dumps the loaded system and all seven runtime artifacts into a native
 image, avoiding an ASDF load and external runtime installation on startup.
-`build/gr8s` forwards arguments to the dumped `build/gr8s.bin` payload:
+`make native` dumps the loaded system and its runtime artifacts straight into
+the executable `build/gr8s` (no launcher script):
 
 ```sh
 make native
@@ -899,14 +900,14 @@ Linux guest with:
 
 ```sh
 python3 scripts/test-podtemplates-sonobuoy.py \
-  --gr8s /path/to/gr8s.bin --sonobuoy /path/to/sonobuoy
+  --gr8s /path/to/gr8s --sonobuoy /path/to/sonobuoy
 ```
 
 Run the entire upstream certified selection with the same disposable harness:
 
 ```sh
 python3 scripts/test-podtemplates-sonobuoy.py \
-  --gr8s /path/to/gr8s.bin --sonobuoy /path/to/sonobuoy \
+  --gr8s /path/to/gr8s --sonobuoy /path/to/sonobuoy \
   --certified-conformance --timeout 21600
 ```
 

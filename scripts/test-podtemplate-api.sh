@@ -9,7 +9,7 @@ set -eu
 
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 project_root=$(dirname -- "$script_directory")
-executable=${GR8S_PODTEMPLATE_EXECUTABLE:-$project_root/build/gr8s.bin}
+executable=${GR8S_PODTEMPLATE_EXECUTABLE:-$project_root/build/gr8s}
 port=${GR8S_PODTEMPLATE_PORT:-18191}
 node_port=${GR8S_PODTEMPLATE_NODE_PORT:-17448}
 work_directory=$(mktemp -d "${TMPDIR:-/tmp}/gr8s-podtemplate-api.XXXXXX")
