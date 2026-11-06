@@ -324,9 +324,11 @@
             "securityContext" "serviceAccountName" "automountServiceAccountToken" "imagePullSecrets"
             "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig"
             "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
-            "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "shareProcessNamespace" "hostAliases" "ephemeralContainers"
+            "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "hostUsers" "shareProcessNamespace" "hostAliases" "ephemeralContainers"
             "readinessGates" "schedulerName" "hostnameOverride" "setHostnameAsFQDN" "serviceAccount"
-            "topologySpreadConstraints" "schedulingGates") "spec")
+            "topologySpreadConstraints" "schedulingGates" "resources" "schedulingGroup") "spec")
+    ;; GenericWorkload is beta and off by default in v1.37, so the API server drops the field.
+    (remhash "schedulingGroup" spec)
     (dolist (field '("hostname" "subdomain"))
       (when (eq (gethash field spec) 'null) (remhash field spec))
       (let ((value (gethash field spec "")))
@@ -369,6 +371,8 @@
                                    (optional-vector spec "initContainers" "spec")))
              (ephemeral-containers (parse-pod-ephemeral-containers spec))
              (all-containers (concatenate 'vector init-containers parsed-containers ephemeral-containers)))
+        ;; Pod-level resources are checked against the containers' normalized ones.
+        (validate-pod-level-resources spec)
         (unless (= (length all-containers)
                    (length (remove-duplicates
                             (map 'list #'container-spec-name all-containers)

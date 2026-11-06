@@ -261,8 +261,10 @@ statistics, and return PATH."
   path)
 
 (defun cleanup-pod-volumes (runtime uid)
-  "Unmount and delete a terminated Pod's volumes; a failed unmount leaves data for retry."
+  "Unmount and delete a terminated Pod's volumes; a failed unmount leaves data for retry.
+The Pod's user namespace block is free again once nothing it owns remains."
   (cleanup-pod-csi-volumes uid)
+  (release-containerd-user-namespace runtime uid)
   (let ((directory (merge-pathnames "volumes/" (containerd-pod-log-directory runtime uid))))
     (when (probe-file directory)
       (dolist (target (pod-volume-mount-targets directory))
@@ -335,6 +337,22 @@ The runtime mounts the image itself, and it fails the container if a subPath isn
                    :propagation (container-mount-propagation mount)
                    :readonly t)))
 
+(defun recursive-read-only-mounts-supported-p ()
+  "Return whether this kernel has mount_setattr(2), which recursive read-only mounts need (Linux 5.12)."
+  (let* ((release (ignore-errors (string-trim '(#\Newline #\Space) (uiop:read-file-string "/proc/sys/kernel/osrelease"))))
+         (parts (and release (uiop:split-string release :separator '(#\. #\-))))
+         (major (and parts (parse-integer (first parts) :junk-allowed t)))
+         (minor (and (second parts) (parse-integer (second parts) :junk-allowed t))))
+    (and major minor (or (> major 5) (and (= major 5) (>= minor 12))))))
+
+(defun container-mount-recursive-read-only-p (mount)
+  "Return whether MOUNT is made read-only recursively: Enabled always, IfPossible where the kernel can.
+A runtime that cannot honour Enabled then fails the container, as a kubelet would."
+  (let ((mode (gethash "recursiveReadOnly" mount "Disabled")))
+    (and (eq t (gethash "readOnly" mount))
+         (or (equal mode "Enabled")
+             (and (equal mode "IfPossible") (recursive-read-only-mounts-supported-p))))))
+
 (defun containerd-pod-mounts (runtime pod container &optional environment)
   "Build CRI mounts from validated Pod volume declarations, materializing those the node provides."
   (let ((volumes (gethash "volumes" (gethash "spec" (pod-to-object pod)) #()))
@@ -351,6 +369,7 @@ The runtime mounts the image itself, and it fails the container if a subPath isn
                         (make-instance 'gr8s.cri.v1::mount
                                        :container-path (gethash "mountPath" mount) :host-path (namestring path)
                                        :propagation (container-mount-propagation mount)
+                                       :recursive-read-only (container-mount-recursive-read-only-p mount)
                                        :readonly (or forced-readonly (not (null (gethash "configMap" volume)))
                                                      (not (null (gethash "secret" volume)))
                                                      (not (null (gethash "downwardAPI" volume)))
@@ -485,6 +504,8 @@ A literal value may refer to any variable defined before it, as $(NAME)."
                   (containerd-key-environment-value runtime pod "secrets" (gethash "secretKeyRef" from)))
                  ((gethash "configMapKeyRef" from)
                   (containerd-key-environment-value runtime pod "configmaps" (gethash "configMapKeyRef" from)))
+                 ((gethash "fileKeyRef" from)
+                  (containerd-file-key-environment-value runtime pod (gethash "fileKeyRef" from)))
                  ((gethash "resourceFieldRef" from)
                   (let ((reference (copy-core-object (gethash "resourceFieldRef" from))))
                     (when (member (gethash "containerName" reference) '(nil "") :test #'equal)
@@ -589,7 +610,7 @@ IMAGE-USER returns the image's numeric user (or NIL) and its user name; an image
                   (container-config-error "container has runAsNonRoot and image has an invalid user id (~D). (Must be 1-(2147483647)) ~A"
                                           uid where)))))))))
 
-(defun containerd-pod-security-context (pod container &key target-id image-user)
+(defun containerd-pod-security-context (pod container &key target-id image-user userns)
   "Map effective Pod/container Linux identities, confinement and privileges to the CRI API.
 TARGET-ID names the running container whose PID namespace an ephemeral container joins;
 IMAGE-USER reports the user the container's image runs as, for runAsNonRoot."
@@ -617,7 +638,9 @@ IMAGE-USER reports the user the container's image runs as, for runAsNonRoot."
                                     (pod-pid-namespace-mode pod))
                            :target-id (or target-id "")
                            :ipc (if (pod-spec-flag-p pod "hostIPC") gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
-                           :network (if (pod-host-network-p pod) gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+))
+                           :network (if (pod-host-network-p pod) gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
+                           ;; A container must name its sandbox's user namespace, as the kubelet passes it to both.
+                           :userns-options userns)
        :capabilities (let ((capabilities (gethash "capabilities" effective)))
                        (when capabilities
                          (make-instance 'gr8s.cri.v1::capability

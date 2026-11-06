@@ -68,7 +68,8 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
          (container (find (gethash "containerName" reference)
                           (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec))
                           :test #'equal :key (lambda (object) (gethash "name" object))))
-         (declared (and container (container-resource-quantity container kind name)))
+         ;; A container without a limit of its own has the Pod's, as the kubelet merges them.
+         (declared (and container (container-resource-quantity (container-with-pod-level-limits spec container) kind name)))
          (nanos (cond (declared (container-quantity-nanos declared))
                       ((equal kind "requests") 0)
                       ((equal name "cpu") (* (node-allocatable-cpu) (expt 10 9)))

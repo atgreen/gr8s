@@ -77,7 +77,10 @@
       (setf (gethash "selector" (gethash "spec" mismatch)) (gr8s::core-object "app" "other"))
       (signals kubernetes-error (gr8s::create-core-resource store "replicationcontrollers" mismatch "alpha")))
     (let ((unrunnable (rc-fixture "bad")))
-      (setf (gethash "hostUsers" (gethash "spec" (gethash "template" (gethash "spec" unrunnable)))) nil)
+      ;; A user namespace can't share the node's network (validateHostUsers, as upstream forbids it).
+      (let ((template-spec (gethash "spec" (gethash "template" (gethash "spec" unrunnable)))))
+        (setf (gethash "hostUsers" template-spec) nil
+              (gethash "hostNetwork" template-spec) t))
       (signals kubernetes-error (gr8s::create-core-resource store "replicationcontrollers" unrunnable "alpha")))))
 
 (test replication-controller-selector-may-change-after-creation

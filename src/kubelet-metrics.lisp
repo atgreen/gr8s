@@ -72,7 +72,16 @@ and when each assigned Pod was first seen and at what version, until it first ru
   (pod-start (make-bucketed-histogram +kubelet-pod-start-buckets+))
   (pod-workers (make-hash-table :test #'equal))
   (pods (make-hash-table :test #'equal))
+  ;; Sandboxes started for Pods with hostUsers false, and those whose start then failed.
+  (user-namespaced-starts 0)
+  (user-namespaced-start-errors 0)
   (lock (bt:make-lock "gr8s kubelet metrics")))
+
+(defun note-user-namespaced-pod-start (succeeded &key (metrics *kubelet-instrumentation*))
+  "Count one sandbox started for a user-namespaced Pod, and an error unless its sync SUCCEEDED."
+  (bt:with-lock-held ((kubelet-instrumentation-lock metrics))
+    (incf (kubelet-instrumentation-user-namespaced-starts metrics))
+    (unless succeeded (incf (kubelet-instrumentation-user-namespaced-start-errors metrics)))))
 
 (defvar *kubelet-instrumentation* (make-kubelet-instrumentation)
   "This process's node agent measurements.")
@@ -171,6 +180,12 @@ operation_type, list_podsandbox, or NIL for anything that isn't a CRI call."
         (write-prometheus-family out "kubelet_runtime_operations_errors_total"
                                  "[ALPHA] Cumulative number of runtime operation errors by operation type." "counter"
                                  (counts (kubelet-instrumentation-errors metrics)))
+        (write-prometheus-family out "kubelet_started_user_namespaced_pods_total"
+                                 "[ALPHA] Cumulative number of pods with user namespaces started" "counter"
+                                 (list (list nil (kubelet-instrumentation-user-namespaced-starts metrics))))
+        (write-prometheus-family out "kubelet_started_user_namespaced_pods_errors_total"
+                                 "[ALPHA] Cumulative number of errors when starting pods with user namespaces. This does not consider errors for non user namespace pods" "counter"
+                                 (list (list nil (kubelet-instrumentation-user-namespaced-start-errors metrics))))
         (write-prometheus-family out "kubelet_runtime_operations_total"
                                  "[ALPHA] Cumulative number of runtime operations by operation type." "counter"
                                  (counts (kubelet-instrumentation-operations metrics)))))))
