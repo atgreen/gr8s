@@ -564,7 +564,8 @@ such as the security-profiles-operator put them.")
   (validate-pod-scheduler-name spec)
   (validate-pod-scheduling-gates spec)
   (validate-pod-readiness-gates spec)
-  (validate-pod-affinity spec))
+  (validate-pod-affinity spec)
+  (validate-topology-spread-constraints spec))
 
 (defparameter +default-scheduler-name+ "default-scheduler"
   "The scheduler a Pod names by default, which is the one gr8s runs.")
