@@ -1,0 +1,23 @@
+Backport of grpc-go commit ecbf7d6d (grpc/grpc-go#9533, released in v1.85.0)
+to the grpc-go v1.83.2 that containerd 2.4.2 requires.
+
+transport: prevent nil pointer dereference in recvBuffer.put.
+
+A client that sends a second DATA frame with END_STREAM on a stream whose
+unary handler has already returned makes recvBuffer.put free the nil buffer
+of an io.EOF message, and the whole containerd process panics in
+http2Server.handleData (podster-uqb.138, conformance run 15).
+
+--- a/internal/transport/transport.go
++++ b/internal/transport/transport.go
+@@ -121,7 +121,9 @@ func (b *recvBuffer) put(r recvMsg) {
+ 	if b.err != nil {
+ 		// drop the buffer on the floor. Since b.err is not nil, any subsequent reads
+ 		// will always return an error, making this buffer inaccessible.
+-		r.buffer.Free()
++		if r.buffer != nil {
++			r.buffer.Free()
++		}
+ 		// An error had occurred earlier, don't accept more
+ 		// data or errors.
+ 		return

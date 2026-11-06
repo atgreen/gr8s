@@ -394,3 +394,115 @@
       (gr8s::unmount-managed-bpffs
        directory :unmounter (lambda (&rest args) (declare (ignore args)) (incf unmounted) 0))
       (is (= 1 unmounted)))))
+
+(defun supervised-test-manager (directory &rest arguments)
+  "A managed containerd whose process is a cons the test kills by setting its CAR."
+  ;; Keyword arguments given first win, so ARGUMENTS override these defaults.
+  (apply #'gr8s::make-managed-containerd
+         (append arguments
+                 (list :state-directory directory
+                       :executable "/opt/gr8s/bin/containerd"
+                       :oci-runtime "/opt/gr8s/bin/runc"
+                       :cni-bin-directory "/opt/gr8s/bin/cni/"
+                       :process-alive-p (lambda (process) (car process))
+                       :exit-describer (lambda (process) (declare (ignore process)) "exit status 2")
+                       :readiness-probe (lambda (socket) (declare (ignore socket)) t)
+                       :stopper (lambda (process) (setf (car process) nil))
+                       :supervision-interval 0.02))))
+
+(defun wait-until (predicate &key (timeout 5))
+  (let ((deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
+    (loop until (or (funcall predicate) (>= (get-internal-real-time) deadline))
+          do (sleep 0.01))
+    (funcall predicate)))
+
+(test managed-containerd-supervisor-restarts-a-dead-containerd-and-reports-the-outage
+  (let* ((directory (merge-pathnames (format nil "gr8s-supervise-~36R/" (random (expt 36 8)))
+                                     (uiop:temporary-directory)))
+         (launches nil)
+         (manager (supervised-test-manager
+                   directory
+                   :restart-initial-delay 0.2
+                   :launcher (lambda (command log environment)
+                               (declare (ignore command log environment))
+                               (let ((process (list t)))
+                                 (push process launches)
+                                 process))))
+         (availability (gr8s::managed-containerd-availability manager))
+         (log (make-string-output-stream)))
+    (unwind-protect
+         (let ((*error-output* log))
+           (gr8s::call-with-running-containerd
+            manager
+            (lambda ()
+              (is (= 1 (length launches)))
+              (is (null (gr8s::runtime-availability-message availability)))
+              ;; containerd panics.
+              (setf (car (first launches)) nil)
+              ;; The CRI caller sees the outage at once, before the supervisor polls.
+              (is (search "container runtime is down" (gr8s::runtime-availability-message availability)))
+              (is (wait-until (lambda () (gr8s::runtime-availability-down-message availability))))
+              (is (search "exit status 2" (gr8s::runtime-availability-down-message availability)))
+              ;; It is restarted after the backoff, not in a hot loop.
+              (is (= 1 (length launches)))
+              (is (wait-until (lambda () (= 2 (length launches)))))
+              (is (wait-until (lambda () (null (gr8s::runtime-availability-message availability)))))
+              (is (= 1 (gr8s::managed-containerd-restarts manager)))
+              (is (= 1 (gr8s::runtime-availability-outages availability)))
+              (is (eq (first launches) (gr8s::managed-containerd-process manager))))))
+      (gr8s::stop-managed-containerd manager)
+      (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))
+    (let ((text (get-output-stream-string log)))
+      (is (search "gr8s managed containerd exited (exit status 2)" text))
+      (is (search "gr8s managed containerd restarted (restart 1)" text)))
+    ;; Stopping ends supervision: the stopped process is not restarted.
+    (is (= 2 (length launches)))
+    (is (null (gr8s::managed-containerd-supervisor manager)))
+    (is (null (gr8s::runtime-availability-liveness availability)))))
+
+(test managed-containerd-supervisor-backs-off-while-restarts-fail
+  (let* ((directory (merge-pathnames (format nil "gr8s-supervise-~36R/" (random (expt 36 8)))
+                                     (uiop:temporary-directory)))
+         (launch-times nil)
+         (failing nil)
+         (manager (supervised-test-manager
+                   directory
+                   :restart-initial-delay 0.1
+                   :restart-max-delay 0.4
+                   :readiness-probe (lambda (socket) (declare (ignore socket)) (not failing))
+                   :launcher (lambda (command log environment)
+                               (declare (ignore command log environment))
+                               (push (get-internal-real-time) launch-times)
+                               ;; A failed restart exits before it is ready.
+                               (list (not failing)))))
+         (availability (gr8s::managed-containerd-availability manager)))
+    (unwind-protect
+         (let ((*error-output* (make-broadcast-stream)))
+           (gr8s::call-with-running-containerd
+            manager
+            (lambda ()
+              (setf failing t)
+              (setf (car (gr8s::managed-containerd-process manager)) nil)
+              (is (wait-until (lambda () (>= (length launch-times) 5)) :timeout 10))
+              (is (gr8s::runtime-availability-message availability))
+              (let ((gaps (loop for (later earlier) on launch-times
+                                while earlier
+                                collect (/ (- later earlier) internal-time-units-per-second))))
+                ;; Delays double from 0.1s and stop growing at 0.4s.
+                (is (>= (first (last gaps)) 0.08))
+                (is (every (lambda (gap) (< gap 1.0)) gaps))
+                (is (>= (first gaps) 0.35)))
+              (setf failing nil)
+              (is (wait-until (lambda () (null (gr8s::runtime-availability-message availability)))
+                              :timeout 5)))))
+      (gr8s::stop-managed-containerd manager)
+      (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
+
+(test runtime-availability-waiters-wake-when-the-runtime-returns
+  (let ((availability (gr8s::make-runtime-availability)))
+    (is (gr8s::wait-for-runtime-available availability 0))
+    (gr8s::note-runtime-unavailable availability "container runtime is down: test")
+    (is (not (gr8s::wait-for-runtime-available availability 0.05)))
+    (bt:make-thread (lambda () (sleep 0.1) (gr8s::note-runtime-available availability)))
+    (is (gr8s::wait-for-runtime-available availability 5))
+    (is (null (gr8s::runtime-availability-message availability)))))

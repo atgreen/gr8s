@@ -3,6 +3,11 @@ set -eu
 
 containerd_version=2.4.2
 containerd_revision=b7a25261e029d68978bbf290df0a62fc819b3c51
+# containerd 2.4.2 requires grpc-go v1.83.2, whose server panics on a repeated
+# END_STREAM (grpc/grpc-go#9533, fixed in v1.85.0). Build containerd against
+# v1.83.2 with that one-line fix rather than move every dependency to v1.85.
+grpc_version=v1.83.2
+grpc_patch=grpc-go-9533-recvbuffer-nil-free.patch
 runc_version=1.5.2
 cni_plugins_version=1.9.1
 destination=${1:-build/containerd}
@@ -29,7 +34,7 @@ runc_url="https://github.com/opencontainers/runc/releases/download/v$runc_versio
 temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/gr8s-containerd.XXXXXX")
 trap 'rm -rf -- "$temporary_directory"' EXIT INT TERM
 
-for command in curl sha256sum awk grep install go readelf sbcl; do
+for command in curl sha256sum awk grep install go readelf sbcl git; do
   if ! command -v "$command" >/dev/null; then
     echo "missing required build command: $command" >&2
     exit 1
@@ -49,6 +54,12 @@ static_binary_p() {
   return 0
 }
 
+# The grpc dependency carries a replacement only when containerd was built with
+# the patched copy below; an unpatched bundle is rebuilt.
+patched_grpc_p() {
+  go version -m "$1" | grep -A1 -F "google.golang.org/grpc	$grpc_version" | grep -q '=>'
+}
+
 cni_plugin_p() {
   static_binary_p "$1" &&
     go version -m "$1" | grep -Fq "github.com/containernetworking/plugins" &&
@@ -56,6 +67,7 @@ cni_plugin_p() {
 }
 
 if ! { static_binary_p "$destination/bin/containerd" &&
+       patched_grpc_p "$destination/bin/containerd" &&
        static_binary_p "$destination/bin/containerd-shim-runc-v2" &&
        "$destination/bin/containerd" --version | grep -q "$containerd_version" &&
        "$destination/bin/containerd-shim-runc-v2" --version 2>&1 |
@@ -64,10 +76,23 @@ if ! { static_binary_p "$destination/bin/containerd" &&
   mkdir -p "$go_bin"
   package=github.com/containerd/containerd/v2
   ldflags="-s -w -X $package/version.Version=$containerd_version -X $package/version.Revision=$containerd_revision -X $package/version.Package=$package"
-  CGO_ENABLED=0 GOBIN="$go_bin" go install -trimpath \
-    -tags 'urfave_cli_no_docs osusergo netgo static_build' \
-    -ldflags "$ldflags" \
-    "$package/cmd/containerd@v$containerd_version"
+  containerd_source=$(go mod download -json "$package@v$containerd_version" |
+    awk -F'"' '$2 == "Dir" { print $4 }')
+  grpc_source=$(go mod download -json "google.golang.org/grpc@$grpc_version" |
+    awk -F'"' '$2 == "Dir" { print $4 }')
+  cp -R "$containerd_source" "$temporary_directory/containerd"
+  cp -R "$grpc_source" "$temporary_directory/grpc"
+  chmod -R u+w "$temporary_directory/containerd" "$temporary_directory/grpc"
+  git -C "$temporary_directory/grpc" apply --unsafe-paths \
+    "$script_directory/patches/$grpc_patch"
+  (
+    cd "$temporary_directory/containerd"
+    go mod edit -replace "google.golang.org/grpc=$temporary_directory/grpc"
+    CGO_ENABLED=0 go build -trimpath \
+      -tags 'urfave_cli_no_docs osusergo netgo static_build' \
+      -ldflags "$ldflags" \
+      -o "$go_bin/containerd" ./cmd/containerd
+  )
   CGO_ENABLED=0 GOBIN="$go_bin" go install -trimpath \
     -tags 'urfave_cli_no_docs osusergo netgo static_build no_grpc' \
     -ldflags "$ldflags" \

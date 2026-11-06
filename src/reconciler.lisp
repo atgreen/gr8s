@@ -320,11 +320,30 @@ finishes stops the node starting Pods, and nothing else reports it (podster-uqb.
   (bt:with-lock-held ((reconciler-lock reconciler))
     (let ((pod (get-pod (reconciler-store reconciler) namespace name)))
       (handler-case
+          (handler-bind
+              ((runtime-error
+                 (lambda (error)
+                   ;; A call that failed because the runtime died is an outage, not a Pod error.
+                   (unless (typep error 'runtime-unavailable)
+                     (let ((down (runtime-unavailable-message (reconciler-runtime reconciler))))
+                       (when down (error 'runtime-unavailable :message down)))))))
+            (let ((down (runtime-unavailable-message (reconciler-runtime reconciler))))
+              (when down (error 'runtime-unavailable :message down)))
+            (add-pod-status-conditions
+             (reconciler-store reconciler) pod
+             (if (deletion-requested-p pod)
+                 (converge-deleting-pod reconciler pod)
+                 (converge-cancellable-running-pod reconciler pod))))
+        (runtime-unavailable (error)
+          ;; Like kubelet with a dead runtime, skip synchronization and keep
+          ;; reporting the last observation rather than a fabricated Pending.
           (add-pod-status-conditions
            (reconciler-store reconciler) pod
-           (if (deletion-requested-p pod)
-               (converge-deleting-pod reconciler pod)
-               (converge-cancellable-running-pod reconciler pod)))
+           (let ((status (pod-observed-status (reconciler-store reconciler) pod)))
+             (if status
+                 (copy-core-object status)
+                 (pod-status "Pending" :reason "ContainerRuntimeUnavailable"
+                                       :message (runtime-error-message error))))))
         (runtime-error (error)
           (format *error-output* "gr8s Pod ~A/~A runtime error: ~A~%" namespace name (runtime-error-message error))
           (add-pod-status-conditions
@@ -348,6 +367,10 @@ finishes stops the node starting Pods, and nothing else reports it (podster-uqb.
                                           (converge-deleting-pod reconciler pod))) pod))))
 
 (defun reconcile-all (reconciler &key observer)
+  ;; kubelet skips Pod synchronization while its runtime is down; the runtime
+  ;; supervisor reports the outage once instead of every Pod failing each pass.
+  (when (runtime-unavailable-message (reconciler-runtime reconciler))
+    (return-from reconcile-all nil))
   (loop for pod in (stable-sort (copy-list (list-pods (reconciler-store reconciler)))
                                 ;; Finish deletions first, then place the most important Pods.
                                 (lambda (left right)

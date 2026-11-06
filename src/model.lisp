@@ -70,6 +70,9 @@
   ;; The port of the node's authenticated kubelet endpoints, or 0 when it serves none.
   (kubelet-port 0)
   (ready-p nil)
+  ;; Why the node's container runtime is down while its agent still holds the
+  ;; lease, or NIL. Not persisted: the next heartbeat reports it again.
+  runtime-down-message
   last-heartbeat
   lease-deadline
   (labels nil)
@@ -85,6 +88,10 @@
   ;; A Node created through the API has no agent: its status is whatever was written.
   api-only
   api-status)
+
+(defun node-record-runtime-ready-p (node)
+  "Return whether NODE's agent holds its lease and its container runtime can run Pods."
+  (and (node-record-ready-p node) (null (node-record-runtime-down-message node))))
 
 (defun invalid-pod (control &rest arguments)
   "Signal an HTTP 422 Kubernetes error formatted by CONTROL and ARGUMENTS."

@@ -397,3 +397,46 @@
 
 (test a-deferred-step-outside-creation-runs-normally
   (is (eq :done (gr8s::with-running-pod-cancellation-deferred :done))))
+
+(defstruct (outage-fake-runtime (:include gr8s::fake-runtime)
+                                (:constructor make-outage-fake-runtime ()))
+  down-message)
+
+(defmethod gr8s::runtime-unavailable-message ((runtime outage-fake-runtime))
+  (outage-fake-runtime-down-message runtime))
+
+(test runtime-outage-pauses-pod-synchronization-and-keeps-observations
+  (with-temporary-store (store path)
+    (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
+           (runtime (make-outage-fake-runtime))
+           (reconciler (make-reconciler store runtime)))
+      (let ((status (reconcile-pod reconciler "default" "hello")))
+        (is (string= "Running" (gethash "phase" status)))
+        (gr8s::save-pod-observation store pod status))
+      (is (= 1 (fake-runtime-ensure-count runtime)))
+      (setf (outage-fake-runtime-down-message runtime) "container runtime is down: test")
+      ;; A changed Pod is not started against a dead runtime, and its last
+      ;; observation stands instead of a fabricated Pending/RuntimeError.
+      (let ((object (com.inuoe.jzon:parse *valid-pod-json*)))
+        (setf (gethash "command" (aref (gethash "containers" (gethash "spec" object)) 0)) #("changed"))
+        (update-pod store (parse-pod object) "1"))
+      (let ((status (reconcile-pod reconciler "default" "hello")))
+        (is (string= "Running" (gethash "phase" status)))
+        (is (not (equal "RuntimeError" (gethash "reason" status)))))
+      (is (null (reconcile-all reconciler)))
+      (is (= 1 (fake-runtime-ensure-count runtime)))
+      ;; It converges once the runtime is back.
+      (setf (outage-fake-runtime-down-message runtime) nil)
+      (is (string= "Running" (gethash "phase" (reconcile-pod reconciler "default" "hello"))))
+      (is (= 2 (fake-runtime-ensure-count runtime))))))
+
+(test runtime-outage-reports-unobserved-pods-pending-on-the-runtime
+  (with-temporary-store (store path)
+    (create-pod store (parse-pod *valid-pod-json*))
+    (let* ((runtime (make-outage-fake-runtime))
+           (reconciler (make-reconciler store runtime)))
+      (setf (outage-fake-runtime-down-message runtime) "container runtime is down: test")
+      (let ((status (reconcile-pod reconciler "default" "hello")))
+        (is (string= "Pending" (gethash "phase" status)))
+        (is (string= "ContainerRuntimeUnavailable" (gethash "reason" status))))
+      (is (= 0 (fake-runtime-ensure-count runtime))))))

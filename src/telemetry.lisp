@@ -19,7 +19,7 @@
         (let* ((name (car entry)) (status (cdr entry))
                (node (get-node (node-grpc-server-store server) name)))
           (format stream "gr8s_dataplane_node_ready{node=\"~A\"} ~D~%"
-                  (prometheus-label name) (if (node-record-ready-p node) 1 0))
+                  (prometheus-label name) (if (node-record-runtime-ready-p node) 1 0))
           (format stream "gr8s_dataplane_observed_timestamp_seconds{node=\"~A\"} ~D~%"
                   (prometheus-label name)
                   (floor (slot-value status 'gr8s.node.v1::observed-at-unix-nanos) 1000000000))

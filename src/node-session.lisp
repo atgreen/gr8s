@@ -369,6 +369,10 @@ What was consumed isn't kept, for streams too long to hold in memory."
        (mark-node-ready (node-grpc-server-store server)
                         node-name now
                         :lease-duration (node-grpc-server-heartbeat-timeout-seconds server))
+       (note-node-runtime-health
+        (node-grpc-server-store server) node-name
+        (slot-value (slot-value envelope 'gr8s.node.v1::heartbeat)
+                    'gr8s.node.v1::runtime-down-message))
        (note-node-heartbeat-lease (node-grpc-server-store server) node-name now)))
     (:snapshot-ack
      (note-node-snapshot-ack
@@ -976,9 +980,15 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
              (return))
            (sleep 0.25)))
 
+(defun agent-heartbeat (runtime-health)
+  "Return a heartbeat carrying why the node's runtime is down, as RUNTIME-HEALTH reports."
+  (make-instance 'gr8s.node.v1::heartbeat
+                 :runtime-down-message
+                 (or (and runtime-health (ignore-errors (funcall runtime-health))) "")))
+
 (defun agent-session-monitor
     (session control session-thread heartbeat-interval
-     stop-predicate finished-p finish-session note-progress tag)
+     stop-predicate finished-p finish-session note-progress tag &optional runtime-health)
   (let ((next-heartbeat
           (+ (get-internal-real-time)
              (* (funcall heartbeat-interval) internal-time-units-per-second))))
@@ -997,8 +1007,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                      (return))
                    (when (>= (get-internal-real-time) next-heartbeat)
                      (send-agent-session-envelope
-                      session :heartbeat
-                      (make-instance 'gr8s.node.v1::heartbeat))
+                      session :heartbeat (agent-heartbeat runtime-health))
                      (funcall note-progress)
                      (setf next-heartbeat
                            (+ (get-internal-real-time)
@@ -1148,7 +1157,8 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
 (defun run-one-node-session
     (host port node-name identity-path apply-snapshot operation-handler
      one-shot-p control stop-predicate underlay-address status-provider
-     ca-certificate-path certificate-path private-key-path &optional snapshot-observer (kubelet-port 0))
+     ca-certificate-path certificate-path private-key-path &optional snapshot-observer (kubelet-port 0)
+                                                                     runtime-health)
   (let* ((identity (load-agent-identity identity-path node-name))
          (session-thread (bt:current-thread))
          (session-timeout (and one-shot-p 5))
@@ -1216,7 +1226,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                               :last-applied-revision
                               (gethash "lastAppliedRevision" identity 0)))
              (send-agent-session-envelope
-              session :heartbeat (make-instance 'gr8s.node.v1::heartbeat))
+              session :heartbeat (agent-heartbeat runtime-health))
              ;; Cancellation must also cover a peer that stalls before its
              ;; ServerHello, not only sessions that finished the handshake.
              (unless one-shot-p
@@ -1236,7 +1246,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                          (lambda () heartbeat-interval)
                          stop-predicate #'finished-p #'finish-session
                          (lambda () (setf last-progress (get-internal-real-time)))
-                         session-tag))
+                         session-tag runtime-health))
                       :name "gr8s agent session heartbeat"))
                (when status-provider
                  (setf status-thread
@@ -1312,7 +1322,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                          &key max-sessions (reconnect-delay 1) endpoints
                            operation-handler underlay-address status-provider snapshot-observer
                            ca-certificate-path certificate-path private-key-path
-                           control (kubelet-port 0)
+                           control (kubelet-port 0) runtime-health
                            (stop-predicate (constantly nil)))
   "Maintain the agent's session to the control plane, reconnecting on loss. With
    ENDPOINTS (a list of (host port)) the agent rotates through the control-plane
@@ -1334,7 +1344,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                                                  (not (null max-sessions)) control stop-predicate
                                                  underlay-address status-provider
                                                  ca-certificate-path certificate-path private-key-path
-                                                 snapshot-observer kubelet-port))
+                                                 snapshot-observer kubelet-port runtime-health))
                        (unless (or (node-session-cancelled-p control) (funcall stop-predicate))
                          (format *error-output* "gr8s node session to ~A:~A ended; reconnecting~%"
                                  try-host try-port))

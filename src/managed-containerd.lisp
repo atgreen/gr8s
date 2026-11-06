@@ -1,5 +1,59 @@
 (in-package #:gr8s)
 
+(defstruct (runtime-availability (:constructor make-runtime-availability ()))
+  "Whether the node's container runtime can serve CRI calls, and why not while it can't.
+The managed containerd supervisor writes it; the agent reads it to pause Pod
+synchronization and to report the Node NotReady, as kubelet does for a dead runtime."
+  (lock (bt:make-lock "gr8s runtime availability"))
+  (changed (bt:make-condition-variable :name "gr8s runtime availability changed"))
+  down-message
+  (outages 0)
+  ;; Optional nullary predicate: is the runtime process alive right now? It lets a
+  ;; caller whose CRI call just failed tell a dead runtime from a failed request
+  ;; before the supervisor's next poll notices the exit.
+  liveness)
+
+(defun runtime-availability-message (availability)
+  "Return why AVAILABILITY's runtime is down, or NIL while it is up or unsupervised."
+  (when availability
+    (or (bt:with-lock-held ((runtime-availability-lock availability))
+          (runtime-availability-down-message availability))
+        (let ((liveness (runtime-availability-liveness availability)))
+          (when (and liveness (not (ignore-errors (funcall liveness))))
+            "container runtime is down: managed containerd is not running")))))
+
+(defun note-runtime-unavailable (availability message)
+  "Record that the runtime is down because of MESSAGE."
+  (bt:with-lock-held ((runtime-availability-lock availability))
+    (unless (runtime-availability-down-message availability)
+      (incf (runtime-availability-outages availability)))
+    (setf (runtime-availability-down-message availability) message)
+    (bt:condition-notify (runtime-availability-changed availability))))
+
+(defun note-runtime-available (availability)
+  "Record that the runtime serves CRI calls again and wake everyone waiting for it."
+  (bt:with-lock-held ((runtime-availability-lock availability))
+    (setf (runtime-availability-down-message availability) nil)
+    (bt:condition-notify (runtime-availability-changed availability))))
+
+(defun wait-for-runtime-available (availability timeout)
+  "Wait up to TIMEOUT seconds for AVAILABILITY's runtime; return true when it is up."
+  (or (null availability)
+      (let ((deadline (+ (get-internal-real-time)
+                         (* timeout internal-time-units-per-second))))
+        (bt:with-lock-held ((runtime-availability-lock availability))
+          (loop
+            (unless (runtime-availability-down-message availability)
+              (return t))
+            (let ((remaining (/ (- deadline (get-internal-real-time))
+                                internal-time-units-per-second)))
+              (unless (plusp remaining)
+                (return nil))
+              ;; Notify wakes one waiter; a bounded wait lets every waiter see the change.
+              (bt:condition-wait (runtime-availability-changed availability)
+                                 (runtime-availability-lock availability)
+                                 :timeout (min remaining 0.25))))))))
+
 (defstruct (managed-containerd (:constructor %make-managed-containerd))
   state-directory
   executable
@@ -23,7 +77,21 @@
   runtime-preparer
   bpf-mounter
   bpf-unmounter
-  process)
+  process
+  ;; Supervision: a node agent restarts its runtime when it dies, as a real
+  ;; node's service manager would (podster-uqb.138).
+  (availability (make-runtime-availability))
+  supervisor
+  stopping-p
+  (supervisor-lock (bt:make-lock "gr8s managed containerd supervisor"))
+  (supervisor-changed (bt:make-condition-variable :name "gr8s managed containerd stop"))
+  (supervision-interval 0.25)
+  (restart-initial-delay 1)
+  (restart-max-delay 30)
+  ;; A containerd that ran this long before exiting restarts after the initial delay again.
+  (restart-stable-seconds 60)
+  (restarts 0)
+  (exit-describer #'describe-containerd-exit))
 
 (defun containerd-platform-for-machine (machine)
   (let ((normalized (string-downcase machine)))
@@ -51,6 +119,11 @@
 
 (defun containerd-process-alive-p (process)
   (uiop:process-alive-p process))
+
+(defun describe-containerd-exit (process)
+  "Describe how PROCESS exited, for the supervisor's log."
+  (let ((code (ignore-errors (uiop:wait-process process))))
+    (if code (format nil "exit status ~D" code) "exit status unknown")))
 
 (defun containerd-cri-ready-p (socket-path)
   (and (probe-file socket-path)
@@ -98,7 +171,11 @@
           (launcher #'launch-containerd-process)
           (process-alive-p #'containerd-process-alive-p)
           (readiness-probe #'containerd-cri-ready-p)
-          (stopper #'terminate-containerd-process))
+          (stopper #'terminate-containerd-process)
+          (exit-describer #'describe-containerd-exit)
+          (restart-initial-delay 1)
+          (restart-max-delay 30)
+          (supervision-interval 0.25))
   (let ((state (uiop:ensure-directory-pathname state-directory)))
     (%make-managed-containerd
      :state-directory state
@@ -119,7 +196,11 @@
      :runtime-preparer runtime-preparer
      :bpf-mounter bpf-mounter
      :bpf-unmounter bpf-unmounter
-     :stopper stopper)))
+     :stopper stopper
+     :exit-describer exit-describer
+     :restart-initial-delay restart-initial-delay
+     :restart-max-delay restart-max-delay
+     :supervision-interval supervision-interval)))
 
 (defun managed-containerd-directory (manager relative-path)
   (namestring
@@ -301,7 +382,96 @@
       (write-string (managed-containerd-cni-config-text manager) stream))
     path))
 
+(defun managed-containerd-stopping (manager)
+  (bt:with-lock-held ((managed-containerd-supervisor-lock manager))
+    (managed-containerd-stopping-p manager)))
+
+(defun managed-containerd-supervisor-wait (manager seconds)
+  "Wait SECONDS unless MANAGER is stopping; return true when it is."
+  (let ((deadline (+ (get-internal-real-time) (* seconds internal-time-units-per-second))))
+    (bt:with-lock-held ((managed-containerd-supervisor-lock manager))
+      (loop
+        (when (managed-containerd-stopping-p manager)
+          (return t))
+        (let ((remaining (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)))
+          (unless (plusp remaining)
+            (return nil))
+          (bt:condition-wait (managed-containerd-supervisor-changed manager)
+                             (managed-containerd-supervisor-lock manager)
+                             :timeout remaining))))))
+
+(defun restart-managed-containerd (manager delay)
+  "Restart MANAGER's dead containerd after DELAY seconds, backing off until it is ready.
+Return the delay the next outage starts from, or NIL when MANAGER began stopping."
+  (let ((delay delay))
+    (loop
+      (when (managed-containerd-supervisor-wait manager delay)
+        (return nil))
+      (handler-case
+          (progn
+            (start-managed-containerd manager)
+            (return (min (managed-containerd-restart-max-delay manager) (* 2 delay))))
+        (error (condition)
+          (when (managed-containerd-stopping manager)
+            (return nil))
+          (setf delay (min (managed-containerd-restart-max-delay manager) (* 2 delay)))
+          (format *error-output* "gr8s managed containerd restart failed: ~A; retrying in ~,1Fs~%"
+                  condition delay))))))
+
+(defun supervise-managed-containerd (manager)
+  "Restart MANAGER's containerd whenever it exits, until MANAGER stops.
+Pods keep running across the outage: their shims outlive containerd, which
+reconnects to them when it starts again."
+  (let ((delay (managed-containerd-restart-initial-delay manager))
+        (started (get-internal-real-time)))
+    (loop
+      (when (managed-containerd-supervisor-wait manager (managed-containerd-supervision-interval manager))
+        (return))
+      (let ((process (managed-containerd-process manager)))
+        (unless (and process (funcall (managed-containerd-process-alive-p manager) process))
+          (let ((uptime (/ (- (get-internal-real-time) started) internal-time-units-per-second))
+                (exit (if process
+                          (or (ignore-errors (funcall (managed-containerd-exit-describer manager) process))
+                              "exit status unknown")
+                          "not running")))
+            (when (>= uptime (managed-containerd-restart-stable-seconds manager))
+              (setf delay (managed-containerd-restart-initial-delay manager)))
+            (setf (managed-containerd-process manager) nil)
+            (note-runtime-unavailable
+             (managed-containerd-availability manager)
+             (format nil "container runtime is down: managed containerd exited (~A)" exit))
+            (format *error-output*
+                    "gr8s managed containerd exited (~A) after ~,1Fs; restarting in ~,1Fs; see ~A~%"
+                    exit uptime delay (managed-containerd-log-path manager))
+            (let ((next (restart-managed-containerd manager delay)))
+              (unless next
+                (return))
+              (setf delay next
+                    started (get-internal-real-time))
+              (incf (managed-containerd-restarts manager))
+              (note-runtime-available (managed-containerd-availability manager))
+              (format *error-output* "gr8s managed containerd restarted (restart ~D)~%"
+                      (managed-containerd-restarts manager)))))))))
+
+(defun start-managed-containerd-supervisor (manager)
+  (setf (managed-containerd-supervisor manager)
+        (let ((output *error-output*))
+          ;; Log where the agent that owns this containerd logs.
+          (bt:make-thread (lambda ()
+                            (let ((*error-output* output))
+                              (supervise-managed-containerd manager)))
+                          :name "gr8s managed containerd supervisor"))))
+
+(defun stop-managed-containerd-supervisor (manager)
+  (bt:with-lock-held ((managed-containerd-supervisor-lock manager))
+    (setf (managed-containerd-stopping-p manager) t)
+    (bt:condition-notify (managed-containerd-supervisor-changed manager)))
+  (let ((thread (shiftf (managed-containerd-supervisor manager) nil)))
+    (when (and thread (not (eq thread (bt:current-thread))))
+      (ignore-errors (bt:join-thread thread)))))
+
 (defun stop-managed-containerd (manager)
+  (stop-managed-containerd-supervisor manager)
   (let ((process (managed-containerd-process manager)))
     (when process
       (unwind-protect
@@ -332,20 +502,31 @@
         (error 'runtime-error
                :message (format nil "managed containerd exited; see ~A"
                                 (managed-containerd-log-path manager))))
-      (when (>= (get-internal-real-time) deadline)
-        (stop-managed-containerd manager)
+      (when (or (>= (get-internal-real-time) deadline)
+                (managed-containerd-stopping manager))
+        (let ((process (shiftf (managed-containerd-process manager) nil)))
+          (when process
+            (funcall (managed-containerd-stopper manager) process)))
         (error 'runtime-error
                :message (format nil "managed containerd was not ready after ~A seconds"
                                 timeout)))
       (sleep 0.05))))
 
 (defun call-with-running-containerd (manager function)
+  (bt:with-lock-held ((managed-containerd-supervisor-lock manager))
+    (setf (managed-containerd-stopping-p manager) nil))
+  (setf (runtime-availability-liveness (managed-containerd-availability manager))
+        (lambda ()
+          (let ((process (managed-containerd-process manager)))
+            (and process (funcall (managed-containerd-process-alive-p manager) process)))))
   (unwind-protect
        (progn
          (start-managed-containerd manager)
          ;; Archives under <state>/images/ are imported before any Pod can start.
          (preload-managed-containerd-images manager)
+         (start-managed-containerd-supervisor manager)
          (funcall function))
+    (setf (runtime-availability-liveness (managed-containerd-availability manager)) nil)
     (stop-managed-containerd manager)))
 
 (defun prepared-runtime-path (name paths)

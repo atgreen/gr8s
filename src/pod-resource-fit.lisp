@@ -137,7 +137,7 @@ resource; an extended resource it does not advertise has zero capacity."
 
 (defun pod-node-placeable-p (store pod node)
   "Return whether NODE satisfies every POD placement constraint other than resources."
-  (and (node-record-ready-p node)
+  (and (node-record-runtime-ready-p node)
        (pod-node-taints-allow-p pod node)
        (pod-node-selector-matches-p pod node)
        (pod-node-affinity-matches-p pod node)
