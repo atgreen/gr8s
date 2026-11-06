@@ -180,3 +180,53 @@ default does not change the Pod. A Pod stored without them keeps the representat
     (default-pod-spec-object (gethash "spec" (pod-to-object replacement))))
   (default-pod-admission (gethash "spec" (pod-to-object replacement)) (gethash "spec" (pod-to-object existing)))
   replacement)
+
+;;;; Defaults of other kinds, from the same upstream v1.37.2 files: core/v1's
+;;;; SetObjectDefaults_PersistentVolume, apps/v1's SetObjectDefaults_StatefulSet and
+;;;; networking/v1's SetObjectDefaults_NetworkPolicy.
+
+(defun default-persistent-volume-source (kind source)
+  "Default the PersistentVolume SOURCE of KIND as SetObjectDefaults_PersistentVolume does:
+SetDefaults_HostPathVolumeSource, and the rbd, iscsi, azureDisk and scaleIO +default markers."
+  (when (hash-table-p source)
+    (cond ((equal kind "hostPath") (default-json-pointer-field source "type" ""))
+          ((equal kind "rbd")
+           (default-json-field source "pool" "rbd")
+           (default-json-field source "user" "admin")
+           (default-json-field source "keyring" "/etc/ceph/keyring"))
+          ((equal kind "iscsi") (default-json-field source "iscsiInterface" "default"))
+          ((equal kind "azureDisk")
+           (default-json-pointer-field source "cachingMode" "ReadWrite")
+           (default-json-pointer-field source "fsType" "ext4")
+           (default-json-pointer-field source "readOnly" nil)
+           (default-json-pointer-field source "kind" "Shared"))
+          ((equal kind "scaleIO")
+           (default-json-field source "storageMode" "ThinProvisioned")
+           (default-json-field source "fsType" "xfs"))))
+  source)
+
+(defun default-claim-template (template)
+  "Default a StatefulSet's claim TEMPLATE as SetObjectDefaults_StatefulSet does, through
+SetDefaults_PersistentVolumeClaim (status.phase Pending) and SetDefaults_PersistentVolumeClaimSpec
+(spec.volumeMode Filesystem)."
+  (when (hash-table-p template)
+    (let ((spec (json-child template "spec"))
+          (status (or (json-child template "status") (setf (gethash "status" template) (core-object)))))
+      (default-json-pointer-field spec "volumeMode" "Filesystem")
+      (default-json-field status "phase" "Pending")))
+  template)
+
+(defun default-network-policy-spec (spec)
+  "Default a NetworkPolicy SPEC as SetObjectDefaults_NetworkPolicy does: policyTypes, when it
+names none, is Ingress, with Egress too when there are egress rules (SetDefaults_NetworkPolicy),
+and every rule's port without a protocol has TCP (SetDefaults_NetworkPolicyPort)."
+  (when (hash-table-p spec)
+    (let ((types (gethash "policyTypes" spec)))
+      (when (or (member types '(nil null)) (and (vectorp types) (not (stringp types)) (zerop (length types))))
+        (setf (gethash "policyTypes" spec)
+              (if (json-items spec "egress") (vector "Ingress" "Egress") (vector "Ingress")))))
+    (dolist (direction '("ingress" "egress"))
+      (dolist (rule (json-items spec direction))
+        (dolist (port (json-items rule "ports"))
+          (default-json-pointer-field port "protocol" "TCP")))))
+  spec)

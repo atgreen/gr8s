@@ -237,6 +237,7 @@
                (storage-string-enum (gethash "persistentVolumeReclaimPolicy" spec) '("Retain" "Delete" "Recycle") "persistentVolumeReclaimPolicy")
                (when (gethash "required" (gethash "nodeAffinity" spec (core-object)))
                  (validate-storage-node-selector (gethash "required" (gethash "nodeAffinity" spec (core-object)))))
+               (default-persistent-volume-source source (gethash source spec))
                (when (equal source "hostPath") (validate-host-storage-source (gethash source spec)))
                (when (equal source "nfs")
                  (validate-nfs-source (gethash source spec))
@@ -250,7 +251,7 @@
                  (require-dns-label (gethash "namespace" claim) "claimRef.namespace")
                  (unless (member (gethash "kind" claim "PersistentVolumeClaim") '("" "PersistentVolumeClaim") :test #'equal)
                    (core-resource-error 422 "Invalid" "claimRef.kind must be PersistentVolumeClaim")))
-               (unless (or existing (nth-value 1 (gethash "storageClassName" spec))) (setf (gethash "storageClassName" spec) ""))
+               ;; No class is no class: only a claim's is defaulted, by DefaultStorageClass admission.
                (storage-ensure-protection-finalizer metadata "kubernetes.io/pv-protection"))
              (let* ((resources (require-object (gethash "resources" spec) "resources"))
                     (requests (require-object (gethash "requests" resources) "resources.requests")))
@@ -295,8 +296,13 @@
         (let ((old (gethash "spec" before)) (new (gethash "spec" after)))
           (if (equal resource "persistentvolumes")
               (progn
+                ;; A PV stored before its source was defaulted has the same source as one with the defaults.
                 (unless (and (equal (storage-source-kind old) (storage-source-kind new))
-                             (core-json-equal-p (gethash (storage-source-kind old) old) (gethash (storage-source-kind new) new)))
+                             (core-json-equal-p
+                              (default-persistent-volume-source (storage-source-kind old)
+                                                                (copy-core-object (gethash (storage-source-kind old) old)))
+                              (default-persistent-volume-source (storage-source-kind new)
+                                                                (copy-core-object (gethash (storage-source-kind new) new)))))
                   (core-resource-error 422 "Invalid" "PersistentVolume source is immutable"))
                 (unless (equal (gethash "volumeMode" old) (gethash "volumeMode" new))
                   (core-resource-error 422 "Invalid" "PersistentVolume volumeMode is immutable")))
