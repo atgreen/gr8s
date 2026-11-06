@@ -134,6 +134,32 @@
                 (t (1+ (gethash "generation" (gethash "metadata" existing) 1)))))
     (networking-keep-status object existing (core-object "loadBalancer" (core-object)))))
 
+(defun default-ingress-class-name (store)
+  "Return the IngressClass the DefaultIngressClass admission plugin assigns: of those annotated
+ingressclass.kubernetes.io/is-default-class true, the newest, the lower name on a tie. NIL if none."
+  (let ((best nil))
+    (loop for object being the hash-values of (pod-store-resources store)
+          for metadata = (gethash "metadata" object)
+          when (and (equal "IngressClass" (gethash "kind" object))
+                    (hash-table-p (gethash "annotations" metadata))
+                    (equal "true" (gethash "ingressclass.kubernetes.io/is-default-class" (gethash "annotations" metadata))))
+            do (let ((created (gethash "creationTimestamp" metadata "")) (name (gethash "name" metadata)))
+                 (when (or (null best) (string> created (first best))
+                           (and (string= created (first best)) (string< name (second best))))
+                   (setf best (list created name)))))
+    (second best)))
+
+(defun apply-default-ingress-class (object store)
+  "As upstream's DefaultIngressClass admission plugin does on create: give an Ingress that names
+no class, by field or by the legacy kubernetes.io/ingress.class annotation, the default class."
+  (let ((spec (gethash "spec" object)) (annotations (gethash "annotations" (gethash "metadata" object))))
+    (when (and (hash-table-p spec)
+               (member (gethash "ingressClassName" spec) '(nil null) :test #'eq)
+               (not (and (hash-table-p annotations) (nth-value 1 (gethash "kubernetes.io/ingress.class" annotations)))))
+      (let ((name (default-ingress-class-name store)))
+        (when name (setf (gethash "ingressClassName" spec) name)))))
+  object)
+
 (defun networking-keep-status (object existing default)
   "Accept OBJECT's status only on a status write; otherwise keep the stored one or DEFAULT."
   (unless (and *networking-status-write* (hash-table-p (gethash "status" object)))
@@ -201,7 +227,9 @@
     (if namespace (setf (gethash "namespace" metadata) namespace) (remhash "namespace" metadata))
     (validate-template-shape object (template-schema (networking-resource-schema-name resource)) kind)
     (cond ((equal resource "endpoints") (normalize-endpoints-subsets object))
-          ((equal resource "ingresses") (normalize-ingress object existing))
+          ((equal resource "ingresses")
+           (when (and store (null existing)) (apply-default-ingress-class object store))
+           (normalize-ingress object existing))
           ((equal resource "ingressclasses") (normalize-ingress-class object))
           ((equal resource "servicecidrs") (normalize-service-cidr object existing))
           (t (normalize-ip-address object existing)))))
