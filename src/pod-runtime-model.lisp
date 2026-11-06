@@ -509,6 +509,10 @@ such as the security-profiles-operator put them.")
 
 (defun validate-runtime-pod-spec (spec)
   "Validate Pod-level volume, security, service account and scheduling fields."
+  ;; The API server defaults an absent Pod securityContext to an empty one, which clients
+  ;; such as kubectl debug read without checking for nil.
+  (when (member (gethash "securityContext" spec) '(nil null))
+    (setf (gethash "securityContext" spec) (core-object)))
   (validate-linux-security-context (gethash "securityContext" spec) :pod t)
   ;; A Pod that declares itself Linux cannot carry Windows settings, as upstream validates.
   (when (and (equal "linux" (gethash "name" (gethash "os" spec (core-object))))

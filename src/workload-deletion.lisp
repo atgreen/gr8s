@@ -44,6 +44,11 @@ with their own deletion lifecycle do."
                                       (gethash "uid" (gethash "metadata" (get-core-resource store resource namespace name)))
                                       policy))))
 
+(defun deletion-held-by-finalizers-p (metadata)
+  "Return whether METADATA names finalizers besides the ones a propagation policy adds."
+  (find-if-not (lambda (name) (member name '("foregroundDeletion" "orphan") :test #'equal))
+               (gethash "finalizers" metadata #())))
+
 (defun delete-workload-resource (store resource namespace name &key uid resource-version dry-run (policy "Background"))
   "Delete immediately in background mode or atomically checkpoint an irreversible deletion."
   (unless (member policy '("Background" "Foreground" "Orphan") :test #'equal)
@@ -60,6 +65,16 @@ with their own deletion lifecycle do."
         (core-resource-error 409 "Conflict" "A workload deletion's propagation policy cannot be changed"))
       (cond
         (pending (copy-core-object existing))
+        ;; A user finalizer holds the object, deleting, until a client removes it.
+        ((and (equal policy "Background") (deletion-held-by-finalizers-p metadata))
+         (if (gethash "deletionTimestamp" metadata)
+             (copy-core-object existing)
+             (let ((copy (copy-core-object existing)))
+               (setf (gethash "deletionTimestamp" (workload-metadata copy)) (current-timestamp))
+               (prepare-core-resource-metadata copy existing revision)
+               (setf (gethash key resources) copy)
+               (unless dry-run (commit-core-resources store resources revision))
+               copy)))
         ((equal policy "Background")
          (remhash key resources)
          (unless dry-run (commit-core-resources store resources revision :workload-deletions deletions))
@@ -97,10 +112,10 @@ with their own deletion lifecycle do."
           (when (and (equal "services" (gethash "resource" record))
                      (plusp (hash-table-count (gethash "selector" (gethash "spec" current) (core-object)))))
             (remhash (core-resource-key "endpoints" (gethash "namespace" record) (gethash "name" record)) resources))
-          ;; A custom object's own finalizers go on holding it after the policy's has done its work.
+          ;; An object's own finalizers go on holding it after the policy's has done its work.
           (let ((remaining (remove-if (lambda (name) (member name '("foregroundDeletion" "orphan") :test #'equal))
                                       (gethash "finalizers" (workload-metadata current) #()))))
-            (if (and (custom-resource-key-p (gethash "resource" record)) (plusp (length remaining)))
+            (if (plusp (length remaining))
                 (let ((copy (copy-core-object current)) (revision (1+ (pod-store-resource-revision store))))
                   (setf (gethash "finalizers" (workload-metadata copy)) remaining)
                   (prepare-core-resource-metadata copy current revision)

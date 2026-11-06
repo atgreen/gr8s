@@ -325,3 +325,87 @@
           (incf now 11)
           (reconcile-until-settled reconciler)
           (is (= 1 (length (remove (pod-uid pod) (list-pods store "alpha") :key #'pod-uid :test #'equal)))))))))
+
+(test a-pod-finishing-after-accounting-waits-for-the-next-pass
+  ;; podster-uqb.158: an index whose second failure landed between accounting and
+  ;; Pod creation got a third Pod, so status.failed read 5 where upstream expects 4.
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable directory))
+    (let* ((now 3000000001) (gr8s::*job-clock* (lambda () now))
+           (original (symbol-function 'gr8s::flush-job-terminal-accounting)) (fail-next nil))
+      (job-with-spec store "completionMode" "Indexed" "completions" 2 "parallelism" 2 "backoffLimitPerIndex" 1)
+      (gr8s::reconcile-jobs reconciler)
+      (finish-indexed-pod reconciler runtime store 1 "Failed" 1)
+      (reconcile-until-settled reconciler)
+      (incf now 11)
+      (reconcile-until-settled reconciler)
+      (is (= 2 (length (indexed-test-pods store 1))))
+      (incf now 100)
+      (unwind-protect
+           (progn
+             ;; The retry fails just after this pass has accounted its Pods.
+             (setf fail-next t
+                   (symbol-function 'gr8s::flush-job-terminal-accounting)
+                   (lambda (reconciler job observations)
+                     (prog1 (funcall original reconciler job observations)
+                       (when fail-next
+                         (setf fail-next nil)
+                         (finish-indexed-pod reconciler runtime store 1 "Failed" 1)))))
+             (gr8s::reconcile-jobs reconciler))
+        (setf (symbol-function 'gr8s::flush-job-terminal-accounting) original))
+      (is (= 2 (length (indexed-test-pods store 1))))
+      (reconcile-until-settled reconciler)
+      (let ((status (gethash "status" (job-now store))))
+        (is (equal "1" (gethash "failedIndexes" status)))
+        (is (= 2 (gethash "failed" status))))
+      (is (= 2 (length (indexed-test-pods store 1)))))))
+
+(test a-user-finalizer-holds-a-deleted-job-until-a-client-removes-it
+  ;; Upstream's TTLAfterFinished spec puts a finalizer on its Job and removes it in cleanup.
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable directory))
+    (let* ((now 3000000000) (gr8s::*job-clock* (lambda () now)))
+      (job-with-spec store "ttlSecondsAfterFinished" 10)
+      (gr8s::update-core-resource store "jobs" "alpha" "work"
+        (lambda (job) (setf (gethash "finalizers" (gethash "metadata" job)) #("example.com/hold")) job))
+      (gr8s::reconcile-jobs reconciler)
+      (finish-job-pods reconciler runtime store "Succeeded")
+      (reconcile-until-settled reconciler)
+      (incf now 11)
+      (reconcile-until-settled reconciler)
+      (dotimes (pass 4) (gr8s::reconcile-workloads reconciler) (reconcile-all reconciler))
+      (let ((metadata (gethash "metadata" (job-now store))))
+        (is-true (gethash "deletionTimestamp" metadata))
+        (is (equalp #("example.com/hold") (gethash "finalizers" metadata))))
+      (gr8s::update-core-resource store "jobs" "alpha" "work"
+        (lambda (job) (setf (gethash "finalizers" (gethash "metadata" job)) #()) job))
+      (signals gr8s::kubernetes-error (job-now store))))
+  ;; Background deletion is held the same way.
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable runtime reconciler directory))
+    (job-with-spec store)
+    (gr8s::update-core-resource store "jobs" "alpha" "work"
+      (lambda (job) (setf (gethash "finalizers" (gethash "metadata" job)) #("example.com/hold")) job))
+    (gr8s::delete-workload-resource store "jobs" "alpha" "work")
+    (is-true (gethash "deletionTimestamp" (gethash "metadata" (job-now store))))
+    (signals gr8s::kubernetes-error
+      (gr8s::update-core-resource store "jobs" "alpha" "work"
+        (lambda (job) (setf (gethash "finalizers" (gethash "metadata" job)) #("example.com/hold" "example.com/more")) job)))
+    (gr8s::update-core-resource store "jobs" "alpha" "work"
+      (lambda (job) (setf (gethash "finalizers" (gethash "metadata" job)) #()) job))
+    (signals gr8s::kubernetes-error (job-now store))))
+
+(test job-controller-records-pod-creation-and-completion-events
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable directory))
+    (job-with-spec store)
+    (gr8s::reconcile-jobs reconciler)
+    (let ((pod (first (list-pods store "alpha"))))
+      (finish-job-pods reconciler runtime store "Succeeded")
+      (reconcile-until-settled reconciler)
+      (let ((events (loop for event in (gr8s::list-core-resources store "events" "alpha")
+                          when (equal "Job" (gethash "kind" (gethash "involvedObject" event)))
+                            collect (cons (gethash "reason" event) (gethash "message" event)))))
+        (is (member (cons "SuccessfulCreate" (format nil "Created pod: ~A" (pod-name pod))) events :test #'equal))
+        (is (member (cons "Completed" "Job completed") events :test #'equal))
+        (is (= 1 (count "Completed" events :key #'car :test #'equal)))))))

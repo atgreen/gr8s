@@ -90,10 +90,18 @@
     (signals gr8s::kubernetes-error
       (gr8s::create-core-resource store "statefulsets"
                                   (stateful-fixture (make-string 53 :initial-element #\a)) "alpha"))
-    (let ((rolling (stateful-fixture "surge")))
-      (setf (gethash "updateStrategy" (gethash "spec" rolling))
-            (gr8s::core-object "type" "RollingUpdate" "rollingUpdate" (gr8s::core-object "maxUnavailable" 2)))
-      (signals gr8s::kubernetes-error (gr8s::create-core-resource store "statefulsets" rolling "alpha")))
+    ;; maxUnavailable defaults to 1 and must be positive and at most 100%, as upstream's
+    ;; SetDefaults_StatefulSet and validateRollingUpdateStatefulSet (pkg/apis/apps) require.
+    (is (= 1 (gethash "maxUnavailable" (gethash "rollingUpdate" (gethash "updateStrategy" (gethash "spec" (gr8s::get-core-resource store "statefulsets" "alpha" "web")))))))
+    (flet ((with-maximum (name maximum)
+             (let ((rolling (stateful-fixture name)))
+               (setf (gethash "updateStrategy" (gethash "spec" rolling))
+                     (gr8s::core-object "type" "RollingUpdate" "rollingUpdate" (gr8s::core-object "maxUnavailable" maximum)))
+               rolling)))
+      (is (= 2 (gethash "maxUnavailable" (gethash "rollingUpdate" (gethash "updateStrategy" (gethash "spec" (gr8s::create-core-resource store "statefulsets" (with-maximum "surge" 2) "alpha")))))))
+      (is (equal "50%" (gethash "maxUnavailable" (gethash "rollingUpdate" (gethash "updateStrategy" (gethash "spec" (gr8s::create-core-resource store "statefulsets" (with-maximum "half" "50%") "alpha")))))))
+      (dolist (bad '(0 "0%" "101%" -1))
+        (signals gr8s::kubernetes-error (gr8s::create-core-resource store "statefulsets" (with-maximum "bad" bad) "alpha"))))
     ;; Only upstream's listed fields may change after creation.
     (signals gr8s::kubernetes-error
       (gr8s::update-core-resource store "statefulsets" "alpha" "web"
@@ -221,6 +229,30 @@
         (stateful-settle reconciler)
         (is (equal first (gethash "currentRevision" (gethash "status" (gr8s::get-core-resource store "statefulsets" "alpha" "web")))))
         (is (= 2 (length (gr8s::list-core-resources store "controllerrevisions" "alpha"))))))))
+
+(test statefulset-rolls-as-many-pods-at-once-as-max-unavailable-allows
+  (with-budget-cluster (store runtime reconciler)
+    (let ((set (stateful-fixture "web" :replicas 5)))
+      (setf (gethash "updateStrategy" (gethash "spec" set))
+            (gr8s::core-object "type" "RollingUpdate" "rollingUpdate" (gr8s::core-object "maxUnavailable" 2)))
+      (gr8s::create-core-resource store "statefulsets" set "alpha"))
+    (stateful-settle reconciler 20)
+    (stateful-set-image store "web" "busybox:2")
+    (gr8s::reconcile-workloads reconciler)
+    ;; The two highest ordinals go at once, and no more while they are unavailable.
+    (flet ((deleting ()
+             ;; With no grace period a deleted Pod may already be gone.
+             (let ((live (remove-if #'gr8s::deletion-requested-p (list-pods store "alpha"))))
+               (remove-if (lambda (name) (find name live :key #'pod-name :test #'equal))
+                          '("web-0" "web-1" "web-2" "web-3" "web-4")))))
+      (is (equal '("web-3" "web-4") (deleting)))
+      (gr8s::reconcile-workloads reconciler)
+      (is (null (intersection '("web-0" "web-1" "web-2") (deleting) :test #'equal))))
+    (stateful-settle reconciler 20)
+    (dolist (name '("web-0" "web-1" "web-2" "web-3" "web-4")) (is (equal "busybox:2" (stateful-pod-image store name))))
+    (let ((status (gethash "status" (gr8s::get-core-resource store "statefulsets" "alpha" "web"))))
+      (is (equal (gethash "currentRevision" status) (gethash "updateRevision" status)))
+      (is (= 5 (gethash "updatedReplicas" status))))))
 
 (test statefulset-partition-holds-lower-ordinals-even-when-recreated
   (with-budget-cluster (store runtime reconciler)
