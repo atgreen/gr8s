@@ -93,6 +93,26 @@
     (remhash "kind" output)
     (signals kubernetes-error (gr8s::crd-validate-value output schema "embedded"))))
 
+;; Upstream's validateEmbeddedResource and ObjectMeta round trip.
+(test embedded-resources-check-identity-forms-and-coerce-metadata
+  (let ((schema (gr8s::core-object "type" "object" "x-kubernetes-embedded-resource" t "x-kubernetes-preserve-unknown-fields" t)))
+    (flet ((refused (text expected)
+             (let ((message (handler-case (progn (gr8s::crd-validate-value (com.inuoe.jzon:parse text) schema "resource.spec.tmpl") nil)
+                              (kubernetes-error (condition) (gr8s::kubernetes-error-message condition)))))
+               (is (and message (search expected message)) "~A: ~A" text message))))
+      (refused "{\"kind\":\"Pod\"}" "spec.tmpl.apiVersion: Required value")
+      (refused "{\"apiVersion\":\"v1\",\"kind\":5}" "spec.tmpl.kind: must be a string")
+      (refused "{\"apiVersion\":\"v1\",\"kind\":\"\"}" "spec.tmpl.kind: must not be empty")
+      (refused "{\"apiVersion\":\"v1\",\"kind\":\"a_b\"}" "spec.tmpl.kind: may have mixed case")
+      (refused "{\"apiVersion\":\"v1\",\"kind\":\"9Lives\"}" "spec.tmpl.kind: may have mixed case")
+      (refused "{\"apiVersion\":\"a/b/c\",\"kind\":\"X\"}" "unexpected GroupVersion string"))
+    (gr8s::crd-validate-value (com.inuoe.jzon:parse "{\"apiVersion\":\"apps/v1\",\"kind\":\"StatefulSet\"}") schema "resource.spec.tmpl")
+    ;; A zero creationTimestamp does not survive the ObjectMeta round trip; unknown fields are pruned.
+    (let ((output (gr8s::crd-prepare-value
+                   (com.inuoe.jzon:parse "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"a\",\"creationTimestamp\":null,\"foo\":1}}")
+                   schema)))
+      (is (equal '("name") (loop for key being the hash-keys of (gethash "metadata" output) collect key))))))
+
 (test structural-int-or-string-and-declared-logical-validation-are-supported
   (let ((schema (gr8s::core-object "x-kubernetes-int-or-string" t "anyOf"
                    (vector (gr8s::core-object "type" "integer") (gr8s::core-object "type" "string")))))
