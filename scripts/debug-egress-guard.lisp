@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Diagnostic (root): exercise the EXACT in-process CNI load path for the
 ;;;; egress guard and run real packets through BPF_PROG_TEST_RUN, to tell

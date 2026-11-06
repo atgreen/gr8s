@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Exercise real Pod shutdown in an isolated privileged guest with native gr8s.
 
 Requires a disposable Linux guest with bpffs mounted. Verifies SIGTERM handling,

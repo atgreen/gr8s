@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Unit coverage for the native runtime installer's pure helpers: URL parsing,
 ;;;; the /opt/kata path rewrite, tar path-safety, and the addon.json descriptor

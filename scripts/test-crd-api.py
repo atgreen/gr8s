@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Exercise real kubectl/HTTP CRD behavior against an isolated native API.
 
 The fake workload runtime is intentional: this test creates no containers and
