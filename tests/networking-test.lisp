@@ -409,10 +409,30 @@
                             (declare (ignore data))
                             (sb-bsd-sockets:socket-send socket buffer length :address (list address port))))))))))
 
+(defun kernel-assigned-port (&rest protocols)
+  "Return a loopback port the kernel assigned that is free for each of PROTOCOLS (:tcp, :udp).
+A fixed or random port in the ephemeral range can already be taken on a shared host
+(podster-uqb.199), so each test that needs one port for both protocols asks for it here."
+  (loop repeat 100
+        do (let ((sockets nil))
+             (unwind-protect
+                  (handler-case
+                      (let ((port 0))
+                        (dolist (protocol protocols (return-from kernel-assigned-port port))
+                          (let ((socket (make-instance 'sb-bsd-sockets:inet-socket
+                                                       :type (if (eq protocol :udp) :datagram :stream)
+                                                       :protocol protocol)))
+                            (push socket sockets)
+                            (sb-bsd-sockets:socket-bind socket #(127 0 0 1) port)
+                            (setf port (nth-value 1 (sb-bsd-sockets:socket-name socket))))))
+                    (sb-bsd-sockets:socket-error () nil))
+               (mapc (lambda (socket) (ignore-errors (sb-bsd-sockets:socket-close socket))) sockets)))
+        finally (error "no loopback port was free for ~{~A~^ and ~}" protocols)))
+
 (test udp-port-forwarder-relays-datagrams-both-ways
   (multiple-value-bind (server thread) (loopback-udp-echo 1)
     (let* ((backend (nth-value 1 (sb-bsd-sockets:socket-name server)))
-           (port (+ 40000 (random 10000)))
+           (port (kernel-assigned-port :udp))
            (forwarder (gr8s::start-host-port-forwarder "127.0.0.1" port (cons "127.0.0.1" backend) "UDP"))
            (client (make-instance 'sb-bsd-sockets:inet-socket :type :datagram :protocol :udp))
            (buffer (make-array 16 :element-type '(unsigned-byte 8))))
@@ -435,7 +455,7 @@
     (values directory)
     (let ((forwarders (make-hash-table :test #'equal))
           (targets (make-hash-table :test #'equal))
-          (port (+ 40000 (random 10000))))
+          (port (kernel-assigned-port :tcp :udp)))
       (setf (gethash (list* "TCP" "127.0.0.1" port) targets) (cons "127.0.0.1" 1)
             (gethash (list* "UDP" "127.0.0.1" port) targets) (cons "127.0.0.1" 1))
       (unwind-protect
