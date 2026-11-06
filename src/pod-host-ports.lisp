@@ -304,9 +304,34 @@ then RELEASE what keeping the client's address took."
                                  (car key) (cadr key) (cddr key) condition))))))
              targets)))
 
+(defun host-ipv4-addresses ()
+  "This host's IPv4 addresses, from an rtnetlink address dump, or NIL when that fails."
+  (ignore-errors
+   (remove-duplicates
+    (loop for message in (call-rtnetlink 22 #x300 (netlink-octets #(2 0 0 0) (netlink-integer 0 4)))
+          when (and (>= (length message) 24) (= 20 (netlink-read-integer message 4 2)) (= 2 (aref message 16)))
+            append (let* ((attributes (netlink-attributes message 24))
+                          (bytes (or (gethash 2 attributes) (gethash 1 attributes))))
+                     (when (= 4 (length bytes)) (list (format nil "~{~D~^.~}" (coerce bytes 'list))))))
+    :test #'equal)))
+
+(defun bind-udp-ports-per-address (targets &optional (addresses (host-ipv4-addresses)))
+  "Replace each wildcard UDP key (\"UDP\" \"\" . port) in TARGETS with one per host address.
+A UDP listener on 0.0.0.0 answers from whatever address the route back picks (towards a Pod, the
+node gateway's), and a client that sent to the node's address drops that reply; one bound to each
+address answers from the address the client used. Without addresses TARGETS is unchanged."
+  (when addresses
+    (loop for key in (loop for key being the hash-keys of targets
+                           when (and (equal "UDP" (car key)) (equal "" (cadr key))) collect key)
+          for target = (gethash key targets)
+          do (remhash key targets)
+             (dolist (address addresses)
+               (setf (gethash (list* "UDP" address (cddr key)) targets) target))))
+  targets)
+
 (defun converge-host-port-forwarders (forwarders store)
   "Make the FORWARDERS table match the host ports of STORE's Pods."
-  (converge-port-forwarders forwarders (desired-host-port-targets store)))
+  (converge-port-forwarders forwarders (bind-udp-ports-per-address (desired-host-port-targets store))))
 
 ;;; Service node ports
 
@@ -397,7 +422,7 @@ With neither there is no listener, so a client is refused exactly as at a Cluste
 (defun converge-node-port-forwarders (forwarders store &key node-name)
   "Relay STORE's Service node ports, replacing a chooser only when its Service's plan changes,
 so a client's affinity survives unrelated changes."
-  (let ((plans (desired-node-port-targets store :node-name node-name))
+  (let ((plans (bind-udp-ports-per-address (desired-node-port-targets store :node-name node-name)))
         (targets (make-hash-table :test #'equal))
         (local-addresses (node-local-pod-addresses store)))
     (maphash (lambda (key plan)

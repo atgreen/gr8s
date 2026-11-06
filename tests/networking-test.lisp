@@ -777,3 +777,18 @@
                    (kubernetes-error (condition) (gr8s::kubernetes-error-message condition))))))
         (is (cl-ppcre:scan (format nil "~D.*port is already allocated" port) (message port)))
         (is (cl-ppcre:scan "40000.*port is not in the valid range" (message 40000)))))))
+
+(test udp-ports-are-bound-on-each-host-address
+  ;; A wildcard UDP listener would answer from the route's address, not the one the client used.
+  (let ((targets (make-hash-table :test #'equal)))
+    (setf (gethash (list* "UDP" "" 30001) targets) :udp
+          (gethash (list* "TCP" "" 30000) targets) :tcp
+          (gethash (list* "UDP" "192.0.2.1" 5353) targets) :pinned)
+    (gr8s::bind-udp-ports-per-address targets '("127.0.0.1" "10.0.2.15"))
+    (is (eq :udp (gethash (list* "UDP" "127.0.0.1" 30001) targets)))
+    (is (eq :udp (gethash (list* "UDP" "10.0.2.15" 30001) targets)))
+    (is (null (gethash (list* "UDP" "" 30001) targets)))
+    (is (eq :tcp (gethash (list* "TCP" "" 30000) targets)))
+    (is (eq :pinned (gethash (list* "UDP" "192.0.2.1" 5353) targets))))
+  ;; This host's own addresses come from rtnetlink, loopback among them.
+  (is (member "127.0.0.1" (gr8s::host-ipv4-addresses) :test #'equal)))
