@@ -379,6 +379,7 @@
                              (:file "bootstrap-protobuf-test")
                              (:file "events-test")
                              (:file "pod-deletion-test")
+                             (:file "pod-terminating-status-test")
                              (:file "pod-finalizers-test")
                              (:file "generated-pod-names-test")
                              (:file "pod-conditions-test")
