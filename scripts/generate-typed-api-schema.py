@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
 # SPDX-License-Identifier: MIT
-"""Generate wire and structural schemas for the API-only and review resources from pinned v1.36 inputs."""
+"""Generate wire and structural schemas for the API-only and review resources from pinned inputs.
+
+Most groups are pinned at v1.36. Dynamic resource allocation and storage version
+migration are pinned at v1.37, where DeviceTaintRule and StorageVersionMigration
+became GA in resource.k8s.io/v1 and storagemigration.k8s.io/v1."""
 import argparse
 import importlib.util
 import json
@@ -13,13 +17,17 @@ spec = importlib.util.spec_from_file_location("gr8s_schema", ROOT / "scripts/gen
 shared = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(shared)
 PREFIX = "api/v0.36.0/"
+PREFIX_137 = "api/v0.37.2/"
 EXTRA_SOURCES = {
     "coordination.proto": (PREFIX + "coordination/v1/generated.proto", "ff9af484a3fc853e5bcad5c2daad8fb0bcb98f2e0d612fb4c05711c897d27047"),
     "coordination-types.go": (PREFIX + "coordination/v1/types.go", "bca731e4e1fb343905759f523f9a77ea5e78151f3f08d0e523adc6359ca863eb"),
     "flowcontrol.proto": (PREFIX + "flowcontrol/v1/generated.proto", "dac873d11fee3bcb2c842d63d818e5c649ee9cde7a71d8d0fa83cdad68762e25"),
     "flowcontrol-types.go": (PREFIX + "flowcontrol/v1/types.go", "ead33a57f173747a1afb7c5bc0dc8e46434fdb696f8b7edcddc80c3f9e9a894d"),
-    "dra.proto": (PREFIX + "resource/v1/generated.proto", "fcd53dbac0eebd17c051e24b6d420469a8e17efec091bffdb0ed797e83f0dd88"),
-    "dra-types.go": (PREFIX + "resource/v1/types.go", "1d8331bf115eb3a8d753ad8c5f73d30896db88bb45ec2c405c4f9b97fe3a89db"),
+    "dra137.proto": (PREFIX_137 + "resource/v1/generated.proto", "08aa3d69d21d1b563067ead173a33fde566aecfff79baebc13e74e2d184380c2"),
+    "dra137-types.go": (PREFIX_137 + "resource/v1/types.go", "18c326763a7ad78c4bdcf75e8a03a940e6668dbea2289aa4f5c999ce35e7efca"),
+    "storagemigration.proto": (PREFIX_137 + "storagemigration/v1/generated.proto", "7a9d3e0b705f77132fcfa6bcf9effcb986baf2c4df90e641ea16234f62547bc3"),
+    "storagemigration-types.go": (PREFIX_137 + "storagemigration/v1/types.go", "96f7cc452c0458edcd851fbc19d37a0cbf4719cf0203a0934cee1b21b0d500e9"),
+    "swagger137.json": ("kubernetes/v1.37.2/api/openapi-spec/swagger.json", "465276aedf437726de5a6ed23a41b86d78bb0d347edf251a755ae26a93cdd8a6"),
     "authorization.proto": (PREFIX + "authorization/v1/generated.proto", "94d3e85950038b33162c751c6d31ff72cd6b131946dfd70b77166747385cf7c6"),
     "authorization-types.go": (PREFIX + "authorization/v1/types.go", "64862e32b366bd7fa857d6a41e8ec27f9158e994c1ef9f7949ad12b2ae7f2c5e"),
     "authentication.proto": (PREFIX + "authentication/v1/generated.proto", "cf5ea7e838b8e0f9813b2de1fb92ca51980b48aaa5ac119cb67a317295b67c8e"),
@@ -34,7 +42,8 @@ EXTRA_SOURCES = {
     "admission-types.go": (PREFIX + "admissionregistration/v1/types.go", "35f58a673ffd825f9bf1ba7ac36795be353978e9d0db507eb7874b8d86bc9b74"),
 }
 TYPES = [("core-types.go", "k8s.io.api.core.v1."), ("coordination-types.go", "k8s.io.api.coordination.v1."),
-         ("flowcontrol-types.go", "k8s.io.api.flowcontrol.v1."), ("dra-types.go", "k8s.io.api.resource.v1."),
+         ("flowcontrol-types.go", "k8s.io.api.flowcontrol.v1."), ("dra137-types.go", "k8s.io.api.resource.v1."),
+         ("storagemigration-types.go", "k8s.io.api.storagemigration.v1."),
          ("authorization-types.go", "k8s.io.api.authorization.v1."), ("authentication-types.go", "k8s.io.api.authentication.v1."),
          ("admission-types.go", "k8s.io.api.admissionregistration.v1."),
          ("autoscaling1-types.go", "k8s.io.api.autoscaling.v1."), ("autoscaling2-types.go", "k8s.io.api.autoscaling.v2."),
@@ -45,13 +54,15 @@ ROOTS = [package + kind for package, kinds in (
     ("k8s.io.api.autoscaling.v1.", ["HorizontalPodAutoscaler"]),
     ("k8s.io.api.autoscaling.v2.", ["HorizontalPodAutoscaler"]),
     ("k8s.io.api.flowcontrol.v1.", ["PriorityLevelConfiguration", "FlowSchema"]),
-    ("k8s.io.api.resource.v1.", ["DeviceClass", "ResourceClaim", "ResourceClaimTemplate", "ResourceSlice"]),
+    ("k8s.io.api.resource.v1.", ["DeviceClass", "ResourceClaim", "ResourceClaimTemplate", "ResourceSlice", "DeviceTaintRule"]),
+    ("k8s.io.api.storagemigration.v1.", ["StorageVersionMigration"]),
     ("k8s.io.api.admissionregistration.v1.", ["ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding",
                                               "MutatingAdmissionPolicy", "MutatingAdmissionPolicyBinding"]),
     ("k8s.io.api.authorization.v1.", ["SubjectAccessReview", "LocalSubjectAccessReview", "SelfSubjectAccessReview", "SelfSubjectRulesReview"]),
     ("k8s.io.api.authentication.v1.", ["TokenRequest", "TokenReview", "SelfSubjectReview"]),
     ("k8s.io.kube_aggregator.pkg.apis.apiregistration.v1.", ["APIService"]),
 ) for kind in kinds]
+V137_DEFINITIONS = ("io.k8s.api.resource.v1.", "io.k8s.api.storagemigration.v1.")
 REVIEWS = {"NamespaceStatus", "Binding", "TokenRequest", "TokenReview", "SelfSubjectReview", "SubjectAccessReview", "LocalSubjectAccessReview",
            "SelfSubjectAccessReview", "SelfSubjectRulesReview"}
 
@@ -116,6 +127,9 @@ def main():
                     if field and not field.get("repeated") and not field.get("mapKey") and field["type"] in {"string", "bool", "int32", "int64"}:
                         field["omitEmpty"] = True
     all_definitions = json.loads(sources["swagger.json"])["definitions"]
+    # The groups pinned at v1.37 take their structural definitions from the same release.
+    all_definitions.update({name: value for name, value in json.loads(sources["swagger137.json"])["definitions"].items()
+                            if name.startswith(V137_DEFINITIONS)})
     # Inline innermost messages first, so an outer inline member sees its child's flattened names.
     for _ in range(3):
         for name, fields in messages.items():

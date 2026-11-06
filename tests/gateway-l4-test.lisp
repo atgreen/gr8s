@@ -11,22 +11,20 @@
 (def-suite gateway-l4 :in gr8s)
 (in-suite gateway-l4)
 
-(defconstant +l4-listener-port+ 18092)
-(defconstant +l4-backend-a-port+ 18093)
-(defconstant +l4-backend-b-port+ 18094)
-(defconstant +l4-tls-listener-port+ 18095)
-(defconstant +l4-tls-backend-a-port+ 18096)
-(defconstant +l4-tls-backend-b-port+ 18097)
+;;; Every listener and backend takes a kernel-assigned port: fixed ones collided with
+;;; other suites' servers in the same run (podster-uqb.127).
 
-(defun l4-start-tag-backend (port tag)
-  "Accept connections and send TAG on connect, then close. Raw sockets (no
-   fd-streams) to match the proxy's I/O. Returns a stop fn."
+(defun l4-start-tag-backend (tag)
+  "Accept connections on a kernel-assigned port and send TAG on connect, then close.
+   Raw sockets (no fd-streams) to match the proxy's I/O. Returns a stop fn and the port."
   (let* ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
          (stop (list nil))
          (tag-bytes (babel:string-to-octets tag))
-         (thread nil))
+         (thread nil)
+         (port nil))
     (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
-    (sb-bsd-sockets:socket-bind socket #(127 0 0 1) port)
+    (sb-bsd-sockets:socket-bind socket #(127 0 0 1) 0)
+    (setf port (nth-value 1 (sb-bsd-sockets:socket-name socket)))
     (sb-bsd-sockets:socket-listen socket 8)
     (setf thread
           (bt:make-thread
@@ -38,23 +36,29 @@
                      (ignore-errors (sb-bsd-sockets:socket-close client)))
                  (error () nil))))
            :name (format nil "l4 test backend ~A" tag)))
-    (lambda ()
-      (setf (car stop) t)
-      ;; Wake the accept and wait for this thread before closing. Closing first leaves it
-      ;; looping on a descriptor number that the next listener takes, where it accepted
-      ;; and closed that server's connections: podster-uqb.106.
-      (ignore-errors
-       (let ((waker (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
-         (unwind-protect (sb-bsd-sockets:socket-connect waker #(127 0 0 1) port)
-           (ignore-errors (sb-bsd-sockets:socket-close waker)))))
-      (ignore-errors (bt:join-thread thread))
-      (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+    (values
+     (lambda ()
+       (setf (car stop) t)
+       ;; Wake the accept and wait for this thread before closing. Closing first leaves it
+       ;; looping on a descriptor number that the next listener takes, where it accepted
+       ;; and closed that server's connections: podster-uqb.106.
+       (ignore-errors
+        (let ((waker (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+          (unwind-protect (sb-bsd-sockets:socket-connect waker #(127 0 0 1) port)
+            (ignore-errors (sb-bsd-sockets:socket-close waker)))))
+       (ignore-errors (bt:join-thread thread))
+       (ignore-errors (sb-bsd-sockets:socket-close socket)))
+     port)))
+
+(defun l4-listener-bound-port (listener)
+  "Return the port LISTENER actually listens on."
+  (nth-value 1 (sb-bsd-sockets:socket-name (gr8s::l4-listener-socket listener))))
 
 (test the-tag-backend-is-gone-before-its-listener-closes
   ;; podster-uqb.106: a backend thread that outlived its listener went on accepting on that
   ;; descriptor number, which by then was the next test server's, and closed its connections.
   (let* ((tag "stops-cleanly")
-         (stop (l4-start-tag-backend +l4-backend-a-port+ tag))
+         (stop (l4-start-tag-backend tag))
          (name (format nil "l4 test backend ~A" tag)))
     (flet ((running-p ()
              (find name (bt:all-threads) :key #'bt:thread-name :test #'equal)))
@@ -105,36 +109,37 @@
     (is (null (gr8s::l4-sni-dispatch routes nil)))))
 
 (test gateway-l4-tcp-splices-to-backend
-  (let* ((stop-backend (l4-start-tag-backend +l4-backend-a-port+ "tcp-ok"))
-         (resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" +l4-backend-a-port+)))
-         (dispatcher (lambda (sni) (declare (ignore sni)) (l4-backend "db" +l4-backend-a-port+)))
-         (listener (gr8s::start-l4-listener :port +l4-listener-port+ :mode :tcp
-                                            :dispatcher dispatcher :resolver resolver :name "tcp")))
-    (unwind-protect
-         (is (equal "tcp-ok" (l4-client-read-tag +l4-listener-port+ :send (babel:string-to-octets "ping"))))
-      (gr8s::stop-l4-listener listener)
-      (funcall stop-backend))))
+  (multiple-value-bind (stop-backend backend-port) (l4-start-tag-backend "tcp-ok")
+    (let* ((resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" backend-port)))
+           (dispatcher (lambda (sni) (declare (ignore sni)) (l4-backend "db" backend-port)))
+           (listener (gr8s::start-l4-listener :port 0 :mode :tcp
+                                              :dispatcher dispatcher :resolver resolver :name "tcp")))
+      (unwind-protect
+           (progn
+             (is (= (l4-listener-bound-port listener) (gr8s::l4-listener-port listener)))
+             (is (equal "tcp-ok" (l4-client-read-tag (gr8s::l4-listener-port listener)
+                                                     :send (babel:string-to-octets "ping")))))
+        (gr8s::stop-l4-listener listener)
+        (funcall stop-backend)))))
 
 (test gateway-l4-tls-sni-steers-to-matching-backend
-  (let* ((stop-a (l4-start-tag-backend +l4-tls-backend-a-port+ "A"))
-         (stop-b (l4-start-tag-backend +l4-tls-backend-b-port+ "B"))
-         (sni-routes (list (gr8s::make-l4-sni-route :hostnames '("one.test")
-                                                    :backends (list (l4-backend "a" +l4-tls-backend-a-port+)))
-                           (gr8s::make-l4-sni-route :hostnames '("two.test")
-                                                    :backends (list (l4-backend "b" +l4-tls-backend-b-port+)))))
-         (resolver (lambda (backend)
-                     (values "127.0.0.1"
-                             (if (equal (gr8s::gw-backend-name backend) "a")
-                                 +l4-tls-backend-a-port+ +l4-tls-backend-b-port+))))
-         (dispatcher (lambda (sni) (gr8s::l4-sni-dispatch sni-routes sni)))
-         (listener (gr8s::start-l4-listener :port +l4-tls-listener-port+ :mode :tls
-                                            :dispatcher dispatcher :resolver resolver :name "tls")))
-    (unwind-protect
-         (progn
-           (is (equal "A" (l4-client-read-tag +l4-tls-listener-port+
-                                              :send (gwsni-client-hello :server-name "one.test"))))
-           (is (equal "B" (l4-client-read-tag +l4-tls-listener-port+
-                                              :send (gwsni-client-hello :server-name "two.test")))))
-      (gr8s::stop-l4-listener listener)
-      (funcall stop-a)
-      (funcall stop-b))))
+  (multiple-value-bind (stop-a port-a) (l4-start-tag-backend "A")
+    (multiple-value-bind (stop-b port-b) (l4-start-tag-backend "B")
+      (let* ((sni-routes (list (gr8s::make-l4-sni-route :hostnames '("one.test")
+                                                        :backends (list (l4-backend "a" port-a)))
+                               (gr8s::make-l4-sni-route :hostnames '("two.test")
+                                                        :backends (list (l4-backend "b" port-b)))))
+             (resolver (lambda (backend)
+                         (values "127.0.0.1"
+                                 (if (equal (gr8s::gw-backend-name backend) "a") port-a port-b))))
+             (dispatcher (lambda (sni) (gr8s::l4-sni-dispatch sni-routes sni)))
+             (listener (gr8s::start-l4-listener :port 0 :mode :tls
+                                                :dispatcher dispatcher :resolver resolver :name "tls"))
+             (port (gr8s::l4-listener-port listener)))
+        (unwind-protect
+             (progn
+               (is (equal "A" (l4-client-read-tag port :send (gwsni-client-hello :server-name "one.test"))))
+               (is (equal "B" (l4-client-read-tag port :send (gwsni-client-hello :server-name "two.test")))))
+          (gr8s::stop-l4-listener listener)
+          (funcall stop-a)
+          (funcall stop-b))))))

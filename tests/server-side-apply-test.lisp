@@ -31,7 +31,7 @@
 (defun apply-request (expected path text &key (manager "mgr") (validation "Strict") force)
   "Send an apply patch and assert its status, returning the decoded body."
   (multiple-value-bind (body status headers)
-      (drakma:http-request (concatenate 'string "http://127.0.0.1:18094" path) :method :patch
+      (drakma:http-request (crd-api-url path) :method :patch
                            :content-type "application/apply-patch+yaml" :content text
                            :parameters (append (when manager (list (cons "fieldManager" manager)))
                                                (when validation (list (cons "fieldValidation" validation)))
@@ -190,7 +190,7 @@
 (defun aggregated-request (path)
   "Request PATH's aggregated discovery form, returning the document and Content-Type."
   (multiple-value-bind (body status headers)
-      (drakma:http-request (concatenate 'string "http://127.0.0.1:18094" path)
+      (drakma:http-request (crd-api-url path)
                            :accept "application/json;g=apidiscovery.k8s.io;v=v2;as=APIGroupDiscoveryList,application/json")
     (is (= 200 status))
     (values (com.inuoe.jzon:parse (if (stringp body) body (babel:octets-to-string body)))
@@ -228,7 +228,7 @@
   (with-crd-api (store path)
     (values store path)
     (multiple-value-bind (body status)
-        (drakma:http-request "http://127.0.0.1:18094/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
+        (drakma:http-request (crd-api-url "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews")
                              :method :post :content-type "application/json"
                              :content "{\"apiVersion\":\"authorization.k8s.io/v1\",\"kind\":\"SelfSubjectAccessReview\",\"spec\":{\"nonResourceAttributes\":{\"path\":\"/\",\"verb\":\"get\"}}}"
                              :accept "application/json;as=Table;v=v1;g=meta.k8s.io")
@@ -236,7 +236,7 @@
       (is (equal "NotAcceptable" (gethash "reason" (com.inuoe.jzon:parse (if (stringp body) body (babel:octets-to-string body)))))))
     ;; kubectl offers a fallback alongside Table and must not be refused.
     (multiple-value-bind (body status)
-        (drakma:http-request "http://127.0.0.1:18094/api/v1/namespaces"
+        (drakma:http-request (crd-api-url "/api/v1/namespaces")
                              :accept "application/json;as=Table;v=v1;g=meta.k8s.io,application/json")
       (declare (ignore body))
       (is (= 200 status)))))
@@ -357,12 +357,12 @@
     (install-apply-crd *apply-test-schema*)
     (let ((text "{\"apiVersion\":\"mygroup.example.com/v1\",\"kind\":\"Foo\",\"metadata\":{\"name\":\"bare\"}}"))
       (multiple-value-bind (body status)
-          (drakma:http-request "http://127.0.0.1:18094/apis/mygroup.example.com/v1/foos" :method :post
+          (drakma:http-request (crd-api-url "/apis/mygroup.example.com/v1/foos") :method :post
                                :content text :content-type nil)
         (declare (ignore body))
         (is (= 201 status))))
     (multiple-value-bind (body status)
-        (drakma:http-request "http://127.0.0.1:18094/apis/apps/v1/namespaces/default/deployments?fieldValidation=Strict"
+        (drakma:http-request (crd-api-url "/apis/apps/v1/namespaces/default/deployments?fieldValidation=Strict")
                              :method :post :content-type nil
                              :content (deployment-json :metadata-extra "\"unknownMeta\":\"foo\","))
       (is (= 400 status))
@@ -776,7 +776,7 @@ Return its port, a function to read the records, and a function to stop it."
                  (is-true peer "the backend saw no client certificate"))
                ;; A request's own identity headers don't reach the server, nor does its credential.
                (multiple-value-bind (body status)
-                   (drakma:http-request (concatenate 'string "http://127.0.0.1:18094" flunders)
+                   (drakma:http-request (crd-api-url flunders)
                                         :additional-headers '(("X-Remote-User" . "mallory") ("Authorization" . "Bearer secret")))
                  (declare (ignore body))
                  (is (= 200 status)))
@@ -798,7 +798,7 @@ Return its port, a function to read the records, and a function to stop it."
                (let* ((document
                         (com.inuoe.jzon:parse
                          (drakma:http-request
-                          "http://127.0.0.1:18094/apis"
+                          (crd-api-url "/apis")
                           :accept "application/json;g=apidiscovery.k8s.io;v=v2;as=APIGroupDiscoveryList")))
                       (entry (find "wardle.example.com" (gethash "items" document) :test #'equal
                                    :key (lambda (entry) (gethash "name" (gethash "metadata" entry))))))
