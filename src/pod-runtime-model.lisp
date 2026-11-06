@@ -231,7 +231,10 @@ such as the security-profiles-operator put them.")
       (invalid-pod "workingDir must be absolute")))
   (validate-linux-security-context (gethash "securityContext" container))
   (loop for mount across (optional-vector container "volumeMounts" "container")
-        do (reject-unsupported-fields mount '("name" "mountPath" "readOnly" "subPath" "subPathExpr" "mountPropagation") "volumeMount")
+        do (reject-unsupported-fields mount '("name" "mountPath" "readOnly" "subPath" "subPathExpr" "mountPropagation"
+                                              "recursiveReadOnly")
+                                      "volumeMount")
+           (validate-recursive-read-only-mount mount)
            (require-dns-label (gethash "name" mount) "volumeMount.name")
            (let ((propagation (gethash "mountPropagation" mount)))
              (when propagation
@@ -255,6 +258,20 @@ such as the security-profiles-operator put them.")
            (multiple-value-bind (value present) (gethash "readOnly" mount)
              (when (and present (not (member value '(t nil))))
                (invalid-pod "volumeMount.readOnly must be boolean")))))
+
+(defun validate-recursive-read-only-mount (mount)
+  "Validate volumeMount.recursiveReadOnly as the API server does (RecursiveReadOnlyMounts, GA in v1.33).
+Anything but Disabled needs a read-only mount whose propagation is None."
+  (when (eq (gethash "recursiveReadOnly" mount) 'null) (remhash "recursiveReadOnly" mount))
+  (let ((mode (gethash "recursiveReadOnly" mount)))
+    (when mode
+      (unless (member mode '("Disabled" "IfPossible" "Enabled") :test #'equal)
+        (invalid-pod "volumeMount.recursiveReadOnly: Unsupported value: ~S: supported values: \"Disabled\", \"Enabled\", \"IfPossible\"" mode))
+      (unless (equal mode "Disabled")
+        (unless (eq t (gethash "readOnly" mount))
+          (invalid-pod "volumeMount.recursiveReadOnly: Forbidden: may only be specified when readOnly is true"))
+        (unless (member (gethash "mountPropagation" mount "None") '("None") :test #'equal)
+          (invalid-pod "volumeMount.recursiveReadOnly: Forbidden: may only be specified when mountPropagation is None or not specified"))))))
 
 (defun validate-empty-dir-source (source)
   "Accept disk-backed and tmpfs emptyDirs; the node evicts a Pod whose disk-backed one outgrows its limit."

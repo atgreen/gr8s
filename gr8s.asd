@@ -380,6 +380,7 @@
                              (:file "pod-level-resources-test")
                              (:file "pod-topology-spread-test")
                              (:file "env-files-test")
+                             (:file "recursive-read-only-test")
                              (:file "service-account-test")
                              (:file "api-client-certificate-test")
                              (:file "bootstrap-protobuf-test")
