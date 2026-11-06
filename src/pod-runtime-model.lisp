@@ -58,17 +58,66 @@
                                    (or (alphanumericp character) (char= character #\_))) name))
                (invalid-pod "capabilities.~A contains an invalid name" field)))))
 
+(defun validate-apparmor-profile (profile)
+  "Validate an appArmorProfile as the API server does; the node decides whether it can enforce it."
+  (drop-null-fields (require-object profile "securityContext.appArmorProfile"))
+  (reject-unsupported-fields profile '("type" "localhostProfile") "appArmorProfile")
+  (let ((type (gethash "type" profile)) (localhost (gethash "localhostProfile" profile)))
+    (cond ((equal type "Localhost")
+           (unless (and (stringp localhost) (plusp (length (string-trim " " localhost))))
+             (invalid-pod "appArmorProfile.localhostProfile must be set when AppArmor type is Localhost"))
+           (unless (equal localhost (string-trim '(#\Space #\Tab #\Newline #\Return) localhost))
+             (invalid-pod "appArmorProfile.localhostProfile must not be padded with whitespace"))
+           (when (> (length localhost) 4095)
+             (invalid-pod "appArmorProfile.localhostProfile may not be more than 4095 bytes")))
+          ((member type '("RuntimeDefault" "Unconfined") :test #'equal)
+           (when localhost
+             (invalid-pod "appArmorProfile.localhostProfile can only be set when AppArmor type is Localhost")))
+          ((member type '(nil "") :test #'equal)
+           (invalid-pod "appArmorProfile.type is required when appArmorProfile is set"))
+          (t (invalid-pod "appArmorProfile.type ~S must be RuntimeDefault, Unconfined or Localhost" type)))))
+
+(defun validate-windows-options (options)
+  "Accept windowsOptions, which a Linux node ignores, when they are well formed."
+  (drop-null-fields (require-object options "securityContext.windowsOptions"))
+  (reject-unsupported-fields options '("gmsaCredentialSpecName" "gmsaCredentialSpec" "runAsUserName" "hostProcess")
+                             "windowsOptions")
+  (dolist (field '("gmsaCredentialSpecName" "gmsaCredentialSpec" "runAsUserName"))
+    (when (and (gethash field options) (not (stringp (gethash field options))))
+      (invalid-pod "windowsOptions.~A must be a string" field)))
+  (multiple-value-bind (value present) (gethash "hostProcess" options)
+    (when (and present (not (member value '(t nil))))
+      (invalid-pod "windowsOptions.hostProcess must be boolean"))))
+
+(defun validate-security-context-enum (context field values)
+  "Require CONTEXT's optional FIELD to be one of VALUES."
+  (when (gethash field context)
+    (unless (member (gethash field context) values :test #'equal)
+      (invalid-pod "securityContext.~A ~S is not one of ~{~A~^, ~}" field (gethash field context) values))))
+
 (defun validate-linux-security-context (context &key pod)
   "Validate the Linux identity, confinement and privilege settings implemented by the CRI adapter."
   (when context
     (drop-null-fields (require-object context "securityContext"))
     (reject-unsupported-fields context
                                (if pod '("runAsUser" "runAsGroup" "runAsNonRoot" "fsGroup"
-                                         "supplementalGroups" "seLinuxOptions" "seccompProfile" "sysctls")
+                                         "supplementalGroups" "seLinuxOptions" "seccompProfile" "sysctls"
+                                         "fsGroupChangePolicy" "supplementalGroupsPolicy" "seLinuxChangePolicy"
+                                         "appArmorProfile" "windowsOptions")
                                    '("runAsUser" "runAsGroup" "runAsNonRoot" "privileged"
                                      "readOnlyRootFilesystem" "allowPrivilegeEscalation"
-                                     "seLinuxOptions" "seccompProfile" "capabilities")) "securityContext")
+                                     "seLinuxOptions" "seccompProfile" "capabilities"
+                                     "appArmorProfile" "windowsOptions" "procMount")) "securityContext")
     (when pod (validate-pod-sysctls context))
+    (validate-security-context-enum context "fsGroupChangePolicy" '("OnRootMismatch" "Always"))
+    (validate-security-context-enum context "supplementalGroupsPolicy" '("Merge" "Strict"))
+    (validate-security-context-enum context "seLinuxChangePolicy" '("Recursive" "MountOption"))
+    (validate-security-context-enum context "procMount" '("Default" "Unmasked"))
+    ;; Pods share the node's user namespace (hostUsers is true), where /proc stays masked.
+    (when (equal "Unmasked" (gethash "procMount" context))
+      (invalid-pod "securityContext.procMount: `hostUsers` must be false to use `Unmasked`"))
+    (when (gethash "appArmorProfile" context) (validate-apparmor-profile (gethash "appArmorProfile" context)))
+    (when (gethash "windowsOptions" context) (validate-windows-options (gethash "windowsOptions" context)))
     (when (gethash "seccompProfile" context) (validate-seccomp-profile (gethash "seccompProfile" context)))
     (when (gethash "seLinuxOptions" context) (validate-selinux-options (gethash "seLinuxOptions" context)))
     (when (gethash "capabilities" context) (validate-container-capabilities (gethash "capabilities" context)))
@@ -82,10 +131,7 @@
     (dolist (field '("runAsNonRoot" "privileged" "readOnlyRootFilesystem" "allowPrivilegeEscalation"))
       (multiple-value-bind (value present) (gethash field context)
         (when (and present (not (member value '(t nil))))
-          (invalid-pod "securityContext.~A must be boolean" field))))
-    (when (and (eq t (gethash "runAsNonRoot" context))
-               (eql 0 (gethash "runAsUser" context)))
-      (invalid-pod "runAsNonRoot cannot be combined with runAsUser 0"))))
+          (invalid-pod "securityContext.~A must be boolean" field))))))
 
 (defun pod-metadata-subscript-reference (field)
   "Recognize a valid single-key label/annotation downward environment reference."
@@ -435,6 +481,15 @@
 (defun validate-runtime-pod-spec (spec)
   "Validate Pod-level volume, security, service account and scheduling fields."
   (validate-linux-security-context (gethash "securityContext" spec) :pod t)
+  ;; A Pod that declares itself Linux cannot carry Windows settings, as upstream validates.
+  (when (and (equal "linux" (gethash "name" (gethash "os" spec (core-object))))
+             (some (lambda (context) (and (hash-table-p context) (gethash "windowsOptions" context)))
+                   (cons (gethash "securityContext" spec)
+                         (map 'list (lambda (container) (and (hash-table-p container) (gethash "securityContext" container)))
+                              (concatenate 'vector (optional-vector spec "initContainers" "spec")
+                                           (optional-vector spec "containers" "spec")
+                                           (optional-vector spec "ephemeralContainers" "spec"))))))
+    (invalid-pod "securityContext.windowsOptions: Forbidden: windows options cannot be set for a linux pod"))
   ;; serviceAccount is the deprecated alias: it names the account when serviceAccountName
   ;; does not, and otherwise mirrors it, as the API server's conversion does.
   (multiple-value-bind (alias present) (gethash "serviceAccount" spec)

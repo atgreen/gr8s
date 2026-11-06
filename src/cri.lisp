@@ -559,6 +559,12 @@ AUTH is a (username . password) credential for the registry."
            (gr8s.cri.v1::image response))
       (ag-grpc:channel-close channel))))
 
+(defun cri-image-user (socket-path image &key (timeout 30))
+  "Return the numeric user IMAGE runs as, or NIL, and its user name, from the node's image record."
+  (let* ((record (cri-local-image socket-path image timeout))
+         (uid (and record (gr8s.cri.v1::uid record))))
+    (values (and uid (gr8s.cri.v1::value uid)) (if record (gr8s.cri.v1::username record) ""))))
+
 (defun cri-image-present-p (socket-path image &key (timeout 30))
   "Query the CRI image service without contacting a registry."
   (not (null (cri-local-image socket-path image timeout))))

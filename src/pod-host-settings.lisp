@@ -83,6 +83,34 @@ Net sysctls cannot be set in the node's own namespace, and others need the node'
         when (and (pod-host-network-p pod) (uiop:string-prefix-p "net." name))
           return (cons (format nil "forbidden sysctl: ~S not allowed with host net enabled" name) "SysctlForbidden")))
 
+(defparameter *apparmor-enabled-path* #P"/sys/module/apparmor/parameters/enabled"
+  "Where the kernel says whether AppArmor is enforcing, as runc's apparmor.IsEnabled reads it.")
+
+(defun host-apparmor-enabled-p ()
+  "Return whether this host's kernel enforces AppArmor."
+  (let ((value (ignore-errors (uiop:read-file-string *apparmor-enabled-path*))))
+    (and value (plusp (length value)) (char-equal #\Y (char value 0)))))
+
+(defun pod-effective-apparmor-profiles (pod)
+  "Return each container's effective appArmorProfile: its own, or else the Pod's."
+  (let* ((spec (gethash "spec" (pod-to-object pod)))
+         (pod-profile (gethash "appArmorProfile" (gethash "securityContext" spec (core-object)))))
+    (loop for container across (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec #())
+                                            (gethash "ephemeralContainers" spec #()))
+          for profile = (or (gethash "appArmorProfile" (gethash "securityContext" container (core-object))) pod-profile)
+          when profile collect profile)))
+
+(defun pod-apparmor-failure (pod)
+  "Return why a node refuses POD's AppArmor profiles as (message . reason), or NIL.
+As a kubelet does, a node without AppArmor refuses any profile other than Unconfined."
+  (when (and (or (some (lambda (profile) (not (equal "Unconfined" (gethash "type" profile))))
+                       (pod-effective-apparmor-profiles pod))
+                 (let ((profile (gethash "appArmorProfile"
+                                         (gethash "securityContext" (gethash "spec" (pod-to-object pod)) (core-object)))))
+                   (and profile (not (equal "Unconfined" (gethash "type" profile))))))
+             (not (host-apparmor-enabled-p)))
+    (cons "Cannot enforce AppArmor: AppArmor is not enabled on the host" "AppArmor")))
+
 (defun validate-pod-host-aliases (spec)
   "Validate hostAliases, each one IP address and at least one hostname."
   (loop for alias across (optional-vector spec "hostAliases" "spec")
