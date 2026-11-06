@@ -111,8 +111,19 @@ MIIBtest
     (gr8s::create-core-resource store "clustertrustbundles" (ctb-object "roots-b" "sds/identity" nil) nil)
     (is (string= (format nil "PEM-roots-a~%")
                  (ctb-source-pem store (gr8s::core-object "path" "b.pem" "name" "roots-a"))))
+    ;; As in the kubelet (and the 1.37 conformance specs), an empty labelSelector
+    ;; selects every bundle of the signer, while an absent one selects none.
     (is (string= (format nil "PEM-roots-a~%PEM-roots-b~%")
-                 (ctb-source-pem store (gr8s::core-object "path" "b.pem" "signerName" "sds/identity"))))
+                 (ctb-source-pem store (gr8s::core-object "path" "b.pem" "signerName" "sds/identity"
+                                                          "labelSelector" (gr8s::core-object)))))
+    (signals gr8s:kubernetes-error
+      (gr8s::cluster-trust-bundle-volume-files store (gr8s::core-object "path" "b.pem" "signerName" "sds/identity") #o644))
+    (is (string= "" (ctb-source-pem store (gr8s::core-object "path" "b.pem" "signerName" "sds/identity" "optional" t))))
+    (is (string= (format nil "PEM-roots-b~%")
+                 (ctb-source-pem store (gr8s::core-object "path" "b.pem" "signerName" "sds/identity"
+                                                          "labelSelector" (gr8s::core-object
+                                                                           "matchExpressions"
+                                                                           (vector (gr8s::core-object "key" "canarying" "operator" "DoesNotExist")))))))
     (is (string= (format nil "PEM-roots-a~%")
                  (ctb-source-pem store (gr8s::core-object "path" "b.pem" "signerName" "sds/identity"
                                                           "labelSelector" (gr8s::core-object

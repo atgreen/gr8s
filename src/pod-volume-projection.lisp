@@ -125,15 +125,16 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
    kubelet always sets maxExpirationSeconds, and signers dereference it, so it
    must never be absent (the signer caps it to its own maximum).")
 
-(defun build-pod-certificate-request (&key name namespace signer-name pkix-public-key
+(defun build-pod-certificate-request (&key name namespace signer-name pkix-public-key stub-pkcs10-request
                                            pod-name pod-uid service-account-name service-account-uid
                                            node-name node-uid max-expiration-seconds
                                            unverified-user-annotations)
-  "Build a PodCertificateRequest object (certificates.k8s.io/v1beta1) for a pod's
-   podCertificate volume: its PKIX public key (base64 DER -- accepted by signers
-   as the transition fallback for stubPKCS10Request) plus the pod/SA/node
-   identity the signer checks, and any signer-domain pod annotations the signer
-   reads via unverifiedUserAnnotations."
+  "Build a PodCertificateRequest object (certificates.k8s.io/v1, GA in Kubernetes
+   1.37) for a pod's podCertificate volume: the stub PKCS#10 request the pod's key
+   signed (base64 DER), which carries the public key v1 signers read, plus the
+   pod/SA/node identity the signer checks, and any signer-domain pod annotations
+   the signer reads via unverifiedUserAnnotations. The PKIX public key is kept as
+   well for v1beta1 signers, which may read it instead."
   ;; Every spec string must be a string, never NIL: gr8s serializes NIL as JSON
   ;; false, which a typed client (the signer's PodCertificateRequest watch)
   ;; cannot decode into a string field. The node often cannot resolve the SA or
@@ -144,11 +145,13 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
                            "serviceAccountUID" (or service-account-uid "")
                            "nodeName" (or node-name "") "nodeUID" (or node-uid "")
                            "pkixPublicKey" (or pkix-public-key ""))))
+    (when (plusp (length stub-pkcs10-request))
+      (setf (gethash "stubPKCS10Request" spec) stub-pkcs10-request))
     (when max-expiration-seconds
       (setf (gethash "maxExpirationSeconds" spec) max-expiration-seconds))
     (when (and unverified-user-annotations (plusp (hash-table-count unverified-user-annotations)))
       (setf (gethash "unverifiedUserAnnotations" spec) unverified-user-annotations))
-    (core-object "apiVersion" "certificates.k8s.io/v1beta1" "kind" "PodCertificateRequest"
+    (core-object "apiVersion" "certificates.k8s.io/v1" "kind" "PodCertificateRequest"
                  "metadata" (core-object "name" name "namespace" namespace)
                  "spec" spec)))
 
@@ -173,6 +176,22 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
                   (pure-tls/acme::encode-oid pure-tls/acme::*oid-secp256r1*))
                  (pure-tls/acme::encode-octet-string sec1))))
     (pure-tls/acme::wrap-pem "PRIVATE KEY" pkcs8)))
+
+(defun pod-certificate-stub-pkcs10-request (private-key public-key)
+  "The DER PKCS#10 request a kubelet sends as stubPKCS10Request: an empty subject
+   and no attributes, carrying PUBLIC-KEY and signed with PRIVATE-KEY
+   (ecdsa-with-SHA256), so a signer can read the key and check possession of it.
+   Upstream's kubelet makes the same request from an empty template."
+  (let ((info (pure-tls/acme::encode-sequence
+               (pure-tls/acme::encode-integer 0)
+               (pure-tls/acme::encode-sequence)
+               (pure-tls/acme::encode-ec-public-key public-key)
+               ;; attributes [0] IMPLICIT SET OF Attribute, here empty
+               (pure-tls/acme::encode-context-tag 0 (make-array 0 :element-type '(unsigned-byte 8))))))
+    (pure-tls/acme::encode-sequence
+     info
+     (pure-tls/acme::encode-sequence (pure-tls/acme::encode-oid pure-tls/acme::*oid-ecdsa-with-sha256*))
+     (pure-tls/acme::encode-bit-string (ecdsa-sign-der private-key info)))))
 
 (defun pod-certificate-credential-bundle (private-key-pem certificate-chain-pem)
   "The credentialBundlePath contents for a signed pod certificate: the PEM
@@ -218,6 +237,8 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
                                       :signer-name (gethash "signerName" source)
                                       :pkix-public-key (ag-grpc:base64-encode
                                                         (pure-tls/acme::encode-ec-public-key public-key))
+                                      :stub-pkcs10-request (ag-grpc:base64-encode
+                                                            (pod-certificate-stub-pkcs10-request private-key public-key))
                                       :pod-name (pod-name pod) :pod-uid (pod-uid pod)
                                       :service-account-name sa-name
                                       :service-account-uid (and sa (gethash "uid" (gethash "metadata" sa)))
@@ -278,13 +299,12 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
           collect (getf material :claim))))
 
 (defun cluster-trust-bundle-matches-p (bundle signer selector)
-  "True when BUNDLE has SIGNER and satisfies SELECTOR's matchLabels (if any)."
-  (and (equal signer (gethash "signerName" (gethash "spec" bundle (core-object))))
-       (let ((match (and selector (gethash "matchLabels" selector))))
-         (or (null match)
-             (let ((labels (gethash "labels" (gethash "metadata" bundle) (core-object))))
-               (loop for key being the hash-keys of match using (hash-value value)
-                     always (equal value (gethash key labels))))))))
+  "True when BUNDLE has SIGNER and satisfies the label SELECTOR. As in the kubelet,
+   an absent selector matches nothing and an empty one matches every bundle of the
+   signer; matchExpressions apply as in any LabelSelector."
+  (and (hash-table-p selector)
+       (equal signer (gethash "signerName" (gethash "spec" bundle (core-object))))
+       (workload-selector-matches-p selector (gethash "labels" (gethash "metadata" bundle)))))
 
 (defun cluster-trust-bundle-volume-files (store source default-mode)
   "Resolve a clusterTrustBundle projected SOURCE against STORE's projected

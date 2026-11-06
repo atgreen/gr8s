@@ -426,7 +426,9 @@
       (core-resource-error 405 "MethodNotAllowed" "Unsupported status method"))
     (let* ((*typed-api-status-write* t)
            ;; Field validation finds a request's schema by version: core has its own ResourceClaim.
-           (*core-resource-view-version* (core-resource-api-version resource))
+           (*core-resource-view-version* (if (equal resource "podcertificaterequests")
+                                             (pod-certificate-request-path-version path)
+                                             (core-resource-api-version resource)))
            (dry-run (core-resource-dry-run-p))
            (content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
            (input (if (eq method :put)
