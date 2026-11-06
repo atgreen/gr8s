@@ -27,7 +27,10 @@
     ("traffic_stats"       2 4 8  7    0)
     ("netpol_egress_mode"  2 4 4  1    0)
     ("netpol_egress_cidr" 11 8 4  1024 1)
-    ("netpol_egress_port"  1 8 1  1024 0)))
+    ("netpol_egress_port"  1 8 1  1024 0)
+    ;; Same-node Pod delivery table: dest Pod IPv4 (network order) -> 16-byte
+    ;; {ifindex, Pod MAC, veth MAC}. Agent-populated on reconcile. HASH.
+    ("local_pod_v4"        1 4 16 4096 0)))
 
 (defstruct cni-configuration
   version name type direction program map-pin-root previous-result endpoint-address policy-interface-name)

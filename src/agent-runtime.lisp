@@ -702,6 +702,13 @@ snapshot application."
                        (let ((id (gethash address ip-map)))
                          (if id (values (car id) (cdr id)) (values nil nil))))
          :directory-fn (lambda (sandbox)
+                         (nth-value 2 (cni-pin-paths root sandbox))))
+        ;; Same-node Pod->Pod delivery table (epic podster-pnd): every local Pod
+        ;; gets the node-wide {dest IP -> ifindex/MAC} table so the egress guard
+        ;; can redirect in-cluster traffic past the host firewall's FORWARD reject.
+        (converge-node-local-pod-delivery
+         endpoints
+         :directory-fn (lambda (sandbox)
                          (nth-value 2 (cni-pin-paths root sandbox))))))))
 
 (defvar *runtime-outage-snapshot-wait-seconds* 2
