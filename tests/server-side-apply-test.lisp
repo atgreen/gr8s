@@ -804,6 +804,10 @@ Return its port, a function to read the records, and a function to stop it."
                                    :key (lambda (entry) (gethash "name" (gethash "metadata" entry))))))
                  (is (equal "flunders"
                             (gethash "resource" (aref (gethash "resources" (aref (gethash "versions" entry) 0)) 0)))))
+               ;; Its OpenAPI v3 document is listed and comes from the server itself.
+               (is (gethash "apis/wardle.example.com/v1alpha1" (gethash "paths" (crd-api-request 200 "/openapi/v3"))))
+               (crd-api-request 200 "/openapi/v3/apis/wardle.example.com/v1alpha1?hash=x")
+               (is (equal "/openapi/v3/apis/wardle.example.com/v1alpha1" (second (first (funcall records)))))
                ;; The object takes spec and status writes, keeping conditions it doesn't own.
                (is (= 400 (gethash "versionPriority"
                                    (gethash "spec" (crd-api-request 200 item :method :patch
@@ -829,6 +833,7 @@ Return its port, a function to read the records, and a function to stop it."
                  (is (member "v1.apps" (names) :test #'equal)))
                ;; Gone from routing and discovery too.
                (crd-api-request 404 flunders)
+               (is-false (gethash "apis/wardle.example.com/v1alpha1" (gethash "paths" (crd-api-request 200 "/openapi/v3"))))
                (is-false (find "wardle.example.com" (gethash "groups" (crd-api-request 200 "/apis")) :test #'equal
                                :key (lambda (entry) (gethash "name" entry)))))
           (gr8s::stop-api-aggregator aggregator)
@@ -876,3 +881,25 @@ Return its port, a function to read the records, and a function to stop it."
                      (gr8s::kubernetes-authorization-target
                       "/api/v1/namespaces/kube-system/configmaps" :post
                       :field-selector "metadata.name=other"))))))
+
+(test proxied-watches-notice-a-departed-client
+  ;; A watch relayed from an aggregated server ends when its client goes, not at the next event.
+  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :element-type '(unsigned-byte 8)))
+         (client (usocket:socket-connect "127.0.0.1" (usocket:get-local-port listener) :element-type '(unsigned-byte 8)))
+         (server (usocket:socket-accept listener))
+         (fd (sb-sys:fd-stream-fd (usocket:socket-stream server))))
+    (unwind-protect
+         (progn
+           (is-false (gr8s::client-connection-closed-p fd))
+           ;; Data waiting to be read is not a departure, and peeking leaves it there.
+           (write-byte 7 (usocket:socket-stream client))
+           (force-output (usocket:socket-stream client))
+           (is-true (wait-until (lambda () (listen (usocket:socket-stream server))) :timeout 5))
+           (is-false (gr8s::client-connection-closed-p fd))
+           (is (= 7 (read-byte (usocket:socket-stream server))))
+           (usocket:socket-close client)
+           (setf client nil)
+           (is-true (wait-until (lambda () (gr8s::client-connection-closed-p fd)) :timeout 5)))
+      (when client (usocket:socket-close client))
+      (usocket:socket-close server)
+      (usocket:socket-close listener))))
