@@ -680,7 +680,7 @@ An object is streamed to the file, never held as one string as large as the stor
      object (if (string= resource "secrets")
                 '("apiVersion" "kind" "metadata" "data" "stringData" "type" "immutable")
                 '("apiVersion" "kind" "metadata" "data" "binaryData" "immutable")) kind)
-    (validate-core-metadata metadata namespace name)
+    (validate-core-metadata metadata namespace name :allow-finalizers t)
     (setf (gethash "apiVersion" object) "v1" (gethash "kind" object) kind
           (gethash "namespace" metadata) namespace)
     (multiple-value-bind (immutable present) (gethash "immutable" object)
@@ -837,6 +837,19 @@ An object is streamed to the file, never held as one string as large as the stor
          (pod-certificate-request-view existing *core-resource-view-version*))
         (t (copy-core-object existing))))
 
+(defun deletion-held-by-finalizers-p (metadata)
+  "Return whether METADATA names finalizers besides the ones a propagation policy adds."
+  (find-if-not (lambda (name) (member name '("foregroundDeletion" "orphan") :test #'equal))
+               (gethash "finalizers" metadata #())))
+
+(defun core-finalizer-lifecycle-p (resource)
+  "Return whether RESOURCE's objects follow the generic finalizer lifecycle: a deleted object
+with finalizers stays, deleting, until a client removes the last one. Kinds with a deletion
+lifecycle of their own are excluded."
+  (not (or (member resource '("namespaces" "customresourcedefinitions" "pods") :test #'equal)
+           (custom-resource-key-p resource) (typed-api-resource-p resource)
+           (storage-resource-p resource) (csr-resource-p resource))))
+
 (defun update-core-resource (store resource namespace name transform &key dry-run)
   (let ((*local-plane-write* (local-plane-resource-p resource)))
    (with-crd-deferred-conversions
@@ -878,6 +891,13 @@ An object is streamed to the file, never held as one string as large as the stor
       (when (and (core-resource-immutable-p existing)
                  (or (not (core-resource-immutable-p object)) (not (core-resource-data-equal-p existing object))))
         (core-resource-error 422 "Invalid" "Immutable resource data cannot change"))
+      (when (core-finalizer-lifecycle-p resource)
+        (let ((pending (gethash "deletionTimestamp" existing-metadata)))
+          (when pending
+            (setf (gethash "deletionTimestamp" metadata) pending)
+            (loop for finalizer across (gethash "finalizers" metadata #())
+                  unless (find finalizer (gethash "finalizers" existing-metadata #()) :test #'equal)
+                    do (core-resource-error 422 "Invalid" "metadata.finalizers: Forbidden: no new finalizers can be added if the object is being deleted")))))
       (prepare-core-resource-metadata object existing revision)
       (apply-track-write existing object resource)
       (prepare-workload-write resource object existing)
@@ -889,9 +909,13 @@ An object is streamed to the file, never held as one string as large as the stor
       (when (admission-config-resource-p resource) (prepare-admission-config-write object existing))
       (let ((resources (copy-core-resource-index store)))
         (if (or (and (csr-resource-p resource) (csr-finalized-p object))
-                (and (or (custom-resource-key-p resource) (typed-api-resource-p resource) (batch-resource-p resource))
+                (and (or (custom-resource-key-p resource) (typed-api-resource-p resource) (core-finalizer-lifecycle-p resource))
                      (gethash "deletionTimestamp" metadata) (zerop (length (gethash "finalizers" metadata #())))))
-            (remhash (core-resource-key resource namespace name) resources)
+            (progn
+              (remhash (core-resource-key resource namespace name) resources)
+              ;; A selector Service owns the Endpoints of its name, as on any other deletion.
+              (when (and (equal resource "services") (plusp (hash-table-count (gethash "selector" (gethash "spec" existing) (core-object)))))
+                (remhash (core-resource-key "endpoints" namespace name) resources)))
             (setf (gethash (core-resource-key resource namespace name) resources) object))
         (when (equal resource "services")
           (setf revision (prepare-service-ip-address-writes resources object existing revision)))
@@ -922,6 +946,18 @@ An object is streamed to the file, never held as one string as large as the stor
          (delete-namespace-unlocked store existing dry-run))
         ((typed-api-resource-p resource)
          (delete-typed-api-resource-unlocked store resource existing dry-run))
+        ;; A finalizer holds the object, deleting, until a client removes the last one.
+        ((deletion-held-by-finalizers-p metadata)
+         (when (policy-resource-p resource) (validate-policy-delete resource existing))
+         (if (gethash "deletionTimestamp" metadata)
+             (copy-core-object existing)
+             (let ((copy (copy-core-object existing)) (resources (copy-core-resource-index store))
+                   (revision (1+ (pod-store-resource-revision store))))
+               (setf (gethash "deletionTimestamp" (gethash "metadata" copy)) (current-timestamp))
+               (prepare-core-resource-metadata copy existing revision)
+               (setf (gethash (core-resource-key resource namespace name) resources) copy)
+               (unless dry-run (commit-core-resources store resources revision))
+               (copy-core-object copy))))
         (t
          (when (policy-resource-p resource) (validate-policy-delete resource existing))
          (let ((resources (copy-core-resource-index store)))

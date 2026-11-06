@@ -463,7 +463,7 @@ Turning affinity off clears the timeout a client read back with the Service."
                  (equal "Service" (gethash "kind" object "Service")))
       (core-resource-error 400 "BadRequest" "Expected v1 Service"))
     (reject-unsupported-fields object '("apiVersion" "kind" "metadata" "spec" "status") "Service")
-    (validate-core-metadata metadata namespace name)
+    (validate-core-metadata metadata namespace name :allow-finalizers t)
     ;; Kubernetes 1.36 enables relaxed Service names, still bounded to one
     ;; 63-character DNS label rather than a general resource DNS subdomain.
     (require-dns-label (gethash "name" metadata) "Service.metadata.name")
