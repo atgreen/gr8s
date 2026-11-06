@@ -156,3 +156,33 @@
                        (is (not (equal "Unknown" (gethash "phase" seen))))
                        (is (= 1 (length (gethash "containerStatuses" seen #())))))))))
           (gr8s::stop-node-runtime agent))))))
+
+(test the-control-plane-never-publishes-less-than-clients-saw-at-removal
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((server (gr8s::%make-node-grpc-server :store store))
+           (reconciler (make-reconciler store (gr8s::make-control-plane-runtime store server)))
+           (pod (create-pod store (terminating-test-pod +fail-pod-spec+)))
+           (exited (gr8s::core-object "phase" "Failed" "containerStatuses"
+                                      (vector (test-container-status "fail" (cons "terminated" (gr8s::core-object "exitCode" 1))))))
+           (running (gr8s::core-object "phase" "Running" "containerStatuses"
+                                       (vector (test-container-status "fail" (cons "running" (gr8s::core-object)))))))
+      (flet ((publish (status) (gr8s::with-store-lock (store) (gr8s::publish-pod-status-unlocked store pod status)))
+             (final (observation)
+               (gr8s::save-pod-observation store pod observation)
+               (gr8s::deleted-pod-final-status reconciler pod (gr8s::pod-observed-status store pod))))
+        ;; A node that rebuilt its acknowledgement after losing its last report says less than clients saw.
+        (publish exited)
+        (let ((status (final (gr8s::core-object "phase" "Pending" "reason" "Deleted" "containerStatuses"
+                                                (vector (test-container-status "fail" (cons "waiting" (gr8s::core-object "reason" "ContainerCreating"))))))))
+          (is (equal "Failed" (gethash "phase" status)))
+          (is (equal "terminated" (status-state-name status "fail"))))
+        ;; A Pod already terminal on its node is removed at once: its last report is still published.
+        (publish running)
+        (let ((status (final exited)))
+          (is (equal "Failed" (gethash "phase" status)))
+          (is (equal "terminated" (status-state-name status "fail"))))
+        ;; Without the node's acknowledgement, a running container is not declared gone.
+        (let ((status (final running)))
+          (is (equal "Running" (gethash "phase" status)))
+          (is (equal "running" (status-state-name status "fail"))))))))
