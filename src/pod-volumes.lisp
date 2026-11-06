@@ -592,6 +592,25 @@ without AppArmor never reaches: admission refuses any other profile there."
     (remove-duplicates (append declared (when (pod-fs-group pod) (list (pod-fs-group pod))))
                        :from-end t)))
 
+(defparameter +volume-gid-annotation+ "pv.beta.kubernetes.io/gid"
+  "The annotation through which a PersistentVolume asks for a supplemental group.")
+
+(defun pod-volume-supplemental-groups (store pod)
+  "Return the groups the volumes bound to POD's claims ask for through their GID annotation,
+which a kubelet adds to each container's supplemental groups."
+  (when store
+    (remove-duplicates
+     (loop for name in (storage-pod-claim-names pod)
+           for claim = (optional-core-resource store "persistentvolumeclaims" (pod-namespace pod) name)
+           for volume-name = (and claim (gethash "volumeName" (gethash "spec" claim)))
+           for volume = (and volume-name (optional-core-resource store "persistentvolumes" nil volume-name))
+           for value = (and volume (gethash +volume-gid-annotation+
+                                            (gethash "annotations" (gethash "metadata" volume) (core-object))))
+           for gid = (and (stringp value) (plusp (length value)) (every #'digit-char-p value)
+                          (parse-integer value))
+           when (and gid (<= gid #xffffffff)) collect gid)
+     :from-end t)))
+
 (defun containerd-pod-sandbox-security (pod)
   "Return Pod-level confinement initargs; containers derive their SELinux context from these."
   (let ((context (gethash "securityContext" (gethash "spec" (pod-to-object pod)))))
@@ -623,10 +642,11 @@ IMAGE-USER returns the image's numeric user (or NIL) and its user name; an image
                   (container-config-error "container has runAsNonRoot and image has an invalid user id (~D). (Must be 1-(2147483647)) ~A"
                                           uid where)))))))))
 
-(defun containerd-pod-security-context (pod container &key target-id image-user userns)
+(defun containerd-pod-security-context (pod container &key target-id image-user userns volume-groups)
   "Map effective Pod/container Linux identities, confinement and privileges to the CRI API.
 TARGET-ID names the running container whose PID namespace an ephemeral container joins;
-IMAGE-USER reports the user the container's image runs as, for runAsNonRoot."
+IMAGE-USER reports the user the container's image runs as, for runAsNonRoot. VOLUME-GROUPS,
+which the Pod's volumes ask for, follow the Pod's own supplemental groups."
   (let* ((pod-context (gethash "securityContext" (gethash "spec" (pod-to-object pod))))
          (container-context (gethash "securityContext" (pod-runtime-container-object pod container)))
          (effective (core-object)))
@@ -638,7 +658,7 @@ IMAGE-USER reports the user the container's image runs as, for runAsNonRoot."
        'gr8s.cri.v1::linux-container-security-context
        :run-as-user (when user (make-instance 'gr8s.cri.v1::int64value :value user))
        :run-as-group (when group (make-instance 'gr8s.cri.v1::int64value :value group))
-       :supplemental-groups (pod-supplemental-groups pod)
+       :supplemental-groups (remove-duplicates (append (pod-supplemental-groups pod) volume-groups) :from-end t)
        :supplemental-groups-policy (cri-supplemental-groups-policy pod-context)
        :seccomp (cri-seccomp-profile effective)
        :apparmor (cri-apparmor-profile effective)
