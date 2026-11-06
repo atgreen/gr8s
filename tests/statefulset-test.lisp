@@ -354,3 +354,36 @@
                 :test #'equal :key (lambda (entry) (gethash "type" entry))))
       (check-core-status 200 collection :method :delete)
       (is (null (gr8s::list-core-resources store "statefulsets" "alpha"))))))
+
+(test statefulset-claims-pass-admission-as-the-controller
+  ;; A claim from a volumeClaimTemplate goes through admission as upstream's controller's
+  ;; create does, so a policy that refuses it holds the Pod back.
+  (with-budget-cluster (store runtime reconciler)
+    (gr8s::create-core-resource store "validatingadmissionpolicies"
+      (gr8s::core-object
+       "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicy"
+       "metadata" (gr8s::core-object "name" "no-claims")
+       "spec" (gr8s::core-object
+               "matchConstraints" (gr8s::core-object
+                                   "resourceRules" (vector (gr8s::core-object "apiGroups" #("") "apiVersions" #("v1")
+                                                                              "operations" #("CREATE")
+                                                                              "resources" #("persistentvolumeclaims"))))
+               "validations" (vector (gr8s::core-object
+                                      "expression" "request.userInfo.username != 'system:serviceaccount:kube-system:statefulset-controller'"
+                                      "message" "no claims from the controller"))))
+      nil)
+    (gr8s::create-core-resource store "validatingadmissionpolicybindings"
+      (gr8s::core-object
+       "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicyBinding"
+       "metadata" (gr8s::core-object "name" "no-claims")
+       "spec" (gr8s::core-object "policyName" "no-claims" "validationActions" #("Deny")))
+      nil)
+    (gr8s::create-core-resource store "statefulsets"
+                                (stateful-fixture "web" :replicas 1 :claims (vector (stateful-claim-template "data"))) "alpha")
+    (ignore-errors (gr8s::reconcile-workloads reconciler))
+    (is (null (gr8s::list-core-resources store "persistentvolumeclaims" "alpha")))
+    (is (null (ignore-errors (get-pod store "alpha" "web-0"))))
+    (gr8s::delete-core-resource store "validatingadmissionpolicybindings" nil "no-claims")
+    (gr8s::reconcile-workloads reconciler)
+    (is (gr8s::get-core-resource store "persistentvolumeclaims" "alpha" "data-web-0"))
+    (is (get-pod store "alpha" "web-0"))))

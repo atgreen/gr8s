@@ -31,7 +31,7 @@
 (defun apply-request (expected path text &key (manager "mgr") (validation "Strict") force)
   "Send an apply patch and assert its status, returning the decoded body."
   (multiple-value-bind (body status headers)
-      (drakma:http-request (concatenate 'string "http://127.0.0.1:18094" path) :method :patch
+      (drakma:http-request (crd-api-url path) :method :patch
                            :content-type "application/apply-patch+yaml" :content text
                            :parameters (append (when manager (list (cons "fieldManager" manager)))
                                                (when validation (list (cons "fieldValidation" validation)))
@@ -190,7 +190,7 @@
 (defun aggregated-request (path)
   "Request PATH's aggregated discovery form, returning the document and Content-Type."
   (multiple-value-bind (body status headers)
-      (drakma:http-request (concatenate 'string "http://127.0.0.1:18094" path)
+      (drakma:http-request (crd-api-url path)
                            :accept "application/json;g=apidiscovery.k8s.io;v=v2;as=APIGroupDiscoveryList,application/json")
     (is (= 200 status))
     (values (com.inuoe.jzon:parse (if (stringp body) body (babel:octets-to-string body)))
@@ -228,7 +228,7 @@
   (with-crd-api (store path)
     (values store path)
     (multiple-value-bind (body status)
-        (drakma:http-request "http://127.0.0.1:18094/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
+        (drakma:http-request (crd-api-url "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews")
                              :method :post :content-type "application/json"
                              :content "{\"apiVersion\":\"authorization.k8s.io/v1\",\"kind\":\"SelfSubjectAccessReview\",\"spec\":{\"nonResourceAttributes\":{\"path\":\"/\",\"verb\":\"get\"}}}"
                              :accept "application/json;as=Table;v=v1;g=meta.k8s.io")
@@ -236,7 +236,7 @@
       (is (equal "NotAcceptable" (gethash "reason" (com.inuoe.jzon:parse (if (stringp body) body (babel:octets-to-string body)))))))
     ;; kubectl offers a fallback alongside Table and must not be refused.
     (multiple-value-bind (body status)
-        (drakma:http-request "http://127.0.0.1:18094/api/v1/namespaces"
+        (drakma:http-request (crd-api-url "/api/v1/namespaces")
                              :accept "application/json;as=Table;v=v1;g=meta.k8s.io,application/json")
       (declare (ignore body))
       (is (= 200 status)))))
@@ -357,12 +357,12 @@
     (install-apply-crd *apply-test-schema*)
     (let ((text "{\"apiVersion\":\"mygroup.example.com/v1\",\"kind\":\"Foo\",\"metadata\":{\"name\":\"bare\"}}"))
       (multiple-value-bind (body status)
-          (drakma:http-request "http://127.0.0.1:18094/apis/mygroup.example.com/v1/foos" :method :post
+          (drakma:http-request (crd-api-url "/apis/mygroup.example.com/v1/foos") :method :post
                                :content text :content-type nil)
         (declare (ignore body))
         (is (= 201 status))))
     (multiple-value-bind (body status)
-        (drakma:http-request "http://127.0.0.1:18094/apis/apps/v1/namespaces/default/deployments?fieldValidation=Strict"
+        (drakma:http-request (crd-api-url "/apis/apps/v1/namespaces/default/deployments?fieldValidation=Strict")
                              :method :post :content-type nil
                              :content (deployment-json :metadata-extra "\"unknownMeta\":\"foo\","))
       (is (= 400 status))
@@ -776,7 +776,7 @@ Return its port, a function to read the records, and a function to stop it."
                  (is-true peer "the backend saw no client certificate"))
                ;; A request's own identity headers don't reach the server, nor does its credential.
                (multiple-value-bind (body status)
-                   (drakma:http-request (concatenate 'string "http://127.0.0.1:18094" flunders)
+                   (drakma:http-request (crd-api-url flunders)
                                         :additional-headers '(("X-Remote-User" . "mallory") ("Authorization" . "Bearer secret")))
                  (declare (ignore body))
                  (is (= 200 status)))
@@ -798,12 +798,16 @@ Return its port, a function to read the records, and a function to stop it."
                (let* ((document
                         (com.inuoe.jzon:parse
                          (drakma:http-request
-                          "http://127.0.0.1:18094/apis"
+                          (crd-api-url "/apis")
                           :accept "application/json;g=apidiscovery.k8s.io;v=v2;as=APIGroupDiscoveryList")))
                       (entry (find "wardle.example.com" (gethash "items" document) :test #'equal
                                    :key (lambda (entry) (gethash "name" (gethash "metadata" entry))))))
                  (is (equal "flunders"
                             (gethash "resource" (aref (gethash "resources" (aref (gethash "versions" entry) 0)) 0)))))
+               ;; Its OpenAPI v3 document is listed and comes from the server itself.
+               (is (gethash "apis/wardle.example.com/v1alpha1" (gethash "paths" (crd-api-request 200 "/openapi/v3"))))
+               (crd-api-request 200 "/openapi/v3/apis/wardle.example.com/v1alpha1?hash=x")
+               (is (equal "/openapi/v3/apis/wardle.example.com/v1alpha1" (second (first (funcall records)))))
                ;; The object takes spec and status writes, keeping conditions it doesn't own.
                (is (= 400 (gethash "versionPriority"
                                    (gethash "spec" (crd-api-request 200 item :method :patch
@@ -829,6 +833,7 @@ Return its port, a function to read the records, and a function to stop it."
                  (is (member "v1.apps" (names) :test #'equal)))
                ;; Gone from routing and discovery too.
                (crd-api-request 404 flunders)
+               (is-false (gethash "apis/wardle.example.com/v1alpha1" (gethash "paths" (crd-api-request 200 "/openapi/v3"))))
                (is-false (find "wardle.example.com" (gethash "groups" (crd-api-request 200 "/apis")) :test #'equal
                                :key (lambda (entry) (gethash "name" entry)))))
           (gr8s::stop-api-aggregator aggregator)
@@ -876,3 +881,25 @@ Return its port, a function to read the records, and a function to stop it."
                      (gr8s::kubernetes-authorization-target
                       "/api/v1/namespaces/kube-system/configmaps" :post
                       :field-selector "metadata.name=other"))))))
+
+(test proxied-watches-notice-a-departed-client
+  ;; A watch relayed from an aggregated server ends when its client goes, not at the next event.
+  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :element-type '(unsigned-byte 8)))
+         (client (usocket:socket-connect "127.0.0.1" (usocket:get-local-port listener) :element-type '(unsigned-byte 8)))
+         (server (usocket:socket-accept listener))
+         (fd (sb-sys:fd-stream-fd (usocket:socket-stream server))))
+    (unwind-protect
+         (progn
+           (is-false (gr8s::client-connection-closed-p fd))
+           ;; Data waiting to be read is not a departure, and peeking leaves it there.
+           (write-byte 7 (usocket:socket-stream client))
+           (force-output (usocket:socket-stream client))
+           (is-true (wait-until (lambda () (listen (usocket:socket-stream server))) :timeout 5))
+           (is-false (gr8s::client-connection-closed-p fd))
+           (is (= 7 (read-byte (usocket:socket-stream server))))
+           (usocket:socket-close client)
+           (setf client nil)
+           (is-true (wait-until (lambda () (gr8s::client-connection-closed-p fd)) :timeout 5)))
+      (when client (usocket:socket-close client))
+      (usocket:socket-close server)
+      (usocket:socket-close listener))))

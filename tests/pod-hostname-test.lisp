@@ -65,3 +65,67 @@
              (is (null (gr8s::containerd-container-mounts runtime pod (aref (pod-containers pod) 0) "actual-sandbox")))
              (is (= 1 calls)))
         (setf (symbol-function 'gr8s::cri-pod-sandbox-ip) original)))))
+
+(test hostname-override-replaces-the-hostname-and-drops-the-domain
+  (let ((object (hostname-test-object "custom-host" "t")))
+    (setf (gethash "hostnameOverride" (gethash "spec" object)) "override.example.host")
+    (let* ((pod (parse-pod object))
+           (runtime (gr8s::make-containerd-runtime :host-network nil)))
+      (is (equal "override.example.host" (gr8s::pod-runtime-hostname pod)))
+      (is (null (gr8s::pod-runtime-domain pod)))
+      (is (equal "override.example.host"
+                 (slot-value (gr8s::containerd-sandbox-config runtime pod) 'gr8s.cri.v1::hostname)))
+      (is (search (format nil "192.0.2.5~Coverride.example.host~%" #\Tab)
+                  (gr8s::pod-managed-hosts-content pod "192.0.2.5")))))
+  (flet ((rejected (override &rest fields)
+           (let ((object (hostname-test-object "" "")))
+             (setf (gethash "hostnameOverride" (gethash "spec" object)) override)
+             (loop for (key value) on fields by #'cddr do (setf (gethash key (gethash "spec" object)) value))
+             (signals gr8s:kubernetes-error (parse-pod object)))))
+    (rejected "Not-RFC1123")
+    (rejected (make-string 65 :initial-element #\a))
+    (rejected "override-host" "setHostnameAsFQDN" t)
+    (rejected "override-host" "hostNetwork" t))
+  (with-temporary-store (store directory)
+    (values directory)
+    (let* ((object (hostname-test-object "" ""))
+           (pod (progn (setf (gethash "hostnameOverride" (gethash "spec" object)) "first")
+                       (create-pod store (parse-pod object))))
+           (changed (gr8s::copy-core-object (pod-to-object pod))))
+      (setf (gethash "hostnameOverride" (gethash "spec" changed)) "second")
+      (signals gr8s:kubernetes-error (gr8s::update-pod store (parse-pod changed) (pod-resource-version pod))))))
+
+(test set-hostname-as-fqdn-names-the-sandbox-by-its-fqdn
+  (let* ((object (hostname-test-object "short" "headless"))
+         (runtime (gr8s::make-containerd-runtime :host-network nil)))
+    (setf (gethash "setHostnameAsFQDN" (gethash "spec" object)) t)
+    (let ((pod (parse-pod object)))
+      (is (equal "short.headless.default.svc.cluster.local" (gr8s::pod-sandbox-hostname pod)))
+      (is (equal "short.headless.default.svc.cluster.local"
+                 (slot-value (gr8s::containerd-sandbox-config runtime pod) 'gr8s.cri.v1::hostname)))
+      ;; The hosts file still names the short hostname and the FQDN.
+      (is (search (format nil "192.0.2.5~Cshort.headless.default.svc.cluster.local~Cshort" #\Tab #\Tab)
+                  (gr8s::pod-managed-hosts-content pod "192.0.2.5"))))
+    ;; Without a subdomain there is no domain, so the hostname stays short.
+    (let ((plain (hostname-test-object "short" "")))
+      (setf (gethash "setHostnameAsFQDN" (gethash "spec" plain)) t)
+      (is (equal "short" (gr8s::pod-sandbox-hostname (parse-pod plain)))))
+    ;; A kernel hostname is at most 64 characters, so a longer FQDN cannot start.
+    (let ((long (hostname-test-object (make-string 40 :initial-element #\a) "headless")))
+      (setf (gethash "setHostnameAsFQDN" (gethash "spec" long)) t)
+      (signals gr8s::runtime-error (gr8s::pod-sandbox-hostname (parse-pod long))))
+    (setf (gethash "setHostnameAsFQDN" (gethash "spec" object)) "yes")
+    (signals gr8s:kubernetes-error (parse-pod object))))
+
+(test deprecated-service-account-alias-names-the-account
+  (let ((object (com.inuoe.jzon:parse *valid-pod-json*)))
+    (setf (gethash "serviceAccount" (gethash "spec" object)) "builder")
+    (let ((spec (gethash "spec" (pod-to-object (parse-pod object)))))
+      (is (equal "builder" (gethash "serviceAccountName" spec)))
+      (is (equal "builder" (gethash "serviceAccount" spec)))))
+  (let ((object (com.inuoe.jzon:parse *valid-pod-json*)))
+    (setf (gethash "serviceAccount" (gethash "spec" object)) "ignored"
+          (gethash "serviceAccountName" (gethash "spec" object)) "named")
+    (let ((spec (gethash "spec" (pod-to-object (parse-pod object)))))
+      (is (equal "named" (gethash "serviceAccountName" spec)))
+      (is (equal "named" (gethash "serviceAccount" spec))))))

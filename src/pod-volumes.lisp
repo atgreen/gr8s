@@ -148,8 +148,8 @@
                                  (core-base64-bytes value field)))) values)))))
     data))
 
-(defun write-projected-volume-file (target bytes mode group)
-  "Atomically publish BYTES with final permissions, starting with a private file."
+(defun write-projected-volume-file (target bytes mode group &optional owner)
+  "Atomically publish BYTES with final permissions and optional OWNER, starting with a private file."
   (let ((temporary (private-temporary-path target)))
     (ensure-directories-exist target)
     (unwind-protect
@@ -160,6 +160,7 @@
                   (stream (sb-sys:make-fd-stream descriptor :output t
                                                :element-type '(unsigned-byte 8) :auto-close t)))
              (unwind-protect (write-sequence bytes stream) (close stream)))
+           (when owner (sb-posix:chown (namestring temporary) owner #xffffffff))
            (set-pod-volume-permissions temporary mode group)
            (sb-posix:rename (namestring temporary) (namestring target)))
       (when (probe-file temporary) (delete-file temporary)))))
@@ -495,10 +496,34 @@ A literal value may refer to any variable defined before it, as $(NAME)."
   "Map a validated seccompProfile to CRI, leaving an unset profile to mean Unconfined."
   (let ((profile (and context (gethash "seccompProfile" context))))
     (when profile
-      (make-instance 'gr8s.cri.v1::security-profile
-                     :profile-type (if (equal "RuntimeDefault" (gethash "type" profile))
-                                       gr8s.cri.v1::|+PROFILETYPE-RuntimeDefault+|
-                                       gr8s.cri.v1::|+PROFILETYPE-Unconfined+|)))))
+      (let ((type (gethash "type" profile)))
+        (if (equal type "Localhost")
+            (make-instance 'gr8s.cri.v1::security-profile
+                           :profile-type gr8s.cri.v1::|+PROFILETYPE-Localhost+|
+                           :localhost-ref (namestring (merge-pathnames (gethash "localhostProfile" profile)
+                                                                       *seccomp-profile-root*)))
+            (make-instance 'gr8s.cri.v1::security-profile
+                           :profile-type (if (equal "RuntimeDefault" type)
+                                             gr8s.cri.v1::|+PROFILETYPE-RuntimeDefault+|
+                                             gr8s.cri.v1::|+PROFILETYPE-Unconfined+|)))))))
+
+(defun cri-apparmor-profile (context)
+  "Map a validated appArmorProfile to CRI. Unset leaves the runtime's default, which a node
+without AppArmor never reaches: admission refuses any other profile there."
+  (let ((profile (and context (gethash "appArmorProfile" context))))
+    (when (and profile (host-apparmor-enabled-p))
+      (let ((type (gethash "type" profile)))
+        (make-instance 'gr8s.cri.v1::security-profile
+                       :profile-type (cond ((equal type "RuntimeDefault") gr8s.cri.v1::|+PROFILETYPE-RuntimeDefault+|)
+                                           ((equal type "Localhost") gr8s.cri.v1::|+PROFILETYPE-Localhost+|)
+                                           (t gr8s.cri.v1::|+PROFILETYPE-Unconfined+|))
+                       :localhost-ref (gethash "localhostProfile" profile ""))))))
+
+(defun cri-supplemental-groups-policy (context)
+  "Map supplementalGroupsPolicy to CRI: Strict leaves out the groups the image declares for the user."
+  (if (equal "Strict" (and context (gethash "supplementalGroupsPolicy" context)))
+      gr8s.cri.v1::|+SUPPLEMENTALGROUPSPOLICY-Strict+|
+      gr8s.cri.v1::|+SUPPLEMENTALGROUPSPOLICY-Merge+|))
 
 (defun cri-selinux-options (context)
   "Map validated seLinuxOptions to the CRI label; enforcement belongs to the runtime."
@@ -519,42 +544,52 @@ A literal value may refer to any variable defined before it, as $(NAME)."
   "Return Pod-level confinement initargs; containers derive their SELinux context from these."
   (let ((context (gethash "securityContext" (gethash "spec" (pod-to-object pod)))))
     (list :seccomp (cri-seccomp-profile context)
+          :apparmor (cri-apparmor-profile context)
           :selinux-options (cri-selinux-options context)
-          :supplemental-groups (pod-supplemental-groups pod))))
+          :supplemental-groups (pod-supplemental-groups pod)
+          :supplemental-groups-policy (cri-supplemental-groups-policy context))))
 
-(defun verify-run-as-non-root (user image-uid image-username)
-  "Enforce runAsNonRoot as the kubelet does: an explicit runAsUser must be
-   nonzero; otherwise the image's own configured user must be non-root. The
-   image user (IMAGE-UID, IMAGE-USERNAME) comes from its CRI record, so a Pod
-   that sets runAsNonRoot without a runAsUser still runs when its image declares
-   a non-root user (as ko-built images do)."
-  (cond
-    ((and user (plusp user)))                                 ; explicit non-root uid
-    (user (container-config-error "runAsNonRoot cannot be combined with runAsUser 0"))
-    ((and image-uid (plusp image-uid)))                       ; image's own non-root uid
-    (image-uid (container-config-error "runAsNonRoot but the image runs as root (uid 0)"))
-    ((and image-username (plusp (length image-username)) (not (equal image-username "root")))) ; non-root username
-    (t (container-config-error
-        "runAsNonRoot requires a nonzero runAsUser or an image that declares a non-root user"))))
+(defun verify-run-as-non-root (pod container effective image-user)
+  "Refuse to create CONTAINER when runAsNonRoot holds and it would run as root, as a kubelet does.
+IMAGE-USER returns the image's numeric user (or NIL) and its user name; an image naming neither runs as root."
+  (when (eq t (gethash "runAsNonRoot" effective))
+    (let ((user (gethash "runAsUser" effective))
+          (where (format nil "(pod: ~S, container: ~A)"
+                         (format nil "~A_~A(~A)" (pod-name pod) (pod-namespace pod) (pod-uid pod))
+                         (container-spec-name container))))
+      (cond
+        (user
+         (when (eql 0 user) (container-config-error "container's runAsUser breaks non-root policy ~A" where)))
+        (t
+         (multiple-value-bind (uid username) (if image-user (funcall image-user) (values nil ""))
+           (cond ((and (null uid) (plusp (length username)))
+                  (container-config-error "container has runAsNonRoot and image has non-numeric user (~A), cannot verify user is non-root ~A"
+                                          username where))
+                 ((or (null uid) (eql 0 uid))
+                  (container-config-error "container has runAsNonRoot and image will run as root ~A" where))
+                 ((not (<= 1 uid 2147483647))
+                  (container-config-error "container has runAsNonRoot and image has an invalid user id (~D). (Must be 1-(2147483647)) ~A"
+                                          uid where)))))))))
 
-(defun containerd-pod-security-context (pod container &key target-id image-uid image-username)
+(defun containerd-pod-security-context (pod container &key target-id image-user)
   "Map effective Pod/container Linux identities, confinement and privileges to the CRI API.
-TARGET-ID names the running container whose PID namespace an ephemeral container joins.
-IMAGE-UID/IMAGE-USERNAME are the container image's configured user, for verifying runAsNonRoot."
+TARGET-ID names the running container whose PID namespace an ephemeral container joins;
+IMAGE-USER reports the user the container's image runs as, for runAsNonRoot."
   (let* ((pod-context (gethash "securityContext" (gethash "spec" (pod-to-object pod))))
          (container-context (gethash "securityContext" (pod-runtime-container-object pod container)))
          (effective (core-object)))
     (dolist (context (list pod-context container-context))
       (when context (maphash (lambda (key value) (setf (gethash key effective) value)) context)))
     (let ((user (gethash "runAsUser" effective)) (group (gethash "runAsGroup" effective)))
-      (when (eq t (gethash "runAsNonRoot" effective))
-        (verify-run-as-non-root user image-uid image-username))
+      (verify-run-as-non-root pod container effective image-user)
       (make-instance
        'gr8s.cri.v1::linux-container-security-context
        :run-as-user (when user (make-instance 'gr8s.cri.v1::int64value :value user))
        :run-as-group (when group (make-instance 'gr8s.cri.v1::int64value :value group))
        :supplemental-groups (pod-supplemental-groups pod)
+       :supplemental-groups-policy (cri-supplemental-groups-policy pod-context)
        :seccomp (cri-seccomp-profile effective)
+       :apparmor (cri-apparmor-profile effective)
        :selinux-options (cri-selinux-options effective)
        :namespace-options (make-instance
                            'gr8s.cri.v1::namespace-option

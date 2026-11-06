@@ -530,6 +530,33 @@ operation streams cross the node-agent gRPC boundary.
 Runtime objects are labeled with gr8s ownership metadata so reconciliation and
 deletion can avoid unrelated workloads.
 
+### Preloaded images
+
+An agent with its own (managed) containerd imports every `*.tar` image archive in
+`images/` under its state directory when it starts, before any Pod can start, as
+k3s does with its airgap images. For `serve`'s local agent that directory is
+`<state>/agent/images/`; for `gr8s agent` it is `<state>/images/`. Archives may be
+OCI image layouts or `docker save` output. They go into containerd's `k8s.io`
+namespace under the names they carry, unpacked for the node's platform, so a Pod
+that asks for one by that name doesn't pull it (with the default `IfNotPresent`
+policy for tagged images). Use this for nodes without registry access, or to
+skip slow pulls:
+
+```sh
+sudo mkdir -p /var/lib/gr8s-worker-b/images
+skopeo copy docker://docker.io/library/nginx:1.27 \
+  oci-archive:nginx.tar:docker.io/library/nginx:1.27
+sudo mv nginx.tar /var/lib/gr8s-worker-b/images/
+```
+
+Keep the full reference after the archive path: a bare tag would be stored as
+`import-gr8s:TAG`. `scripts/save-image-archives.sh DIRECTORY` saves the images the
+upstream conformance selection uses. Each archive's import is logged, and one
+that fails to import is logged and skipped. Archives are imported again on every
+start. An import saves the network but not the disk work: containerd still writes,
+flushes and unpacks every layer. On a virtual disk whose flushes are slow, the
+nine conformance archives took about 11 minutes, so the node became ready that much later.
+
 The pinned containerd 2.4.2 daemon, shim, and baseline CNI plugins 1.9.1 are
 built from Go source with cgo disabled; the pinned static runc release is
 checksum-verified. The dumped Common Lisp image is exposed to containerd under
@@ -659,12 +686,13 @@ make clean         remove build outputs
 See [`docs/design.md`](docs/design.md) for the compatibility and architecture
 boundary.
 
-The Kubernetes API compatibility target is **1.36** (`/version` reports
-`v1.36.0-gr8s.0`). This selects the upstream client and conformance test version;
-it is not a claim that gr8s passes Kubernetes conformance. The gr8s project release
-version is maintained separately in `gr8s.asd`.
+The Kubernetes API compatibility target is **1.37** (`/version` reports
+`v1.37.2` plus the gr8s suffix). This selects the upstream client and conformance
+test version, `registry.k8s.io/conformance:v1.37.2`, whose certified selection is
+462 specs; it is not a claim that gr8s passes Kubernetes conformance. The gr8s
+project release version is maintained separately in `gr8s.asd`.
 
-The [fourth complete native conformance run](docs/conformance-full-fourth-2026-11-04.json)
+The runs below predate the move to 1.37. The [fourth complete native conformance run](docs/conformance-full-fourth-2026-11-04.json)
 ran all **446** selected v1.36 conformance specs: **64 passed, 382 failed**.
 Compared with the [third run](docs/conformance-full-third-2026-11-04.json),
 16 previously failing cases passed and none regressed. The official JUnit archive,
@@ -887,6 +915,11 @@ individual executed specs in its printed report directory. A timeout preserves
 partial worker logs. A passing result requires every selected spec to execute
 and pass; running this command alone does not establish certification.
 
+`--image-archives DIRECTORY` stages the archives there (for example from
+`scripts/save-image-archives.sh`) as [preloaded images](#preloaded-images), so specs
+don't wait on cold pulls. The report records `preloadedImages` and each archive's
+name, size and SHA-256 under `imageArchives`, so compare runs only when they match.
+
 ### Debugging a running cluster
 
 `gr8s serve --debug-slynk-port PORT` starts an opt-in [Slynk](https://github.com/joaotavora/sly)
@@ -1009,27 +1042,42 @@ lock, as their upstream service accounts. A refused Pod shows on its owner as a
 ReplicaFailure, and a refused deletion is retried. EndpointSlices, bootstrap objects
 and status writes do not yet pass through webhooks.
 
-A node reports each container's CPU and memory from CRI statistics, from which a
-HorizontalPodAutoscaler controller scales Deployments, ReplicaSets, ReplicationControllers
-and StatefulSets on Resource and ContainerResource metrics, with upstream's tolerance,
-stabilization and rate policies. There is no metrics API or custom metrics source, so
-other metric types report a failed `ScalingActive` condition.
+The local agent serves the kubelet's endpoints on port 10250 (`serve --kubelet-port`,
+0 to turn them off): `/metrics/resource`, `/stats/summary`, `/metrics` and `/healthz`,
+measured from CRI container statistics and the node's root cgroup. They are served over TLS
+with a cluster-CA certificate for the node's address. Callers authenticate with a
+cluster-CA client certificate or a bearer token checked by TokenReview, and are authorized
+by SubjectAccessReview on `nodes/metrics`, `nodes/stats`, `nodes/healthz` or
+`nodes/proxy`, as the kubelet maps them. The Node advertises the port in
+`status.daemonEndpoints.kubeletEndpoint`, and `/api/v1/nodes/<name>/proxy/...` reaches it.
+So unmodified metrics-server, installed from its release `components.yaml`, provides
+`metrics.k8s.io`, which serves `kubectl top` and the CPU and MEM columns of k9s and
+Headlamp. A Pod's usage is the sum of its containers', since gr8s gives Pods no cgroup
+of their own. A standalone `gr8s agent` doesn't serve these endpoints yet.
+
+A HorizontalPodAutoscaler controller scales Deployments, ReplicaSets,
+ReplicationControllers and StatefulSets on Resource and ContainerResource metrics, with
+upstream's tolerance, stabilization and rate policies. When a `v1beta1.metrics.k8s.io`
+APIService is registered, it reads PodMetrics from it, as upstream does. Otherwise each
+node reports its containers' CPU and memory from CRI statistics, and the controller
+derives rates from those. There is no custom or external metrics source, so other metric
+types report a failed `ScalingActive` condition.
 
 ## Versioning
 
 gr8s versions itself as the **Kubernetes API version it implements plus a gr8s
 release suffix**, following the k3s/k0s convention (k3s's `v1.31.4+k3s1`). The
-ASDF `:version` in `gr8s.asd` is the Kubernetes API version (`1.36.0`) and the
+ASDF `:version` in `gr8s.asd` is the Kubernetes API version (`1.37.2`) and the
 single source of truth for the `/version` endpoint's `major`/`minor`, a Node's
 `kubeletVersion`, and the startup banner. The release suffix lives in a git tag
-(`v1.36.0-gr8s.0`), surfaced through the `version-string` library as
+(`v1.37.2-gr8s.0`), surfaced through the `version-string` library as
 `+gr8s-version+` and reported by `gr8s version`:
 
-- a tagged release prints the tag verbatim (`v1.36.0-gr8s.0`, `+dirty` if the
+- a tagged release prints the tag verbatim (`v1.37.2-gr8s.0`, `+dirty` if the
   tree has uncommitted changes);
-- an untagged build prints the base version with the commit (`v1.36.0-g1a2b3c4`);
+- an untagged build prints the base version with the commit (`v1.37.2-g1a2b3c4`);
 - the native binary bakes the string in at build time.
 
-Cutting a release is therefore just a tag — `git tag v1.36.0-gr8s.1` — and the
+Cutting a release is therefore just a tag — `git tag v1.37.2-gr8s.1` — and the
 binary, `/version`, `kubeletVersion`, and banner all report it with no code
 change.

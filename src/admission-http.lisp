@@ -24,6 +24,18 @@
   "Run BODY's writes through the webhooks as the in-process CONTROLLER, which has no HTTP request."
   `(let ((*admission-controller* ,controller)) ,@body))
 
+(defun controller-create-core-resource (store resource input namespace controller)
+  "Create INPUT as the in-process CONTROLLER does through the API, past admission. Call
+without STORE's lock, because webhooks answer over the network."
+  (with-controller-admission (controller)
+    (admitted-create-core-resource store resource input namespace)))
+
+(defun controller-update-core-resource (store resource namespace name transform controller)
+  "Update as the in-process CONTROLLER does through the API, past admission. Call without
+STORE's lock, because webhooks answer over the network."
+  (with-controller-admission (controller)
+    (admitted-update-core-resource store resource namespace name transform)))
+
 (defun admit-controller-pod (store object controller)
   "Run a Pod OBJECT that CONTROLLER is creating through the webhooks and in-cluster admission.
 Call without STORE's lock, because webhooks answer over the network. Return the POD to commit."
@@ -44,6 +56,26 @@ Call without STORE's lock. Writes that need no such lock use ADMITTED-CREATE-COR
       (if (not (admission-active-p store attributes))
           input
           (progn
+            (setf (admission-object attributes) (admission-input-view store resource input namespace attributes))
+            (let ((mutated (admission-mutate store attributes)))
+              (setf (admission-object attributes) (admission-input-view store resource mutated namespace attributes))
+              (admission-validate store attributes)
+              mutated))))))
+
+(defun admit-controller-write (store resource input old namespace controller)
+  "Run CONTROLLER's create of INPUT, or its update of OLD to INPUT, through admission,
+returning what to commit. Call without STORE's lock."
+  (with-controller-admission (controller)
+    (let* ((name (gethash "name" (gethash "metadata" input)))
+           (attributes (admission-attributes-for store (if old "UPDATE" "CREATE") resource namespace name
+                                                 :options (admission-request-options
+                                                           (if old "UpdateOptions" "CreateOptions")))))
+      (if (not (admission-active-p store attributes))
+          input
+          (progn
+            (when old
+              (setf (admission-old-object attributes)
+                    (admission-stamp-object attributes (core-resource-update-view resource old))))
             (setf (admission-object attributes) (admission-input-view store resource input namespace attributes))
             (let ((mutated (admission-mutate store attributes)))
               (setf (admission-object attributes) (admission-input-view store resource mutated namespace attributes))
@@ -110,6 +142,15 @@ without a name yet and custom objects, which stay in the requested version."
                 (kubernetes-error () nil)))
          (copy-core-object input)))))
 
+(defun admission-preview-input (input)
+  "Return INPUT without the resourceVersion that only its committing create refuses."
+  (let ((metadata (gethash "metadata" input)))
+    (if (and (hash-table-p metadata) (nth-value 1 (gethash "resourceVersion" metadata)))
+        (let ((copy (copy-core-object input)))
+          (remhash "resourceVersion" (gethash "metadata" copy))
+          copy)
+        input)))
+
 (defun admitted-create-core-resource (store resource input namespace &key dry-run)
   "Create through the webhooks: mutate, preview the result, validate, then commit that identity."
   (let* ((metadata (require-object (gethash "metadata" input) "metadata"))
@@ -121,7 +162,15 @@ without a name yet and custom objects, which stay in the requested version."
         (progn
           (setf (admission-object attributes) (admission-input-view store resource input namespace attributes))
           (let* ((mutated (admission-mutate store attributes))
-                 (preview (create-core-resource store resource mutated namespace :dry-run t))
+                 ;; Upstream's storage refuses a set resourceVersion or a name in use only after
+                 ;; validating admission has run, so the preview leaves the revision out, a name
+                 ;; in use previews the object as submitted, and the commit refuses either.
+                 (preview (handler-case
+                              (create-core-resource store resource (admission-preview-input mutated) namespace :dry-run t)
+                            (kubernetes-error (condition)
+                              (if (equal "AlreadyExists" (kubernetes-error-reason condition))
+                                  (admission-input-view store resource (admission-preview-input mutated) namespace attributes)
+                                  (error condition)))))
                  (preview-metadata (gethash "metadata" preview))
                  (final (copy-core-object mutated)))
             (setf (admission-object attributes) (admission-stamp-object attributes preview)

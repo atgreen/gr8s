@@ -27,12 +27,12 @@
   "Return a Pod security context requesting sysctls NAMES, each set to 1."
   (gr8s::core-object "sysctls" (map 'vector (lambda (name) (gr8s::core-object "name" name "value" "1")) names)))
 
-(test scheduler-name-default-is-accepted-and-a-custom-one-is-refused
-  ;; Controller-generated specs routinely set schedulerName: default-scheduler;
-  ;; gr8s runs that one built-in scheduler, so it admits it (ate's
-  ;; podcertcontroller needs this) but refuses a scheduler it would never bind.
+(test scheduler-name-default-and-custom-ones-are-accepted
+  ;; Controller-generated specs routinely set schedulerName: default-scheduler,
+  ;; which gr8s's scheduler is. As upstream, a Pod may name another scheduler,
+  ;; which binds it through pods/binding; gr8s's scheduler leaves it alone.
   (is (gr8s::pod-name (parse-pod (gap-pod-object "schedulerName" "default-scheduler"))))
-  (signals kubernetes-error (parse-pod (gap-pod-object "schedulerName" "custom-scheduler")))
+  (is (not (gr8s::pod-for-this-scheduler-p (parse-pod (gap-pod-object "schedulerName" "custom-scheduler")))))
   ;; topologySpreadConstraints is admitted (unhonored on a single node) rather
   ;; than blocking an otherwise valid Pod.
   (is (gr8s::pod-name
@@ -54,15 +54,21 @@
   ;; one, the image's own user decides -- a non-root image (ko builds run as
   ;; 65532) passes, a root image is refused. This is what let ate's
   ;; podcertcontroller (runAsNonRoot, no runAsUser, image user 65532) run.
-  (flet ((ok (user uid name) (finishes (gr8s::verify-run-as-non-root user uid name)))
-         (bad (user uid name) (signals gr8s::container-config-error (gr8s::verify-run-as-non-root user uid name))))
-    (ok 1000 nil nil)          ; explicit non-root uid
-    (bad 0 nil nil)            ; explicit uid 0
-    (ok nil 65532 "")          ; image's non-root uid
-    (bad nil 0 "")             ; image runs as root uid 0
-    (ok nil nil "nonroot")     ; image's non-root username
-    (bad nil nil "root")       ; image username root
-    (bad nil nil "")))         ; nothing proves non-root
+  ;; As the kubelet's verifyRunAsNonRoot, a user name alone cannot prove non-root.
+  (let* ((pod (parse-pod (gap-pod-object))) (container (aref (pod-containers pod) 0)))
+    (flet ((verify (user uid name)
+             (gr8s::verify-run-as-non-root
+              pod container (if user (gr8s::core-object "runAsNonRoot" t "runAsUser" user) (gr8s::core-object "runAsNonRoot" t))
+              (lambda () (values uid name)))))
+      (flet ((ok (user uid name) (finishes (verify user uid name)))
+             (bad (user uid name) (signals gr8s::container-config-error (verify user uid name))))
+        (ok 1000 nil nil)          ; explicit non-root uid
+        (bad 0 nil nil)            ; explicit uid 0
+        (ok nil 65532 "")          ; image's non-root uid
+        (bad nil 0 "")             ; image runs as root uid 0
+        (bad nil nil "nonroot")    ; a non-numeric user name cannot be verified
+        (bad nil nil "root")       ; image username root
+        (bad nil nil "")))))       ; nothing proves non-root
 
 (test sysctl-names-are-validated-together-and-either-separator-means-the-same-variable
   (is (gr8s::pod-name (parse-pod (gap-pod-object "securityContext" (gap-sysctl-security "kernel.shm_rmid_forced")))))
@@ -118,9 +124,20 @@
     (parse-pod (gap-pod-object "hostNetwork" t
                                "containers" (vector (gap-container "web" "ports" (vector (gr8s::core-object "containerPort" 8080 "hostPort" 81))))))))
 
-(test pod-os-accepts-only-the-operating-system-nodes-run
+(test pod-os-is-validated-by-the-api-and-enforced-by-the-node
   (is (gr8s::pod-name (parse-pod (gap-pod-object "os" (gr8s::core-object "name" "linux")))))
-  (signals kubernetes-error (parse-pod (gap-pod-object "os" (gr8s::core-object "name" "windows")))))
+  (is (null (gr8s::pod-os-failure (parse-pod (gap-pod-object "os" (gr8s::core-object "name" "linux"))))))
+  ;; As upstream ("PodOSRejection"), the API accepts a Windows Pod and the Linux node refuses it.
+  (let ((failure (gr8s::pod-os-failure (parse-pod (gap-pod-object "os" (gr8s::core-object "name" "windows"))))))
+    (is (equal "PodOSNotSupported" (cdr failure)))
+    (is (equal "Failed to admit pod as the OS field doesn't match node OS" (car failure))))
+  (signals kubernetes-error (parse-pod (gap-pod-object "os" (gr8s::core-object "name" "plan9"))))
+  ;; Linux-only settings are forbidden for a Windows Pod.
+  (signals kubernetes-error
+    (parse-pod (gap-pod-object "os" (gr8s::core-object "name" "windows") "hostPID" t)))
+  (signals kubernetes-error
+    (parse-pod (gap-pod-object "os" (gr8s::core-object "name" "windows")
+                               "securityContext" (gr8s::core-object "runAsUser" 1000)))))
 
 (test qos-class-follows-cpu-and-memory-requests-and-limits
   (flet ((qos (&optional resources)
@@ -213,8 +230,10 @@
                                (vector (gap-container "plain" "startupProbe" (gr8s::core-object "exec" (gr8s::core-object "command" #("true"))))))))
   (signals kubernetes-error
     (parse-pod (gap-pod-object "initContainers" (vector (gap-container "plain" "restartPolicy" "OnFailure")))))
+  ;; An application container may set its own restartPolicy (ContainerRestartRules), but only a valid one.
+  (is (gr8s::pod-name (parse-pod (gap-pod-object "containers" (vector (gap-container "app" "restartPolicy" "Always"))))))
   (signals kubernetes-error
-    (parse-pod (gap-pod-object "containers" (vector (gap-container "app" "restartPolicy" "Always"))))))
+    (parse-pod (gap-pod-object "containers" (vector (gap-container "app" "restartPolicy" "Sometimes"))))))
 
 (defun gap-sidecar-pod (store &optional (policy "Always"))
   "Create a Pod: sidecar, ordinary init container, then one application."
@@ -813,7 +832,8 @@
 (test a-node-reported-resize-wait-becomes-the-pod-condition
   (with-temporary-store (store path)
     (values path)
-    (let* ((pod (create-pod store (parse-pod (gap-pod-object))))
+    ;; Only a Pod a node has can wait on a resize; an unbound one reports just PodScheduled.
+    (let* ((pod (create-pod store (parse-pod (gap-pod-object "nodeName" "worker-a"))))
            (status (gr8s::core-object
                     "phase" "Running"
                     "conditions" (vector (gr8s::core-object "type" "PodResizePending" "status" "True"
@@ -843,3 +863,19 @@
           (is (search "enough allocatable" (gr8s::kubernetes-error-message condition)))
           (is (equal "NodeCapacity"
                      (gethash "reason" (aref (gethash "causes" (gr8s::kubernetes-error-details condition)) 0)))))))))
+
+(test deletion-stops-a-readiness-probed-container-while-its-probes-still-run
+  (flet ((stops (container)
+           (with-temporary-store (store directory)
+             (let* ((now 4000000000) (gr8s::*container-lifecycle-clock* (lambda () now))
+                    (pod (create-pod store (parse-pod (gap-pod-object "containers" (vector container)))))
+                    (runtime (gr8s::make-containerd-runtime :log-root directory)))
+               (with-lifecycle-cri (fixture pod (list (lifecycle-info "app" 0 gr8s.cri.v1::+containerstate-container_running+ now)))
+                 (gr8s::stop-pod-containers-in-order runtime pod (+ (funcall gr8s::*pod-deletion-clock*) 30))
+                 (loop for call in (lifecycle-cri-fixture-calls fixture)
+                       when (eq :stop (first call)) collect (second call)))))))
+    ;; Stopped here, before removal stops the probes, so readiness can see it leave service.
+    (is (equal '("app-0") (stops (gap-container "app" "readinessProbe"
+                                                (gr8s::core-object "exec" (gr8s::core-object "command" #("ready")))))))
+    ;; With nothing to observe or run first, removal stops it as before.
+    (is (null (stops (gap-container "app"))))))

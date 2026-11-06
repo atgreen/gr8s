@@ -43,7 +43,7 @@
   (with-crd-api (store path)
     (values store path)
     (multiple-value-bind (body code)
-        (drakma:http-request "http://127.0.0.1:18094/apis/apiextensions.k8s.io/v1/customresourcedefinitions"
+        (drakma:http-request (crd-api-url "/apis/apiextensions.k8s.io/v1/customresourcedefinitions")
                             :method :post :content-type "application/vnd.kubernetes.protobuf" :content (crd-test-wire-request))
       (is (= 201 code) "~A" body)
       (let* ((object (com.inuoe.jzon:parse body))

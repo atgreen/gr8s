@@ -13,23 +13,25 @@
   (core-object "apiVersion" "v1" "kind" "APIGroup" "name" "certificates.k8s.io"
                "versions" (vector (core-object "groupVersion" "certificates.k8s.io/v1" "version" "v1")
                                   (core-object "groupVersion" "certificates.k8s.io/v1beta1" "version" "v1beta1"))
-               ;; CertificateSigningRequest and ClusterTrustBundle are GA at v1
-               ;; (the preferred version); the v1beta1 version carries
-               ;; PodCertificateRequest (KEP-4317).
+               ;; CertificateSigningRequest, ClusterTrustBundle and PodCertificateRequest
+               ;; are GA at v1 (the preferred version) in Kubernetes 1.37; v1beta1 still
+               ;; serves PodCertificateRequest for clients that have not moved.
                "preferredVersion" (core-object "groupVersion" "certificates.k8s.io/v1" "version" "v1")))
+
+(defun pod-certificate-request-discovery ()
+  "The PodCertificateRequest collection and its signer-written status subresource."
+  (let ((collection (find "podcertificaterequests" (stored-resource-discovery "certificates.k8s.io/v1")
+                          :key (lambda (entry) (gethash "name" entry)) :test #'equal)))
+    (vector collection
+            (core-object "name" "podcertificaterequests/status" "singularName" "" "namespaced" t
+                         "kind" "PodCertificateRequest" "verbs" #("get" "patch" "update")))))
 
 (defun csr-v1beta1-discovery-response ()
   "Advertise certificates.k8s.io/v1beta1 resources (PodCertificateRequest + its
    signer-written status subresource)."
   (json-response (core-object "apiVersion" "v1" "kind" "APIResourceList"
                               "groupVersion" "certificates.k8s.io/v1beta1"
-                              "resources"
-                              (concatenate 'vector
-                                (stored-resource-discovery "certificates.k8s.io/v1beta1")
-                                (vector (core-object "name" "podcertificaterequests/status"
-                                                     "singularName" "" "namespaced" t
-                                                     "kind" "PodCertificateRequest"
-                                                     "verbs" #("get" "patch" "update")))))))
+                              "resources" (pod-certificate-request-discovery))))
 
 (defun csr-discovery-response ()
   "Advertise only actual collection, status and approval operations."
@@ -38,7 +40,8 @@
                   (map 'vector (lambda (subresource)
                                  (core-object "name" (concatenate 'string "certificatesigningrequests/" subresource)
                                               "singularName" "" "namespaced" nil "kind" "CertificateSigningRequest"
-                                              "verbs" #("get" "patch" "update"))) '("approval" "status"))))))
+                                              "verbs" #("get" "patch" "update"))) '("approval" "status"))
+                  (subseq (pod-certificate-request-discovery) 1)))))
 
 (defun csr-http-request-actor (store)
   "Derive immutable request actor fields from verified TLS or token identity, never headers claiming a username."

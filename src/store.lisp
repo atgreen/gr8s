@@ -45,12 +45,18 @@
   (pod-condition-histories (make-hash-table :test #'equal))
   (pod-revision 0)
   (pod-revision-ceiling 0)
+  ;; NIL for a store no client watches, such as an agent's copy of its desired Pods.
+  (watch-journal-p t)
   (pod-watch-floor 0)
   pod-watch-journal
   (pod-watch-journal-length 0)
+  (pod-watch-journal-bytes 0)
+  ;; Pod UID to the API view its newest journal event ended with, which the next shares.
+  (pod-watch-views (make-hash-table :test #'equal))
   (node-watch-floor 0)
   node-watch-journal
   (node-watch-journal-length 0)
+  (node-watch-journal-bytes 0)
   (pod-published-statuses (make-hash-table :test #'equal))
   (pod-client-statuses (make-hash-table :test #'equal))
   ;; Pod UID to the node reserved for it while its preemption victims terminate.
@@ -156,6 +162,7 @@
           (gethash "name" object) (node-record-name node)
           (gethash "podCIDR" object) (node-record-pod-cidr node)
           (gethash "underlayAddress" object) (node-record-underlay-address node)
+          (gethash "kubeletPort" object) (node-record-kubelet-port node)
           (gethash "ready" object) (not (null (node-record-ready-p node))))
     (when (node-record-last-heartbeat node)
       (setf (gethash "lastHeartbeat" object) (node-record-last-heartbeat node)))
@@ -186,6 +193,7 @@
                       :name (gethash "name" object)
                       :pod-cidr (gethash "podCIDR" object)
                       :underlay-address (gethash "underlayAddress" object "")
+                      :kubelet-port (let ((port (gethash "kubeletPort" object 0))) (if (integerp port) port 0))
                       :last-heartbeat (when (integerp heartbeat) heartbeat)
                       :lease-deadline (when (integerp deadline) deadline)
                       :labels (gethash "labels" object)

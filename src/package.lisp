@@ -10,6 +10,13 @@
   (:use #:cl)
   (:shadow #:type #:block))
 
+(defpackage #:gr8s.containerd.tasks.v1
+  (:use #:cl)
+  (:shadow #:signal))
+
+(defpackage #:gr8s.containerd.transfer.v1
+  (:use #:cl))
+
 (defpackage #:gr8s.node.v1
   (:use #:cl)
   (:shadow #:labels #:phase))

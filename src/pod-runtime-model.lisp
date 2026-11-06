@@ -30,14 +30,22 @@
     (remhash key object))
   object)
 
+(defparameter *seccomp-profile-root* #P"/var/lib/kubelet/seccomp/"
+  "Where Localhost seccomp profiles are read from: the kubelet's default, where profile installers
+such as the security-profiles-operator put them.")
+
 (defun validate-seccomp-profile (profile)
-  "Accept profiles CRI can apply; Localhost is refused because no profile root is configured."
+  "Accept the profile types CRI applies. A Localhost profile names a file under the profile root."
   (drop-null-fields (require-object profile "securityContext.seccompProfile"))
   (reject-unsupported-fields profile '("type" "localhostProfile") "seccompProfile")
-  (unless (member (gethash "type" profile) '("RuntimeDefault" "Unconfined") :test #'equal)
-    (invalid-pod "seccompProfile.type ~S is not supported" (gethash "type" profile)))
-  (when (gethash "localhostProfile" profile)
-    (invalid-pod "seccompProfile.localhostProfile requires type Localhost")))
+  (let ((type (gethash "type" profile)) (localhost (gethash "localhostProfile" profile)))
+    (unless (member type '("RuntimeDefault" "Unconfined" "Localhost") :test #'equal)
+      (invalid-pod "seccompProfile.type ~S must be RuntimeDefault, Unconfined or Localhost" type))
+    (cond ((equal type "Localhost")
+           (unless (safe-volume-relative-path-p localhost)
+             (invalid-pod "seccompProfile.localhostProfile must be a relative path without traversal when type is Localhost")))
+          (localhost
+           (invalid-pod "seccompProfile.localhostProfile requires type Localhost")))))
 
 (defun validate-selinux-options (options)
   "Validate the SELinux label components forwarded to the container runtime."
@@ -58,18 +66,66 @@
                                    (or (alphanumericp character) (char= character #\_))) name))
                (invalid-pod "capabilities.~A contains an invalid name" field)))))
 
+(defun validate-apparmor-profile (profile)
+  "Validate an appArmorProfile as the API server does; the node decides whether it can enforce it."
+  (drop-null-fields (require-object profile "securityContext.appArmorProfile"))
+  (reject-unsupported-fields profile '("type" "localhostProfile") "appArmorProfile")
+  (let ((type (gethash "type" profile)) (localhost (gethash "localhostProfile" profile)))
+    (cond ((equal type "Localhost")
+           (unless (and (stringp localhost) (plusp (length (string-trim " " localhost))))
+             (invalid-pod "appArmorProfile.localhostProfile must be set when AppArmor type is Localhost"))
+           (unless (equal localhost (string-trim '(#\Space #\Tab #\Newline #\Return) localhost))
+             (invalid-pod "appArmorProfile.localhostProfile must not be padded with whitespace"))
+           (when (> (length localhost) 4095)
+             (invalid-pod "appArmorProfile.localhostProfile may not be more than 4095 bytes")))
+          ((member type '("RuntimeDefault" "Unconfined") :test #'equal)
+           (when localhost
+             (invalid-pod "appArmorProfile.localhostProfile can only be set when AppArmor type is Localhost")))
+          ((member type '(nil "") :test #'equal)
+           (invalid-pod "appArmorProfile.type is required when appArmorProfile is set"))
+          (t (invalid-pod "appArmorProfile.type ~S must be RuntimeDefault, Unconfined or Localhost" type)))))
+
+(defun validate-windows-options (options)
+  "Accept windowsOptions, which a Linux node ignores, when they are well formed."
+  (drop-null-fields (require-object options "securityContext.windowsOptions"))
+  (reject-unsupported-fields options '("gmsaCredentialSpecName" "gmsaCredentialSpec" "runAsUserName" "hostProcess")
+                             "windowsOptions")
+  (dolist (field '("gmsaCredentialSpecName" "gmsaCredentialSpec" "runAsUserName"))
+    (when (and (gethash field options) (not (stringp (gethash field options))))
+      (invalid-pod "windowsOptions.~A must be a string" field)))
+  (multiple-value-bind (value present) (gethash "hostProcess" options)
+    (when (and present (not (member value '(t nil))))
+      (invalid-pod "windowsOptions.hostProcess must be boolean"))))
+
+(defun validate-security-context-enum (context field values)
+  "Require CONTEXT's optional FIELD to be one of VALUES."
+  (when (gethash field context)
+    (unless (member (gethash field context) values :test #'equal)
+      (invalid-pod "securityContext.~A ~S is not one of ~{~A~^, ~}" field (gethash field context) values))))
+
 (defun validate-linux-security-context (context &key pod)
   "Validate the Linux identity, confinement and privilege settings implemented by the CRI adapter."
   (when context
     (drop-null-fields (require-object context "securityContext"))
     (reject-unsupported-fields context
                                (if pod '("runAsUser" "runAsGroup" "runAsNonRoot" "fsGroup"
-                                         "fsGroupChangePolicy"
-                                         "supplementalGroups" "seLinuxOptions" "seccompProfile" "sysctls")
+                                         "supplementalGroups" "seLinuxOptions" "seccompProfile" "sysctls"
+                                         "fsGroupChangePolicy" "supplementalGroupsPolicy" "seLinuxChangePolicy"
+                                         "appArmorProfile" "windowsOptions")
                                    '("runAsUser" "runAsGroup" "runAsNonRoot" "privileged"
                                      "readOnlyRootFilesystem" "allowPrivilegeEscalation"
-                                     "seLinuxOptions" "seccompProfile" "capabilities")) "securityContext")
+                                     "seLinuxOptions" "seccompProfile" "capabilities"
+                                     "appArmorProfile" "windowsOptions" "procMount")) "securityContext")
     (when pod (validate-pod-sysctls context))
+    (validate-security-context-enum context "fsGroupChangePolicy" '("OnRootMismatch" "Always"))
+    (validate-security-context-enum context "supplementalGroupsPolicy" '("Merge" "Strict"))
+    (validate-security-context-enum context "seLinuxChangePolicy" '("Recursive" "MountOption"))
+    (validate-security-context-enum context "procMount" '("Default" "Unmasked"))
+    ;; Pods share the node's user namespace (hostUsers is true), where /proc stays masked.
+    (when (equal "Unmasked" (gethash "procMount" context))
+      (invalid-pod "securityContext.procMount: `hostUsers` must be false to use `Unmasked`"))
+    (when (gethash "appArmorProfile" context) (validate-apparmor-profile (gethash "appArmorProfile" context)))
+    (when (gethash "windowsOptions" context) (validate-windows-options (gethash "windowsOptions" context)))
     (when (gethash "seccompProfile" context) (validate-seccomp-profile (gethash "seccompProfile" context)))
     (when (gethash "seLinuxOptions" context) (validate-selinux-options (gethash "seLinuxOptions" context)))
     (when (gethash "capabilities" context) (validate-container-capabilities (gethash "capabilities" context)))
@@ -83,15 +139,7 @@
     (dolist (field '("runAsNonRoot" "privileged" "readOnlyRootFilesystem" "allowPrivilegeEscalation"))
       (multiple-value-bind (value present) (gethash field context)
         (when (and present (not (member value '(t nil))))
-          (invalid-pod "securityContext.~A must be boolean" field))))
-    (when (and (eq t (gethash "runAsNonRoot" context))
-               (eql 0 (gethash "runAsUser" context)))
-      (invalid-pod "runAsNonRoot cannot be combined with runAsUser 0"))
-    ;; gr8s applies fsGroup ownership on volume setup; accept the policy knob
-    ;; (controller-generated specs set it) and validate its enum.
-    (let ((policy (gethash "fsGroupChangePolicy" context)))
-      (when (and policy (not (member policy '("Always" "OnRootMismatch") :test #'equal)))
-        (invalid-pod "securityContext.fsGroupChangePolicy must be Always or OnRootMismatch")))))
+          (invalid-pod "securityContext.~A must be boolean" field))))))
 
 (defun pod-metadata-subscript-reference (field)
   "Recognize a valid single-key label/annotation downward environment reference."
@@ -108,7 +156,8 @@
   (drop-null-fields (require-object reference "resourceFieldRef"))
   (reject-unsupported-fields reference '("containerName" "resource" "divisor") "resourceFieldRef")
   (unless (member (gethash "resource" reference)
-                  '("limits.cpu" "limits.memory" "requests.cpu" "requests.memory") :test #'equal)
+                  '("limits.cpu" "limits.memory" "requests.cpu" "requests.memory"
+                    "limits.ephemeral-storage" "requests.ephemeral-storage") :test #'equal)
     (invalid-pod "resourceFieldRef.resource ~S is not supported" (gethash "resource" reference)))
   (when (gethash "divisor" reference)
     (when (minusp (container-quantity-coefficient (parse-container-quantity (gethash "divisor" reference))))
@@ -290,6 +339,9 @@
     (when (and seconds (not (and (integerp seconds) (<= 600 seconds (expt 2 32)))))
       (invalid-pod "serviceAccountToken.expirationSeconds must be between 10 minutes and 2^32 seconds"))))
 
+(defconstant +pod-certificate-max-expiration-seconds+ (* 91 24 60 60)
+  "The longest lifetime a podCertificate projection may request: 91 days (7862400s).")
+
 (defun validate-pod-certificate-source (source paths)
   "Validate one podCertificate projection (KEP-4317): its required signerName, the
    one keyType gr8s issues, its bounded lifetime and its distinct output paths.
@@ -311,9 +363,17 @@
   (let ((user (gethash "user" source)))
     (when (and user (not (typep user '(integer 0 4294967294))))
       (invalid-pod "podCertificate.user must be a Linux UID")))
+  ;; Upstream's ValidatePodCertificateProjection bounds, worded as it words them:
+  ;; the 1.37 conformance specs match these messages.
   (let ((seconds (gethash "maxExpirationSeconds" source)))
-    (when (and seconds (not (and (integerp seconds) (<= 3600 seconds (expt 2 31)))))
-      (invalid-pod "podCertificate.maxExpirationSeconds must be between 3600 and 2^31 seconds")))
+    (when seconds
+      (unless (integerp seconds)
+        (invalid-pod "podCertificate.maxExpirationSeconds must be an integer"))
+      (when (< seconds 3600)
+        (invalid-pod "podCertificate.maxExpirationSeconds: Invalid value: ~D: if provided, maxExpirationSeconds must be >= 3600" seconds))
+      (when (> seconds +pod-certificate-max-expiration-seconds+)
+        (invalid-pod "podCertificate.maxExpirationSeconds: Invalid value: ~D: if provided, maxExpirationSeconds must be <= ~D"
+                     seconds +pod-certificate-max-expiration-seconds+))))
   (let ((contributed nil))
     (dolist (field '("credentialBundlePath" "keyPath" "certificateChainPath"))
       (let ((path (gethash field source)))
@@ -450,6 +510,26 @@
 (defun validate-runtime-pod-spec (spec)
   "Validate Pod-level volume, security, service account and scheduling fields."
   (validate-linux-security-context (gethash "securityContext" spec) :pod t)
+  ;; A Pod that declares itself Linux cannot carry Windows settings, as upstream validates.
+  (when (and (equal "linux" (gethash "name" (gethash "os" spec (core-object))))
+             (some (lambda (context) (and (hash-table-p context) (gethash "windowsOptions" context)))
+                   (cons (gethash "securityContext" spec)
+                         (map 'list (lambda (container) (and (hash-table-p container) (gethash "securityContext" container)))
+                              (concatenate 'vector (optional-vector spec "initContainers" "spec")
+                                           (optional-vector spec "containers" "spec")
+                                           (optional-vector spec "ephemeralContainers" "spec"))))))
+    (invalid-pod "securityContext.windowsOptions: Forbidden: windows options cannot be set for a linux pod"))
+  ;; serviceAccount is the deprecated alias: it names the account when serviceAccountName
+  ;; does not, and otherwise mirrors it, as the API server's conversion does.
+  (multiple-value-bind (alias present) (gethash "serviceAccount" spec)
+    (when present
+      (when (member alias '(null "") :test #'equal) (setf alias nil))
+      (when (and alias (not (stringp alias))) (invalid-pod "spec.serviceAccount must be a string"))
+      (when (and alias (member (gethash "serviceAccountName" spec) '(nil null "") :test #'equal))
+        (setf (gethash "serviceAccountName" spec) alias))
+      (if (stringp (gethash "serviceAccountName" spec))
+          (setf (gethash "serviceAccount" spec) (gethash "serviceAccountName" spec))
+          (remhash "serviceAccount" spec))))
   (when (gethash "serviceAccountName" spec)
     (require-dns-subdomain (gethash "serviceAccountName" spec) "serviceAccountName"))
   (multiple-value-bind (value present) (gethash "automountServiceAccountToken" spec)
@@ -477,7 +557,74 @@
   (when (gethash "nodeSelector" spec) (validate-pod-node-selector (gethash "nodeSelector" spec)))
   (validate-pod-tolerations spec)
   (validate-pod-policy-fields spec)
+  (validate-pod-scheduler-name spec)
+  (validate-pod-scheduling-gates spec)
+  (validate-pod-readiness-gates spec)
   (validate-pod-affinity spec))
+
+(defparameter +default-scheduler-name+ "default-scheduler"
+  "The scheduler a Pod names by default, which is the one gr8s runs.")
+
+(defun validate-pod-scheduler-name (spec)
+  "Default an omitted spec.schedulerName as the API server does, and require a DNS subdomain."
+  (when (member (gethash "schedulerName" spec) '(nil null "") :test #'equal)
+    (setf (gethash "schedulerName" spec) +default-scheduler-name+))
+  (require-dns-subdomain (gethash "schedulerName" spec) "spec.schedulerName"))
+
+(defun pod-scheduler-name (pod)
+  "Return the name of the scheduler responsible for placing POD."
+  (gethash "schedulerName" (gethash "spec" (pod-to-object pod)) +default-scheduler-name+))
+
+(defun pod-for-this-scheduler-p (pod)
+  "Return whether gr8s's scheduler places POD; any other scheduler binds it through pods/binding."
+  (equal +default-scheduler-name+ (pod-scheduler-name pod)))
+
+(defun validate-pod-scheduling-gates (spec)
+  "Validate spec.schedulingGates: unique qualified names, none left once a node is named."
+  (when (eq (gethash "schedulingGates" spec) 'null) (remhash "schedulingGates" spec))
+  (let ((names nil))
+    (loop for gate across (optional-vector spec "schedulingGates" "spec")
+          do (drop-null-fields (require-object gate "schedulingGate"))
+             (reject-unsupported-fields gate '("name") "schedulingGate")
+             (let ((name (gethash "name" gate)))
+               (unless (core-qualified-key-p name)
+                 (invalid-pod "spec.schedulingGates.name ~S must be a qualified name" name))
+               (when (member name names :test #'equal)
+                 (invalid-pod "spec.schedulingGates: Duplicate value: ~S" name))
+               (push name names)))
+    (when (and names (stringp (gethash "nodeName" spec)) (plusp (length (gethash "nodeName" spec))))
+      (invalid-pod "spec.nodeName: Forbidden: cannot be set until all schedulingGates have been cleared"))))
+
+(defun pod-scheduling-gated-p (pod)
+  "Return whether POD still carries scheduling gates, which keep every scheduler from placing it."
+  (plusp (length (gethash "schedulingGates" (gethash "spec" (pod-to-object pod)) #()))))
+
+(defun validate-pod-readiness-gates (spec)
+  "Validate spec.readinessGates: each names a qualified condition type that Ready also waits for."
+  (when (eq (gethash "readinessGates" spec) 'null) (remhash "readinessGates" spec))
+  (loop for gate across (optional-vector spec "readinessGates" "spec")
+        do (drop-null-fields (require-object gate "readinessGate"))
+           (reject-unsupported-fields gate '("conditionType") "readinessGate")
+           (unless (core-qualified-key-p (gethash "conditionType" gate))
+             (invalid-pod "spec.readinessGates.conditionType ~S must be a qualified name"
+                          (gethash "conditionType" gate)))))
+
+(defun pod-readiness-gate-types (pod)
+  "Return the condition types POD's readiness gates wait for."
+  (loop for gate across (gethash "readinessGates" (gethash "spec" (pod-to-object pod)) #())
+        collect (gethash "conditionType" gate)))
+
+(defun pod-readiness-gates-message (pod conditions)
+  "Explain, as a kubelet does, which of POD's readiness gates CONDITIONS leave unmet; NIL when all are True."
+  (let ((messages
+          (loop for type in (pod-readiness-gate-types pod)
+                for condition = (find-pod-condition conditions type)
+                unless (and condition (equal "True" (gethash "status" condition)))
+                  collect (if condition
+                              (format nil "the status of pod readiness gate ~S is not \"True\", but ~A"
+                                      type (gethash "status" condition))
+                              (format nil "corresponding condition of pod readiness gate ~S does not exist." type)))))
+    (when messages (format nil "~{~A~^, ~}" messages))))
 
 (defun validate-node-selector-term (term)
   "Validate a NodeSelectorTerm's label expressions and metadata.name field requirements."

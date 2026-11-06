@@ -544,3 +544,64 @@
                              :key #'gr8s::cri-container-info-id :test #'equal)))
         (is (null (find :stop (lifecycle-cri-fixture-calls fixture) :key #'first)))
         (is (null (find :new-sandbox (lifecycle-cri-fixture-calls fixture) :key #'first)))))))
+
+(defun restart-rules-pod (pod-policy &rest side-fields)
+  "Return a parsed Pod with POD-POLICY whose side container carries SIDE-FIELDS."
+  (let* ((object (com.inuoe.jzon:parse *valid-pod-json*)) (spec (gethash "spec" object))
+         (side (gr8s::core-object "name" "side" "image" "busybox")))
+    (loop for (key value) on side-fields by #'cddr do (setf (gethash key side) value))
+    (setf (gethash "restartPolicy" spec) pod-policy
+          (gethash "containers" spec) (vector (gr8s::core-object "name" "main" "image" "busybox") side))
+    (parse-pod object)))
+
+(defun exit-code-rule (operator &rest values)
+  "Return a Restart rule matching exit codes VALUES under OPERATOR."
+  (gr8s::core-object "action" "Restart" "exitCodes" (gr8s::core-object "operator" operator "values" (coerce values 'vector))))
+
+(test container-restart-rules-and-policy-override-the-pods
+  (flet ((restarts (pod code &optional killed) (gr8s::container-restarts-after-exit-p pod "side" code killed)))
+    ;; Without container settings the Pod's policy decides, as before.
+    (is-true (restarts (restart-rules-pod "Always") 0))
+    (is-true (restarts (restart-rules-pod "OnFailure") 1))
+    (is-false (restarts (restart-rules-pod "OnFailure") 0))
+    (is-true (restarts (restart-rules-pod "OnFailure") 0 t))
+    (is-false (restarts (restart-rules-pod "Never") 1))
+    ;; A container's own policy wins over the Pod's.
+    (is-true (restarts (restart-rules-pod "Never" "restartPolicy" "Always") 0))
+    (is-false (restarts (restart-rules-pod "Always" "restartPolicy" "Never") 1))
+    ;; Rules are tried first, then the container's policy.
+    (let ((pod (restart-rules-pod "Never" "restartPolicy" "Never" "restartPolicyRules" (vector (exit-code-rule "In" 42)))))
+      (is-true (restarts pod 42))
+      (is-false (restarts pod 1)))
+    (let ((pod (restart-rules-pod "Never" "restartPolicy" "Never" "restartPolicyRules" (vector (exit-code-rule "NotIn" 0)))))
+      (is-true (restarts pod 3))
+      (is-false (restarts pod 0)))
+    ;; The sibling without settings keeps the Pod's policy.
+    (is-false (gr8s::container-restarts-after-exit-p
+               (restart-rules-pod "Never" "restartPolicy" "Always") "main" 1)))
+  (with-temporary-store (store directory)
+    (values directory)
+    (let* ((now 4000000000)
+           (pod (create-pod store (restart-rules-pod "Never" "restartPolicy" "Never"
+                                                     "restartPolicyRules" (vector (exit-code-rule "In" 42))))))
+      (is-true (gr8s::container-restart-eligible-p
+                pod (lifecycle-info "side" 0 gr8s.cri.v1::+containerstate-container_exited+ now 42)))
+      (is-false (gr8s::container-restart-eligible-p
+                 pod (lifecycle-info "side" 0 gr8s.cri.v1::+containerstate-container_exited+ now 1)))
+      (is-false (gr8s::pod-applications-finished-p
+                 pod (vector (gr8s::core-object "name" "main" "state" (gr8s::core-object "terminated" (gr8s::core-object "exitCode" 0)))
+                             (gr8s::core-object "name" "side" "state" (gr8s::core-object "terminated" (gr8s::core-object "exitCode" 42)))))))))
+
+(test container-restart-rules-are-validated
+  (dolist (fields (list (list "restartPolicy" "Sometimes")
+                        ;; Rules need an explicit container policy.
+                        (list "restartPolicyRules" (vector (exit-code-rule "In" 42)))
+                        (list "restartPolicy" "Never" "restartPolicyRules" (vector (exit-code-rule "Between" 42)))
+                        (list "restartPolicy" "Never"
+                              "restartPolicyRules" (vector (gr8s::core-object "action" "Restart")))
+                        (list "restartPolicy" "Never"
+                              "restartPolicyRules" (vector (gr8s::core-object "action" "RestartAllContainers"
+                                                                              "exitCodes" (gr8s::core-object "operator" "In" "values" #(42)))))))
+    (signals kubernetes-error (apply #'restart-rules-pod "Never" fields)))
+  (finishes (restart-rules-pod "Never" "restartPolicy" "OnFailure"
+                               "restartPolicyRules" (vector (exit-code-rule "In" 42 43) (exit-code-rule "NotIn" 1)))))

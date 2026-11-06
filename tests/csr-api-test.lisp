@@ -42,16 +42,19 @@
     "metadata" (gr8s::core-object "name" name)
     "spec" (gr8s::core-object "request" (ag-grpc:base64-encode request) "signerName" signer "expirationSeconds" 3600 "usages" usages)))
 
+(defvar *csr-api-port* nil "The kernel-assigned port of the current WITH-CSR-API server.")
+
 (defmacro with-csr-api ((store directory) &body body)
-  "Run focused CSR HTTP tests on their own port."
+  "Run focused CSR HTTP tests on a kernel-assigned port of their own."
   `(with-temporary-store (,store ,directory)
-     (let ((server (start-server :address "127.0.0.1" :port 18095 :store ,store :runtime (make-fake-runtime))))
+     (let* ((server (start-server :address "127.0.0.1" :port 0 :store ,store :runtime (make-fake-runtime)))
+            (*csr-api-port* (hunchentoot:acceptor-port server)))
        (unwind-protect (progn ,@body) (stop-server server)))))
 
 (defun csr-api-request (code path &key (method :get) object text bytes (content-type "application/json") headers)
   "Make an actual request and check the precise HTTP code without hiding response details."
   (multiple-value-bind (body status response-headers)
-      (drakma:http-request (concatenate 'string "http://127.0.0.1:18095" path) :method method :content-type content-type
+      (drakma:http-request (format nil "http://127.0.0.1:~D~A" *csr-api-port* path) :method method :content-type content-type
                           :additional-headers headers :content (or bytes text (when object (com.inuoe.jzon:stringify object))))
     (is (= code status) "~A returned ~D: ~A" path status body)
     (values (com.inuoe.jzon:parse body) response-headers)))
@@ -113,9 +116,10 @@
       (is (equal "Wire-CSR" (gethash "name" (gethash "metadata" created))))
       (csr-api-request 200 "/apis/certificates.k8s.io")
       (let ((resources (gethash "resources" (csr-api-request 200 "/apis/certificates.k8s.io/v1"))))
-        ;; certificatesigningrequests (+/approval, +/status) and the GA
-        ;; ClusterTrustBundle, all under certificates.k8s.io/v1 (k8s 1.37).
-        (is (= 4 (length resources)))
+        ;; certificatesigningrequests (+/approval, +/status), and the GA
+        ;; ClusterTrustBundle and PodCertificateRequest (+/status), all under
+        ;; certificates.k8s.io/v1 as Kubernetes 1.37 serves them.
+        (is (= 6 (length resources)))
         (is (find "clustertrustbundles" resources :test #'equal
                   :key (lambda (r) (gethash "name" r)))))
       (let ((listed (csr-api-request 200 (concatenate 'string collection "?fieldSelector=spec.signerName=example.test/wire"))))
@@ -274,3 +278,67 @@
                   (pure-tls::x509-name-rdns (gr8s::parsed-certificate-request-subject (gr8s::parse-and-verify-certificate-request rewritten)))))))
       (csr-api-request 403 "/apis/certificates.k8s.io/v1/certificatesigningrequests" :method :post
         :object (csr-fixture rewritten :signer "kubernetes.io/kube-apiserver-client" :usages #("client auth"))))))
+
+;;; PodCertificateRequest over HTTP, at v1 and v1beta1 (KEP-4317, GA in 1.37)
+
+(defun pcr-http-object (name stub)
+  (gr8s::core-object
+   "apiVersion" "certificates.k8s.io/v1" "kind" "PodCertificateRequest"
+   "metadata" (gr8s::core-object "name" name "labels" (gr8s::core-object "e2e" "pcr"))
+   "spec" (gr8s::core-object "signerName" "example.com/e2e" "podName" "test-pod"
+                             "podUID" "12345678-1234-1234-1234-123456789012"
+                             "serviceAccountName" "default" "serviceAccountUID" "12345678-1234-1234-1234-123456789013"
+                             "nodeName" "test-node" "nodeUID" "12345678-1234-1234-1234-123456789014"
+                             "maxExpirationSeconds" 86400 "stubPKCS10Request" stub)))
+
+(test podcertificaterequests-are-served-at-v1-and-v1beta1
+  ;; The 1.37 conformance spec "PodCertificateRequest API operations" drives
+  ;; certificates.k8s.io/v1 through create, update, status writes, patches, list
+  ;; and deletecollection; v1beta1 stays served for older signers.
+  (multiple-value-bind (private-key public-key) (ironclad:generate-key-pair :secp256r1)
+    (let ((stub (ag-grpc:base64-encode (gr8s::pod-certificate-stub-pkcs10-request private-key public-key))))
+      (with-core-api (store directory)
+        (values store directory)
+        (let* ((v1 (check-core-status 200 "/apis/certificates.k8s.io/v1"))
+               (names (map 'list (lambda (entry) (gethash "name" entry)) (gethash "resources" v1))))
+          (dolist (name '("podcertificaterequests" "podcertificaterequests/status" "clustertrustbundles"
+                          "certificatesigningrequests"))
+            (is-true (member name names :test #'equal) "v1 lacks ~A" name))
+          (is (member "deletecollection"
+                      (coerce (gethash "verbs" (discovery-entry v1 "podcertificaterequests")) 'list) :test #'equal)))
+        (let* ((collection "/apis/certificates.k8s.io/v1/namespaces/default/podcertificaterequests")
+               (item (concatenate 'string collection "/test"))
+               (created (check-core-status 201 collection :method :post :object (pcr-http-object "test" stub))))
+          (is (equal "certificates.k8s.io/v1" (gethash "apiVersion" created)))
+          (is (equal stub (gethash "stubPKCS10Request" (gethash "spec" created))))
+          ;; The same object read through v1beta1.
+          (is (equal "certificates.k8s.io/v1beta1"
+                     (gethash "apiVersion" (check-core-status 200 "/apis/certificates.k8s.io/v1beta1/namespaces/default/podcertificaterequests/test"))))
+          ;; The spec is immutable; labels are not.
+          (let ((changed (gr8s::copy-core-object created)))
+            (setf (gethash "podName" (gethash "spec" changed)) "other")
+            (check-core-status 422 item :method :put :object changed))
+          (check-core-status 200 item :method :patch :content-type "application/merge-patch+json"
+                             :object (gr8s::core-object "metadata" (gr8s::core-object "labels" (gr8s::core-object "x" "y"))))
+          ;; A main-resource write cannot set status; the status subresource can.
+          (let ((ignored (check-core-status 200 item :method :patch :content-type "application/merge-patch+json"
+                                            :object (gr8s::core-object "status" (gr8s::core-object "certificateChain" "x")))))
+            (is (null (gethash "status" ignored))))
+          (let ((status (check-core-status 200 (concatenate 'string item "/status") :method :patch
+                                           :content-type "application/json-patch+json"
+                                           :object (vector (gr8s::core-object "op" "add" "path" "/status/certificateChain"
+                                                                              "value" "CHAIN")))))
+            (is (equal "certificates.k8s.io/v1" (gethash "apiVersion" status)))
+            (is (equal "CHAIN" (gethash "certificateChain" (gethash "status" status)))))
+          (let ((status (check-core-status 200 "/apis/certificates.k8s.io/v1beta1/namespaces/default/podcertificaterequests/test/status")))
+            (is (equal "certificates.k8s.io/v1beta1" (gethash "apiVersion" status)))
+            (is (equal "CHAIN" (gethash "certificateChain" (gethash "status" status)))))
+          ;; Signers list and watch their own requests by spec.signerName.
+          (is (= 1 (length (gethash "items" (check-core-status 200 "/apis/certificates.k8s.io/v1/podcertificaterequests"
+                                                                 :parameters '(("fieldSelector" . "spec.signerName=example.com/e2e")))))))
+          (is (= 0 (length (gethash "items" (check-core-status 200 "/apis/certificates.k8s.io/v1/podcertificaterequests"
+                                                                 :parameters '(("fieldSelector" . "spec.signerName=example.com/other")))))))
+          (check-core-status 200 "/apis/certificates.k8s.io/v1/clustertrustbundles"
+                             :parameters '(("fieldSelector" . "spec.signerName=example.com/e2e")))
+          (check-core-status 200 collection :method :delete :parameters '(("labelSelector" . "e2e=pcr")))
+          (check-core-status 404 item))))))

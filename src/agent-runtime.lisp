@@ -45,6 +45,8 @@
                                  (when manager #'reconcile-node-vxlan-network)))
   (let* ((directory (uiop:ensure-directory-pathname state-directory))
          (store (open-store (merge-pathnames "desired/" directory))))
+    ;; The control plane serves every watch; a journal here would only repeat its own.
+    (setf (pod-store-watch-journal-p store) nil)
     (when (containerd-runtime-p runtime)
       (setf (containerd-runtime-resource-store runtime) store))
     (let ((node-runtime
@@ -565,6 +567,7 @@ the node from starting."
    :name (getf claim :name) :namespace (getf claim :namespace)
    :signer-name (or (getf claim :signer-name) "")
    :pkix-public-key (or (getf claim :pkix-public-key) "")
+   :stub-pkcs10-request (or (getf claim :stub-pkcs10-request) "")
    :pod-name (getf claim :pod-name) :pod-uid (getf claim :pod-uid)
    :service-account-name (or (getf claim :service-account-name) "")
    :service-account-uid (or (getf claim :service-account-uid) "")

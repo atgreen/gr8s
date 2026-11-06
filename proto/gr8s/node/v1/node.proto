@@ -62,6 +62,8 @@ message NodeHello {
   repeated string capabilities = 6;
   string underlay_address = 7;
   map<string, string> capacity = 8;
+  // The port of the agent's authenticated kubelet endpoints, or 0 when it serves none.
+  uint32 kubelet_port = 9;
 }
 
 message Heartbeat {
@@ -99,6 +101,7 @@ message PodCertificateClaim {
   string service_account_name = 7;
   string service_account_uid = 8;
   int64 max_expiration_seconds = 9;
+  string stub_pkcs10_request = 10; // base64 PKCS#10 DER signed by the pod key (certificates.k8s.io/v1)
 }
 
 message CsiDriverRegistration {

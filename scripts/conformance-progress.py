@@ -31,7 +31,7 @@ import time
 
 NAMESPACE = "sonobuoy"
 E2E_LOG_PATH = "/tmp/sonobuoy/results/e2e.log"
-DEFAULT_TOTAL = 446  # upstream v1.36 certified-conformance selection
+DEFAULT_TOTAL = 462  # upstream v1.37 certified-conformance selection (v1.36 selected 446)
 
 # Ginkgo v2 summary lines, e.g.
 #   "SUCCESS! -- 64 Passed | 382 Failed | 0 Pending | 0 Skipped"

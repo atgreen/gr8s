@@ -381,22 +381,70 @@
   (core-resource-error 503 "ServiceUnavailable" "the server is currently unable to handle the request (~A~@[: ~A~])"
                        (apiservice-object-name apiservice) reason))
 
-(defun aggregated-api-proxy-response (store apiservice method)
-  "Forward the current request to APIService's server and relay its answer as it arrives."
+(defun request-client-fd ()
+  "Return the file descriptor of the current request's client connection, or NIL."
+  (let ((stream hunchentoot::*hunchentoot-stream*))
+    (loop repeat 8
+          do (typecase stream
+               (sb-sys:fd-stream (return (sb-sys:fd-stream-fd stream)))
+               (chunga:chunked-stream (setf stream (chunga:chunked-stream-stream stream)))
+               (flexi-streams:flexi-stream (setf stream (flexi-streams:flexi-stream-stream stream)))
+               (pure-tls::tls-stream (setf stream (pure-tls::tls-stream-underlying-stream stream)))
+               (t (return nil))))))
+
+(defun client-connection-closed-p (fd)
+  "Report whether the peer of socket FD has closed it, without consuming anything it sent."
+  (sb-alien:with-alien ((octet (sb-alien:array (sb-alien:unsigned 8) 1)))
+    (let ((got (sb-alien:alien-funcall
+                (sb-alien:extern-alien "recv" (function sb-alien:long sb-alien:int (* t) sb-alien:unsigned-long sb-alien:int))
+                fd (sb-alien:alien-sap octet) 1 (logior 2 #x40)))) ; MSG_PEEK | MSG_DONTWAIT
+      (zerop got))))
+
+(defun watch-client-departure (fd socket)
+  "Shut the proxied SOCKET down once the client on FD goes away, so a watch that has nothing to
+send does not keep its thread until the aggregated server next writes. Return a function that
+stops watching and reports whether the client left. The proxy still closes SOCKET itself:
+shutting it down only wakes the read, and leaves the descriptor its own until then."
+  (let* ((done nil) (gone nil)
+         (thread (bt:make-thread
+                  (lambda ()
+                    (loop until done
+                          do (sleep 1)
+                             (when (and (not done) (client-connection-closed-p fd))
+                               (setf gone t)
+                               (ignore-errors (usocket:socket-shutdown socket :io))
+                               (return))))
+                  :name "gr8s aggregated watch client")))
+    (lambda ()
+      (setf done t)
+      (ignore-errors (bt:join-thread thread))
+      gone)))
+
+(defun aggregated-watch-request-p (method)
+  "Recognize a long-running watch, which may wait a long time for its next event."
+  (and (eq method :get)
+       (or (true-parameter-p (hunchentoot:get-parameter "watch"))
+           (search "/watch/" (hunchentoot:script-name*)))))
+
+(defun aggregated-api-proxy-response (store apiservice method &key (target (hunchentoot:request-uri*)))
+  "Forward the current request to APIService's server and relay its answer as it arrives.
+TARGET is the request line's path, the current request's own unless given."
   (let ((aggregator (gethash store *aggregators*)))
     (unless (and aggregator (apiservice-available-p apiservice))
       (aggregated-api-unavailable apiservice))
-    (let ((socket nil) (stream nil) (started nil))
+    (let ((socket nil) (stream nil) (started nil) (stop-watching nil))
       (unwind-protect
            (handler-case
                (progn
                  (multiple-value-setq (socket stream) (aggregator-connect store apiservice aggregator))
                  (aggregator-track-connection aggregator socket)
+                 (let ((fd (and (aggregated-watch-request-p method) (request-client-fd))))
+                   (when fd (setf stop-watching (watch-client-departure fd socket))))
                  (let* ((service (apiservice-service apiservice))
                         (body (or (hunchentoot:raw-post-data :force-binary t) #()))
                         (content-type (hunchentoot:header-in* :content-type)))
                    (aggregator-write-request
-                    stream method (hunchentoot:request-uri*)
+                    stream method target
                     (format nil "~A.~A.svc:~D" (gethash "name" service) (gethash "namespace" service)
                             (gethash "port" service))
                     (append (aggregator-identity-headers *authenticated-api-identity*)
@@ -409,9 +457,12 @@
                      (unless (or (eq method :head) (member code '(204 304)))
                        (aggregator-copy-body stream client headers)))))
              (error (condition)
-               (if (or started hunchentoot::*headers-sent*)
-                   (error condition)
-                   (aggregated-api-unavailable apiservice (remove #\Newline (princ-to-string condition))))))
+               (cond ((and stop-watching (funcall stop-watching))
+                      ;; The client left, and closing its upstream ended the copy.
+                      nil)
+                     ((or started hunchentoot::*headers-sent*) (error condition))
+                     (t (aggregated-api-unavailable apiservice (remove #\Newline (princ-to-string condition)))))))
+        (when stop-watching (funcall stop-watching))
         (when socket
           (aggregator-forget-connection aggregator socket)
           (ignore-errors (usocket:socket-close socket)))))))

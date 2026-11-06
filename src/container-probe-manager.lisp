@@ -44,8 +44,9 @@ has rebound the handler clusters and an ERROR finds no handler and kills the thr
   stopping-p)
 
 (defstruct container-probe-target
-  "Bind all probes to one actual container ID and its authoritative declaration."
-  uid name id container pod-ip started-at workers stopping-p)
+  "Bind all probes to one actual container ID and its authoritative declaration.
+TERMINATING-P is set once the Pod is being deleted: only readiness still probes."
+  uid name id container pod-ip started-at workers stopping-p terminating-p)
 
 (defstruct container-probe-worker
   "Track one probe kind's consecutive results independently of its siblings."
@@ -147,7 +148,10 @@ has rebound the handler clusters and an ERROR finds no handler and kills the thr
            (multiple-value-bind (success message result-kind error-result)
                (execute-container-probe-with-retries manager runtime target worker)
              (bt:with-lock-held ((container-probe-manager-lock manager))
-               (when (current-probe-target-p manager target)
+               (when (and (current-probe-target-p manager target)
+                          ;; A result that finishes after deletion began cannot fail a terminating container.
+                          (not (and (container-probe-target-terminating-p target)
+                                    (not (equal "readinessProbe" (container-probe-worker-kind worker))))))
                  (let ((completed (funcall (container-probe-manager-clock manager))))
                    (if (eq result-kind :error)
                        (record-container-probe-error worker message completed error-result)
@@ -438,7 +442,8 @@ has rebound the handler clusters and an ERROR finds no handler and kills the thr
           for request = (gethash "probeRestart" (gethash (gethash "name" status) (gethash "containers" state) (core-object)))
           thereis (and request (gethash "terminated" (gethash "state" status))
                        (or (equal "update" (gethash "kind" request))
-                           (not (equal "Never" (pod-restart-policy pod))))
+                           (container-restarts-after-exit-p
+                            pod (gethash "name" status) (gethash "exitCode" (gethash "terminated" (gethash "state" status))) t))
                             (equal (gethash "containerID" status) (concatenate 'string "containerd://" (gethash "containerID" request)))))))
 
 (defun preserve-stopped-container-probe-events (runtime manager)
@@ -458,6 +463,25 @@ has rebound the handler clusters and an ERROR finds no handler and kills the thr
             (unless (equalp events (gethash "probeEvents" state))
               (setf (gethash "probeEvents" state) events)
               (%save-container-lifecycle-state runtime uid state))))))))
+
+(defun begin-terminating-container-probes (runtime uid)
+  "Stop UID's liveness and startup probes, counting them as passed, as a kubelet does once a Pod is
+being deleted. Readiness keeps probing, so a container that leaves service during its grace period
+shows as unready; the probes stop for good when its containers are removed."
+  (let ((manager (containerd-runtime-probes runtime)))
+    (when manager
+      (bt:with-lock-held ((container-probe-manager-lock manager))
+        (maphash (lambda (key target)
+                   (declare (ignore key))
+                   (when (and (equal uid (container-probe-target-uid target))
+                              (not (container-probe-target-terminating-p target)))
+                     (setf (container-probe-target-terminating-p target) t)
+                     (dolist (worker (container-probe-target-workers target))
+                       (unless (equal "readinessProbe" (container-probe-worker-kind worker))
+                         (setf (container-probe-worker-result worker) t
+                               (container-probe-worker-failed-p worker) nil
+                               (container-probe-worker-on-hold-p worker) t)))))
+                 (container-probe-manager-targets manager))))))
 
 (defun stop-container-probes (runtime &optional uid)
   "Withdraw and join probes; full shutdown persists owned Events then releases its manager."

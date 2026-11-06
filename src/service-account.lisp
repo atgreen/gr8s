@@ -131,7 +131,9 @@
                                          :key (lambda (mount) (gethash "mountPath" mount))))
                                  containers))
            (volume (when (and mount-p (plusp (length unmounted))) (automount-api-access-volume))))
-      (setf (gethash "serviceAccountName" spec) account-name)
+      ;; The API server reports the deprecated serviceAccount alias alongside the name.
+      (setf (gethash "serviceAccountName" spec) account-name
+            (gethash "serviceAccount" spec) account-name)
       ;; A Pod naming no pull secrets uses its account's, and later edits to the account don't change it.
       (when (and (zerop (length (gethash "imagePullSecrets" spec #())))
                  (plusp (length (gethash "imagePullSecrets" account #()))))
@@ -211,9 +213,37 @@
                             (uiop:string-prefix-p (subseq pattern 0 (1- (length pattern))) url))))
                  (gethash "nonResourceURLs" rule)))))
 
+(defparameter +discovery-url-patterns+
+  '("/api" "/api/*" "/apis" "/apis/*" "/openapi" "/openapi/*" "/version" "/version/"
+    "/healthz" "/livez" "/readyz")
+  "The URLs upstream's system:discovery and system:public-info-viewer roles grant to every
+authenticated user, which gr8s answers without stored RBAC objects.")
+
+(defun authenticated-default-grant-p (identity verb group resource url)
+  "Report what upstream's default bindings grant every authenticated user: reading the
+discovery and health URLs, and creating self reviews (system:basic-user)."
+  (and (find "system:authenticated" (api-identity-groups identity) :test #'equal)
+       (if url
+           (and (member verb '("get" "head") :test #'equal)
+                (some (lambda (pattern)
+                        (if (uiop:string-suffix-p pattern "*")
+                            (uiop:string-prefix-p (subseq pattern 0 (1- (length pattern))) url)
+                            (equal pattern url)))
+                      +discovery-url-patterns+))
+           (and (equal verb "create")
+                (or (and (equal group "authorization.k8s.io")
+                         (member resource '("selfsubjectaccessreviews" "selfsubjectrulesreviews") :test #'equal))
+                    (and (equal group "authentication.k8s.io") (equal resource "selfsubjectreviews")))))
+       t))
+
 (defun service-account-authorized-p (store identity verb group resource name namespace &optional url)
-  "Honor the verified system:masters group, then evaluate applicable live RoleBindings and ClusterRoleBindings."
+  "Honor the verified system:masters group and the grants every authenticated user has, then
+evaluate applicable live RoleBindings and ClusterRoleBindings."
   (when (find "system:masters" (api-identity-groups identity) :test #'equal)
+    (return-from service-account-authorized-p t))
+  (when (authenticated-default-grant-p identity verb group resource url)
+    (return-from service-account-authorized-p t))
+  (when (node-authorizer-allows-p store identity verb group resource name namespace)
     (return-from service-account-authorized-p t))
 
   (let ((bindings (append (list-core-resources store "clusterrolebindings")
@@ -235,11 +265,13 @@
      bindings)))
 
 (defun ensure-default-service-account (store namespace)
-  "Create the namespace's default ServiceAccount without replacing an existing identity."
+  "Create the namespace's default ServiceAccount without replacing an existing identity.
+It passes admission as upstream's service account controller's create does."
   (handler-case
       (let ((*resource-quota-admission-exempt* t))
-        (create-core-resource store "serviceaccounts"
-         (core-object "metadata" (core-object "name" "default")) namespace))
+        (controller-create-core-resource store "serviceaccounts"
+                                         (core-object "metadata" (core-object "name" "default")) namespace
+                                         "service-account-controller"))
     (kubernetes-error (condition)
       (if (= 409 (kubernetes-error-status-code condition))
           (get-core-resource store "serviceaccounts" namespace "default")
@@ -286,17 +318,21 @@
         ((null existing)
          (let ((owner (get-core-resource store "namespaces" nil namespace)))
            (let ((*resource-quota-admission-exempt* t))
-             (create-core-resource store "configmaps"
+             (controller-create-core-resource
+              store "configmaps"
               (core-object "metadata" (core-object "name" "kube-root-ca.crt"
                                         "ownerReferences" (vector (core-object "apiVersion" "v1" "kind" "Namespace"
                                                                   "name" namespace "uid" (gethash "uid" (gethash "metadata" owner)))))
-                           "data" (core-object "ca.crt" ca)) namespace))))
+                           "data" (core-object "ca.crt" ca))
+              namespace "root-ca-cert-publisher"))))
         ((not (equal ca (gethash "ca.crt" (or (gethash "data" existing) (core-object)))))
-         (update-core-resource store "configmaps" namespace "kube-root-ca.crt"
+         (controller-update-core-resource
+          store "configmaps" namespace "kube-root-ca.crt"
           (lambda (object)
             (unless (gethash "data" object) (setf (gethash "data" object) (core-object)))
             (setf (gethash "ca.crt" (gethash "data" object)) ca)
-            object)))))))
+            object)
+          "root-ca-cert-publisher"))))))
 
 (defun ensure-native-namespace-root-cas (store)
   "Initialize CA ConfigMaps for persisted namespaces once the native CA is available."
@@ -307,6 +343,71 @@
   "Create the default account and API trust anchor after a real Namespace is admitted."
   (when (and (equal resource "namespaces") (not dry-run) (pod-store-in-cluster-config store))
     (let ((namespace (gethash "name" (gethash "metadata" object))))
-      (ensure-default-service-account store namespace)
-      (ensure-namespace-root-ca store namespace)))
+      ;; Admission may refuse either for now; the Namespace stands, and the
+      ;; controller pass tries again, as upstream's controllers retry.
+      (dolist (ensure (list #'ensure-default-service-account #'ensure-namespace-root-ca))
+        (handler-case (funcall ensure store namespace)
+          (kubernetes-error (condition)
+            (format *error-output* "~&Namespace ~A defaults: ~A~%" namespace (kubernetes-error-message condition)))))))
   object)
+
+;;; Node authorization: a kubelet reads what the Pods bound to its node use, as
+;;; upstream's node authorizer allows from its graph, and nothing more of those kinds.
+
+(defun node-identity-name (identity)
+  "Return the node name a system:node:<name> identity in system:nodes speaks for, or NIL."
+  (let ((username (api-identity-username identity)))
+    (and (uiop:string-prefix-p "system:node:" username)
+         (find "system:nodes" (api-identity-groups identity) :test #'equal)
+         (subseq username (length "system:node:")))))
+
+(defun pod-references (pod-object kind)
+  "List the names of the KIND objects (:secret, :configmap or :claim) POD-OBJECT's spec uses."
+  (let ((spec (gethash "spec" pod-object)) (names nil))
+    (labels ((add (name) (when (stringp name) (pushnew name names :test #'equal)))
+             (each (value visit) (when (vectorp value) (map nil visit value)))
+             (env (container)
+               (each (gethash "env" container)
+                     (lambda (variable)
+                       (let ((from (gethash "valueFrom" variable)))
+                         (when (hash-table-p from)
+                           (add (table-get from (if (eq kind :secret) "secretKeyRef" "configMapKeyRef") "name"))))))
+               (each (gethash "envFrom" container)
+                     (lambda (source) (add (table-get source (if (eq kind :secret) "secretRef" "configMapRef") "name"))))))
+      (dolist (field '("containers" "initContainers" "ephemeralContainers"))
+        (unless (eq kind :claim) (each (gethash field spec) #'env)))
+      (when (eq kind :secret)
+        (each (gethash "imagePullSecrets" spec) (lambda (reference) (add (gethash "name" reference)))))
+      (each (gethash "volumes" spec)
+            (lambda (volume)
+              (ecase kind
+                (:secret (add (table-get volume "secret" "secretName")))
+                (:configmap (add (table-get volume "configMap" "name")))
+                (:claim (add (table-get volume "persistentVolumeClaim" "claimName"))
+                 (when (hash-table-p (gethash "ephemeral" volume))
+                   (add (format nil "~A-~A" (table-get pod-object "metadata" "name") (gethash "name" volume))))))
+              (unless (eq kind :claim)
+                (each (table-get volume "projected" "sources")
+                      (lambda (source)
+                        (add (table-get source (if (eq kind :secret) "secret" "configMap") "name"))))))))
+    names))
+
+(defun node-authorizer-allows-p (store identity verb group resource name namespace)
+  "Allow a node to get a Secret, ConfigMap or PersistentVolumeClaim a Pod bound to it uses, and to
+review tokens and access for the requests its kubelet endpoints receive, as upstream's node rules do."
+  (when (and (node-identity-name identity) (equal verb "create")
+             (or (and (equal group "authentication.k8s.io") (equal resource "tokenreviews"))
+                 (and (equal group "authorization.k8s.io")
+                      (member resource '("subjectaccessreviews" "localsubjectaccessreviews") :test #'equal))))
+    (return-from node-authorizer-allows-p t))
+  (let ((node (node-identity-name identity))
+        (kind (and (equal group "") (cdr (assoc resource '(("secrets" . :secret) ("configmaps" . :configmap)
+                                                            ("persistentvolumeclaims" . :claim))
+                                                :test #'equal)))))
+    (and node kind name namespace (equal verb "get")
+         (some (lambda (pod)
+                 (let ((object (pod-to-object pod)))
+                   (and (equal node (table-get object "spec" "nodeName"))
+                        (member name (pod-references object kind) :test #'equal))))
+               (list-pods store namespace))
+         t)))

@@ -3,8 +3,10 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Scale the targets of HorizontalPodAutoscalers from what containers actually use.
-;;;; Nodes report CRI statistics, from which CPU rates are derived between samples, so
-;;;; Resource and ContainerResource metrics work with no metrics server. There is no
+;;;; When an aggregated server provides the resource metrics API, as metrics-server
+;;;; does, usage is read from its PodMetrics as upstream's controller reads it.
+;;;; Otherwise nodes report CRI statistics, from which CPU rates are derived between
+;;;; samples, so Resource and ContainerResource metrics work with no metrics server. There is no
 ;;;; custom or external metrics API, so those metric types report a failed
 ;;;; ScalingActive condition rather than scale on nothing. The replica arithmetic,
 ;;;; stabilization and rate policies follow the upstream controller.
@@ -75,13 +77,82 @@ The rate spans at least ten seconds where it can, and a counter that went back m
         (when (and (plusp elapsed) (not (minusp used)))
           (values (/ used elapsed) (third newest)))))))
 
+(defparameter +resource-metrics-apiservice+ "v1beta1.metrics.k8s.io"
+  "The APIService through which a metrics server provides PodMetrics.")
+
+(defvar *hpa-pod-metrics* nil
+  "While one autoscaler is evaluated from the resource metrics API, its namespace's PodMetrics:
+a table of Pod name to a table of container name to (cpu-cores . memory-bytes), or a string
+saying why they could not be read. NIL means usage comes from the controller's own samples.")
+
+(defun hpa-resource-metrics-apiservice (store)
+  "Return the APIService of an aggregated resource metrics API, or NIL when none is registered."
+  (let ((apiservice (stored-apiservice store +resource-metrics-apiservice+)))
+    (and apiservice (apiservice-service apiservice) apiservice)))
+
+(defun aggregated-api-get (store apiservice target)
+  "GET TARGET from APIService's server as the controller manager and return the parsed object."
+  (let ((aggregator (gethash store *aggregators*)) (socket nil))
+    (unless (and aggregator (apiservice-available-p apiservice))
+      (error "the server is currently unable to handle the request"))
+    (unwind-protect
+         (multiple-value-bind (connected stream) (aggregator-connect store apiservice aggregator)
+           (setf socket connected)
+           (let ((service (apiservice-service apiservice)))
+             (sb-sys:with-deadline (:seconds 10)
+               (aggregator-write-request
+                stream :get target (format nil "~A.~A.svc:~D" (gethash "name" service) (gethash "namespace" service)
+                                           (gethash "port" service))
+                '(("Accept" . "application/json") ("User-Agent" . "kube-controller-manager/gr8s")
+                  ("X-Remote-User" . "system:kube-controller-manager") ("X-Remote-Group" . "system:masters")
+                  ("X-Remote-Group" . "system:authenticated"))
+                #())
+               (multiple-value-bind (code body) (admission-read-http-response stream)
+                 (unless (<= 200 code 299)
+                   (error "the server responded with HTTP ~D" code))
+                 (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string body))))))
+      (when socket (ignore-errors (usocket:socket-close socket))))))
+
+(defun pod-metrics-usage-table (list)
+  "Index a PodMetricsList by Pod name, each a table of container name to (cpu-cores . memory-bytes)."
+  (let ((pods (make-hash-table :test #'equal)))
+    (loop for item across (gethash "items" list #())
+          for containers = (make-hash-table :test #'equal)
+          do (loop for container across (gethash "containers" item #())
+                   for usage = (gethash "usage" container (core-object))
+                   do (setf (gethash (gethash "name" container) containers)
+                            (cons (policy-value (gethash "cpu" usage "0")) (policy-value (gethash "memory" usage "0")))))
+             (setf (gethash (table-get item "metadata" "name") pods) containers))
+    pods))
+
+(defun hpa-fetch-pod-metrics (store namespace)
+  "Read NAMESPACE's PodMetrics from the resource metrics API, or the reason they can't be read."
+  (let ((apiservice (hpa-resource-metrics-apiservice store)))
+    (handler-case
+        (let ((table (pod-metrics-usage-table
+                      (aggregated-api-get store apiservice
+                                          (format nil "/apis/metrics.k8s.io/v1beta1/namespaces/~A/pods" namespace)))))
+          (if (plusp (hash-table-count table)) table "no metrics returned from resource metrics API"))
+      ((or error sb-sys:deadline-timeout) (condition)
+        (format nil "unable to fetch metrics from resource metrics API: ~A (get pods.metrics.k8s.io)"
+                (remove #\Newline (princ-to-string condition)))))))
+
+(defvar *hpa-pod-metrics-reader* 'hpa-fetch-pod-metrics
+  "The function that reads a namespace's PodMetrics, given the store and namespace.")
+
 (defun hpa-pod-usage (state pod resource container)
   "Return POD's use of RESOURCE, CPU in cores and memory in bytes, or NIL when any container lacks a measure."
-  (let ((total 0))
+  (let ((total 0)
+        (reported (and (hash-table-p *hpa-pod-metrics*) (gethash (pod-name pod) *hpa-pod-metrics*))))
+    (when (and (hash-table-p *hpa-pod-metrics*) (null reported))
+      (return-from hpa-pod-usage nil))
     (loop for spec across (pod-containers pod)
           for name = (container-spec-name spec)
           do (when (or (null container) (equal name container))
-               (multiple-value-bind (cpu memory) (hpa-container-usage state (pod-uid pod) name)
+               (multiple-value-bind (cpu memory)
+                   (if reported
+                       (let ((usage (gethash name reported))) (values (car usage) (cdr usage)))
+                       (hpa-container-usage state (pod-uid pod) name))
                  (unless cpu (return-from hpa-pod-usage nil))
                  (incf total (if (equal resource "cpu") cpu memory)))))
     total))
@@ -167,6 +238,8 @@ FALLBACK gives what a missing Pod is assumed to use when scaling down."
     (unless pods (hpa-metric-failure failure "no pods returned by selector while calculating replica count"))
     (unless (member resource '("cpu" "memory") :test #'equal)
       (hpa-metric-failure failure "no metrics are measured for resource ~A" resource))
+    (when (stringp *hpa-pod-metrics*)
+      (hpa-metric-failure failure "unable to get metrics for resource ~A: ~A" resource *hpa-pod-metrics*))
     (multiple-value-bind (metrics unready missing) (hpa-group-pods reconciler state pods resource container now)
       (unless metrics
         (hpa-metric-failure failure "did not receive metrics for targeted pods (pods might be unready)"))
@@ -347,6 +420,35 @@ FALLBACK gives what a missing Pod is assumed to use when scaling down."
     (and type (member (first type) '("deployments" "replicasets" "replicationcontrollers" "statefulsets") :test #'equal)
          (first type))))
 
+(defun hpa-custom-target (store ref namespace)
+  "Resolve SCALE-TARGET-REF to a custom resource whose version serves the scale subresource.
+Return its definition, the Scale its paths describe, and the scale paths of the stored version."
+  (let* ((api-version (gethash "apiVersion" ref ""))
+         (slash (position #\/ api-version))
+         (group (and slash (subseq api-version 0 slash)))
+         (version (and slash (subseq api-version (1+ slash))))
+         (definition (and group
+                          (find-if (lambda (definition)
+                                     (let ((spec (gethash "spec" definition)))
+                                       (and (equal group (gethash "group" spec))
+                                            (equal (gethash "kind" ref) (gethash "kind" (gethash "names" spec))))))
+                                   (list-core-resources store "customresourcedefinitions"))))
+         (served (and definition (crd-version definition version :served t)))
+         (scale (and served (gethash "scale" (gethash "subresources" served (core-object))))))
+    (when (hash-table-p scale)
+      (let ((object (handler-case (get-core-resource store (crd-custom-key definition) namespace (gethash "name" ref))
+                      (kubernetes-error () nil))))
+        (when object
+          (let ((*crd-view-definition* definition) (*crd-request-version* version))
+            (values definition
+                    (crd-scale-view (crd-api-view object) definition)
+                    (gethash "scale" (gethash "subresources" (crd-storage-version definition) (core-object))))))))))
+
+(defun hpa-selected-pods (store selector namespace)
+  "Return the Pods in NAMESPACE whose labels match the label selector string SELECTOR."
+  (let ((predicate (core-selector-predicate selector)))
+    (remove-if-not (lambda (pod) (funcall predicate (pod-to-object pod))) (list-pods store namespace))))
+
 (defun hpa-target-pods (store target namespace)
   "Return the Pods TARGET's selector chooses."
   (let ((selector (workload-spec-selector target)))
@@ -356,7 +458,12 @@ FALLBACK gives what a missing Pod is assumed to use when scaling down."
 
 (defun hpa-evaluate-metrics (reconciler state spec current pods now)
   "Return the largest replicas any metric asks for, currentMetrics, and the first failure's reason and message."
-  (let ((proposal nil) (observed nil) (failure nil) (failed nil))
+  (let ((proposal nil) (observed nil) (failure nil) (failed nil)
+        (*hpa-pod-metrics*
+          (and pods (hpa-resource-metrics-apiservice (reconciler-store reconciler))
+               (some (lambda (metric) (member (gethash "type" metric) '("Resource" "ContainerResource") :test #'equal))
+                     (gethash "metrics" spec #()))
+               (funcall *hpa-pod-metrics-reader* (reconciler-store reconciler) (pod-namespace (first pods))))))
     (loop for metric across (gethash "metrics" spec #())
           do (handler-case
                  (let ((type (gethash "type" metric)))
@@ -382,7 +489,13 @@ FALLBACK gives what a missing Pod is assumed to use when scaling down."
          (minimum (gethash "minReplicas" spec 1)) (maximum (gethash "maxReplicas" spec))
          (target (when resource
                    (handler-case (get-core-resource store resource namespace (gethash "name" ref))
-                     (kubernetes-error () nil)))))
+                     (kubernetes-error () nil))))
+         (definition nil) (custom-scale nil) (scale-paths nil))
+    ;; Anything else is read and scaled through its scale subresource, as upstream's controller does.
+    (unless resource
+      (multiple-value-setq (definition custom-scale scale-paths) (hpa-custom-target store ref namespace))
+      (when custom-scale
+        (setf target custom-scale resource (crd-custom-key definition))))
     (unless target
       (write-hpa-status store hpa 0 (gethash "desiredReplicas" (gethash "status" hpa (core-object)) 0) nil
                         (list (list "AbleToScale" "False" "FailedGetScale"
@@ -406,9 +519,15 @@ FALLBACK gives what a missing Pod is assumed to use when scaling down."
         ((< current minimum)
          (setf desired minimum)
          (push (list "ScalingLimited" "True" "TooFewReplicas" "the desired replica count is less than the minimum replica count") entries))
+        ((and custom-scale (zerop (length (gethash "selector" (gethash "status" custom-scale) ""))))
+         (push (list "ScalingActive" "False" "InvalidSelector" "selector is required") entries))
         (t
          (multiple-value-bind (proposal observed-metrics reason message)
-             (hpa-evaluate-metrics reconciler state spec current (hpa-target-pods store target namespace) now)
+             (hpa-evaluate-metrics reconciler state spec current
+                                   (if custom-scale
+                                       (hpa-selected-pods store (gethash "selector" (gethash "status" custom-scale) "") namespace)
+                                       (hpa-target-pods store target namespace))
+                                   now)
            (setf metrics observed-metrics)
            (if proposal
                (push (if reason
@@ -427,8 +546,11 @@ FALLBACK gives what a missing Pod is assumed to use when scaling down."
         (when scaled
           (setf able (list "AbleToScale" "True" "SucceededRescale"
                            (format nil "the HPA controller was able to update the target scale to ~D" desired)))
-          (update-owned-workload store resource target
-            (lambda (object) (setf (gethash "replicas" (gethash "spec" object)) desired) object))
+          (if custom-scale
+              (update-owned-workload store resource target
+                (lambda (object) (crd-write-json-path object (gethash "specReplicasPath" scale-paths) desired)))
+              (update-owned-workload store resource target
+                (lambda (object) (setf (gethash "replicas" (gethash "spec" object)) desired) object)))
           (record-hpa-scale-event state key current desired now))
         (write-hpa-status store hpa observed desired metrics (cons able (reverse entries)) now scaled)))))
 
@@ -438,7 +560,9 @@ FALLBACK gives what a missing Pod is assumed to use when scaling down."
          (autoscalers (list-core-resources store "horizontalpodautoscalers")))
     (when autoscalers
       (let ((state (hpa-state-for store)) (now (funcall *workload-clock*)))
-        (when (>= (- now (hpa-state-last-sample state)) *hpa-sample-period*)
+        ;; With a resource metrics API, its server measures usage instead.
+        (when (and (>= (- now (hpa-state-last-sample state)) *hpa-sample-period*)
+                   (not (hpa-resource-metrics-apiservice store)))
           (record-hpa-samples state (runtime-container-metrics (reconciler-runtime reconciler)) now))
         (dolist (hpa autoscalers)
           (let ((uid (gethash "uid" (workload-metadata hpa))))

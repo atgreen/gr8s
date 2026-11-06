@@ -149,11 +149,94 @@
                "preferredVersion" (core-object "groupVersion" "autoscaling/v2" "version" "v2")))
 
 (defun autoscaling-discovery-response (version)
-  "Advertise the autoscaler collection in VERSION, v1 or v2."
-  (let ((resources (stored-resource-discovery "autoscaling/v2")))
+  "Advertise the autoscaler collection and its status subresource in VERSION, v1 or v2."
+  (let ((resources (concatenate 'vector (stored-resource-discovery "autoscaling/v2")
+                                (vector (core-object "name" "horizontalpodautoscalers/status" "singularName" ""
+                                                     "namespaced" t "kind" "HorizontalPodAutoscaler"
+                                                     "verbs" #("get" "patch" "update"))))))
     (json-response (core-object "apiVersion" "v1" "kind" "APIResourceList"
                                 "groupVersion" (format nil "autoscaling/~A" version)
                                 "resources" resources))))
+
+;;; Status subresource
+
+(defun hpa-status-route (path)
+  "Resolve an autoscaler's status URL in autoscaling/v1 or v2 to its view version, namespace and name."
+  (let ((parts (uiop:split-string path :separator '(#\/))))
+    (when (and (= 9 (length parts)) (equal (subseq parts 0 3) '("" "apis" "autoscaling"))
+               (member (fourth parts) '("v1" "v2") :test #'equal)
+               (equal (fifth parts) "namespaces") (dns-label-p (sixth parts))
+               (equal (seventh parts) "horizontalpodautoscalers") (dns-subdomain-p (eighth parts))
+               (equal (ninth parts) "status"))
+      (list (concatenate 'string "autoscaling/" (fourth parts)) (sixth parts) (eighth parts)))))
+
+(defun hpa-cpu-current-metric-p (metric)
+  "Recognize the current CPU metric that autoscaling/v1 reports as a percentage."
+  (let ((resource (and (hash-table-p metric) (gethash "resource" metric))))
+    (and (hash-table-p resource) (equal "cpu" (gethash "name" resource)))))
+
+(defun hpa-v2-status-from-v1 (status stored)
+  "Carry a v1 STATUS write into the STORED v2 status, keeping the conditions and
+   other metrics v1 cannot express, as upstream's round-trip conversion does."
+  (let ((result (copy-core-object (if (hash-table-p stored) stored (core-object))))
+        (cpu (gethash "currentCPUUtilizationPercentage" status)))
+    (dolist (field '("observedGeneration" "lastScaleTime" "currentReplicas" "desiredReplicas"))
+      (multiple-value-bind (value present) (gethash field status)
+        (if present (setf (gethash field result) value) (remhash field result))))
+    (let ((metrics (concatenate 'vector
+                                (when (integerp cpu)
+                                  (vector (core-object "type" "Resource"
+                                                       "resource" (core-object "name" "cpu" "current"
+                                                                               (core-object "averageUtilization" cpu)))))
+                                (remove-if #'hpa-cpu-current-metric-p (gethash "currentMetrics" result #())))))
+      (if (plusp (length metrics))
+          (setf (gethash "currentMetrics" result) metrics)
+          (remhash "currentMetrics" result)))
+    result))
+
+(defun hpa-status-request-input (view version method)
+  "Read a status PUT body, or apply a supported patch to VIEW, the object as VERSION shows it."
+  (if (eq method :put)
+      (core-resource-request-object "HorizontalPodAutoscaler")
+      (let ((content-type (request-media-type))
+            (text (hunchentoot:raw-post-data :force-text t)))
+        (cond ((equal content-type "application/json-patch+json")
+               (let ((base (copy-core-object view)))
+                 ;; Clients see an unset status as an empty object, so patches can add into it.
+                 (unless (hash-table-p (gethash "status" base)) (setf (gethash "status" base) (core-object)))
+                 (apply-core-json-patch base (com.inuoe.jzon:parse text))))
+              ((equal content-type "application/merge-patch+json")
+               (merge-json-object (copy-core-object view) (require-object (com.inuoe.jzon:parse text) "patch")))
+              ((equal content-type "application/strategic-merge-patch+json")
+               (template-strategic-merge (copy-core-object view) (require-object (com.inuoe.jzon:parse text) "patch")
+                                         (template-schema (format nil "io.k8s.api.~A.HorizontalPodAutoscaler"
+                                                                  (substitute #\. #\/ version)))))
+              ((equal content-type "application/apply-patch+yaml")
+               (merge-json-object (copy-core-object view) (require-object (yaml-parse text) "patch")))
+              (t (core-resource-error 415 "UnsupportedMediaType" "Unsupported status patch type"))))))
+
+(defun dispatch-hpa-status-request (store path method)
+  "Read or replace only an autoscaler's status, in either served version, never its spec."
+  (destructuring-bind (version namespace name) (hpa-status-route path)
+    (let* ((*core-resource-view-version* version)
+           (v1 (equal version "autoscaling/v1"))
+           (stored (get-core-resource store "horizontalpodautoscalers" namespace name)))
+      (case method
+        (:get (json-response stored))
+        ((:put :patch)
+         (let* ((dry-run (core-resource-dry-run-p))
+                (view (if v1 (hpa-v1-view stored) (copy-core-object stored)))
+                (input (admit-subresource-write store "horizontalpodautoscalers" "status" namespace name
+                                                (hpa-status-request-input view version method) view
+                                                :dry-run dry-run))
+                (status (require-object (gethash "status" input (core-object)) "status")))
+           (unless (and (equal version (gethash "apiVersion" input version))
+                        (equal "HorizontalPodAutoscaler" (gethash "kind" input "HorizontalPodAutoscaler")))
+             (core-resource-error 400 "BadRequest" "Expected ~A HorizontalPodAutoscaler" version))
+           (setf (gethash "apiVersion" input) "autoscaling/v2"
+                 (gethash "status" input) (if v1 (hpa-v2-status-from-v1 status (gethash "status" stored)) status))
+           (json-response (workload-update-status-request store "horizontalpodautoscalers" namespace name input dry-run))))
+        (t (core-resource-error 405 "MethodNotAllowed" "Unsupported status method"))))))
 
 (defun apiservice-api-group ()
   "Describe the apiregistration.k8s.io group."

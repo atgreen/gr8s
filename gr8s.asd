@@ -12,10 +12,10 @@
   :author "gr8s contributors"
   :license "MIT"
   ;; The Kubernetes API version gr8s implements. The gr8s release itself is this
-  ;; base plus a "-gr8s.N" suffix carried in a git tag (e.g. v1.36.0-gr8s.0),
+  ;; base plus a "-gr8s.N" suffix carried in a git tag (e.g. v1.37.2-gr8s.0),
   ;; surfaced through VERSION-STRING as +GR8S-VERSION+ (see src/version.lisp).
-  :version "1.36.0"
-  :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cffi" "cl-cancel"
+  :version "1.37.2"
+  :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cffi" "chipz" "cl-cancel"
                "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
                "pure-tls/acme" "drakma"
                "sb-posix" "slynk" "trivial-utf-8" "usocket" "version-string"
@@ -39,9 +39,12 @@
                 :components ((:file "package")
                              (:file "version")
                              (:file "grpc-close-compat")
+                             (:file "grpc-inflate-compat")
                              (:file "cri-v1-generated")
                              (:file "csi-v1-generated")
                              (:file "pluginregistration-v1-generated")
+                             (:file "containerd-tasks-v1-generated")
+                             (:file "containerd-transfer-v1-generated")
                              (:file "cri-wire-compat")
                              (:file "node-v1-generated")
                              (:file "node-protocol")
@@ -121,6 +124,7 @@
                              (:file "crd-resources")
                              (:file "crd-protobuf")
                              (:file "crd-deletion")
+                             (:file "node-lease")
                              (:file "node-session")
                              (:file "runtime")
                              (:file "runtime-deletion")
@@ -146,8 +150,10 @@
                              (:file "tar")
                              (:file "runtime-install")
                              (:file "cri")
+                             (:file "image-preload")
                              (:file "container-expansion")
                              (:file "containerd")
+                             (:file "kubelet-stats")
                              (:file "pod-hostname")
                              (:file "pod-dns-config")
                              (:file "container-lifecycle")
@@ -209,6 +215,7 @@
                              (:file "server")
                              (:file "in-cluster-api")
                              (:file "api-aggregation")
+                             (:file "kubelet-server")
                              (:file "services")
                              (:file "endpointslice-controller")
                              (:file "endpoints-controller")
@@ -237,6 +244,7 @@
                              (:file "workload-http")
                              (:file "budget-http")
                              (:file "doctor")
+                             (:file "memory-monitor")
                              (:file "main"))))
   :in-order-to ((test-op (test-op "gr8s/tests"))))
 
@@ -285,12 +293,14 @@
                              (:file "agent-runtime-test")
                              (:file "grpc-unix-test")
                              (:file "grpc-close-test")
+                             (:file "grpc-inflate-test")
                              (:file "cri-test")
                              (:file "runtime-assets-test")
                              (:file "cni-test")
                              (:file "node-ipam-test")
                              (:file "rtnetlink-test")
                              (:file "managed-containerd-test")
+                             (:file "image-preload-test")
                              (:file "runtime-addons-test")
                              (:file "runtime-install-test")
                              (:file "clustertrustbundle-test")
@@ -307,6 +317,8 @@
                              (:file "core-resource-http-test")
                              (:file "pod-runtime-gaps-test")
                              (:file "hpa-controller-test")
+                             (:file "kubelet-stats-test")
+                             (:file "kubelet-server-test")
                              (:file "crd-api-test")
                              (:file "server-side-apply-test")
                              (:file "crd-protobuf-test")
@@ -360,6 +372,9 @@
                              (:file "pod-finalizers-test")
                              (:file "generated-pod-names-test")
                              (:file "pod-conditions-test")
+                             (:file "pod-readiness-gates-test")
+                             (:file "pod-security-context-test")
+                             (:file "node-lease-test")
                              (:file "node-log-delivery-test")
                              (:file "garbage-collection-test")
                              (:file "doctor-test")

@@ -691,7 +691,9 @@
            (UNDERLAY-ADDRESS :INITARG :UNDERLAY-ADDRESS :ACCESSOR
             GR8S.NODE.V1::UNDERLAY-ADDRESS :INITFORM "" :TYPE STRING)
            (CAPACITY :INITARG :CAPACITY :ACCESSOR GR8S.NODE.V1::CAPACITY
-            :INITFORM NIL :TYPE LIST))
+            :INITFORM NIL :TYPE LIST)
+           (KUBELET-PORT :INITARG :KUBELET-PORT :ACCESSOR
+            GR8S.NODE.V1::KUBELET-PORT :INITFORM 0 :TYPE (UNSIGNED-BYTE 32)))
           (:DOCUMENTATION "Proto message: NodeHello"))
 
 
@@ -758,6 +760,10 @@
          AG-PROTO::ENTRY-BUFFER)
         (AG-PROTO::WRITE-LENGTH-DELIMITED AG-PROTO::ENTRY-BUFFER
                                           AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'KUBELET-PORT)))
+      (WHEN (AND AG-PROTO::VALUE (NOT (EQL AG-PROTO::VALUE 0)))
+        (AG-PROTO::WRITE-FIELD-TAG 9 0 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-VARINT AG-PROTO::VALUE AG-PROTO::BUFFER)))
     AG-PROTO::BUFFER))
 
 
@@ -872,6 +878,9 @@
                                                           7))))))
                      (CONS AG-PROTO::KEY AG-PROTO::VALUE))
                    (SLOT-VALUE AG-PROTO::OBJ 'CAPACITY)))
+                 (9
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'KUBELET-PORT)
+                          (AG-PROTO::READ-VARINT AG-PROTO::BUFFER)))
                  (OTHERWISE
                   (AG-PROTO::SKIP-FIELD AG-PROTO::BUFFER
                                         AG-PROTO::WIRE-TYPE)))))
@@ -1137,7 +1146,9 @@
             GR8S.NODE.V1::SERVICE-ACCOUNT-UID :INITFORM "" :TYPE STRING)
            (MAX-EXPIRATION-SECONDS :INITARG :MAX-EXPIRATION-SECONDS :ACCESSOR
             GR8S.NODE.V1::MAX-EXPIRATION-SECONDS :INITFORM 0 :TYPE
-            (SIGNED-BYTE 64)))
+            (SIGNED-BYTE 64))
+           (STUB-PKCS10-REQUEST :INITARG :STUB-PKCS10-REQUEST :ACCESSOR
+            GR8S.NODE.V1::STUB-PKCS10-REQUEST :INITFORM "" :TYPE STRING))
           (:DOCUMENTATION "Proto message: PodCertificateClaim"))
 
 
@@ -1190,6 +1201,11 @@
       (WHEN (AND AG-PROTO::VALUE (NOT (EQL AG-PROTO::VALUE 0)))
         (AG-PROTO::WRITE-FIELD-TAG 9 0 AG-PROTO::BUFFER)
         (AG-PROTO::WRITE-VARINT AG-PROTO::VALUE AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'STUB-PKCS10-REQUEST)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 10 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
     AG-PROTO::BUFFER))
 
 
@@ -1249,6 +1265,11 @@
                             (IF (>= AG-PROTO::N 9223372036854775808)
                                 (- AG-PROTO::N 18446744073709551616)
                                 AG-PROTO::N))))
+                 (10
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'STUB-PKCS10-REQUEST)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
                  (OTHERWISE
                   (AG-PROTO::SKIP-FIELD AG-PROTO::BUFFER
                                         AG-PROTO::WIRE-TYPE)))))

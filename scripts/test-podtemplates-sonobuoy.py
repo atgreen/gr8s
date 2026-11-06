@@ -26,6 +26,11 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 FOCUS = "PodTemplates|Servers with support for API chunking"
+# Specs the certified-conformance mode (focus \[Conformance\], no skip) selects, by
+# the server's Kubernetes minor version. Counted with a ginkgo dry run of each
+# release's registry.k8s.io/conformance image: v1.36.0 runs 446 of 7579 specs and
+# v1.37.2 runs 462 of 3206. Sonobuoy picks the image from the server version.
+CERTIFIED_SPECS = {"1.36": 446, "1.37": 462}
 
 
 def official_e2e_log(archive):
@@ -73,11 +78,16 @@ def main():
     parser.add_argument("--timeout", type=int, default=1200)
     parser.add_argument("--containerd-no-sync", action="store_true",
                         help="Skip fsync on containerd metadata commits; for disposable VMs whose disk flushes are slow")
+    parser.add_argument("--image-archives", type=Path, metavar="DIRECTORY",
+                        help="Stage these image archives (*.tar) for the agent to import before Pods start, "
+                             "as scripts/save-image-archives.sh writes them; recorded in the report")
     parser.add_argument("--certified-conformance", action="store_true",
                         help="Run the entire upstream certified selection instead of the five focused specs")
     parser.add_argument("--focus", default=FOCUS, help="Upstream regex for a supplemental focused run")
     parser.add_argument("--expected-specs", type=int, default=5, help="Require this many executed specs in a focused run")
     parser.add_argument("--debug-slynk-port", type=int, help="Expose the opt-in debug server to a focused diagnostic run")
+    parser.add_argument("--kubernetes-version",
+                        help="Run a focused batch with this release's e2e image (e.g. v1.37.2) instead of the server's own")
     parser.add_argument("--hold-on-failure", type=int, default=0, metavar="SECONDS",
                         help="Keep a failed cluster running for debugging, until SECONDS pass or <run>/release exists")
     args = parser.parse_args()
@@ -87,6 +97,8 @@ def main():
         parser.error("--expected-specs must be positive")
     if args.certified_conformance and (args.focus != FOCUS or args.expected_specs != 5):
         parser.error("Custom focus/count cannot be combined with the full certified selection")
+    if args.certified_conformance and args.kubernetes_version:
+        parser.error("A certified run uses the e2e image of the server's own version")
     if os.geteuid() != 0:
         parser.error("Run this privileged integration test inside a disposable Linux guest")
     root = Path(tempfile.mkdtemp(prefix="gr8s-conformance." if args.certified_conformance else "gr8s-podtemplates.", dir=args.state_parent))
@@ -96,7 +108,24 @@ def main():
               "mode": "certified-conformance" if args.certified_conformance else "focused",
               "isCertificationResult": False, "nativeSHA256": hashlib.sha256(args.gr8s.read_bytes()).hexdigest(),
               "stateDirectory": str(state), "reusedState": args.state_directory is not None,
-              "debugServer": args.debug_slynk_port is not None, "containerdNoSync": args.containerd_no_sync}
+              "debugServer": args.debug_slynk_port is not None, "containerdNoSync": args.containerd_no_sync,
+              "preloadedImages": args.image_archives is not None,
+              "e2eKubernetesVersion": args.kubernetes_version}
+    if args.image_archives:
+        # The agent imports <state>/agent/images/*.tar at startup, before any Pod starts.
+        staged = state / "agent" / "images"
+        staged.mkdir(parents=True, exist_ok=True)
+        report["imageArchives"] = []
+        for archive in sorted(args.image_archives.glob("*.tar")):
+            try:
+                os.link(archive, staged / archive.name)
+            except OSError:
+                shutil.copyfile(archive, staged / archive.name)
+            with archive.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            report["imageArchives"].append({"name": archive.name, "bytes": archive.stat().st_size, "sha256": digest})
+        if not report["imageArchives"]:
+            parser.error("--image-archives names a directory without *.tar archives")
     native_log = (root / "gr8s.log").open("w")
     debug_arguments = ["--debug-slynk-port", str(args.debug_slynk_port)] if args.debug_slynk_port else []
     process = subprocess.Popen([str(args.gr8s), "serve", "--runtime", "containerd", "--state-directory", str(state),
@@ -130,7 +159,9 @@ def main():
         return path.read_text(errors="replace") if path.exists() else ""
 
     try:
-        deadline = time.monotonic() + 60
+        started = time.monotonic()
+        # Importing staged archives happens before the node reports ready.
+        deadline = started + (900 if args.image_archives else 60)
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise RuntimeError("Native gr8s exited before readiness")
@@ -143,8 +174,20 @@ def main():
         else:
             raise RuntimeError("Native agent did not become ready")
         report["nativeAgentReady"] = True
+        report["nativeAgentReadySeconds"] = round(time.monotonic() - started, 1)
+        if args.image_archives:
+            native_log.flush()
+            imports = [line.strip() for line in (root / "gr8s.log").read_text(errors="replace").splitlines()
+                       if "image archive" in line]
+            report["imageArchiveImports"] = imports
         report["version"] = json.loads(request("/version")[1])
         report["sonobuoyVersion"] = subprocess.check_output([str(args.sonobuoy), "version", "--short"], text=True).strip()
+        expected_specs = args.expected_specs
+        if args.certified_conformance:
+            minor = "{}.{}".format(report["version"]["major"], report["version"]["minor"].rstrip("+"))
+            if minor not in CERTIFIED_SPECS:
+                raise RuntimeError(f"No pinned certified selection count for Kubernetes {minor}")
+            expected_specs = report["expectedCertifiedSpecs"] = CERTIFIED_SPECS[minor]
         if args.state_directory:
             operations = []
             code, body = request("/api/v1/namespaces/sonobuoy/pods")
@@ -196,7 +239,8 @@ def main():
                 time.sleep(.2)
             report["stateReuseCleanupOperations"] = operations
         command = [str(args.sonobuoy), "run", "--kubeconfig", str(root / "kubeconfig"), "--dns-pod-labels=", "--plugin=e2e",
-                   *(["--mode=certified-conformance"] if args.certified_conformance else ["--e2e-focus=" + args.focus, "--e2e-skip="])]
+                   *(["--mode=certified-conformance"] if args.certified_conformance else ["--e2e-focus=" + args.focus, "--e2e-skip="]),
+                   *(["--kubernetes-version=" + args.kubernetes_version] if args.kubernetes_version else [])]
         report["command"] = command
         result = subprocess.run(command, capture_output=True, text=True, timeout=90)
         report["sonobuoyRunExitCode"] = result.returncode
@@ -237,7 +281,7 @@ def main():
         e2e = official_e2e_log(root / "sonobuoy-results.tar.gz")
         (root / "e2e.log").write_text(e2e)
         report.update(verify_upstream_results(root / "sonobuoy-results.tar.gz", e2e, result.stdout,
-                                              expected_specs=None if args.certified_conformance else args.expected_specs))
+                                              expected_specs=expected_specs))
         if not report["passed"]:
             raise RuntimeError("Upstream conformance cases did not all pass; inspect the official archive and logs")
     except Exception as error:

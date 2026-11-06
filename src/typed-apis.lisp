@@ -3,7 +3,8 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Serve the API objects whose consumers are other API clients: Leases, flow
-;;;; control, dynamic resource allocation and admission policies.
+;;;; control, dynamic resource allocation, storage version migrations and
+;;;; admission policies.
 ;;;; They share the durable store, so this file holds what differs per type: its
 ;;;; schema, defaults, immutable fields, status subresource and finalizer lifecycle.
 
@@ -21,6 +22,9 @@
     ("resourceclaims" "ResourceClaim" "resource.k8s.io/v1" t "resource" :status)
     ("resourceclaimtemplates" "ResourceClaimTemplate" "resource.k8s.io/v1" t "resource")
     ("resourceslices" "ResourceSlice" "resource.k8s.io/v1" nil "resource" :generation)
+    ;; GA in Kubernetes 1.37 (DRADeviceTaintRules, StorageVersionMigrator).
+    ("devicetaintrules" "DeviceTaintRule" "resource.k8s.io/v1" nil "resource" :status :generation)
+    ("storageversionmigrations" "StorageVersionMigration" "storagemigration.k8s.io/v1" nil "storagemigration" :status)
     ("validatingadmissionpolicies" "ValidatingAdmissionPolicy" "admissionregistration.k8s.io/v1" nil "admissionregistration" :status :generation)
     ("validatingadmissionpolicybindings" "ValidatingAdmissionPolicyBinding" "admissionregistration.k8s.io/v1" nil "admissionregistration" :generation)
     ("mutatingadmissionpolicies" "MutatingAdmissionPolicy" "admissionregistration.k8s.io/v1" nil "admissionregistration" :generation)
@@ -29,7 +33,7 @@
   "Each entry: resource, kind, version, namespaced, proto package segment, then its traits.")
 
 (defparameter *typed-api-groups*
-  '("coordination.k8s.io" "flowcontrol.apiserver.k8s.io" "resource.k8s.io")
+  '("coordination.k8s.io" "flowcontrol.apiserver.k8s.io" "resource.k8s.io" "storagemigration.k8s.io")
   "Groups served only through this file. Admission keeps its own group document.")
 
 (eval-when (:load-toplevel :execute)
@@ -164,6 +168,32 @@
          (loop for item across value do (fill-required-arrays item (gethash "items" schema) (1+ depth)))))))
   value)
 
+(defun validate-device-taint-rule-spec (spec)
+  "Check a DeviceTaintRule's taint as upstream's validation does: a label-name key,
+   a label value and one of the effects a rule may set."
+  (let ((taint (require-object (gethash "taint" spec) "spec.taint")))
+    (unless (core-qualified-key-p (typed-api-require taint "key" "spec.taint"))
+      (core-resource-error 422 "Invalid" "spec.taint.key: Invalid value: ~S: must be a label name" (gethash "key" taint)))
+    (let ((value (gethash "value" taint)))
+      (unless (or (member value '(nil null "") :test #'equal) (core-label-name-p value :empty t))
+        (core-resource-error 422 "Invalid" "spec.taint.value: Invalid value: ~S: must be a label value" value)))
+    (unless (member (gethash "effect" taint) '("None" "NoSchedule" "NoExecute") :test #'equal)
+      (core-resource-error 422 "Invalid" "spec.taint.effect: Unsupported value: ~S: supported values: \"NoExecute\", \"NoSchedule\", \"None\""
+                           (gethash "effect" taint)))))
+
+(defun stamp-device-taint-time (object existing)
+  "Set a DeviceTaintRule's taint.timeAdded as upstream's strategy does: on create or
+   update when the client set none, and to now when an update changes the effect but
+   carries the old time over."
+  (let* ((taint (gethash "taint" (gethash "spec" object)))
+         (old (and existing (gethash "taint" (gethash "spec" existing (core-object)))))
+         (time (gethash "timeAdded" taint)))
+    (when (or (member time '(nil null))
+              (and (hash-table-p old)
+                   (not (equal (gethash "effect" old) (gethash "effect" taint)))
+                   (equal time (gethash "timeAdded" old))))
+      (setf (gethash "timeAdded" taint) (current-timestamp)))))
+
 (defun normalize-typed-api-spec (resource object)
   "Apply RESOURCE's defaults and the validation its clients rely on."
   (let ((spec (gethash "spec" object)))
@@ -219,6 +249,10 @@
                                     (and value (not (eq value 'null)) (not (equal value "")))))
                                 '("nodeName" "nodeSelector" "allNodes" "perDeviceNodeSelection")))
            (core-resource-error 422 "Invalid" "ResourceSlice needs exactly one of nodeName, nodeSelector, allNodes or perDeviceNodeSelection"))))
+      ((equal resource "devicetaintrules") (validate-device-taint-rule-spec (require-object spec "spec")))
+      ((equal resource "storageversionmigrations")
+       (let ((target (require-object (gethash "resource" (require-object spec "spec")) "spec.resource")))
+         (typed-api-require target "resource" "spec.resource")))
       ((equal resource "validatingadmissionpolicies")
        (let ((spec (require-object spec "spec")))
          (typed-api-default spec "failurePolicy" "Fail")
@@ -268,7 +302,7 @@
 
 (defun typed-api-immutable-paths (resource)
   "Return the top-level fields of RESOURCE that an update may not change."
-  (when (member resource '("resourceclaims" "resourceclaimtemplates") :test #'equal) '("spec")))
+  (when (member resource '("resourceclaims" "resourceclaimtemplates" "storageversionmigrations") :test #'equal) '("spec")))
 
 (defun validate-typed-api-update (resource before after)
   "Reject changes to fields RESOURCE fixes at creation."
@@ -290,13 +324,17 @@
     (validate-core-metadata metadata namespace name :allow-finalizers t)
     (setf (gethash "kind" object) kind (gethash "apiVersion" object) version)
     (if namespace (setf (gethash "namespace" metadata) namespace) (remhash "namespace" metadata))
-    (fill-required-arrays object (template-schema (typed-api-schema-name resource)))
-    (validate-template-shape object (template-schema (typed-api-schema-name resource)) kind)
-    (normalize-typed-api-spec resource object)
+    ;; A write to the main resource keeps the stored status, so a status it carries is
+    ;; dropped before validation, as upstream's strategies reset it first.
     (when (typed-api-trait-p resource :status)
       (unless *typed-api-status-write*
         (let ((status (and existing (gethash "status" existing))))
           (if status (setf (gethash "status" object) (copy-core-object status)) (remhash "status" object)))))
+    (fill-required-arrays object (template-schema (typed-api-schema-name resource)))
+    (validate-template-shape object (template-schema (typed-api-schema-name resource)) kind)
+    (normalize-typed-api-spec resource object)
+    (when (and (equal resource "devicetaintrules") (not *typed-api-status-write*))
+      (stamp-device-taint-time object existing))
     (when (and (equal resource "apiservices") (not existing))
       (refuse-builtin-apiservice (gethash "name" metadata))
       (default-local-apiservice-status object))
@@ -419,14 +457,20 @@
   (destructuring-bind (resource namespace name) (typed-status-route path)
     (when (eq method :get)
       (return-from dispatch-typed-status-request
-        (json-response (if (equal resource "apiservices")
-                           (apiservice-by-name store name)
-                           (get-core-resource store resource namespace name)))))
+        ;; Shown in the version the URL names; PodCertificateRequest has two.
+        (let ((*core-resource-view-version* (if (equal resource "podcertificaterequests")
+                                                (pod-certificate-request-path-version path)
+                                                *core-resource-view-version*)))
+          (json-response (if (equal resource "apiservices")
+                             (apiservice-by-name store name)
+                             (get-core-resource store resource namespace name))))))
     (unless (member method '(:put :patch))
       (core-resource-error 405 "MethodNotAllowed" "Unsupported status method"))
     (let* ((*typed-api-status-write* t)
            ;; Field validation finds a request's schema by version: core has its own ResourceClaim.
-           (*core-resource-view-version* (core-resource-api-version resource))
+           (*core-resource-view-version* (if (equal resource "podcertificaterequests")
+                                             (pod-certificate-request-path-version path)
+                                             (core-resource-api-version resource)))
            (dry-run (core-resource-dry-run-p))
            (content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
            (input (if (eq method :put)
@@ -452,3 +496,114 @@
         store resource namespace name
         (lambda (old) (typed-status-from-request resource name namespace old method content-type input))
         :dry-run dry-run)))))
+
+;;; StorageVersionMigration controller
+
+;;; gr8s keeps one stored form per resource, so there is never anything to
+;;; re-encode: a migration of a served resource completes as soon as it is seen,
+;;; recording the revision it covers, with the conditions upstream's
+;;; storage-version-migrator controller writes. A resource that is not served
+;;; fails once upstream's one-minute grace for discovery to catch up has passed.
+
+(defparameter +storage-version-migration-grace-seconds+ 60
+  "How long a migration of an unknown resource waits before it fails, as upstream.")
+
+(defun storage-version-migration-target-objects (store group resource)
+  "Return the objects of GROUP/RESOURCE, or :UNKNOWN when it is not served."
+  (cond
+    ((and (equal group "") (equal resource "pods")) (list-pods store))
+    ((and (equal group "") (equal resource "nodes")) (list-nodes store))
+    (t
+     (let ((type (find-if (lambda (entry)
+                            (and (equal resource (first entry))
+                                 (equal group (let ((slash (position #\/ (third entry))))
+                                                (if slash (subseq (third entry) 0 slash) "")))))
+                          *stored-resource-types*)))
+       (cond
+         (type (list-core-resources store resource))
+         ((find-if (lambda (definition)
+                     (let ((spec (gethash "spec" definition (core-object))))
+                       (and (equal group (gethash "group" spec))
+                            (equal resource (gethash "plural" (gethash "names" spec (core-object)))))))
+                   (list-core-resources store "customresourcedefinitions"))
+          ;; Custom resources live in the store under their definition's key.
+          (let ((custom (format nil "custom:~A/~A" group resource)))
+            (with-store-lock (store)
+              (loop for key being the hash-keys of (pod-store-resources store)
+                    when (equal (first key) custom) collect key))))
+         (t :unknown))))))
+
+(defun storage-version-migration-condition (status type)
+  "Return STATUS's condition of TYPE."
+  (find type (typed-api-array status "conditions") :test #'equal :key (lambda (c) (gethash "type" c))))
+
+(defun storage-version-migration-terminal-p (object)
+  "A migration whose Succeeded or Failed condition is True is finished."
+  (let ((status (gethash "status" object (core-object))))
+    (some (lambda (type)
+            (let ((condition (storage-version-migration-condition status type)))
+              (and condition (equal "True" (gethash "status" condition)))))
+          '("Succeeded" "Failed"))))
+
+(defun set-storage-version-migration-condition (status type reason message now)
+  "Set condition TYPE True in STATUS, keeping its transition time when already True."
+  (let* ((old (storage-version-migration-condition status type))
+         (condition (core-object "type" type "status" "True" "reason" reason "message" message
+                                 "lastTransitionTime"
+                                 (if (and old (equal "True" (gethash "status" old)))
+                                     (gethash "lastTransitionTime" old)
+                                     now))))
+    (setf (gethash "conditions" status)
+          (concatenate 'vector
+                       (remove type (typed-api-array status "conditions") :test #'equal
+                                                                         :key (lambda (c) (gethash "type" c)))
+                       (vector condition)))))
+
+(defun storage-version-migration-age (object now)
+  "Seconds since OBJECT was created, or NIL when its timestamp cannot be read."
+  (let ((created (ignore-errors
+                  (pod-deletion-time (gethash "creationTimestamp" (gethash "metadata" object))))))
+    (and created (- now created))))
+
+(defun reconcile-storage-version-migrations (store &key (now (get-universal-time)))
+  "Complete or fail every unfinished StorageVersionMigration."
+  (dolist (object (list-core-resources store "storageversionmigrations"))
+    (unless (or (storage-version-migration-terminal-p object)
+                (gethash "deletionTimestamp" (gethash "metadata" object)))
+      (let* ((spec (gethash "resource" (gethash "spec" object (core-object)) (core-object)))
+             (targets (storage-version-migration-target-objects
+                       store (gethash "group" spec "") (gethash "resource" spec "")))
+             (age (storage-version-migration-age object now))
+             (name (gethash "name" (gethash "metadata" object)))
+             (uid (gethash "uid" (gethash "metadata" object))))
+        (unless (and (eq targets :unknown) age (< age +storage-version-migration-grace-seconds+))
+          (handler-case
+              (let ((*typed-api-status-write* t))
+                (update-core-resource
+                 store "storageversionmigrations" nil name
+                 (lambda (current)
+                   (unless (equal uid (gethash "uid" (gethash "metadata" current)))
+                     (return-from reconcile-storage-version-migrations nil))
+                   (let ((status (copy-core-object (gethash "status" current (core-object))))
+                         (stamp (current-timestamp now)))
+                     (if (eq targets :unknown)
+                         (set-storage-version-migration-condition
+                          status "Failed" "StorageVersionMigrationFailed"
+                          "migration encountered unhandled error: unable to obtain GVR from discovery" stamp)
+                         (progn
+                           (unless (plusp (length (gethash "resourceVersion" status "")))
+                             (setf (gethash "resourceVersion" status)
+                                   (write-to-string (pod-store-resource-revision store))))
+                           (set-storage-version-migration-condition
+                            status "Running" "MigrationRunning"
+                            (if targets
+                                (format nil "The migration is running, ~D objects verified migrated" (length targets))
+                                "The migration is running")
+                            stamp)
+                           (set-storage-version-migration-condition
+                            status "Succeeded" "StorageVersionMigrationSucceeded" "Migration completed" stamp)))
+                     (setf (gethash "status" current) status))
+                   current)))
+            (kubernetes-error (condition)
+              (format *error-output* "gr8s StorageVersionMigration ~A: ~A~%" name
+                      (kubernetes-error-message condition)))))))))

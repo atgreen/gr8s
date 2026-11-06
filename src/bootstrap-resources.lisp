@@ -146,6 +146,79 @@
        (let ((ref (require-object (gethash "issuerRef" spec) "spec.issuerRef")))
          (require-nonempty-string (gethash "name" ref) "spec.issuerRef.name"))))))
 
+;;; ClusterTrustBundle validation, as pkg/apis/certificates/validation does it at v1.37.
+
+(defconstant +cluster-trust-bundle-max-size+ (* 1024 1024)
+  "certificates.MaxTrustBundleSize: the largest spec.trustBundle accepted.")
+
+(defun cluster-trust-bundle-invalid (control &rest arguments)
+  "Reject a ClusterTrustBundle with upstream's wording."
+  (core-resource-error 422 "Invalid" "ClusterTrustBundle ~?" control arguments))
+
+(defun validate-cluster-trust-bundle-name (name signer)
+  "ValidateClusterTrustBundleName: a signer-linked bundle is named <signerName with
+   / as :>:<DNS subdomain>; any other has no colon and is a DNS subdomain."
+  (if (zerop (length signer))
+      (progn
+        (when (find #\: name)
+          (cluster-trust-bundle-invalid "metadata.name: Invalid value: ~S: ClusterTrustBundle without signer name must not have \":\" in its name" name))
+        (unless (dns-subdomain-p name)
+          (cluster-trust-bundle-invalid "metadata.name: Invalid value: ~S: must be a DNS subdomain" name)))
+      (let ((prefix (concatenate 'string (substitute #\: #\/ signer) ":")))
+        (unless (uiop:string-prefix-p prefix name)
+          (cluster-trust-bundle-invalid "metadata.name: Invalid value: ~S: ClusterTrustBundle for signerName ~A must be named with prefix ~A"
+                                        name signer prefix))
+        (unless (dns-subdomain-p (subseq name (length prefix)))
+          (cluster-trust-bundle-invalid "metadata.name: Invalid value: ~S: the part after ~A must be a DNS subdomain" name prefix)))))
+
+(defun validate-cluster-trust-bundle-anchors (bundle)
+  "validateTrustBundle: only header-free CERTIFICATE blocks that parse as X.509 CA
+   certificates, at least one of them and none twice."
+  (unless (stringp bundle)
+    (cluster-trust-bundle-invalid "spec.trustBundle: Required value"))
+  (when (> (length (trivial-utf-8:string-to-utf-8-bytes bundle)) +cluster-trust-bundle-max-size+)
+    (cluster-trust-bundle-invalid "spec.trustBundle: Too long: may not be more than ~D bytes" +cluster-trust-bundle-max-size+))
+  (let ((blocks (handler-case (csr-pem-blocks (trivial-utf-8:string-to-utf-8-bytes bundle))
+                  (kubernetes-error (condition)
+                    (cluster-trust-bundle-invalid "spec.trustBundle: Invalid value: \"<value omitted>\": ~A"
+                                                  (kubernetes-error-message condition)))))
+        (seen nil))
+    (loop for (label . der) in blocks for index from 0
+          do (unless (equal label "CERTIFICATE")
+               (cluster-trust-bundle-invalid "spec.trustBundle: Invalid value: \"<value omitted>\": entry ~D has bad block type: ~A" index label))
+             (let ((certificate (handler-case (if (der-well-formed-p der)
+                                                  (pure-tls::parse-certificate der)
+                                                  (error "Malformed DER"))
+                                  (error () (cluster-trust-bundle-invalid "spec.trustBundle: Invalid value: \"<value omitted>\": entry ~D does not parse as X.509" index)))))
+               (unless (pure-tls::certificate-is-ca-p certificate)
+                 (cluster-trust-bundle-invalid "spec.trustBundle: Invalid value: \"<value omitted>\": entry ~D does not have the CA bit set" index)))
+             (when (member der seen :test #'equalp)
+               (cluster-trust-bundle-invalid "spec.trustBundle: Invalid value: \"<value omitted>\": duplicate trust anchor (entry ~D)" index))
+             (push der seen))
+    (unless seen
+      (cluster-trust-bundle-invalid "spec.trustBundle: Invalid value: \"<value omitted>\": at least one trust anchor must be provided"))))
+
+(defun validate-cluster-trust-bundle (object existing)
+  "ValidateClusterTrustBundle and, for an update, ValidateClusterTrustBundleUpdate:
+   the name matches the signer, the signer is well formed and immutable, and the
+   bundle holds only CA certificates (reparsed only when an update changes it)."
+  (let* ((spec (or (gethash "spec" object) (core-object)))
+         (signer (let ((value (gethash "signerName" spec))) (if (stringp value) value "")))
+         (old-spec (and existing (gethash "spec" existing (core-object)))))
+    (let ((name (gethash "name" (gethash "metadata" object))))
+      ;; A generated name is checked once it exists.
+      (when (and (stringp name) (plusp (length name)))
+        (validate-cluster-trust-bundle-name name signer)))
+    (when (plusp (length signer))
+      (handler-case (validate-csr-signer-name signer)
+        (kubernetes-error ()
+          (cluster-trust-bundle-invalid "spec.signerName: Invalid value: ~S: must be a fully qualified domain and path of the form 'example.com/signer-name'" signer))))
+    (when old-spec
+      (unless (equal signer (let ((value (gethash "signerName" old-spec))) (if (stringp value) value "")))
+        (cluster-trust-bundle-invalid "spec.signerName: Invalid value: ~S: field is immutable" signer)))
+    (unless (and old-spec (equal (gethash "trustBundle" spec) (gethash "trustBundle" old-spec)))
+      (validate-cluster-trust-bundle-anchors (gethash "trustBundle" spec)))))
+
 (defun normalize-bootstrap-resource (resource input namespace name &optional store)
   "Copy, validate and default an implemented bootstrap API object."
   (when (workload-resource-p resource)
@@ -158,13 +231,16 @@
     (return-from normalize-bootstrap-resource (normalize-service-resource input namespace name store)))
   (when (equal resource "podtemplates")
     (return-from normalize-bootstrap-resource (normalize-podtemplate input namespace name)))
+  (when (equal resource "podcertificaterequests")
+    (return-from normalize-bootstrap-resource (normalize-pod-certificate-request input namespace name store)))
   (let* ((object (copy-core-object (require-object input "resource")))
          (kind (core-resource-kind resource))
          (version (core-resource-api-version resource))
          (metadata (require-object (gethash "metadata" object) "metadata"))
          (fields (cond ((equal resource "namespaces") '("spec" "status"))
                        ((equal resource "serviceaccounts") '("secrets" "imagePullSecrets" "automountServiceAccountToken"))
-                       ((member resource '("roles" "clusterroles") :test #'equal) '("rules"))
+                       ((equal resource "roles") '("rules"))
+                       ((equal resource "clusterroles") '("rules" "aggregationRule"))
                        ((equal resource "networkpolicies") '("spec"))
                        ((equal resource "gatewayclasses") '("spec" "status"))
                        ((member resource '("gateways" "httproutes"
@@ -214,7 +290,9 @@
                  unless (dns-subdomain-p (gethash "name" (require-object ref field)))
                    do (core-resource-error 422 "Invalid" "~A references require valid names" field)))))
       ((member resource '("roles" "clusterroles") :test #'equal)
-       (validate-rbac-rules (gethash "rules" object #()) (equal resource "clusterroles")))
+       (when (eq 'null (gethash "rules" object)) (remhash "rules" object))
+       (validate-rbac-rules (gethash "rules" object #()) (equal resource "clusterroles"))
+       (when (equal resource "clusterroles") (validate-cluster-role-aggregation-rule object)))
       ((equal resource "networkpolicies")
        ;; The spec is stored as-is; it is validated when parsed into an np-spec
        ;; at resolution time (which fails closed on unsupported constructs).
@@ -230,7 +308,10 @@
       ((equal resource "clustertrustbundles")
        (let ((spec (gethash "spec" object)))
          (when (and spec (not (hash-table-p spec)))
-           (core-resource-error 422 "Invalid" "ClusterTrustBundle spec must be an object"))))
+           (core-resource-error 422 "Invalid" "ClusterTrustBundle spec must be an object"))
+         (validate-cluster-trust-bundle
+          object (and name store (gethash (core-resource-key "clustertrustbundles" nil name)
+                                          (pod-store-resources store))))))
       ((equal resource "podcertificaterequests")
        (let ((spec (gethash "spec" object)))
          (unless (hash-table-p spec)
@@ -308,7 +389,7 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
       (member resource '("configmaps" "secrets" "serviceaccounts" "roles" "rolebindings" "clusterroles" "clusterrolebindings"
                          "networkpolicies" "services" "podtemplates" "events" "horizontalpodautoscalers" "deployments"
                          "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions"
-                         "customresourcedefinitions")
+                         "customresourcedefinitions" "clustertrustbundles" "podcertificaterequests")
               :test #'equal)))
 
 (defun stored-resource-discovery (version)
@@ -378,6 +459,7 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
                                                   "message" "Readiness follows the gr8s node session lease"))
                "addresses" (if (and address (plusp (length address)))
                                (vector (core-object "type" "InternalIP" "address" address)) #())
+               "daemonEndpoints" (core-object "kubeletEndpoint" (core-object "Port" (node-record-kubelet-port node)))
                "capacity" (node-resource-list node)
                "allocatable" (node-resource-list node)
                "nodeInfo" (core-object "operatingSystem" "linux" "architecture" (native-node-architecture)
