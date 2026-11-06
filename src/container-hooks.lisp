@@ -236,7 +236,10 @@
   "Run preStop hooks and stop application containers, then sidecars, before physical removal."
   (let* ((objects (pod-all-container-objects pod))
          (sidecars (pod-sidecar-names pod)))
-    (when (or sidecars (some (lambda (object) (container-lifecycle-handler object "preStop")) objects))
+    ;; A container with a readiness probe is stopped here too, while its probes still run, so
+    ;; it shows as unready once it leaves service instead of when it is removed.
+    (when (or sidecars (some (lambda (object) (container-lifecycle-handler object "preStop")) objects)
+              (some (lambda (object) (gethash "readinessProbe" object)) objects))
       (let ((sandbox (containerd-owned-sandbox runtime (pod-uid pod))))
         (when sandbox
           (let ((infos (running-pod-container-infos runtime sandbox))
