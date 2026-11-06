@@ -266,8 +266,9 @@ NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the templat
       (update-workload-controller-status store (workload-owner-resource owner) owner status))))
 
 (defun deployment-template (object)
-  "Compare desired Pod templates independently of the generated rollout label."
-  (let ((template (copy-core-object (gethash "template" (gethash "spec" object)))))
+  "Compare desired Pod templates independently of the generated rollout label and of API
+defaults, which a template stored by an older gr8s lacks."
+  (let ((template (defaulted-pod-template (gethash "template" (gethash "spec" object)))))
     (let ((labels (gethash "labels" (gethash "metadata" template)))) (when labels (remhash "pod-template-hash" labels)))
     template))
 
