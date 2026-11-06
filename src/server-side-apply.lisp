@@ -484,11 +484,13 @@ Holding a list item's \".\" keeps only the item, and any field inside an item ke
            source)
   target)
 
-(defun apply-trackable-view (object)
-  "Reduce OBJECT to what ownership tracks: its content and owned metadata."
+(defun apply-trackable-view (object &optional without-status)
+  "Reduce OBJECT to what ownership tracks: its content and owned metadata, WITHOUT-STATUS
+for a write to an object that serves status at its own endpoint."
   (let ((view (copy-core-object object)))
     (remhash "apiVersion" view)
     (remhash "kind" view)
+    (when without-status (remhash "status" view))
     (let ((metadata (gethash "metadata" view)))
       (when (hash-table-p metadata)
         (dolist (key (loop for key being the hash-keys of metadata collect key))
@@ -509,8 +511,12 @@ Holding a list item's \".\" keeps only the item, and any field inside an item ke
                          nil)
                         ((and (second submitted) (crd-array-p (first submitted))) (coerce (first submitted) 'list))
                         (old (apply-managed-entries old))))
-             (before (and old (apply-trackable-view old)))
-             (after (apply-trackable-view new))
+             ;; As upstream's reset fields: a write to the object itself never owns its
+             ;; status, which only the status endpoint changes, just as an apply does.
+             (without-status (and (null subresource)
+                                  (or (not (custom-resource-key-p resource)) (apply-status-subresource-p))))
+             (before (and old (apply-trackable-view old without-status)))
+             (after (apply-trackable-view new without-status))
              (changed (apply-changed-set before after))
              (removed (and before (apply-removed-paths before after)))
              (taken (append removed (apply-field-paths changed)))
@@ -659,6 +665,11 @@ Holding a list item's \".\" keeps only the item, and any field inside an item ke
             (admitted-create-core-resource store resource input namespace :dry-run dry-run)
             dry-run)
            201)))))
+
+(defun apply-status-configuration (live configuration resource)
+  "Merge the applied status CONFIGURATION into LIVE for the request's manager, recording its ownership."
+  (let ((*apply-schema* (apply-resource-schema resource)) (*apply-update-manager* nil))
+    (apply-merge live configuration resource (apply-field-manager) (apply-force-p) "status")))
 
 (defun apply-pod-patched-object (current subresource)
   "Apply the request's configuration to the Pod object CURRENT at SUBRESOURCE, or NIL for the Pod itself."

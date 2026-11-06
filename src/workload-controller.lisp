@@ -218,7 +218,9 @@ NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the templat
        store owner
        (with-store-lock (store)
          (when (workload-current-unlocked store (workload-owner-resource owner) owner :generation t)
-           (create-pod-unlocked store pod)))))))
+           (let ((*apply-update-manager* (list "kube-controller-manager" nil)))
+             ;; Upstream's controllers create Pods as kube-controller-manager.
+             (create-pod-unlocked store pod))))))))
 
 (defun replica-set-observations (reconciler owner)
   "Return active child Pods paired with their actual statuses."

@@ -96,7 +96,9 @@
        store job
        (with-store-lock (store)
          (when (workload-current-unlocked store "jobs" job :generation t)
-           (create-pod-unlocked store pod)))))))
+           (let ((*apply-update-manager* (list "kube-controller-manager" nil)))
+             ;; Upstream's controllers create Pods as kube-controller-manager.
+             (create-pod-unlocked store pod))))))))
 
 (defun job-observations (reconciler job &key claim)
   "Pair managed Pods with actual reconciliation observations, never fabricated success."

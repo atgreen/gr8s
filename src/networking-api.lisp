@@ -331,19 +331,23 @@ here are single-stack IPv4."
     (let* ((*networking-status-write* t)
            (dry-run (core-resource-dry-run-p))
            (content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
-           (input (if (eq method :put)
-                      (core-resource-request-object (core-resource-kind resource))
-                      (progn
-                        (unless (member content-type '("application/merge-patch+json" "application/strategic-merge-patch+json"
-                                                       "application/json-patch+json")
-                                        :test #'equal)
-                          (core-resource-error 415 "UnsupportedMediaType" "Unsupported status patch type"))
-                        (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t))))))
+           (applied (and (eq method :patch) (equal content-type "application/apply-patch+yaml")))
+           ;; An apply records its own ownership; any other status write's manager owns what it changed.
+           (*apply-update-manager* (unless applied (list (apply-default-manager) "status")))
+           (input (cond ((eq method :put) (core-resource-request-object (core-resource-kind resource)))
+                        (applied (apply-read-configuration resource namespace name))
+                        (t
+                         (unless (member content-type '("application/merge-patch+json" "application/strategic-merge-patch+json"
+                                                        "application/json-patch+json")
+                                         :test #'equal)
+                           (core-resource-error 415 "UnsupportedMediaType" "Unsupported status patch type"))
+                         (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t))))))
       (json-response
        (update-core-resource
         store resource namespace name
         (lambda (old)
           (let* ((requested (cond ((eq method :put) input)
+                                  (applied (apply-status-configuration (copy-core-object old) input resource))
                                   ((equal content-type "application/json-patch+json")
                                    (apply-core-json-patch (copy-core-object old) input))
                                   (t (merge-json-object (copy-core-object old) (require-object input "patch")))))
@@ -354,6 +358,11 @@ here are single-stack IPv4."
             (dolist (field '("labels" "annotations"))
               (multiple-value-bind (value present) (gethash field metadata)
                 (when present (setf (gethash field (gethash "metadata" old)) value))))
+            ;; A subresource write cannot set managedFields; an apply brings what it recorded.
+            (when applied
+              (if (gethash "managedFields" metadata)
+                  (setf (gethash "managedFields" (gethash "metadata" old)) (gethash "managedFields" metadata))
+                  (remhash "managedFields" (gethash "metadata" old))))
             (unless (member (gethash "resourceVersion" metadata) '(nil "") :test #'equal)
               (setf (gethash "resourceVersion" (gethash "metadata" old)) (gethash "resourceVersion" metadata)))
             old))

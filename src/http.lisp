@@ -440,7 +440,9 @@ not be changed; add or replace entries instead."
 
 (defun create-pod-response (store reconciler &optional (namespace "default"))
   "Admit a new Pod; a dry run runs every admission and quota check but stores nothing."
-  (let ((raw (core-resource-request-object "Pod")))
+  (let ((raw (core-resource-request-object "Pod"))
+        ;; The client comes to own the fields it created, as an Update.
+        (*apply-update-manager* (list (apply-default-manager) nil)))
     ;; The API server defaults a request as it decodes it, so admission sees the defaults.
     (when (hash-table-p raw) (default-pod-spec-object (gethash "spec" raw)))
     (multiple-value-bind (admitted attributes)
