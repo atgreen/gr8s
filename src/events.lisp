@@ -151,7 +151,9 @@
   (append '("metadata.name" "metadata.namespace")
           (when (and (custom-resource-key-p resource) *crd-view-definition*)
             (crd-selectable-field-paths *crd-view-definition* *crd-request-version*))
-          (when (csr-resource-p resource) '("spec.signerName"))
+          (when (or (csr-resource-p resource) (equal resource "clustertrustbundles")) '("spec.signerName"))
+          ;; pkg/apis/certificates/v1 field label conversions; signers watch by signerName.
+          (when (equal resource "podcertificaterequests") '("spec.signerName" "spec.podName" "spec.nodeName"))
           (when (equal resource "events")
             '("involvedObject.kind" "involvedObject.namespace" "involvedObject.name" "involvedObject.uid"
               "involvedObject.apiVersion" "involvedObject.resourceVersion" "involvedObject.fieldPath"

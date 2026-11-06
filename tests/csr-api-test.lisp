@@ -330,5 +330,12 @@
           (let ((status (check-core-status 200 "/apis/certificates.k8s.io/v1beta1/namespaces/default/podcertificaterequests/test/status")))
             (is (equal "certificates.k8s.io/v1beta1" (gethash "apiVersion" status)))
             (is (equal "CHAIN" (gethash "certificateChain" (gethash "status" status)))))
+          ;; Signers list and watch their own requests by spec.signerName.
+          (is (= 1 (length (gethash "items" (check-core-status 200 "/apis/certificates.k8s.io/v1/podcertificaterequests"
+                                                                 :parameters '(("fieldSelector" . "spec.signerName=example.com/e2e"))))))))
+          (is (= 0 (length (gethash "items" (check-core-status 200 "/apis/certificates.k8s.io/v1/podcertificaterequests"
+                                                                 :parameters '(("fieldSelector" . "spec.signerName=example.com/other"))))))))
+          (check-core-status 200 "/apis/certificates.k8s.io/v1/clustertrustbundles"
+                             :parameters '(("fieldSelector" . "spec.signerName=example.com/e2e")))
           (check-core-status 200 (concatenate 'string collection "?labelSelector=e2e%3Dpcr") :method :delete)
           (check-core-status 404 item))))))
