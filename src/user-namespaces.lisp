@@ -82,3 +82,14 @@ applyPlatformSpecificContainerConfig does: files keep inside the Pod the owners 
       (setf (slot-value mount 'gr8s.cri.v1::uidmappings) (gr8s.cri.v1::uids user-namespace)
             (slot-value mount 'gr8s.cri.v1::gidmappings) (gr8s.cri.v1::gids user-namespace))))
   mounts)
+
+(defun counting-user-namespaced-pod-starts (runtime pod converge)
+  "Call CONVERGE on RUNTIME and POD, counting a sandbox it starts for a user-namespaced Pod and,
+when the sync then fails, an error, as the kubelet's started_user_namespaced_pods metrics count them."
+  (if (or (pod-host-users-p pod) (containerd-owned-sandbox runtime (pod-uid pod)))
+      (funcall converge runtime pod)
+      (let ((succeeded nil))
+        (unwind-protect (multiple-value-prog1 (funcall converge runtime pod) (setf succeeded t))
+          ;; A sync that started a sandbox, or failed trying to, counts.
+          (when (or (not succeeded) (ignore-errors (containerd-owned-sandbox runtime (pod-uid pod))))
+            (note-user-namespaced-pod-start succeeded))))))

@@ -353,7 +353,9 @@ A container running as any user can write here, and a user mount at the path tak
 
 (defmethod runtime-ensure ((runtime containerd-runtime) pod)
   "Converge native containers without destroying an unchanged sandbox or healthy siblings."
-  (call-containerd-runtime (lambda () (reconcile-container-probes runtime pod (converge-containerd-containers runtime pod)))))
+  (call-containerd-runtime
+   (lambda ()
+     (reconcile-container-probes runtime pod (counting-user-namespaced-pod-starts runtime pod #'converge-containerd-containers)))))
 
 (defmethod runtime-reconcile-containers ((runtime containerd-runtime) pod observed)
   "Retry only eligible native containers, even while a sibling keeps the Pod Running."

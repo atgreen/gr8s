@@ -84,3 +84,11 @@
     (let ((plain (list (make-instance 'gr8s.cri.v1::mount :container-path "/a" :host-path "/x"))))
       (gr8s::map-mounts-into-user-namespace plain nil)
       (is (null (gr8s.cri.v1::uidmappings (first plain)))))))
+
+(test user-namespaced-pod-starts-are-counted-as-the-kubelet-counts-them
+  (let ((gr8s::*kubelet-instrumentation* (gr8s::make-kubelet-instrumentation)))
+    (gr8s::note-user-namespaced-pod-start t)
+    (gr8s::note-user-namespaced-pod-start nil)
+    (let ((text (gr8s::kubelet-instrumentation-text)))
+      (is (search (format nil "kubelet_started_user_namespaced_pods_total 2~%") text))
+      (is (search (format nil "kubelet_started_user_namespaced_pods_errors_total 1~%") text)))))
