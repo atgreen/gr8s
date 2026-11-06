@@ -385,9 +385,14 @@ Each call for an unbound Pod is a scheduling attempt, measured as kube-scheduler
               (remhash (pod-uid pod) (pod-store-nominated-nodes store))
               (persist-pod-assignment store pod (node-record-name node)))
             (let ((plan (choose-preemption-unlocked store pod placeable)))
-              (when plan
-                (setf victims (cdr plan)
-                      (gethash (pod-uid pod) (pod-store-nominated-nodes store)) (node-record-name (car plan))))))))
+              (cond (plan
+                     (setf victims (cdr plan)
+                           (gethash (pod-uid pod) (pod-store-nominated-nodes store)) (node-record-name (car plan))))
+                    ;; As upstream, a Pod still waiting for its victims keeps its nomination, while
+                    ;; one whose preemption now finds nothing gives it up, so its reservation stops
+                    ;; holding room against Pods of its own priority.
+                    ((not (pod-awaiting-preemption-p store pod))
+                     (remhash (pod-uid pod) (pod-store-nominated-nodes store))))))))
     (ignore-errors
      (note-scheduling-attempt (pod-uid pod)
                               (ignore-errors (pod-deletion-time (table-get (pod-to-object pod) "metadata" "creationTimestamp")))
@@ -395,7 +400,8 @@ Each call for an unbound Pod is a scheduling attempt, measured as kube-scheduler
                               (/ (- (get-internal-real-time) started) internal-time-units-per-second)
                               (and node algorithm)))
     ;; Deletion takes the store lock itself and is retried by reconciliation.
-    (dolist (victim victims) (preempt-pod store victim))
+    (dolist (victim victims)
+      (unless (deletion-requested-p victim) (preempt-pod store victim)))
     (if node
         (progn
           (with-store-lock (store) (remhash (pod-uid pod) (pod-store-scheduling-notes store)))

@@ -298,7 +298,8 @@
       (when (gethash "podFixed" overhead)
         (maphash (lambda (name value)
                    (declare (ignore value))
-                   (unless (member name '("cpu" "memory") :test #'equal)
+                   ;; Extended resources are counted by the scheduler alone, as for containers.
+                   (unless (or (member name '("cpu" "memory") :test #'equal) (extended-resource-name-p name))
                      (core-resource-error 422 "Invalid" "overhead.podFixed[~A] has no implemented accounting" name)))
                  (gethash "podFixed" overhead)))))
   (let ((scheduling (gethash "scheduling" object)))

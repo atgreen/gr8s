@@ -159,11 +159,15 @@ resource; an extended resource it does not advertise has zero capacity."
          (requests (pod-requests-table pod))
          (allocatable (node-allocatable-table node))
          (occupants (node-charged-pods-unlocked store (node-record-name node)))
-         (removable (sort (remove-if-not (lambda (other)
-                                           (and (< (pod-spec-priority other) priority)
-                                                (not (deletion-requested-p other))))
-                                         occupants)
-                          #'pod-more-important-p))
+         ;; As upstream's SelectVictimsOnNode does, a lower-priority Pod already terminating
+         ;; (another preemptor's victim) can be one of this Pod's victims too; it is
+         ;; reprieved last, so live Pods are kept in preference to it.
+         (removable (sort (remove-if-not (lambda (other) (< (pod-spec-priority other) priority)) occupants)
+                          (lambda (left right)
+                            (let ((left-going (deletion-requested-p left)) (right-going (deletion-requested-p right)))
+                              (if (eq (not left-going) (not right-going))
+                                  (pod-more-important-p left right)
+                                  right-going)))))
          (kept (append (set-difference occupants removable)
                        (nominated-pods-unlocked store (node-record-name node) pod))))
     (unless (resource-fit-p requests allocatable kept)

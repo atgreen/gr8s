@@ -744,7 +744,7 @@ Anything but Disabled needs a read-only mount whose propagation is None."
     (when overhead
       (require-object overhead "spec.overhead")
       (dolist (name (loop for name being the hash-keys of overhead collect name))
-        (unless (member name '("cpu" "memory") :test #'equal)
+        (unless (or (member name '("cpu" "memory") :test #'equal) (extended-resource-name-p name))
           (invalid-pod "spec.overhead[~A] has no implemented accounting" name))
         (setf (gethash name overhead)
               (container-quantity-string (container-quantity-round (parse-container-quantity (gethash name overhead)) -3)))))))
