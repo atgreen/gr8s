@@ -244,6 +244,22 @@ SHARE names a provisioned volume's export, whose own directory is created on fir
       (unless (zerop (funcall *pod-tmpfs-mount* target options))
         (pod-volume-system-error "mount" target)))))
 
+(defun pod-claim-volume-record (runtime uid volume-name)
+  "Return where UID's record of the claim behind VOLUME-NAME is kept. It sits beside the
+Pod's volume directories, which no container mounts, so it outlives an agent restart and
+goes with them when the Pod's volumes are cleaned up."
+  (merge-pathnames (format nil "volumes/.claims/~A" volume-name) (containerd-pod-log-directory runtime uid)))
+
+(defun record-pod-claim-volume (runtime pod volume-name claim-name path)
+  "Record that POD's VOLUME-NAME mounts CLAIM-NAME from PATH, for the kubelet's volume
+statistics, and return PATH."
+  (when path
+    (let ((record (pod-claim-volume-record runtime (pod-uid pod) volume-name)))
+      (ensure-directories-exist record)
+      (with-open-file (stream record :direction :output :if-exists :supersede)
+        (write-string (com.inuoe.jzon:stringify (vector (pod-namespace pod) claim-name (namestring path))) stream))))
+  path)
+
 (defun cleanup-pod-volumes (runtime uid)
   "Unmount and delete a terminated Pod's volumes; a failed unmount leaves data for retry."
   (cleanup-pod-csi-volumes uid)
@@ -263,14 +279,16 @@ SHARE names a provisioned volume's export, whose own directory is created on fir
   "Create a volume's directories and projected files with enforced fsGroup access."
   (when (gethash "hostPath" volume)
     (return-from materialize-pod-volume (materialize-host-storage-source (gethash "hostPath" volume))))
-  (when (gethash "persistentVolumeClaim" volume)
-    (return-from materialize-pod-volume
-      (materialize-persistent-claim-volume runtime pod (gethash "persistentVolumeClaim" volume) (gethash "name" volume))))
-  (when (gethash "ephemeral" volume)
-    (return-from materialize-pod-volume
-      (materialize-persistent-claim-volume
-       runtime pod (core-object "claimName" (ephemeral-claim-name (pod-name pod) (gethash "name" volume)))
-       (gethash "name" volume) t)))
+  (when (or (gethash "persistentVolumeClaim" volume) (gethash "ephemeral" volume))
+    (let* ((ephemeral (gethash "ephemeral" volume))
+           (source (if ephemeral
+                       (core-object "claimName" (ephemeral-claim-name (pod-name pod) (gethash "name" volume)))
+                       (gethash "persistentVolumeClaim" volume))))
+      (multiple-value-bind (path readonly)
+          (materialize-persistent-claim-volume runtime pod source (gethash "name" volume) ephemeral)
+        (return-from materialize-pod-volume
+          (values (record-pod-claim-volume runtime pod (gethash "name" volume) (gethash "claimName" source) path)
+                  readonly)))))
   (when (gethash "csi" volume)
     (return-from materialize-pod-volume
       (materialize-inline-csi-volume (containerd-runtime-resource-store runtime) pod volume)))

@@ -15,11 +15,32 @@
 
 No helper Pod, image or NFS client package is needed for the built-in kinds.
 
-PV and PVC `v1` and the `storage.k8s.io/v1` StorageClass, CSIDriver, CSINode,
-VolumeAttachment and CSIStorageCapacity APIs support durable CRUD,
+PV and PVC `v1` and the `storage.k8s.io/v1` StorageClass, VolumeAttributesClass,
+CSIDriver, CSINode, VolumeAttachment and CSIStorageCapacity APIs support durable CRUD,
 JSON/merge/strategic patches, optimistic resource versions, selectors, paginated
-lists, JSON watches and typed Kubernetes protobuf requests. PV, PVC and
-VolumeAttachment status subresources preserve specification fields.
+lists, JSON watches and typed Kubernetes protobuf requests. PV, PVC, CSINode and
+VolumeAttachment status subresources preserve specification fields. CSINode
+`status.storageHealth` is dropped, as Kubernetes does while its alpha
+`CSIVolumeHealth` gate is off. A VolumeAttributesClass carries the
+`kubernetes.io/vac-protection` finalizer, which holds its deletion while a PV or PVC
+names it. gr8s doesn't yet act on a claim's `volumeAttributesClassName`.
+
+## Volume statistics
+
+The kubelet `/metrics` endpoint reports `kubelet_volume_stats_capacity_bytes`,
+`_available_bytes`, `_used_bytes`, `_inodes`, `_inodes_free` and `_inodes_used` for
+each claim a running container mounts, labelled by `namespace` and
+`persistentvolumeclaim`, as the Persistent Volumes dashboard expects. Each is
+measured with `statvfs(3)` on the mounted path, as the kubelet does for local and
+NFS volumes. Two things differ from Kubernetes:
+
+- **Whole filesystem:** a `local-path` or `hostPath` directory reports its whole
+  filesystem, because its capacity isn't enforced. The kubelet reports nothing for
+  `hostPath`.
+- **CSI:** a CSI volume is measured at its published path, rather than through the
+  driver's `NodeGetVolumeStats`.
+
+The record of each mounted claim is kept with the Pod's volumes, so it survives an agent restart.
 
 ## Node-local volumes
 
@@ -201,7 +222,7 @@ kubelet's part and the Kubernetes controllers' part:
 privileged container, as upstream requires. `/var/lib/kubelet` must be on a shared
 mount, which is the systemd default. Leases are served for sidecar leader election.
 
-Not implemented yet: `NodeExpandVolume`, volume stats, raw block volumes, `fsGroup`
+Not implemented yet: `NodeExpandVolume`, `NodeGetVolumeStats`, raw block volumes, `fsGroup`
 delegation, service account tokens for drivers and Node topology labels. Snapshot
 and clone data sources are passed through to `external-provisioner`, but gr8s
 doesn't serve the snapshot APIs, which come from a driver's own CRDs.
