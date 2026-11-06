@@ -471,6 +471,8 @@ What was consumed isn't kept, for streams too long to hold in memory."
            (session (progn
                       (update-node-capacity (node-grpc-server-store server) node-name
                                             (node-capacity-from-entries (slot-value hello 'gr8s.node.v1::capacity)))
+                      (update-node-kubelet-port (node-grpc-server-store server) node-name
+                                                (or (slot-value hello 'gr8s.node.v1::kubelet-port) 0))
                       (make-node-agent-session stream)))
            (heartbeat-interval
              (max 1 (floor (node-grpc-server-heartbeat-timeout-seconds server) 2))))
@@ -1146,7 +1148,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
 (defun run-one-node-session
     (host port node-name identity-path apply-snapshot operation-handler
      one-shot-p control stop-predicate underlay-address status-provider
-     ca-certificate-path certificate-path private-key-path &optional snapshot-observer)
+     ca-certificate-path certificate-path private-key-path &optional snapshot-observer (kubelet-port 0))
   (let* ((identity (load-agent-identity identity-path node-name))
          (session-thread (bt:current-thread))
          (session-timeout (and one-shot-p 5))
@@ -1210,6 +1212,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                               :underlay-address
                               (or underlay-address (node-channel-underlay-address channel))
                               :capacity (node-reported-capacity-entries)
+                              :kubelet-port kubelet-port
                               :last-applied-revision
                               (gethash "lastAppliedRevision" identity 0)))
              (send-agent-session-envelope
@@ -1309,7 +1312,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                          &key max-sessions (reconnect-delay 1) endpoints
                            operation-handler underlay-address status-provider snapshot-observer
                            ca-certificate-path certificate-path private-key-path
-                           control
+                           control (kubelet-port 0)
                            (stop-predicate (constantly nil)))
   "Maintain the agent's session to the control plane, reconnecting on loss. With
    ENDPOINTS (a list of (host port)) the agent rotates through the control-plane
@@ -1331,7 +1334,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                                                  (not (null max-sessions)) control stop-predicate
                                                  underlay-address status-provider
                                                  ca-certificate-path certificate-path private-key-path
-                                                 snapshot-observer))
+                                                 snapshot-observer kubelet-port))
                        (unless (or (node-session-cancelled-p control) (funcall stop-predicate))
                          (format *error-output* "gr8s node session to ~A:~A ended; reconnecting~%"
                                  try-host try-port))

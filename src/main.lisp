@@ -57,6 +57,7 @@
                        :containerd-socket "/run/containerd/containerd.sock"
                        :containerd-log-root "/var/log/gr8s/pods/"
                        :kubeconfig nil
+                       :kubelet-port +kubelet-default-port+
                        :local-storage-path +default-local-storage-path+)))
     (loop while arguments
           for option = (first arguments)
@@ -115,6 +116,8 @@
                       (setf (getf options :containerd-log-root) value))
                      ((string= option "--kubeconfig")
                       (setf (getf options :kubeconfig) value))
+                     ((string= option "--kubelet-port")
+                      (setf (getf options :kubelet-port) (if (equal value "0") 0 (parse-port value))))
                      ;; HA (podster-c2d.7.1): opt in to a Raft-replicated control
                      ;; plane. Absent these, serve runs single-node as before.
                      ((string= option "--raft-id")
@@ -476,7 +479,8 @@ bare positional state directory for backward compatibility.  A missing
           (certificate (agent-state-path options "node.crt"))
           (ca-certificate (agent-state-path options "ca.crt"))
           (identity (agent-state-path options "identity.json"))
-          (node-runtime nil))
+          (node-runtime nil)
+          (kubelet nil))
       (unless (and (probe-file private-key)
                    (probe-file certificate)
                    (probe-file ca-certificate))
@@ -490,6 +494,7 @@ bare positional state directory for backward compatibility.  A missing
         (unwind-protect
              (progn
                (start-node-runtime node-runtime)
+               (setf kubelet (start-agent-kubelet-server options node-name runtime))
                (run-node-session
                 host port node-name identity
                 (lambda (snapshot)
@@ -504,7 +509,9 @@ bare positional state directory for backward compatibility.  A missing
                 :certificate-path certificate :private-key-path private-key
                 :underlay-address (getf options :node-address)
                 :reconnect-delay 0.1 :control control
+                :kubelet-port (if kubelet (getf options :kubelet-port) 0)
                 :stop-predicate stop-predicate))
+          (when kubelet (stop-kubelet-server kubelet))
           (stop-node-runtime node-runtime)))))
   0)
 
@@ -537,6 +544,13 @@ bare positional state directory for backward compatibility.  A missing
           ;; parent of this agent directory.
           (getf options :runtime-addons-directory)
           (namestring (uiop:pathname-parent-directory-pathname directory)))
+    ;; Only a managed containerd node has the in-cluster API its kubelet delegates reviews to.
+    (if (and (plusp (or (getf options :kubelet-port) 0))
+             (equal "containerd" (getf options :runtime)) (equal "managed" (getf options :containerd-mode)))
+        (issue-kubelet-credentials pki directory node-name
+                                   (remove-duplicates (remove nil (list (discover-local-primary-ipv4) "127.0.0.1"))
+                                                      :test #'equal))
+        (setf (getf options :kubelet-port) 0))
     (setf (local-node-agent-thread worker)
           (bt:make-thread
            (lambda ()
@@ -699,6 +713,8 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          (progn
            (setf memory-monitor (start-memory-monitor store))
            (setf ha (maybe-start-ha-control-plane store pki options))
+           (multiple-value-bind (certificate key) (ensure-apiserver-kubelet-client-credentials pki)
+             (setf *kubelet-proxy-credentials* (list (cluster-pki-ca-certificate pki) certificate key)))
            (setf node-server
                  (start-node-grpc-server
                   store :host (getf options :node-listen "127.0.0.1")

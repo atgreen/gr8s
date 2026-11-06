@@ -1,0 +1,478 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: MIT
+;;;;
+;;;; Purpose:
+;;;; Serve a node's kubelet endpoints over HTTPS, as the kubelet does on port 10250:
+;;;; /metrics/resource, /stats/summary, /metrics and /healthz, for metrics-server and the API
+;;;; server's Node proxy. The serving certificate is signed by the cluster CA for the
+;;;; node's address, so clients that trust the in-cluster CA verify it. Requests are
+;;;; authenticated by a client certificate from that CA or by a bearer token checked
+;;;; with a TokenReview, and authorized with a SubjectAccessReview on the nodes
+;;;; subresource the path maps to, both delegated to the API server and cached for
+;;;; the kubelet's default lifetimes. The API server's Node proxy reaches this
+;;;; listener with its own client certificate.
+
+(in-package #:gr8s)
+
+(defparameter +kubelet-default-port+ 10250
+  "The kubelet's authenticated HTTPS port, which clients assume when a Node reports none.")
+
+(defparameter +kubelet-apiserver-client-name+ "kube-apiserver-kubelet-client"
+  "The API server's identity toward kubelets.")
+
+;;; Credentials, issued by the cluster CA
+
+(defun encode-kubelet-subject (common-name &optional organization)
+  "Encode an X.501 Name holding ORGANIZATION, when given, and COMMON-NAME."
+  (apply #'pure-tls/acme::encode-sequence
+         (append
+          (when organization
+            (list (pure-tls/acme::encode-set
+                   (pure-tls/acme::encode-sequence (pure-tls/acme::encode-oid '(2 5 4 10))
+                                                   (pure-tls/acme::encode-utf8-string organization)))))
+          (list (pure-tls/acme::encode-set
+                 (pure-tls/acme::encode-sequence (pure-tls/acme::encode-oid pure-tls/acme::*oid-common-name*)
+                                                 (pure-tls/acme::encode-utf8-string common-name)))))))
+
+(defun ipv4-address-octets (address)
+  "Return dotted-quad ADDRESS as four octets, or NIL when it is not one."
+  (let ((parts (uiop:split-string address :separator ".")))
+    (when (and (= 4 (length parts))
+               (every (lambda (part) (and (plusp (length part)) (every #'digit-char-p part) (<= (parse-integer part) 255)))
+                      parts))
+      (coerce (mapcar #'parse-integer parts) '(vector (unsigned-byte 8))))))
+
+(defun kubelet-san-extension (addresses dns-names)
+  "Encode subjectAltName with DNS-NAMES and the IPv4 ADDRESSES."
+  (apply #'pure-tls/acme::encode-sequence
+         (append (loop for name in dns-names collect (pure-tls/acme::encode-der #x82 (pki-ascii-octets name)))
+                 (loop for address in addresses
+                       for octets = (ipv4-address-octets address)
+                       when octets collect (pure-tls/acme::encode-der #x87 octets)))))
+
+(defun issue-cluster-certificate (pki certificate-path key-path common-name organization
+                                  &key server (addresses nil) (dns-names nil))
+  "Write a fresh key and a cluster-CA certificate for COMMON-NAME in ORGANIZATION, for
+server authentication with SANs when SERVER is true and client authentication otherwise."
+  (multiple-value-bind (private public) (ironclad:generate-key-pair :secp256r1)
+    (let ((der (certificate-der
+                (pure-tls/acme::encode-subject +pki-ca-common-name+)
+                (encode-kubelet-subject common-name organization)
+                (pure-tls/acme::encode-ec-public-key public)
+                (append
+                 (list (pure-tls/acme::encode-critical-extension
+                        +oid-key-usage+ (pure-tls/acme::encode-bit-string #(#x80) 7))
+                       (pure-tls/acme::encode-extension
+                        +oid-extended-key-usage+
+                        (pure-tls/acme::encode-sequence
+                         (pure-tls/acme::encode-oid (if server '(1 3 6 1 5 5 7 3 1) +oid-client-auth+)))))
+                 (when server
+                   (list (pure-tls/acme::encode-extension pure-tls/acme::*oid-subject-alt-name*
+                                                          (kubelet-san-extension addresses dns-names)))))
+                (cluster-pki-ca-private-key pki))))
+      (ensure-directories-exist certificate-path)
+      (write-private-text-atomically key-path (pure-tls/acme::encode-ec-private-key-pem private))
+      (write-private-text-atomically
+       certificate-path
+       (concatenate 'string (pure-tls/acme::wrap-pem "CERTIFICATE" der)
+                    (uiop:read-file-string (cluster-pki-ca-certificate-path pki))))
+      (values certificate-path key-path))))
+
+(defun kubelet-credential-paths (directory)
+  "Return the serving certificate, its key, the client certificate and its key under DIRECTORY."
+  (let ((directory (uiop:ensure-directory-pathname directory)))
+    (values (merge-pathnames "kubelet.crt" directory) (merge-pathnames "kubelet.key" directory)
+            (merge-pathnames "kubelet-client.crt" directory) (merge-pathnames "kubelet-client.key" directory))))
+
+(defun issue-kubelet-credentials (pki directory node-name addresses)
+  "Give NODE-NAME's kubelet a serving certificate for ADDRESSES and its node name, and a client
+certificate as system:node:NODE-NAME for the reviews it delegates, as kubelet TLS bootstrap would.
+Both are issued afresh, so an address that changed is covered."
+  (multiple-value-bind (certificate key client-certificate client-key) (kubelet-credential-paths directory)
+    (let ((subject (format nil "system:node:~A" node-name)))
+      (issue-cluster-certificate pki certificate key subject "system:nodes"
+                                 :server t :addresses addresses
+                                 :dns-names (remove-duplicates (list node-name (machine-instance)) :test #'equal))
+      (issue-cluster-certificate pki client-certificate client-key subject "system:nodes"))))
+
+(defun ensure-apiserver-kubelet-client-credentials (pki)
+  "Return the API server's client certificate and key toward kubelets, issuing them when missing."
+  (let ((certificate (merge-pathnames "apiserver-kubelet-client.crt" (cluster-pki-root pki)))
+        (key (merge-pathnames "apiserver-kubelet-client.key" (cluster-pki-root pki))))
+    (bt:with-lock-held ((cluster-pki-lock pki))
+      (unless (and (probe-file certificate) (probe-file key))
+        (issue-cluster-certificate pki certificate key +kubelet-apiserver-client-name+ "system:masters")))
+    (values certificate key)))
+
+;;; HTTPS requests with client credentials
+
+(defun read-http-response-body (stream headers &key (limit (* 16 1024 1024)))
+  "Read the body HEADERS frame on STREAM, of at most LIMIT octets."
+  (let ((length-text (cdr (assoc "content-length" headers :test #'string=)))
+        (chunked (search "chunked" (string-downcase (or (cdr (assoc "transfer-encoding" headers :test #'string=)) "")))))
+    (cond
+      (chunked
+       (let ((body (make-array 4096 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+         (loop
+           (let* ((line (admission-read-line stream))
+                  (size (parse-integer line :end (or (position #\; line) (length line)) :radix 16)))
+             (when (zerop size)
+               (loop until (zerop (length (admission-read-line stream))))
+               (return))
+             (when (> (+ size (length body)) limit) (error "HTTP response is too large"))
+             (loop for octet across (admission-read-exactly stream size) do (vector-push-extend octet body))
+             (admission-read-line stream)))
+         (coerce body '(simple-array (unsigned-byte 8) (*)))))
+      (length-text
+       (let ((length (parse-integer length-text)))
+         (when (> length limit) (error "HTTP response is too large"))
+         (admission-read-exactly stream length)))
+      (t (let ((body (make-array 4096 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+           (loop for octet = (read-byte stream nil nil)
+                 while octet
+                 do (when (>= (length body) limit) (error "HTTP response is too large"))
+                    (vector-push-extend octet body))
+           (coerce body '(simple-array (unsigned-byte 8) (*))))))))
+
+(defun tls-http-request (&key address port server-name (method :get) target headers body
+                              trust-certificates client-certificate client-key (timeout 10))
+  "Send one HTTP/1.1 request over TLS verified against TRUST-CERTIFICATES for SERVER-NAME,
+presenting CLIENT-CERTIFICATE when given. Return the status, lowercase headers and body octets."
+  (let ((socket nil) (pure-tls:*session-ticket-cache* (make-hash-table :test 'equal)))
+    (unwind-protect
+         ;; A deadline is no ERROR, and one escaping a request thread ends the process.
+         (handler-case
+          (sb-sys:with-deadline (:seconds timeout)
+           (setf socket (usocket:socket-connect address port :element-type '(unsigned-byte 8)
+                                                             :timeout timeout :nodelay t))
+           (let* ((context (pure-tls:make-tls-context :verify-mode pure-tls:+verify-required+ :auto-load-system-ca nil))
+                  (stream (progn
+                            (setf (pure-tls::tls-context-trust-store context)
+                                  (pure-tls::make-trust-store :certificates trust-certificates))
+                            (pure-tls:make-tls-client-stream
+                             (usocket:socket-stream socket) :hostname server-name :context context
+                             :verify pure-tls:+verify-required+
+                             :client-certificate (and client-certificate (namestring client-certificate))
+                             :client-key (and client-key (namestring client-key))))))
+             (aggregator-write-request stream method target (format nil "~A:~D" server-name port)
+                                       headers (or body #()))
+             (multiple-value-bind (code response-headers) (aggregator-read-response-head stream)
+               (values code response-headers
+                       (if (or (eq method :head) (member code '(204 304)))
+                           (make-array 0 :element-type '(unsigned-byte 8))
+                           (read-http-response-body stream response-headers))))))
+           (sb-sys:deadline-timeout ()
+             (error "no answer from ~A:~D within ~D seconds" address port timeout)))
+      (when socket (ignore-errors (usocket:socket-close socket))))))
+
+;;; Delegated authentication and authorization
+
+(defstruct (kubelet-auth (:constructor %make-kubelet-auth))
+  "How a kubelet checks its callers: certificates against CLIENT-CA, and tokens and access with
+the API server at API-ADDRESS:API-PORT, which it trusts by TRUST-CERTIFICATES and reaches as
+CLIENT-CERTIFICATE. REVIEW, when set, replaces the API call: it takes a review object and
+returns the API server's answer."
+  client-ca
+  api-address
+  (api-port 443)
+  (api-server-name "kubernetes.default.svc")
+  trust-certificates
+  client-certificate
+  client-key
+  review
+  (cache (make-hash-table :test #'equal))
+  (lock (bt:make-lock "gr8s kubelet auth cache")))
+
+(defparameter +kubelet-authentication-cache-seconds+ 120
+  "How long a token's review is reused, the kubelet's default.")
+
+(defparameter +kubelet-authorized-cache-seconds+ 300
+  "How long an allowed access review is reused, the kubelet's default.")
+
+(defparameter +kubelet-unauthorized-cache-seconds+ 30
+  "How long a denied access review is reused, the kubelet's default.")
+
+(defparameter +kubelet-auth-cache-limit+ 1024
+  "Entries kept before the cache starts over, so reviews of many tokens cost bounded memory.")
+
+(defun make-kubelet-auth (&key client-ca api-address (api-port 443) trust-certificates
+                               client-certificate client-key review)
+  "Return how a kubelet authenticates and authorizes its callers."
+  (%make-kubelet-auth :client-ca client-ca :api-address api-address :api-port api-port
+                      :trust-certificates trust-certificates :client-certificate client-certificate
+                      :client-key client-key :review review))
+
+(defun kubelet-auth-cached (auth key ttl-function compute)
+  "Return KEY's cached answer, or COMPUTE it and keep it for as long as TTL-FUNCTION says it may be."
+  (let ((now (get-universal-time)))
+    (bt:with-lock-held ((kubelet-auth-lock auth))
+      (let ((entry (gethash key (kubelet-auth-cache auth))))
+        (when (and entry (< now (car entry)))
+          (return-from kubelet-auth-cached (cdr entry)))))
+    (let ((value (funcall compute)))
+      (bt:with-lock-held ((kubelet-auth-lock auth))
+        (when (>= (hash-table-count (kubelet-auth-cache auth)) +kubelet-auth-cache-limit+)
+          (clrhash (kubelet-auth-cache auth)))
+        (setf (gethash key (kubelet-auth-cache auth)) (cons (+ now (funcall ttl-function value)) value)))
+      value)))
+
+(defun kubelet-delegated-review (auth review)
+  "Create REVIEW, a TokenReview or SubjectAccessReview object, with the API server and return its answer."
+  (if (kubelet-auth-review auth)
+      (funcall (kubelet-auth-review auth) review)
+      (let ((group (if (equal "TokenReview" (gethash "kind" review)) "authentication.k8s.io" "authorization.k8s.io"))
+            (resource (if (equal "TokenReview" (gethash "kind" review)) "tokenreviews" "subjectaccessreviews")))
+        (multiple-value-bind (code headers body)
+            (tls-http-request :address (kubelet-auth-api-address auth) :port (kubelet-auth-api-port auth)
+                              :server-name (kubelet-auth-api-server-name auth) :method :post
+                              :target (format nil "/apis/~A/v1/~A" group resource)
+                              :headers '(("Content-Type" . "application/json") ("Accept" . "application/json"))
+                              :body (trivial-utf-8:string-to-utf-8-bytes (com.inuoe.jzon:stringify review))
+                              :trust-certificates (kubelet-auth-trust-certificates auth)
+                              :client-certificate (kubelet-auth-client-certificate auth)
+                              :client-key (kubelet-auth-client-key auth))
+          (declare (ignore headers))
+          (unless (<= 200 code 299)
+            (error "~A review failed with HTTP ~D: ~A" (gethash "kind" review) code
+                   (trivial-utf-8:utf-8-bytes-to-string body)))
+          (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string body))))))
+
+(defun kubelet-token-identity (auth token)
+  "Return the identity a TokenReview finds for TOKEN, or NIL when the token is not valid."
+  (kubelet-auth-cached
+   auth (list :token (octets-to-hex (ironclad:digest-sequence :sha256 (trivial-utf-8:string-to-utf-8-bytes token))))
+   (constantly +kubelet-authentication-cache-seconds+)
+   (lambda ()
+     (let* ((answer (kubelet-delegated-review
+                     auth (core-object "apiVersion" "authentication.k8s.io/v1" "kind" "TokenReview"
+                                       "spec" (core-object "token" token))))
+            (status (gethash "status" answer)))
+       (when (and (hash-table-p status) (eq t (gethash "authenticated" status)))
+         (let ((user (gethash "user" status)))
+           (make-api-user-identity :username (gethash "username" user)
+                                   :uid (let ((uid (gethash "uid" user))) (and (plusp (length uid)) uid))
+                                   :groups (coerce (gethash "groups" user #()) 'vector)
+                                   :extra (let ((extra (gethash "extra" user))) (and (hash-table-p extra) extra)))))))))
+
+(defun kubelet-authenticate (auth chain authorization)
+  "Return the caller's identity from a verified client certificate CHAIN or the bearer token in
+the AUTHORIZATION header, or NIL."
+  (or (and chain (handler-case (certificate-api-identity chain (kubelet-auth-client-ca auth))
+                   (kubernetes-error () nil)))
+      (let ((token (and authorization (uiop:string-prefix-p "Bearer " authorization)
+                        (string-trim " " (subseq authorization 7)))))
+        (and token (plusp (length token)) (kubelet-token-identity auth token)))))
+
+(defun kubelet-authorized-p (auth identity verb subresource node-name)
+  "Ask whether IDENTITY may VERB nodes/SUBRESOURCE on NODE-NAME."
+  (let ((actor (api-identity-actor identity)))
+    (kubelet-auth-cached
+     auth (list :access (gethash "username" actor) (coerce (gethash "groups" actor #()) 'list)
+                (gethash "uid" actor) verb subresource node-name)
+     (lambda (allowed) (if allowed +kubelet-authorized-cache-seconds+ +kubelet-unauthorized-cache-seconds+))
+     (lambda ()
+       (let* ((spec (core-object "user" (gethash "username" actor) "groups" (gethash "groups" actor #())
+                                 "resourceAttributes" (core-object "verb" verb "version" "v1" "resource" "nodes"
+                                                                   "subresource" subresource "name" node-name)))
+              (answer (progn
+                        (when (gethash "uid" actor) (setf (gethash "uid" spec) (gethash "uid" actor)))
+                        (when (hash-table-p (gethash "extra" actor)) (setf (gethash "extra" spec) (gethash "extra" actor)))
+                        (kubelet-delegated-review
+                         auth (core-object "apiVersion" "authorization.k8s.io/v1" "kind" "SubjectAccessReview"
+                                           "spec" spec))))
+              (status (gethash "status" answer)))
+         (and (hash-table-p status) (eq t (gethash "allowed" status))))))))
+
+(defun kubelet-request-verb (method)
+  "Map an HTTP METHOD to the verb the kubelet authorizes, as its auth filter does."
+  (case method (:post "create") (:get "get") (:put "update") (:patch "patch") (:delete "delete") (t "")))
+
+(defun kubelet-request-subresources (path)
+  "Return the nodes subresources that may allow PATH, in the order the kubelet tries them.
+With fine-grained authorization, always on since 1.36, /pods, /healthz and /configz have their
+own subresource and fall back to proxy; /stats and /metrics have only theirs."
+  (flet ((under (prefix) (or (equal path prefix) (uiop:string-prefix-p (concatenate 'string prefix "/") path))))
+    (append
+     (cond ((or (under "/allocatedPods") (under "/pods") (under "/runningpods")) '("pods"))
+           ((under "/healthz") '("healthz"))
+           ((under "/configz") '("configz")))
+     (list (cond ((under "/stats") "stats")
+                 ((under "/metrics") "metrics")
+                 ((under "/logs") "log")
+                 ((under "/checkpoint") "checkpoint")
+                 ((under "/statusz") "statusz")
+                 ((under "/flagz") "configz")
+                 (t "proxy"))))))
+
+;;; The listener
+
+(defclass kubelet-acceptor (gr8s-acceptor)
+  ((certificate :initarg :certificate :reader kubelet-acceptor-certificate)
+   (private-key :initarg :private-key :reader kubelet-acceptor-private-key)
+   (node-name :initarg :node-name :reader kubelet-acceptor-node-name)
+   (auth :initarg :auth :reader kubelet-acceptor-auth)
+   (stats-function :initarg :stats-function :reader kubelet-acceptor-stats-function))
+  (:documentation "Serve a node's kubelet endpoints to authenticated, authorized callers over TLS.")
+  (:default-initargs
+   :taskmaster (make-instance 'hunchentoot:one-thread-per-connection-taskmaster :max-thread-count 64
+                                                                                  :max-accept-count 128)))
+
+(defmethod hunchentoot:acceptor-ssl-p ((acceptor kubelet-acceptor))
+  "Identify this acceptor as HTTPS."
+  t)
+
+(defmethod hunchentoot:process-connection :around ((acceptor kubelet-acceptor) socket)
+  "Keep each connection's verified client chain to that connection."
+  (let ((*api-connection-certificate-chain* nil)) (call-next-method)))
+
+(defmethod hunchentoot:initialize-connection-stream ((acceptor kubelet-acceptor) stream)
+  "Accept an optional client certificate, whose chain the request's authentication then verifies."
+  (sb-sys:with-deadline (:seconds 10)
+    (let* ((pure-tls:*server-ticket-key* (ironclad:random-data 32))
+           (tls (pure-tls:make-tls-server-stream stream :certificate (kubelet-acceptor-certificate acceptor)
+                                                        :key (kubelet-acceptor-private-key acceptor)
+                                                        :verify pure-tls:+verify-peer+ :trust-store nil)))
+      (setf *api-connection-certificate-chain* (pure-tls:tls-peer-certificate-chain tls))
+      tls)))
+
+(defun kubelet-text-response (code text &optional (content-type "text/plain; charset=utf-8"))
+  "Answer with status CODE and TEXT."
+  (setf (hunchentoot:return-code*) code (hunchentoot:content-type*) content-type)
+  text)
+
+(defvar *kubelet-process-start-time* (get-universal-time)
+  "When this process started serving, in universal time.")
+
+(defun kubelet-own-metrics-text (stats node-name)
+  "Render the kubelet's own /metrics: what it runs, from STATS, and its identity."
+  (with-output-to-string (out)
+    (write-prometheus-family out "kubelet_node_name" "[ALPHA] The node's name. The count is always 1." "gauge"
+                             (list (list (list (cons "node" node-name)) 1)))
+    (when stats
+      (write-prometheus-family out "kubelet_running_containers" "[ALPHA] Number of containers currently running" "gauge"
+                               (list (list (list (cons "container_state" "running"))
+                                           (reduce #'+ (kubelet-node-stats-pods stats)
+                                                   :key (lambda (pod) (length (kubelet-pod-stats-containers pod)))))))
+      (write-prometheus-family out "kubelet_running_pods" "[ALPHA] Number of pods that have a running pod sandbox" "gauge"
+                               (list (list nil (length (kubelet-node-stats-pods stats))))))
+    (write-prometheus-family out "process_start_time_seconds" "[ALPHA] Start time of the process since unix epoch in seconds." "gauge"
+                             (list (list nil (- *kubelet-process-start-time* 2208988800))))))
+
+(defun kubelet-endpoint-response (acceptor path method)
+  "Serve PATH for a caller already allowed to read it."
+  (cond
+    ((and (equal path "/metrics") (member method '(:get :head)))
+     (kubelet-text-response
+      200 (kubelet-own-metrics-text (ignore-errors (funcall (kubelet-acceptor-stats-function acceptor)))
+                                    (kubelet-acceptor-node-name acceptor))
+      "text/plain; version=0.0.4; charset=utf-8"))
+    ((and (equal path "/metrics/resource") (member method '(:get :head)))
+     (let ((text (handler-case (kubelet-resource-metrics-text (funcall (kubelet-acceptor-stats-function acceptor)))
+                   (error (condition)
+                     (format *error-output* "gr8s kubelet resource metrics: ~A~%" condition)
+                     (kubelet-resource-metrics-text nil :error t)))))
+       (kubelet-text-response 200 text "text/plain; version=0.0.4; charset=utf-8")))
+    ((and (equal path "/stats/summary") (member method '(:get :post)))
+     (let ((only (loop for (name . value) in (hunchentoot:get-parameters*)
+                       when (equal name "only_cpu_and_memory") collect value)))
+       (handler-case
+           (kubelet-text-response
+            200 (com.inuoe.jzon:stringify
+                 (kubelet-stats-summary-object (funcall (kubelet-acceptor-stats-function acceptor))
+                                               :cpu-and-memory-only (equal only '("true"))))
+            "application/json")
+         (error (condition)
+           (kubelet-text-response 500 (format nil "Internal Error: failed to get node info: ~A~%" condition))))))
+    ((and (member path '("/healthz" "/healthz/ping") :test #'equal) (member method '(:get :head)))
+     (kubelet-text-response 200 "ok"))
+    (t (kubelet-text-response 404 (format nil "404 page not found~%")))))
+
+(defmethod hunchentoot:acceptor-dispatch-request ((acceptor kubelet-acceptor) request)
+  "Authenticate, authorize as the kubelet's filter does, then serve the endpoint."
+  (let* ((path (hunchentoot:script-name request)) (method (hunchentoot:request-method request))
+         (auth (kubelet-acceptor-auth acceptor)) (node (kubelet-acceptor-node-name acceptor)))
+    (handler-case
+        (let ((identity (kubelet-authenticate auth *api-connection-certificate-chain*
+                                              (hunchentoot:header-in :authorization request))))
+          (cond
+            ((null identity) (kubelet-text-response 401 "Unauthorized"))
+            ((let ((verb (kubelet-request-verb method)) (subresources (kubelet-request-subresources path)))
+               (unless (some (lambda (subresource) (kubelet-authorized-p auth identity verb subresource node))
+                             subresources)
+                 (kubelet-text-response 403 (format nil "Forbidden (user=~A, verb=~A, resource=nodes, subresource(s)=[~{~A~^ ~}])~%"
+                                                    (api-identity-username identity) verb subresources)))))
+            (t (kubelet-endpoint-response acceptor path method))))
+      ((or error sb-sys:deadline-timeout sb-ext:timeout) (condition)
+        (format *error-output* "gr8s kubelet request ~A: ~A~%" path condition)
+        (kubelet-text-response 500 (format nil "Internal Error: ~A~%" condition))))))
+
+(defun start-kubelet-server (&key (address "0.0.0.0") (port +kubelet-default-port+) certificate key
+                                  node-name auth stats-function)
+  "Start serving NODE-NAME's kubelet endpoints. STATS-FUNCTION returns a fresh KUBELET-NODE-STATS."
+  (hunchentoot:start
+   (make-instance 'kubelet-acceptor :address address :port port
+                                    ;; Loaded once, so connections need not read the files.
+                                    :certificate (pure-tls:load-certificate-chain certificate)
+                                    :private-key (pure-tls:load-private-key key)
+                                    :node-name node-name :auth auth :stats-function stats-function
+                                    :access-log-destination nil :message-log-destination *error-output*)))
+
+(defun stop-kubelet-server (server)
+  "Stop a kubelet listener and the requests it is serving."
+  (ignore-errors (hunchentoot:stop server)))
+
+;;; The API server side: the Node proxy
+
+(defun node-kubelet-endpoint (store name)
+  "Return NAME's address and advertised kubelet port, or NIL when its kubelet serves nothing."
+  (with-store-lock (store)
+    (let ((node (gethash name (pod-store-nodes store))))
+      (when (and node (not (node-record-api-only node)) (plusp (or (node-record-kubelet-port node) 0)))
+        (values (node-reported-address node) (node-record-kubelet-port node))))))
+
+(defvar *kubelet-proxy-credentials* nil
+  "The cluster CA certificate, and the API server's kubelet client certificate and key paths, once known.")
+
+(defun kubelet-proxy-response (store name port suffix method)
+  "Forward a Node proxy read to NAME's kubelet and relay its status, type and body."
+  (multiple-value-bind (address advertised) (node-kubelet-endpoint store name)
+    (destructuring-bind (&optional ca certificate key) *kubelet-proxy-credentials*
+      (unless (and address ca)
+        (core-resource-error 503 "ServiceUnavailable" "Node ~A has no kubelet endpoint to proxy to" name))
+      (let* ((raw (hunchentoot:request-uri*))
+             (query (let ((question (position #\? raw))) (and question (subseq raw question))))
+             (target-port (if (and port (plusp (length port)) (every #'digit-char-p port)) (parse-integer port) advertised)))
+        (multiple-value-bind (code headers body)
+            (handler-case
+                (tls-http-request :address address :port target-port :server-name address :method method
+                                  :target (concatenate 'string suffix (or query ""))
+                                  :headers '(("Accept" . "*/*"))
+                                  :trust-certificates (list ca) :client-certificate certificate :client-key key)
+              (error (condition)
+                (core-resource-error 503 "ServiceUnavailable" "error trying to reach the kubelet of node ~A: ~A"
+                                     name (remove #\Newline (princ-to-string condition)))))
+          (setf (hunchentoot:return-code*) code
+                (hunchentoot:content-type*) (or (cdr (assoc "content-type" headers :test #'string=)) "text/plain"))
+          body)))))
+
+;;; The agent side
+
+(defun start-agent-kubelet-server (options node-name runtime)
+  "Start the agent's kubelet listener when OPTIONS give it a port and its credentials exist,
+returning it, or NIL. A port another process holds leaves the node without one, as reported."
+  (let ((port (or (getf options :kubelet-port) 0))
+        (directory (uiop:ensure-directory-pathname (getf options :state-directory))))
+    (multiple-value-bind (certificate key client-certificate client-key) (kubelet-credential-paths directory)
+      (when (and (plusp port) (probe-file certificate) (probe-file client-certificate))
+        (handler-case
+            (let ((ca (first (pure-tls:load-certificate-chain (merge-pathnames "ca.crt" directory)))))
+              (multiple-value-bind (api-host api-port) (parse-agent-server (or (getf options :kubelet-api-server) "10.96.0.1:443"))
+                (start-kubelet-server
+                 :port port :certificate certificate :key key :node-name node-name
+                 :auth (make-kubelet-auth :client-ca ca :api-address api-host :api-port api-port
+                                          :trust-certificates (list ca)
+                                          :client-certificate client-certificate :client-key client-key)
+                 :stats-function (lambda () (collect-kubelet-node-stats runtime node-name)))))
+          (error (condition)
+            (format *error-output* "gr8s kubelet endpoints on port ~D are unavailable: ~A~%" port condition)
+            nil))))))
