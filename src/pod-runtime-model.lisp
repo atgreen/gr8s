@@ -30,14 +30,22 @@
     (remhash key object))
   object)
 
+(defparameter *seccomp-profile-root* #P"/var/lib/kubelet/seccomp/"
+  "Where Localhost seccomp profiles are read from: the kubelet's default, where profile installers
+such as the security-profiles-operator put them.")
+
 (defun validate-seccomp-profile (profile)
-  "Accept profiles CRI can apply; Localhost is refused because no profile root is configured."
+  "Accept the profile types CRI applies. A Localhost profile names a file under the profile root."
   (drop-null-fields (require-object profile "securityContext.seccompProfile"))
   (reject-unsupported-fields profile '("type" "localhostProfile") "seccompProfile")
-  (unless (member (gethash "type" profile) '("RuntimeDefault" "Unconfined") :test #'equal)
-    (invalid-pod "seccompProfile.type ~S is not supported" (gethash "type" profile)))
-  (when (gethash "localhostProfile" profile)
-    (invalid-pod "seccompProfile.localhostProfile requires type Localhost")))
+  (let ((type (gethash "type" profile)) (localhost (gethash "localhostProfile" profile)))
+    (unless (member type '("RuntimeDefault" "Unconfined" "Localhost") :test #'equal)
+      (invalid-pod "seccompProfile.type ~S must be RuntimeDefault, Unconfined or Localhost" type))
+    (cond ((equal type "Localhost")
+           (unless (safe-volume-relative-path-p localhost)
+             (invalid-pod "seccompProfile.localhostProfile must be a relative path without traversal when type is Localhost")))
+          (localhost
+           (invalid-pod "seccompProfile.localhostProfile requires type Localhost")))))
 
 (defun validate-selinux-options (options)
   "Validate the SELinux label components forwarded to the container runtime."

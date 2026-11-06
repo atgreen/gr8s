@@ -495,10 +495,16 @@ A literal value may refer to any variable defined before it, as $(NAME)."
   "Map a validated seccompProfile to CRI, leaving an unset profile to mean Unconfined."
   (let ((profile (and context (gethash "seccompProfile" context))))
     (when profile
-      (make-instance 'gr8s.cri.v1::security-profile
-                     :profile-type (if (equal "RuntimeDefault" (gethash "type" profile))
-                                       gr8s.cri.v1::|+PROFILETYPE-RuntimeDefault+|
-                                       gr8s.cri.v1::|+PROFILETYPE-Unconfined+|)))))
+      (let ((type (gethash "type" profile)))
+        (if (equal type "Localhost")
+            (make-instance 'gr8s.cri.v1::security-profile
+                           :profile-type gr8s.cri.v1::|+PROFILETYPE-Localhost+|
+                           :localhost-ref (namestring (merge-pathnames (gethash "localhostProfile" profile)
+                                                                       *seccomp-profile-root*)))
+            (make-instance 'gr8s.cri.v1::security-profile
+                           :profile-type (if (equal "RuntimeDefault" type)
+                                             gr8s.cri.v1::|+PROFILETYPE-RuntimeDefault+|
+                                             gr8s.cri.v1::|+PROFILETYPE-Unconfined+|)))))))
 
 (defun cri-apparmor-profile (context)
   "Map a validated appArmorProfile to CRI. Unset leaves the runtime's default, which a node

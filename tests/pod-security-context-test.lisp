@@ -141,3 +141,16 @@
                                                           "valueFrom" (gr8s::core-object "resourceFieldRef"
                                                                                          (gr8s::core-object "resource" "limits.ephemeral-storage")))))
                          object))))
+
+(test localhost-seccomp-profiles-are-read-from-the-kubelet-profile-root
+  (let* ((pod (parse-pod (security-context-test-object
+                          :container "{\"seccompProfile\":{\"type\":\"Localhost\",\"localhostProfile\":\"operator/default/profile.json\"}}")))
+         (profile (gr8s.cri.v1::seccomp (gr8s::containerd-pod-security-context pod (aref (pod-containers pod) 0)))))
+    (is (= gr8s.cri.v1::|+PROFILETYPE-Localhost+| (gr8s.cri.v1::profile-type profile)))
+    (is (equal "/var/lib/kubelet/seccomp/operator/default/profile.json" (gr8s.cri.v1::localhost-ref profile))))
+  (dolist (container '("{\"seccompProfile\":{\"type\":\"Localhost\"}}"
+                       "{\"seccompProfile\":{\"type\":\"Localhost\",\"localhostProfile\":\"../escape.json\"}}"
+                       "{\"seccompProfile\":{\"type\":\"Localhost\",\"localhostProfile\":\"/abs.json\"}}"
+                       "{\"seccompProfile\":{\"type\":\"RuntimeDefault\",\"localhostProfile\":\"x.json\"}}"
+                       "{\"seccompProfile\":{\"type\":\"Other\"}}"))
+    (signals kubernetes-error (parse-pod (security-context-test-object :container container)))))
