@@ -368,6 +368,7 @@
                              (:file "csi-test")
                              (:file "policy-api-test")
                              (:file "env-files-test")
+                             (:file "recursive-read-only-test")
                              (:file "service-account-test")
                              (:file "api-client-certificate-test")
                              (:file "bootstrap-protobuf-test")

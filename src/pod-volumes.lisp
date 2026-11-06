@@ -317,6 +317,22 @@ The runtime mounts the image itself, and it fails the container if a subPath isn
                    :propagation (container-mount-propagation mount)
                    :readonly t)))
 
+(defun recursive-read-only-mounts-supported-p ()
+  "Return whether this kernel has mount_setattr(2), which recursive read-only mounts need (Linux 5.12)."
+  (let* ((release (ignore-errors (string-trim '(#\Newline #\Space) (uiop:read-file-string "/proc/sys/kernel/osrelease"))))
+         (parts (and release (uiop:split-string release :separator '(#\. #\-))))
+         (major (and parts (parse-integer (first parts) :junk-allowed t)))
+         (minor (and (second parts) (parse-integer (second parts) :junk-allowed t))))
+    (and major minor (or (> major 5) (and (= major 5) (>= minor 12))))))
+
+(defun container-mount-recursive-read-only-p (mount)
+  "Return whether MOUNT is made read-only recursively: Enabled always, IfPossible where the kernel can.
+A runtime that cannot honour Enabled then fails the container, as a kubelet would."
+  (let ((mode (gethash "recursiveReadOnly" mount "Disabled")))
+    (and (eq t (gethash "readOnly" mount))
+         (or (equal mode "Enabled")
+             (and (equal mode "IfPossible") (recursive-read-only-mounts-supported-p))))))
+
 (defun containerd-pod-mounts (runtime pod container &optional environment)
   "Build CRI mounts from validated Pod volume declarations, materializing those the node provides."
   (let ((volumes (gethash "volumes" (gethash "spec" (pod-to-object pod)) #()))
@@ -333,6 +349,7 @@ The runtime mounts the image itself, and it fails the container if a subPath isn
                         (make-instance 'gr8s.cri.v1::mount
                                        :container-path (gethash "mountPath" mount) :host-path (namestring path)
                                        :propagation (container-mount-propagation mount)
+                                       :recursive-read-only (container-mount-recursive-read-only-p mount)
                                        :readonly (or forced-readonly (not (null (gethash "configMap" volume)))
                                                      (not (null (gethash "secret" volume)))
                                                      (not (null (gethash "downwardAPI" volume)))
