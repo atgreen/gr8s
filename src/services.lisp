@@ -599,10 +599,14 @@ Turning affinity off clears the timeout a client read back with the Service."
     object))
 
 (defun service-port-target (pod port)
-  "Resolve an integer or named Service target against the Pod's real port declarations."
-  (let ((target (gethash "targetPort" port (gethash "port" port))))
+  "Resolve an integer or named Service target against the Pod's real port declarations: its
+containers' and, as upstream's FindPort does, its restartable (sidecar) init containers'."
+  (let ((target (gethash "targetPort" port (gethash "port" port)))
+        (spec (gethash "spec" (pod-to-object pod))))
     (if (integerp target) target
-        (loop for container across (gethash "containers" (gethash "spec" (pod-to-object pod)))
+        (loop for container across (concatenate 'vector (gethash "containers" spec #())
+                                                (remove-if-not (lambda (init) (equal "Always" (gethash "restartPolicy" init)))
+                                                               (gethash "initContainers" spec #())))
               thereis (loop for declared across (gethash "ports" container #())
                             when (and (equal target (gethash "name" declared))
                                       (equal (gethash "protocol" port "TCP") (gethash "protocol" declared "TCP")))
