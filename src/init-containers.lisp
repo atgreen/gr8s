@@ -10,22 +10,16 @@
 (in-package #:gr8s)
 
 (defun parse-init-container (object)
-  "Validate an init container: only a restartable sidecar may define probes or lifecycle hooks."
+  "Validate an init container: only a restartable sidecar may define probes or lifecycle hooks.
+As validateInitContainerRestartPolicy allows with ContainerRestartRules, an ordinary init container
+may override the Pod's policy with OnFailure or Never and restart rules of its own."
   (require-object object "init container")
   (when (eq (gethash "restartPolicy" object) 'null) (remhash "restartPolicy" object))
-  (let ((policy (gethash "restartPolicy" object)))
-    (when (and policy (not (equal policy "Always")))
-      (invalid-pod "init container restartPolicy must be Always when set"))
-    (when (plusp (length (optional-vector object "restartPolicyRules" "init container")))
-      (invalid-pod "init container restartPolicyRules are not supported"))
-    (unless policy
-      (dolist (key '("startupProbe" "readinessProbe" "livenessProbe" "lifecycle"))
-        (when (nth-value 1 (gethash key object))
-          (invalid-pod "ordinary init containers cannot define ~A" key))))
-    ;; PARSE-CONTAINER refuses this field on application containers.
-    (remhash "restartPolicy" object)
-    (unwind-protect (parse-container object)
-      (when policy (setf (gethash "restartPolicy" object) policy)))))
+  (unless (equal "Always" (gethash "restartPolicy" object))
+    (dolist (key '("startupProbe" "readinessProbe" "livenessProbe" "lifecycle"))
+      (when (nth-value 1 (gethash key object))
+        (invalid-pod "ordinary init containers cannot define ~A" key))))
+  (parse-container object))
 
 (defun pod-init-container-p (pod name)
   "Find NAME among POD's ordered init declarations."
@@ -51,8 +45,10 @@ Pod's restartPolicy for it (ContainerRestartRules, beta in v1.36). Only the Rest
     (loop for rule across rules
           do (drop-null-fields (require-object rule "restartPolicyRule"))
              (reject-unsupported-fields rule '("action" "exitCodes") "restartPolicyRule")
-             (unless (equal "Restart" (gethash "action" rule))
-               (invalid-pod "restartPolicyRules.action ~S is not supported (only Restart)" (gethash "action" rule)))
+             ;; RestartAllContainersOnContainerExits is beta and on by default since v1.36.
+             (unless (member (gethash "action" rule) '("Restart" "RestartAllContainers") :test #'equal)
+               (invalid-pod "restartPolicyRules.action: Unsupported value: ~S: supported values: \"Restart\", \"RestartAllContainers\""
+                            (gethash "action" rule)))
              (let ((codes (gethash "exitCodes" rule)))
                (unless codes (invalid-pod "restartPolicyRules.exitCodes: Required value: must be specified"))
                (drop-null-fields (require-object codes "restartPolicyRules.exitCodes"))
@@ -66,9 +62,25 @@ Pod's restartPolicy for it (ContainerRestartRules, beta in v1.36). Only the Rest
                    (invalid-pod "restartPolicyRules.exitCodes.values must be int32 exit codes")))))))
 
 (defun pod-container-declaration (pod name)
-  "Return the JSON declaration of POD's application container NAME, or NIL."
-  (find name (gethash "containers" (gethash "spec" (pod-to-object pod)) #()) :test #'equal
-        :key (lambda (object) (gethash "name" object))))
+  "Return the JSON declaration of POD's application or init container NAME, or NIL."
+  (let ((spec (gethash "spec" (pod-to-object pod))))
+    (find name (concatenate 'vector (gethash "containers" spec #()) (gethash "initContainers" spec #()))
+          :test #'equal :key (lambda (object) (gethash "name" object)))))
+
+(defun container-exit-rule (pod name exit-code)
+  "Return the first of container NAME's restartPolicyRules matching EXIT-CODE, or NIL."
+  (let ((declaration (pod-container-declaration pod name)))
+    (and declaration
+         (find-if (lambda (rule)
+                    (let* ((codes (gethash "exitCodes" rule))
+                           (member (member exit-code (coerce (gethash "values" codes #()) 'list))))
+                      (if (equal "In" (gethash "operator" codes)) member (not member))))
+                  (gethash "restartPolicyRules" declaration #())))))
+
+(defun container-exit-restarts-all-p (pod name exit-code)
+  "Return whether container NAME exiting with EXIT-CODE restarts every container of POD in place."
+  (let ((rule (container-exit-rule pod name exit-code)))
+    (and rule (equal "RestartAllContainers" (gethash "action" rule)))))
 
 (defun container-restarts-after-exit-p (pod name exit-code &optional killed)
   "Decide, as a kubelet does, whether container NAME of POD runs again after exiting with EXIT-CODE.
@@ -76,12 +88,7 @@ KILLED marks an exit the node caused, such as a failed liveness probe, which cou
 An application container's restartPolicyRules are tried in order, then its own restartPolicy,
 then the Pod's."
   (let* ((declaration (pod-container-declaration pod name))
-         (rule (and declaration
-                    (find-if (lambda (rule)
-                               (let* ((codes (gethash "exitCodes" rule))
-                                      (member (member exit-code (coerce (gethash "values" codes #()) 'list))))
-                                 (if (equal "In" (gethash "operator" codes)) member (not member))))
-                             (gethash "restartPolicyRules" declaration #()))))
+         (rule (container-exit-rule pod name exit-code))
          (policy (or (and declaration (gethash "restartPolicy" declaration))
                      (container-effective-restart-policy pod name))))
     (cond (rule (equal "Restart" (gethash "action" rule)))
@@ -133,16 +140,36 @@ then the Pod's."
   (when (plusp (length (pod-init-containers pod)))
     (labels ((declarations (specs)
                (map 'vector (lambda (spec)
-                              (let ((declaration (core-object "name" (container-spec-name spec)
-                                                              "image" (container-spec-image spec))))
-                                (when (pod-sidecar-p pod (container-spec-name spec))
+                              (let* ((name (container-spec-name spec))
+                                     (declaration (core-object "name" name "image" (container-spec-image spec)))
+                                     (object (pod-container-declaration pod name)))
+                                (when (pod-sidecar-p pod name)
                                   (setf (gethash "sidecar" declaration) t))
+                                ;; Read-only observations decide init failure from these.
+                                (dolist (field '("restartPolicy" "restartPolicyRules"))
+                                  (when (and object (gethash field object))
+                                    (setf (gethash field declaration) (copy-core-object (gethash field object)))))
                                 declaration))
                     specs)))
       (setf (gethash "initDeclarations" state) (declarations (pod-init-containers pod))
             (gethash "appDeclarations" state) (declarations (pod-containers pod))
             (gethash "restartPolicy" state) (pod-restart-policy pod))))
   state)
+
+(defun init-declaration-exit-continues-p (declaration pod-policy exit-code)
+  "Return whether an ordinary init container DECLARATION runs again, or restarts every container,
+after EXIT-CODE: any matching restart rule acts, then its own restartPolicy, then the Pod's POD-POLICY,
+under which Always restarts a failed init container as OnFailure does."
+  (let ((rule (find-if (lambda (rule)
+                         (let* ((codes (gethash "exitCodes" rule))
+                                (member (member exit-code (coerce (gethash "values" codes #()) 'list))))
+                           (if (equal "In" (gethash "operator" codes)) member (not member))))
+                       (gethash "restartPolicyRules" declaration #())))
+        (policy (or (gethash "restartPolicy" declaration) (if (equal "Always" pod-policy) "OnFailure" pod-policy))))
+    (cond (rule t)
+          ((equal "Always" policy) t)
+          ((equal "OnFailure" policy) (not (eql 0 exit-code)))
+          (t nil))))
 
 (defun initializing-container-status (declaration)
   "Represent a declared container that has not yet been allowed to start."
@@ -181,7 +208,9 @@ then the Pod's."
                             inits declarations))
            (failed (some (lambda (item decl)
                            (let ((exit (gethash "terminated" (gethash "state" item))))
-                             (and exit (not (gethash "sidecar" decl)) (not (eql 0 (gethash "exitCode" exit))))))
+                             (and exit (not (gethash "sidecar" decl)) (not (eql 0 (gethash "exitCode" exit)))
+                                  (not (init-declaration-exit-continues-p decl (gethash "restartPolicy" state)
+                                                                          (gethash "exitCode" exit))))))
                          inits declarations))
            (sidecar-running (some (lambda (item decl)
                                     (and (gethash "sidecar" decl) (gethash "running" (gethash "state" item))))
@@ -200,7 +229,7 @@ then the Pod's."
                (let ((phase (container-lifecycle-phase apps (not (equal "Unknown" (runtime-pod-phase observed))))))
                  ;; The Pod is not finished until its sidecars have stopped too.
                  (if (and sidecar-running (member phase '("Succeeded" "Failed") :test #'equal)) "Running" phase)))
-              (t (if (and failed (not sidecar-running) (equal "Never" (gethash "restartPolicy" state))) "Failed" "Pending"))))))
+              (t (if (and failed (not sidecar-running)) "Failed" "Pending"))))))
   observed)
 
 (defun container-lifecycle-all-statuses (observed)
@@ -258,23 +287,28 @@ Sidecars stay admitted so they restart; nothing is started again once applicatio
                (unless (init-container-complete-p status sidecar applications-started)
                  (return-from next-pod-container-specs
                    (cond (sidecar (coerce (reverse admitted) 'vector))
-                         ((and (equal "Never" (pod-restart-policy pod)) status
-                               (gethash "terminated" (gethash "state" status)))
+                         ;; An exit that won't be retried ends initialization here.
+                         ((and status (gethash "terminated" (gethash "state" status))
+                               (not (container-restarts-after-exit-p
+                                     pod name (gethash "exitCode" (gethash "terminated" (gethash "state" status))))))
                           (coerce (reverse admitted) 'vector))
                          (t (coerce (reverse (cons spec admitted)) 'vector)))))))
     (concatenate 'vector (reverse admitted) (pod-containers pod) (pod-ephemeral-containers pod))))
 
 (defun pod-init-failed-for-good-p (pod statuses)
   "Return whether an ordinary init container in STATUSES failed a Pod that will never retry it.
-A sidecar's own exit does not count: its restartPolicy restarts it whatever the Pod's says."
-  (and (equal "Never" (pod-restart-policy pod))
-       (loop with sidecars = (pod-sidecar-names pod)
-             for spec across (pod-init-containers pod)
-             for status = (find (container-spec-name spec) statuses :test #'equal
-                                :key (lambda (item) (gethash "name" item)))
-             for terminated = (and status (gethash "terminated" (gethash "state" status)))
-             thereis (and terminated (not (eql 0 (gethash "exitCode" terminated)))
-                          (not (member (container-spec-name spec) sidecars :test #'equal))))))
+A sidecar's own exit does not count: its restartPolicy restarts it whatever the Pod's says. Nor does
+an exit its restart rules answer, by restarting it or every container."
+  (loop with sidecars = (pod-sidecar-names pod)
+        for spec across (pod-init-containers pod)
+        for name = (container-spec-name spec)
+        for status = (find name statuses :test #'equal :key (lambda (item) (gethash "name" item)))
+        for terminated = (and status (gethash "terminated" (gethash "state" status)))
+        for code = (and terminated (gethash "exitCode" terminated))
+        thereis (and terminated (not (eql 0 code))
+                     (not (member name sidecars :test #'equal))
+                     (not (container-restarts-after-exit-p pod name code))
+                     (not (container-exit-restarts-all-p pod name code)))))
 
 (defun retained-init-failure-terminal-p (pod state)
   "Preserve a Never Pod's actual failed initialization after its CRI sandbox disappears."

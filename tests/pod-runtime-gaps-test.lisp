@@ -228,8 +228,12 @@
   (signals kubernetes-error
     (parse-pod (gap-pod-object "initContainers"
                                (vector (gap-container "plain" "startupProbe" (gr8s::core-object "exec" (gr8s::core-object "command" #("true"))))))))
+  ;; With ContainerRestartRules (beta, on since v1.35) validateInitContainerRestartPolicy
+  ;; (pkg/apis/core/validation/validation.go) lets an ordinary init container set OnFailure or Never;
+  ;; only probes and hooks remain a sidecar's.
+  (is (gr8s::pod-name (parse-pod (gap-pod-object "initContainers" (vector (gap-container "plain" "restartPolicy" "OnFailure"))))))
   (signals kubernetes-error
-    (parse-pod (gap-pod-object "initContainers" (vector (gap-container "plain" "restartPolicy" "OnFailure")))))
+    (parse-pod (gap-pod-object "initContainers" (vector (gap-container "plain" "restartPolicy" "Sometimes")))))
   ;; An application container may set its own restartPolicy (ContainerRestartRules), but only a valid one.
   (is (gr8s::pod-name (parse-pod (gap-pod-object "containers" (vector (gap-container "app" "restartPolicy" "Always"))))))
   (signals kubernetes-error
