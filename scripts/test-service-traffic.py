@@ -16,7 +16,8 @@ load balancer governs, so it is itself a node-local client:
   hand-written EndpointSlice that also lists an unreachable endpoint on another node;
 * a Local LoadBalancer's healthCheckNodePort answers 200 with this node's ready
   endpoints and 503 without them, as kube-proxy's does;
-* a Local node port still serves this node's own clients.
+* a Local node port still serves this node's own clients;
+* a ClusterIP from an extra ServiceCIDR is claimed by an IPAddress and serves.
 
 It accepts and ignores the arguments gr8s-upstream passes, so that tool can run it.
 """
@@ -273,6 +274,16 @@ def main():
         gone = wait_for("health check listener to close", 60, lambda: (lambda r: r if r[0] is None else None)(
             http_get("127.0.0.1", health, "/healthz")))
         check("clusterPolicyClosesHealthCheck", gone[0] is None, gone)
+
+        # A ClusterIP from a second ServiceCIDR.
+        cluster.apply({"apiVersion": "networking.k8s.io/v1", "kind": "ServiceCIDR",
+                       "metadata": {"name": "extra"}, "spec": {"cidrs": ["198.51.100.0/24"]}})
+        cluster.apply(service("extra", [HTTP], selector={"app": "web"}, clusterIP="198.51.100.10"))
+        claim = cluster.get("ipaddress", "198.51.100.10")
+        check("extraRangeAddressIsClaimed", claim["spec"]["parentRef"].get("name") == "extra", claim["spec"])
+        served = wait_for("extra-range ClusterIP answers", 60, lambda: (lambda r: r if r[0] == 200 else None)(
+            http_get("198.51.100.10", 80, "/hostname")))
+        check("extraRangeClusterIPServes", served[1] in ("web-0", "web-1", "web-2"), served)
     except Exception as error:  # Every failure is still reported with partial observations.
         failures.append(f"exception: {error}")
     finally:

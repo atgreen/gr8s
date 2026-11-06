@@ -812,6 +812,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                                       (reconcile-storage-version-migrations store)
                                       (reconcile-endpointslices store)
                                       (reconcile-endpoints store)
+                                      (reconcile-service-ip-addresses store)
                                       (prune-projected-tokens store)
                                       ;; Each snapshot also carries projected tokens, renewed when due.
                                       (publish-service-discovery-snapshots runtime)

@@ -292,8 +292,8 @@
     (let ((cidr (check-core-status 201 "/apis/networking.k8s.io/v1/servicecidrs" :method :post
                                    :object (gr8s::core-object "metadata" (gr8s::core-object "name" "extra")
                                                               "spec" (gr8s::core-object "cidrs" (vector "203.0.113.0/24"))))))
-      ;; Nothing allocates from another range, so the object says so rather than claiming Ready.
-      (is (equal "False" (gethash "status" (aref (gethash "conditions" (gethash "status" cidr)) 0)))))
+      ;; ClusterIPs are allocated from every IPv4 range, so another one is Ready too.
+      (is (equal "True" (gethash "status" (aref (gethash "conditions" (gethash "status" cidr)) 0)))))
     (check-core-status 422 "/apis/networking.k8s.io/v1/servicecidrs" :method :post
                        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "hostbits")
                                                   "spec" (gr8s::core-object "cidrs" (vector "203.0.113.1/24"))))
@@ -600,3 +600,63 @@
              (is (equal "HTTP/1.1 200 OK" status))
              (is (= 2 (gethash "localEndpoints" (com.inuoe.jzon:parse body))))))
       (gr8s::stop-health-check-server server))))
+
+;;; ClusterIPs from every ServiceCIDR, each claimed by an IPAddress
+
+(defun service-ip-claim (store address)
+  (gr8s::get-core-resource store "ipaddresses" nil address))
+
+(test cluster-ips-come-from-every-service-cidr-and-are-claimed
+  (with-temporary-store (store directory)
+    (values directory)
+    (gr8s::ensure-default-service-cidr store)
+    (gr8s::create-core-resource store "servicecidrs"
+                                (gr8s::core-object "metadata" (gr8s::core-object "name" "extra")
+                                                   "spec" (gr8s::core-object "cidrs" (vector "203.0.113.0/24")))
+                                nil)
+    ;; A dynamic address comes from the default range, and its IPAddress names the Service.
+    (let* ((plain (gr8s::create-core-resource store "services" (network-service "plain") "alpha"))
+           (address (gethash "clusterIP" (gethash "spec" plain)))
+           (claim (service-ip-claim store address)))
+      (is (gr8s::service-ip-index address))
+      (is (equal "ipallocator.k8s.io"
+                 (gethash "ipaddress.kubernetes.io/managed-by" (gethash "labels" (gethash "metadata" claim)))))
+      (is (equal '("alpha" "plain") (gr8s::ip-address-parent-service claim))))
+    ;; An address in the other range is accepted and claimed; one in no range is refused.
+    (let ((extra (gr8s::create-core-resource store "services" (network-service "extra" "clusterIP" "203.0.113.10") "alpha")))
+      (is (equal "203.0.113.10" (gethash "clusterIP" (gethash "spec" extra))))
+      (is (service-ip-claim store "203.0.113.10")))
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "outside" "clusterIP" "198.51.100.10") "alpha"))
+    ;; Nor are a range's network and broadcast addresses, or an address another IPAddress holds.
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "edge" "clusterIP" "203.0.113.255") "alpha"))
+    (gr8s::create-core-resource store "ipaddresses"
+                                (gr8s::core-object "metadata" (gr8s::core-object "name" "203.0.113.11")
+                                                   "spec" (gr8s::core-object "parentRef"
+                                                                             (gr8s::core-object "group" "example.com" "resource" "things"
+                                                                                                "name" "held")))
+                                nil)
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "taken" "clusterIP" "203.0.113.11") "alpha"))
+    ;; A Service that goes away leaves a stale claim: an allocation may take the address over,
+    ;; and the repair pass removes it.
+    (gr8s::delete-core-resource store "services" "alpha" "extra")
+    (is (service-ip-claim store "203.0.113.10"))
+    (gr8s::create-core-resource store "services" (network-service "again" "clusterIP" "203.0.113.10") "beta")
+    (is (equal '("beta" "again") (gr8s::ip-address-parent-service (service-ip-claim store "203.0.113.10"))))
+    (gr8s::delete-core-resource store "services" "beta" "again")
+    (gr8s::reconcile-service-ip-addresses store)
+    (signals kubernetes-error (service-ip-claim store "203.0.113.10"))
+    ;; The user's own IPAddress is never touched.
+    (is (service-ip-claim store "203.0.113.11"))))
+
+(test service-ip-repair-claims-addresses-of-older-services
+  (with-temporary-store (store directory)
+    (values directory)
+    (let ((address (gethash "clusterIP" (gethash "spec" (gr8s::create-core-resource
+                                                          store "services" (network-service "old") "alpha")))))
+      ;; As if the Service predated IPAddress objects.
+      (gr8s::delete-core-resource store "ipaddresses" nil address)
+      (gr8s::reconcile-service-ip-addresses store)
+      (is (equal '("alpha" "old") (gr8s::ip-address-parent-service (service-ip-claim store address)))))))

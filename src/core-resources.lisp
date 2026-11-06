@@ -821,6 +821,9 @@ An object is streamed to the file, never held as one string as large as the stor
         (enforce-resource-quotas-unlocked store resource namespace object)
         (when (admission-config-resource-p resource) (prepare-admission-config-write object nil))
         (setf (gethash key resources) object)
+        ;; A ClusterIP is claimed by its IPAddress object in the same commit, as upstream's allocator does.
+        (when (equal resource "services")
+          (setf revision (prepare-service-ip-address-writes resources object nil revision)))
         (unless dry-run (commit-core-resources store resources revision))
         (copy-core-object object)))))))
 
@@ -890,6 +893,8 @@ An object is streamed to the file, never held as one string as large as the stor
                      (gethash "deletionTimestamp" metadata) (zerop (length (gethash "finalizers" metadata #())))))
             (remhash (core-resource-key resource namespace name) resources)
             (setf (gethash (core-resource-key resource namespace name) resources) object))
+        (when (equal resource "services")
+          (setf revision (prepare-service-ip-address-writes resources object existing revision)))
         (unless dry-run (commit-core-resources store resources revision)))
       (copy-core-object object))))))
 

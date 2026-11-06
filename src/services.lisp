@@ -3,11 +3,53 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Allocate durable single-stack ClusterIP and node port Services and resolve
-;;;; their ports to running, selector-matched Pod endpoints. Virtual addresses
+;;;; their ports to running, selector-matched Pod endpoints. ClusterIPs come from
+;;;; every IPv4 ServiceCIDR, and each one is claimed by an IPAddress object, as
+;;;; upstream's allocator does. Virtual addresses
 ;;;; live only on the cluster-owned service interface; the API listener owns the
 ;;;; reserved Kubernetes Service address and credentials remain separate.
 
 (in-package #:gr8s)
+
+(defparameter +ip-address-manager+ "ipallocator.k8s.io"
+  "The manager label upstream's ClusterIP allocator puts on the IPAddress objects it owns.")
+
+(defun service-cidr-prefixes (store)
+  "Return the IPv4 ranges ClusterIPs come from, as (name network prefix-length) lists: those of
+STORE's ServiceCIDRs not being deleted, the default first, then by name. Without any
+ServiceCIDR, as before the default one is published, the native default range."
+  (let ((result nil))
+    (loop for object being the hash-values of (pod-store-resources store)
+          for metadata = (gethash "metadata" object)
+          when (and (equal "ServiceCIDR" (gethash "kind" object)) (not (gethash "deletionTimestamp" metadata)))
+            do (loop for cidr across (gethash "cidrs" (gethash "spec" object) #())
+                     for slash = (position #\/ cidr)
+                     unless (or (find #\: cidr) (null slash))
+                       do (push (list (gethash "name" metadata) (parse-ipv4-integer (subseq cidr 0 slash))
+                                      (parse-integer cidr :start (1+ slash)))
+                                result)))
+    (or (sort result (lambda (left right)
+                       (cond ((equal (first left) +default-service-cidr-name+) (not (equal (first right) +default-service-cidr-name+)))
+                             ((equal (first right) +default-service-cidr-name+) nil)
+                             (t (string< (first left) (first right))))))
+        (let ((slash (position #\/ +default-service-cidr+)))
+          (list (list +default-service-cidr-name+ (parse-ipv4-integer (subseq +default-service-cidr+ 0 slash))
+                      (parse-integer +default-service-cidr+ :start (1+ slash))))))))
+
+(defun service-cidr-index (value network prefix)
+  "Return VALUE's offset in NETWORK/PREFIX when it may be a ClusterIP: inside the range and,
+as upstream's allocator reserves them, neither its network nor its broadcast address."
+  (let ((size (ash 1 (- 32 prefix))) (offset (- value network)))
+    (when (and (<= 0 offset) (< offset size)
+               (or (<= size 2) (< 0 offset (1- size))))
+      offset)))
+
+(defun service-ip-range (store address)
+  "Return the name of the ServiceCIDR whose range holds ADDRESS, or NIL."
+  (let ((value (and (networking-canonical-ip-p address) (not (find #\: address)) (parse-ipv4-integer address))))
+    (when value
+      (loop for (name network prefix) in (service-cidr-prefixes store)
+            when (service-cidr-index value network prefix) return name))))
 
 (defun service-ip-index (address)
   "Return ADDRESS's usable index within the native 10.96.0.0/16 service pool."
@@ -21,16 +63,115 @@
             (let ((index (+ (* 256 (third numbers)) (fourth numbers))))
               (when (<= 1 index 65534) index))))))))
 
+(defun ip-address-parent-service (object)
+  "Return (namespace name) of the Service an IPAddress OBJECT names as its parent, or NIL."
+  (let ((parent (gethash "parentRef" (gethash "spec" object))))
+    (when (and (hash-table-p parent) (equal "services" (gethash "resource" parent))
+               (member (gethash "group" parent "") '("" nil) :test #'equal))
+      (list (gethash "namespace" parent) (gethash "name" parent)))))
+
+(defun ip-address-stale-p (store object)
+  "True for an IPAddress the allocator made whose Service is gone or no longer holds it, which
+the repair pass removes and an allocation may take over meanwhile."
+  (let ((labels (gethash "labels" (gethash "metadata" object)))
+        (parent (ip-address-parent-service object)))
+    (and (hash-table-p labels) (equal +ip-address-manager+ (gethash "ipaddress.kubernetes.io/managed-by" labels))
+         parent
+         (let ((service (gethash (core-resource-key "services" (first parent) (second parent)) (pod-store-resources store))))
+           (not (and service (equal (gethash "name" (gethash "metadata" object))
+                                    (gethash "clusterIP" (gethash "spec" service)))))))))
+
+(defun service-ip-holder (store address namespace name)
+  "Describe what, other than Service NAMESPACE/NAME, holds ADDRESS: another Service, or an
+IPAddress object that isn't a stale one of the allocator's. NIL when it is free."
+  (or (loop for object being the hash-values of (pod-store-resources store)
+            for metadata = (gethash "metadata" object)
+            thereis (and (equal "Service" (gethash "kind" object))
+                         (equal address (gethash "clusterIP" (gethash "spec" object)))
+                         (not (and (equal namespace (gethash "namespace" metadata))
+                                   (equal name (gethash "name" metadata))))
+                         (format nil "Service ~A/~A" (gethash "namespace" metadata) (gethash "name" metadata))))
+      (let ((claim (gethash (core-resource-key "ipaddresses" nil address) (pod-store-resources store))))
+        (when (and claim (not (ip-address-stale-p store claim))
+                   (not (equal (ip-address-parent-service claim) (list namespace name))))
+          (format nil "IPAddress ~A" address)))))
+
 (defun allocate-service-ip-unlocked (store)
-  "Choose a free service IP while the caller holds the durable store transaction lock."
+  "Choose a free service IP from STORE's ServiceCIDRs while the caller holds the durable store
+transaction lock: the default range first, from offset 10 as before, then the others in name order.
+An address is taken by a Service or by an IPAddress object that isn't a stale one of the allocator's."
   (let ((used (make-hash-table :test #'equal)))
     (loop for object being the hash-values of (pod-store-resources store)
-          when (equal "Service" (gethash "kind" object))
-            do (setf (gethash (gethash "clusterIP" (gethash "spec" object)) used) t))
-    (loop for index from 10 below 65535
-          for address = (format nil "10.96.~D.~D" (floor index 256) (mod index 256))
-          unless (gethash address used) return address
-          finally (core-resource-error 503 "ServiceUnavailable" "Service address pool is exhausted"))))
+          do (cond ((equal "Service" (gethash "kind" object))
+                    (setf (gethash (gethash "clusterIP" (gethash "spec" object)) used) t))
+                   ((and (equal "IPAddress" (gethash "kind" object)) (not (ip-address-stale-p store object)))
+                    (setf (gethash (gethash "name" (gethash "metadata" object)) used) t))))
+    (loop for (name network prefix) in (service-cidr-prefixes store)
+          for size = (ash 1 (- 32 prefix))
+          do (loop for offset from (if (equal name +default-service-cidr-name+) (min 10 (max 1 (- size 2))) 1)
+                   below (if (<= size 2) size (1- size))
+                   for value = (+ network offset)
+                   for address = (format nil "~D.~D.~D.~D" (ldb (byte 8 24) value) (ldb (byte 8 16) value)
+                                         (ldb (byte 8 8) value) (ldb (byte 8 0) value))
+                   unless (gethash address used) do (return-from allocate-service-ip-unlocked address)))
+    (core-resource-error 503 "ServiceUnavailable" "Service address pool is exhausted")))
+
+(defun service-ip-address-object (address namespace name)
+  "The IPAddress object upstream's allocator writes for Service NAMESPACE/NAME's ADDRESS."
+  (core-object "apiVersion" "networking.k8s.io/v1" "kind" "IPAddress"
+               "metadata" (core-object "name" address
+                                       "labels" (core-object "ipaddress.kubernetes.io/ip-family" "IPv4"
+                                                             "ipaddress.kubernetes.io/managed-by" +ip-address-manager+))
+               "spec" (core-object "parentRef" (core-object "group" "" "resource" "services"
+                                                            "namespace" namespace "name" name))))
+
+(defun prepare-service-ip-address-writes (resources service existing revision)
+  "Add to RESOURCES, the index a Service write is about to commit, the IPAddress object for
+SERVICE's ClusterIP, and drop the one for the address EXISTING held if SERVICE no longer has it.
+Returns the revision the commit then needs."
+  (let* ((metadata (gethash "metadata" service))
+         (namespace (gethash "namespace" metadata)) (name (gethash "name" metadata))
+         (address (and (not (service-external-name-p service)) (gethash "clusterIP" (gethash "spec" service))))
+         (old (and existing (not (service-external-name-p existing)) (gethash "clusterIP" (gethash "spec" existing)))))
+    (when (and (stringp old) (not (equal old address)))
+      (let* ((key (core-resource-key "ipaddresses" nil old)) (claim (gethash key resources)))
+        (when (and claim (equal (ip-address-parent-service claim) (list namespace name)))
+          (remhash key resources)
+          (incf revision))))
+    (when (and (stringp address) (not (equal address "None")))
+      (let* ((key (core-resource-key "ipaddresses" nil address)) (claim (gethash key resources)))
+        (unless (and claim (equal (ip-address-parent-service claim) (list namespace name)))
+          (let ((object (service-ip-address-object address namespace name)))
+            (prepare-core-resource-metadata object nil (incf revision))
+            (setf (gethash key resources) object)))))
+    revision))
+
+(defun reconcile-service-ip-addresses (store)
+  "Repair IPAddress objects as upstream's allocator repair loop does: give every ClusterIP Service
+its IPAddress, and remove the allocator's own ones whose Service is gone or holds another address.
+An address someone else's IPAddress already names is left alone."
+  (with-store-lock (store)
+    (let* ((index (pod-store-resources store))
+           (stale (loop for object being the hash-values of index
+                        when (and (equal "IPAddress" (gethash "kind" object)) (ip-address-stale-p store object))
+                          collect (gethash "name" (gethash "metadata" object))))
+           (unclaimed (loop for object being the hash-values of index
+                            for address = (and (equal "Service" (gethash "kind" object))
+                                               (not (service-external-name-p object))
+                                               (gethash "clusterIP" (gethash "spec" object)))
+                            when (and (stringp address) (not (equal address "None"))
+                                      (or (member address stale :test #'equal)
+                                          (null (gethash (core-resource-key "ipaddresses" nil address) index))))
+                              collect object)))
+      (when (or stale unclaimed)
+        (let* ((revision (pod-store-resource-revision store))
+               (resources (copy-core-resource-index store)))
+          (dolist (address stale)
+            (remhash (core-resource-key "ipaddresses" nil address) resources)
+            (incf revision))
+          (dolist (service unclaimed)
+            (setf revision (prepare-service-ip-address-writes resources service nil revision)))
+          (commit-core-resources store resources revision))))))
 
 (defun service-external-name-p (service)
   "Recognize a DNS-only Service without allocating a cluster address or listeners."
@@ -413,21 +554,29 @@ Turning affinity off clears the timeout a client read back with the Service."
              (address (if (or (null specified) (equal specified ""))
                           (if store (allocate-service-ip-unlocked store)
                               (invalid-pod "Service allocation requires the control-plane store")) specified)))
-        (unless (or (equal address "None") (service-ip-index address))
-          (invalid-pod "clusterIP must be in the native service pool or None"))
+        (unless (or (equal address "None")
+                    (and existing (equal address (gethash "clusterIP" (gethash "spec" existing))))
+                    (and store (service-ip-range store address))
+                    (and (null store) (service-ip-index address)))
+          (invalid-pod "spec.clusterIPs: Invalid value: [~S]: failed to allocate IP ~A: the provided IP (~A) is not in the valid range. The range of valid IPs is ~{~A~^, ~}"
+                       address address address
+                       (if store
+                           (mapcar (lambda (range) (destructuring-bind (name network prefix) range
+                                                     (declare (ignore name))
+                                                     (format nil "~D.~D.~D.~D/~D" (ldb (byte 8 24) network) (ldb (byte 8 16) network)
+                                                             (ldb (byte 8 8) network) (ldb (byte 8 0) network) prefix)))
+                                   (service-cidr-prefixes store))
+                           (list +default-service-cidr+))))
         (when (and (equal address "None") (not (equal type "ClusterIP")))
           (invalid-pod "clusterIP may not be None for a ~A Service" type))
         (when (and (equal address "10.96.0.1")
                    (not (and (equal namespace "default") (equal (gethash "name" metadata) "kubernetes"))))
           (invalid-pod "the API service address is reserved"))
         (when (and store (not (equal address "None")))
-          (loop for existing being the hash-values of (pod-store-resources store)
-                for old-metadata = (gethash "metadata" existing)
-                when (and (equal "Service" (gethash "kind" existing))
-                          (equal address (gethash "clusterIP" (gethash "spec" existing)))
-                          (not (and (equal namespace (gethash "namespace" old-metadata))
-                                    (equal (gethash "name" metadata) (gethash "name" old-metadata)))))
-                  do (core-resource-error 422 "Invalid" "clusterIP is already allocated")))
+          (let ((holder (service-ip-holder store address namespace (gethash "name" metadata))))
+            (when holder
+              (core-resource-error 422 "Invalid" "spec.clusterIPs: Invalid value: [~S]: failed to allocate IP ~A: provided IP is already allocated (by ~A)"
+                                   address address holder))))
         (when (equal address "10.96.0.1")
           (let ((ports (gethash "ports" spec)))
             (unless (and (= 1 (length ports)) (= 443 (gethash "port" (aref ports 0)))
