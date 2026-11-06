@@ -139,3 +139,20 @@
             (is (equal before (gr8s::pod-runtime-spec-fingerprint updated)))
             (is (equal (format nil "actual-directory/~A" (pod-name pod))
                        (gr8s::container-mount-subpath mount environment)))))))))
+
+(test escaping-subpaths-wait-with-the-kubelets-config-error
+  ;; Upstream's subPath suites wait for CreateContainerConfigError naming the subPath.
+  (with-temporary-store (store directory)
+    (let* ((pod (create-pod store (parse-pod (subpath-test-object (gr8s::core-object "name" "data" "mountPath" "/data" "subPath" "escape")))))
+           (runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))
+           (container (aref (pod-containers pod) 0))
+           (volume (gr8s::materialize-pod-volume runtime pod (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0))))
+      (sb-posix:symlink "../../../" (namestring (merge-pathnames "escape" volume)))
+      (let ((condition (handler-case (progn (gr8s::containerd-pod-mounts runtime pod container) nil)
+                         (gr8s::container-config-error (condition) condition))))
+        (is-true condition)
+        (when condition
+          (is (equal "CreateContainerConfigError" (gr8s::container-config-error-reason condition)))
+          (is (search (format nil "failed to prepare subPath for volumeMount \"data\" of container ~S"
+                              (gr8s::container-spec-name container))
+                      (gr8s::runtime-error-message condition))))))))

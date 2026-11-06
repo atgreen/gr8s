@@ -365,7 +365,16 @@ A runtime that cannot honour Enabled then fails the container, as a kubelet woul
                       (multiple-value-bind (path forced-readonly) (materialize-pod-volume runtime pod volume)
                         (let ((relative (container-mount-subpath mount environment)))
                           (when (plusp (length relative))
-                            (setf path (stage-container-volume-subpath runtime pod container mount index path relative))))
+                            ;; As the kubelet does, a subPath that can't be prepared, such as one
+                            ;; escaping its volume, keeps this container waiting with
+                            ;; CreateContainerConfigError rather than failing the Pod's sync.
+                            (setf path (handler-case
+                                           (stage-container-volume-subpath runtime pod container mount index path relative)
+                                         (container-config-error (condition) (error condition))
+                                         (runtime-error (condition)
+                                           (container-config-error "failed to prepare subPath for volumeMount ~S of container ~S: ~A"
+                                                                   (gethash "name" mount) (container-spec-name container)
+                                                                   (runtime-error-message condition)))))))
                         (make-instance 'gr8s.cri.v1::mount
                                        :container-path (gethash "mountPath" mount) :host-path (namestring path)
                                        :propagation (container-mount-propagation mount)
