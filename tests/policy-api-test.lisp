@@ -620,3 +620,43 @@
                                                    (vector (gr8s::core-object "scopeName" "CrossNamespacePodAffinity"
                                                                               "operator" "In" "values" #("x"))))))
        "team"))))
+
+(test runtime-class-overhead-may-name-extended-resources
+  ;; Upstream's "validates pod overhead is considered along with resource limits"
+  ;; spec charges a RuntimeClass overhead of an extended resource; the scheduler counts it.
+  (with-temporary-store (store path)
+    (values path)
+    (policy-test-runtime-class store "beard"
+                               "overhead" (gr8s::core-object "podFixed" (gr8s::core-object "example.com/beardsecond" "250")))
+    (let* ((pod (gr8s::admit-pod-policies store (policy-test-pod "using" :spec-fields (list "runtimeClassName" "beard"))))
+           (spec (gethash "spec" (pod-to-object pod))))
+      (is (= 250 (gethash "example.com/beardsecond" (gr8s::pod-spec-resource-totals spec))))
+      (is-false (gr8s::resource-fit-p (gr8s::pod-requests-table pod)
+                                      (let ((table (make-hash-table :test #'equal)))
+                                        (setf (gethash "example.com/beardsecond" table) 200) table)
+                                      nil)))
+    (signals kubernetes-error
+      (policy-test-runtime-class store "odd" "overhead" (gr8s::core-object "podFixed" (gr8s::core-object "hugepages-2Mi" "2Mi"))))))
+
+(test a-preemptor-may-count-another-preemptors-terminating-victims
+  ;; Upstream's "validates various priority Pods preempt expectedly with the async
+  ;; preemption" spec: medium Pods preempt every low Pod, then high Pods arrive while
+  ;; those victims are still terminating, and must still be nominated.
+  (with-temporary-store (store path)
+    (values path)
+    (policy-test-node store "only" :extended (gr8s::core-object "example.com/dongle" "2"))
+    (loop for (name value) in '(("low" 1) ("medium" 2) ("high" 3)) do (policy-test-class store name value))
+    (dolist (name '("low-0" "low-1"))
+      (is-true (gr8s::schedule-pod store (policy-test-priority-pod store name "low" 1))))
+    (let ((medium (policy-test-priority-pod store "medium-0" "medium" 2)))
+      (is (null (gr8s::schedule-pod store medium)))
+      (is-true (policy-test-deleting-p store "low-0"))
+      (is-true (policy-test-deleting-p store "low-1"))
+      (let ((high (policy-test-priority-pod store "high-0" "high" 1)))
+        (is (null (gr8s::schedule-pod store high)))
+        (is (equal "only" (gethash (gr8s::pod-uid high) (gr8s::pod-store-nominated-nodes store))))
+        (dolist (name '("low-0" "low-1")) (gr8s::remove-pod store "team" name))
+        ;; The high Pod takes its reservation first, and the medium one no longer fits.
+        (is (null (gr8s::schedule-pod store (get-pod store "team" "medium-0"))))
+        (is-true (gr8s::schedule-pod store high))
+        (is (null (gr8s::schedule-pod store (get-pod store "team" "medium-0"))))))))

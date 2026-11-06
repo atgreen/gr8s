@@ -392,7 +392,8 @@ Each call for an unbound Pod is a scheduling attempt, measured as kube-scheduler
                               (/ (- (get-internal-real-time) started) internal-time-units-per-second)
                               (and node algorithm)))
     ;; Deletion takes the store lock itself and is retried by reconciliation.
-    (dolist (victim victims) (preempt-pod store victim))
+    (dolist (victim victims)
+      (unless (deletion-requested-p victim) (preempt-pod store victim)))
     (if node
         (progn
           (with-store-lock (store) (remhash (pod-uid pod) (pod-store-scheduling-notes store)))
