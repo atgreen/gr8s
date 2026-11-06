@@ -25,9 +25,14 @@
       (is (equal fingerprint (gr8s::pod-runtime-spec-fingerprint pod))))
     (remhash "terminationGracePeriodSeconds" spec)
     (is (equal fingerprint (gr8s::pod-runtime-spec-fingerprint pod)))
-    (dolist (value '(-1 1.5 "10" t 9223372036854775808))
+    (dolist (value '(1.5 "10" t 9223372036854775808 -9223372036854775809))
       (setf (gethash "terminationGracePeriodSeconds" spec) value)
-      (signals kubernetes-error (parse-pod (gr8s::copy-json-object (pod-to-object pod)))))))
+      (signals kubernetes-error (parse-pod (gr8s::copy-json-object (pod-to-object pod)))))
+    ;; As upstream ("pod with negative grace period"), a negative period becomes 1.
+    (dolist (value '(-1 -9223372036854775808))
+      (setf (gethash "terminationGracePeriodSeconds" spec) value)
+      (is (= 1 (gethash "terminationGracePeriodSeconds"
+                        (gethash "spec" (pod-to-object (parse-pod (gr8s::copy-json-object (pod-to-object pod)))))))))))
 
 (test pod-deletion-deadline-survives-restart-and-only-shortens-from-original-start
   (with-temporary-store (store path)

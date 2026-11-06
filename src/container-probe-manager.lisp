@@ -438,7 +438,8 @@ has rebound the handler clusters and an ERROR finds no handler and kills the thr
           for request = (gethash "probeRestart" (gethash (gethash "name" status) (gethash "containers" state) (core-object)))
           thereis (and request (gethash "terminated" (gethash "state" status))
                        (or (equal "update" (gethash "kind" request))
-                           (not (equal "Never" (pod-restart-policy pod))))
+                           (container-restarts-after-exit-p
+                            pod (gethash "name" status) (gethash "exitCode" (gethash "terminated" (gethash "state" status))) t))
                             (equal (gethash "containerID" status) (concatenate 'string "containerd://" (gethash "containerID" request)))))))
 
 (defun preserve-stopped-container-probe-events (runtime manager)

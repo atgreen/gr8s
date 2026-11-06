@@ -86,6 +86,18 @@ A hostNetwork Pod has no address of its own, so it reports its node's as its Pod
                                       (gethash "conditions" client #())))))))
   status)
 
+(defparameter *pod-status-patch-schema*
+  (let ((keyed (lambda (key) (core-object "x-kubernetes-patch-strategy" "merge" "x-kubernetes-patch-merge-key" key
+                                            "items" (core-object)))))
+    (core-object "properties"
+                 (core-object "status"
+                              (core-object "properties"
+                                           (core-object "conditions" (funcall keyed "type")
+                                                        "podIPs" (funcall keyed "ip")
+                                                        "hostIPs" (funcall keyed "ip"))))))
+  "The strategic merge keys of PodStatus lists, as Kubernetes declares them: a status patch
+   naming one condition changes that condition and keeps the others.")
+
 (defun pod-status-write-input (current method)
   "Return the requested Pod object from a typed or JSON PUT, or a patch applied to CURRENT."
   (if (eq method :put)
@@ -96,9 +108,11 @@ A hostNetwork Pod has no address of its own, so it reports its node's as its Pod
              (patch (unless applied (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t)))))
         (cond (applied (apply-pod-patched-object (copy-json-object current) "status"))
               ((equal content-type "application/json-patch+json") (apply-core-json-patch current patch))
-              ((member content-type '("application/merge-patch+json" "application/strategic-merge-patch+json")
-                       :test #'equal)
+              ((equal content-type "application/merge-patch+json")
                (merge-json-object (copy-json-object current) (require-object patch "patch")))
+              ((equal content-type "application/strategic-merge-patch+json")
+               (template-strategic-merge (copy-json-object current) (require-object patch "patch")
+                                         *pod-status-patch-schema*))
               (t (core-resource-error 415 "UnsupportedMediaType" "Unsupported Pod status patch format"))))))
 
 (defun pod-client-status-from (status)

@@ -231,7 +231,7 @@
 (test unenforceable-security-and-volume-requests-are-refused
   (flet ((pod-with (spec-json)
            (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"refused\"},\"spec\":{~A,\"containers\":[{\"name\":\"c\",\"image\":\"busybox:latest\"}]}}" spec-json)))
-    (dolist (spec '("\"securityContext\":{\"seccompProfile\":{\"type\":\"Localhost\",\"localhostProfile\":\"p.json\"}}"
+    (dolist (spec '("\"securityContext\":{\"seccompProfile\":{\"type\":\"Localhost\"}}"
                     "\"securityContext\":{\"seccompProfile\":{}}"
                     "\"securityContext\":{\"seccompProfile\":{\"type\":\"RuntimeDefault\",\"localhostProfile\":\"p\"}}"
                     "\"securityContext\":{\"seLinuxOptions\":{\"level\":7}}"

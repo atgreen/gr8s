@@ -116,30 +116,51 @@ list as 'nothing is running': Sonobuoy's worker takes it to mean all containers 
                        (when reason (setf (gethash "reason" result) reason))
                        (when message (setf (gethash "message" result) message))
                        (push result conditions))))
-            (condition "PodScheduled" (if scheduled "True" "False")
-                       (unless scheduled "Unschedulable")
-                       (unless scheduled (pod-unschedulable-message store pod)))
-            (let ((initialized (and scheduled (pod-initialization-complete-p pod status)))
-                  (incomplete (unless (pod-initialization-complete-p pod status)
-                                (loop for spec across (pod-init-containers pod)
-                                      unless (init-container-complete-p
-                                              (find (container-spec-name spec) (gethash "initContainerStatuses" status)
-                                                    :test #'equal :key (lambda (item) (gethash "name" item)))
-                                              (pod-sidecar-p pod (container-spec-name spec)) nil)
-                                        collect (container-spec-name spec)))))
-              (condition "Initialized" (if initialized "True" "False")
-                         (cond ((not scheduled) "PodInitializing")
-                               (incomplete "ContainersNotInitialized")
-                               ((equal phase "Succeeded") "PodCompleted"))
-                         (when incomplete
-                           (format nil "containers with incomplete status: [~{~A~^ ~}]" incomplete))))
-            (condition "ContainersReady" readiness reason message)
-            (condition "Ready" readiness reason message)
-            (let ((pending (find-pod-condition incoming "PodResizePending")))
-              (cond (pending
-                     (condition "PodResizePending" "True" (gethash "reason" pending) (gethash "message" pending)))
-                    ((pod-resize-in-progress-p pod status)
-                     (condition "PodResizeInProgress" "True")))))
+            ;; Another scheduler's Pod says nothing about scheduling until that scheduler binds it,
+            ;; unless gates hold every scheduler off, which the API server reports itself.
+            (when (or scheduled (pod-for-this-scheduler-p pod) (pod-scheduling-gated-p pod))
+              (cond (scheduled (condition "PodScheduled" "True"))
+                    ((pod-scheduling-gated-p pod)
+                     (condition "PodScheduled" "False" "SchedulingGated"
+                                "Scheduling is blocked due to non-empty scheduling gates"))
+                    (t (condition "PodScheduled" "False" "Unschedulable" (pod-unschedulable-message store pod))))
+              ;; The scheduler records the generation it judged, before any node has seen the Pod.
+              (unless (or scheduled generation)
+                (setf (gethash "observedGeneration" (first conditions))
+                      (gethash "generation" (gethash "metadata" (pod-to-object pod)) 1))))
+            ;; Until a node has the Pod, scheduling is the only thing known about it, as upstream reports.
+            (when scheduled
+              (let ((initialized (pod-initialization-complete-p pod status))
+                    (incomplete (unless (pod-initialization-complete-p pod status)
+                                  (loop for spec across (pod-init-containers pod)
+                                        unless (init-container-complete-p
+                                                (find (container-spec-name spec) (gethash "initContainerStatuses" status)
+                                                      :test #'equal :key (lambda (item) (gethash "name" item)))
+                                                (pod-sidecar-p pod (container-spec-name spec)) nil)
+                                          collect (container-spec-name spec)))))
+                (condition "Initialized" (if initialized "True" "False")
+                           (cond (incomplete "ContainersNotInitialized")
+                                 ((equal phase "Succeeded") "PodCompleted"))
+                           (when incomplete
+                             (format nil "containers with incomplete status: [~{~A~^ ~}]" incomplete))))
+              (condition "ContainersReady" readiness reason message)
+              ;; Ready also waits for the conditions the Pod's readiness gates name, which clients write.
+              (let ((gates (and (equal readiness "True")
+                                (pod-readiness-gates-message
+                                 pod (concatenate 'vector
+                                                  (or (gethash "conditions"
+                                                               (gethash (pod-uid pod) (pod-store-pod-client-statuses store)
+                                                                        (core-object)))
+                                                      #())
+                                                  (if (and (vectorp incoming) (not (stringp incoming))) incoming #()))))))
+                (if gates
+                    (condition "Ready" "False" "ReadinessGatesNotReady" gates)
+                    (condition "Ready" readiness reason message)))
+              (let ((pending (find-pod-condition incoming "PodResizePending")))
+                (cond (pending
+                       (condition "PodResizePending" "True" (gethash "reason" pending) (gethash "message" pending)))
+                      ((pod-resize-in-progress-p pod status)
+                       (condition "PodResizeInProgress" "True"))))))
           (setf conditions (coerce (nreverse conditions) 'vector)
                 (gethash "conditions" status) conditions)
           ;; The Pod started when it reached its node, which is when it was scheduled here.

@@ -365,9 +365,11 @@ What was consumed isn't kept, for streams too long to hold in memory."
    (slot-value envelope 'gr8s.node.v1::protocol-version))
   (case (slot-value envelope 'gr8s.node.v1::payload-case)
     (:heartbeat
-     (mark-node-ready (node-grpc-server-store server)
-                      node-name (get-universal-time)
-                      :lease-duration (node-grpc-server-heartbeat-timeout-seconds server)))
+     (let ((now (get-universal-time)))
+       (mark-node-ready (node-grpc-server-store server)
+                        node-name now
+                        :lease-duration (node-grpc-server-heartbeat-timeout-seconds server))
+       (note-node-heartbeat-lease (node-grpc-server-store server) node-name now)))
     (:snapshot-ack
      (note-node-snapshot-ack
       server node-name

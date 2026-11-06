@@ -16,6 +16,8 @@
   (let ((policy (gethash "restartPolicy" object)))
     (when (and policy (not (equal policy "Always")))
       (invalid-pod "init container restartPolicy must be Always when set"))
+    (when (plusp (length (optional-vector object "restartPolicyRules" "init container")))
+      (invalid-pod "init container restartPolicyRules are not supported"))
     (unless policy
       (dolist (key '("startupProbe" "readinessProbe" "livenessProbe" "lifecycle"))
         (when (nth-value 1 (gethash key object))
@@ -32,6 +34,60 @@
 (defun pod-sidecar-p (pod name)
   "Return whether NAME is one of POD's restartable init containers."
   (member name (pod-sidecar-names pod) :test #'equal))
+
+(defun validate-container-restart-rules (container)
+  "Validate an application container's restartPolicy and restartPolicyRules, which override the
+Pod's restartPolicy for it (ContainerRestartRules, beta in v1.36). Only the Restart action exists here."
+  (dolist (field '("restartPolicy" "restartPolicyRules"))
+    (when (eq (gethash field container) 'null) (remhash field container)))
+  (let ((policy (gethash "restartPolicy" container))
+        (rules (optional-vector container "restartPolicyRules" "container")))
+    (when (and policy (not (member policy '("Always" "OnFailure" "Never") :test #'equal)))
+      (invalid-pod "container restartPolicy ~S must be Always, OnFailure or Never" policy))
+    (when (and (plusp (length rules)) (null policy))
+      (invalid-pod "container restartPolicy: Required value: must specify restartPolicy when restart rules are used"))
+    (when (> (length rules) 20)
+      (invalid-pod "container restartPolicyRules: Too many: must have at most 20 items"))
+    (loop for rule across rules
+          do (drop-null-fields (require-object rule "restartPolicyRule"))
+             (reject-unsupported-fields rule '("action" "exitCodes") "restartPolicyRule")
+             (unless (equal "Restart" (gethash "action" rule))
+               (invalid-pod "restartPolicyRules.action ~S is not supported (only Restart)" (gethash "action" rule)))
+             (let ((codes (gethash "exitCodes" rule)))
+               (unless codes (invalid-pod "restartPolicyRules.exitCodes: Required value: must be specified"))
+               (drop-null-fields (require-object codes "restartPolicyRules.exitCodes"))
+               (reject-unsupported-fields codes '("operator" "values") "restartPolicyRules.exitCodes")
+               (unless (member (gethash "operator" codes) '("In" "NotIn") :test #'equal)
+                 (invalid-pod "restartPolicyRules.exitCodes.operator ~S must be In or NotIn" (gethash "operator" codes)))
+               (let ((values (optional-vector codes "values" "restartPolicyRules.exitCodes")))
+                 (when (> (length values) 255)
+                   (invalid-pod "restartPolicyRules.exitCodes.values: Too many: must have at most 255 items"))
+                 (unless (every (lambda (value) (typep value '(signed-byte 32))) values)
+                   (invalid-pod "restartPolicyRules.exitCodes.values must be int32 exit codes")))))))
+
+(defun pod-container-declaration (pod name)
+  "Return the JSON declaration of POD's application container NAME, or NIL."
+  (find name (gethash "containers" (gethash "spec" (pod-to-object pod)) #()) :test #'equal
+        :key (lambda (object) (gethash "name" object))))
+
+(defun container-restarts-after-exit-p (pod name exit-code &optional killed)
+  "Decide, as a kubelet does, whether container NAME of POD runs again after exiting with EXIT-CODE.
+KILLED marks an exit the node caused, such as a failed liveness probe, which counts as a failure.
+An application container's restartPolicyRules are tried in order, then its own restartPolicy,
+then the Pod's."
+  (let* ((declaration (pod-container-declaration pod name))
+         (rule (and declaration
+                    (find-if (lambda (rule)
+                               (let* ((codes (gethash "exitCodes" rule))
+                                      (member (member exit-code (coerce (gethash "values" codes #()) 'list))))
+                                 (if (equal "In" (gethash "operator" codes)) member (not member))))
+                             (gethash "restartPolicyRules" declaration #()))))
+         (policy (or (and declaration (gethash "restartPolicy" declaration))
+                     (container-effective-restart-policy pod name))))
+    (cond (rule (equal "Restart" (gethash "action" rule)))
+          ((equal "Always" policy) t)
+          ((equal "OnFailure" policy) (or killed (not (eql 0 exit-code))))
+          (t nil))))
 
 (defun container-effective-restart-policy (pod name)
   "Sidecars always restart, ephemeral containers never do; finished init containers never restart under Always."
@@ -155,14 +211,13 @@
 
 (defun pod-applications-finished-p (pod statuses)
   "Return whether every application container in STATUSES has finished for good."
-  (and (not (equal "Always" (pod-restart-policy pod)))
-       (loop for spec across (pod-containers pod)
-             for status = (find (container-spec-name spec) statuses :test #'equal
-                                :key (lambda (item) (gethash "name" item)))
-             for terminated = (and status (gethash "terminated" (gethash "state" status)))
-             always (and terminated
-                         (or (equal "Never" (pod-restart-policy pod))
-                             (eql 0 (gethash "exitCode" terminated)))))))
+  (loop for spec across (pod-containers pod)
+        for status = (find (container-spec-name spec) statuses :test #'equal
+                           :key (lambda (item) (gethash "name" item)))
+        for terminated = (and status (gethash "terminated" (gethash "state" status)))
+        always (and terminated
+                    (not (container-restarts-after-exit-p
+                          pod (container-spec-name spec) (gethash "exitCode" terminated))))))
 
 (defun pod-sidecar-progress-required-p (pod status)
   "Return whether a sidecar should be restarted, or stopped because the Pod has nothing left to run."

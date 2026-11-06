@@ -83,6 +83,61 @@ Net sysctls cannot be set in the node's own namespace, and others need the node'
         when (and (pod-host-network-p pod) (uiop:string-prefix-p "net." name))
           return (cons (format nil "forbidden sysctl: ~S not allowed with host net enabled" name) "SysctlForbidden")))
 
+(defparameter *apparmor-enabled-path* #P"/sys/module/apparmor/parameters/enabled"
+  "Where the kernel says whether AppArmor is enforcing, as runc's apparmor.IsEnabled reads it.")
+
+(defun host-apparmor-enabled-p ()
+  "Return whether this host's kernel enforces AppArmor."
+  (let ((value (ignore-errors (uiop:read-file-string *apparmor-enabled-path*))))
+    (and value (plusp (length value)) (char-equal #\Y (char value 0)))))
+
+(defun pod-effective-apparmor-profiles (pod)
+  "Return each container's effective appArmorProfile: its own, or else the Pod's."
+  (let* ((spec (gethash "spec" (pod-to-object pod)))
+         (pod-profile (gethash "appArmorProfile" (gethash "securityContext" spec (core-object)))))
+    (loop for container across (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec #())
+                                            (gethash "ephemeralContainers" spec #()))
+          for profile = (or (gethash "appArmorProfile" (gethash "securityContext" container (core-object))) pod-profile)
+          when profile collect profile)))
+
+(defun pod-apparmor-failure (pod)
+  "Return why a node refuses POD's AppArmor profiles as (message . reason), or NIL.
+As a kubelet does, a node without AppArmor refuses any profile other than Unconfined."
+  (when (and (or (some (lambda (profile) (not (equal "Unconfined" (gethash "type" profile))))
+                       (pod-effective-apparmor-profiles pod))
+                 (let ((profile (gethash "appArmorProfile"
+                                         (gethash "securityContext" (gethash "spec" (pod-to-object pod)) (core-object)))))
+                   (and profile (not (equal "Unconfined" (gethash "type" profile))))))
+             (not (host-apparmor-enabled-p)))
+    (cons "Cannot enforce AppArmor: AppArmor is not enabled on the host" "AppArmor")))
+
+(defun validate-windows-pod-spec (spec)
+  "Refuse the Linux-only settings upstream forbids for a Pod whose os.name is windows."
+  (dolist (field '("hostPID" "hostIPC" "shareProcessNamespace" "hostUsers"))
+    (when (eq t (gethash field spec))
+      (invalid-pod "spec.~A: Forbidden: cannot be set for a windows pod" field)))
+  (let ((context (gethash "securityContext" spec)))
+    (when (hash-table-p context)
+      (dolist (field '("appArmorProfile" "seLinuxOptions" "seccompProfile" "fsGroup" "fsGroupChangePolicy" "sysctls"
+                       "runAsUser" "runAsGroup" "supplementalGroups" "supplementalGroupsPolicy" "seLinuxChangePolicy"))
+        (unless (member (gethash field context) '(nil null) :test #'equal)
+          (invalid-pod "spec.securityContext.~A: Forbidden: cannot be set for a windows pod" field)))))
+  (loop for container across (concatenate 'vector (optional-vector spec "initContainers" "spec")
+                                          (optional-vector spec "containers" "spec")
+                                          (optional-vector spec "ephemeralContainers" "spec"))
+        for context = (and (hash-table-p container) (gethash "securityContext" container))
+        when (hash-table-p context)
+          do (dolist (field '("appArmorProfile" "seLinuxOptions" "seccompProfile" "capabilities" "readOnlyRootFilesystem"
+                              "privileged" "allowPrivilegeEscalation" "procMount" "runAsUser" "runAsGroup"))
+               (unless (member (gethash field context) '(nil null) :test #'equal)
+                 (invalid-pod "securityContext.~A: Forbidden: cannot be set for a windows pod" field)))))
+
+(defun pod-os-failure (pod)
+  "Return why this Linux node refuses POD as (message . reason) when POD declares another OS, as a kubelet does."
+  (let ((os (gethash "os" (gethash "spec" (pod-to-object pod)))))
+    (when (and (hash-table-p os) (not (equal "linux" (gethash "name" os))))
+      (cons "Failed to admit pod as the OS field doesn't match node OS" "PodOSNotSupported"))))
+
 (defun validate-pod-host-aliases (spec)
   "Validate hostAliases, each one IP address and at least one hostname."
   (loop for alias across (optional-vector spec "hostAliases" "spec")
@@ -110,8 +165,9 @@ Net sysctls cannot be set in the node's own namespace, and others need the node'
     (when os
       (drop-null-fields (require-object os "spec.os"))
       (reject-unsupported-fields os '("name") "spec.os")
-      (unless (equal "linux" (gethash "name" os))
-        (invalid-pod "spec.os.name ~S cannot run on this node's operating system" (gethash "name" os)))))
+      (unless (member (gethash "name" os) '("linux" "windows") :test #'equal)
+        (invalid-pod "spec.os.name: Unsupported value: ~S: supported values: \"linux\", \"windows\"" (gethash "name" os)))
+      (when (equal "windows" (gethash "name" os)) (validate-windows-pod-spec spec))))
   (when (eq (gethash "hostAliases" spec) 'null) (remhash "hostAliases" spec))
   (validate-pod-host-aliases spec))
 

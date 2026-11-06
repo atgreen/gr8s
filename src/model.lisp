@@ -231,8 +231,10 @@
    object '("name" "image" "command" "args" "env" "envFrom" "ports" "resources"
             "imagePullPolicy" "volumeMounts" "securityContext" "workingDir"
             "startupProbe" "readinessProbe" "livenessProbe"
-            "terminationMessagePath" "terminationMessagePolicy" "stdin" "stdinOnce" "tty" "lifecycle" "resizePolicy")
+            "terminationMessagePath" "terminationMessagePolicy" "stdin" "stdinOnce" "tty" "lifecycle" "resizePolicy"
+            "restartPolicy" "restartPolicyRules")
    "container")
+  (validate-container-restart-rules object)
   (default-container-termination-message object)
   (normalize-container-resources object)
   (validate-runtime-container object)
@@ -313,13 +315,8 @@
             "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig"
             "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
             "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "shareProcessNamespace" "hostAliases" "ephemeralContainers"
-            "schedulerName" "topologySpreadConstraints") "spec")
-    ;; gr8s runs the one built-in scheduler, which is the default scheduler, so a
-    ;; Pod may name it (controller-generated specs routinely do) but not request
-    ;; another, which nothing here would ever bind.
-    (let ((scheduler (gethash "schedulerName" spec)))
-      (when (and scheduler (not (equal scheduler "default-scheduler")))
-        (invalid-pod "spec.schedulerName ~S is not supported (only default-scheduler)" scheduler)))
+            "readinessGates" "schedulerName" "hostnameOverride" "setHostnameAsFQDN" "serviceAccount"
+            "topologySpreadConstraints" "schedulingGates") "spec")
     (dolist (field '("hostname" "subdomain"))
       (when (eq (gethash field spec) 'null) (remhash field spec))
       (let ((value (gethash field spec "")))
@@ -327,10 +324,14 @@
           (invalid-pod "spec.~A must be a DNS label or empty" field))))
     (let ((grace (gethash "terminationGracePeriodSeconds" spec 30)))
       (when (eq grace 'null) (setf grace 30))
+      ;; As the API server does, a negative grace period becomes the shortest one.
+      (when (and (integerp grace) (minusp grace) (>= grace (- #x8000000000000000)))
+        (setf grace 1))
       (unless (and (integerp grace) (<= 0 grace #x7fffffffffffffff))
-        (invalid-pod "spec.terminationGracePeriodSeconds must be a nonnegative int64"))
+        (invalid-pod "spec.terminationGracePeriodSeconds must be an int64"))
       (setf (gethash "terminationGracePeriodSeconds" spec) grace))
     (validate-pod-host-settings spec)
+    (validate-pod-hostname-fields spec)
     (validate-runtime-pod-spec spec)
     (validate-pod-dns-spec spec)
     (default-host-network-ports spec)
