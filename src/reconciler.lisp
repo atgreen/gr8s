@@ -413,16 +413,26 @@ the runtime finds none or has removed them, the status is the terminal one a kub
              (setf (gethash "phase" status) (kubelet-pod-phase pod status gone)))))
     status))
 
+(defun pod-published-status (store pod)
+  "Return the status clients last saw for POD, or NIL."
+  (with-store-lock (store)
+    (copy-pod-status-value (gethash (pod-uid pod) (pod-store-pod-published-statuses store)))))
+
 (defun deleted-pod-final-status (reconciler pod last)
-  "Return the terminal status to publish for POD now its runtime confirmed removal, or NIL.
-A runtime that stops containers itself reports what it last saw; a delegating one publishes the
-final status its node acknowledged, and nothing when the API alone forced the deletion."
+  "Return the status to publish for POD as it is removed, or NIL.
+A runtime that stops containers itself reports what it last saw, with its containers gone. A
+delegating one publishes its node's last report over what clients last saw, as an API server keeps
+the kubelet's last status write: with the containers gone once the node acknowledged removal, and
+unchanged when the deletion needed no acknowledgement. Neither forgets a container or reverts a
+terminal phase clients saw, even when a node rebuilt its acknowledgement from less."
   (let ((store (reconciler-store reconciler)))
     (cond ((runtime-runs-containers-p (reconciler-runtime reconciler))
            (terminating-pod-status pod nil last :gone t))
-          ((and last (equal "Deleted" (gethash "reason" last))
-                (equal (pod-resource-version pod) (pod-observed-resource-version store pod)))
-           (copy-core-object last)))))
+          (last
+           (terminating-pod-status pod last (pod-published-status store pod)
+                                   :gone (and (equal "Deleted" (gethash "reason" last))
+                                              (equal (pod-resource-version pod)
+                                                     (pod-observed-resource-version store pod))))))))
 
 (defun converge-deleting-pod (reconciler pod)
   (when (or (pod-finalizers-present-p pod) (pod-finalization-state (reconciler-store reconciler) pod))
