@@ -193,3 +193,14 @@
         (finishes
           (gr8s::update-core-resource store "clustertrustbundles" nil "example.com:signer:one"
             (lambda (current) (setf (gethash "trustBundle" (gethash "spec" current)) (ctb-test-ca-pem "rotated")) current)))))))
+
+(test truncated-der-is-refused-before-it-is-parsed
+  ;; pure-tls's DER parser loops without end on a truncated constructed element,
+  ;; so gr8s checks untrusted DER first. A SEQUENCE claiming 437 bytes in 6:
+  (let ((truncated (coerce #(48 130 1 181 235 45) '(vector (unsigned-byte 8)))))
+    (is (not (gr8s::der-well-formed-p truncated)))
+    (is (not (gr8s::der-well-formed-p (coerce #(48 3 2 1) '(vector (unsigned-byte 8))))))
+    (is (gr8s::der-well-formed-p (coerce #(48 3 2 1 5) '(vector (unsigned-byte 8)))))
+    (signals gr8s:kubernetes-error
+      (gr8s::parse-and-verify-certificate-request
+       (trivial-utf-8:string-to-utf-8-bytes (pure-tls/acme::wrap-pem "CERTIFICATE REQUEST" truncated))))))

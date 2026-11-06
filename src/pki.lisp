@@ -363,7 +363,9 @@
 (defun parse-and-verify-node-csr (csr expected-node-name)
   "Verify the real RSA-SHA256 request and exact node CN before returning signed identity material."
   (handler-case
-      (let* ((root (pure-tls::parse-der csr))
+      (let* ((root (if (der-well-formed-p csr)
+                       (pure-tls::parse-der csr)
+                       (pki-fail "invalid-csr" "CSR must be a three-part DER sequence")))
              (children (pure-tls::asn1-children root)))
         (unless (and (pure-tls::asn1-sequence-p root) (= 3 (length children)))
           (pki-fail "invalid-csr" "CSR must be a three-part DER sequence"))

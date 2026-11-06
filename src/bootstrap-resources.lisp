@@ -186,7 +186,9 @@
     (loop for (label . der) in blocks for index from 0
           do (unless (equal label "CERTIFICATE")
                (cluster-trust-bundle-invalid "spec.trustBundle: Invalid value: \"<value omitted>\": entry ~D has bad block type: ~A" index label))
-             (let ((certificate (handler-case (pure-tls::parse-certificate der)
+             (let ((certificate (handler-case (if (der-well-formed-p der)
+                                                  (pure-tls::parse-certificate der)
+                                                  (error "Malformed DER"))
                                   (error () (cluster-trust-bundle-invalid "spec.trustBundle: Invalid value: \"<value omitted>\": entry ~D does not parse as X.509" index)))))
                (unless (pure-tls::certificate-is-ca-p certificate)
                  (cluster-trust-bundle-invalid "spec.trustBundle: Invalid value: \"<value omitted>\": entry ~D does not have the CA bit set" index)))
