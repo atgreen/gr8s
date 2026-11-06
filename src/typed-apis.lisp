@@ -496,3 +496,114 @@
         store resource namespace name
         (lambda (old) (typed-status-from-request resource name namespace old method content-type input))
         :dry-run dry-run)))))
+
+;;; StorageVersionMigration controller
+
+;;; gr8s keeps one stored form per resource, so there is never anything to
+;;; re-encode: a migration of a served resource completes as soon as it is seen,
+;;; recording the revision it covers, with the conditions upstream's
+;;; storage-version-migrator controller writes. A resource that is not served
+;;; fails once upstream's one-minute grace for discovery to catch up has passed.
+
+(defparameter +storage-version-migration-grace-seconds+ 60
+  "How long a migration of an unknown resource waits before it fails, as upstream.")
+
+(defun storage-version-migration-target-objects (store group resource)
+  "Return the objects of GROUP/RESOURCE, or :UNKNOWN when it is not served."
+  (cond
+    ((and (equal group "") (equal resource "pods")) (list-pods store))
+    ((and (equal group "") (equal resource "nodes")) (list-nodes store))
+    (t
+     (let ((type (find-if (lambda (entry)
+                            (and (equal resource (first entry))
+                                 (equal group (let ((slash (position #\/ (third entry))))
+                                                (if slash (subseq (third entry) 0 slash) "")))))
+                          *stored-resource-types*)))
+       (cond
+         (type (list-core-resources store resource))
+         ((find-if (lambda (definition)
+                     (let ((spec (gethash "spec" definition (core-object))))
+                       (and (equal group (gethash "group" spec))
+                            (equal resource (gethash "plural" (gethash "names" spec (core-object)))))))
+                   (list-core-resources store "customresourcedefinitions"))
+          ;; Custom resources live in the store under their definition's key.
+          (let ((custom (format nil "custom:~A/~A" group resource)))
+            (with-store-lock (store)
+              (loop for key being the hash-keys of (pod-store-resources store)
+                    when (equal (first key) custom) collect key))))
+         (t :unknown))))))
+
+(defun storage-version-migration-condition (status type)
+  "Return STATUS's condition of TYPE."
+  (find type (typed-api-array status "conditions") :test #'equal :key (lambda (c) (gethash "type" c))))
+
+(defun storage-version-migration-terminal-p (object)
+  "A migration whose Succeeded or Failed condition is True is finished."
+  (let ((status (gethash "status" object (core-object))))
+    (some (lambda (type)
+            (let ((condition (storage-version-migration-condition status type)))
+              (and condition (equal "True" (gethash "status" condition)))))
+          '("Succeeded" "Failed"))))
+
+(defun set-storage-version-migration-condition (status type reason message now)
+  "Set condition TYPE True in STATUS, keeping its transition time when already True."
+  (let* ((old (storage-version-migration-condition status type))
+         (condition (core-object "type" type "status" "True" "reason" reason "message" message
+                                 "lastTransitionTime"
+                                 (if (and old (equal "True" (gethash "status" old)))
+                                     (gethash "lastTransitionTime" old)
+                                     now))))
+    (setf (gethash "conditions" status)
+          (concatenate 'vector
+                       (remove type (typed-api-array status "conditions") :test #'equal
+                                                                         :key (lambda (c) (gethash "type" c)))
+                       (vector condition)))))
+
+(defun storage-version-migration-age (object now)
+  "Seconds since OBJECT was created, or NIL when its timestamp cannot be read."
+  (let ((created (ignore-errors
+                  (pod-deletion-time (gethash "creationTimestamp" (gethash "metadata" object))))))
+    (and created (- now created))))
+
+(defun reconcile-storage-version-migrations (store &key (now (get-universal-time)))
+  "Complete or fail every unfinished StorageVersionMigration."
+  (dolist (object (list-core-resources store "storageversionmigrations"))
+    (unless (or (storage-version-migration-terminal-p object)
+                (gethash "deletionTimestamp" (gethash "metadata" object)))
+      (let* ((spec (gethash "resource" (gethash "spec" object (core-object)) (core-object)))
+             (targets (storage-version-migration-target-objects
+                       store (gethash "group" spec "") (gethash "resource" spec "")))
+             (age (storage-version-migration-age object now))
+             (name (gethash "name" (gethash "metadata" object)))
+             (uid (gethash "uid" (gethash "metadata" object))))
+        (unless (and (eq targets :unknown) age (< age +storage-version-migration-grace-seconds+))
+          (handler-case
+              (let ((*typed-api-status-write* t))
+                (update-core-resource
+                 store "storageversionmigrations" nil name
+                 (lambda (current)
+                   (unless (equal uid (gethash "uid" (gethash "metadata" current)))
+                     (return-from reconcile-storage-version-migrations nil))
+                   (let ((status (copy-core-object (gethash "status" current (core-object))))
+                         (stamp (current-timestamp now)))
+                     (if (eq targets :unknown)
+                         (set-storage-version-migration-condition
+                          status "Failed" "StorageVersionMigrationFailed"
+                          "migration encountered unhandled error: unable to obtain GVR from discovery" stamp)
+                         (progn
+                           (unless (plusp (length (gethash "resourceVersion" status "")))
+                             (setf (gethash "resourceVersion" status)
+                                   (write-to-string (pod-store-resource-revision store))))
+                           (set-storage-version-migration-condition
+                            status "Running" "MigrationRunning"
+                            (if targets
+                                (format nil "The migration is running, ~D objects verified migrated" (length targets))
+                                "The migration is running")
+                            stamp)
+                           (set-storage-version-migration-condition
+                            status "Succeeded" "StorageVersionMigrationSucceeded" "Migration completed" stamp)))
+                     (setf (gethash "status" current) status))
+                   current)))
+            (kubernetes-error (condition)
+              (format *error-output* "gr8s StorageVersionMigration ~A: ~A~%" name
+                      (kubernetes-error-message condition)))))))))

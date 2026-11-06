@@ -571,3 +571,47 @@
         (is (equal "TestCondition" (gethash "type" (aref (gethash "conditions" (gethash "status" status)) 0)))))
       (typed-check 200 item :method :delete)
       (typed-check 404 item))))
+
+(defun svm-test-object (name group resource)
+  (gr8s::core-object "apiVersion" "storagemigration.k8s.io/v1" "kind" "StorageVersionMigration"
+                     "metadata" (gr8s::core-object "name" name)
+                     "spec" (gr8s::core-object "resource" (gr8s::core-object "group" group "resource" resource))))
+
+(defun svm-test-condition (store name type)
+  (find type (gethash "conditions" (gethash "status" (gr8s::get-core-resource store "storageversionmigrations" nil name)
+                                            (gr8s::core-object))
+                      #())
+        :test #'equal :key (lambda (c) (gethash "type" c))))
+
+(test storage-version-migrations-complete-for-served-resources-and-fail-for-unknown-ones
+  ;; Upstream's storage-version-migrator records the revision it covers, then sets
+  ;; Running and Succeeded; a resource discovery does not know fails after a minute.
+  ;; gr8s stores one form per resource, so there is nothing to rewrite.
+  (with-temporary-store (store directory)
+    (values directory)
+    (gr8s::create-core-resource store "configmaps"
+                                (gr8s::core-object "apiVersion" "v1" "kind" "ConfigMap"
+                                                   "metadata" (gr8s::core-object "name" "one"))
+                                "default")
+    (gr8s::create-core-resource store "storageversionmigrations" (svm-test-object "cm" "" "configmaps") nil)
+    (gr8s::create-core-resource store "storageversionmigrations" (svm-test-object "foo" "" "foo") nil)
+    (let ((now (get-universal-time)))
+      (gr8s::reconcile-storage-version-migrations store :now now)
+      (let ((succeeded (svm-test-condition store "cm" "Succeeded"))
+            (running (svm-test-condition store "cm" "Running")))
+        (is (equal "True" (gethash "status" succeeded)))
+        (is (equal "StorageVersionMigrationSucceeded" (gethash "reason" succeeded)))
+        (is (equal "The migration is running, 1 objects verified migrated" (gethash "message" running)))
+        (is (plusp (length (gethash "resourceVersion"
+                                    (gethash "status" (gr8s::get-core-resource store "storageversionmigrations" nil "cm")))))))
+      ;; Within the grace period an unknown resource is left alone.
+      (is (null (svm-test-condition store "foo" "Failed")))
+      (gr8s::reconcile-storage-version-migrations store :now (+ now 61))
+      (let ((failed (svm-test-condition store "foo" "Failed")))
+        (is (equal "True" (gethash "status" failed)))
+        (is (search "unable to obtain GVR from discovery" (gethash "message" failed))))
+      ;; A finished migration is not touched again.
+      (let ((before (gethash "resourceVersion" (gethash "metadata" (gr8s::get-core-resource store "storageversionmigrations" nil "cm")))))
+        (gr8s::reconcile-storage-version-migrations store :now (+ now 120))
+        (is (equal before (gethash "resourceVersion"
+                                   (gethash "metadata" (gr8s::get-core-resource store "storageversionmigrations" nil "cm")))))))))
