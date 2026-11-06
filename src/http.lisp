@@ -469,6 +469,27 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
               (pod-status "Pending")))
     object))
 
+(defun pod-last-published-status (store pod)
+  "Return a copy of the status clients last saw for POD, or NIL."
+  (with-store-lock (store)
+    (copy-pod-status-value (gethash (pod-uid pod) (pod-store-pod-published-statuses store)))))
+
+(defun written-pod-response (store reconciler pod before &optional (code 200))
+  "Answer a successful write of POD with its current status.
+A write that removed a deleting Pod's last finalizer may already have let the namespace controller
+or the reconciliation loop remove it; as the API server answers with the object it wrote, the reply
+is then POD with BEFORE, the status clients last saw, rather than the 404 a fresh read would give."
+  (let ((status (handler-case (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))
+                  (kubernetes-error (condition)
+                    (unless (and (= 404 (kubernetes-error-status-code condition))
+                                 (not (with-store-lock (store)
+                                        (let ((current (gethash (pod-key (pod-namespace pod) (pod-name pod))
+                                                                (pod-store-pods store))))
+                                          (and current (equal (pod-uid current) (pod-uid pod)))))))
+                      (error condition))
+                    nil))))
+    (json-response (pod-response-object pod (or status before (pod-status "Pending"))) code)))
+
 (defun apply-pod-response (store reconciler name &optional (namespace "default"))
   (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
          (applied (equal content-type "application/apply-patch+yaml"))
@@ -495,14 +516,12 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
         (when (core-resource-dry-run-p)
           (return-from apply-pod-response
             (json-response (pod-dry-run-object store replacement existing) (if existing 200 201))))
-        (let ((pod (if existing
-                       (update-pod store replacement
-                                   (pod-resource-version existing))
-                       (create-pod store (admit-in-cluster-pod store replacement)))))
-          (json-response
-           (pod-response-object
-            pod (reconcile-pod reconciler namespace name))
-           (if existing 200 201)))))))
+        (let* ((before (and existing (pod-last-published-status store existing)))
+               (pod (if existing
+                        (update-pod store replacement
+                                    (pod-resource-version existing))
+                        (create-pod store (admit-in-cluster-pod store replacement)))))
+          (written-pod-response store reconciler pod before (if existing 200 201)))))))
 
 (defun replace-pod-response (store reconciler name &optional (namespace "default"))
   (let ((raw (core-resource-request-object "Pod")))
@@ -516,12 +535,11 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
           (return-from replace-pod-response
             (json-response (pod-dry-run-object store replacement (get-pod store namespace name)))))
         ;; An omitted revision is an unconditional update.
-        (let ((pod (update-pod store replacement
-                               (or (pod-resource-version replacement)
-                                   (pod-resource-version (get-pod store namespace name))))))
-          (json-response
-           (pod-response-object
-            pod (reconcile-pod reconciler namespace name))))))))
+        (let* ((current (get-pod store namespace name))
+               (before (pod-last-published-status store current))
+               (pod (update-pod store replacement
+                                (or (pod-resource-version replacement) (pod-resource-version current)))))
+          (written-pod-response store reconciler pod before))))))
 
 (defun pod-delete-request-arguments ()
   "Decode JSON/protobuf DeleteOptions and query options without mutating desired state."

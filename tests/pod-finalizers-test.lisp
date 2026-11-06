@@ -335,3 +335,29 @@
       ;; A snapshot taken before the removal still carries the finalizer.
       (is (equal "Terminating"
                  (gethash "reason" (gr8s::converge-finalized-pod-deletion reconciler stale)))))))
+
+(test removing-the-last-finalizer-answers-with-the-pod-even-once-it-is-gone
+  ;; podster-uqb.183: OrderedNamespaceDeletion's PUT removing the last finalizer got a 404.
+  ;; The namespace controller or reconciliation loop may remove the finished Pod before the
+  ;; handler reads it back; the API server answers such a write with the object it wrote.
+  (with-core-api (store path)
+    (values path)
+    (let ((object (com.inuoe.jzon:parse *valid-pod-json*)))
+      (setf (gethash "namespace" (gethash "metadata" object)) "alpha"
+            (gethash "finalizers" (gethash "metadata" object)) (vector "example.com/hold"))
+      (create-pod store (parse-pod object)))
+    (mark-pod-deleting store "alpha" "hello")
+    (let ((current (check-core-status 200 "/api/v1/namespaces/alpha/pods/hello")))
+      (setf (gethash "finalizers" (gethash "metadata" current)) #())
+      (sb-int:encapsulate 'gr8s::reconcile-pod 'concurrent-removal
+                          (lambda (function reconciler namespace name)
+                            (ignore-errors (gr8s::remove-pod store namespace name))
+                            (funcall function reconciler namespace name)))
+      (unwind-protect
+           (let ((written (check-core-status 200 "/api/v1/namespaces/alpha/pods/hello" :method :put :object current)))
+             (is (equal "hello" (gethash "name" (gethash "metadata" written))))
+             (is (zerop (length (gethash "finalizers" (gethash "metadata" written) #())))))
+        (sb-int:unencapsulate 'gr8s::reconcile-pod 'concurrent-removal))
+      ;; The Pod really is gone, and a write to a Pod that is gone is still a 404.
+      (signals kubernetes-error (get-pod store "alpha" "hello"))
+      (check-core-status 404 "/api/v1/namespaces/alpha/pods/hello" :method :put :object current))))
