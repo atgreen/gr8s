@@ -275,6 +275,14 @@
                 (node-runtime-reconciler node-runtime)
                 :before-reconcile (lambda ()
                                     (reconcile-cached-node-network node-runtime)
+                                    ;; Re-run dataplane convergence every tick, not only on a new
+                                    ;; control-plane snapshot: the out-of-process CNI plugin adds Pod
+                                    ;; allocations the agent must pick up to populate local/host/remote
+                                    ;; redirect tables for live Pods (podster-6yd). Fail-soft.
+                                    (handler-case
+                                        (converge-node-network-policies node-runtime)
+                                      (error (condition)
+                                        (format *error-output* "gr8s: NetworkPolicy convergence failed: ~A~%" condition)))
                                     (handler-case
                                         (converge-host-port-forwarders (node-runtime-host-port-forwarders node-runtime)
                                                                        (node-runtime-store node-runtime))
@@ -688,6 +696,10 @@ snapshot application."
         (ipam (node-runtime-ipam node-runtime))
         (store (node-runtime-store node-runtime)))
     (when (and manager ipam store)
+      ;; The out-of-process CNI plugin persists every allocation to the ipam file;
+      ;; reload it so the dataplane tables below cover Pods added since the agent's
+      ;; ipam was opened, not only those present at startup (podster-6yd).
+      (ignore-errors (reload-node-ipam-allocations ipam))
       (let ((root (managed-containerd-bpf-directory manager))
             (endpoints (bt:with-lock-held ((node-ipam-lock ipam))
                          (loop for key being the hash-keys of (node-ipam-allocations ipam)
@@ -712,6 +724,17 @@ snapshot application."
          (ignore-errors (containerd-node-address (node-runtime-runtime node-runtime)))
          :directory-fn (lambda (sandbox)
                          (nth-value 2 (cni-pin-paths root sandbox))))
+        ;; Cross-node Pod->Pod send table (podster-xuc): every local Pod gets the
+        ;; peer Pod CIDRs so the egress guard redirects remote-bound traffic to
+        ;; gr8s-vxlan (kernel encaps to the peer VTEP), past the FORWARD reject.
+        ;; The peer CIDRs are the VXLAN routes already driving the tunnel.
+        (let ((network (node-runtime-network node-runtime)))
+          (when network
+            (converge-node-remote-pod-delivery
+             (mapcar #'first endpoints)
+             (mapcar #'car (node-vxlan-route-pairs network))
+             :directory-fn (lambda (sandbox)
+                             (nth-value 2 (cni-pin-paths root sandbox))))))
         (let ((specs (network-policy-specs-from-objects
                       (list-core-resources store "networkpolicies")))
               (ip-map (pod-ip-identity-map store)))

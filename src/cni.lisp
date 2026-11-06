@@ -34,7 +34,10 @@
     ("local_pod_v4"       11 8 16 4096 1)
     ;; Host-local destinations (API server 10.96.0.1, node IP) -> presence byte.
     ;; Agent-populated on reconcile. HASH, NO_PREALLOC.
-    ("host_redirect_v4"    1 4 1  64   1)))
+    ("host_redirect_v4"    1 4 1  64   1)
+    ;; Remote-node Pod CIDRs -> 16-byte {gr8s-vxlan ifindex, router MAC, vxlan MAC}.
+    ;; Agent-populated from the node's VXLAN routes. LPM /N keys, NO_PREALLOC.
+    ("remote_pod_v4"      11 8 16 4096 1)))
 
 (defstruct cni-configuration
   version name type direction program map-pin-root previous-result endpoint-address policy-interface-name)
