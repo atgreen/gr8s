@@ -689,9 +689,6 @@ snapshot application."
         (store (node-runtime-store node-runtime)))
     (when (and manager ipam store)
       (let ((root (managed-containerd-bpf-directory manager))
-            (specs (network-policy-specs-from-objects
-                    (list-core-resources store "networkpolicies")))
-            (ip-map (pod-ip-identity-map store))
             (endpoints (bt:with-lock-held ((node-ipam-lock ipam))
                          (loop for key being the hash-keys of (node-ipam-allocations ipam)
                                  using (hash-value address)
@@ -699,19 +696,23 @@ snapshot application."
         ;; Same-node Pod->Pod delivery table (epic podster-pnd): every local Pod
         ;; gets the node-wide {dest IP -> ifindex/MAC} table so the egress guard
         ;; can redirect in-cluster traffic past the host firewall's FORWARD reject.
-        ;; Runs first and fail-soft so an unsupported NetworkPolicy below (which
-        ;; aborts the egress-policy convergence) can't skip it.
+        ;; Populate it FIRST and independently: resolving an unsupported
+        ;; NetworkPolicy (below) can throw, and keeping that resolution out of this
+        ;; let's bindings is what lets the delivery table still be written.
         (converge-node-local-pod-delivery
          endpoints
          :directory-fn (lambda (sandbox)
                          (nth-value 2 (cni-pin-paths root sandbox))))
-        (converge-pod-egress-policies
-         specs endpoints
-         :pod-finder (lambda (address)
-                       (let ((id (gethash address ip-map)))
-                         (if id (values (car id) (cdr id)) (values nil nil))))
-         :directory-fn (lambda (sandbox)
-                         (nth-value 2 (cni-pin-paths root sandbox))))))))
+        (let ((specs (network-policy-specs-from-objects
+                      (list-core-resources store "networkpolicies")))
+              (ip-map (pod-ip-identity-map store)))
+          (converge-pod-egress-policies
+           specs endpoints
+           :pod-finder (lambda (address)
+                         (let ((id (gethash address ip-map)))
+                           (if id (values (car id) (cdr id)) (values nil nil))))
+           :directory-fn (lambda (sandbox)
+                           (nth-value 2 (cni-pin-paths root sandbox)))))))))
 
 (defvar *runtime-outage-snapshot-wait-seconds* 2
   "How long a snapshot waits for a restarting container runtime before giving up this attempt.")
