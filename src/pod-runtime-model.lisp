@@ -169,7 +169,7 @@ such as the security-profiles-operator put them.")
     (invalid-pod "env.value and env.valueFrom are mutually exclusive"))
   (let* ((from (require-object (gethash "valueFrom" variable) "env.valueFrom"))
          (sources (loop for key being the hash-keys of from collect key)))
-    (reject-unsupported-fields from '("fieldRef" "resourceFieldRef" "secretKeyRef" "configMapKeyRef") "env.valueFrom")
+    (reject-unsupported-fields from '("fieldRef" "resourceFieldRef" "secretKeyRef" "configMapKeyRef" "fileKeyRef") "env.valueFrom")
     (unless (= 1 (length sources)) (invalid-pod "env.valueFrom requires exactly one source"))
     (let* ((kind (first sources)) (ref (require-object (gethash kind from) "environment source")))
       (cond
@@ -183,6 +183,7 @@ such as the security-profiles-operator put them.")
            (invalid-pod "unsupported downward API field reference")))
         ;; Unlike in a volume, an unnamed container here means the variable's own.
         ((equal kind "resourceFieldRef") (validate-resource-field-reference ref))
+        ((equal kind "fileKeyRef") (validate-file-key-selector ref))
         (t
          (reject-unsupported-fields ref '("name" "key" "optional") "environment key reference")
          (require-dns-subdomain (gethash "name" ref) "environment source name")
@@ -230,7 +231,10 @@ such as the security-profiles-operator put them.")
       (invalid-pod "workingDir must be absolute")))
   (validate-linux-security-context (gethash "securityContext" container))
   (loop for mount across (optional-vector container "volumeMounts" "container")
-        do (reject-unsupported-fields mount '("name" "mountPath" "readOnly" "subPath" "subPathExpr" "mountPropagation") "volumeMount")
+        do (reject-unsupported-fields mount '("name" "mountPath" "readOnly" "subPath" "subPathExpr" "mountPropagation"
+                                              "recursiveReadOnly")
+                                      "volumeMount")
+           (validate-recursive-read-only-mount mount)
            (require-dns-label (gethash "name" mount) "volumeMount.name")
            (let ((propagation (gethash "mountPropagation" mount)))
              (when propagation
@@ -254,6 +258,20 @@ such as the security-profiles-operator put them.")
            (multiple-value-bind (value present) (gethash "readOnly" mount)
              (when (and present (not (member value '(t nil))))
                (invalid-pod "volumeMount.readOnly must be boolean")))))
+
+(defun validate-recursive-read-only-mount (mount)
+  "Validate volumeMount.recursiveReadOnly as the API server does (RecursiveReadOnlyMounts, GA in v1.33).
+Anything but Disabled needs a read-only mount whose propagation is None."
+  (when (eq (gethash "recursiveReadOnly" mount) 'null) (remhash "recursiveReadOnly" mount))
+  (let ((mode (gethash "recursiveReadOnly" mount)))
+    (when mode
+      (unless (member mode '("Disabled" "IfPossible" "Enabled") :test #'equal)
+        (invalid-pod "volumeMount.recursiveReadOnly: Unsupported value: ~S: supported values: \"Disabled\", \"Enabled\", \"IfPossible\"" mode))
+      (unless (equal mode "Disabled")
+        (unless (eq t (gethash "readOnly" mount))
+          (invalid-pod "volumeMount.recursiveReadOnly: Forbidden: may only be specified when readOnly is true"))
+        (unless (member (gethash "mountPropagation" mount "None") '("None") :test #'equal)
+          (invalid-pod "volumeMount.recursiveReadOnly: Forbidden: may only be specified when mountPropagation is None or not specified"))))))
 
 (defun validate-empty-dir-source (source)
   "Accept disk-backed and tmpfs emptyDirs; the node evicts a Pod whose disk-backed one outgrows its limit."
@@ -509,6 +527,7 @@ such as the security-profiles-operator put them.")
 
 (defun validate-runtime-pod-spec (spec)
   "Validate Pod-level volume, security, service account and scheduling fields."
+  (validate-file-key-ref-volumes spec)
   ;; The API server defaults an absent Pod securityContext to an empty one, which clients
   ;; such as kubectl debug read without checking for nil.
   (when (member (gethash "securityContext" spec) '(nil null))
@@ -564,7 +583,8 @@ such as the security-profiles-operator put them.")
   (validate-pod-scheduler-name spec)
   (validate-pod-scheduling-gates spec)
   (validate-pod-readiness-gates spec)
-  (validate-pod-affinity spec))
+  (validate-pod-affinity spec)
+  (validate-topology-spread-constraints spec))
 
 (defparameter +default-scheduler-name+ "default-scheduler"
   "The scheduler a Pod names by default, which is the one gr8s runs.")

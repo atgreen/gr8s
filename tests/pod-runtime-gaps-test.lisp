@@ -33,8 +33,8 @@
   ;; which binds it through pods/binding; gr8s's scheduler leaves it alone.
   (is (gr8s::pod-name (parse-pod (gap-pod-object "schedulerName" "default-scheduler"))))
   (is (not (gr8s::pod-for-this-scheduler-p (parse-pod (gap-pod-object "schedulerName" "custom-scheduler")))))
-  ;; topologySpreadConstraints is admitted (unhonored on a single node) rather
-  ;; than blocking an otherwise valid Pod.
+  ;; topologySpreadConstraints is admitted, and the scheduler honours it
+  ;; (pod-topology-spread-test).
   (is (gr8s::pod-name
        (parse-pod (gap-pod-object "topologySpreadConstraints"
                                   (vector (gr8s::core-object "maxSkew" 1 "topologyKey" "kubernetes.io/hostname"
@@ -228,8 +228,12 @@
   (signals kubernetes-error
     (parse-pod (gap-pod-object "initContainers"
                                (vector (gap-container "plain" "startupProbe" (gr8s::core-object "exec" (gr8s::core-object "command" #("true"))))))))
+  ;; With ContainerRestartRules (beta, on since v1.35) validateInitContainerRestartPolicy
+  ;; (pkg/apis/core/validation/validation.go) lets an ordinary init container set OnFailure or Never;
+  ;; only probes and hooks remain a sidecar's.
+  (is (gr8s::pod-name (parse-pod (gap-pod-object "initContainers" (vector (gap-container "plain" "restartPolicy" "OnFailure"))))))
   (signals kubernetes-error
-    (parse-pod (gap-pod-object "initContainers" (vector (gap-container "plain" "restartPolicy" "OnFailure")))))
+    (parse-pod (gap-pod-object "initContainers" (vector (gap-container "plain" "restartPolicy" "Sometimes")))))
   ;; An application container may set its own restartPolicy (ContainerRestartRules), but only a valid one.
   (is (gr8s::pod-name (parse-pod (gap-pod-object "containers" (vector (gap-container "app" "restartPolicy" "Always"))))))
   (signals kubernetes-error

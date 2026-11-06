@@ -142,6 +142,7 @@ resource; an extended resource it does not advertise has zero capacity."
        (pod-node-selector-matches-p pod node)
        (pod-node-affinity-matches-p pod node)
        (null (pod-affinity-failure-unlocked store pod node))
+       (null (pod-topology-spread-failure-unlocked store pod node))
        (pod-host-ports-free-p store pod node)
        (pod-node-storage-compatible-p store pod node)))
 
