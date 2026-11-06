@@ -76,8 +76,10 @@ def main():
                 if config in line and "containerd-shim" not in line]
 
     def node_ready():
-        """Return the local Node's Ready condition."""
+        """Return the local Node's Ready condition; an unregistered Node is not ready."""
         code, node = request("/api/v1/nodes/gr8s-local")
+        if code == 404:
+            return {"type": "Ready", "status": "Unknown", "reason": "NotRegistered"}
         assert code == 200, (code, node)
         return next(c for c in node["status"]["conditions"] if c["type"] == "Ready")
 
