@@ -183,7 +183,9 @@
     (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
     (sb-bsd-sockets:socket-bind socket (sb-bsd-sockets:make-inet-address address) port)
     (sb-bsd-sockets:socket-listen socket 32)
-    (let ((listener (make-l4-listener :socket socket :address address :port port
+    ;; Record the bound port, which the kernel chose when PORT is 0: STOP-L4-LISTENER connects to it.
+    (let ((listener (make-l4-listener :socket socket :address address
+                                      :port (nth-value 1 (sb-bsd-sockets:socket-name socket))
                                       :mode mode :dispatcher dispatcher :resolver resolver)))
       (setf (l4-listener-thread listener)
             (bt:make-thread

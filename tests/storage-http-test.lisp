@@ -9,10 +9,12 @@
 (def-suite storage-http :in gr8s)
 (in-suite storage-http)
 
+(defvar *storage-http-port* nil "The kernel-assigned port of the current WITH-STORAGE-HTTP server.")
+
 (defun storage-http-request (path &key (method :get) object octets (content-type "application/json"))
   "Make one isolated HTTP request to the storage test server."
   (multiple-value-bind (body code)
-      (drakma:http-request (concatenate 'string "http://127.0.0.1:18093" path) :method method
+      (drakma:http-request (format nil "http://127.0.0.1:~D~A" *storage-http-port* path) :method method
                           :content-type content-type :content (or octets (when object (com.inuoe.jzon:stringify object))))
     (values (com.inuoe.jzon:parse body) code)))
 
@@ -24,7 +26,8 @@
 (defmacro with-storage-http ((store path) &body body)
   "Run an API-only storage test without acquiring any native runtime state."
   `(with-temporary-store (,store ,path)
-     (let ((server (start-server :address "127.0.0.1" :port 18093 :store ,store :runtime (make-fake-runtime))))
+     (let* ((server (start-server :address "127.0.0.1" :port 0 :store ,store :runtime (make-fake-runtime)))
+            (*storage-http-port* (hunchentoot:acceptor-port server)))
        (unwind-protect (progn ,@body) (stop-server server)))))
 
 (test storage-http-discovery-and-typed-protobuf-creation
@@ -67,7 +70,7 @@
            (revision (gethash "resourceVersion" (gethash "metadata" claim))))
       (sb-sys:with-deadline (:seconds 8)
         (multiple-value-bind (stream code)
-            (drakma:http-request "http://127.0.0.1:18093/api/v1/namespaces/default/persistentvolumeclaims"
+            (drakma:http-request (format nil "http://127.0.0.1:~D/api/v1/namespaces/default/persistentvolumeclaims" *storage-http-port*)
                                  :want-stream t :parameters `(("watch" . "true") ("resourceVersion" . ,revision) ("timeoutSeconds" . "5")))
           (unwind-protect
                (progn

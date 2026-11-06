@@ -30,10 +30,17 @@
   (gr8s::core-object "apiVersion" (format nil "~A/~A" group version) "kind" kind
                     "metadata" (gr8s::core-object "name" name) "spec" (gr8s::core-object)))
 
+(defvar *crd-api-port* nil "The kernel-assigned port of the current WITH-CRD-API server.")
+
+(defun crd-api-url (path)
+  "Return the URL of PATH on the current WITH-CRD-API server."
+  (format nil "http://127.0.0.1:~D~A" *crd-api-port* path))
+
 (defmacro with-crd-api ((store path) &body body)
-  "Use a distinct port so focused CRD tests can run beside unrelated suites."
+  "Serve a fresh store on a kernel-assigned port, so no other suite's server can collide with it."
   `(with-temporary-store (,store ,path)
-     (let ((server (start-server :address "127.0.0.1" :port 18094 :store ,store :runtime (make-fake-runtime))))
+     (let* ((server (start-server :address "127.0.0.1" :port 0 :store ,store :runtime (make-fake-runtime)))
+            (*crd-api-port* (hunchentoot:acceptor-port server)))
        (unwind-protect (progn ,@body) (stop-server server)))))
 
 (defvar *watch-test-server*)
@@ -41,7 +48,7 @@
 (defun crd-api-request (expected path &key (method :get) object text content-type parameters)
   "Issue a real HTTP request and assert its actual Kubernetes response code."
   (multiple-value-bind (body status)
-      (drakma:http-request (concatenate 'string "http://127.0.0.1:18094" path) :method method
+      (drakma:http-request (crd-api-url path) :method method
                           :content-type (or content-type "application/json") :parameters parameters
                           :content (or text (when object (com.inuoe.jzon:stringify object))))
     (is (= expected status) "~A returned ~A: ~A" path status body)
@@ -317,7 +324,7 @@
     (gr8s::create-core-resource store "customresourcedefinitions" (crd-fixture) nil)
     (sb-sys:with-deadline (:seconds 10)
       (multiple-value-bind (stream code)
-          (drakma:http-request "http://127.0.0.1:18094/apis/widgets.example.test/v1/namespaces/alpha/widgets"
+          (drakma:http-request (crd-api-url "/apis/widgets.example.test/v1/namespaces/alpha/widgets")
                                :want-stream t :parameters '(("watch" . "true") ("resourceVersion" . "0") ("timeoutSeconds" . "3")))
         (unwind-protect
              (progn
@@ -387,7 +394,7 @@
   (with-crd-api (store path)
     (values store path)
     (crd-api-request 201 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post :object (crd-fixture))
-    (let* ((events (let ((*watch-test-server* "http://127.0.0.1:18094"))
+    (let* ((events (let ((*watch-test-server* (crd-api-url "")))
                      (apply #'collect-watch-stream "/apis/widgets.example.test/v1/namespaces/default/widgets" (watch-list-parameters))))
            (object (gethash "object" (first (last events)))))
       (is (equal "BOOKMARK" (gethash "type" (first (last events)))))
