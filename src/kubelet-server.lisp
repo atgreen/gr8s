@@ -327,7 +327,7 @@ own subresource and fall back to proxy; /stats and /metrics have only theirs."
 
 (defmethod hunchentoot:initialize-connection-stream ((acceptor kubelet-acceptor) stream)
   "Accept an optional client certificate, whose chain the request's authentication then verifies."
-  (sb-sys:with-deadline (:seconds 10)
+  (with-tls-handshake-deadline (*tls-handshake-seconds*)
     (let* ((pure-tls:*server-ticket-key* (ironclad:random-data 32))
            (tls (pure-tls:make-tls-server-stream stream :certificate (kubelet-acceptor-certificate acceptor)
                                                         :key (kubelet-acceptor-private-key acceptor)
