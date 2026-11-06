@@ -570,3 +570,17 @@
       (run-workload-passes reconciler)
       (is (member (cons "SuccessfulCreate" "create Pod db-0 in StatefulSet db successful")
                   (workload-events-about store "StatefulSet" "db") :test #'equal)))))
+
+(test deployment-conditions-are-worded-as-upstream-words-them
+  (with-temporary-store (store path)
+    (declare (ignorable path))
+    (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)))
+      (gr8s::create-core-resource store "deployments" (workload-fixture "Deployment" "web" 2) "alpha")
+      (run-workload-passes reconciler)
+      (mark-workload-pods-ready store runtime)
+      (run-workload-passes reconciler)
+      (let* ((set-name (gethash "name" (gethash "metadata" (first (gr8s::list-core-resources store "replicasets" "alpha")))))
+             (conditions (gethash "conditions" (workload-status store "deployments" "web"))))
+        (flet ((message (type) (gethash "message" (find type conditions :test #'equal :key (lambda (c) (gethash "type" c))))))
+          (is (equal "Deployment has minimum availability." (message "Available")))
+          (is (equal (format nil "ReplicaSet \"~A\" has successfully progressed." set-name) (message "Progressing"))))))))

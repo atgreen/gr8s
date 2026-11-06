@@ -513,6 +513,7 @@ NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the templat
          (ready (reduce #'+ sets :key (lambda (set) (gethash "readyReplicas" (gethash "status" set) 0)) :initial-value 0))
          (available (reduce #'+ sets :key (lambda (set) (gethash "availableReplicas" (gethash "status" set) 0)) :initial-value 0))
          (updated (if new (gethash "replicas" (gethash "status" new) 0) 0))
+         (set-name (gethash "name" (workload-metadata (or new current (core-object "metadata" (core-object))))))
          (complete (and (= updated desired) (= replicas desired) (>= available desired)))
          (progress (or (/= updated (gethash "updatedReplicas" prior -1))
                        (> available (gethash "availableReplicas" prior -1))
@@ -524,7 +525,11 @@ NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the templat
                           (copy-core-object old-progressing)
                           (workload-condition previous "Progressing" (if paused "Unknown" "True")
                         (cond (paused "DeploymentPaused") (complete "NewReplicaSetAvailable") (t "ReplicaSetUpdated"))
-                        (if complete "The deployment's replicas are available" "Reconciling the deployment's ReplicaSets") :progress progress)))
+                        ;; Worded as upstream's deployment controller words them.
+                        (cond (paused "Deployment is paused")
+                              (complete (format nil "ReplicaSet \"~A\" has successfully progressed." set-name))
+                              (t (format nil "ReplicaSet \"~A\" is progressing." set-name)))
+                        :progress progress)))
          (status (core-object "observedGeneration" (gethash "generation" (workload-metadata deployment))
                               "replicas" replicas "updatedReplicas" updated "readyReplicas" ready "availableReplicas" available
                               "unavailableReplicas" (max 0 (- desired available)))))
@@ -534,10 +539,13 @@ NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the templat
       (when (and (not paused) (not complete) time
                  (> (funcall *workload-clock*) (+ time (gethash "progressDeadlineSeconds" spec))))
         (setf progressing (workload-condition previous "Progressing" "False" "ProgressDeadlineExceeded"
-                                              "The deployment exceeded its progress deadline"))))
-    (let ((conditions (list (workload-condition previous "Available" (if (>= available (- desired unavailable)) "True" "False")
-                            (if (>= available (- desired unavailable)) "MinimumReplicasAvailable" "MinimumReplicasUnavailable")
-                            "Availability is derived from ready child Pods") progressing)))
+                                              (format nil "ReplicaSet \"~A\" has timed out progressing." set-name)))))
+    (let ((conditions (list (if (>= available (- desired unavailable))
+                                (workload-condition previous "Available" "True" "MinimumReplicasAvailable"
+                                                    "Deployment has minimum availability.")
+                                (workload-condition previous "Available" "False" "MinimumReplicasUnavailable"
+                                                    "Deployment does not have minimum availability."))
+                            progressing)))
       (dolist (set sets)
         (let ((failure (find "ReplicaFailure" (gethash "conditions" (gethash "status" set) #())
                              :test #'equal :key (lambda (condition) (gethash "type" condition)))))
