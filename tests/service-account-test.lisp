@@ -311,3 +311,32 @@
                                                                   (vector (gr8s::core-object "matchExpressions"
                                                                                              (vector (gr8s::core-object "key" "a" "operator" "Bogus"))))))
           nil)))))
+
+(test nodes-read-only-what-their-pods-use
+  (with-temporary-store (store directory)
+    (values directory)
+    (let ((node (gr8s::make-api-user-identity :username "system:node:n1" :groups #("system:nodes" "system:authenticated")))
+          (other (gr8s::make-api-user-identity :username "system:node:n2" :groups #("system:nodes" "system:authenticated")))
+          (impostor (gr8s::make-api-user-identity :username "system:node:n1" :groups #("system:authenticated"))))
+      (create-pod store (parse-pod "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"user\",\"namespace\":\"alpha\"},
+        \"spec\":{\"nodeName\":\"n1\",\"imagePullSecrets\":[{\"name\":\"pull\"}],
+          \"containers\":[{\"name\":\"web\",\"image\":\"busybox:1.36.1\",
+            \"env\":[{\"name\":\"A\",\"valueFrom\":{\"configMapKeyRef\":{\"name\":\"settings\",\"key\":\"a\"}}}],
+            \"envFrom\":[{\"secretRef\":{\"name\":\"env-secret\"}}]}],
+          \"volumes\":[{\"name\":\"s\",\"secret\":{\"secretName\":\"mounted\"}},
+                       {\"name\":\"d\",\"persistentVolumeClaim\":{\"claimName\":\"data\"}},
+                       {\"name\":\"p\",\"projected\":{\"sources\":[{\"configMap\":{\"name\":\"projected\"}}]}}]}}"))
+      (flet ((allowed (identity resource name &optional (verb "get") (namespace "alpha"))
+               (gr8s::node-authorizer-allows-p store identity verb "" resource name namespace)))
+        (dolist (name '("pull" "env-secret" "mounted"))
+          (is-true (allowed node "secrets" name) "~A" name))
+        (dolist (name '("settings" "projected"))
+          (is-true (allowed node "configmaps" name) "~A" name))
+        (is-true (allowed node "persistentvolumeclaims" "data"))
+        ;; Nothing the Pod doesn't use, nothing for another node or a pretender, and only get.
+        (is-false (allowed node "secrets" "unrelated"))
+        (is-false (allowed node "secrets" "mounted" "get" "beta"))
+        (is-false (allowed other "secrets" "mounted"))
+        (is-false (allowed impostor "secrets" "mounted"))
+        (is-false (allowed node "secrets" "mounted" "update"))
+        (is-false (allowed node "secrets" nil "list"))))))
