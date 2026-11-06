@@ -103,6 +103,14 @@
     (mapc #'default-volume-object (json-items spec "volumes")))
   spec)
 
+(defun defaulted-pod-template (template)
+  "Return a copy of the Pod TEMPLATE (metadata and spec) with its spec defaulted.
+Controllers compare templates through this, so that one stored by an older gr8s, which
+lacks the defaults, still matches the same template stored since with them."
+  (let ((copy (copy-core-object template)))
+    (default-pod-template-spec-object (json-child copy "spec"))
+    copy))
+
 (defun default-pod-spec-object (spec)
   "Apply a Pod's spec defaults: a template's, and those SetDefaults_Pod adds for a Pod alone."
   (when (hash-table-p spec)

@@ -420,6 +420,7 @@
                              (:file "disruption-budget-test")
                              (:file "statefulset-test")
                              (:file "rc-daemonset-test")
+                             (:file "template-defaults-test")
                              (:file "suite-watchdog"))))
   :perform (test-op (operation component)
              (declare (ignore operation component))
