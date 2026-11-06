@@ -170,14 +170,18 @@ A template equal to an older revision makes that revision the newest again, whic
   (when (statefulset-ensure-claims store set ordinal)
     (let ((pod (admit-controller-pod store (statefulset-pod-object set template ordinal revision-name)
                                      "statefulset-controller")))
-      (with-store-lock (store)
-        (when (workload-current-unlocked store "statefulsets" set :generation t)
-          (create-pod-unlocked store pod))))))
+      (record-pod-created-event
+       store set
+       (with-store-lock (store)
+         (when (workload-current-unlocked store "statefulsets" set :generation t)
+           (create-pod-unlocked store pod)))))))
 
-(defun statefulset-delete-pod (reconciler member)
+(defun statefulset-delete-pod (reconciler member &optional set)
   "Start deleting one exact member Pod, tolerating one that is already gone."
   (let ((pod (statefulset-member-pod member)))
-    (handler-case (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod) "statefulset-controller" :uid (pod-uid pod))
+    (handler-case (when (and (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod) "statefulset-controller" :uid (pod-uid pod))
+                             set)
+                    (record-pod-deleted-event (reconciler-store reconciler) set pod))
       (kubernetes-error (condition)
         (unless (member (kubernetes-error-status-code condition) '(404 409)) (error condition))))))
 
@@ -217,7 +221,7 @@ A template equal to an older revision makes that revision the newest again, whic
                ((deletion-requested-p (statefulset-member-pod member))
                 (when ordered (return t)))
                ((member (gethash "phase" (statefulset-member-status member)) '("Failed" "Succeeded") :test #'equal)
-                (statefulset-delete-pod reconciler member)
+                (statefulset-delete-pod reconciler member set)
                 (when ordered (return t)))
                (t
                 (statefulset-repair-identity store member)
@@ -239,7 +243,7 @@ A template equal to an older revision makes that revision the newest again, whic
          (when ordered (return t)))
         ((and ordered (not (statefulset-member-healthy-p member)) (not (eq member first-unhealthy)))
          (return t))
-        (t (statefulset-delete-pod reconciler member)
+        (t (statefulset-delete-pod reconciler member set)
            (when ordered (return t)))))))
 
 (defun statefulset-max-unavailable (spec)
@@ -274,9 +278,9 @@ while a parallel one first replaces old Pods that are already unavailable."
               (let ((member (assoc ordinal members)))
                 (when (and (>= ordinal lowest) (old-p member))
                   (cond ((and parallel (not (available-p member)))
-                         (statefulset-delete-pod reconciler member))
+                         (statefulset-delete-pod reconciler member set))
                         ((and (plusp budget) (or (not parallel) (available-p member)))
-                         (statefulset-delete-pod reconciler member)
+                         (statefulset-delete-pod reconciler member set)
                          (decf budget))))))))))))
 
 (defun statefulset-delete-scaled-claims (store set members)

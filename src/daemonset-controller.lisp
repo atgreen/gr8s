@@ -208,9 +208,11 @@ A daemon Pod ignores a node being cordoned, but needs an agent to run on."
   "Select the observations assigned to NODE-NAME."
   (remove node-name observations :test-not #'equal :key (lambda (pair) (pod-node-name (car pair)))))
 
-(defun delete-daemon-pod (reconciler pod)
+(defun delete-daemon-pod (reconciler pod &optional daemonset)
   "Start deleting one exact daemon Pod, tolerating one that is already gone."
-  (handler-case (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod) "daemon-set-controller" :uid (pod-uid pod))
+  (handler-case (when (and (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod) "daemon-set-controller" :uid (pod-uid pod))
+                           daemonset)
+                  (record-pod-deleted-event (reconciler-store reconciler) daemonset pod))
     (kubernetes-error (condition)
       (unless (member (kubernetes-error-status-code condition) '(404 409)) (error condition)))))
 
@@ -244,15 +246,15 @@ while the new one is coming up, and gives up the old one once it is unready or r
     (dolist (pair observations)
       (let ((name (pod-node-name (car pair))))
         (when (and name (not (member name eligible-names :test #'equal)) (not (deletion-requested-p (car pair))))
-          (delete-daemon-pod reconciler (car pair)))))
+          (delete-daemon-pod reconciler (car pair) daemonset))))
     (dolist (name eligible-names)
       (let* ((pods (daemonset-pods-on-node observations name))
              (running (remove-if (lambda (pair) (or (deletion-requested-p (car pair)) (daemonset-pod-terminal-p (cdr pair)))) pods)))
         (dolist (pair pods)
           (when (and (daemonset-pod-terminal-p (cdr pair)) (not (deletion-requested-p (car pair))))
-            (delete-daemon-pod reconciler (car pair))))
+            (delete-daemon-pod reconciler (car pair) daemonset)))
         (dolist (pod (daemon-excess-pods daemonset running hashes))
-          (delete-daemon-pod reconciler pod))
+          (delete-daemon-pod reconciler pod daemonset))
         (when (null pods)
           (create-replica-set-pod store daemonset :node-name name
                                   :labels (list (cons +controller-revision-hash-label+
@@ -303,10 +305,10 @@ A new Pod's arrival is what frees its node's old Pod, which DAEMON-EXCESS-PODS t
               ((daemon-pod-updated-p (car pair) hashes)
                (unless (workload-pod-available-p (cdr pair) minimum) (decf budget)))
               ((workload-pod-available-p (cdr pair) minimum) (push (car pair) candidates))
-              (t (decf budget) (delete-daemon-pod reconciler (car pair))))))
+              (t (decf budget) (delete-daemon-pod reconciler (car pair) daemonset)))))
     (loop for pod in (nreverse candidates)
           while (plusp budget)
-          do (delete-daemon-pod reconciler pod) (decf budget))))
+          do (delete-daemon-pod reconciler pod daemonset) (decf budget))))
 
 (defun clean-daemonset-history (store daemonset old observations)
   "Delete the oldest revisions beyond revisionHistoryLimit, keeping any a live Pod still names."

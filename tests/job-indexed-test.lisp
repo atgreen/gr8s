@@ -394,3 +394,18 @@
     (gr8s::update-core-resource store "jobs" "alpha" "work"
       (lambda (job) (setf (gethash "finalizers" (gethash "metadata" job)) #()) job))
     (signals gr8s::kubernetes-error (job-now store))))
+
+(test job-controller-records-pod-creation-and-completion-events
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable directory))
+    (job-with-spec store)
+    (gr8s::reconcile-jobs reconciler)
+    (let ((pod (first (list-pods store "alpha"))))
+      (finish-job-pods reconciler runtime store "Succeeded")
+      (reconcile-until-settled reconciler)
+      (let ((events (loop for event in (gr8s::list-core-resources store "events" "alpha")
+                          when (equal "Job" (gethash "kind" (gethash "involvedObject" event)))
+                            collect (cons (gethash "reason" event) (gethash "message" event)))))
+        (is (member (cons "SuccessfulCreate" (format nil "Created pod: ~A" (pod-name pod))) events :test #'equal))
+        (is (member (cons "Completed" "Job completed") events :test #'equal))
+        (is (= 1 (count "Completed" events :key #'car :test #'equal)))))))

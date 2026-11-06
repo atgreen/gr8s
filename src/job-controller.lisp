@@ -92,9 +92,11 @@
             (concatenate 'vector (gethash "finalizers" metadata #()) (vector +job-tracking-finalizer+))))
     (let ((pod (admit-controller-pod
                 store (core-object "apiVersion" "v1" "kind" "Pod" "metadata" metadata "spec" spec) "job-controller")))
-      (with-store-lock (store)
-        (when (workload-current-unlocked store "jobs" job :generation t)
-          (create-pod-unlocked store pod))))))
+      (record-pod-created-event
+       store job
+       (with-store-lock (store)
+         (when (workload-current-unlocked store "jobs" job :generation t)
+           (create-pod-unlocked store pod)))))))
 
 (defun job-observations (reconciler job &key claim)
   "Pair managed Pods with actual reconciliation observations, never fabricated success."
@@ -285,6 +287,7 @@ any other, and a Job already failing, counts it at once."
     (dolist (pod pods)
       (handler-case
           (when (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod) "job-controller" :uid (pod-uid pod))
+            (record-pod-deleted-event store job pod)
             (when release
               (let ((current (gethash (pod-key (pod-namespace pod) (pod-name pod)) (pod-store-pods store))))
                 (when current (remove-accounted-job-finalizer store job current :deleting t)))))
@@ -375,15 +378,22 @@ any other, and a Job already failing, counts it at once."
 (defun finish-job (reconciler job type reason message active-pods terminating)
   "Record the outcome and stop active Pods; declare Complete or Failed only once all have stopped."
   (delete-job-pods reconciler job active-pods :release nil)
-  (write-job-status (reconciler-store reconciler) job 0 0 (+ terminating (length active-pods))
-    (lambda (next)
-      (set-job-condition next (if (equal type "Complete") "SuccessCriteriaMet" "FailureTarget")
-                         "True" reason message)
-      (when (and (null active-pods) (zerop terminating)
-                 (null (job-uncounted-uids next "succeeded")) (null (job-uncounted-uids next "failed")))
-        (set-job-condition next type "True" reason message)
-        (when (equal type "Complete")
-          (setf (gethash "completionTime" next) (current-timestamp (funcall *job-clock*))))))))
+  (let ((written (write-job-status (reconciler-store reconciler) job 0 0 (+ terminating (length active-pods))
+                   (lambda (next)
+                     (set-job-condition next (if (equal type "Complete") "SuccessCriteriaMet" "FailureTarget")
+                                        "True" reason message)
+                     (when (and (null active-pods) (zerop terminating)
+                                (null (job-uncounted-uids next "succeeded")) (null (job-uncounted-uids next "failed")))
+                       (set-job-condition next type "True" reason message)
+                       (when (equal type "Complete")
+                         (setf (gethash "completionTime" next) (current-timestamp (funcall *job-clock*)))))))))
+    ;; As upstream's Job controller does when the Job first finishes.
+    (when (and written (not (job-terminal-condition (gethash "status" job (core-object))))
+               (job-terminal-condition (gethash "status" written (core-object))))
+      (if (equal type "Complete")
+          (record-controller-event (reconciler-store reconciler) written "Normal" "Completed" "Job completed")
+          (record-controller-event (reconciler-store reconciler) written "Warning" reason message)))
+    written))
 
 (defun run-job-pods (reconciler job status active-pods waiting-pods ready terminating)
   "Move the number of active Pods toward what this Job still wants, then publish status."

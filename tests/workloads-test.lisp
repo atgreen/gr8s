@@ -535,3 +535,38 @@
         (is (equal "ValidMetricFound" (gethash "reason" (hpa-test-condition store "ScalingActive"))))
         (is (= 4 (gethash "replicas" (gethash "spec" (crd-api-request 200 (concatenate 'string item "/scale"))))))
         (is (= 4 (gethash "desiredReplicas" (gethash "status" (gr8s::get-core-resource store "horizontalpodautoscalers" "alpha" "web")))))))))
+
+(defun workload-events-about (store kind name)
+  "Return (reason . message) of the test namespace's Events about the KIND object NAME."
+  (loop for event in (gr8s::list-core-resources store "events" "alpha")
+        for involved = (gethash "involvedObject" event)
+        when (and (equal kind (gethash "kind" involved)) (equal name (gethash "name" involved)))
+          collect (cons (gethash "reason" event) (gethash "message" event))))
+
+(test workload-controllers-record-the-events-upstream-controllers-do
+  ;; kubectl describe and kubectl events --for show these; upstream's deployment,
+  ;; replicaset, statefulset and job controllers record them with these words.
+  (with-temporary-store (store path)
+    (declare (ignorable path))
+    (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)))
+      (gr8s::create-core-resource store "deployments" (workload-fixture "Deployment" "web" 2) "alpha")
+      (run-workload-passes reconciler)
+      (let* ((set (first (gr8s::list-core-resources store "replicasets" "alpha")))
+             (set-name (gethash "name" (gethash "metadata" set))))
+        (is (member (cons "ScalingReplicaSet" (format nil "Scaled up replica set ~A from 0 to 2" set-name))
+                    (workload-events-about store "Deployment" "web") :test #'equal))
+        (dolist (pod (list-pods store "alpha"))
+          (is (member (cons "SuccessfulCreate" (format nil "Created pod: ~A" (pod-name pod)))
+                      (workload-events-about store "ReplicaSet" set-name) :test #'equal)))
+        (gr8s::update-core-resource store "deployments" "alpha" "web"
+          (lambda (object) (setf (gethash "replicas" (gethash "spec" object)) 1) object))
+        (run-workload-passes reconciler)
+        (is (member (cons "ScalingReplicaSet" (format nil "Scaled down replica set ~A from 2 to 1" set-name))
+                    (workload-events-about store "Deployment" "web") :test #'equal))
+        (is (find "SuccessfulDelete" (workload-events-about store "ReplicaSet" set-name) :key #'car :test #'equal)))
+      (let ((set (workload-fixture "StatefulSet" "db" 1)))
+        (setf (gethash "serviceName" (gethash "spec" set)) "db")
+        (gr8s::create-core-resource store "statefulsets" set "alpha"))
+      (run-workload-passes reconciler)
+      (is (member (cons "SuccessfulCreate" "create Pod db-0 in StatefulSet db successful")
+                  (workload-events-about store "StatefulSet" "db") :test #'equal)))))

@@ -159,6 +159,51 @@
           ((equal kind "CronJob") "cronjob-controller")
           (t "replicaset-controller"))))
 
+(defun record-controller-event (store object type reason message &key (key message) (component (workload-controller-name object)))
+  "Publish one Event about the workload OBJECT as its upstream controller would; KEY makes a repeat a no-op.
+Call without STORE's lock. A failure is logged rather than failing the controller's pass."
+  (let* ((metadata (workload-metadata object)) (namespace (gethash "namespace" metadata))
+         (now (current-timestamp))
+         (digest (octets-to-hex (ironclad:digest-sequence
+                                 :sha256 (trivial-utf-8:string-to-utf-8-bytes
+                                          (format nil "~A/~A/~A" (gethash "uid" metadata) reason key)))))
+         (name (format nil "~A.~A" (gethash "name" metadata) (string-downcase (subseq digest 0 16))))
+         (involved (core-object "apiVersion" (gethash "apiVersion" object) "kind" (gethash "kind" object)
+                                "namespace" namespace "name" (gethash "name" metadata) "uid" (gethash "uid" metadata))))
+    (when (gethash "resourceVersion" metadata)
+      (setf (gethash "resourceVersion" involved) (gethash "resourceVersion" metadata)))
+    (handler-case
+        (create-core-resource store "events"
+          (core-object "apiVersion" "v1" "kind" "Event" "metadata" (core-object "name" name)
+                       "involvedObject" involved
+                       "reason" reason "message" message "type" type "count" 1
+                       "firstTimestamp" now "lastTimestamp" now
+                       "source" (core-object "component" component)
+                       "reportingComponent" component)
+          namespace)
+      (error (condition)
+        (unless (and (typep condition 'kubernetes-error) (= 409 (kubernetes-error-status-code condition)))
+          (format *error-output* "gr8s ~A Event publication failed: ~A~%" component condition))))))
+
+(defun record-pod-created-event (store owner pod)
+  "Record OWNER's SuccessfulCreate Event for POD, worded as its upstream controller words it."
+  (when pod
+    (record-controller-event store owner "Normal" "SuccessfulCreate"
+                             (if (equal "StatefulSet" (gethash "kind" owner))
+                                 (format nil "create Pod ~A in StatefulSet ~A successful"
+                                         (pod-name pod) (gethash "name" (workload-metadata owner)))
+                                 (format nil "Created pod: ~A" (pod-name pod)))))
+  pod)
+
+(defun record-pod-deleted-event (store owner pod)
+  "Record OWNER's SuccessfulDelete Event for POD, worded as its upstream controller words it."
+  (record-controller-event store owner "Normal" "SuccessfulDelete"
+                           (if (equal "StatefulSet" (gethash "kind" owner))
+                               (format nil "delete Pod ~A in StatefulSet ~A successful"
+                                       (pod-name pod) (gethash "name" (workload-metadata owner)))
+                               (format nil "Deleted pod: ~A" (pod-name pod)))
+                           :key (format nil "Deleted pod: ~A" (pod-uid pod))))
+
 (defun create-replica-set-pod (store owner &key node-name labels)
   "Admit a real Pod and commit it only if its owner's UID and generation remain current.
 NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the template's labels."
@@ -169,9 +214,11 @@ NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the templat
         (unless (gethash "labels" metadata) (setf (gethash "labels" metadata) (core-object)))
         (loop for (key . value) in labels do (setf (gethash key (gethash "labels" metadata)) value))))
     (let ((pod (admit-controller-pod store object (workload-controller-name owner))))
-      (with-store-lock (store)
-        (when (workload-current-unlocked store (workload-owner-resource owner) owner :generation t)
-          (create-pod-unlocked store pod))))))
+      (record-pod-created-event
+       store owner
+       (with-store-lock (store)
+         (when (workload-current-unlocked store (workload-owner-resource owner) owner :generation t)
+           (create-pod-unlocked store pod)))))))
 
 (defun replica-set-observations (reconciler owner)
   "Return active child Pods paired with their actual statuses."
@@ -196,8 +243,9 @@ NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the templat
                                         (string> (pod-name (car a)) (pod-name (car b))))))))
                  (loop for pair in active repeat (- delta)
                        for pod = (car pair)
-                       do (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod)
-                                                 (workload-controller-name owner) :uid (pod-uid pod)))))
+                       do (when (delete-controller-pod reconciler (pod-namespace pod) (pod-name pod)
+                                                       (workload-controller-name owner) :uid (pod-uid pod))
+                            (record-pod-deleted-event store owner pod)))))
         (error (condition) (setf failure (princ-to-string condition)))))
     (let* ((active (replica-set-observations reconciler owner))
            (ready (count-if (lambda (pair) (pod-status-ready-p (cdr pair))) active))
@@ -329,13 +377,30 @@ NODE-NAME pins a daemon Pod to its node; LABELS is an alist added to the templat
     (if (and (= count (gethash "replicas" (gethash "spec" set)))
              (equal (write-to-string desired) (gethash "deployment.kubernetes.io/desired-replicas" annotations))
              (equal (write-to-string maximum) (gethash "deployment.kubernetes.io/max-replicas" annotations))) set
-        (update-owned-workload store "replicasets" set
-          (lambda (object)
-            (setf (gethash "replicas" (gethash "spec" object)) count)
-            (let ((annotations (gethash "annotations" (workload-metadata object) (core-object))))
-              (setf (gethash "deployment.kubernetes.io/desired-replicas" annotations) (write-to-string desired)
-                    (gethash "deployment.kubernetes.io/max-replicas" annotations) (write-to-string maximum)
-                    (gethash "annotations" (workload-metadata object)) annotations)) object)))))
+        (let ((before (gethash "replicas" (gethash "spec" set)))
+              (scaled (update-owned-workload store "replicasets" set
+                        (lambda (object)
+                          (setf (gethash "replicas" (gethash "spec" object)) count)
+                          (let ((annotations (gethash "annotations" (workload-metadata object) (core-object))))
+                            (setf (gethash "deployment.kubernetes.io/desired-replicas" annotations) (write-to-string desired)
+                                  (gethash "deployment.kubernetes.io/max-replicas" annotations) (write-to-string maximum)
+                                  (gethash "annotations" (workload-metadata object)) annotations))
+                          object))))
+          (when (and scaled (/= before count))
+            (deployment-scaling-event store set before count))
+          scaled))))
+
+(defun deployment-scaling-event (store set before after)
+  "Record the owning Deployment's ScalingReplicaSet Event for SET, as upstream's controller does."
+  (let ((owner (workload-controller-reference set)) (metadata (workload-metadata set)))
+    (when (and owner (equal "Deployment" (gethash "kind" owner)))
+      (record-controller-event
+       store (core-object "apiVersion" (gethash "apiVersion" owner) "kind" "Deployment"
+                          "metadata" (core-object "name" (gethash "name" owner) "namespace" (gethash "namespace" metadata)
+                                                  "uid" (gethash "uid" owner)))
+       "Normal" "ScalingReplicaSet"
+       (format nil "Scaled ~:[down~;up~] replica set ~A from ~D to ~D" (> after before) (gethash "name" metadata) before after)
+       :key (format nil "~A/~A/~D/~D" (gethash "name" metadata) (gethash "resourceVersion" metadata) before after)))))
 
 (defun deployment-old-pods-exist-p (reconciler sets)
   "Recreate waits for the old workload's processes, including terminating Pods."
