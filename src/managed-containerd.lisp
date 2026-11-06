@@ -343,6 +343,8 @@
   (unwind-protect
        (progn
          (start-managed-containerd manager)
+         ;; Archives under <state>/images/ are imported before any Pod can start.
+         (preload-managed-containerd-images manager)
          (funcall function))
     (stop-managed-containerd manager)))
 
