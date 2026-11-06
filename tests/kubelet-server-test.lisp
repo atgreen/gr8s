@@ -215,3 +215,32 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
             (setf gr8s::*kubelet-proxy-credentials* previous)
             (when frontend (stop-server frontend))
             (when kubelet (gr8s::stop-kubelet-server kubelet))))))))
+
+(test a-stalled-tls-handshake-drops-its-connection-not-the-server
+  ;; A focused run of 117b50c ended when one client left the in-cluster API's
+  ;; handshake unfinished for ten seconds: the bare SB-SYS:DEADLINE-TIMEOUT, a
+  ;; SERIOUS-CONDITION, passed Hunchentoot's error handling and quit the process.
+  (with-kubelet-test-pki (pki directory)
+    (gr8s::issue-kubelet-credentials pki directory "node-a" '("127.0.0.1"))
+    (multiple-value-bind (certificate key) (gr8s::kubelet-credential-paths directory)
+      (let ((limit gr8s::*tls-handshake-seconds*)
+            (server (gr8s::start-kubelet-server
+                     :address "127.0.0.1" :port 18252 :certificate certificate :key key :node-name "node-a"
+                     :auth (gr8s::make-kubelet-auth :client-ca (gr8s::cluster-pki-ca-certificate pki)
+                                                    :review (kubelet-test-review (list nil)))
+                     :stats-function #'kubelet-test-node-stats))
+            (stalled nil))
+        ;; Worker threads read the global value.
+        (setf gr8s::*tls-handshake-seconds* 1)
+        (unwind-protect
+             (progn
+               ;; Connect and never send a ClientHello.
+               (setf stalled (usocket:socket-connect "127.0.0.1" 18252 :element-type '(unsigned-byte 8)))
+               (sleep 2.5)
+               ;; The server dropped that connection and still answers others.
+               (is (null (sb-sys:with-deadline (:seconds 5)
+                           (read-byte (usocket:socket-stream stalled) nil nil))))
+               (is (= 401 (kubelet-test-get pki 18252 "/metrics/resource"))))
+          (setf gr8s::*tls-handshake-seconds* limit)
+          (when stalled (ignore-errors (usocket:socket-close stalled)))
+          (gr8s::stop-kubelet-server server))))))

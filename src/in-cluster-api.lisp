@@ -71,7 +71,7 @@
 
 (defmethod hunchentoot:initialize-connection-stream ((acceptor gr8s-in-cluster-acceptor) stream)
   "Request optional client proof-of-possession; HTTP authenticators verify trust and token alternatives."
-  (sb-sys:with-deadline (:seconds 10)
+  (with-tls-handshake-deadline (*tls-handshake-seconds*)
     ;; This TLS implementation's resumption tickets do not retain peer chains.
     ;; Fresh ticket keys require a full certificate handshake on every connection.
     (let* ((pure-tls:*server-ticket-key* (ironclad:random-data 32))
