@@ -17,7 +17,7 @@
                               "--cacert" (namestring (gr8s:cluster-pki-ca-certificate-path pki))
                               "--cert" (namestring certificate) "--key" (namestring key)
                               "--request" method "--write-out" (format nil "~%%{http_code}")
-                              (concatenate 'string "https://127.0.0.1:18096" path))
+                              (format nil "https://127.0.0.1:~D~A" *tls-api-port* path))
                         (when object (list "--header" "Content-Type: application/json" "--data-binary" (com.inuoe.jzon:stringify object)))
                         (loop for header in headers append (list "--header" header)))
                 :output :string :error-output :string))
@@ -27,7 +27,7 @@
 (defun certificate-api-test-invalid-proof-rejected-p (pki certificate wrong-key token)
   "Require actual TLS to reject a certificate presented with another private key, despite a valid token."
   (sb-sys:with-deadline (:seconds 10)
-    (let ((socket (usocket:socket-connect "127.0.0.1" 18096 :element-type '(unsigned-byte 8))) (tls nil))
+    (let ((socket (usocket:socket-connect "127.0.0.1" *tls-api-port* :element-type '(unsigned-byte 8))) (tls nil))
       (unwind-protect
            (handler-case
                (progn
@@ -117,7 +117,7 @@
            (runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
            (collection "/apis/certificates.k8s.io/v1/certificatesigningrequests")
            (attributes '(((2 5 4 3) . "certificate-user")))
-           (server nil))
+           (server nil) (*tls-api-port* nil))
       (service-account-test-store store)
       (let* ((secret (gr8s::ensure-service-account-credential store "alpha" "reader"))
              (token (service-account-test-token secret))
@@ -127,7 +127,7 @@
           (vector (gr8s::core-object "apiGroups" #("certificates.k8s.io") "resources" #("certificatesigningrequests") "verbs" #("create"))))
         (unwind-protect
              (progn
-               (setf server (gr8s::start-in-cluster-api store runtime reconciler pki :address "127.0.0.1" :port 18096))
+               (setf server (start-test-tls-api store runtime reconciler pki))
                (dolist (kind '(:expired :untrusted :valid))
                  (multiple-value-bind (leaf private)
                      (certificate-api-test-subject-leaf (if (eq kind :untrusted) foreign pki) attributes :expired (eq kind :expired))
@@ -161,10 +161,10 @@
     (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
            (runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
            (collection "/apis/certificates.k8s.io/v1/certificatesigningrequests")
-           (server nil))
+           (server nil) (*tls-api-port* nil))
       (unwind-protect
            (progn
-             (setf server (gr8s::start-in-cluster-api store runtime reconciler pki :address "127.0.0.1" :port 18096))
+             (setf server (start-test-tls-api store runtime reconciler pki))
              (is-false (gr8s::list-core-resources store "clusterrolebindings"))
              (dolist (privileged '(t nil))
                (multiple-value-bind (leaf private)
@@ -227,13 +227,13 @@
            (certificate (merge-pathnames "client.pem" directory))
            (key (merge-pathnames "ec-key.pem" directory))
            (collection "/apis/certificates.k8s.io/v1/certificatesigningrequests")
-           (runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)) (server nil))
+           (runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)) (server nil) (*tls-api-port* nil))
       (gr8s::write-private-text-exclusively certificate
         (profile-test-issued-csr store directory pki "/CN=tester-csr/O=csr-team/O=second-team"
           "kubernetes.io/kube-apiserver-client" #("digital signature" "client auth") nil))
       (unwind-protect
            (progn
-             (setf server (gr8s::start-in-cluster-api store runtime reconciler pki :address "127.0.0.1" :port 18096))
+             (setf server (start-test-tls-api store runtime reconciler pki))
              (is (= 200 (certificate-api-test-request pki certificate key "/version")))
              (is (= 403 (certificate-api-test-request pki certificate key collection)))
              (certificate-api-test-grant store "csr-users"
@@ -297,8 +297,8 @@
                             "--cacert" (namestring (gr8s:cluster-pki-ca-certificate-path pki))
                             "--cert" (namestring certificate) "--key" (namestring key)
                             "--output" "/dev/null" "--write-out" (format nil "%{http_code}:%{num_connects}~%")
-                            "https://127.0.0.1:18096/version"
-                            "--output" "/dev/null" (concatenate 'string "https://127.0.0.1:18096" collection))
+                            (format nil "https://127.0.0.1:~D/version" *tls-api-port*)
+                            "--output" "/dev/null" (format nil "https://127.0.0.1:~D~A" *tls-api-port* collection))
                       :output :string :error-output :string)))
                (is (equal (format nil "200:1~%200:0~%") connections)))
              (let ((connections (uiop:run-program
@@ -307,8 +307,8 @@
                              "--cert" (namestring certificate) "--key" (namestring key)
                              "--header" "Connection: close" "--output" "/dev/null"
                              "--write-out" (format nil "%{http_code}:%{num_connects}~%")
-                             "https://127.0.0.1:18096/version" "--output" "/dev/null"
-                             (concatenate 'string "https://127.0.0.1:18096" collection))
+                             (format nil "https://127.0.0.1:~D/version" *tls-api-port*) "--output" "/dev/null"
+                             (format nil "https://127.0.0.1:~D~A" *tls-api-port* collection))
                        :output :string :error-output :string)))
                (is (equal (format nil "200:1~%200:1~%") connections)))
              (gr8s::delete-core-resource store "clusterrolebindings" nil "csr-team")

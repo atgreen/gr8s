@@ -414,7 +414,7 @@
           (is (equal "False" (gethash "status" condition))))
         (is (search "apiserver_flowcontrol_nominal_limit_seats{priority_level=\"test-level\"} 100"
                     (gr8s::flowcontrol-metrics-text store)))))
-    (multiple-value-bind (body status headers) (drakma:http-request "http://127.0.0.1:18089/version")
+    (multiple-value-bind (body status headers) (drakma:http-request (core-api-url "/version"))
       (declare (ignore body))
       (is (= 200 status))
       (is (plusp (length (cdr (assoc :x-kubernetes-pf-flowschema-uid headers)))))

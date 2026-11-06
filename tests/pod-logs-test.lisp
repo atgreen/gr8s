@@ -49,7 +49,7 @@
 
 (defun websocket-handshake (path protocol)
   "Send an upgrade request for PATH and return its status line and the following bytes."
-  (let* ((socket (usocket:socket-connect "127.0.0.1" 18089 :element-type '(unsigned-byte 8)))
+  (let* ((socket (usocket:socket-connect "127.0.0.1" *core-api-port* :element-type '(unsigned-byte 8)))
          (stream (usocket:socket-stream socket)))
     (unwind-protect
          (sb-sys:with-deadline (:seconds 10)
@@ -117,7 +117,7 @@
          (dolist (query '("tailLines=-1" "tailLines=x" "limitBytes=0" "sinceSeconds=0" "sinceTime=yesterday"
                           "sinceSeconds=5&sinceTime=2026-01-01T00:00:00Z"))
            (is (= 400 (nth-value 1 (drakma:http-request
-                                    (format nil "http://127.0.0.1:18089/api/v1/namespaces/default/pods/hello/log?~A" query))))
+                                    (core-api-url (format nil "/api/v1/namespaces/default/pods/hello/log?~A" query)))))
                query))
       (sb-int:unencapsulate 'gr8s::reconciler-logs 'canned))))
 

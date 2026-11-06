@@ -99,26 +99,27 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
       (declare (ignore client-certificate client-key))
       (let* ((calls (list nil))
              (server (gr8s::start-kubelet-server
-                      :address "127.0.0.1" :port 18250 :certificate certificate :key key :node-name "node-a"
+                      :address "127.0.0.1" :port 0 :certificate certificate :key key :node-name "node-a"
                       :auth (gr8s::make-kubelet-auth :client-ca (gr8s::cluster-pki-ca-certificate pki)
                                                      :review (kubelet-test-review calls))
                       :stats-function #'kubelet-test-node-stats
-                      :states-function (lambda () (values 1 '(("running" . 2) ("exited" . 1)))))))
+                      :states-function (lambda () (values 1 '(("running" . 2) ("exited" . 1))))))
+             (port (hunchentoot:acceptor-port server)))
         (unwind-protect
              (progn
-               (is (= 401 (kubelet-test-get pki 18250 "/metrics/resource")))
-               (is (= 401 (kubelet-test-get pki 18250 "/metrics/resource" :token "bad")))
-               (multiple-value-bind (code text type) (kubelet-test-get pki 18250 "/metrics/resource" :token "good")
+               (is (= 401 (kubelet-test-get pki port "/metrics/resource")))
+               (is (= 401 (kubelet-test-get pki port "/metrics/resource" :token "bad")))
+               (multiple-value-bind (code text type) (kubelet-test-get pki port "/metrics/resource" :token "good")
                  (is (= 200 code))
                  (is (equal "text/plain; version=0.0.4; charset=utf-8" type))
                  (is (equal (gr8s::kubelet-resource-metrics-text (kubelet-test-node-stats)) text)))
                ;; alice may read metrics but not stats, and the kubelet says what it checked.
-               (multiple-value-bind (code text) (kubelet-test-get pki 18250 "/stats/summary" :token "good")
+               (multiple-value-bind (code text) (kubelet-test-get pki port "/stats/summary" :token "good")
                  (is (= 403 code))
                  (is (equal (format nil "Forbidden (user=alice, verb=get, resource=nodes, subresource(s)=[stats])~%") text)))
                ;; Reviews are cached: a repeat asks the API server nothing more.
                (let ((before (length (car calls))))
-                 (kubelet-test-get pki 18250 "/metrics/resource" :token "good")
+                 (kubelet-test-get pki port "/metrics/resource" :token "good")
                  (is (= before (length (car calls)))))
                (let ((access (find "SubjectAccessReview" (car calls) :key (lambda (review) (gethash "kind" review)) :test #'equal)))
                  (is (equal "u-1" (gr8s::table-get access "spec" "uid")))
@@ -126,17 +127,17 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
                ;; A cluster-CA client certificate authenticates without a token review.
                (multiple-value-bind (client client-key) (gr8s::ensure-apiserver-kubelet-client-credentials pki)
                  (let ((reviews (count "TokenReview" (car calls) :key (lambda (review) (gethash "kind" review)) :test #'equal)))
-                   (multiple-value-bind (code text type) (kubelet-test-get pki 18250 "/stats/summary?only_cpu_and_memory=true"
+                   (multiple-value-bind (code text type) (kubelet-test-get pki port "/stats/summary?only_cpu_and_memory=true"
                                                                            :client (list client client-key))
                      (is (= 200 code))
                      (is (equal "application/json" type))
                      (is (equal "node-a" (gr8s::table-get (com.inuoe.jzon:parse text) "node" "nodeName"))))
                    (is (= reviews (count "TokenReview" (car calls) :key (lambda (review) (gethash "kind" review)) :test #'equal))))
                  (is (equal '(200 "ok") (multiple-value-list
-                                         (values (kubelet-test-get pki 18250 "/healthz" :client (list client client-key))
-                                                 (nth-value 1 (kubelet-test-get pki 18250 "/healthz" :client (list client client-key)))))))
-                 (is (= 404 (kubelet-test-get pki 18250 "/nothing" :client (list client client-key))))
-                 (multiple-value-bind (code text) (kubelet-test-get pki 18250 "/metrics" :client (list client client-key))
+                                         (values (kubelet-test-get pki port "/healthz" :client (list client client-key))
+                                                 (nth-value 1 (kubelet-test-get pki port "/healthz" :client (list client client-key)))))))
+                 (is (= 404 (kubelet-test-get pki port "/nothing" :client (list client client-key))))
+                 (multiple-value-bind (code text) (kubelet-test-get pki port "/metrics" :client (list client client-key))
                    (is (= 200 code))
                    (is (search "kubelet_node_name{node=\"node-a\"} 1" text))
                    (is (search (format nil "kubelet_running_containers{container_state=\"running\"} 2~%") text))
@@ -150,13 +151,14 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
   (with-kubelet-test-pki (pki directory)
     (gr8s::issue-kubelet-credentials pki directory "node-a" '("127.0.0.1"))
     (multiple-value-bind (certificate key) (gr8s::kubelet-credential-paths directory)
-      (let ((server (gr8s::start-kubelet-server
-                     :address "127.0.0.1" :port 18251 :certificate certificate :key key :node-name "node-a"
-                     :auth (gr8s::make-kubelet-auth :client-ca (gr8s::cluster-pki-ca-certificate pki)
-                                                    :review (kubelet-test-review (list nil)))
-                     :stats-function (lambda () (error "runtime unavailable")))))
+      (let* ((server (gr8s::start-kubelet-server
+                      :address "127.0.0.1" :port 0 :certificate certificate :key key :node-name "node-a"
+                      :auth (gr8s::make-kubelet-auth :client-ca (gr8s::cluster-pki-ca-certificate pki)
+                                                     :review (kubelet-test-review (list nil)))
+                      :stats-function (lambda () (error "runtime unavailable"))))
+             (port (hunchentoot:acceptor-port server)))
         (unwind-protect
-             (multiple-value-bind (code text) (kubelet-test-get pki 18251 "/metrics/resource" :token "good")
+             (multiple-value-bind (code text) (kubelet-test-get pki port "/metrics/resource" :token "good")
                (is (= 200 code))
                (is (search "resource_scrape_error 1" text))
                (is (not (search "node_cpu" text))))
@@ -170,31 +172,32 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
                                                        :underlay-address "127.0.0.1"))
       (is (= 0 (gr8s::table-get (gr8s::node-api-object (gr8s::get-node store "node-a"))
                                 "status" "daemonEndpoints" "kubeletEndpoint" "Port")))
-      (gr8s::update-node-kubelet-port store "node-a" 18252)
-      (is (= 18252 (gr8s::table-get (gr8s::node-api-object (gr8s::get-node store "node-a"))
-                                    "status" "daemonEndpoints" "kubeletEndpoint" "Port")))
-      ;; The port survives a restart of the control plane.
-      (is (= 18252 (gr8s::node-record-kubelet-port
-                    (gr8s::parse-node-record (gr8s::node-record-to-object (gr8s::get-node store "node-a"))))))
       (multiple-value-bind (certificate key) (gr8s::kubelet-credential-paths directory)
         (let* ((calls (list nil))
                (kubelet (gr8s::start-kubelet-server
-                         :address "127.0.0.1" :port 18252 :certificate certificate :key key :node-name "node-a"
+                         :address "127.0.0.1" :port 0 :certificate certificate :key key :node-name "node-a"
                          :auth (gr8s::make-kubelet-auth :client-ca (gr8s::cluster-pki-ca-certificate pki)
                                                         :review (kubelet-test-review calls))
                          :stats-function #'kubelet-test-node-stats))
+               (kubelet-port (hunchentoot:acceptor-port kubelet))
                (frontend nil)
                (previous gr8s::*kubelet-proxy-credentials*))
+          (gr8s::update-node-kubelet-port store "node-a" kubelet-port)
+          (is (= kubelet-port (gr8s::table-get (gr8s::node-api-object (gr8s::get-node store "node-a"))
+                                               "status" "daemonEndpoints" "kubeletEndpoint" "Port")))
+          ;; The port survives a restart of the control plane.
+          (is (= kubelet-port (gr8s::node-record-kubelet-port
+                               (gr8s::parse-node-record (gr8s::node-record-to-object (gr8s::get-node store "node-a"))))))
           ;; Request threads see only the global value.
           (setf gr8s::*kubelet-proxy-credentials*
                 (multiple-value-bind (client client-key) (gr8s::ensure-apiserver-kubelet-client-credentials pki)
                   (list (gr8s::cluster-pki-ca-certificate pki) client client-key)))
           (unwind-protect
                (progn
-                 (setf frontend (start-server :address "127.0.0.1" :port 18080 :store store :runtime (make-fake-runtime)))
+                 (setf frontend (start-http-test-server :store store :runtime (make-fake-runtime)))
                  (flet ((fetch (suffix)
                           (multiple-value-bind (body code headers)
-                              (drakma:http-request (concatenate 'string "http://127.0.0.1:18080/api/v1/nodes/" suffix)
+                              (drakma:http-request (format nil "http://127.0.0.1:~D/api/v1/nodes/~A" *http-test-port* suffix)
                                                    :proxy nil :redirect nil)
                             (values code body (cdr (assoc :content-type headers))))))
                    (multiple-value-bind (code body type) (fetch "node-a/proxy/metrics/resource")
@@ -202,7 +205,7 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
                      (is (equal "text/plain; version=0.0.4; charset=utf-8" type))
                      (is (search "node_cpu_usage_seconds_total 357.35" body)))
                    ;; An explicit port, as the e2e framework names it, reaches the same listener.
-                   (multiple-value-bind (code body) (fetch "node-a:18252/proxy/stats/summary")
+                   (multiple-value-bind (code body) (fetch (format nil "node-a:~D/proxy/stats/summary" kubelet-port))
                      (is (= 200 code))
                      (is (equal "node-a" (gr8s::table-get (com.inuoe.jzon:parse body) "node" "nodeName"))))
                    ;; The kubelet saw the API server's own identity.
@@ -226,24 +229,25 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
   (with-kubelet-test-pki (pki directory)
     (gr8s::issue-kubelet-credentials pki directory "node-a" '("127.0.0.1"))
     (multiple-value-bind (certificate key) (gr8s::kubelet-credential-paths directory)
-      (let ((limit gr8s::*tls-handshake-seconds*)
-            (server (gr8s::start-kubelet-server
-                     :address "127.0.0.1" :port 18252 :certificate certificate :key key :node-name "node-a"
-                     :auth (gr8s::make-kubelet-auth :client-ca (gr8s::cluster-pki-ca-certificate pki)
-                                                    :review (kubelet-test-review (list nil)))
-                     :stats-function #'kubelet-test-node-stats))
-            (stalled nil))
+      (let* ((limit gr8s::*tls-handshake-seconds*)
+             (server (gr8s::start-kubelet-server
+                      :address "127.0.0.1" :port 0 :certificate certificate :key key :node-name "node-a"
+                      :auth (gr8s::make-kubelet-auth :client-ca (gr8s::cluster-pki-ca-certificate pki)
+                                                     :review (kubelet-test-review (list nil)))
+                      :stats-function #'kubelet-test-node-stats))
+             (port (hunchentoot:acceptor-port server))
+             (stalled nil))
         ;; Worker threads read the global value.
         (setf gr8s::*tls-handshake-seconds* 1)
         (unwind-protect
              (progn
                ;; Connect and never send a ClientHello.
-               (setf stalled (usocket:socket-connect "127.0.0.1" 18252 :element-type '(unsigned-byte 8)))
+               (setf stalled (usocket:socket-connect "127.0.0.1" port :element-type '(unsigned-byte 8)))
                (sleep 2.5)
                ;; The server dropped that connection and still answers others.
                (is (null (sb-sys:with-deadline (:seconds 5)
                            (read-byte (usocket:socket-stream stalled) nil nil))))
-               (is (= 401 (kubelet-test-get pki 18252 "/metrics/resource"))))
+               (is (= 401 (kubelet-test-get pki port "/metrics/resource"))))
           (setf gr8s::*tls-handshake-seconds* limit)
           (when stalled (ignore-errors (usocket:socket-close stalled)))
           (gr8s::stop-kubelet-server server))))))

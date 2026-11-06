@@ -2,16 +2,24 @@
 
 (in-suite gr8s)
 
+(defvar *http-test-port* nil "The kernel-assigned port of the server the last START-HTTP-TEST-SERVER started.")
+
+(defun start-http-test-server (&rest arguments)
+  "Start a test API server on a kernel-assigned port, recording it in *HTTP-TEST-PORT*."
+  (let ((server (apply #'start-server :address "127.0.0.1" :port 0 arguments)))
+    (setf *http-test-port* (hunchentoot:acceptor-port server))
+    server))
+
 (defun request (path &rest arguments)
   (apply #'drakma:http-request
-         (format nil "http://127.0.0.1:18080~A" path)
+         (format nil "http://127.0.0.1:~D~A" *http-test-port* path)
          arguments))
 
 (defun response-object (body)
   (com.inuoe.jzon:parse body))
 
 (test health-endpoints-cross-the-http-boundary
-  (let ((server (start-server :address "127.0.0.1" :port 18080)))
+  (let ((server (start-http-test-server)))
     (unwind-protect
          (loop for path in '("/livez" "/readyz")
                do (multiple-value-bind (body status)
@@ -24,17 +32,15 @@
   (with-temporary-store (store path)
     (let* ((runtime (make-fake-runtime))
            (reconciler (make-reconciler store runtime))
-           (server (start-server :address "127.0.0.1"
-                                 :port 18080
-                                 :store store
-                                 :runtime runtime
-                                 :reconciler reconciler)))
+           (server (start-http-test-server :store store
+                                           :runtime runtime
+                                           :reconciler reconciler)))
       (unwind-protect
            (is (eq reconciler (gr8s::acceptor-reconciler server)))
         (stop-server server)))))
 
 (test legacy-discovery-fallback-for-aggregated-discovery-clients
-  (let ((server (start-server :address "127.0.0.1" :port 18080)))
+  (let ((server (start-http-test-server)))
     (unwind-protect
          (loop for (path kind) in '(("/api" "APIVersions")
                                    ("/apis" "APIGroupList")
@@ -52,10 +58,8 @@
 (test kubernetes-discovery-and-pod-workflow
   (with-temporary-store (store path)
     (let* ((runtime (make-fake-runtime))
-           (server (start-server :address "127.0.0.1"
-                                 :port 18080
-                                 :store store
-                                 :runtime runtime)))
+           (server (start-http-test-server :store store
+                                           :runtime runtime)))
       (unwind-protect
            (progn
              (dolist (path '("/version" "/api" "/apis" "/api/v1"))
@@ -290,10 +294,8 @@
   (with-temporary-store (store path)
     (create-pod store (parse-pod *valid-pod-json*))
     (let* ((runtime (make-fake-runtime))
-           (server (start-server :address "127.0.0.1"
-                                 :port 18080
-                                 :store store
-                                 :runtime runtime)))
+           (server (start-http-test-server :store store
+                                           :runtime runtime)))
       (unwind-protect
            (multiple-value-bind (body status)
                (request
@@ -354,16 +356,15 @@
         :exit-code 0))
       (unwind-protect
            (progn
-             (setf server (start-server :address "127.0.0.1" :port 18080
-                                        :store store :runtime runtime)
+             (setf server (start-http-test-server :store store :runtime runtime)
                    client (usocket:socket-connect
-                           "127.0.0.1" 18080
+                           "127.0.0.1" *http-test-port*
                            :element-type '(unsigned-byte 8)))
              (let ((stream (usocket:socket-stream client)))
                (write-sequence
                 (gr8s::ascii-octets
                  (format nil
-                         "GET /api/v1/namespaces/default/pods/hello/exec?command=sh&command=-c&command=printf&container=web&stdout=true&stderr=true HTTP/1.1~C~CHost: 127.0.0.1:18080~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-Websocket-Key: dGhlIHNhbXBsZSBub25jZQ==~C~CSec-Websocket-Version: 13~C~CSec-Websocket-Protocol: v5.channel.k8s.io~C~CContent-Length: 0~C~C~C~C"
+                         "GET /api/v1/namespaces/default/pods/hello/exec?command=sh&command=-c&command=printf&container=web&stdout=true&stderr=true HTTP/1.1~C~CHost: 127.0.0.1~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-Websocket-Key: dGhlIHNhbXBsZSBub25jZQ==~C~CSec-Websocket-Version: 13~C~CSec-Websocket-Protocol: v5.channel.k8s.io~C~CContent-Length: 0~C~C~C~C"
                          #\Return #\Linefeed #\Return #\Linefeed
                          #\Return #\Linefeed #\Return #\Linefeed
                          #\Return #\Linefeed #\Return #\Linefeed
@@ -429,7 +430,7 @@
            (runtime (make-fake-runtime))
            (listener
              (usocket:socket-listen
-              "127.0.0.1" 18081 :reuse-address t
+              "127.0.0.1" 0 :reuse-address t
               :element-type '(unsigned-byte 8)))
            (upstream-request nil)
            (upstream-payload nil)
@@ -463,19 +464,18 @@
            (server nil)
            (client nil))
       (gr8s::set-fake-runtime-exec-url
-       runtime "http://127.0.0.1:18081/exec/token")
+       runtime (format nil "http://127.0.0.1:~D/exec/token" (usocket:get-local-port listener)))
       (unwind-protect
            (progn
-             (setf server (start-server :address "127.0.0.1" :port 18080
-                                        :store store :runtime runtime))
+             (setf server (start-http-test-server :store store :runtime runtime))
              (setf client
                    (usocket:socket-connect
-                    "127.0.0.1" 18080 :element-type '(unsigned-byte 8)))
+                    "127.0.0.1" *http-test-port* :element-type '(unsigned-byte 8)))
              (let ((stream (usocket:socket-stream client)))
                (write-sequence
                 (gr8s::ascii-octets
                  (format nil
-                         "POST /api/v1/namespaces/default/pods/hello/exec?command=sh&command=-i&container=web&stdin=true&stdout=true&tty=true HTTP/1.1~C~CHost: 127.0.0.1:18080~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-Websocket-Key: key==~C~CSec-Websocket-Version: 13~C~CSec-Websocket-Protocol: v5.channel.k8s.io~C~CContent-Length: 0~C~C~C~C"
+                         "POST /api/v1/namespaces/default/pods/hello/exec?command=sh&command=-i&container=web&stdin=true&stdout=true&tty=true HTTP/1.1~C~CHost: 127.0.0.1~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-Websocket-Key: key==~C~CSec-Websocket-Version: 13~C~CSec-Websocket-Protocol: v5.channel.k8s.io~C~CContent-Length: 0~C~C~C~C"
                          #\Return #\Linefeed #\Return #\Linefeed
                          #\Return #\Linefeed #\Return #\Linefeed
                          #\Return #\Linefeed #\Return #\Linefeed
@@ -592,17 +592,16 @@
                (lambda () (runtime-observe fake-runtime (pod-uid pod)))
                :timeout 5))
              (setf http-server
-                   (start-server :address "127.0.0.1" :port 18082
-                                 :store store :runtime control-runtime
-                                 :reconciler reconciler)
+                   (start-http-test-server :store store :runtime control-runtime
+                                           :reconciler reconciler)
                    client
                    (usocket:socket-connect
-                    "127.0.0.1" 18082 :element-type '(unsigned-byte 8)))
+                    "127.0.0.1" *http-test-port* :element-type '(unsigned-byte 8)))
              (let ((stream (usocket:socket-stream client)))
                (write-sequence
                 (gr8s::ascii-octets
                  (format nil
-                         "POST /api/v1/namespaces/default/pods/hello/exec?command=sh&command=-i&container=web&stdin=true&stdout=true&tty=true HTTP/1.1~C~CHost: 127.0.0.1:18082~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==~C~CSec-WebSocket-Version: 13~C~CSec-WebSocket-Protocol: v5.channel.k8s.io~C~CContent-Length: 0~C~C~C~C"
+                         "POST /api/v1/namespaces/default/pods/hello/exec?command=sh&command=-i&container=web&stdin=true&stdout=true&tty=true HTTP/1.1~C~CHost: 127.0.0.1~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==~C~CSec-WebSocket-Version: 13~C~CSec-WebSocket-Protocol: v5.channel.k8s.io~C~CContent-Length: 0~C~C~C~C"
                          #\Return #\Linefeed #\Return #\Linefeed
                          #\Return #\Linefeed #\Return #\Linefeed
                          #\Return #\Linefeed #\Return #\Linefeed
@@ -755,17 +754,16 @@
                (lambda () (runtime-observe fake-runtime (pod-uid pod)))
                :timeout 5))
              (setf http-server
-                   (start-server :address "127.0.0.1" :port 18084
-                                 :store store :runtime control-runtime
-                                 :reconciler reconciler)
+                   (start-http-test-server :store store :runtime control-runtime
+                                           :reconciler reconciler)
                    client
                    (usocket:socket-connect
-                    "127.0.0.1" 18084 :element-type '(unsigned-byte 8)))
+                    "127.0.0.1" *http-test-port* :element-type '(unsigned-byte 8)))
              (let ((stream (usocket:socket-stream client)))
                (write-sequence
                 (gr8s::ascii-octets
                  (format nil
-                         "POST /api/v1/namespaces/default/pods/hello/exec?command=sh&command=-i&container=web&stdin=true&stdout=true&tty=true HTTP/1.1~C~CHost: 127.0.0.1:18084~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==~C~CSec-WebSocket-Version: 13~C~CSec-WebSocket-Protocol: v5.channel.k8s.io~C~CContent-Length: 0~C~C~C~C"
+                         "POST /api/v1/namespaces/default/pods/hello/exec?command=sh&command=-i&container=web&stdin=true&stdout=true&tty=true HTTP/1.1~C~CHost: 127.0.0.1~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==~C~CSec-WebSocket-Version: 13~C~CSec-WebSocket-Protocol: v5.channel.k8s.io~C~CContent-Length: 0~C~C~C~C"
                          #\Return #\Linefeed #\Return #\Linefeed
                          #\Return #\Linefeed #\Return #\Linefeed
                          #\Return #\Linefeed #\Return #\Linefeed
@@ -823,8 +821,8 @@
 
 (test pod-http-routes-isolate-namespaces-and-filter-cluster-lists
   (with-temporary-store (store directory)
-    (let ((server (start-server :address "127.0.0.1" :port 18080 :store store
-                                :runtime (make-fake-runtime))))
+    (let ((server (start-http-test-server :store store
+                                          :runtime (make-fake-runtime))))
       (unwind-protect
            (progn
              (dolist (namespace '("default" "sonobuoy" "kube-system"))
@@ -868,7 +866,7 @@
         (stop-server server)))))
 
 (test kubernetes-version-reports-the-conformance-target
-  (let ((server (start-server :address "127.0.0.1" :port 18080)))
+  (let ((server (start-http-test-server)))
     (unwind-protect
          (multiple-value-bind (body status) (request "/version")
            (is (= 200 status))

@@ -265,13 +265,13 @@
 
 ;;; WatchList, as client-go's reflector asks for it.
 
-(defvar *watch-test-server* "http://127.0.0.1:18089" "The server COLLECT-WATCH-STREAM asks.")
+(defvar *watch-test-server* nil "The server COLLECT-WATCH-STREAM asks, by default the current core API test server.")
 
 (defun collect-watch-stream (path &rest parameters)
   "Read a watch at PATH until the server's timeoutSeconds ends it, returning its events."
   (sb-sys:with-deadline (:seconds 20)
     (multiple-value-bind (stream code)
-        (drakma:http-request (concatenate 'string *watch-test-server* path) :want-stream t
+        (drakma:http-request (concatenate 'string (or *watch-test-server* (core-api-url "")) path) :want-stream t
                              :parameters (append '(("watch" . "true") ("timeoutSeconds" . "1")) parameters))
       (unwind-protect
            (progn
@@ -328,7 +328,7 @@
                (is (eql 410 (and status (gethash "code" status))))
                (is (hash-table-p (and status (gethash "metadata" status))))))
     ;; What is wrong with the request itself is still an HTTP error.
-    (is (= 400 (nth-value 1 (drakma:http-request "http://127.0.0.1:18089/api/v1/pods"
+    (is (= 400 (nth-value 1 (drakma:http-request (core-api-url "/api/v1/pods")
                                                  :parameters '(("watch" . "true") ("resourceVersion" . "x"))))))))
 
 (test watch-list-ends-initial-events-with-a-bookmark-on-every-storage-path
@@ -356,7 +356,7 @@
     (gr8s::create-core-resource store "configmaps" (gr8s::core-object "metadata" (gr8s::core-object "name" "one")) "alpha")
     (sb-sys:with-deadline (:seconds 10)
       (multiple-value-bind (stream code)
-          (drakma:http-request "http://127.0.0.1:18089/api/v1/configmaps" :want-stream t
+          (drakma:http-request (core-api-url "/api/v1/configmaps") :want-stream t
                                :parameters (append '(("watch" . "true") ("timeoutSeconds" . "3")) (watch-list-parameters)))
         (unwind-protect
              (progn
@@ -374,7 +374,7 @@
     (values path)
     (gr8s::create-core-resource store "configmaps" (gr8s::core-object "metadata" (gr8s::core-object "name" "one")) "alpha")
     (flet ((status (&rest parameters)
-             (nth-value 1 (drakma:http-request "http://127.0.0.1:18089/api/v1/configmaps" :want-stream nil
+             (nth-value 1 (drakma:http-request (core-api-url "/api/v1/configmaps") :want-stream nil
                                                :parameters (append '(("watch" . "true") ("timeoutSeconds" . "1")) parameters)))))
       (is (= 400 (status '("sendInitialEvents" . "true"))))
       (is (= 400 (status '("sendInitialEvents" . "false"))))

@@ -50,7 +50,7 @@
            (server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0
                                                :heartbeat-timeout-seconds 6))
            (proxy (gr8s::make-control-plane-runtime store server))
-           (api (start-server :address "127.0.0.1" :port 18091 :store store :runtime proxy))
+           (api (start-server :address "127.0.0.1" :port 0 :store store :runtime proxy))
            (identity (merge-pathnames "session/identity.json" path))
            (control (gr8s::make-node-session-control))
            (applied nil)
@@ -94,7 +94,8 @@
                      (gr8s:publish-node-desired-state
                       server "log-worker" (gr8s::node-desired-state-snapshot store "log-worker")))
                (multiple-value-bind (octets status)
-                   (drakma:http-request "http://127.0.0.1:18091/api/v1/namespaces/default/pods/completed/log?container=web"
+                   (drakma:http-request (format nil "http://127.0.0.1:~D/api/v1/namespaces/default/pods/completed/log?container=web"
+                                                (hunchentoot:acceptor-port api))
                                         :force-binary t :connection-timeout 15)
                  (let ((body (trivial-utf-8:utf-8-bytes-to-string octets)))
                    (is (= 200 status) "log HTTP response ~A: ~A" status body)

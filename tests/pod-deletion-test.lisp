@@ -217,7 +217,8 @@
   (with-temporary-store (store path)
     (let* ((runtime (make-gated-deletion-runtime))
            (reconciler (make-reconciler store runtime))
-           (server (start-server :port 18089 :store store :runtime runtime :reconciler reconciler))
+           (server (start-server :port 0 :store store :runtime runtime :reconciler reconciler))
+           (*core-api-port* (hunchentoot:acceptor-port server))
            (pod (create-pod store (grace-pod))))
       (unwind-protect
            (progn

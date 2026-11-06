@@ -74,7 +74,8 @@
 (test typed-rbac-grants-are-enforced-by-the-authenticated-tls-api
   (with-core-api (store directory)
     (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
-           (runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)) (tls-server nil))
+           (runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime)) (tls-server nil)
+           (*tls-api-port* nil))
       (setf (gr8s::pod-store-in-cluster-config store)
             (list :host "10.96.0.1" :port 443 :ca-pem (uiop:read-file-string (gr8s:cluster-pki-ca-certificate-path pki))))
       (check-core-status 201 "/api/v1/namespaces/alpha/serviceaccounts" :method :post :content-type "application/vnd.kubernetes.protobuf"
@@ -83,7 +84,7 @@
              (token (service-account-test-token secret)))
         (unwind-protect
              (progn
-               (setf tls-server (gr8s::start-in-cluster-api store runtime reconciler pki :address "127.0.0.1" :port 18091))
+               (setf tls-server (start-test-tls-api store runtime reconciler pki))
                (is (= 403 (service-account-tls-status pki "/api/v1/namespaces/alpha/pods" token)))
                (check-core-status 201 "/apis/rbac.authorization.k8s.io/v1/namespaces/alpha/roles"
                                   :method :post :content-type "application/vnd.kubernetes.protobuf"

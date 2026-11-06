@@ -30,8 +30,6 @@
           (hunchentoot:header-out :x-backend) "origin")
     "backend-ok"))
 
-(defconstant +gw-backend-port+ 18090)
-(defconstant +gw-listener-port+ 18091)
 
 (defun gw-raw-request (port host path &key (method "GET") body)
   "Send one HTTP/1.1 request with an explicit Host header over a raw socket and
@@ -80,13 +78,14 @@
 
 (test gateway-proxy-routes-dispatches-and-proxies
   (let* ((backend (hunchentoot:start (make-instance 'gw-echo-acceptor
-                                                    :address "127.0.0.1" :port +gw-backend-port+)))
+                                                    :address "127.0.0.1" :port 0)))
+         (backend-port (hunchentoot:acceptor-port backend))
          (routes (list
                   (gr8s::make-gw-route
                    :namespace "default" :hostnames '("app.example.com")
                    :rules (list (gr8s::make-gw-rule
                                  :matches (list (gr8s::make-gw-match :path-type :prefix :path "/"))
-                                 :backends (list (gr8s::make-gw-backend :name "echo" :port +gw-backend-port+)))))
+                                 :backends (list (gr8s::make-gw-backend :name "echo" :port backend-port)))))
                   (gr8s::make-gw-route
                    :namespace "default" :hostnames '("fail.example.com")
                    :rules (list (gr8s::make-gw-rule
@@ -95,14 +94,15 @@
          (router (gr8s::compile-gateway-router routes))
          (resolver (lambda (backend)
                      (when (equal (gr8s::gw-backend-name backend) "echo")
-                       (values "127.0.0.1" +gw-backend-port+))))
-         (gateway (gr8s::start-gateway-listener :port +gw-listener-port+
-                                                :router router :resolver resolver :name "test")))
+                       (values "127.0.0.1" backend-port))))
+         (gateway (gr8s::start-gateway-listener :port 0
+                                                :router router :resolver resolver :name "test"))
+         (listener-port (hunchentoot:acceptor-port gateway)))
     (unwind-protect
          (progn
            (setf *gw-backend-last* nil)
            (multiple-value-bind (code headers body)
-               (gw-raw-request +gw-listener-port+ "app.example.com" "/cart" :method "POST" :body "hello")
+               (gw-raw-request listener-port "app.example.com" "/cart" :method "POST" :body "hello")
              (is (= 200 code))
              (is (equal "backend-ok" body))
              (is (equal "origin" (gw-header headers "x-backend")))
@@ -110,9 +110,9 @@
              (is (equal "/cart" (second *gw-backend-last*)))
              (is (equal "hello" (fourth *gw-backend-last*))))
            (setf *gw-backend-last* nil)
-           (is (= 404 (gw-raw-request +gw-listener-port+ "nope.org" "/x")))
+           (is (= 404 (gw-raw-request listener-port "nope.org" "/x")))
            (is (null *gw-backend-last*))
-           (is (= 503 (gw-raw-request +gw-listener-port+ "fail.example.com" "/y"))))
+           (is (= 503 (gw-raw-request listener-port "fail.example.com" "/y"))))
       (gr8s::stop-gateway-listener gateway)
       (hunchentoot:stop backend))))
 
@@ -126,16 +126,18 @@
 
 (test gateway-proxy-rate-limits-and-counts-metrics
   (let* ((backend (hunchentoot:start (make-instance 'gw-echo-acceptor
-                                                    :address "127.0.0.1" :port +gw-backend-port+)))
+                                                    :address "127.0.0.1" :port 0)))
+         (backend-port (hunchentoot:acceptor-port backend))
          (routes (list (gr8s::make-gw-route
                         :namespace "default" :name "rl" :rate-limit 1 :hostnames '("rl.test")
                         :rules (list (gr8s::make-gw-rule
                                       :matches (list (gr8s::make-gw-match :path-type :prefix :path "/"))
-                                      :backends (list (gr8s::make-gw-backend :name "echo" :port +gw-backend-port+)))))))
+                                      :backends (list (gr8s::make-gw-backend :name "echo" :port backend-port)))))))
          (router (gr8s::compile-gateway-router routes))
-         (resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" +gw-backend-port+)))
-         (gateway (gr8s::start-gateway-listener :port +gw-listener-port+
-                                                :router router :resolver resolver :name "rl-gw")))
+         (resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" backend-port)))
+         (gateway (gr8s::start-gateway-listener :port 0
+                                                :router router :resolver resolver :name "rl-gw"))
+         (listener-port (hunchentoot:acceptor-port gateway)))
     ;; The acceptor handles requests on its own thread, so dynamic rebinding would
     ;; not reach it; clear the process-global tables instead.
     (clrhash gr8s::*gateway-rate-buckets*)
@@ -143,8 +145,8 @@
     (unwind-protect
          (progn
            ;; First request passes to the backend; the immediate second is throttled.
-           (is (= 200 (gw-raw-request +gw-listener-port+ "rl.test" "/a")))
-           (is (= 429 (gw-raw-request +gw-listener-port+ "rl.test" "/a")))
+           (is (= 200 (gw-raw-request listener-port "rl.test" "/a")))
+           (is (= 429 (gw-raw-request listener-port "rl.test" "/a")))
            ;; Metrics recorded both outcomes for this route.
            (let ((text (gr8s::gateway-metrics-text)))
              (is (search "gr8s_gateway_requests_total" text))
@@ -156,8 +158,9 @@
 
 (test gateway-proxy-applies-http-filters
   (let* ((backend (hunchentoot:start (make-instance 'gw-echo-acceptor
-                                                    :address "127.0.0.1" :port +gw-backend-port+)))
-         (echo (gr8s::make-gw-backend :name "echo" :port +gw-backend-port+))
+                                                    :address "127.0.0.1" :port 0)))
+         (backend-port (hunchentoot:acceptor-port backend))
+         (echo (gr8s::make-gw-backend :name "echo" :port backend-port))
          (routes (list
                   ;; Header modifiers: set a request header the backend should see,
                   ;; and a response header the client should see.
@@ -191,27 +194,28 @@
                                                  :data (list :scheme "https" :status-code 301
                                                              :hostname nil :port nil :path nil))))))))
          (router (gr8s::compile-gateway-router routes))
-         (resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" +gw-backend-port+)))
-         (gateway (gr8s::start-gateway-listener :port +gw-listener-port+
-                                                :router router :resolver resolver :name "filters")))
+         (resolver (lambda (b) (declare (ignore b)) (values "127.0.0.1" backend-port)))
+         (gateway (gr8s::start-gateway-listener :port 0
+                                                :router router :resolver resolver :name "filters"))
+         (listener-port (hunchentoot:acceptor-port gateway)))
     (unwind-protect
          (progn
            ;; Header modifiers.
            (setf *gw-backend-last* nil)
            (multiple-value-bind (code headers body)
-               (gw-raw-request +gw-listener-port+ "hdr.test" "/go")
+               (gw-raw-request listener-port "hdr.test" "/go")
              (is (= 200 code))
              (is (equal "backend-ok" body))
              (is (equal "injected" (gw-request-header-seen "x-test")))  ; backend saw the set header
              (is (equal "added" (gw-header headers "x-resp"))))         ; client saw the response header
            ;; URL rewrite: /api/users -> backend sees /users.
            (setf *gw-backend-last* nil)
-           (is (= 200 (gw-raw-request +gw-listener-port+ "rw.test" "/api/users")))
+           (is (= 200 (gw-raw-request listener-port "rw.test" "/api/users")))
            (is (equal "/users" (second *gw-backend-last*)))
            ;; Request redirect: 301 with https Location, backend untouched.
            (setf *gw-backend-last* nil)
            (multiple-value-bind (code headers body)
-               (gw-raw-request +gw-listener-port+ "redir.test" "/page")
+               (gw-raw-request listener-port "redir.test" "/page")
              (declare (ignore body))
              (is (= 301 code))
              (is (equal "https://redir.test/page" (gw-header headers "location")))

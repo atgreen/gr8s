@@ -235,7 +235,8 @@
   (with-temporary-store (store directory)
     (declare (ignore directory))
     (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
-           (server (start-server :address "127.0.0.1" :port 18089 :store store :runtime runtime :reconciler reconciler))
+           (server (start-server :address "127.0.0.1" :port 0 :store store :runtime runtime :reconciler reconciler))
+           (*core-api-port* (hunchentoot:acceptor-port server))
            (item "/api/v1/namespaces/default/pods/wire-finalizer"))
       (unwind-protect
            (let* ((metadata (core-test-protobuf '((1 "wire-finalizer") (14 "example.com/cleanup"))))

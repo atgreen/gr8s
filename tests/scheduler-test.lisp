@@ -325,9 +325,12 @@
 (test the-host-port-table-follows-the-pods
   (with-temporary-store (store path)
     (let* ((forwarders (make-hash-table :test #'equal))
-           (pod (create-pod store (host-port-test-pod "web" 0))))
+           (pod (create-pod store (host-port-test-pod "web" 0)))
+           ;; A host port is the Pod's choice, so take one the kernel just found free.
+           (host-port (let ((probe (usocket:socket-listen "127.0.0.1" 0)))
+                        (prog1 (usocket:get-local-port probe) (usocket:socket-close probe)))))
       (declare (ignorable pod))
-      (let* ((declared (gr8s::core-object "containerPort" 80 "hostPort" 28431 "hostIP" "127.0.0.1"))
+      (let* ((declared (gr8s::core-object "containerPort" 80 "hostPort" host-port "hostIP" "127.0.0.1"))
              (input (gr8s::core-object "apiVersion" "v1" "kind" "Pod"
                                        "metadata" (gr8s::core-object "name" "served" "namespace" "default")
                                        "spec" (gr8s::core-object "containers"
@@ -340,7 +343,7 @@
                (is (zerop (hash-table-count forwarders)) "A Pod with no address has nothing to relay to")
                (gr8s::update-pod-observed-status store served (gr8s::core-object "phase" "Running" "podIP" "10.1.2.3"))
                (gr8s::converge-host-port-forwarders forwarders store)
-               (let ((forwarder (gethash (list* "TCP" "127.0.0.1" 28431) forwarders)))
+               (let ((forwarder (gethash (list* "TCP" "127.0.0.1" host-port) forwarders)))
                  (is (equal '("10.1.2.3" . 80) (gr8s::host-port-forwarder-target forwarder))))
                (gr8s::update-pod-observed-status store served (gr8s::core-object "phase" "Failed" "podIP" "10.1.2.3"))
                (gr8s::converge-host-port-forwarders forwarders store)
