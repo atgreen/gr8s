@@ -27,8 +27,9 @@ NOSUID and NODEV are always set, so asking for them changes nothing.")
 
 (defparameter +nfs-versions+ '("3" "4" "4.0" "4.1" "4.2"))
 
-(defparameter +nfs-default-version-attempts+ '("4.2" "4.1" "4.0")
-  "NFSv4 versions tried in turn when a mount names none, newest first.")
+(defparameter +nfs-default-version-attempts+ '("4.2" "4.1" "4.0" "3")
+  "Versions tried in turn when a mount names none, newest first, ending with NFSv3 as
+mount.nfs does.")
 
 (defun nfs-mount-option-tokens (mount-options)
   "Split MOUNT-OPTIONS entries on commas, as mount(8) would, dropping empty items."
@@ -168,11 +169,17 @@ A later call with the same KEY collects the result instead of starting another."
             target
             (lambda ()
               (multiple-value-bind (attempts flags) (nfs-mount-attempts tokens (funcall address-of))
+                ;; As mount.nfs does, a refused version moves on to the next, and ENOENT from
+                ;; NFSv4 goes on to NFSv3: a Linux server exporting with fsid=0 makes that path
+                ;; the v4 pseudo-root, so the v3 path isn't found over v4. Other answers are final.
                 (loop with last = 0
+                      with skipping-v4 = nil
                       for (filesystem-type . data) in attempts
-                      do (setf last (funcall mount-call source target filesystem-type flags data))
-                      ;; Only a refused version moves on; any other answer is final.
-                      until (not (member last (list sb-posix:eprotonosupport sb-posix:einval)))
+                      unless (and skipping-v4 (equal filesystem-type "nfs4"))
+                        do (setf last (funcall mount-call source target filesystem-type flags data))
+                           (when (and (= last sb-posix:enoent) (equal filesystem-type "nfs4"))
+                             (setf skipping-v4 t))
+                      until (not (member last (list sb-posix:eprotonosupport sb-posix:einval sb-posix:enoent)))
                       finally (return last))))
             :wait (or wait *nfs-operation-wait-seconds*))))
     (unless (zerop code)
