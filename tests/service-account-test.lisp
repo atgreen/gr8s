@@ -46,6 +46,29 @@
         (gr8s::complete-created-bootstrap-resource store "namespaces" preview t)
         (is (null (gr8s::list-core-resources store "configmaps" "preview")))))))
 
+(test a-single-control-plane-bootstraps-the-cluster-without-a-local-agent
+  ;; A control plane serving only remote agents is a real cluster too.
+  (let ((managed '(:runtime "containerd" :containerd-mode "managed")))
+    (is-true (gr8s::serve-bootstraps-cluster-p managed nil nil))
+    (is-true (gr8s::serve-bootstraps-cluster-p '(:runtime "fake") :agent nil))
+    (is-true (gr8s::serve-bootstraps-cluster-p managed :agent nil))
+    ;; A Raft member keeps its earlier behaviour: only with a local managed agent.
+    (is-true (gr8s::serve-bootstraps-cluster-p managed :agent :ha))
+    (is-false (gr8s::serve-bootstraps-cluster-p managed nil :ha))
+    (is-false (gr8s::serve-bootstraps-cluster-p '(:runtime "containerd" :containerd-mode "external") :agent :ha)))
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (gr8s::ensure-native-bootstrap-namespaces store)
+    (dolist (name '("default" "kube-system" "kube-public" "kube-node-lease"))
+      (is-true (gr8s::get-core-resource store "namespaces" nil name))
+      (is-true (gr8s::get-core-resource store "serviceaccounts" name "default")))
+    (dolist (role '("cluster-admin" "admin" "edit" "view" "system:auth-delegator"))
+      (is-true (gr8s::get-core-resource store "clusterroles" nil role) "missing ClusterRole ~A" role))
+    ;; Running it again, as every start does, keeps what exists.
+    (let ((uid (gethash "uid" (gethash "metadata" (gr8s::get-core-resource store "namespaces" nil "default")))))
+      (gr8s::ensure-native-bootstrap-namespaces store)
+      (is (equal uid (gethash "uid" (gethash "metadata" (gr8s::get-core-resource store "namespaces" nil "default"))))))))
+
 (test credentials-require-private-issuance-and-live-account-identities
   (with-temporary-store (store directory)
     (service-account-test-store store)
