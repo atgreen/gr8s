@@ -158,3 +158,45 @@
       (signals kubernetes-error (gr8s::get-core-resource store "configmaps" "alpha" "owner"))
       (let ((metadata (gethash "metadata" (gr8s::get-core-resource store "configmaps" "alpha" "dependent"))))
         (is (zerop (length (gethash "ownerReferences" metadata))))))))
+
+(test a-finalizer-holds-a-deleted-object-until-a-client-removes-it
+  ;; As the API server does for any kind: deletion sets deletionTimestamp, no finalizer
+  ;; may be added after that, and removing the last one completes the deletion.
+  (with-temporary-store (store directory)
+    (declare (ignorable directory))
+    (flet ((finalizers (resource name list)
+             (gr8s::update-core-resource store resource "alpha" name
+               (lambda (object) (setf (gethash "finalizers" (gethash "metadata" object)) (coerce list 'vector)) object)))
+           (gone-p (resource name)
+             (handler-case (progn (gr8s::get-core-resource store resource "alpha" name) nil)
+               (kubernetes-error () t))))
+      (gr8s::create-core-resource store "configmaps"
+        (gr8s::core-object "metadata" (gr8s::core-object "name" "held" "finalizers" #("example.com/hold"))) "alpha")
+      (gr8s::create-core-resource store "services"
+        (gr8s::core-object "metadata" (gr8s::core-object "name" "web")
+                           "spec" (gr8s::core-object "selector" (gr8s::core-object "app" "web")
+                                                     "ports" (vector (gr8s::core-object "port" 80)))) "alpha")
+      (finalizers "services" "web" '("example.com/lb"))
+      (dolist (target '(("configmaps" "held") ("services" "web")))
+        (destructuring-bind (resource name) target
+          (gr8s::delete-core-resource store resource "alpha" name)
+          (let ((metadata (gethash "metadata" (gr8s::get-core-resource store resource "alpha" name))))
+            (is-true (gethash "deletionTimestamp" metadata))
+            (is (= 1 (length (gethash "finalizers" metadata)))))
+          ;; Deleting again changes nothing, and no finalizer can be added now.
+          (gr8s::delete-core-resource store resource "alpha" name)
+          (signals kubernetes-error (finalizers resource name '("example.com/hold" "example.com/lb" "example.com/more")))
+          (finalizers resource name '())
+          (is-true (gone-p resource name)))))))
+
+(test a-finalizer-holds-a-deleted-deployment
+  (with-temporary-store (store directory)
+    (declare (ignorable directory))
+    (let ((deployment (workload-fixture "Deployment" "web" 1)))
+      (setf (gethash "finalizers" (gethash "metadata" deployment)) #("example.com/hold"))
+      (gr8s::create-core-resource store "deployments" deployment "alpha"))
+    (gr8s::delete-workload-resource store "deployments" "alpha" "web")
+    (is-true (gethash "deletionTimestamp" (gethash "metadata" (gr8s::get-core-resource store "deployments" "alpha" "web"))))
+    (gr8s::update-core-resource store "deployments" "alpha" "web"
+      (lambda (object) (setf (gethash "finalizers" (gethash "metadata" object)) #()) object))
+    (signals kubernetes-error (gr8s::get-core-resource store "deployments" "alpha" "web"))))

@@ -209,7 +209,7 @@ to reject."
     (unless (and (equal version (gethash "apiVersion" object version)) (equal kind (gethash "kind" object kind)))
       (core-resource-error 400 "BadRequest" "Expected ~A ~A" version kind))
     (when replication (normalize-replication-controller-defaults object))
-    (validate-core-metadata metadata namespace name)
+    (validate-core-metadata metadata namespace name :allow-finalizers t)
     (pod-generate-name-prefix metadata)
     (setf (gethash "namespace" metadata) namespace (gethash "kind" object) kind (gethash "apiVersion" object) version)
     (remhash "status" object)
