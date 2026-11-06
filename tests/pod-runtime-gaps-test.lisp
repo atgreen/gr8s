@@ -863,3 +863,19 @@
           (is (search "enough allocatable" (gr8s::kubernetes-error-message condition)))
           (is (equal "NodeCapacity"
                      (gethash "reason" (aref (gethash "causes" (gr8s::kubernetes-error-details condition)) 0)))))))))
+
+(test deletion-stops-a-readiness-probed-container-while-its-probes-still-run
+  (flet ((stops (container)
+           (with-temporary-store (store directory)
+             (let* ((now 4000000000) (gr8s::*container-lifecycle-clock* (lambda () now))
+                    (pod (create-pod store (parse-pod (gap-pod-object "containers" (vector container)))))
+                    (runtime (gr8s::make-containerd-runtime :log-root directory)))
+               (with-lifecycle-cri (fixture pod (list (lifecycle-info "app" 0 gr8s.cri.v1::+containerstate-container_running+ now)))
+                 (gr8s::stop-pod-containers-in-order runtime pod (+ (funcall gr8s::*pod-deletion-clock*) 30))
+                 (loop for call in (lifecycle-cri-fixture-calls fixture)
+                       when (eq :stop (first call)) collect (second call)))))))
+    ;; Stopped here, before removal stops the probes, so readiness can see it leave service.
+    (is (equal '("app-0") (stops (gap-container "app" "readinessProbe"
+                                                (gr8s::core-object "exec" (gr8s::core-object "command" #("ready")))))))
+    ;; With nothing to observe or run first, removal stops it as before.
+    (is (null (stops (gap-container "app"))))))
