@@ -509,9 +509,6 @@
                                    \"schema\":{\"openAPIV3Schema\":{\"type\":\"object\",\"x-kubernetes-preserve-unknown-fields\":true}},
                                    \"subresources\":{\"status\":{},\"scale\":{\"specReplicasPath\":\".spec.replicas\",
                                      \"statusReplicasPath\":\".status.replicas\",\"labelSelectorPath\":\".status.selector\"}}}]}}")
-      (is-true (wait-until (lambda () (= 200 (nth-value 1 (drakma:http-request
-                                                             "http://127.0.0.1:18094/apis/autoscalinge2e.example.com/v1/namespaces/alpha/testcrds"))))
-                           :timeout 10))
       (crd-api-request 201 "/apis/autoscalinge2e.example.com/v1/namespaces/alpha/testcrds" :method :post
                        :text "{\"apiVersion\":\"autoscalinge2e.example.com/v1\",\"kind\":\"TestCRD\",
                                \"metadata\":{\"name\":\"web\"},\"spec\":{\"replicas\":1}}")
