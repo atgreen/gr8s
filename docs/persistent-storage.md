@@ -106,7 +106,9 @@ parameters:
 The agent mounts through `mount(2)`, so hosts need the kernel NFS client but not
 `mount.nfs` or `nfs-common`:
 
-- **Versions:** it tries NFSv4.2, 4.1 and 4.0 unless `vers` or `nfsvers` is set.
+- **Versions:** it tries NFSv4.2, 4.1, 4.0 and then NFSv3 unless `vers` or `nfsvers`
+  is set, as `mount.nfs` does. NFSv4 moves on to NFSv3 when the path isn't found,
+  which happens with a Linux server exporting it with `fsid=0`.
 - **NFSv3:** this defaults to `nolock`, because `rpc.statd` isn't assumed. Add the
   `lock` option only if the host runs it. NFSv4 has no such limit.
 - **Server names:** these are resolved by the host, so a cluster Service name or
