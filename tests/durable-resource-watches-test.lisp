@@ -304,6 +304,35 @@
         (is (= (- (gr8s::pod-store-resource-revision store) 3)
                (gr8s::pod-store-template-history-floor store)))))))
 
+(test watch-history-stops-at-its-memory-limit-and-expires-what-it-dropped
+  (with-temporary-store (store path)
+    (values path)
+    (flet ((update (count)
+             (flet ((fill-data (object index)
+                      (setf (gethash "data" object) (gr8s::core-object "value" (make-string 10000 :initial-element #\x)
+                                                                      "index" (write-to-string index)))
+                      object))
+               (gr8s::create-core-resource store "configmaps" (fill-data (durable-watch-fixture "configmaps" "big") 0) "alpha")
+               (loop for index from 1 below count
+                     do (gr8s::update-core-resource store "configmaps" "alpha" "big"
+                                                    (lambda (object) (fill-data object index)))))))
+      ;; Each change keeps the version it replaced, about 40 KB here.
+      (let ((gr8s::*resource-watch-history-bytes* (* 400 1024)))
+        (update 30)
+        (let ((history (gr8s::pod-store-template-history store)))
+          (is (< 3 (length history) 12))
+          (is (<= (reduce #'+ history :key #'gr8s::template-history-entry-bytes) (* 400 1024)))
+          (is (< (gr8s::pod-store-template-history-floor store) (gethash "revision" (first history)))))
+        (is (= 410 (core-resource-status
+                    (lambda () (gr8s::template-list-page store "alpha" "" "" :resource "configmaps"
+                                                          :resource-version (write-to-string (1- (gr8s::pod-store-template-history-floor store)))))))))))
+  ;; Small objects keep the whole count however many there are.
+  (with-temporary-store (store path)
+    (values path)
+    (dolist (name '("a" "b" "c" "d" "e"))
+      (gr8s::create-core-resource store "configmaps" (durable-watch-fixture "configmaps" name) "alpha"))
+    (is (= 5 (length (gr8s::pod-store-template-history store))))))
+
 (test legacy-template-history-upgrade-does-not-invent-other-resource-history
   (with-temporary-store (store path)
     (gr8s::create-core-resource store "configmaps" (durable-watch-fixture "configmaps" "settings") "alpha")

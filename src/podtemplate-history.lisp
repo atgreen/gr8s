@@ -20,17 +20,51 @@ so its clients can see up to 10 minutes of history and specs hold revisions for 
 (defparameter *resource-watch-history-limit* 16384
   "The most stored-resource history entries kept in memory, whatever their age.
 An entry only refers to objects, most of which the store or a neighbouring entry also holds.")
+(defparameter *resource-watch-history-bytes* (* 96 1024 1024)
+  "The most memory, by APPROXIMATE-HEAP-BYTES, that stored-resource history may hold in all.
+At a write a second this keeps the full window; a burst of writes keeps less of it.")
 (defparameter *podtemplate-clock* #'get-universal-time)
 (defparameter +template-watch-maintenance-interval+ internal-time-units-per-second
   "Least time between the journal and Event expiry checks that watches perform.")
 
-(defun trim-template-history (history floor now seconds limit)
-  "Drop entries older than SECONDS or beyond the newest LIMIT, returning those left and their floor."
+(defun approximate-heap-bytes (value)
+  "Estimate the memory a parsed JSON VALUE occupies, erring high, without allocating."
+  (labels ((walk (value)
+             (typecase value
+               (hash-table (let ((bytes (+ 480 (* 40 (hash-table-count value)))))
+                             (maphash (lambda (key item) (incf bytes (+ (walk key) (walk item)))) value)
+                             bytes))
+               (string (+ 16 (* (if (typep value 'base-string) 1 4) (length value))))
+               (cons (+ 16 (walk (car value)) (walk (cdr value))))
+               (vector (+ 16 (* 8 (length value)) (reduce #'+ value :key #'walk)))
+               ((or fixnum symbol character) 0)
+               (t 16))))
+    (walk value)))
+
+(defun template-history-old-bytes (old)
+  "Return the memory a history entry whose old object is OLD alone keeps alive.
+That is OLD: the store or the next change of the same object holds the new one."
+  (+ 512 (if (hash-table-p old) (approximate-heap-bytes old) 0)))
+
+(defun template-history-entry-bytes (entry)
+  "Return the memory ENTRY alone keeps alive. Entries are never changed once published,
+since watches read them unlocked, so one written by an older version is measured each time."
+  (or (gethash "bytes" entry) (template-history-old-bytes (gethash "old" entry))))
+
+(defun trim-template-history (history floor now seconds limit &optional byte-limit)
+  "Drop entries older than SECONDS, beyond the newest LIMIT, or beyond the newest BYTE-LIMIT
+of memory, returning those left and their floor."
   (let ((excess (max 0 (- (length history) limit))))
     (loop repeat excess
           do (setf floor (max floor (gethash "revision" (pop history)))))
     (loop while (and history (> (- now (gethash "time" (first history))) seconds))
           do (setf floor (max floor (gethash "revision" (pop history)))))
+    (when byte-limit
+      (let ((bytes (reduce #'+ history :key #'template-history-entry-bytes)))
+        (loop while (and history (> bytes byte-limit))
+              do (let ((entry (pop history)))
+                   (decf bytes (template-history-entry-bytes entry))
+                   (setf floor (max floor (gethash "revision" entry)))))))
     ;; Never retain half of a transaction (for example a large DeleteCollection).
     (values (remove-if (lambda (entry) (<= (gethash "revision" entry) floor)) history) floor)))
 
@@ -49,11 +83,13 @@ Also returns this commit's new entries, newest first."
                  (unless (eq old new)
                    (let ((entry (core-object "revision" revision "time" now "resource" (first key)
                                              "namespace" (second key) "name" (third key)
-                                             "old" (or old 'null) "new" (or new 'null))))
+                                             "old" (or old 'null) "new" (or new 'null)
+                                             "bytes" (template-history-old-bytes old))))
                      (push entry added)
                      (setf history (nconc history (list entry))))))) keys)
     (multiple-value-bind (history floor)
-        (trim-template-history history floor now *watch-history-seconds* *resource-watch-history-limit*)
+        (trim-template-history history floor now *watch-history-seconds* *resource-watch-history-limit*
+                               *resource-watch-history-bytes*)
       (values history floor added))))
 
 (defun durable-template-history (history floor)
