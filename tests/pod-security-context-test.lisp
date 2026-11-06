@@ -116,3 +116,28 @@
     (multiple-value-bind (result asked) (context "{\"runAsUser\":0}")
       (is (eq :created result))
       (is (not asked)))))
+
+(test downward-api-reports-ephemeral-storage-requests-and-limits
+  (let* ((object (com.inuoe.jzon:parse *valid-pod-json*))
+         (container (aref (gethash "containers" (gethash "spec" object)) 0)))
+    (setf (gethash "resources" container)
+          (gr8s::core-object "requests" (gr8s::core-object "ephemeral-storage" "32Mi")
+                             "limits" (gr8s::core-object "ephemeral-storage" "64Mi")))
+    (let ((pod (parse-pod object)))
+      (flet ((value (resource &optional divisor)
+               (gr8s::downward-resource-value
+                pod (let ((reference (gr8s::core-object "containerName" "web" "resource" resource)))
+                      (when divisor (setf (gethash "divisor" reference) divisor))
+                      reference))))
+        (is (equal (write-to-string (* 32 1024 1024)) (value "requests.ephemeral-storage")))
+        (is (equal "64" (value "limits.ephemeral-storage" "1Mi"))))))
+  ;; Without a limit the node's storage capacity is reported, as for cpu and memory.
+  (let ((pod (parse-pod *valid-pod-json*)))
+    (is (plusp (parse-integer (gr8s::downward-resource-value
+                               pod (gr8s::core-object "containerName" "web" "resource" "limits.ephemeral-storage"))))))
+  (finishes (parse-pod (let ((object (com.inuoe.jzon:parse *valid-pod-json*)))
+                         (setf (gethash "env" (aref (gethash "containers" (gethash "spec" object)) 0))
+                               (vector (gr8s::core-object "name" "EPHEMERAL"
+                                                          "valueFrom" (gr8s::core-object "resourceFieldRef"
+                                                                                         (gr8s::core-object "resource" "limits.ephemeral-storage")))))
+                         object))))

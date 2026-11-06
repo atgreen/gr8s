@@ -148,7 +148,8 @@
   (drop-null-fields (require-object reference "resourceFieldRef"))
   (reject-unsupported-fields reference '("containerName" "resource" "divisor") "resourceFieldRef")
   (unless (member (gethash "resource" reference)
-                  '("limits.cpu" "limits.memory" "requests.cpu" "requests.memory") :test #'equal)
+                  '("limits.cpu" "limits.memory" "requests.cpu" "requests.memory"
+                    "limits.ephemeral-storage" "requests.ephemeral-storage") :test #'equal)
     (invalid-pod "resourceFieldRef.resource ~S is not supported" (gethash "resource" reference)))
   (when (gethash "divisor" reference)
     (when (minusp (container-quantity-coefficient (parse-container-quantity (gethash "divisor" reference))))

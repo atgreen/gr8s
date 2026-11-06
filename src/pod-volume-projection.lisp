@@ -72,6 +72,7 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
          (nanos (cond (declared (container-quantity-nanos declared))
                       ((equal kind "requests") 0)
                       ((equal name "cpu") (* (node-allocatable-cpu) (expt 10 9)))
+                      ((equal name "ephemeral-storage") (* (or (filesystem-capacity-bytes "/var/lib") 0) (expt 10 9)))
                       (t (* (node-allocatable-memory) (expt 10 9)))))
          (text (gethash "divisor" reference))
          (divisor (and text (container-quantity-nanos (parse-container-quantity text)))))
