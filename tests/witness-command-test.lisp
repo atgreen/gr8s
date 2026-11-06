@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
 ;;;; The 'gr8s witness' command (podster-c2d.9): a headless Raft voting member

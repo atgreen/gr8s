@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
 ;;;; Enforce Kubernetes structural invariants independently of value validation:

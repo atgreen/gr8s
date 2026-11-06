@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
 ;;;; Verify Service node port allocation, session affinity and status writes, the
@@ -452,3 +452,81 @@
   (multiple-value-bind (maps programs) (gr8s::compile-service-lb)
     (is (= 3 (length maps)))
     (is (= 1 (length programs)))))
+
+;;; Ingress classes and NetworkPolicy over the API
+
+(test ingress-gets-the-newest-default-class-on-create
+  (with-temporary-store (store directory)
+    (values directory)
+    (flet ((ingress-class (name default)
+             (gr8s::create-core-resource
+              store "ingressclasses"
+              (gr8s::core-object "metadata" (if default
+                                                (gr8s::core-object "name" name "annotations"
+                                                                   (gr8s::core-object "ingressclass.kubernetes.io/is-default-class" "true"))
+                                                (gr8s::core-object "name" name))
+                                 "spec" (gr8s::core-object "controller" "example.com/controller"))
+              nil))
+           (ingress (name &optional class)
+             (let ((spec (gr8s::core-object "defaultBackend" (gr8s::core-object "service" (gr8s::core-object "name" "web" "port" (gr8s::core-object "number" 80))))))
+               (when class (setf (gethash "ingressClassName" spec) class))
+               (gethash "ingressClassName"
+                        (gethash "spec" (gr8s::create-core-resource
+                                         store "ingresses" (gr8s::core-object "metadata" (gr8s::core-object "name" name) "spec" spec)
+                                         "alpha"))))))
+      (ingress-class "plain" nil)
+      (is (null (ingress "none")))
+      ;; Two default classes created together: the lower name wins the tie.
+      (ingress-class "zeta" t)
+      (ingress-class "alpha" t)
+      (is (equal "alpha" (ingress "defaulted")))
+      ;; A class the Ingress names itself is kept.
+      (is (equal "plain" (ingress "chosen" "plain"))))))
+
+(test ingress-class-parameters-decode-their-api-group
+  (let* ((parameters (core-test-protobuf '((1 "example.com") (2 "fookind") (3 "fooname") (4 "Namespace") (5 "foo-ns"))))
+         (spec (core-test-protobuf (list (list 1 "example.com/controller") (list 2 parameters))))
+         (object (gr8s::decode-core-resource-protobuf
+                  (core-test-protobuf-envelope "IngressClass" (list (list 1 (core-test-protobuf '((1 "ingressclass1"))))
+                                                                    (list 2 spec))
+                                               "networking.k8s.io/v1")
+                  "IngressClass")))
+    (is (equal "example.com" (gethash "apiGroup" (gethash "parameters" (gethash "spec" object)))))))
+
+(test network-policies-decode-from-protobuf-and-validate-end-ports
+  (let* ((port (core-test-protobuf (list (list 2 (core-test-protobuf '((1 0) (2 20000)))) (list 3 20000))))
+         (rule (core-test-protobuf (list (list 1 port))))
+         (spec (core-test-protobuf (list (list 3 rule) (list 4 "Egress"))))
+         (object (gr8s::decode-core-resource-protobuf
+                  (core-test-protobuf-envelope "NetworkPolicy" (list (list 1 (core-test-protobuf '((1 "endport"))))
+                                                                     (list 2 spec))
+                                               "networking.k8s.io/v1")
+                  "NetworkPolicy"))
+         (decoded (aref (gethash "ports" (aref (gethash "egress" (gethash "spec" object)) 0)) 0)))
+    (is (eql 20000 (gethash "port" decoded)))
+    (is (eql 20000 (gethash "endPort" decoded))))
+  (with-temporary-store (store directory)
+    (values directory)
+    (flet ((policy (name port)
+             (gr8s::create-core-resource
+              store "networkpolicies"
+              (gr8s::core-object "metadata" (gr8s::core-object "name" name)
+                                 "spec" (gr8s::core-object "podSelector" (gr8s::core-object)
+                                                           "policyTypes" #("Egress")
+                                                           "egress" (vector (gr8s::core-object "ports" (vector port)))))
+              "alpha")))
+      (is (policy "equal" (gr8s::core-object "port" 20000 "endPort" 20000)))
+      (is (policy "range" (gr8s::core-object "port" 10000 "endPort" 20000)))
+      (signals kubernetes-error (policy "no-port" (gr8s::core-object "endPort" 20000)))
+      (signals kubernetes-error (policy "named" (gr8s::core-object "port" "serve-80" "endPort" 20000)))
+      (signals kubernetes-error (policy "below" (gr8s::core-object "port" 30000 "endPort" 20000)))
+      (signals kubernetes-error
+        (gr8s::create-core-resource
+         store "networkpolicies"
+         (gr8s::core-object "metadata" (gr8s::core-object "name" "outside")
+                            "spec" (gr8s::core-object "podSelector" (gr8s::core-object)
+                                                      "egress" (vector (gr8s::core-object
+                                                                        "to" (vector (gr8s::core-object
+                                                                                      "ipBlock" (gr8s::core-object "cidr" "10.0.0.0/16"
+                                                                                                                   "except" #("10.1.0.0/24"))))))))
+         "alpha")))))

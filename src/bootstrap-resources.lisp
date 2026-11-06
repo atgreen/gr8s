@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
 ;;;; Validate durable Namespace, ServiceAccount and RBAC API objects used to
@@ -294,11 +294,11 @@
        (validate-rbac-rules (gethash "rules" object #()) (equal resource "clusterroles"))
        (when (equal resource "clusterroles") (validate-cluster-role-aggregation-rule object)))
       ((equal resource "networkpolicies")
-       ;; The spec is stored as-is; it is validated when parsed into an np-spec
-       ;; at resolution time (which fails closed on unsupported constructs).
+       ;; Validated as upstream's API does; the agent parses what it enforces into an np-spec.
        (let ((spec (gethash "spec" object)))
          (when (and spec (not (hash-table-p spec)))
-           (core-resource-error 422 "Invalid" "NetworkPolicy spec must be an object"))))
+           (core-resource-error 422 "Invalid" "NetworkPolicy spec must be an object"))
+         (when spec (validate-network-policy-spec spec))))
       ((member resource '("gatewayclasses" "gateways" "httproutes"
                           "tcproutes" "tlsroutes" "grpcroutes") :test #'equal)
        (validate-gateway-resource resource object))

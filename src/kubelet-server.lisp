@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
 ;;;; Serve a node's kubelet endpoints over HTTPS, as the kubelet does on port 10250:

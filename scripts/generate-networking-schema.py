@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Generate pinned core Endpoints and networking.k8s.io/v1 schema additions."""
 
 import argparse
@@ -16,7 +16,7 @@ SOURCES = {
     "networking.proto": ("api/v0.36.0/networking/v1/generated.proto", "af6aee12496d4978ffff05f9fe9fcfcac1a5c34fc4a0fee4ef05d7c3b65a5a8c"),
     "networking-types.go": ("api/v0.36.0/networking/v1/types.go", "4ecd933fd7813323c1ba478905fd1df143724317353c7ad25dba1a861c3c3a93"),
 }
-KINDS = ["Ingress", "IngressClass", "ServiceCIDR", "IPAddress"]
+KINDS = ["Ingress", "IngressClass", "ServiceCIDR", "IPAddress", "NetworkPolicy"]
 ROOTS = ["k8s.io.api.core.v1.Endpoints"] + ["k8s.io.api.networking.v1." + kind for kind in KINDS]
 TYPE_SOURCES = [("core-types.go", "k8s.io.api.core.v1."), ("networking-types.go", "k8s.io.api.networking.v1.")]
 

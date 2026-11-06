@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
 ;;;; Resolve Kubernetes NetworkPolicy resources into the per-Pod normalized rule
@@ -305,3 +305,79 @@ Fail-soft per endpoint; returns the list of sandboxes written."
         (error (condition)
           (format *error-output* "gr8s: netpol endpoint ~S failed: ~A~%" endpoint condition)
           nil)))))
+
+;;; ---------------------------------------------------------------------------
+;;; API validation, as upstream's ValidateNetworkPolicySpec does for what clients send.
+
+(defun validate-network-policy-port (port path)
+  "Check one NetworkPolicyPort: a known protocol, a port number or name, and an endPort only
+after a numeric port it is not below."
+  (let ((protocol (gethash "protocol" port "TCP")) (number (gethash "port" port)) (end (gethash "endPort" port)))
+    (unless (member protocol '("TCP" "UDP" "SCTP" null) :test #'equal)
+      (core-resource-error 422 "Invalid" "~A.protocol: Unsupported value: ~S" path protocol))
+    (cond ((member number '(nil null)))
+          ((integerp number)
+           (unless (<= 1 number 65535)
+             (core-resource-error 422 "Invalid" "~A.port: Invalid value: ~A: must be between 1 and 65535, inclusive" path number)))
+          ((not (and (stringp number) (<= 1 (length number) 15) (dns-label-p number) (some #'alpha-char-p number)))
+           (core-resource-error 422 "Invalid" "~A.port: Invalid value: ~S: must be a valid port name" path number)))
+    (unless (member end '(nil null))
+      (cond ((member number '(nil null))
+             (core-resource-error 422 "Invalid" "~A.endPort: Required value: may not be set when `port` is not specified" path))
+            ((not (integerp number))
+             (core-resource-error 422 "Invalid" "~A.endPort: Required value: may not be set when `port` is non-numeric" path))
+            ((not (and (integerp end) (<= number end 65535)))
+             (core-resource-error 422 "Invalid" "~A.endPort: Invalid value: ~A: must be greater than or equal to `port`" path end))))))
+
+(defun network-policy-cidr (text)
+  "Parse TEXT as address/prefix, returning (values family-length address-integer-or-nil prefix), or NIL.
+IPv4 addresses are returned as integers; an IPv6 one is only checked for form."
+  (let ((slash (and (stringp text) (position #\/ text))))
+    (when slash
+      (let* ((address (subseq text 0 slash)) (digits (subseq text (1+ slash)))
+             (prefix (and (<= 1 (length digits) 3) (every #'digit-char-p digits) (parse-integer digits))))
+        (cond ((null prefix) nil)
+              ((find #\: address)
+               (and (<= prefix 128) (not (find #\% address))
+                    (handler-case (progn (0conf:parse-ipv6 address) (values 128 nil prefix)) (error () nil))))
+              ((and (<= prefix 32) (networking-canonical-ip-p address))
+               (values 32 (parse-ipv4-integer address) prefix)))))))
+
+(defun validate-network-policy-peer (peer path)
+  "Check one NetworkPolicyPeer: selectors, or an ipBlock alone whose exceptions lie inside its CIDR."
+  (let ((block (gethash "ipBlock" peer)))
+    (when (hash-table-p block)
+      (when (or (hash-table-p (gethash "podSelector" peer)) (hash-table-p (gethash "namespaceSelector" peer)))
+        (core-resource-error 422 "Invalid" "~A: Forbidden: may not specify more than 1 peer type" path))
+      (let ((cidr (gethash "cidr" block)))
+        (multiple-value-bind (family network prefix) (network-policy-cidr cidr)
+          (unless family
+            (core-resource-error 422 "Invalid" "~A.ipBlock.cidr: Invalid value: ~S: must be a valid CIDR" path cidr))
+          (loop for except across (gethash "except" block #())
+                do (multiple-value-bind (inner-family inner-network inner-prefix) (network-policy-cidr except)
+                     (unless (and inner-family (= family inner-family) (> inner-prefix prefix)
+                                  (or (null network)
+                                      (= (ash inner-network (- prefix 32)) (ash network (- prefix 32)))))
+                       (core-resource-error 422 "Invalid" "~A.ipBlock.except: Invalid value: ~S: must be a strict subset of `cidr`"
+                                            path except)))))))))
+
+(defun validate-network-policy-spec (spec)
+  "Reject a NetworkPolicy spec upstream's API would: bad policyTypes, ports or peers."
+  (loop for type across (gethash "policyTypes" spec #())
+        do (unless (member type '("Ingress" "Egress") :test #'equal)
+             (core-resource-error 422 "Invalid" "spec.policyTypes: Unsupported value: ~S: supported values: \"Ingress\", \"Egress\"" type)))
+  (dolist (direction '(("ingress" "from") ("egress" "to")))
+    (destructuring-bind (key peers-key) direction
+      (let ((rules (gethash key spec #())))
+        (when (and (vectorp rules) (not (stringp rules)))
+          (loop for rule across rules
+                for index from 0
+                when (hash-table-p rule)
+                  do (loop for port across (gethash "ports" rule #())
+                           for position from 0
+                           when (hash-table-p port)
+                             do (validate-network-policy-port port (format nil "spec.~A[~D].ports[~D]" key index position)))
+                     (loop for peer across (gethash peers-key rule #())
+                           for position from 0
+                           when (hash-table-p peer)
+                             do (validate-network-policy-peer peer (format nil "spec.~A[~D].~A[~D]" key index peers-key position)))))))))

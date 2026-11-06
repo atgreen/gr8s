@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Anthony Green
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 //
 // The messages gr8s needs to import an image archive through containerd's
 // Transfer and Streaming services (api/services/transfer/v1,

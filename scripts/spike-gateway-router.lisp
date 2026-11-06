@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Spike (podster-43k.1): JIT-compile a Gateway API HTTPRoute set into a NATIVE
 ;;;; Lisp dispatch function. This proves the thesis behind gr8s's Gateway API: the

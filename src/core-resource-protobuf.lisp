@@ -210,7 +210,7 @@
               (return-from decode-core-resource-protobuf object)))
           (when (auth-review-kind-version kind)
             (return-from decode-core-resource-protobuf (decode-auth-review-protobuf raw kind version)))
-          (when (member kind '("Endpoints" "Ingress" "IngressClass" "ServiceCIDR" "IPAddress") :test #'equal)
+          (when (member kind '("Endpoints" "Ingress" "IngressClass" "ServiceCIDR" "IPAddress" "NetworkPolicy") :test #'equal)
             (return-from decode-core-resource-protobuf (decode-networking-protobuf raw kind version)))
           (when (member kind '("ResourceQuota" "LimitRange" "RuntimeClass" "PriorityClass") :test #'equal)
             (return-from decode-core-resource-protobuf (decode-policy-protobuf raw kind version)))

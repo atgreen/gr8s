@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Generate pinned discovery.k8s.io/v1 EndpointSlice schema additions."""
 
 import argparse

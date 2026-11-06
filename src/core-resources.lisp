@@ -886,7 +886,7 @@ An object is streamed to the file, never held as one string as large as the stor
       (when (admission-config-resource-p resource) (prepare-admission-config-write object existing))
       (let ((resources (copy-core-resource-index store)))
         (if (or (and (csr-resource-p resource) (csr-finalized-p object))
-                (and (or (custom-resource-key-p resource) (typed-api-resource-p resource))
+                (and (or (custom-resource-key-p resource) (typed-api-resource-p resource) (batch-resource-p resource))
                      (gethash "deletionTimestamp" metadata) (zerop (length (gethash "finalizers" metadata #())))))
             (remhash (core-resource-key resource namespace name) resources)
             (setf (gethash (core-resource-key resource namespace name) resources) object))

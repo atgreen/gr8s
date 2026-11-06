@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
 ;;;; Describe the serial load order and dependencies of the gr8s control plane,
@@ -10,7 +10,7 @@
 (asdf:defsystem "gr8s"
   :description "A small Kubernetes-compatible control plane in Common Lisp"
   :author "gr8s contributors"
-  :license "MIT"
+  :license "Apache-2.0"
   ;; The Kubernetes API version gr8s implements. The gr8s release itself is this
   ;; base plus a "-gr8s.N" suffix carried in a git tag (e.g. v1.37.2-gr8s.0),
   ;; surfaced through VERSION-STRING as +GR8S-VERSION+ (see src/version.lisp).
@@ -150,6 +150,7 @@
                              (:file "zstd")
                              (:file "tar")
                              (:file "runtime-install")
+                             (:file "notices")
                              (:file "cri")
                              (:file "image-preload")
                              (:file "container-expansion")

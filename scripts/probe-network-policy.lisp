@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Isolated privileged probe (root) for the NetworkPolicy compiled firewall
 ;;;; (podster-10p.7). It JIT-compiles gr8s-netpol-egress for a sample egress

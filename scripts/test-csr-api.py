@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Purpose: Verify native CSR APIs and genuine approved certificates with strict kubectl and Go TLS.
 
 Use an isolated fake workload runtime because this test creates no Pods. API,

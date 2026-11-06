@@ -1,9 +1,9 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
-;;;; Streaming zstd decompression via a minimal, MIT-licensed CFFI binding to
-;;;; the system libzstd. libzstd is dual-licensed BSD-3-Clause OR GPL-2.0; gr8s
-;;;; links it under the BSD-3-Clause option, which is compatible with gr8s's MIT
+;;;; Streaming zstd decompression via a minimal CFFI binding to the system
+;;;; libzstd. libzstd is dual-licensed BSD-3-Clause OR GPL-2.0; gr8s links it
+;;;; under the BSD-3-Clause option, which is compatible with gr8s's Apache-2.0
 ;;;; licence. Only the decompression streaming API is bound -- enough to unpack
 ;;;; the zstd-compressed runtime bundles (gVisor, Kata) that `gr8s runtime
 ;;;; install` downloads. The library is opened lazily at runtime (not baked into

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Verify Pod confinement and tmpfs volumes from inside real native containers.
 
 Requires root in a disposable Linux guest, a native gr8s executable, kubectl and

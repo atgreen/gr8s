@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Privileged probe (root) for the Gateway sk_lookup steering MODULE
 ;;;; (src/gateway-sklookup.lisp, podster-43k.5). Proves the productionized,
