@@ -110,6 +110,15 @@ without a name yet and custom objects, which stay in the requested version."
                 (kubernetes-error () nil)))
          (copy-core-object input)))))
 
+(defun admission-preview-input (input)
+  "Return INPUT without the resourceVersion that only its committing create refuses."
+  (let ((metadata (gethash "metadata" input)))
+    (if (and (hash-table-p metadata) (nth-value 1 (gethash "resourceVersion" metadata)))
+        (let ((copy (copy-core-object input)))
+          (remhash "resourceVersion" (gethash "metadata" copy))
+          copy)
+        input)))
+
 (defun admitted-create-core-resource (store resource input namespace &key dry-run)
   "Create through the webhooks: mutate, preview the result, validate, then commit that identity."
   (let* ((metadata (require-object (gethash "metadata" input) "metadata"))
@@ -121,7 +130,9 @@ without a name yet and custom objects, which stay in the requested version."
         (progn
           (setf (admission-object attributes) (admission-input-view store resource input namespace attributes))
           (let* ((mutated (admission-mutate store attributes))
-                 (preview (create-core-resource store resource mutated namespace :dry-run t))
+                 ;; Upstream's storage refuses a set resourceVersion only after validating
+                 ;; admission has run, so the preview leaves it out and the commit refuses it.
+                 (preview (create-core-resource store resource (admission-preview-input mutated) namespace :dry-run t))
                  (preview-metadata (gethash "metadata" preview))
                  (final (copy-core-object mutated)))
             (setf (admission-object attributes) (admission-stamp-object attributes preview)

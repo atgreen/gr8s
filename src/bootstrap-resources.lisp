@@ -158,13 +158,16 @@
     (return-from normalize-bootstrap-resource (normalize-service-resource input namespace name store)))
   (when (equal resource "podtemplates")
     (return-from normalize-bootstrap-resource (normalize-podtemplate input namespace name)))
+  (when (equal resource "podcertificaterequests")
+    (return-from normalize-bootstrap-resource (normalize-pod-certificate-request input namespace name store)))
   (let* ((object (copy-core-object (require-object input "resource")))
          (kind (core-resource-kind resource))
          (version (core-resource-api-version resource))
          (metadata (require-object (gethash "metadata" object) "metadata"))
          (fields (cond ((equal resource "namespaces") '("spec" "status"))
                        ((equal resource "serviceaccounts") '("secrets" "imagePullSecrets" "automountServiceAccountToken"))
-                       ((member resource '("roles" "clusterroles") :test #'equal) '("rules"))
+                       ((equal resource "roles") '("rules"))
+                       ((equal resource "clusterroles") '("rules" "aggregationRule"))
                        ((equal resource "networkpolicies") '("spec"))
                        ((equal resource "gatewayclasses") '("spec" "status"))
                        ((member resource '("gateways" "httproutes"
@@ -214,7 +217,9 @@
                  unless (dns-subdomain-p (gethash "name" (require-object ref field)))
                    do (core-resource-error 422 "Invalid" "~A references require valid names" field)))))
       ((member resource '("roles" "clusterroles") :test #'equal)
-       (validate-rbac-rules (gethash "rules" object #()) (equal resource "clusterroles")))
+       (when (eq 'null (gethash "rules" object)) (remhash "rules" object))
+       (validate-rbac-rules (gethash "rules" object #()) (equal resource "clusterroles"))
+       (when (equal resource "clusterroles") (validate-cluster-role-aggregation-rule object)))
       ((equal resource "networkpolicies")
        ;; The spec is stored as-is; it is validated when parsed into an np-spec
        ;; at resolution time (which fails closed on unsupported constructs).
@@ -308,7 +313,7 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
       (member resource '("configmaps" "secrets" "serviceaccounts" "roles" "rolebindings" "clusterroles" "clusterrolebindings"
                          "networkpolicies" "services" "podtemplates" "events" "horizontalpodautoscalers" "deployments"
                          "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions"
-                         "customresourcedefinitions")
+                         "customresourcedefinitions" "clustertrustbundles" "podcertificaterequests")
               :test #'equal)))
 
 (defun stored-resource-discovery (version)

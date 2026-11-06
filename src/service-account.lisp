@@ -217,6 +217,8 @@
   "Honor the verified system:masters group, then evaluate applicable live RoleBindings and ClusterRoleBindings."
   (when (find "system:masters" (api-identity-groups identity) :test #'equal)
     (return-from service-account-authorized-p t))
+  (when (node-authorizer-allows-p store identity verb group resource name namespace)
+    (return-from service-account-authorized-p t))
 
   (let ((bindings (append (list-core-resources store "clusterrolebindings")
                           (when namespace (list-core-resources store "rolebindings" namespace)))))
@@ -312,3 +314,58 @@
       (ensure-default-service-account store namespace)
       (ensure-namespace-root-ca store namespace)))
   object)
+
+;;; Node authorization: a kubelet reads what the Pods bound to its node use, as
+;;; upstream's node authorizer allows from its graph, and nothing more of those kinds.
+
+(defun node-identity-name (identity)
+  "Return the node name a system:node:<name> identity in system:nodes speaks for, or NIL."
+  (let ((username (api-identity-username identity)))
+    (and (uiop:string-prefix-p "system:node:" username)
+         (find "system:nodes" (api-identity-groups identity) :test #'equal)
+         (subseq username (length "system:node:")))))
+
+(defun pod-references (pod-object kind)
+  "List the names of the KIND objects (:secret, :configmap or :claim) POD-OBJECT's spec uses."
+  (let ((spec (gethash "spec" pod-object)) (names nil))
+    (labels ((add (name) (when (stringp name) (pushnew name names :test #'equal)))
+             (each (value visit) (when (vectorp value) (map nil visit value)))
+             (env (container)
+               (each (gethash "env" container)
+                     (lambda (variable)
+                       (let ((from (gethash "valueFrom" variable)))
+                         (when (hash-table-p from)
+                           (add (table-get from (if (eq kind :secret) "secretKeyRef" "configMapKeyRef") "name"))))))
+               (each (gethash "envFrom" container)
+                     (lambda (source) (add (table-get source (if (eq kind :secret) "secretRef" "configMapRef") "name"))))))
+      (dolist (field '("containers" "initContainers" "ephemeralContainers"))
+        (unless (eq kind :claim) (each (gethash field spec) #'env)))
+      (when (eq kind :secret)
+        (each (gethash "imagePullSecrets" spec) (lambda (reference) (add (gethash "name" reference)))))
+      (each (gethash "volumes" spec)
+            (lambda (volume)
+              (ecase kind
+                (:secret (add (table-get volume "secret" "secretName")))
+                (:configmap (add (table-get volume "configMap" "name")))
+                (:claim (add (table-get volume "persistentVolumeClaim" "claimName"))
+                 (when (hash-table-p (gethash "ephemeral" volume))
+                   (add (format nil "~A-~A" (table-get pod-object "metadata" "name") (gethash "name" volume))))))
+              (unless (eq kind :claim)
+                (each (table-get volume "projected" "sources")
+                      (lambda (source)
+                        (add (table-get source (if (eq kind :secret) "secret" "configMap") "name"))))))))
+    names))
+
+(defun node-authorizer-allows-p (store identity verb group resource name namespace)
+  "Allow a node to get a Secret, ConfigMap or PersistentVolumeClaim a Pod bound to it uses."
+  (let ((node (node-identity-name identity))
+        (kind (and (equal group "") (cdr (assoc resource '(("secrets" . :secret) ("configmaps" . :configmap)
+                                                            ("persistentvolumeclaims" . :claim))
+                                                :test #'equal)))))
+    (and node kind name namespace (equal verb "get")
+         (some (lambda (pod)
+                 (let ((object (pod-to-object pod)))
+                   (and (equal node (table-get object "spec" "nodeName"))
+                        (member name (pod-references object kind) :test #'equal))))
+               (list-pods store namespace))
+         t)))

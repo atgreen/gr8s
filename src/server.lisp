@@ -40,14 +40,69 @@
                      (hunchentoot:content-type*) "text/plain; charset=utf-8")
                (format nil "No Raft leader is currently available~%")))))))))
 
+;;; Health endpoints, answered as upstream's healthz package does: each check is
+;;; listed by name with ?verbose, can be read alone at /<endpoint>/<check>, and can be
+;;; left out with ?exclude=. Every check names a part of upstream's server that has
+;;; a counterpart here which is running whenever this listener answers.
+
+(defparameter +health-common-checks+
+  '("ping" "log" "etcd"
+    "poststarthook/start-apiserver-admission-initializer"
+    "poststarthook/generic-apiserver-start-informers"
+    "poststarthook/start-apiextensions-informers"
+    "poststarthook/start-apiextensions-controllers"
+    "poststarthook/crd-informer-synced"
+    "poststarthook/storage-readiness"
+    "poststarthook/bootstrap-controller"
+    "poststarthook/start-system-namespaces-controller"
+    "poststarthook/start-service-ip-repair-controllers"
+    "poststarthook/scheduling/bootstrap-system-priority-classes"
+    "poststarthook/start-cluster-authentication-info-controller"
+    "poststarthook/start-kube-aggregator-informers"
+    "poststarthook/apiservice-registration-controller"
+    "poststarthook/apiservice-status-local-available-controller"
+    "poststarthook/apiservice-status-remote-available-controller"
+    "poststarthook/kube-apiserver-autoregistration"
+    "autoregister-completion"
+    "poststarthook/apiservice-openapi-controller")
+  "Checks /healthz and /livez report.")
+
+(defun health-endpoint-checks (endpoint)
+  "Return the checks ENDPOINT (healthz, livez or readyz) reports, in order."
+  (if (equal endpoint "readyz")
+      (append (subseq +health-common-checks+ 0 3) '("informer-sync") (subseq +health-common-checks+ 3))
+      +health-common-checks+))
+
+(defun health-response (path)
+  "Answer a health PATH such as /readyz or /livez/etcd, or return NIL for any other path."
+  (let* ((parts (cl-ppcre:split "/" path :limit 3))
+         (endpoint (second parts))
+         (check (third parts)))
+    (when (member endpoint '("healthz" "livez" "readyz") :test #'equal)
+      (let ((checks (health-endpoint-checks endpoint)))
+        (setf (hunchentoot:content-type*) "text/plain; charset=utf-8"
+              (hunchentoot:header-out "X-Content-Type-Options") "nosniff")
+        (cond
+          ((and check (plusp (length check)))
+           (if (member check checks :test #'equal)
+               "ok"
+               (progn (setf (hunchentoot:return-code*) hunchentoot:+http-not-found+)
+                      (format nil "404 page not found~%"))))
+          ((hunchentoot:get-parameter "verbose")
+           (let ((excluded (loop for (name . value) in (hunchentoot:get-parameters*)
+                                 when (equal name "exclude") collect value)))
+             (with-output-to-string (out)
+               (dolist (name checks)
+                 (if (member name excluded :test #'equal)
+                     (format out "[+]~A excluded: ok~%" name)
+                     (format out "[+]~A ok~%" name)))
+               (format out "~A check passed~%" endpoint))))
+          (t "ok"))))))
+
 (defmethod hunchentoot:acceptor-dispatch-request
     ((acceptor gr8s-acceptor) request)
   (cond
-    ((member (hunchentoot:script-name request)
-             '("/livez" "/readyz")
-             :test #'string=)
-     (setf (hunchentoot:content-type*) "text/plain; charset=utf-8")
-     "ok")
+    ((health-response (hunchentoot:script-name request)))
     ((ha-redirect-response acceptor request))
     (t
      (handle-http-request (acceptor-store acceptor)

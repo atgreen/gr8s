@@ -2,11 +2,13 @@
 ;;;; SPDX-License-Identifier: MIT
 ;;;;
 ;;;; Purpose:
-;;;; Create the user-facing ClusterRoles every Kubernetes cluster ships. Their rules
+;;;; Create the user-facing ClusterRoles every Kubernetes cluster ships, and aggregate
+;;;; ClusterRoles as upstream's clusterrole-aggregation controller does. Their rules
 ;;;; are upstream's plugin/pkg/auth/authorizer/rbac/bootstrappolicy at release-1.36,
-;;;; where admin, edit and view are built by aggregating system:aggregate-to-* roles.
-;;;; Aggregation is not implemented here, so each role holds its expanded rules. A
-;;;; role grants nothing until someone binds it, and none of these is bound by default.
+;;;; where admin, edit and view carry an aggregationRule selecting the labelled
+;;;; system:aggregate-to-* roles, so a chart's role labelled aggregate-to-edit adds to
+;;;; edit. A role grants nothing until someone binds it, and none of these is bound by
+;;;; default.
 
 (in-package #:gr8s)
 
@@ -127,19 +129,84 @@
     (kubernetes-error (condition)
       (unless (= 409 (kubernetes-error-status-code condition)) (error condition)))))
 
+;;; Aggregation
+
+(defun validate-cluster-role-aggregation-rule (role)
+  "Validate ROLE's aggregationRule as upstream does: at least one valid label selector."
+  (multiple-value-bind (rule present) (gethash "aggregationRule" role)
+    (cond
+      ((or (not present) (eq rule 'null)) (remhash "aggregationRule" role))
+      (t
+       (require-object rule "aggregationRule")
+       (reject-unsupported-fields rule '("clusterRoleSelectors") "aggregationRule")
+       (let ((selectors (gethash "clusterRoleSelectors" rule)))
+         (unless (and (vectorp selectors) (not (stringp selectors)) (plusp (length selectors)))
+           (core-resource-error 422 "Invalid" "aggregationRule.clusterRoleSelectors: Required value: at least one clusterRoleSelector required if aggregationRule is non-nil"))
+         (loop for selector across selectors
+               do (validate-workload-selector selector :allow-empty t)))))))
+
+(defun cluster-role-aggregated-rules (role roles)
+  "Return the rules ROLE's aggregationRule gathers from ROLES: for each selector in turn, the
+selected roles in name order, each new rule once, and never ROLE's own."
+  (let ((rules nil) (name (object-name role)))
+    (loop for selector across (gethash "clusterRoleSelectors" (gethash "aggregationRule" role))
+          do (dolist (other (sort (remove-if-not (lambda (candidate)
+                                                   (workload-selector-matches-p
+                                                    selector (or (gethash "labels" (gethash "metadata" candidate)) (core-object))))
+                                                 roles)
+                                  #'string< :key #'object-name))
+               (unless (equal name (object-name other))
+                 (loop for rule across (let ((value (gethash "rules" other))) (if (vectorp value) value #()))
+                       unless (find rule rules :test #'crd-json-equal-p)
+                         do (setf rules (append rules (list (copy-core-object rule))))))))
+    (coerce rules 'vector)))
+
+(defun reconcile-cluster-role-aggregation (store)
+  "Keep every aggregating ClusterRole's rules equal to the union its selectors gather."
+  (let ((roles (list-core-resources store "clusterroles")))
+    (dolist (role roles)
+      (when (hash-table-p (gethash "aggregationRule" role))
+        (let ((wanted (cluster-role-aggregated-rules role roles)))
+          (unless (crd-json-equal-p wanted (let ((value (gethash "rules" role))) (if (vectorp value) value #())))
+            (handler-case
+                (let ((*apply-update-manager* nil))
+                  (update-core-resource store "clusterroles" nil (object-name role)
+                                        (lambda (object) (setf (gethash "rules" object) wanted) object)))
+              ;; Lost a race with a writer: the next pass looks again.
+              (kubernetes-error () nil))))))))
+
 (defun ensure-default-cluster-roles (store)
-  "Create cluster-admin, admin, edit and view, and bind cluster-admin to system:masters.
+  "Create cluster-admin, admin, edit and view with their aggregated sources, and bind
+cluster-admin to system:masters.
 The authorizer already admits system:masters outright, so that binding grants nothing new;
 it records the fact for clients that read RBAC objects."
-  (loop for (name . rules)
-          in (list (cons "cluster-admin"
-                         (vector (core-object "apiGroups" #("*") "resources" #("*") "verbs" #("*"))
-                                 (core-object "nonResourceURLs" #("*") "verbs" #("*"))))
-                   (cons "view" (default-cluster-role-rules *default-view-rules*))
-                   (cons "edit" (default-cluster-role-rules *default-edit-rules* *default-view-rules*))
-                   (cons "admin" (default-cluster-role-rules *default-admin-rules* *default-edit-rules* *default-view-rules*)))
-        do (ensure-default-rbac-object
-            store "clusterroles" (core-object "metadata" (default-rbac-metadata name) "rules" rules)))
+  (ensure-default-rbac-object
+   store "clusterroles"
+   (core-object "metadata" (default-rbac-metadata "cluster-admin")
+                "rules" (vector (core-object "apiGroups" #("*") "resources" #("*") "verbs" #("*"))
+                                (core-object "nonResourceURLs" #("*") "verbs" #("*")))))
+  ;; The aggregated roles' sources first, labelled as upstream labels them, so the
+  ;; aggregation pass below finds them.
+  (loop for (name rules . targets)
+          in (list (list "system:aggregate-to-admin" *default-admin-rules* "admin")
+                   (list "system:aggregate-to-edit" *default-edit-rules* "admin" "edit")
+                   (list "system:aggregate-to-view" *default-view-rules* "admin" "edit" "view"))
+        do (let ((metadata (default-rbac-metadata name)))
+             (dolist (target targets)
+               (setf (gethash (format nil "rbac.authorization.k8s.io/aggregate-to-~A" target) (gethash "labels" metadata)) "true"))
+             (ensure-default-rbac-object
+              store "clusterroles" (core-object "metadata" metadata "rules" (default-cluster-role-rules rules)))))
+  (dolist (name '("admin" "edit" "view"))
+    (ensure-default-rbac-object
+     store "clusterroles"
+     (core-object "metadata" (default-rbac-metadata name)
+                  "aggregationRule"
+                  (core-object "clusterRoleSelectors"
+                               (vector (core-object "matchLabels"
+                                                    (core-object (format nil "rbac.authorization.k8s.io/aggregate-to-~A" name) "true"))))
+                  "rules" #())))
+  ;; Fill them now, so they grant what they should before the first controller pass.
+  (reconcile-cluster-role-aggregation store)
   (ensure-default-rbac-object
    store "clusterrolebindings"
    (core-object "metadata" (default-rbac-metadata "cluster-admin")

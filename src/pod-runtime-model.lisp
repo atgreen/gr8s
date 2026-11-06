@@ -339,6 +339,9 @@ such as the security-profiles-operator put them.")
     (when (and seconds (not (and (integerp seconds) (<= 600 seconds (expt 2 32)))))
       (invalid-pod "serviceAccountToken.expirationSeconds must be between 10 minutes and 2^32 seconds"))))
 
+(defconstant +pod-certificate-max-expiration-seconds+ (* 91 24 60 60)
+  "The longest lifetime a podCertificate projection may request: 91 days (7862400s).")
+
 (defun validate-pod-certificate-source (source paths)
   "Validate one podCertificate projection (KEP-4317): its required signerName, the
    one keyType gr8s issues, its bounded lifetime and its distinct output paths.
@@ -360,9 +363,17 @@ such as the security-profiles-operator put them.")
   (let ((user (gethash "user" source)))
     (when (and user (not (typep user '(integer 0 4294967294))))
       (invalid-pod "podCertificate.user must be a Linux UID")))
+  ;; Upstream's ValidatePodCertificateProjection bounds, worded as it words them:
+  ;; the 1.37 conformance specs match these messages.
   (let ((seconds (gethash "maxExpirationSeconds" source)))
-    (when (and seconds (not (and (integerp seconds) (<= 3600 seconds (expt 2 31)))))
-      (invalid-pod "podCertificate.maxExpirationSeconds must be between 3600 and 2^31 seconds")))
+    (when seconds
+      (unless (integerp seconds)
+        (invalid-pod "podCertificate.maxExpirationSeconds must be an integer"))
+      (when (< seconds 3600)
+        (invalid-pod "podCertificate.maxExpirationSeconds: Invalid value: ~D: if provided, maxExpirationSeconds must be >= 3600" seconds))
+      (when (> seconds +pod-certificate-max-expiration-seconds+)
+        (invalid-pod "podCertificate.maxExpirationSeconds: Invalid value: ~D: if provided, maxExpirationSeconds must be <= ~D"
+                     seconds +pod-certificate-max-expiration-seconds+))))
   (let ((contributed nil))
     (dolist (field '("credentialBundlePath" "keyPath" "certificateChainPath"))
       (let ((path (gethash field source)))

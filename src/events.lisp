@@ -29,6 +29,8 @@
 (defun event-api-view (input &optional (version *core-resource-view-version*))
   "Project Event objects, lists and watch envelopes into the requested API version."
   (when (equal version "autoscaling/v1") (return-from event-api-view (hpa-api-view input)))
+  (when (member version '("certificates.k8s.io/v1" "certificates.k8s.io/v1beta1") :test #'equal)
+    (return-from event-api-view (pod-certificate-request-api-view input version)))
   (if (not (and (hash-table-p input) (equal version "events.k8s.io/v1"))) input
       (cond
         ((equal "Event" (gethash "kind" input)) (convert-event-fields input t))
@@ -149,7 +151,9 @@
   (append '("metadata.name" "metadata.namespace")
           (when (and (custom-resource-key-p resource) *crd-view-definition*)
             (crd-selectable-field-paths *crd-view-definition* *crd-request-version*))
-          (when (csr-resource-p resource) '("spec.signerName"))
+          (when (or (csr-resource-p resource) (equal resource "clustertrustbundles")) '("spec.signerName"))
+          ;; pkg/apis/certificates/v1 field label conversions; signers watch by signerName.
+          (when (equal resource "podcertificaterequests") '("spec.signerName" "spec.podName" "spec.nodeName"))
           (when (equal resource "events")
             '("involvedObject.kind" "involvedObject.namespace" "involvedObject.name" "involvedObject.uid"
               "involvedObject.apiVersion" "involvedObject.resourceVersion" "involvedObject.fieldPath"

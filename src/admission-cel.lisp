@@ -23,6 +23,9 @@
 (define-condition cel-cost-exceeded (cel-evaluation-error) ()
   (:documentation "An expression ran out of cost budget, which nothing absorbs."))
 
+(define-condition cel-budget-exhausted (cel-cost-exceeded) ()
+  (:documentation "A group of expressions ran out of the budget they share, so none of the rest run."))
+
 ;;; Values beyond JSON's. JSON strings, numbers, booleans, null, vectors and hash
 ;;; tables stand for themselves; bytes are octet vectors.
 
@@ -43,6 +46,20 @@
 
 (defvar *cel-remaining-steps* 0
   "Cost left for the expression being evaluated.")
+
+(defvar *cel-shared-budget* nil
+  "A cell holding the cost left for the group of expressions being evaluated, or NIL when
+each expression has only its own per-call limit.")
+
+(defparameter +cel-runtime-budget+ 10000000
+  "Upstream's RuntimeCELCostBudget, shared by one policy binding's expressions.")
+
+(defparameter +cel-match-conditions-budget+ 2500000
+  "Upstream's RuntimeCELCostBudgetMatchConditions, shared by one object's matchConditions.")
+
+(defmacro with-cel-budget ((amount) &body body)
+  "Run BODY with the expressions it evaluates sharing AMOUNT of cost, as upstream's runtime budgets do."
+  `(let ((*cel-shared-budget* (list ,amount))) ,@body))
 
 (defvar *cel-declared-variables* '("object" "oldObject" "request" "authorizer")
   "Variables the environment of the expression being compiled declares.")
@@ -352,6 +369,8 @@
        (list :comprehension (cel-comprehension-kind name) target
              (cel-comprehension-variable parser (first arguments)) (third arguments) nil
              (cel-comprehension-variable parser (second arguments))))
+      ((and (equal name "sortBy") (= count 2))
+       (list :comprehension :sort-by target (cel-comprehension-variable parser (first arguments)) (second arguments) nil nil))
       ((and (equal name "map") (= count 2))
        (list :comprehension :map target (cel-comprehension-variable parser (first arguments)) (second arguments) nil nil))
       ((and (equal name "map") (= count 3))
@@ -658,7 +677,13 @@
         (when predicate
           (unless (cel-compatible-p (cel-check predicate inner) :bool)
             (cel-check-error "comprehension filter must be bool")))
+        (when (and (eq kind :sort-by) (not list-source) (not (eq :dyn (cel-type-head source))))
+          (cel-check-error "sortBy can only be applied to a list, got: ~A" (cel-type-name source)))
         (ecase kind
+          (:sort-by
+           (unless (cel-compatible-p type :int :uint :double :bool :string :timestamp :duration)
+             (cel-check-error "sortBy key must be a comparable type, got: ~A" (cel-type-name type)))
+           source)
           ((:all :exists :exists_one :filter)
            (unless (cel-compatible-p type :bool)
              (cel-check-error "comprehension predicate must be bool"))
@@ -901,7 +926,7 @@
                             ((:all :exists) (+ 3 body-cost))
                             (:exists_one (+ 3 body-cost))
                             (:filter (+ 12 body-cost))
-                            ((:map :transform-list) (+ 12 body-cost))
+                            ((:map :transform-list :sort-by) (+ 12 body-cost))
                             (:transform-map (+ 32 body-cost)))))
           (+ range 1 (* count loop-cost))))))))
 
@@ -943,6 +968,62 @@
   (cond ((realp value) value)
         ((cel-uint-p value) (cel-uint-value value))))
 
+;; x-kubernetes-list-type set and map lists compare and concatenate as upstream's
+;; unstructuredSetList and unstructuredMapList do. Lists stay plain vectors; the kind is
+;; noted beside them, weakly, when CRD values are converted for rules.
+(defvar *cel-list-kinds* (make-hash-table :test #'eq :weakness :key :synchronized t)
+  "From a list value to :SET, or (:MAP . keys) for a map list keyed by those fields.")
+
+(defun cel-mark-list (items kind)
+  "Note that ITEMS is a set list (KIND :SET) or a map list (KIND (:MAP . keys)), returning ITEMS."
+  (when (plusp (length items)) (setf (gethash items *cel-list-kinds*) kind))
+  items)
+
+(defun cel-list-kind (items)
+  "Return the list type noted for ITEMS, or NIL for an ordinary atomic list."
+  (and (plusp (length items)) (gethash items *cel-list-kinds*)))
+
+(defun cel-map-list-key (item keys)
+  "Return ITEM's key values under KEYS, or :NONE when ITEM is not an object."
+  (if (hash-table-p item)
+      (mapcar (lambda (key) (gethash key item 'null)) keys)
+      :none))
+
+(defun cel-map-list-find (items keys key)
+  "Return the element of ITEMS whose key fields equal KEY, and whether there was one."
+  (unless (eq key :none)
+    (loop for item across items
+          when (let ((candidate (cel-map-list-key item keys)))
+                 (and (not (eq candidate :none)) (every #'cel-equal candidate key)))
+            do (return (values item t)))))
+
+(defun cel-typed-list-equal (left right kind)
+  "Compare RIGHT to LEFT, a set or map list of KIND, ignoring element order."
+  (and (= (length left) (length right))
+       (if (eq kind :set)
+           (every (lambda (item) (find item left :test #'cel-equal)) right)
+           (every (lambda (item)
+                    (multiple-value-bind (match found) (cel-map-list-find left (rest kind) (cel-map-list-key item (rest kind)))
+                      (and found (cel-equal match item))))
+                  right))))
+
+(defun cel-typed-list-concatenate (left right kind)
+  "Concatenate RIGHT onto LEFT, a set or map list of KIND: sets skip present items, map lists replace by key."
+  (cel-mark-list
+   (if (eq kind :set)
+       (concatenate 'vector left (remove-if (lambda (item) (find item left :test #'cel-equal)) right))
+       (let ((result (copy-seq left)) (added nil) (keys (rest kind)))
+         (loop for item across right
+               for key = (cel-map-list-key item keys)
+               for position = (unless (eq key :none)
+                                (position-if (lambda (old)
+                                               (let ((candidate (cel-map-list-key old keys)))
+                                                 (and (not (eq candidate :none)) (every #'cel-equal candidate key))))
+                                             result))
+               do (if position (setf (aref result position) item) (push item added)))
+         (concatenate 'vector result (nreverse added))))
+   kind))
+
 (defun cel-equal (left right)
   "Apply CEL heterogeneous equality."
   (let ((a (cel-numeric-value left)) (b (cel-numeric-value right)))
@@ -950,7 +1031,10 @@
           ((and (stringp left) (stringp right)) (string= left right))
           ((and (cel-bytes-p left) (cel-bytes-p right)) (equalp left right))
           ((and (cel-list-p left) (cel-list-p right))
-           (and (= (length left) (length right)) (every #'cel-equal left right)))
+           (let ((kind (cel-list-kind left)))
+             (if kind
+                 (cel-typed-list-equal left right kind)
+                 (and (= (length left) (length right)) (every #'cel-equal left right)))))
           ((and (hash-table-p left) (hash-table-p right))
            (and (= (hash-table-count left) (hash-table-count right))
                 (loop for key being the hash-keys of left using (hash-value value)
@@ -1019,7 +1103,9 @@
     ((and (equal name "_+_") (stringp left) (stringp right)) (concatenate 'string left right))
     ((and (equal name "_+_") (cel-bytes-p left) (cel-bytes-p right))
      (concatenate '(vector (unsigned-byte 8)) left right))
-    ((and (equal name "_+_") (cel-list-p left) (cel-list-p right)) (concatenate 'vector left right))
+    ((and (equal name "_+_") (cel-list-p left) (cel-list-p right))
+     (let ((kind (cel-list-kind left)))
+       (if kind (cel-typed-list-concatenate left right kind) (concatenate 'vector left right))))
     ((and (cel-timestamp-p left) (cel-duration-p right) (member name '("_+_" "_-_") :test #'equal))
      (cel-checked-timestamp
       (funcall (if (equal name "_+_") #'+ #'-) (cel-timestamp-nanos left) (cel-duration-nanos right))))
@@ -1159,6 +1245,14 @@
          (when pending (error pending))
          (not absorbing)))
       (:exists_one (= 1 (count-if #'truth items)))
+      (:sort-by
+       (let ((keyed (loop for item in items
+                          do (cel-charge 3)
+                          collect (cons (cel-evaluate body (scope item)) item))))
+         (loop for (left right) on keyed while right
+               do (cel-compare-values (car left) (car right) "sortBy"))
+         (map 'vector #'cdr (stable-sort keyed (lambda (left right)
+                                                 (minusp (cel-compare-values (car left) (car right) "sortBy")))))))
       (:filter (coerce (remove-if-not #'truth items) 'vector))
       (:map
        (coerce (loop for item in items
@@ -1320,14 +1414,29 @@
              (make-cel-optional :value value :present (and present t))))
           (t (make-cel-optional)))))
 
+(defun cel-run-budgeted (program bindings)
+  "Evaluate PROGRAM under its per-call limit and any shared budget, charging what it used to that budget."
+  (let ((shared *cel-shared-budget*))
+    (when (and shared (<= (car shared) 0))
+      (error 'cel-budget-exhausted
+             :message "validation failed due to running out of cost budget, no further validation rules will be run"))
+    (let* ((limit (if shared (min (car shared) +cel-evaluation-budget+) +cel-evaluation-budget+))
+           (*cel-remaining-steps* limit))
+      (unwind-protect
+           (handler-case (cel-evaluate program bindings)
+             (cel-cost-exceeded (condition)
+               (if (and shared (< (car shared) +cel-evaluation-budget+))
+                   (error 'cel-budget-exhausted
+                          :message "validation failed due to running out of cost budget, no further validation rules will be run")
+                   (error condition))))
+        (when shared (decf (car shared) (- limit (max 0 *cel-remaining-steps*))))))))
+
 (defun evaluate-cel-value (program bindings)
-  "Run a compiled PROGRAM under a fresh budget, returning its value of any type."
-  (let ((*cel-remaining-steps* +cel-evaluation-budget+))
-    (cel-evaluate program bindings)))
+  "Run a compiled PROGRAM under a fresh per-call budget and any shared one, returning its value of any type."
+  (cel-run-budgeted program bindings))
 
 (defun evaluate-cel-condition (program bindings)
-  "Run a compiled PROGRAM under a fresh budget, signaling on any runtime error."
-  (let* ((*cel-remaining-steps* +cel-evaluation-budget+)
-         (value (cel-evaluate program bindings)))
+  "Run a compiled PROGRAM under a fresh per-call budget and any shared one, signaling on any runtime error."
+  (let ((value (cel-run-budgeted program bindings)))
     (unless (cel-bool-p value) (cel-fail "expression did not evaluate to bool"))
     value))

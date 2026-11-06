@@ -565,6 +565,7 @@ the node from starting."
    :name (getf claim :name) :namespace (getf claim :namespace)
    :signer-name (or (getf claim :signer-name) "")
    :pkix-public-key (or (getf claim :pkix-public-key) "")
+   :stub-pkcs10-request (or (getf claim :stub-pkcs10-request) "")
    :pod-name (getf claim :pod-name) :pod-uid (getf claim :pod-uid)
    :service-account-name (or (getf claim :service-account-name) "")
    :service-account-uid (or (getf claim :service-account-uid) "")

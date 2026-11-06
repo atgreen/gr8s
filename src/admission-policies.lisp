@@ -216,8 +216,12 @@ No audit backend exists to carry the values, so they go to the server log."
              (admission-policy-failure policy binding attributes "no params found for policy binding"))
            (unless denied
              (handler-case
-                 (let ((bindings (admission-policy-bindings store policy parameter attributes)))
-                   (when (admission-policy-conditions-pass-p policy bindings)
+                 ;; Validations, their messages, audit annotations and variables share one runtime
+                 ;; budget per binding; matchConditions have their own, as upstream's do.
+                 (let* ((*cel-shared-budget* (list +cel-runtime-budget+))
+                        (bindings (admission-policy-bindings store policy parameter attributes)))
+                   (when (with-cel-budget (+cel-match-conditions-budget+)
+                           (admission-policy-conditions-pass-p policy bindings))
                      (loop for validation across (let ((value (gethash "validations" (gethash "spec" policy))))
                                                    (if (member value '(nil null)) #() value))
                            unless (let ((*cel-declared-variables* +admission-policy-variables+))
@@ -255,8 +259,10 @@ No audit backend exists to carry the values, so they go to the server log."
                (admission-policy-failure policy binding attributes "no params found for policy binding"))
              (unless denied
                (handler-case
-                   (let ((bindings (admission-policy-bindings store policy parameter attributes)))
-                     (when (admission-policy-conditions-pass-p policy bindings)
+                   (let* ((*cel-shared-budget* (list +cel-runtime-budget+))
+                          (bindings (admission-policy-bindings store policy parameter attributes)))
+                     (when (with-cel-budget (+cel-match-conditions-budget+)
+                             (admission-policy-conditions-pass-p policy bindings))
                        (loop for mutation across (gethash "mutations" (gethash "spec" policy))
                              do (setf (admission-object attributes)
                                       (admission-mutation-result mutation bindings (admission-object attributes)))

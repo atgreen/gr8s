@@ -28,6 +28,104 @@
   "The lifetime the built-in signer issues when a request sets no bound.")
 
 ;;; ---------------------------------------------------------------------------
+;;; The PodCertificateRequest API: stored once, served at v1 and v1beta1
+;;; ---------------------------------------------------------------------------
+
+(defparameter +pod-certificate-request-beta-version+ "certificates.k8s.io/v1beta1"
+  "The beta version still served beside v1 (GA in Kubernetes 1.37), for clients
+   that have not moved, such as Agent Substrate's podcertcontroller.")
+
+(defparameter +pod-certificate-request-beta-fields+ '("pkixPublicKey" "proofOfPossession")
+  "Spec fields only v1beta1 has. v1 carries the key in stubPKCS10Request instead.")
+
+(defun pod-certificate-request-path-version (path)
+  "The API version a PodCertificateRequest URL is served in."
+  (if (uiop:string-prefix-p "/apis/certificates.k8s.io/v1beta1/" path)
+      +pod-certificate-request-beta-version+
+      "certificates.k8s.io/v1"))
+
+(defun pod-certificate-request-view (object version)
+  "Show a stored PodCertificateRequest as VERSION does: v1 has no v1beta1-only spec fields."
+  (let ((copy (copy-core-object object)))
+    (setf (gethash "apiVersion" copy) version)
+    (unless (equal version +pod-certificate-request-beta-version+)
+      (let ((spec (gethash "spec" copy)))
+        (when (hash-table-p spec)
+          (dolist (field +pod-certificate-request-beta-fields+) (remhash field spec)))))
+    copy))
+
+(defun pod-certificate-request-api-view (input version)
+  "Project PodCertificateRequests, their lists and watch envelopes into VERSION,
+   leaving the group's other kinds untouched."
+  (cond
+    ((not (hash-table-p input)) input)
+    ((equal "PodCertificateRequest" (gethash "kind" input)) (pod-certificate-request-view input version))
+    ((equal "PodCertificateRequestList" (gethash "kind" input))
+     (let ((object (copy-core-object input)))
+       (setf (gethash "apiVersion" object) version
+             (gethash "items" object) (map 'vector (lambda (item) (pod-certificate-request-view item version))
+                                           (gethash "items" input)))
+       object))
+    ((hash-table-p (gethash "object" input))
+     (let ((object (copy-core-object input)))
+       (setf (gethash "object" object) (pod-certificate-request-api-view (gethash "object" input) version))
+       object))
+    (t input)))
+
+(defun normalize-pod-certificate-request (input namespace name store)
+  "Validate a PodCertificateRequest written in either served version and store it
+   as v1. The spec is immutable and a write to the main resource keeps the stored
+   status, as upstream's strategy does; only the status subresource sets status."
+  (let* ((object (copy-core-object (require-object input "PodCertificateRequest")))
+         (view (or *core-resource-view-version* "certificates.k8s.io/v1"))
+         (version (gethash "apiVersion" object view))
+         (metadata (require-object (gethash "metadata" object) "metadata"))
+         (existing (and store name
+                        (gethash (core-resource-key "podcertificaterequests" namespace name) (pod-store-resources store)))))
+    ;; A request names its version in the URL; an in-process writer may use either.
+    (unless (and (member version (if *core-resource-view-version*
+                                     (list view "certificates.k8s.io/v1")
+                                     (list "certificates.k8s.io/v1" +pod-certificate-request-beta-version+))
+                         :test #'equal)
+                 (equal "PodCertificateRequest" (gethash "kind" object "PodCertificateRequest")))
+      (core-resource-error 400 "BadRequest" "Expected ~A PodCertificateRequest" view))
+    (reject-unsupported-fields object '("apiVersion" "kind" "metadata" "spec" "status") "PodCertificateRequest")
+    (validate-core-metadata metadata namespace name)
+    (setf (gethash "apiVersion" object) "certificates.k8s.io/v1" (gethash "kind" object) "PodCertificateRequest"
+          (gethash "namespace" metadata) namespace)
+    (let ((spec (gethash "spec" object)))
+      (unless (hash-table-p spec)
+        (core-resource-error 422 "Invalid" "PodCertificateRequest spec must be an object"))
+      (unless (and (stringp (gethash "signerName" spec)) (plusp (length (gethash "signerName" spec))))
+        (core-resource-error 422 "Invalid" "PodCertificateRequest spec.signerName is required"))
+      ;; Like upstream, accept only a stub request that parses and is signed by its key.
+      (let ((stub (gethash "stubPKCS10Request" spec)))
+        (when (and (stringp stub) (plusp (length stub)) (not existing))
+          (handler-case
+              (parse-and-verify-certificate-request
+               (trivial-utf-8:string-to-utf-8-bytes
+                (pure-tls/acme::wrap-pem "CERTIFICATE REQUEST" (core-base64-bytes stub "spec.stubPKCS10Request"))))
+            (kubernetes-error (condition)
+              (core-resource-error 422 "Invalid" "spec.stubPKCS10Request: Invalid value: ~A"
+                                   (kubernetes-error-message condition))))))
+      (when existing
+        ;; A v1 writer never sees the v1beta1-only fields, so it cannot be clearing them.
+        (let ((stored (gethash "spec" existing (core-object))))
+          (dolist (field +pod-certificate-request-beta-fields+)
+            (multiple-value-bind (value present) (gethash field stored)
+              (when (and present (not (nth-value 1 (gethash field spec))))
+                (setf (gethash field spec) value))))
+          (unless (core-json-equal-p stored spec)
+            (core-resource-error 422 "Invalid" "PodCertificateRequest spec: Invalid value: field is immutable")))))
+    ;; Only an API request is held to that; in-process writers set status directly.
+    (when (and *core-resource-view-version* (not *typed-api-status-write*))
+      (let ((status (and existing (gethash "status" existing))))
+        (if (hash-table-p status)
+            (setf (gethash "status" object) (copy-core-object status))
+            (remhash "status" object))))
+    object))
+
+;;; ---------------------------------------------------------------------------
 ;;; Node claim -> PodCertificateRequest resource
 ;;; ---------------------------------------------------------------------------
 
@@ -35,11 +133,12 @@
   "The API UID of NODE-NAME, or NIL, for attributing a request to its node."
   (ignore-errors (gethash "uid" (gethash "metadata" (node-api-object (get-node store node-name))))))
 
-(defun pod-certificate-request-matches-claim-p (pcr pod-uid pkix)
+(defun pod-certificate-request-matches-claim-p (pcr pod-uid pkix &optional stub)
   "True when an existing PCR already belongs to this pod incarnation and key."
   (let ((spec (gethash "spec" pcr (core-object))))
     (and (equal pod-uid (gethash "podUID" spec))
-         (equal pkix (gethash "pkixPublicKey" spec)))))
+         (equal pkix (gethash "pkixPublicKey" spec))
+         (or (zerop (length stub)) (equal stub (gethash "stubPKCS10Request" spec))))))
 
 (defun signer-domain (signer-name)
   "The domain of a signerName, e.g. postgres.podcert.ate.dev for
@@ -72,8 +171,9 @@
          (name (slot-value claim 'gr8s.node.v1::name))
          (pod-uid (slot-value claim 'gr8s.node.v1::pod-uid))
          (pkix (slot-value claim 'gr8s.node.v1::pkix-public-key))
+         (stub (slot-value claim 'gr8s.node.v1::stub-pkcs10-request))
          (existing (ignore-errors (get-core-resource store "podcertificaterequests" namespace name))))
-    (when (and existing (pod-certificate-request-matches-claim-p existing pod-uid pkix))
+    (when (and existing (pod-certificate-request-matches-claim-p existing pod-uid pkix stub))
       (return-from ensure-pod-certificate-request-from-claim existing))
     (when existing
       ;; A request left from a prior incarnation or key: remove and reissue.
@@ -84,7 +184,7 @@
        (build-pod-certificate-request
         :name name :namespace namespace
         :signer-name (slot-value claim 'gr8s.node.v1::signer-name)
-        :pkix-public-key pkix
+        :pkix-public-key pkix :stub-pkcs10-request stub
         :pod-name (slot-value claim 'gr8s.node.v1::pod-name) :pod-uid pod-uid
         :service-account-name (slot-value claim 'gr8s.node.v1::service-account-name)
         ;; The node cannot resolve the SA UID (ServiceAccounts are not projected
@@ -180,6 +280,7 @@
               (pod-certificate-leaf-pem pki spki spiffe duration)
             (values (concatenate 'string leaf (pod-certificate-ca-pem pki)) nb na)))
       (flet ((stamp (seconds) (rfc3339-from-unix (- seconds 2208988800))))
+        (let ((*typed-api-status-write* t))
         (update-core-resource store "podcertificaterequests" (gethash "namespace" metadata)
                                (gethash "name" metadata)
           (lambda (current)
@@ -198,7 +299,7 @@
                                          "message" "gr8s built-in signer issued the certificate"
                                          "lastTransitionTime" (stamp not-before)))
                     (gethash "status" current) status))
-            current))))))
+            current)))))))
 
 (defun reconcile-pod-certificate-requests (store pki)
   "Sign every eligible PodCertificateRequest for a gr8s-hosted signer, resuming

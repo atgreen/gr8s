@@ -304,8 +304,10 @@
 
 ;;; Time getters
 
-(defun cel-timezone-offset (zone)
-  "Return ZONE's offset from UTC in seconds. Only UTC and fixed offsets exist here."
+(defun cel-timezone-offset (zone seconds)
+  "Return ZONE's offset from UTC in seconds at SECONDS past the Unix epoch.
+A ZONE with a colon is a fixed offset, as cel-go reads it; any other names a zone in the
+host's time zone database, as Go's time.LoadLocation does."
   (cond ((member zone '("UTC" "") :test #'equal) 0)
         ((cl-ppcre:scan "^[+-]?[0-9]{1,2}:[0-9]{2}$" zone)
          (let* ((signed (find (char zone 0) "+-"))
@@ -314,12 +316,15 @@
                 (minutes (parse-integer zone :start (1+ colon)))
                 (magnitude (+ (* 3600 hours) (* 60 minutes))))
            (if (eql signed #\-) (- magnitude) magnitude)))
-        (t (cel-fail "unknown time zone ~A: only UTC and fixed offsets are available" zone))))
+        ((find #\: zone) (cel-fail "unknown time zone ~A" zone))
+        (t (let ((loaded (handler-case (load-cron-zone zone)
+                           (invalid-cron-schedule () (cel-fail "unknown time zone ~A" zone)))))
+             (cron-zone-offset loaded (+ seconds +unix-epoch-universal+))))))
 
 (defun cel-timestamp-field (timestamp zone field)
   "Read the calendar FIELD of TIMESTAMP in ZONE."
   (multiple-value-bind (seconds fraction) (floor (cel-timestamp-nanos timestamp) 1000000000)
-    (multiple-value-bind (days rest) (floor (+ seconds (cel-timezone-offset zone)) 86400)
+    (multiple-value-bind (days rest) (floor (+ seconds (cel-timezone-offset zone seconds)) 86400)
       (multiple-value-bind (year month day) (cel-civil-from-days days)
         (ecase field
           (:year year)
