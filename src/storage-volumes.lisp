@@ -141,7 +141,10 @@
 entry is lchowned to GROUP and gains group rw (r when READONLY), and each directory also gains
 group x and setgid. Links are re-owned but never followed or chmodded. With POLICY
 OnRootMismatch, a root already owned by GROUP with those bits is left as it is."
-  (let* ((root (string-right-trim "/" (namestring root)))
+  ;; The kubelet walks the volume's mount, a real directory, so a root that is a link is
+  ;; resolved once, as a dir-link local PV's path is. Nothing below it is followed.
+  (let* ((root (string-right-trim "/" (or (canonical-linux-subpath (namestring root) :allow-missing t)
+                                          (namestring root))))
          (mask (if readonly #o440 #o660))
          (stat (sb-posix:lstat root)))
     (unless (and (equal policy "OnRootMismatch")
