@@ -321,13 +321,18 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
                (let ((bundle (ignore-errors (get-core-resource store "clustertrustbundles" nil name))))
                  (cond (bundle (list bundle))
                        (optional nil)
-                       (t (invalid-pod "clusterTrustBundle ~A not found" name))))
+                       ;; As for the kubelet, a mount that cannot be made yet keeps the
+                       ;; Pod waiting and is retried; it is not an invalid Pod.
+                       (t (error 'runtime-error
+                                 :message (format nil "clusterTrustBundle ~A not found" name)))))
                (sort (remove-if-not (lambda (bundle)
                                       (cluster-trust-bundle-matches-p bundle signer selector))
                                     (list-core-resources store "clustertrustbundles"))
                      #'string< :key (lambda (bundle) (gethash "name" (gethash "metadata" bundle)))))))
     (when (and (not name) (null bundles) (not optional))
-      (invalid-pod "no ClusterTrustBundle matches signerName ~A" signer))
+      (error 'runtime-error
+             :message (format nil "combination of signerName ~A and labelSelector matched zero ClusterTrustBundles"
+                              signer)))
     (let ((pem (with-output-to-string (out)
                  (dolist (bundle bundles)
                    (let ((trust (gethash "trustBundle" (gethash "spec" bundle (core-object)))))

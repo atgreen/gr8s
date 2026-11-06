@@ -50,9 +50,14 @@
                           (hash-table-p (gethash "running" (gethash "state" (aref matches 0))))))
                 (push name unready))))
     (if (or unknown unready (not (equal phase "Running")) (not (pod-node-name pod)))
+        ;; Worded as the kubelet's GeneratePodReadyCondition words it (Go's %s of a
+        ;; []string), which clients and the 1.37 ClusterTrustBundle specs match.
         (values "False" "ContainersNotReady"
-                (format nil "containers with unknown status: [~{~A~^, ~}]; containers not ready: [~{~A~^, ~}]"
-                        (nreverse unknown) (nreverse unready)))
+                (let ((messages (remove nil (list (when unknown
+                                                    (format nil "containers with unknown status: [~{~A~^ ~}]" (reverse unknown)))
+                                                  (when unready
+                                                    (format nil "containers with unready status: [~{~A~^ ~}]" (reverse unready)))))))
+                  (when messages (format nil "~{~A~^, ~}" messages))))
         (values "True" nil nil))))
 
 (defun pod-condition-transition-time (old incoming value now)
