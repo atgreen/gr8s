@@ -362,21 +362,43 @@ bare positional state directory for backward compatibility.  A missing
      (parse-witness-options (rest arguments)))
     ((string= "kubeconfig" (first arguments))
      (parse-kubeconfig-options (rest arguments)))
-    ((string= "runtime-assets" (first arguments))
-     (when (rest arguments)
-       (error "runtime-assets takes no arguments"))
-     (list :command :runtime-assets))
+    ((string= "runtime" (first arguments))
+     (parse-runtime-options (rest arguments)))
     ((string= "doctor" (first arguments))
      (parse-doctor-options (rest arguments)))
     (t (error "unknown command: ~A" (first arguments)))))
 
-(defun print-runtime-assets ()
-  (if *embedded-runtime-assets*
-      (dolist (asset *embedded-runtime-assets*)
-        (format t "~A: ~:D bytes~%"
-                (runtime-asset-name asset)
-                (length (runtime-asset-octets asset))))
-      (format t "runtime assets: external~%")))
+(defun parse-runtime-options (arguments)
+  "Parse `runtime install <gvisor|kata> [options]` / `runtime list [options]`."
+  (let ((subcommand (first arguments)))
+    (cond
+      ((string= subcommand "install")
+       (let ((name (second arguments))
+             (options (list :command :runtime-install
+                            :state-directory (namestring (default-state-directory)))))
+         (when (or (null name) (uiop:string-prefix-p "--" name))
+           (error "usage: gr8s runtime install <gvisor|kata> [options]"))
+         (setf (getf options :runtime-name) name)
+         (loop for (option value) on (cddr arguments) by #'cddr do
+           (cond
+             ((string= option "--state-directory") (setf (getf options :state-directory) value))
+             ((string= option "--version") (setf (getf options :version) value))
+             ((string= option "--release") (setf (getf options :release) value))
+             ((string= option "--hypervisor") (setf (getf options :hypervisor) value))
+             ((string= option "--sha256") (setf (getf options :sha256) value))
+             ((string= option "--bundle") (setf (getf options :bundle-path) value))
+             (t (error "unknown runtime install option: ~A" option))))
+         options))
+      ((string= subcommand "list")
+       (let ((options (list :command :runtime-list
+                            :state-directory (namestring (default-state-directory)))))
+         (loop for (option value) on (rest arguments) by #'cddr do
+           (cond
+             ((string= option "--state-directory") (setf (getf options :state-directory) value))
+             (t (error "unknown runtime list option: ~A" option))))
+         options))
+      (t (error "unknown runtime subcommand: ~A (use install or list)"
+                (or subcommand "<none>"))))))
 
 (defun print-kubeconfig (stream server-url)
   (format stream
@@ -811,8 +833,36 @@ handler and never gets here. A busy host makes this race likely."
          :pki pki)))))
 
 (defun print-help ()
-  (format t
-          "Usage:~%  gr8s serve [--state-directory DIR] [--listen 127.0.0.1] [--port PORT] [--node-port PORT] [--node-listen IPV4] [--node-address IPV4] [--node-name NAME] [--debug-slynk-port PORT] [--cluster-pod-cidr CIDR] [--node-pod-prefix BITS] [--disable-agent] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR] [--containerd-no-sync] [--kubeconfig FILE] [--local-storage-path DIR]~%  gr8s agent --server HOST:PORT [--token TOKEN --ca-pin SHA256] --node-name NAME --state-directory DIR [--node-address IPV4] [--runtime containerd|fake] [--containerd-mode managed|external] [--containerd-executable PATH] [--containerd-oci-runtime PATH] [--containerd-socket PATH] [--containerd-log-root DIR]~%  gr8s join-token --node-name NAME [--role node|control-plane] [--state-directory CONTROL_PLANE_DIR]~%  gr8s witness --join HOST:PORT --node-name NAME [--token TOKEN --ca-pin PIN] [--listen IPV4] [--port PORT] [--state-directory DIR]~%  gr8s kubeconfig [--output FILE] [--server URL]~%  gr8s runtime-assets~%  gr8s doctor [STATE_DIRECTORY]~%  gr8s version~%"))
+  (multiple-value-bind (major minor) (kubernetes-api-version-components)
+    (format t "~&gr8s ~A — a Kubernetes-compatible control plane in Common Lisp~%" +gr8s-version+)
+    (format t "Kubernetes API v~A.~A · no Envoy, no kube-proxy, no etcd~%" major minor)
+    (format t "Copyright (C) 2026 Anthony Green · MIT License~%~%"))
+  (format t "Usage: gr8s <command> [options]~%~%")
+  (format t "Cluster:~%")
+  (format t "  serve        Run the control plane (and, by default, a local node agent)~%")
+  (format t "  agent        Run a node agent that joins a control plane~%")
+  (format t "  witness      Run a witness arbiter for HA quorum~%")
+  (format t "  join-token   Print a token for a node or control-plane to join~%~%")
+  (format t "Runtime:~%")
+  (format t "  runtime install <gvisor|kata>   Download, verify and stage a sandbox runtime~%")
+  (format t "  runtime list                    List embedded assets and installed addons~%~%")
+  (format t "Tools:~%")
+  (format t "  kubeconfig   Print or write a cluster kubeconfig~%")
+  (format t "  doctor       Diagnose a node's state directory~%")
+  (format t "  version      Print the gr8s version~%~%")
+  (format t "serve options:~%")
+  (format t "  --state-directory DIR   --listen IPV4   --port PORT   --node-port PORT   --node-name NAME~%")
+  (format t "  --kubeconfig FILE   --cluster-pod-cidr CIDR   --node-pod-prefix BITS   --disable-agent~%")
+  (format t "  --runtime containerd|fake   --containerd-mode managed|external~%")
+  (format t "  --containerd-{executable,oci-runtime,socket,log-root} PATH   --containerd-no-sync~%")
+  (format t "  --node-listen IPV4   --node-address IPV4   --debug-slynk-port PORT   --local-storage-path DIR~%~%")
+  (format t "agent options:~%")
+  (format t "  --server HOST:PORT   --node-name NAME   --state-directory DIR   --token TOKEN   --ca-pin SHA256~%")
+  (format t "  --node-address IPV4   --runtime containerd|fake   --containerd-mode managed|external~%~%")
+  (format t "runtime install options:~%")
+  (format t "  --state-directory DIR   --version V   --hypervisor qemu|clh|fc|dragonball (kata)~%")
+  (format t "  --sha256 HEX (kata; trust-on-first-use)   --bundle FILE (use a local bundle)   --release R (gvisor)~%~%")
+  (format t "join-token / witness / kubeconfig / doctor take their own options; see the docs.~%"))
 
 (defun print-gr8s-banner (role)
   "Print a startup banner (Spring-Boot style) naming the role gr8s is starting."
@@ -853,8 +903,17 @@ handler and never gets here. A busy host makes this race likely."
                    (print-kubeconfig *standard-output* (getf options :server)))
                0)
               (:join-token (print-node-join-token options))
-              (:runtime-assets
-               (print-runtime-assets)
+              (:runtime-install
+               (install-runtime (getf options :runtime-name)
+                                (getf options :state-directory)
+                                :version (getf options :version)
+                                :release (getf options :release)
+                                :hypervisor (getf options :hypervisor)
+                                :sha256 (getf options :sha256)
+                                :bundle-path (getf options :bundle-path))
+               0)
+              (:runtime-list
+               (print-runtime-list (getf options :state-directory))
                0)
               (:doctor
                (if (plusp (apply #'run-doctor
