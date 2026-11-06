@@ -44,8 +44,8 @@ iptables, no Envoy, no etcd, and no C toolchain anywhere in the build.
   eBPF `sk_lookup` program steers the gateway port straight to the agent's
   socket. The agent *is* the gateway. See [Gateway API](#gateway-api-no-envoy).
 - **NetworkPolicy as a compiled firewall.** Policies become data in per-Pod eBPF
-  maps enforced at the Pod's host veth — default-deny egress proven on a real Pod
-  in the smoke test, with no per-change recompile. See
+  maps enforced at the Pod's host veth, ingress and egress, with connection
+  tracking for replies and no per-change recompile. See
   [NetworkPolicy](#networkpolicy-compiled-ebpf-firewall).
 - **Multi-master HA on a Raft written from scratch in Lisp.** No etcd, no
   external database: the control plane replicates its desired state over a
@@ -229,20 +229,25 @@ an eBPF rate-limit fast path are tracked follow-ups.
 ## NetworkPolicy (compiled eBPF firewall)
 
 `networking.k8s.io/v1` NetworkPolicy is enforced as a compiled eBPF firewall on
-real Pods. Rather than recompiling a program per policy change, gr8s folds
-enforcement into the per-Pod egress classifier at the host veth and drives it
-from BPF maps: the resolved policy — allowed destination CIDRs in an LPM trie and
-permitted `(group, protocol, port)` tuples in a hash — is written as *data* into
-pinned maps, so a policy change is a map update, not a recompile or a re-attach.
-Egress to a destination no rule permits is dropped (default-deny), and the drops
-are counted and exported through the same endpoint telemetry as the anti-spoof
-guard.
+real Pods, in both directions. Rather than recompiling a program per policy
+change, gr8s drives two per-Pod classifiers from BPF maps: the egress guard on
+the Pod's host veth ingress and the ingress guard on its egress. The control
+plane resolves each policy's Pod and Namespace selectors (`matchLabels`,
+`matchExpressions`, `kubernetes.io/metadata.name`) and egress named ports into
+addresses and numbers, and projects the result to nodes. A node writes each
+Pod's allowed peers and ports as *data* into pinned maps: peer CIDRs in an LPM
+trie whose longest match gives `ipBlock.except` exactly, and the allowed
+protocols and ports, ranges (`endPort`) included, in a second trie. A policy
+change is a map update, not a recompile or a re-attach. Both guards record each
+connection they allow in a shared LRU table, so replies pass the other
+direction's isolation. Drops are counted and exported through the same endpoint
+telemetry as the anti-spoof guard. The node always reaches its own Pods, from
+its gateway address, so probes and node DNS keep working.
 
-The smoke test applies a default-deny-egress policy to a running Pod and
-requires its previously reachable gateway to become unreachable, proving
-enforcement on a live Pod; detach-on-removal is covered by unit tests.
-Ingress-direction enforcement, connection tracking for reply traffic, namespace
-selectors and `ipBlock.except` are tracked for completeness.
+`scripts/test-endpoint-policy.py` runs both guards' bytecode over packet cases,
+in an interpreter or (`--kernel`) in Linux; the smoke test applies a
+default-deny-egress policy to a running Pod and requires its previously
+reachable gateway to become unreachable. IPv6 is not governed.
 
 ## High availability (pure-Lisp Raft)
 

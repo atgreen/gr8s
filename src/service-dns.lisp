@@ -66,8 +66,8 @@
                                                               kept))
                                                   ingress))))))))
       ((equal kind "NetworkPolicy")
-       ;; The whole spec (podSelector, policyTypes, ingress/egress rules) is what
-       ;; the agent needs to resolve and compile the per-Pod classifier.
+       ;; The spec as network-policy-projection resolved it: podSelector, defaulted
+       ;; policyTypes, and rules whose peers are addresses. The node needs nothing else.
        (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
       ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
        ;; The agent's Gateway controller reconciles these into L7 proxy listeners,
@@ -141,7 +141,8 @@
              (endpointslice-canonical-json (service-discovery-public-object object))))
           (sort (append (list-core-resources store "services")
                         (list-core-resources store "endpointslices")
-                        (list-core-resources store "networkpolicies")
+                        ;; Resolved against the cluster's Pods and Namespaces, which nodes do not see.
+                        (network-policy-projection store)
                         (list-core-resources store "gatewayclasses")
                         (list-core-resources store "gateways")
                         (list-core-resources store "httproutes")

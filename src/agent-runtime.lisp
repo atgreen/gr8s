@@ -523,7 +523,17 @@ the node from starting."
 
 (defun cache-node-observation (node-runtime pod status)
   "Persist actual status and transport Events without confusing runtime deletion with public phase."
-  (save-pod-observation (node-runtime-store node-runtime) pod status)
+  (let* ((store (node-runtime-store node-runtime))
+         (before (pod-observed-status store pod))
+         (address (gethash "podIP" status)))
+    (save-pod-observation store pod status)
+    ;; A Pod's policy can only be written once it has an address. Policies that
+    ;; select it may not change when it gets one, so no snapshot would follow.
+    (when (and (stringp address) (plusp (length address))
+               (not (equal address (and (hash-table-p before) (gethash "podIP" before)))))
+      (handler-case (converge-node-network-policies node-runtime)
+        (error (condition)
+          (format *error-output* "gr8s: NetworkPolicy convergence failed: ~A~%" condition)))))
   (let* ((finalization (pod-finalization-state (node-runtime-store node-runtime) pod))
          (message (pod-observed-status-message
                    pod status (runtime-events (node-runtime-runtime node-runtime) (pod-uid pod))
@@ -670,24 +680,31 @@ the node from starting."
     (error 'pod-reconciliation-superseded)))
 
 (defun pod-ip-identity-map (store)
-  "Map each known Pod IP -> (cons namespace label-alist), for policy selection."
+  "Map each local Pod's IP to the np-pod its NetworkPolicy is resolved for."
   (let ((map (make-hash-table :test #'equal)))
     (dolist (pod (list-pods store) map)
       (let* ((status (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)))
              (ip (and status (gethash "podIP" status)))
-             (metadata (gethash "metadata" (pod-object pod) (make-hash-table :test #'equal)))
-             (labels (gethash "labels" metadata)))
+             (object (pod-object pod))
+             (metadata (gethash "metadata" object (make-hash-table :test #'equal))))
         (when (and (stringp ip) (plusp (length ip)))
-          (let ((alist '()))
-            (when (hash-table-p labels)
-              (maphash (lambda (k v) (push (cons k v) alist)) labels))
-            (setf (gethash ip map) (cons (pod-namespace pod) alist))))))))
+          (setf (gethash ip map)
+                (make-np-pod :name (pod-name pod) :namespace (pod-namespace pod)
+                             :labels (gethash "labels" metadata (make-hash-table :test #'equal))
+                             :ip ip :ports (np-container-ports object))))))))
+
+(defvar *node-network-policy-lock* (bt:make-lock "gr8s node network policy")
+  "Serializes writes of Pods' policies from snapshots and from new Pod addresses.")
 
 (defun converge-node-network-policies (node-runtime)
-  "Write each local Pod's resolved egress NetworkPolicy into its pinned maps
-(data-only; the egress guard enforces it, no recompile/re-attach). Always runs,
-so clearing the last policy resets a Pod's mode to open. Fail-soft: never aborts
+  "Write each local Pod's resolved NetworkPolicy into its pinned maps (data only; its
+guards enforce it, no recompile or re-attach). Runs for every snapshot, so removing the
+last policy opens a Pod again, and when a Pod gets its address. Fail-soft: never aborts
 snapshot application."
+  (bt:with-lock-held (*node-network-policy-lock*)
+    (converge-node-network-policies-unlocked node-runtime)))
+
+(defun converge-node-network-policies-unlocked (node-runtime)
   (let ((manager (node-runtime-manager node-runtime))
         (ipam (node-runtime-ipam node-runtime))
         (store (node-runtime-store node-runtime)))
@@ -700,11 +717,9 @@ snapshot application."
                          (loop for key being the hash-keys of (node-ipam-allocations ipam)
                                  using (hash-value address)
                                collect (list (car key) (cdr key) address)))))
-        (converge-pod-egress-policies
+        (converge-pod-network-policies
          specs endpoints
-         :pod-finder (lambda (address)
-                       (let ((id (gethash address ip-map)))
-                         (if id (values (car id) (cdr id)) (values nil nil))))
+         :pod-finder (lambda (address) (gethash address ip-map))
          :directory-fn (lambda (sandbox)
                          (nth-value 2 (cni-pin-paths root sandbox))))))))
 

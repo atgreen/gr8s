@@ -28,7 +28,7 @@ prog-specs), the same shape as compile-service-lb."
   map-specs
   program-specs
   (maps nil)        ; alist (map name . map-info), populated by load
-  (program nil))    ; prog-info, populated by load
+  (programs nil))   ; alist (program name . prog-info), populated by load
 
 (defvar *egress-guard-specs* nil
   "The compiled (map-specs . program-specs). The guard's source is fixed in the image
@@ -74,9 +74,8 @@ LOAD-PROGRAMS are injected so the orchestration is testable without CAP_BPF."
                            (funcall create-map info))
                     collect (cons name info))))
     (setf (egress-policy-object-maps object) maps
-          (egress-policy-object-program object)
-          (cdr (first (funcall load-programs
-                               (egress-policy-object-program-specs object) maps))))
+          (egress-policy-object-programs object)
+          (funcall load-programs (egress-policy-object-program-specs object) maps))
     object))
 
 (defun egress-policy-object-find-map (object name)
@@ -84,14 +83,13 @@ LOAD-PROGRAMS are injected so the orchestration is testable without CAP_BPF."
   (cdr (assoc name (egress-policy-object-maps object) :test #'string=)))
 
 (defun egress-policy-object-find-program (object name)
-  "Return the loaded program's prog-info. NAME is the program's section symbol."
-  (declare (ignore name))
-  (egress-policy-object-program object))
+  "Return the loaded program NAME's prog-info (gr8s_egress_guard or gr8s_ingress_guard), or NIL."
+  (cdr (assoc name (egress-policy-object-programs object) :test #'string=)))
 
 (defun close-egress-policy-object (object &key (close-fd #'sb-posix:close))
-  "Close the program fd and every map fd the object holds."
-  (when (egress-policy-object-program object)
-    (let ((fd (whistler/loader:prog-info-fd (egress-policy-object-program object))))
+  "Close every program fd and map fd the object holds."
+  (dolist (entry (egress-policy-object-programs object))
+    (let ((fd (whistler/loader:prog-info-fd (cdr entry))))
       (when (and fd (plusp fd)) (ignore-errors (funcall close-fd fd)))))
   (dolist (entry (egress-policy-object-maps object))
     (let ((fd (whistler/loader:map-info-fd (cdr entry))))

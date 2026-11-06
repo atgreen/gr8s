@@ -33,11 +33,43 @@
         (:policy '(add-pod-counter policy-drops 1)))
      (return TC_ACT_SHOT)))
 
-;; Keys for the map-driven NetworkPolicy egress rules. The LPM-trie key is the
-;; kernel's {prefixlen, data} layout for IPv4 (addr stored in network order);
-;; the port key ties an allowed (proto, port) to the CIDR's rule group.
+;; Keys for the map-driven NetworkPolicy rules. The LPM-trie keys use the
+;; kernel's {prefixlen, data} layout. An address is stored as the packet
+;; carries it (network order); a port key holds the rule group, the IP
+;; protocol, a zero pad byte and the port in network order, so a port range
+;; is a set of prefixes. The flow key names a connection from the Pod's side:
+;; the peer, the Pod's port, the peer's port and the protocol, so both
+;; directions of one connection share it.
 (defstruct netpol-lpm-key (prefixlen u32) (addr u32))
-(defstruct netpol-port-key (group u32) (proto u8) (pad u8) (port u16))
+(defstruct netpol-port-key (prefixlen u32) (group u32) (proto u8) (pad u8) (port u16))
+(defstruct netpol-flow-key (peer u32) (pod-port u16) (peer-port u16) (proto u8) (pad0 u8) (pad1 u16))
+(defstruct netpol-flow-stamp (ns u64))
+;; A key or value held in a variable is a pointer, so these use map-lookup-ptr and
+;; map-update-ptr: plain map-lookup would key the map by the pointer's own bytes.
+
+;; Is (ADDR, PROTO, PORT) allowed by the CIDR and port tries? HAS-PORT is 0 when
+;; the packet carries no readable L4 ports, which then matches only rules that
+;; allow every port of the protocol (or every protocol).
+(defmacro netpol-allowed (cidr-map port-map addr proto port has-port)
+  `(let ((verdict u32 0)
+         (lkey (make-netpol-lpm-key)))
+     (setf (netpol-lpm-key-prefixlen lkey) 32
+           (netpol-lpm-key-addr lkey) ,addr)
+     (let ((hit (map-lookup-ptr ,cidr-map lkey)))
+       (when (/= hit 0)
+         (let ((pkey (make-netpol-port-key)))
+           (setf (netpol-port-key-prefixlen pkey) (if (= ,has-port 1) 64 40)
+                 (netpol-port-key-group pkey) (load u32 hit 0)
+                 (netpol-port-key-proto pkey) ,proto
+                 (netpol-port-key-pad pkey) 0
+                 (netpol-port-key-port pkey) (if (= ,has-port 1) ,port 0))
+           (when (/= (map-lookup-ptr ,port-map pkey) 0)
+             (setf verdict 1)))))
+     verdict))
+
+;; How long a connection's replies stay allowed after its last packet.
+(defmacro netpol-flow-lifetime (proto)
+  `(if (= ,proto 6) 7200000000000 180000000000))
 
 (defparameter gr8s::*egress-guard-map-forms*
   '((defmap rejected-spoofs :type :array
@@ -49,16 +81,24 @@
     ;; Allowed packets/bytes, dropped packets/bytes, malformed, unsupported, policy.
     (defmap traffic-stats :type :array
       :key-size 4 :value-size 8 :max-entries 7)
-    ;; NetworkPolicy egress (data-only, updated by the agent on policy change):
-    ;; mode 0 = Pod not egress-isolated (policy not enforced); 1 = default-deny.
-    (defmap netpol-egress-mode :type :array
-      :key-size 4 :value-size 4 :max-entries 1)
-    ;; Allowed destination CIDRs -> rule-group id (#xffffffff = all ports).
+    ;; NetworkPolicy, data the agent writes on policy change (no recompile):
+    ;; [0] is 1 when the Pod is isolated for egress, [1] when isolated for ingress.
+    (defmap netpol-mode :type :array
+      :key-size 4 :value-size 4 :max-entries 2)
+    ;; Peer CIDRs -> the rule group of the longest matching prefix (0 = nothing allowed).
     (defmap netpol-egress-cidr :type :lpm-trie
-      :key-size 8 :value-size 4 :max-entries 1024 :map-flags 1) ; BPF_F_NO_PREALLOC
-    ;; Allowed (group, proto, port) tuples for port-restricted rules.
-    (defmap netpol-egress-port :type :hash
-      :key-size 8 :value-size 1 :max-entries 1024)))
+      :key-size 8 :value-size 4 :max-entries 16384 :map-flags 1) ; BPF_F_NO_PREALLOC
+    ;; (group, protocol, port) prefixes each group allows.
+    (defmap netpol-egress-ports :type :lpm-trie
+      :key-size 12 :value-size 1 :max-entries 4096 :map-flags 1)
+    (defmap netpol-ingress-cidr :type :lpm-trie
+      :key-size 8 :value-size 4 :max-entries 16384 :map-flags 1)
+    (defmap netpol-ingress-ports :type :lpm-trie
+      :key-size 12 :value-size 1 :max-entries 4096 :map-flags 1)
+    ;; Connections allowed in either direction -> when their last packet passed, so
+    ;; that their replies pass the other direction's isolation.
+    (defmap netpol-flows :type :lru-hash
+      :key-size 12 :value-size 8 :max-entries 4096)))
 
 (defparameter gr8s::*egress-guard-program-forms*
   '((defprog gr8s-egress-guard (:type :tc :section "classifier" :license "GPL")
@@ -73,7 +113,8 @@
             (policy-drops (map-lookup traffic-stats 6))
             (spoofs (map-lookup rejected-spoofs 0))
             (identity (map-lookup endpoint-identity 0))
-            (mode (map-lookup netpol-egress-mode 0))
+            (egress-mode (map-lookup netpol-mode 0))
+            (ingress-mode (map-lookup netpol-mode 1))
             (data u64 (tc-data)) (data-end u64 (tc-data-end)))
         (when (> (+ data 14) data-end) (drop-pod-packet :malformed))
         ;; Keep all helpers before packet bounds proofs. Whistler may otherwise
@@ -120,39 +161,37 @@
                        (store u32 data 0 0)                        ; zero dst MAC bytes 0-3
                        (store u16 data 4 0)                        ; zero dst MAC bytes 4-5
                        (return (redirect 1 1))))                   ; lo = ifindex 1, BPF_F_INGRESS
-                   ;; NetworkPolicy egress (map-driven; agent updates the maps on
-                   ;; policy change, no recompile). When the Pod is egress-isolated
-                   ;; (mode=1): the destination must match an allowed CIDR, and for
-                   ;; port-restricted rules the (group, proto, dport) must be listed.
-                   (when (/= mode 0)
-                     (when (/= (load u32 mode 0) 0)
-                       ;; Read every packet field BEFORE any map lookup:
-                       ;; bpf_map_lookup_elem resets the verifier's proven packet
-                       ;; range, so a packet deref after a lookup is rejected.
-                       (let ((dst u32 (load u32 ip 16))
-                             (proto u8 (load u8 ip 9))
-                             (ihl u8 (logand (load u8 ip 0) 15))
-                             (dport u16 0)
+                   ;; NetworkPolicy (map-driven; the agent rewrites the maps on policy
+                   ;; change). Egress isolation allows a packet that its rules allow, or
+                   ;; that answers a connection the ingress guard admitted. Either
+                   ;; isolation records the connection, so that its replies pass.
+                   (let ((egress-on u32 (if (/= egress-mode 0) (load u32 egress-mode 0) 0))
+                         (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0)))
+                     (when (or (/= egress-on 0) (/= ingress-on 0))
+                       ;; Copy every packet field into the stack key BEFORE any helper
+                       ;; call: Whistler rematerializes a let-bound packet load at its
+                       ;; uses, and a load after a helper call reads clobbered registers.
+                       (let ((fkey (make-netpol-flow-key))
                              (has-port u8 0))
-                         (when (and (= ihl 5) (<= (+ data 38) data-end))
-                           (setf dport (ntohs (load u16 ip 22)) has-port 1))
-                         (let ((lkey (make-netpol-lpm-key)))
-                           (setf (netpol-lpm-key-prefixlen lkey) 32
-                                 (netpol-lpm-key-addr lkey) dst)
-                           (let ((hit (map-lookup netpol-egress-cidr lkey)))
-                             (if (/= hit 0)
-                                 (let ((grp u32 (load u32 hit 0)))
-                                   (when (/= grp #xffffffff)
-                                     (if (= has-port 1)
-                                         (let ((pkey (make-netpol-port-key)))
-                                           (setf (netpol-port-key-group pkey) grp
-                                                 (netpol-port-key-proto pkey) proto
-                                                 (netpol-port-key-pad pkey) 0
-                                                 (netpol-port-key-port pkey) dport)
-                                           (when (= (map-lookup netpol-egress-port pkey) 0)
-                                             (drop-pod-packet :policy)))
-                                         (drop-pod-packet :policy))))
-                                 (drop-pod-packet :policy)))))))))
+                         (setf (netpol-flow-key-peer fkey) (load u32 ip 16)
+                               (netpol-flow-key-proto fkey) (load u8 ip 9))
+                         (when (and (= (logand (load u8 ip 0) 15) 5) (<= (+ data 38) data-end))
+                           (setf (netpol-flow-key-pod-port fkey) (load u16 ip 20)
+                                 (netpol-flow-key-peer-port fkey) (load u16 ip 22)
+                                 has-port 1))
+                         (let ((now u64 (ktime-get-ns)))
+                           (when (/= egress-on 0)
+                             (when (= (netpol-allowed netpol-egress-cidr netpol-egress-ports
+                                                      (netpol-flow-key-peer fkey) (netpol-flow-key-proto fkey)
+                                                      (netpol-flow-key-peer-port fkey) has-port)
+                                      0)
+                               (let ((flow (map-lookup-ptr netpol-flows fkey)))
+                                 (when (= flow 0) (drop-pod-packet :policy))
+                                 (when (> (- now (load u64 flow 0)) (netpol-flow-lifetime (netpol-flow-key-proto fkey)))
+                                   (drop-pod-packet :policy)))))
+                           (let ((stamp (make-netpol-flow-stamp)))
+                             (setf (netpol-flow-stamp-ns stamp) now)
+                             (map-update-ptr netpol-flows fkey stamp 0))))))))
                 ((= protocol #x0806)
                  (when (> (+ data 42) data-end) (drop-pod-packet :malformed))
                  (let ((arp u64 (+ data 14)))
@@ -170,4 +209,59 @@
           (drop-pod-packet :spoof))
         (add-pod-counter allowed-packets 1)
         (add-pod-counter allowed-bytes (ctx u32 0))
+        TC_ACT_OK))
+    ;; Pod ingress (host veth egress, or the Pod interface's ingress when chained):
+    ;; the same rules for the packet's source and the Pod's destination port. Only
+    ;; IPv4 is governed; the node gateway address, from which the node's probes,
+    ;; DNS answers and proxies reach the Pod, always passes.
+    (defprog gr8s-ingress-guard (:type :tc :section "classifier" :license "GPL")
+      ;; Read the packet's fields into locals before any helper call or stack struct:
+      ;; the calls clobber the registers holding the context and packet pointers.
+      (let ((data u64 (tc-data))
+            (data-end u64 (tc-data-end))
+            (ipv4 u8 0)
+            (peer u32 0)
+            (proto u8 0)
+            (sport u16 0)
+            (dport u16 0)
+            (has-port u8 0))
+        (when (and (<= (+ data 34) data-end)
+                   (= (eth-type data) #x0800)
+                   (= (logand (load u8 data 14) #xf0) #x40))
+          (setf ipv4 1
+                peer (load u32 data 26)
+                proto (load u8 data 23))
+          (when (and (= (logand (load u8 data 14) 15) 5) (<= (+ data 38) data-end))
+            (setf sport (load u16 data 34)
+                  dport (load u16 data 36)
+                  has-port 1)))
+        (when (and (= ipv4 1) (/= (ntohl peer) #xa9fe0101))
+          (let ((policy-drops (map-lookup traffic-stats 6))
+                (egress-mode (map-lookup netpol-mode 0))
+                (ingress-mode (map-lookup netpol-mode 1)))
+            (let ((egress-on u32 (if (/= egress-mode 0) (load u32 egress-mode 0) 0))
+                  (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0)))
+              (when (or (/= egress-on 0) (/= ingress-on 0))
+                (let ((now u64 (ktime-get-ns)))
+                  ;; Whistler builds a stack struct's address in r1 whatever r1 holds,
+                  ;; so the key is made just after a helper call, when r1 is free.
+                  (let ((fkey (make-netpol-flow-key)))
+                    (setf (netpol-flow-key-peer fkey) peer
+                          (netpol-flow-key-pod-port fkey) dport
+                          (netpol-flow-key-peer-port fkey) sport
+                          (netpol-flow-key-proto fkey) proto)
+                    (when (/= ingress-on 0)
+                      (when (= (netpol-allowed netpol-ingress-cidr netpol-ingress-ports
+                                               peer proto dport has-port)
+                               0)
+                        (let ((flow (map-lookup-ptr netpol-flows fkey)))
+                          (when (= flow 0)
+                            (add-pod-counter policy-drops 1)
+                            (return TC_ACT_SHOT))
+                          (when (> (- now (load u64 flow 0)) (netpol-flow-lifetime proto))
+                            (add-pod-counter policy-drops 1)
+                            (return TC_ACT_SHOT)))))
+                    (let ((stamp (make-netpol-flow-stamp)))
+                      (setf (netpol-flow-stamp-ns stamp) now)
+                      (map-update-ptr netpol-flows fkey stamp 0))))))))
         TC_ACT_OK))))
