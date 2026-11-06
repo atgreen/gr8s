@@ -3,7 +3,8 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Serve a node's kubelet endpoints over HTTPS, as the kubelet does on port 10250:
-;;;; /metrics/resource, /stats/summary, /metrics and /healthz, for metrics-server and the API
+;;;; /metrics/resource, /metrics/cadvisor, /stats/summary, /metrics and /healthz, for
+;;;; metrics-server, Prometheus and the API
 ;;;; server's Node proxy. The serving certificate is signed by the cluster CA for the
 ;;;; node's address, so clients that trust the in-cluster CA verify it. Requests are
 ;;;; authenticated by a client certificate from that CA or by a bearer token checked
@@ -311,7 +312,8 @@ own subresource and fall back to proxy; /stats and /metrics have only theirs."
    (private-key :initarg :private-key :reader kubelet-acceptor-private-key)
    (node-name :initarg :node-name :reader kubelet-acceptor-node-name)
    (auth :initarg :auth :reader kubelet-acceptor-auth)
-   (stats-function :initarg :stats-function :reader kubelet-acceptor-stats-function))
+   (stats-function :initarg :stats-function :reader kubelet-acceptor-stats-function)
+   (cadvisor-function :initarg :cadvisor-function :initform (constantly nil) :reader kubelet-acceptor-cadvisor-function))
   (:documentation "Serve a node's kubelet endpoints to authenticated, authorized callers over TLS.")
   (:default-initargs
    :taskmaster (make-instance 'hunchentoot:one-thread-per-connection-taskmaster :max-thread-count 64
@@ -361,6 +363,13 @@ own subresource and fall back to proxy; /stats and /metrics have only theirs."
 (defun kubelet-endpoint-response (acceptor path method)
   "Serve PATH for a caller already allowed to read it."
   (cond
+    ((and (equal path "/metrics/cadvisor") (member method '(:get :head)))
+     (kubelet-text-response
+      200 (handler-case (kubelet-cadvisor-metrics-text (funcall (kubelet-acceptor-cadvisor-function acceptor)))
+            (error (condition)
+              (format *error-output* "gr8s kubelet cadvisor metrics: ~A~%" condition)
+              (kubelet-cadvisor-metrics-text nil)))
+      "text/plain; version=0.0.4; charset=utf-8"))
     ((and (equal path "/metrics") (member method '(:get :head)))
      (kubelet-text-response
       200 (kubelet-own-metrics-text (ignore-errors (funcall (kubelet-acceptor-stats-function acceptor)))
@@ -407,7 +416,7 @@ own subresource and fall back to proxy; /stats and /metrics have only theirs."
         (kubelet-text-response 500 (format nil "Internal Error: ~A~%" condition))))))
 
 (defun start-kubelet-server (&key (address "0.0.0.0") (port +kubelet-default-port+) certificate key
-                                  node-name auth stats-function)
+                                  node-name auth stats-function (cadvisor-function (constantly nil)))
   "Start serving NODE-NAME's kubelet endpoints. STATS-FUNCTION returns a fresh KUBELET-NODE-STATS."
   (hunchentoot:start
    (make-instance 'kubelet-acceptor :address address :port port
@@ -415,6 +424,7 @@ own subresource and fall back to proxy; /stats and /metrics have only theirs."
                                     :certificate (pure-tls:load-certificate-chain certificate)
                                     :private-key (pure-tls:load-private-key key)
                                     :node-name node-name :auth auth :stats-function stats-function
+                                    :cadvisor-function cadvisor-function
                                     :access-log-destination nil :message-log-destination *error-output*)))
 
 (defun stop-kubelet-server (server)
@@ -472,7 +482,8 @@ returning it, or NIL. A port another process holds leaves the node without one, 
                  :auth (make-kubelet-auth :client-ca ca :api-address api-host :api-port api-port
                                           :trust-certificates (list ca)
                                           :client-certificate client-certificate :client-key client-key)
-                 :stats-function (lambda () (collect-kubelet-node-stats runtime node-name)))))
+                 :stats-function (lambda () (collect-kubelet-node-stats runtime node-name))
+                 :cadvisor-function (lambda () (runtime-cadvisor-entries runtime)))))
           (error (condition)
             (format *error-output* "gr8s kubelet endpoints on port ~D are unavailable: ~A~%" port condition)
             nil))))))
