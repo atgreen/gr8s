@@ -257,7 +257,8 @@ directives and Pod metadata, so what is left must still equal the stored templat
         (when (gethash field (gethash "metadata" template))
           (setf (gethash field embedded) (copy-core-object (gethash field (gethash "metadata" template))))))
       (let ((checked (parse-pod (core-object "apiVersion" "v1" "kind" "Pod" "metadata" embedded "spec" (copy-core-object pod-spec)))))
-        (setf (gethash "spec" template) (copy-core-object (gethash "spec" (pod-to-object checked))))))
+        (setf (gethash "spec" template) (copy-core-object (gethash "spec" (pod-to-object checked))))
+        (default-pod-template-spec-object (gethash "spec" template))))
     object))
 
 (defun prepare-batch-write (object existing)
@@ -292,7 +293,9 @@ directives and Pod metadata, so what is left must still equal the stored templat
         (unless (workload-equal-p (gethash field spec) (gethash field (gethash "spec" existing)))
           (core-resource-error 422 "Invalid" "Job.spec.~A is immutable" field)))
       (validate-job-completions-update spec (gethash "spec" existing))
-      (unless (workload-equal-p (job-template-immutable-view spec existing) (gethash "template" (gethash "spec" existing)))
+      ;; A Job an older gr8s stored lacks the template defaults its next write adds.
+      (unless (workload-equal-p (defaulted-pod-template (job-template-immutable-view spec existing))
+                                (defaulted-pod-template (gethash "template" (gethash "spec" existing))))
         (core-resource-error 422 "Invalid" "Job.spec.template is immutable")))
     (remhash "deletionTimestamp" metadata)
     (when (and existing (gethash "deletionTimestamp" (gethash "metadata" existing)))

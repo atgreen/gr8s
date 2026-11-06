@@ -87,7 +87,10 @@
   unschedulable
   ;; A Node created through the API has no agent: its status is whatever was written.
   api-only
-  api-status)
+  api-status
+  ;; When the node was first registered, as an RFC 3339 timestamp; NIL for a node an older
+  ;; gr8s registered until its agent registers again.
+  creation-timestamp)
 
 (defun node-record-runtime-ready-p (node)
   "Return whether NODE's agent holds its lease and its container runtime can run Pods."

@@ -186,6 +186,8 @@
     (when (node-record-unschedulable node) (setf (gethash "unschedulable" object) t))
     (when (node-record-api-only node) (setf (gethash "apiOnly" object) t))
     (when (node-record-api-status node) (setf (gethash "apiStatus" object) (node-record-api-status node)))
+    (when (node-record-creation-timestamp node)
+      (setf (gethash "creationTimestamp" object) (node-record-creation-timestamp node)))
     object))
 
 (defun parse-node-record (input)
@@ -211,6 +213,8 @@
                       :unschedulable (eq t (gethash "unschedulable" object))
                       :api-only (eq t (gethash "apiOnly" object))
                       :api-status (gethash "apiStatus" object)
+                      :creation-timestamp (let ((time (gethash "creationTimestamp" object)))
+                                            (and (stringp time) time))
                       :ready-p (and (eq t (gethash "ready" object))
                                     (integerp heartbeat) (integerp deadline)
                                     (<= (get-universal-time) deadline)))))
@@ -451,6 +455,8 @@
 
 (defun create-pod-unlocked (store pod)
   "Create POD while the caller holds STORE's lock, including owner-checked controller writes."
+    ;; Controllers create Pods here directly, and the API server defaults every Pod it creates.
+    (default-created-pod pod)
     (assign-generated-pod-name-unlocked store pod)
     (when (gethash (pod-key (pod-namespace pod) (pod-name pod))
                    (pod-store-pods store))
@@ -496,6 +502,7 @@
       (validate-pod-finalizer-update existing replacement)
       (validate-pod-policy-update existing replacement)
       (preserve-pod-ephemeral-containers existing replacement)
+      (default-updated-pod existing replacement)
       (when (pod-node-name existing)
         (when (and (pod-node-name replacement)
                    (not (string= (pod-node-name existing)

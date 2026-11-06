@@ -80,6 +80,19 @@ Keys are sorted, unset and omitempty zero values vanish, and pointers to empty o
       (setf (gethash key replace) (gethash key template)))
     (core-object "spec" (core-object "template" replace))))
 
+(defun revision-template-key (data)
+  "Return the Pod template revision DATA records, defaulted and in its Go JSON view."
+  (let ((template (defaulted-pod-template (gethash "template" (gethash "spec" data) (core-object)))))
+    (remhash "$patch" template)
+    (go-json-view template "k8s.io.api.core.v1.PodTemplateSpec")))
+
+(defun revision-data-equal-p (left right)
+  "Return whether revision data LEFT and RIGHT record the same template, whichever of them was
+stored by an older gr8s without the API defaults: a template that gains its defaults on its
+next write is not a new revision, and must not roll every Pod."
+  (or (workload-equal-p left right)
+      (workload-equal-p (revision-template-key left) (revision-template-key right))))
+
 (defun daemonset-revision-hash (data collision)
   "Hash revision DATA and the collision count into a label value and name suffix."
   (string-downcase
@@ -152,7 +165,7 @@ Keys are sorted, unset and omitempty zero values vanish, and pointers to empty o
         (kubernetes-error (condition)
           (unless (= 409 (kubernetes-error-status-code condition)) (error condition))
           (let ((existing (get-core-resource store "controllerrevisions" namespace name)))
-            (if (and (workload-owned-p existing daemonset) (workload-equal-p (gethash "data" existing) data))
+            (if (and (workload-owned-p existing daemonset) (revision-data-equal-p (gethash "data" existing) data))
                 existing
                 (progn (bump-daemonset-collision-count store daemonset (1+ collision))
                        (core-resource-error 409 "Conflict" "ControllerRevision name collision; the next pass uses a new count")))))))))
@@ -165,7 +178,7 @@ the DaemonSet, which nothing does for a revision a client just created. This
 level-triggered loop syncs always, so it keeps duplicates and ages them out with
 the rest of the history instead of deleting one a client is about to use."
   (let* ((revisions (daemonset-revisions store daemonset)) (data (daemonset-revision-data daemonset))
-         (matching (remove-if-not (lambda (revision) (workload-equal-p (gethash "data" revision) data)) revisions))
+         (matching (remove-if-not (lambda (revision) (revision-data-equal-p (gethash "data" revision) data)) revisions))
          (different (remove-if (lambda (revision) (member revision matching :test #'eq)) revisions))
          (number (1+ (reduce #'max different :key (lambda (revision) (gethash "revision" revision)) :initial-value 0)))
          (current (or (car (last matching)) (create-daemonset-revision store daemonset data number))))
