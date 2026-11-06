@@ -74,3 +74,42 @@
     (is (search "process_max_fds " text))
     (is (search "process_virtual_memory_bytes " text))
     (is (search "process_start_time_seconds " text))))
+
+(test claim-volumes-report-kubelet-volume-stats-until-their-pod-is-cleaned-up
+  (with-temporary-store (store directory)
+    (let* ((runtime (gr8s::%make-containerd-runtime :log-root (merge-pathnames "logs/" directory) :resource-store store))
+           (backing (merge-pathnames "backing/" directory)))
+      (gr8s::create-core-resource store "persistentvolumes" (storage-test-volume "provided" backing) nil)
+      (gr8s::create-core-resource store "persistentvolumeclaims" (storage-test-claim "data") "default")
+      (gr8s::reconcile-storage-bindings store)
+      (let* ((pod (create-pod store (storage-test-pod "consumer" "data")))
+             (volume (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0))
+             (path (gr8s::materialize-pod-volume runtime pod volume)))
+        (is (equal (namestring backing) (namestring path)))
+        (is (equal (list (list "default" "data" (namestring backing))) (gr8s::runtime-claim-volume-paths runtime)))
+        ;; The record is on disk, so a restarted agent still reports a consumer it didn't restart.
+        (is (equal (list (list "default" "data" (namestring backing)))
+                   (gr8s::runtime-claim-volume-paths
+                    (gr8s::%make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))))
+        ;; A second Pod on the same claim, and a path that can't be measured, add no series.
+        (let ((text (gr8s::kubelet-volume-stats-text
+                     (append (gr8s::runtime-claim-volume-paths runtime)
+                             (list (list "default" "data" (namestring backing))
+                                   (list "default" "gone" (namestring (merge-pathnames "missing/" directory))))))))
+          (dolist (family '("capacity_bytes" "available_bytes" "used_bytes" "inodes" "inodes_free" "inodes_used"))
+            (is (search (format nil "# TYPE kubelet_volume_stats_~A gauge" family) text))
+            (is (= 1 (count-matches (cl-ppcre:quote-meta-chars
+                                    (format nil "kubelet_volume_stats_~A{namespace=\"default\",persistentvolumeclaim=\"data\"} " family))
+                                   text))
+                "~A" family))
+          (is (not (search "gone" text))))
+        (destructuring-bind (capacity available used inodes free-inodes used-inodes)
+            (gr8s::filesystem-statistics (namestring backing))
+          (is (<= available capacity))
+          (is (<= used capacity))
+          (is (= inodes (+ free-inodes used-inodes))))
+        (is (search "kubelet_volume_stats_used_bytes{namespace=\"default\",persistentvolumeclaim=\"data\"}"
+                    (gr8s::kubelet-own-metrics-text nil "node-a" (gr8s::runtime-claim-volume-paths runtime))))
+        (gr8s::cleanup-pod-volumes runtime (pod-uid pod))
+        (is (null (gr8s::runtime-claim-volume-paths runtime)))
+        (is (equal "" (gr8s::kubelet-volume-stats-text nil)))))))

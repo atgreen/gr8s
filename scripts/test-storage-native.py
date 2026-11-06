@@ -120,6 +120,27 @@ class NativeStorageSmoke:
                                                       {"name": "host-data", "mountPath": "/host-data", "readOnly": True}]}]},
         }
 
+    def volume_stats(self):
+        """Return the kubelet's volume statistics for the claim, read through the Node proxy."""
+        result = self.kubectl("get", "--raw", "/api/v1/nodes/gr8s-storage/proxy/metrics", check=False)
+        if result.returncode:
+            return {}
+        stats = {}
+        for line in result.stdout.splitlines():
+            if line.startswith("kubelet_volume_stats_") and 'persistentvolumeclaim="storage-claim"' in line:
+                name, value = line.split("{")[0], float(line.rsplit(" ", 1)[1])
+                stats[name[len("kubelet_volume_stats_"):]] = value
+        return stats
+
+    def check_volume_stats(self):
+        """Require every statfs series for the mounted claim, consistent with the backing filesystem."""
+        wait_for(lambda: len(self.volume_stats()) == 6, "kubelet_volume_stats_* for the mounted claim", 60)
+        stats = self.volume_stats()
+        disk = os.statvfs(self.backing)
+        assert stats["capacity_bytes"] == disk.f_blocks * disk.f_frsize, stats
+        assert 0 < stats["available_bytes"] <= stats["capacity_bytes"], stats
+        assert stats["inodes"] == stats["inodes_free"] + stats["inodes_used"], stats
+
     def wait_running(self, name):
         """Wait for the agent to observe a real running container."""
         wait_for(lambda: self.phase("pod", name) == "Running", f"Pod {name} Running")
@@ -158,6 +179,8 @@ class NativeStorageSmoke:
         assert self.kubectl("exec", "storage-writer", "--", "cat", "/host-data/native").stdout.strip() == "native-write"
         assert (self.backing / "starts").read_text().splitlines() == ["started"]
         print("real local-PV/PVC and direct hostPath mounts passed", flush=True)
+        self.check_volume_stats()
+        print("kubelet volume statistics reported the mounted claim", flush=True)
 
         self.stop()
         self.start()
@@ -165,6 +188,8 @@ class NativeStorageSmoke:
         assert self.kubectl("exec", "storage-writer", "--", "cat", "/data/native").stdout.strip() == "native-write"
         assert (self.backing / "starts").read_text().splitlines() == ["started"], "healthy consumer restarted during server recovery"
         print("native restart retained the running consumer and backing data", flush=True)
+        self.check_volume_stats()
+        print("kubelet volume statistics survived the restart", flush=True)
 
         self.apply(self.pod("storage-reader", readonly=True))
         self.wait_running("storage-reader")
