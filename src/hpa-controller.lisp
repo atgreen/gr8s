@@ -347,6 +347,35 @@ FALLBACK gives what a missing Pod is assumed to use when scaling down."
     (and type (member (first type) '("deployments" "replicasets" "replicationcontrollers" "statefulsets") :test #'equal)
          (first type))))
 
+(defun hpa-custom-target (store ref namespace)
+  "Resolve SCALE-TARGET-REF to a custom resource whose version serves the scale subresource.
+Return its definition, the Scale its paths describe, and the scale paths of the stored version."
+  (let* ((api-version (gethash "apiVersion" ref ""))
+         (slash (position #\/ api-version))
+         (group (and slash (subseq api-version 0 slash)))
+         (version (and slash (subseq api-version (1+ slash))))
+         (definition (and group
+                          (find-if (lambda (definition)
+                                     (let ((spec (gethash "spec" definition)))
+                                       (and (equal group (gethash "group" spec))
+                                            (equal (gethash "kind" ref) (gethash "kind" (gethash "names" spec))))))
+                                   (list-core-resources store "customresourcedefinitions"))))
+         (served (and definition (crd-version definition version :served t)))
+         (scale (and served (gethash "scale" (gethash "subresources" served (core-object))))))
+    (when (hash-table-p scale)
+      (let ((object (handler-case (get-core-resource store (crd-custom-key definition) namespace (gethash "name" ref))
+                      (kubernetes-error () nil))))
+        (when object
+          (let ((*crd-view-definition* definition) (*crd-request-version* version))
+            (values definition
+                    (crd-scale-view (crd-api-view object) definition)
+                    (gethash "scale" (gethash "subresources" (crd-storage-version definition) (core-object))))))))))
+
+(defun hpa-selected-pods (store selector namespace)
+  "Return the Pods in NAMESPACE whose labels match the label selector string SELECTOR."
+  (let ((predicate (core-selector-predicate selector)))
+    (remove-if-not (lambda (pod) (funcall predicate (pod-to-object pod))) (list-pods store namespace))))
+
 (defun hpa-target-pods (store target namespace)
   "Return the Pods TARGET's selector chooses."
   (let ((selector (workload-spec-selector target)))
@@ -382,7 +411,13 @@ FALLBACK gives what a missing Pod is assumed to use when scaling down."
          (minimum (gethash "minReplicas" spec 1)) (maximum (gethash "maxReplicas" spec))
          (target (when resource
                    (handler-case (get-core-resource store resource namespace (gethash "name" ref))
-                     (kubernetes-error () nil)))))
+                     (kubernetes-error () nil))))
+         (definition nil) (custom-scale nil) (scale-paths nil))
+    ;; Anything else is read and scaled through its scale subresource, as upstream's controller does.
+    (unless resource
+      (multiple-value-setq (definition custom-scale scale-paths) (hpa-custom-target store ref namespace))
+      (when custom-scale
+        (setf target custom-scale resource (crd-custom-key definition))))
     (unless target
       (write-hpa-status store hpa 0 (gethash "desiredReplicas" (gethash "status" hpa (core-object)) 0) nil
                         (list (list "AbleToScale" "False" "FailedGetScale"
@@ -406,9 +441,15 @@ FALLBACK gives what a missing Pod is assumed to use when scaling down."
         ((< current minimum)
          (setf desired minimum)
          (push (list "ScalingLimited" "True" "TooFewReplicas" "the desired replica count is less than the minimum replica count") entries))
+        ((and custom-scale (zerop (length (gethash "selector" (gethash "status" custom-scale) ""))))
+         (push (list "ScalingActive" "False" "InvalidSelector" "selector is required") entries))
         (t
          (multiple-value-bind (proposal observed-metrics reason message)
-             (hpa-evaluate-metrics reconciler state spec current (hpa-target-pods store target namespace) now)
+             (hpa-evaluate-metrics reconciler state spec current
+                                   (if custom-scale
+                                       (hpa-selected-pods store (gethash "selector" (gethash "status" custom-scale) "") namespace)
+                                       (hpa-target-pods store target namespace))
+                                   now)
            (setf metrics observed-metrics)
            (if proposal
                (push (if reason
@@ -427,8 +468,11 @@ FALLBACK gives what a missing Pod is assumed to use when scaling down."
         (when scaled
           (setf able (list "AbleToScale" "True" "SucceededRescale"
                            (format nil "the HPA controller was able to update the target scale to ~D" desired)))
-          (update-owned-workload store resource target
-            (lambda (object) (setf (gethash "replicas" (gethash "spec" object)) desired) object))
+          (if custom-scale
+              (update-owned-workload store resource target
+                (lambda (object) (crd-write-json-path object (gethash "specReplicasPath" scale-paths) desired)))
+              (update-owned-workload store resource target
+                (lambda (object) (setf (gethash "replicas" (gethash "spec" object)) desired) object)))
           (record-hpa-scale-event state key current desired now))
         (write-hpa-status store hpa observed desired metrics (cons able (reverse entries)) now scaled)))))
 

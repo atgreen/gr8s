@@ -17,7 +17,9 @@
              (type (assoc (first remaining) *stored-resource-types* :test #'equal)))
         (when (and type (or (equal version (third type))
                                   (and (equal "events" (first type)) (equal version "events.k8s.io/v1"))
-                                  (and (equal "horizontalpodautoscalers" (first type)) (equal version "autoscaling/v1")))
+                                  (and (equal "horizontalpodautoscalers" (first type)) (equal version "autoscaling/v1"))
+                                  (and (equal "podcertificaterequests" (first type))
+                                       (equal version +pod-certificate-request-beta-version+)))
                    (<= 1 (length remaining) 2)
                    (every (lambda (part) (plusp (length part))) remaining)
                    (or (not namespaced) (fourth type))
@@ -37,7 +39,8 @@
       ((string= content-type "application/vnd.kubernetes.protobuf")
        (decode-core-resource-protobuf (hunchentoot:raw-post-data :force-binary t) expected-kind
                                       (if (equal expected-kind "Scale") "autoscaling/v1"
-                                          (when (member expected-kind '("Event" "DeleteOptions") :test #'equal) *core-resource-view-version*))))
+                                          (when (member expected-kind '("Event" "DeleteOptions" "PodCertificateRequest") :test #'equal)
+                                            *core-resource-view-version*))))
       ((member content-type '("" "application/json") :test #'string=)
        (let ((text (hunchentoot:raw-post-data :force-text t)))
          (if (member expected-kind '("CustomResourceDefinition" "CertificateSigningRequest") :test #'equal)
@@ -296,6 +299,7 @@
           (*apply-update-manager* (and (member method '(:post :put :patch)) (list (apply-default-manager) nil)))
           (*core-resource-view-version* (cond ((and (equal resource "events") (uiop:string-prefix-p "/apis/" path)) "events.k8s.io/v1")
                                               ((uiop:string-prefix-p "/apis/autoscaling/v1/" path) "autoscaling/v1")
+                                              ((equal resource "podcertificaterequests") (pod-certificate-request-path-version path))
                                               (t (core-resource-api-version resource))))
           (dry-run (core-resource-dry-run-p))
           (writable-scope (or namespace (not (core-resource-namespaced-p resource)))))

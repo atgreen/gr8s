@@ -6,12 +6,40 @@
           do (setf (gethash key object) value))
     object))
 
+(defun shallow-copy-object (object)
+  "Copy OBJECT's top level only, sharing its values."
+  (let ((copy (make-hash-table :test (hash-table-test object) :size (hash-table-count object))))
+    (maphash (lambda (key value) (setf (gethash key copy) value)) object)
+    copy))
+
+(defun list-items-without-type-meta (object)
+  "Return a typed list OBJECT whose items carry no apiVersion or kind, as upstream encodes a
+built-in or PartialObjectMetadata list; the list's own kind names theirs. Custom resource
+lists keep them, as upstream's unstructured encoding does. OBJECT itself is left alone."
+  (let ((items (and (hash-table-p object) (gethash "items" object)))
+        (kind (and (hash-table-p object) (gethash "kind" object))))
+    (if (and (vectorp items) (not (stringp items)) (stringp kind) (uiop:string-suffix-p kind "List")
+             (or (equal kind "PartialObjectMetadataList") (null *crd-view-definition*))
+             (some (lambda (item) (and (hash-table-p item) (or (gethash "kind" item) (gethash "apiVersion" item)))) items))
+        (let ((copy (shallow-copy-object object)))
+          (setf (gethash "items" copy)
+                (map 'vector (lambda (item)
+                               (if (hash-table-p item)
+                                   (let ((bare (shallow-copy-object item)))
+                                     (remhash "kind" bare) (remhash "apiVersion" bare)
+                                     bare)
+                                   item))
+                     items))
+          copy)
+        object)))
+
 (defun json-response (object &optional (status 200))
   (setf (hunchentoot:return-code*) status
         ;; client-go v0.27 discovery compares this media type literally. JSON
         ;; is UTF-8 already; a charset parameter breaks its legacy fallback.
         (hunchentoot:content-type*) "application/json")
-  (com.inuoe.jzon:stringify (table-representation (crd-api-view (event-api-view object)))))
+  (com.inuoe.jzon:stringify
+   (list-items-without-type-meta (table-representation (crd-api-view (event-api-view object))))))
 
 (defun status-response (status reason message code &optional details)
   "Answer a Kubernetes Status, with DETAILS such as the causes clients inspect when given."
@@ -1265,15 +1293,31 @@ than wait for the next, which truncates any body that spans records in flight."
         for parts = (mapcar (lambda (part) (string-trim " " part)) (uiop:split-string range :separator '(#\;)))
         when (plusp (length (first parts))) collect parts))
 
+(defun check-request-timeout-parameter ()
+  "Refuse a timeout query parameter that is not a Go duration, as upstream's request deadline filter does.
+Watches are long-running requests, which that filter leaves alone."
+  (let ((timeout (hunchentoot:get-parameter "timeout")))
+    (when (and timeout (plusp (length timeout))
+               (not (true-parameter-p (hunchentoot:get-parameter "watch")))
+               (null (cel-parse-duration timeout)))
+      (core-resource-error 400 "BadRequest" "invalid timeout specified in the request URL: time: invalid duration ~S"
+                           timeout))))
+
 (defun handle-http-request (store runtime reconciler request)
   (handler-case
       (let ((path (progn (read-request-body request) (request-route-path (hunchentoot:script-name request))))
             (method (hunchentoot:request-method request))
             (*crd-field-validation* (crd-request-field-validation)))
-        (when (and store (not *authenticated-api-identity*))
-          (flowcontrol-note-request store (request-api-identity) path method))
-        (multiple-value-bind (*table-request* *table-api-version*) (negotiate-table-request)
-          (route-http-request store runtime reconciler path method)))
+        (let ((*flowcontrol-request-level*
+                (if (and store (not *authenticated-api-identity*))
+                    (flowcontrol-note-request store (request-api-identity) path method)
+                    *flowcontrol-request-level*)))
+          (check-request-timeout-parameter)
+          (multiple-value-bind (*table-request* *table-api-version*) (negotiate-table-request)
+            (if store
+                (flowcontrol-call-with-seat store path method
+                                            (lambda () (route-http-request store runtime reconciler path method)))
+                (route-http-request store runtime reconciler path method)))))
     (kubernetes-error (error)
       (kubernetes-error-response error))
     (com.inuoe.jzon:json-parse-error (error)
@@ -1353,6 +1397,7 @@ than wait for the next, which truncates any body that spans records in flight."
           ((string= path "/apis/autoscaling") (json-response (autoscaling-api-group)))
           ((string= path "/apis/autoscaling/v1") (autoscaling-discovery-response "v1"))
           ((string= path "/apis/autoscaling/v2") (autoscaling-discovery-response "v2"))
+          ((hpa-status-route path) (dispatch-hpa-status-request store path method))
           ((string= path "/apis/apiregistration.k8s.io") (json-response (apiservice-api-group)))
           ((string= path "/apis/apiregistration.k8s.io/v1") (apiservice-discovery-response))
           ((and (nth-value 1 (apiservice-route path))

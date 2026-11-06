@@ -98,9 +98,10 @@
     ("clustertrustbundles" "ClusterTrustBundle" "certificates.k8s.io/v1" nil)
     ;; KEP-4317 PodCertificateRequest: the node asks a signer for a short-lived
     ;; pod X.509 (the podCertificate projected volume). Namespaced; the signer
-    ;; fills status.certificateChain. Served at certificates.k8s.io/v1beta1 (the
-    ;; Kubernetes 1.37 group-version Agent Substrate's controller speaks).
-    ("podcertificaterequests" "PodCertificateRequest" "certificates.k8s.io/v1beta1" t)))
+    ;; fills status.certificateChain. Stored and served at certificates.k8s.io/v1
+    ;; (GA in Kubernetes 1.37), and also served at v1beta1 for clients that have
+    ;; not moved (Agent Substrate's controller).
+    ("podcertificaterequests" "PodCertificateRequest" "certificates.k8s.io/v1" t)))
 
 (defun stored-resource-type (resource)
   "Return the descriptor for a durable Kubernetes resource collection."
@@ -586,6 +587,9 @@
   (cond ((custom-resource-key-p resource) (crd-api-view (copy-core-object existing)))
         ((equal resource "events") (event-api-view (copy-core-object existing) (or *core-resource-view-version* "v1")))
         ((and (hpa-resource-p resource) (equal *core-resource-view-version* "autoscaling/v1")) (hpa-v1-view existing))
+        ;; An API writer edits the version it asked for; in-process writers see the stored object.
+        ((and (equal resource "podcertificaterequests") *core-resource-view-version*)
+         (pod-certificate-request-view existing *core-resource-view-version*))
         (t (copy-core-object existing))))
 
 (defun update-core-resource (store resource namespace name transform &key dry-run)

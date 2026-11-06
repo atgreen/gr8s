@@ -39,8 +39,11 @@
                (api-user-identity (api-user-identity-uid identity))
                (api-service-account-identity (api-service-account-identity-uid identity)))))
     (when uid (setf (gethash "uid" actor) uid))
-    (when (and (api-user-identity-p identity) (api-user-identity-extra identity))
-      (setf (gethash "extra" actor) (api-user-identity-extra identity)))
+    (let ((extra (etypecase identity
+                   (api-user-identity (api-user-identity-extra identity))
+                   ;; A bound token's pod and node claims, which admission policies match on.
+                   (api-service-account-identity (api-service-account-identity-extra identity)))))
+      (when extra (setf (gethash "extra" actor) extra)))
     actor))
 
 (defun certificate-api-identity (chain ca)

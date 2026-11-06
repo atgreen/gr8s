@@ -78,6 +78,9 @@ def main():
     parser.add_argument("--timeout", type=int, default=1200)
     parser.add_argument("--containerd-no-sync", action="store_true",
                         help="Skip fsync on containerd metadata commits; for disposable VMs whose disk flushes are slow")
+    parser.add_argument("--image-archives", type=Path, metavar="DIRECTORY",
+                        help="Stage these image archives (*.tar) for the agent to import before Pods start, "
+                             "as scripts/save-image-archives.sh writes them; recorded in the report")
     parser.add_argument("--certified-conformance", action="store_true",
                         help="Run the entire upstream certified selection instead of the five focused specs")
     parser.add_argument("--focus", default=FOCUS, help="Upstream regex for a supplemental focused run")
@@ -106,7 +109,22 @@ def main():
               "isCertificationResult": False, "nativeSHA256": hashlib.sha256(args.gr8s.read_bytes()).hexdigest(),
               "stateDirectory": str(state), "reusedState": args.state_directory is not None,
               "debugServer": args.debug_slynk_port is not None, "containerdNoSync": args.containerd_no_sync,
-              "e2eKubernetesVersion": args.kubernetes_version}
+              "preloadedImages": args.image_archives is not None}
+    if args.image_archives:
+        # The agent imports <state>/agent/images/*.tar at startup, before any Pod starts.
+        staged = state / "agent" / "images"
+        staged.mkdir(parents=True, exist_ok=True)
+        report["imageArchives"] = []
+        for archive in sorted(args.image_archives.glob("*.tar")):
+            try:
+                os.link(archive, staged / archive.name)
+            except OSError:
+                shutil.copyfile(archive, staged / archive.name)
+            with archive.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            report["imageArchives"].append({"name": archive.name, "bytes": archive.stat().st_size, "sha256": digest})
+        if not report["imageArchives"]:
+            parser.error("--image-archives names a directory without *.tar archives")
     native_log = (root / "gr8s.log").open("w")
     debug_arguments = ["--debug-slynk-port", str(args.debug_slynk_port)] if args.debug_slynk_port else []
     process = subprocess.Popen([str(args.gr8s), "serve", "--runtime", "containerd", "--state-directory", str(state),
@@ -140,7 +158,9 @@ def main():
         return path.read_text(errors="replace") if path.exists() else ""
 
     try:
-        deadline = time.monotonic() + 60
+        started = time.monotonic()
+        # Importing staged archives happens before the node reports ready.
+        deadline = started + (900 if args.image_archives else 60)
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise RuntimeError("Native gr8s exited before readiness")
@@ -153,6 +173,12 @@ def main():
         else:
             raise RuntimeError("Native agent did not become ready")
         report["nativeAgentReady"] = True
+        report["nativeAgentReadySeconds"] = round(time.monotonic() - started, 1)
+        if args.image_archives:
+            native_log.flush()
+            imports = [line.strip() for line in (root / "gr8s.log").read_text(errors="replace").splitlines()
+                       if "image archive" in line]
+            report["imageArchiveImports"] = imports
         report["version"] = json.loads(request("/version")[1])
         report["sonobuoyVersion"] = subprocess.check_output([str(args.sonobuoy), "version", "--short"], text=True).strip()
         expected_specs = args.expected_specs

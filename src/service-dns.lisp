@@ -25,7 +25,7 @@
           (gethash "apiVersion" result) (cond ((equal kind "Service") "v1")
                                               ((equal kind "Secret") "v1")
                                               ((equal kind "ClusterTrustBundle") "certificates.k8s.io/v1")
-                                              ((equal kind "PodCertificateRequest") "certificates.k8s.io/v1beta1")
+                                              ((equal kind "PodCertificateRequest") "certificates.k8s.io/v1")
                                               ((equal kind "NetworkPolicy") "networking.k8s.io/v1")
                                               ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
                                                "gateway.networking.k8s.io/v1")

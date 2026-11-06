@@ -944,6 +944,19 @@
     ((and (hash-table-p object) (equal "Status" (gethash "kind" object))) object)
     (t (table-not-acceptable))))
 
+(defun watch-bookmark-representation (bookmark)
+  "Put a watch BOOKMARK in the negotiated representation, as upstream's watch encoder does:
+a Table whose one row carries the bookmark, or the bookmark's PartialObjectMetadata.
+Without that, a reflector reading Tables would take the bookmark's annotation for the end
+of an initial list it cannot store."
+  (case *table-request*
+    (:table (core-object "apiVersion" *table-api-version* "kind" "Table"
+                         "metadata" (core-object "resourceVersion" (table-get bookmark "metadata" "resourceVersion"))
+                         "rows" (vector (core-object "cells" #() "object" bookmark))))
+    (:partial (core-object "apiVersion" *table-api-version* "kind" "PartialObjectMetadata"
+                           "metadata" (gethash "metadata" bookmark)))
+    (t bookmark)))
+
 (defun table-not-acceptable ()
   "Refuse a client that accepts only representations this response cannot take."
   (core-resource-error 406 "NotAcceptable"

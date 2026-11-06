@@ -3,9 +3,10 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Classify requests by FlowSchema and report the result in the response headers
-;;;; upstream's clients read, keep the mandatory exempt and catch-all objects, report
-;;;; dangling references and publish each priority level's nominal seats. Requests are
-;;;; classified but not queued or rejected: no limit is enforced.
+;;;; upstream's clients read, limit each priority level to its share of the server's
+;;;; seats, queueing or refusing what exceeds it, keep the mandatory exempt and
+;;;; catch-all objects, report dangling references and publish each priority level's
+;;;; nominal seats.
 
 (in-package #:gr8s)
 
@@ -16,7 +17,7 @@
   "Least time between rereading the FlowSchemas, since classification runs on every request.")
 
 (defvar *flowcontrol-snapshot* nil
-  "List of store, revision, read time and classification table, replaced as a whole.")
+  "List of store, revision, read time, classification table and level limits, replaced as a whole.")
 
 (defun flowcontrol-table (store)
   "Return (schema . level-uid) pairs in match order, rereading them only when something changed."
@@ -35,7 +36,7 @@
                                               levels :key #'object-name :test #'equal)
                             when level
                               collect (cons schema (gethash "uid" (gethash "metadata" level))))))
-          (setf *flowcontrol-snapshot* (list store revision now table))
+          (setf *flowcontrol-snapshot* (list store revision now table (flowcontrol-level-limits levels)))
           table))))
 
 (defun flowcontrol-listed-p (entries value wildcard)
@@ -102,11 +103,105 @@
                  (return (values (gethash "uid" (gethash "metadata" schema)) level)))))))
 
 (defun flowcontrol-note-request (store identity path method)
-  "Say on the response which FlowSchema and priority level this request classified as."
+  "Say on the response which FlowSchema and priority level this request classified as,
+returning the level's UID."
   (multiple-value-bind (schema level) (flowcontrol-classify store identity path method (true-parameter-p (hunchentoot:parameter "watch")))
     (when schema
       (setf (hunchentoot:header-out "X-Kubernetes-PF-FlowSchema-UID") schema
-            (hunchentoot:header-out "X-Kubernetes-PF-PriorityLevel-UID") level))))
+            (hunchentoot:header-out "X-Kubernetes-PF-PriorityLevel-UID") level))
+    level))
+
+;;; Seats: each limited priority level may run its share of the server's seats at once.
+;;; A request beyond that waits in its level's queue, if the level queues and the queue
+;;; has room, for at most a quarter of the request timeout as upstream's does; otherwise
+;;; it is refused with 429 and Retry-After. Exempt levels and long-running requests take
+;;; no seat. Requests wait first come, first served: the shuffle-sharded fair queues
+;;; that upstream divides a level's queue into are not modelled.
+
+(defparameter +flowcontrol-queue-wait-seconds+ 15
+  "Longest a request waits for a seat, upstream's quarter of the 60 second request timeout.")
+
+(defvar *flowcontrol-request-level* nil
+  "The priority level UID the current request classified as, or NIL.")
+
+(defvar *flowcontrol-seats-lock* (bt:make-lock "gr8s flowcontrol seats")
+  "Guards *FLOWCONTROL-SEATS*.")
+
+(defvar *flowcontrol-seat-freed* (bt:make-condition-variable :name "gr8s flowcontrol seat freed")
+  "Signalled whenever a seat is given back.")
+
+(defvar *flowcontrol-seats* (make-hash-table :test #'equal)
+  "From priority level UID to a cons of the seats in use and the requests waiting.")
+
+(defun flowcontrol-level-limits (levels)
+  "Return a table from each limited level's UID to its seat limit and queue capacity.
+A level's limit is its nominal share of the server's seats, at least one; a Reject level
+has no queue, and a Queue level holds queues times queueLengthLimit."
+  (let* ((limited (remove-if-not (lambda (level) (hash-table-p (table-get level "spec" "limited"))) levels))
+         (shares (lambda (level) (or (table-get level "spec" "limited" "nominalConcurrencyShares") 30)))
+         (total (reduce #'+ (mapcar shares limited)))
+         (table (make-hash-table :test #'equal)))
+    (dolist (level limited table)
+      (let* ((response (table-get level "spec" "limited" "limitResponse"))
+             (queuing (and (hash-table-p response) (equal "Queue" (gethash "type" response))
+                           (or (gethash "queuing" response) (core-object)))))
+        (setf (gethash (gethash "uid" (gethash "metadata" level)) table)
+              (cons (max 1 (if (plusp total) (ceiling (* +flowcontrol-server-seats+ (funcall shares level)) total) 1))
+                    (if queuing
+                        (* (gethash "queues" queuing 64) (gethash "queueLengthLimit" queuing 50))
+                        0)))))))
+
+(defun flowcontrol-long-running-p (path method)
+  "Recognize the requests upstream's long-running check exempts: watches, proxies,
+and the exec, attach, port-forward and log subresources."
+  (or (true-parameter-p (hunchentoot:get-parameter "watch"))
+      (and (eq method :get) (search "/watch/" path))
+      (cl-ppcre:scan "/(proxy|exec|attach|portforward|log)(/|$)" path)
+      (and (eq method :get) (equal (hunchentoot:get-parameter "follow") "true"))))
+
+(defun flowcontrol-refuse ()
+  "Refuse a request its priority level has no room for, as upstream does."
+  (when (boundp 'hunchentoot:*reply*)
+    (setf (hunchentoot:header-out "Retry-After") "1"))
+  (core-resource-error 429 "TooManyRequests" "Too many requests, please try again later."))
+
+(defun flowcontrol-acquire-seat (level limit capacity)
+  "Take one of LEVEL's LIMIT seats, waiting in its queue of CAPACITY when they are all taken."
+  (bt:with-lock-held (*flowcontrol-seats-lock*)
+    (let ((state (or (gethash level *flowcontrol-seats*)
+                     (setf (gethash level *flowcontrol-seats*) (cons 0 0)))))
+      (cond
+        ((< (car state) limit) (incf (car state)))
+        ((>= (cdr state) capacity) (flowcontrol-refuse))
+        (t
+         (incf (cdr state))
+         (let ((deadline (+ (get-internal-real-time) (* +flowcontrol-queue-wait-seconds+ internal-time-units-per-second))))
+           (unwind-protect
+                (loop until (< (car state) limit)
+                      do (let ((left (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)))
+                           (when (<= left 0) (flowcontrol-refuse))
+                           (bt:condition-wait *flowcontrol-seat-freed* *flowcontrol-seats-lock* :timeout left)))
+             (decf (cdr state)))
+           (incf (car state))))))))
+
+(defun flowcontrol-release-seat (level)
+  "Give back one of LEVEL's seats and wake whoever waits for one."
+  (bt:with-lock-held (*flowcontrol-seats-lock*)
+    (decf (car (gethash level *flowcontrol-seats*)))
+    (sb-thread:condition-broadcast *flowcontrol-seat-freed*)))
+
+(defun flowcontrol-call-with-seat (store path method function)
+  "Call FUNCTION holding a seat of the current request's priority level, when that level is limited."
+  (let* ((level *flowcontrol-request-level*)
+         (limits (and level (not (flowcontrol-long-running-p path method))
+                      (progn (flowcontrol-table store) (fifth *flowcontrol-snapshot*))))
+         (entry (and limits (gethash level limits))))
+    (if (null entry)
+        (funcall function)
+        (progn
+          (flowcontrol-acquire-seat level (car entry) (cdr entry))
+          (unwind-protect (funcall function)
+            (flowcontrol-release-seat level))))))
 
 ;;; Mandatory objects and status
 

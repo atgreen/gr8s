@@ -275,3 +275,72 @@
         (is (integerp (gethash "nodePort" (aref (gethash "ports" (gethash "spec" node-port)) 0))))))))
 
 (in-suite gr8s)
+
+(test health-endpoints-list-their-checks-as-upstream-does
+  (with-core-api (store path)
+    (values store path)
+    (flet ((fetch (path)
+             (multiple-value-bind (body status) (drakma:http-request (concatenate 'string "http://127.0.0.1:18089" path))
+               (values (if (stringp body) body (flexi-streams:octets-to-string body :external-format :utf-8)) status))))
+      (is (equal "ok" (fetch "/livez")))
+      (dolist (endpoint '("healthz" "livez" "readyz"))
+        (let ((body (fetch (format nil "/~A?verbose=1" endpoint))))
+          (dolist (line '("[+]ping ok" "[+]etcd ok" "[+]poststarthook/crd-informer-synced ok" "[+]autoregister-completion ok"))
+            (is (search line body) "~A lacks ~A" endpoint line))
+          (is (search (format nil "~A check passed" endpoint) body))))
+      (is (search "[+]informer-sync ok" (fetch "/readyz?verbose=1")))
+      (is (search "[+]etcd excluded: ok" (fetch "/readyz?verbose=1&exclude=etcd")))
+      (is (equal "ok" (fetch "/livez/poststarthook/start-apiextensions-controllers")))
+      (is (= 404 (nth-value 1 (fetch "/readyz/no-such-check")))))))
+
+(test request-timeouts-must-be-go-durations
+  (with-core-api (store path)
+    (values store path)
+    (let ((status (check-core-status 400 "/version" :parameters '(("timeout" . "invalid")))))
+      (is (search "invalid timeout specified in the request URL" (gethash "message" status))))
+    (check-core-status 200 "/version" :parameters '(("timeout" . "3m")))
+    (check-core-status 200 "/version" :parameters '(("timeout" . "0s")))))
+
+(test discovery-storage-version-hashes-match-upstream
+  ;; base64 of the first eight bytes of SHA-256 over group/version/kind, core for the empty group.
+  (is (equal "c5X+1R4so64=" (gr8s::storage-version-hash "" "v1" "Pod")))
+  (is (equal "EdX2FP+L0js=" (gr8s::storage-version-hash "stable.example.com" "v1" "CronTab"))))
+
+(test openapi-v3-documents-survive-a-spec3-round-trip
+  ;; kube-openapi omits empty parameters and properties, so publishing them breaks DeepEqual after a round trip.
+  (let ((document (com.inuoe.jzon:parse
+                   "{\"paths\":{\"/apis/x/v1/things\":{\"parameters\":[],\"get\":{\"parameters\":[{\"name\":\"a\"}]}}},
+                     \"components\":{\"schemas\":{\"T\":{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"object\",\"properties\":{}}}}}}}")))
+    (gr8s::openapi-v3-drop-empty-fields document)
+    (is (equal "{\"paths\":{\"/apis/x/v1/things\":{\"get\":{\"parameters\":[{\"name\":\"a\"}]}}},\"components\":{\"schemas\":{\"T\":{\"type\":\"object\",\"properties\":{\"status\":{\"type\":\"object\"}}}}}}"
+               (com.inuoe.jzon:stringify document))))
+  (with-core-api (store path)
+    (values store path)
+    (let ((text (drakma:http-request "http://127.0.0.1:18089/openapi/v3/apis/rbac.authorization.k8s.io/v1")))
+      (setf text (if (stringp text) text (flexi-streams:octets-to-string text :external-format :utf-8)))
+      (is (not (search "\"parameters\":[]" text))))))
+
+(test lists-and-bookmarks-take-upstream-shapes
+  ;; A built-in list's items carry no apiVersion or kind, so a typed client decodes them as
+  ;; it decodes a single object; the list itself is left as it was.
+  (let* ((item (gr8s::core-object "apiVersion" "v1" "kind" "Secret" "metadata" (gr8s::core-object "name" "a")))
+         (list (gr8s::core-object "apiVersion" "v1" "kind" "SecretList" "items" (vector item)))
+         (shown (gr8s::list-items-without-type-meta list)))
+    (is (null (gethash "kind" (aref (gethash "items" shown) 0))))
+    (is (equal "a" (gethash "name" (gethash "metadata" (aref (gethash "items" shown) 0)))))
+    (is (equal "Secret" (gethash "kind" item)))
+    ;; Custom resource lists keep them, as upstream's unstructured encoding does.
+    (let ((gr8s::*crd-view-definition* (gr8s::core-object)))
+      (is (eq list (gr8s::list-items-without-type-meta list)))))
+  ;; A watch's bookmark becomes a one-row Table when Tables were asked for.
+  (let* ((bookmark (gr8s::core-object "apiVersion" "v1" "kind" "Secret"
+                                      "metadata" (gr8s::core-object "resourceVersion" "7"
+                                                                    "annotations" (gr8s::core-object "k8s.io/initial-events-end" "true"))))
+         (gr8s::*table-api-version* "meta.k8s.io/v1"))
+    (let ((table (let ((gr8s::*table-request* :table)) (gr8s::watch-bookmark-representation bookmark))))
+      (is (equal "Table" (gethash "kind" table)))
+      (is (= 1 (length (gethash "rows" table))))
+      (is (eq bookmark (gethash "object" (aref (gethash "rows" table) 0)))))
+    (is (equal "PartialObjectMetadata"
+               (gethash "kind" (let ((gr8s::*table-request* :partial)) (gr8s::watch-bookmark-representation bookmark)))))
+    (is (eq bookmark (let ((gr8s::*table-request* nil)) (gr8s::watch-bookmark-representation bookmark))))))
