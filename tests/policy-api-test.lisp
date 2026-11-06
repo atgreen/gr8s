@@ -315,8 +315,9 @@
 
 (defun policy-test-node (store name &key extended capacity)
   "Register ready node NAME with EXTENDED advertised and CAPACITY measured quantity tables."
+  ;; Each node of a store needs its own Pod CIDR: two random picks collided one run in 200.
   (gr8s:register-node store (gr8s:make-node-record :id (concatenate 'string "id-" name) :name name
-                                                   :pod-cidr (format nil "10.88.~D.0/24" (random 200))))
+                                                   :pod-cidr (format nil "10.88.~D.0/24" (length (gr8s::list-nodes store)))))
   (gr8s:mark-node-ready store name (get-universal-time) :lease-duration 3600)
   (when extended (gr8s::update-node-extended-resources store name extended))
   (when capacity (gr8s::update-node-capacity store name capacity)))
