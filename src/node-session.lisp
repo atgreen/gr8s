@@ -28,7 +28,71 @@
   stream
   (lock (bt:make-lock "gr8s node agent session"))
   (last-envelope-time (get-universal-time))
-  (evicted-p nil))
+  (evicted-p nil)
+  ;; Whether the agent applies desired-state deltas, and the last snapshot this
+  ;; session delivered, which the next delta changes (podster-uqb.139).
+  deltas-p
+  delivered)
+
+(defparameter +desired-state-delta-capability+ "desired-state-delta"
+  "The NodeHello capability of an agent that rebuilds snapshots from deltas.")
+
+(defun same-pod-assignment-p (left right)
+  "Return whether two PodAssignments deliver the same desired Pod and objects."
+  (and (string= (slot-value left 'gr8s.node.v1::uid) (slot-value right 'gr8s.node.v1::uid))
+       (string= (slot-value left 'gr8s.node.v1::resource-version)
+                (slot-value right 'gr8s.node.v1::resource-version))
+       (string= (slot-value left 'gr8s.node.v1::namespace) (slot-value right 'gr8s.node.v1::namespace))
+       (string= (slot-value left 'gr8s.node.v1::name) (slot-value right 'gr8s.node.v1::name))
+       (eq (not (slot-value left 'gr8s.node.v1::deleting)) (not (slot-value right 'gr8s.node.v1::deleting)))
+       (equalp (slot-value left 'gr8s.node.v1::pod-json) (slot-value right 'gr8s.node.v1::pod-json))
+       (equalp (slot-value left 'gr8s.node.v1::resource-objects-json)
+               (slot-value right 'gr8s.node.v1::resource-objects-json))))
+
+(defun node-snapshot-delta (base snapshot)
+  "Return a delta that turns BASE, the last snapshot a session delivered, into SNAPSHOT."
+  (let ((base-pods (make-hash-table :test #'equal))
+        (current (make-hash-table :test #'equal))
+        (service-discovery-changed
+          (not (equalp (slot-value base 'gr8s.node.v1::service-discovery-objects-json)
+                       (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json)))))
+    (dolist (pod (slot-value base 'gr8s.node.v1::pods))
+      (setf (gethash (slot-value pod 'gr8s.node.v1::uid) base-pods) pod))
+    (dolist (pod (slot-value snapshot 'gr8s.node.v1::pods))
+      (setf (gethash (slot-value pod 'gr8s.node.v1::uid) current) t))
+    (make-instance
+     'gr8s.node.v1::desired-state-snapshot
+     :revision (slot-value snapshot 'gr8s.node.v1::revision)
+     :base-revision (slot-value base 'gr8s.node.v1::revision)
+     :network (slot-value snapshot 'gr8s.node.v1::network)
+     :routes (slot-value snapshot 'gr8s.node.v1::routes)
+     :pods (remove-if (lambda (pod)
+                        (let ((old (gethash (slot-value pod 'gr8s.node.v1::uid) base-pods)))
+                          (and old (same-pod-assignment-p old pod))))
+                      (slot-value snapshot 'gr8s.node.v1::pods))
+     :removed-pod-uids (loop for uid being the hash-keys of base-pods
+                             unless (gethash uid current) collect uid)
+     :service-discovery-changed service-discovery-changed
+     :service-discovery-objects-json
+     (when service-discovery-changed
+       (slot-value snapshot 'gr8s.node.v1::service-discovery-objects-json)))))
+
+(defun deliver-node-snapshot (session snapshot)
+  "Send SNAPSHOT on SESSION, as a delta when the agent takes them, unless it already has a newer one.
+Deltas are computed against what this session delivered, under its send lock, so
+concurrent publications cannot reorder a delta ahead of its base."
+  (bt:with-lock-held ((node-agent-session-lock session))
+    (let ((delivered (node-agent-session-delivered session)))
+      (unless (and delivered (<= (slot-value snapshot 'gr8s.node.v1::revision)
+                                 (slot-value delivered 'gr8s.node.v1::revision)))
+        (ag-grpc:stream-send
+         (node-agent-session-stream session)
+         (make-server-envelope :desired-state
+                               (if (and delivered (node-agent-session-deltas-p session))
+                                   (node-snapshot-delta delivered snapshot)
+                                   snapshot)
+                               :sequence 0))
+        (setf (node-agent-session-delivered session) snapshot)))))
 
 (defvar *node-session-stall-seconds* 30
   "Silence after which either end of a node session treats it as wedged.")
@@ -477,7 +541,12 @@ What was consumed isn't kept, for streams too long to hold in memory."
                                             (node-capacity-from-entries (slot-value hello 'gr8s.node.v1::capacity)))
                       (update-node-kubelet-port (node-grpc-server-store server) node-name
                                                 (or (slot-value hello 'gr8s.node.v1::kubelet-port) 0))
-                      (make-node-agent-session stream)))
+                      (let ((session (make-node-agent-session stream)))
+                        (setf (node-agent-session-deltas-p session)
+                              (member +desired-state-delta-capability+
+                                      (slot-value hello 'gr8s.node.v1::capabilities)
+                                      :test #'equal))
+                        session)))
            (heartbeat-interval
              (max 1 (floor (node-grpc-server-heartbeat-timeout-seconds server) 2))))
       (declare (ignore authenticated))
@@ -500,8 +569,10 @@ What was consumed isn't kept, for streams too long to hold in memory."
                                                 :heartbeat-interval-seconds heartbeat-interval
                                                 :assigned-pod-cidr (node-record-pod-cidr node))
                           :sequence 1))
+                 ;; Every session starts from a complete snapshot.
                  (ag-grpc:stream-send
                   stream (make-server-envelope :desired-state snapshot :sequence 2))
+                 (setf (node-agent-session-delivered session) snapshot)
                  (loop for operation in operations for sequence from 3
                        do (setf (pending-node-operation-session operation) session)
                           (ag-grpc:stream-send
@@ -656,8 +727,8 @@ What was consumed isn't kept, for streams too long to hold in memory."
   (and left right (same-node-snapshot-topology-p left right)
        (equalp (slot-value left 'gr8s.node.v1::service-discovery-objects-json)
                (slot-value right 'gr8s.node.v1::service-discovery-objects-json))
-       (equalp (mapcar #'ag-proto:serialize-to-bytes (slot-value left 'gr8s.node.v1::pods))
-               (mapcar #'ag-proto:serialize-to-bytes (slot-value right 'gr8s.node.v1::pods)))))
+       (= (length (slot-value left 'gr8s.node.v1::pods)) (length (slot-value right 'gr8s.node.v1::pods)))
+       (every #'same-pod-assignment-p (slot-value left 'gr8s.node.v1::pods) (slot-value right 'gr8s.node.v1::pods))))
 
 (defun publish-node-desired-state (server node-name snapshot &key deduplicate)
   (get-node (node-grpc-server-store server) node-name)
@@ -677,10 +748,7 @@ What was consumed isn't kept, for streams too long to hold in memory."
             (gethash node-name (node-grpc-server-snapshots server)) snapshot
             session (gethash node-name (node-grpc-server-sessions server))))
     (when session
-      (handler-case
-          (send-node-agent-envelope
-           session
-           (make-server-envelope :desired-state snapshot :sequence 0))
+      (handler-case (deliver-node-snapshot session snapshot)
         (error () nil)))
     revision))
 
@@ -769,7 +837,45 @@ What was consumed isn't kept, for streams too long to hold in memory."
   owner
   (outbox nil)
   (outbox-lock (bt:make-lock "gr8s agent node session outbox"))
-  (outbox-changed (bt:make-condition-variable :name "gr8s agent node session outbox")))
+  (outbox-changed (bt:make-condition-variable :name "gr8s agent node session outbox"))
+  ;; The last complete snapshot received, which the server's next delta changes.
+  received)
+
+(defun pod-assignment-sort-key (pod)
+  (format nil "~A/~A" (slot-value pod 'gr8s.node.v1::namespace) (slot-value pod 'gr8s.node.v1::name)))
+
+(defun assemble-node-snapshot (session snapshot)
+  "Return the complete snapshot SNAPSHOT describes, rebuilding a delta from the last one SESSION received.
+A delta that does not follow that snapshot ends the session; the server sends a
+complete snapshot to the next one."
+  (let ((base-revision (slot-value snapshot 'gr8s.node.v1::base-revision))
+        (base (agent-node-session-received session)))
+    (setf (agent-node-session-received session)
+          (if (zerop base-revision)
+              snapshot
+              (progn
+                (unless (and base (= base-revision (slot-value base 'gr8s.node.v1::revision)))
+                  (error "Desired-state delta changes revision ~D, but the session last received ~:[none~;~:*~D~]"
+                         base-revision (and base (slot-value base 'gr8s.node.v1::revision))))
+                (let ((replaced (make-hash-table :test #'equal)))
+                  (dolist (uid (slot-value snapshot 'gr8s.node.v1::removed-pod-uids))
+                    (setf (gethash uid replaced) t))
+                  (dolist (pod (slot-value snapshot 'gr8s.node.v1::pods))
+                    (setf (gethash (slot-value pod 'gr8s.node.v1::uid) replaced) t))
+                  (make-instance
+                   'gr8s.node.v1::desired-state-snapshot
+                   :revision (slot-value snapshot 'gr8s.node.v1::revision)
+                   :network (slot-value snapshot 'gr8s.node.v1::network)
+                   :routes (slot-value snapshot 'gr8s.node.v1::routes)
+                   :service-discovery-objects-json
+                   (slot-value (if (slot-value snapshot 'gr8s.node.v1::service-discovery-changed) snapshot base)
+                               'gr8s.node.v1::service-discovery-objects-json)
+                   ;; The server's own order, so the rebuilt snapshot is the one it holds.
+                   :pods (stable-sort
+                          (append (remove-if (lambda (pod) (gethash (slot-value pod 'gr8s.node.v1::uid) replaced))
+                                             (slot-value base 'gr8s.node.v1::pods))
+                                  (copy-list (slot-value snapshot 'gr8s.node.v1::pods)))
+                          #'string< :key #'pod-assignment-sort-key))))))))
 
 (defun accept-agent-server-hello (identity identity-path hello)
   (let ((node-id (slot-value hello 'gr8s.node.v1::node-id))
@@ -881,7 +987,7 @@ applicable method for NIL rather than finding a closed connection."
    (slot-value envelope 'gr8s.node.v1::protocol-version))
   (case (slot-value envelope 'gr8s.node.v1::payload-case)
     (:desired-state
-     (let ((snapshot (slot-value envelope 'gr8s.node.v1::desired-state)))
+     (let ((snapshot (assemble-node-snapshot session (slot-value envelope 'gr8s.node.v1::desired-state))))
        (if snapshot-worker
            (queue-agent-snapshot-work snapshot-worker snapshot)
            (apply-node-snapshot-and-respond session identity identity-path snapshot apply-snapshot))))
@@ -1152,6 +1258,11 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
         (bt:join-thread thread))))
   nil)
 
+(defun loopback-host-p (host)
+  "Return whether HOST names this machine's loopback interface."
+  (or (member host '("localhost" "::1") :test #'string-equal)
+      (uiop:string-prefix-p "127." host)))
+
 (defun node-channel-underlay-address (channel)
   (let* ((connection (ag-grpc::channel-connection channel))
          (socket (ag-http2::connection-socket connection))
@@ -1216,8 +1327,11 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
       (unwind-protect
          (with-node-session-interruption (session-tag)
            (let* ((stub (gr8s.node.v1::make-node-service-stub channel))
-                  (stream (gr8s.node.v1::node-service-connect
-                           stub :timeout session-timeout))
+                  (stream (let ((ag-grpc::*grpc-accept-encoding*
+                                  ;; Compressing what never leaves the host only costs CPU.
+                                  (if (loopback-host-p host) "identity" ag-grpc::*grpc-accept-encoding*)))
+                            (gr8s.node.v1::node-service-connect
+                             stub :timeout session-timeout)))
                   (session (make-agent-node-session stream)))
              (send-agent-session-envelope
               session :hello
@@ -1227,6 +1341,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                               :agent-version "gr8s"
                               :underlay-address
                               (or underlay-address (node-channel-underlay-address channel))
+                              :capabilities (list +desired-state-delta-capability+)
                               :capacity (node-reported-capacity-entries)
                               :kubelet-port kubelet-port
                               :last-applied-revision
@@ -1277,8 +1392,10 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                      (max 1 (slot-value server-hello
                                         'gr8s.node.v1::heartbeat-interval-seconds)))
                (let* ((snapshot
-                        (require-server-envelope
-                         (ag-grpc:stream-read-message stream) :desired-state)))
+                        (assemble-node-snapshot
+                         session
+                         (require-server-envelope
+                          (ag-grpc:stream-read-message stream) :desired-state))))
                  (if one-shot-p
                      (progn
                        (validate-node-snapshot-identity identity snapshot)

@@ -1093,3 +1093,117 @@
         (heartbeat "")
         (is (string= "True" (gethash "status" (ready-condition))))
         (is (gr8s::node-record-runtime-ready-p (gr8s:get-node store "worker-a")))))))
+(defun delta-test-assignment (name &key (version "1") (body "a") deleting objects)
+  (make-instance 'gr8s.node.v1::pod-assignment
+                 :namespace "default" :name name :uid (format nil "uid-~A" name)
+                 :resource-version version :deleting deleting
+                 :pod-json (trivial-utf-8:string-to-utf-8-bytes (format nil "{\"name\":\"~A\",\"body\":\"~A\"}" name body))
+                 :resource-objects-json (mapcar #'trivial-utf-8:string-to-utf-8-bytes objects)))
+
+(defun delta-test-snapshot (revision pods &optional (discovery '("svc-a")))
+  (make-instance 'gr8s.node.v1::desired-state-snapshot
+                 :revision revision
+                 :network (make-instance 'gr8s.node.v1::node-network-config :node-pod-cidr "10.88.3.0/24")
+                 :service-discovery-objects-json (mapcar #'trivial-utf-8:string-to-utf-8-bytes discovery)
+                 :pods (sort (copy-list pods) #'string< :key #'gr8s::pod-assignment-sort-key)))
+
+;; podster-uqb.139: a change sends what changed, and the agent rebuilds exactly
+;; the snapshot the server holds.
+(test desired-state-deltas-rebuild-the-servers-snapshot
+  (let* ((base (delta-test-snapshot 4 (list (delta-test-assignment "kept")
+                                            (delta-test-assignment "changed")
+                                            (delta-test-assignment "objects" :objects '("{\"cm\":1}"))
+                                            (delta-test-assignment "removed"))))
+         (next (delta-test-snapshot 5 (list (delta-test-assignment "kept")
+                                            (delta-test-assignment "changed" :version "2" :body "b")
+                                            (delta-test-assignment "objects" :objects '("{\"cm\":2}"))
+                                            (delta-test-assignment "added")
+                                            (delta-test-assignment "aardvark" :deleting t))))
+         (later (delta-test-snapshot 6 (slot-value next 'gr8s.node.v1::pods) '("svc-a" "svc-b")))
+         (delta (gr8s::node-snapshot-delta base next))
+         (agent (gr8s::make-agent-node-session nil)))
+    (is (= 4 (slot-value delta 'gr8s.node.v1::base-revision)))
+    (is (equal '("uid-aardvark" "uid-added" "uid-changed" "uid-objects")
+               (sort (mapcar (lambda (pod) (slot-value pod 'gr8s.node.v1::uid)) (slot-value delta 'gr8s.node.v1::pods))
+                     #'string<)))
+    (is (equal '("uid-removed") (slot-value delta 'gr8s.node.v1::removed-pod-uids)))
+    (is-false (slot-value delta 'gr8s.node.v1::service-discovery-changed))
+    (is (null (slot-value delta 'gr8s.node.v1::service-discovery-objects-json)))
+    ;; Over the wire, as the agent receives them.
+    (flet ((wire (snapshot)
+             (ag-proto:deserialize-from-bytes 'gr8s.node.v1::desired-state-snapshot
+                                              (ag-proto:serialize-to-bytes snapshot))))
+      (is (eq (gr8s::assemble-node-snapshot agent (wire base)) (gr8s::agent-node-session-received agent)))
+      (is (equalp (ag-proto:serialize-to-bytes next)
+                  (ag-proto:serialize-to-bytes (gr8s::assemble-node-snapshot agent (wire delta)))))
+      (let ((discovery (gr8s::node-snapshot-delta next later)))
+        (is (null (slot-value discovery 'gr8s.node.v1::pods)))
+        (is-true (slot-value discovery 'gr8s.node.v1::service-discovery-changed))
+        (is (equalp (ag-proto:serialize-to-bytes later)
+                    (ag-proto:serialize-to-bytes (gr8s::assemble-node-snapshot agent (wire discovery))))))
+      ;; A delta that does not follow what this session received is refused.
+      (signals error (gr8s::assemble-node-snapshot agent (wire delta)))
+      (signals error (gr8s::assemble-node-snapshot (gr8s::make-agent-node-session nil) (wire delta))))))
+
+(test persistent-agent-applies-deltas-and-resyncs-after-reconnecting
+  (with-temporary-store (store path)
+    (gr8s:register-node
+     store (gr8s:make-node-record :id "node-delta" :name "worker-delta" :pod-cidr "10.88.3.0/24"))
+    (let* ((server (gr8s:start-node-grpc-server
+                    store :host "127.0.0.1" :port 0 :heartbeat-timeout-seconds 2))
+           (identity (merge-pathnames "agent/identity.json" path))
+           (applied nil) (lock (bt:make-lock)) (control nil) (agent-thread nil)
+           (deltas 0) (delta-function (symbol-function 'gr8s::node-snapshot-delta)))
+      (labels ((start-agent ()
+                 (setf control (gr8s::make-node-session-control)
+                       agent-thread
+                       (bt:make-thread
+                        (lambda ()
+                          (gr8s:run-node-session
+                           "127.0.0.1" (gr8s:node-grpc-server-port server) "worker-delta" identity
+                           (lambda (snapshot) (bt:with-lock-held (lock) (setf applied snapshot)))
+                           :reconnect-delay 0.01 :control control))
+                        :name "gr8s delta test agent")))
+               (stop-agent ()
+                 (gr8s::cancel-node-session control)
+                 (bt:join-thread agent-thread))
+               (session ()
+                 (bt:with-lock-held ((gr8s::node-grpc-server-lock server))
+                   (gethash "worker-delta" (gr8s::node-grpc-server-sessions server))))
+               (publish (revision pods)
+                 (declare (ignore revision))
+                 (gr8s:publish-node-desired-state server "worker-delta" (delta-test-snapshot 0 pods)))
+               (converged-p ()
+                 (let ((current (gr8s::current-node-snapshot server "worker-delta")))
+                   (bt:with-lock-held (lock)
+                     (and applied (= (slot-value applied 'gr8s.node.v1::revision)
+                                     (slot-value current 'gr8s.node.v1::revision))
+                          (equalp (mapcar #'ag-proto:serialize-to-bytes (slot-value applied 'gr8s.node.v1::pods))
+                                  (mapcar #'ag-proto:serialize-to-bytes (slot-value current 'gr8s.node.v1::pods)))
+                          (equalp (slot-value applied 'gr8s.node.v1::service-discovery-objects-json)
+                                  (slot-value current 'gr8s.node.v1::service-discovery-objects-json)))))))
+        ;; Count the deltas the server actually sends.
+        (setf (symbol-function 'gr8s::node-snapshot-delta)
+              (lambda (base snapshot) (incf deltas) (funcall delta-function base snapshot)))
+        (unwind-protect
+             (progn
+               (publish 1 (list (delta-test-assignment "a") (delta-test-assignment "b")))
+               (start-agent)
+               (is-true (wait-until #'converged-p :timeout 5))
+               (is-true (gr8s::node-agent-session-deltas-p (session)))
+               (publish 2 (list (delta-test-assignment "a" :version "2") (delta-test-assignment "c")))
+               (is-true (wait-until #'converged-p :timeout 5))
+               (publish 3 (list (delta-test-assignment "c")))
+               (is-true (wait-until #'converged-p :timeout 5))
+               ;; Changes made while no session is open arrive as a complete snapshot.
+               (stop-agent)
+               (publish 4 (list (delta-test-assignment "c" :version "2") (delta-test-assignment "d")))
+               (start-agent)
+               (is-true (wait-until #'converged-p :timeout 5))
+               (publish 5 (list (delta-test-assignment "d")))
+               (is-true (wait-until #'converged-p :timeout 5))
+               ;; Revisions 2, 3 and 5 followed one the session had delivered.
+               (is (= 3 deltas)))
+          (setf (symbol-function 'gr8s::node-snapshot-delta) delta-function)
+          (ignore-errors (stop-agent))
+          (gr8s:stop-node-grpc-server server))))))

@@ -188,6 +188,15 @@ message DesiredStateSnapshot {
   repeated NodeRoute routes = 4;
   // Public Service/EndpointSlice DNS data, separate from Pod-scoped secrets.
   repeated bytes service_discovery_objects_json = 5;
+  // Nonzero on a delta (podster-uqb.139), sent only to an agent that offered
+  // the "desired-state-delta" capability: the revision of the snapshot this one
+  // changes, which must be the last one the session delivered. PODS then holds
+  // only new or changed assignments, REMOVED_POD_UIDS the base's assignments
+  // that are gone, and SERVICE_DISCOVERY_OBJECTS_JSON is the base's unless
+  // SERVICE_DISCOVERY_CHANGED. NETWORK and ROUTES are always complete.
+  uint64 base_revision = 6;
+  repeated string removed_pod_uids = 7;
+  bool service_discovery_changed = 8;
 }
 
 message PodAssignment {
