@@ -158,8 +158,10 @@ A template equal to an older revision makes that revision the newest again, whic
                                (gethash (core-resource-key "persistentvolumeclaims" namespace name)
                                         (pod-store-resources store)))))
                (cond ((null existing)
-                      (create-core-resource store "persistentvolumeclaims"
-                                            (statefulset-claim-object set template ordinal) namespace))
+                      ;; Through admission, as upstream's controller creates claims through the API.
+                      (controller-create-core-resource store "persistentvolumeclaims"
+                                                       (statefulset-claim-object set template ordinal) namespace
+                                                       "statefulset-controller"))
                      ((gethash "deletionTimestamp" (gethash "metadata" existing)) (setf usable nil)))))
     usable))
 
