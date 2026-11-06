@@ -280,7 +280,10 @@
                                   (and (equal port-name (gethash "name" candidate))
                                        (equal protocol (gethash "protocol" candidate "TCP"))))
                                 (gethash "ports" spec #()))))
-            (when (or (service-external-name-p service) (null port))
+            ;; A headless Service's named ports are its endpoints', as CoreDNS reads them from the
+            ;; slices: a selectorless one's slices may name ports its spec does not.
+            (when (or (service-external-name-p service)
+                      (and (null port) (not (equal "None" (gethash "clusterIP" spec)))))
               (return-from resolve-store-service-srv (values nil nil)))
             (unless (equal "None" (gethash "clusterIP" spec))
               (return-from resolve-store-service-srv
