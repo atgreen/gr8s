@@ -59,7 +59,8 @@
                      (not (eq 'null (gethash "ipFamilyPolicy" spec)))))
         (invalid-pod "ExternalName Services do not allocate cluster IPs or IP families")))
     (dolist (field '("clusterIP" "clusterIPs" "ipFamilies" "ipFamilyPolicy" "sessionAffinityConfig"
-                     "internalTrafficPolicy" "externalTrafficPolicy" "allocateLoadBalancerNodePorts" "loadBalancerClass"))
+                     "internalTrafficPolicy" "externalTrafficPolicy" "allocateLoadBalancerNodePorts" "loadBalancerClass"
+                     "healthCheckNodePort"))
       (remhash field spec))
     (setf (gethash "sessionAffinity" spec) "None")
     (loop for port across (gethash "ports" spec #()) do (remhash "nodePort" port))
@@ -87,7 +88,10 @@
                               (equal name (gethash "name" metadata)))))
             do (loop for port across (gethash "ports" (gethash "spec" object) #())
                      when (integerp (gethash "nodePort" port))
-                       do (setf (gethash (gethash "nodePort" port) used) t)))
+                       do (setf (gethash (gethash "nodePort" port) used) t))
+               ;; A health check node port comes from the same range.
+               (let ((health (gethash "healthCheckNodePort" (gethash "spec" object))))
+                 (when (integerp health) (setf (gethash health used) t))))
     used))
 
 (defun assign-service-node-ports (spec namespace name existing store)
@@ -106,6 +110,8 @@
         (return-from assign-service-node-ports spec))
       (unless store (invalid-pod "Service allocation requires the control-plane store"))
       (let ((used (service-node-ports-in-use-unlocked store namespace name)) (mine nil))
+        (let ((health (gethash "healthCheckNodePort" spec)))
+          (when (integerp health) (setf (gethash health used) t)))
         (loop for port across ports
               for number = (or (requested port)
                                (loop for old across (or old-ports #())
@@ -132,6 +138,152 @@
                                        finally (core-resource-error 503 "ServiceUnavailable" "NodePort range is exhausted"))))
                      (push (cons number (gethash "protocol" port)) mine)
                      (setf (gethash "nodePort" port) number)))))
+    spec))
+
+;;; Traffic policies, external addresses and health check node ports
+
+(defun service-externally-accessible-p (spec)
+  "True, as upstream decides, for NodePort and LoadBalancer Services and a ClusterIP Service
+with external IPs: these take an externalTrafficPolicy."
+  (let ((type (gethash "type" spec "ClusterIP")))
+    (or (member type '("NodePort" "LoadBalancer") :test #'equal)
+        (and (equal type "ClusterIP") (plusp (length (gethash "externalIPs" spec #())))))))
+
+(defun service-needs-health-check-p (spec)
+  "True when a load balancer must ask each node whether it has local endpoints."
+  (and (equal "LoadBalancer" (gethash "type" spec "ClusterIP"))
+       (equal "Local" (gethash "externalTrafficPolicy" spec))))
+
+(defun service-ip-special-reason (address)
+  "Return why ADDRESS may not be a Service external IP, as upstream's endpoint IP check does, or NIL."
+  (if (find #\: address)
+      (let ((bytes (0conf:parse-ipv6 address)))
+        (cond ((every #'zerop bytes) "may not be unspecified")
+              ((and (every #'zerop (subseq bytes 0 15)) (= 1 (aref bytes 15)))
+               "may not be in the loopback range (127.0.0.0/8, ::1/128)")
+              ((and (= #xfe (aref bytes 0)) (= #x80 (logand #xc0 (aref bytes 1))))
+               "may not be in the link-local range (169.254.0.0/16, fe80::/10)")
+              ((and (= #xff (aref bytes 0)) (= #x02 (aref bytes 1)))
+               "may not be in the link-local multicast range (224.0.0.0/24, ff02::/10)")))
+      (let ((value (parse-ipv4-integer address)))
+        (cond ((zerop value) "may not be unspecified")
+              ((= 127 (ash value -24)) "may not be in the loopback range (127.0.0.0/8, ::1/128)")
+              ((= #xa9fe (ash value -16)) "may not be in the link-local range (169.254.0.0/16, fe80::/10)")
+              ((= #xe00000 (ash value -8))
+               "may not be in the link-local multicast range (224.0.0.0/24, ff02::/10)")))))
+
+(defun service-legacy-ip-p (text)
+  "Recognize an IPv4 address without leading zeros, or any IPv6 address without a zone."
+  (and (stringp text)
+       (if (find #\: text)
+           (and (not (find #\% text)) (not (find #\. text))
+                (handler-case (and (0conf:parse-ipv6 text) t) (error () nil)))
+           (networking-canonical-ip-p text))))
+
+(defun service-legacy-cidr-p (text)
+  "Recognize an address/prefix, allowing bits beyond the prefix as upstream's legacy fields do."
+  (let ((slash (and (stringp text) (position #\/ text))))
+    (when slash
+      (let* ((address (subseq text 0 slash)) (digits (subseq text (1+ slash)))
+             (prefix (and (plusp (length digits)) (<= (length digits) 3) (every #'digit-char-p digits)
+                          (parse-integer digits))))
+        (and prefix (service-legacy-ip-p address)
+             (<= prefix (if (find #\: address) 128 32)))))))
+
+(defun validate-service-addresses (spec existing)
+  "Check externalIPs, loadBalancerIP and loadBalancerSourceRanges as upstream validation does.
+Values already stored are accepted again unchanged, like upstream's legacy-field rule."
+  (let ((old-spec (and existing (gethash "spec" existing))))
+    (let ((addresses (require-string-vector (optional-vector spec "externalIPs" "Service.spec") "Service.spec.externalIPs"))
+          (old (and old-spec (gethash "externalIPs" old-spec))))
+      (loop for address across addresses
+            unless (and old (find address old :test #'equal))
+              do (unless (service-legacy-ip-p address)
+                   (invalid-pod "spec.externalIPs: Invalid value: ~S: must be a valid IP address" address))
+                 (let ((reason (service-ip-special-reason address)))
+                   (when reason (invalid-pod "spec.externalIPs: Invalid value: ~S: ~A" address reason))))
+      (if (plusp (length addresses))
+          (setf (gethash "externalIPs" spec) addresses)
+          (remhash "externalIPs" spec)))
+    (let ((address (gethash "loadBalancerIP" spec)))
+      (cond ((member address '(nil "") :test #'equal) (remhash "loadBalancerIP" spec))
+            ((not (stringp address)) (invalid-pod "spec.loadBalancerIP must be a string"))))
+    (let ((ranges (require-string-vector (optional-vector spec "loadBalancerSourceRanges" "Service.spec")
+                                         "Service.spec.loadBalancerSourceRanges"))
+          (old (and old-spec (map 'list (lambda (value) (string-trim " " value))
+                                  (gethash "loadBalancerSourceRanges" old-spec #())))))
+      (when (plusp (length ranges))
+        (unless (equal "LoadBalancer" (gethash "type" spec "ClusterIP"))
+          (invalid-pod "spec.loadBalancerSourceRanges: Forbidden: may only be used when `type` is 'LoadBalancer'"))
+        (loop for range across ranges
+              for trimmed = (string-trim " " range)
+              unless (or (member trimmed old :test #'equal) (service-legacy-cidr-p trimmed))
+                do (invalid-pod "spec.loadBalancerSourceRanges: Invalid value: ~S: must be a valid CIDR value" range)))
+      (if (plusp (length ranges))
+          (setf (gethash "loadBalancerSourceRanges" spec) ranges)
+          (remhash "loadBalancerSourceRanges" spec)))))
+
+(defun normalize-service-traffic-policies (spec existing)
+  "Default and validate internal and external traffic policies and trafficDistribution.
+An update that leaves a type which takes externalTrafficPolicy, and doesn't change it,
+drops it as upstream's dropTypeDependentFields does; anything else that isn't allowed is refused."
+  (dolist (field '("internalTrafficPolicy" "externalTrafficPolicy" "trafficDistribution"))
+    (when (equal "" (gethash field spec)) (remhash field spec)))
+  (setf (gethash "internalTrafficPolicy" spec) (gethash "internalTrafficPolicy" spec "Cluster"))
+  (unless (member (gethash "internalTrafficPolicy" spec) '("Cluster" "Local") :test #'equal)
+    (invalid-pod "spec.internalTrafficPolicy: Unsupported value: ~S: supported values: \"Cluster\", \"Local\""
+                 (gethash "internalTrafficPolicy" spec)))
+  (let* ((old-spec (and existing (gethash "spec" existing)))
+         (policy (gethash "externalTrafficPolicy" spec)))
+    (cond ((service-externally-accessible-p spec)
+           (setf (gethash "externalTrafficPolicy" spec) (or policy "Cluster"))
+           (unless (member (gethash "externalTrafficPolicy" spec) '("Cluster" "Local") :test #'equal)
+             (invalid-pod "spec.externalTrafficPolicy: Unsupported value: ~S: supported values: \"Cluster\", \"Local\""
+                          policy)))
+          ((null policy))
+          ((and old-spec (service-externally-accessible-p old-spec)
+                (equal policy (gethash "externalTrafficPolicy" old-spec)))
+           (remhash "externalTrafficPolicy" spec))
+          (t (invalid-pod "spec.externalTrafficPolicy: Invalid value: ~S: may only be set for externally-accessible services"
+                          policy))))
+  (let ((distribution (gethash "trafficDistribution" spec)))
+    (when (and distribution
+               (not (member distribution '("PreferClose" "PreferSameZone" "PreferSameNode") :test #'equal)))
+      (invalid-pod "spec.trafficDistribution: Unsupported value: ~S: supported values: \"PreferClose\", \"PreferSameNode\", \"PreferSameZone\""
+                   distribution))))
+
+(defun assign-service-health-check-node-port (spec namespace name existing store)
+  "Allocate, keep or release a LoadBalancer Service's healthCheckNodePort from the node port range.
+It is needed only by an externalTrafficPolicy Local LoadBalancer, and immutable while it is."
+  (let* ((requested (let ((value (gethash "healthCheckNodePort" spec))) (if (member value '(nil null 0)) nil value)))
+         (old-spec (and existing (gethash "spec" existing)))
+         (old (and old-spec (service-needs-health-check-p old-spec) (gethash "healthCheckNodePort" old-spec))))
+    (cond ((not (service-needs-health-check-p spec))
+           (when (and requested (not (eql requested old)))
+             (invalid-pod "spec.healthCheckNodePort: Invalid value: ~A: may only be set when `type` is 'LoadBalancer' and `externalTrafficPolicy` is 'Local'"
+                          requested))
+           (remhash "healthCheckNodePort" spec))
+          (t
+           (when (and old requested (/= old requested))
+             (invalid-pod "spec.healthCheckNodePort: Forbidden: field is immutable"))
+           (unless (or (null requested) (typep requested '(integer 1 65535)))
+             (invalid-pod "spec.healthCheckNodePort: Invalid value: ~S: must be between 1 and 65535, inclusive" requested))
+           (unless store (invalid-pod "Service allocation requires the control-plane store"))
+           (let ((used (service-node-ports-in-use-unlocked store namespace name)))
+             (loop for port across (gethash "ports" spec #())
+                   when (integerp (gethash "nodePort" port)) do (setf (gethash (gethash "nodePort" port) used) t))
+             (let ((port (or requested old)))
+               (cond ((and old (eql port old)))
+                     (port
+                      (unless (typep port `(integer ,+node-port-minimum+ ,+node-port-maximum+))
+                        (invalid-pod "spec.healthCheckNodePort: Invalid value: ~A: provided port is not in the valid range. The range of valid ports is ~D-~D"
+                                     port +node-port-minimum+ +node-port-maximum+))
+                      (when (gethash port used)
+                        (invalid-pod "spec.healthCheckNodePort: Invalid value: ~A: provided port is already allocated" port)))
+                     (t (setf port (loop for candidate from +node-port-minimum+ to +node-port-maximum+
+                                         unless (gethash candidate used) return candidate
+                                         finally (core-resource-error 503 "ServiceUnavailable" "NodePort range is exhausted")))))
+               (setf (gethash "healthCheckNodePort" spec) port)))))
     spec))
 
 (defun normalize-service-affinity (spec existing)
@@ -179,15 +331,15 @@ Turning affinity off clears the timeout a client read back with the Service."
     (reject-unsupported-fields spec '("type" "ports" "selector" "clusterIP" "clusterIPs" "ipFamilies"
                                      "ipFamilyPolicy" "sessionAffinity" "sessionAffinityConfig" "internalTrafficPolicy"
                                      "externalTrafficPolicy" "allocateLoadBalancerNodePorts" "loadBalancerClass"
-                                     "publishNotReadyAddresses" "externalName") "Service.spec")
+                                     "publishNotReadyAddresses" "externalName" "externalIPs" "loadBalancerIP"
+                                     "loadBalancerSourceRanges" "healthCheckNodePort" "trafficDistribution") "Service.spec")
     (unless (member (gethash "type" spec "ClusterIP") '("ClusterIP" "NodePort" "LoadBalancer" "ExternalName") :test #'equal)
       (invalid-pod "Service type must be ClusterIP, NodePort, LoadBalancer or ExternalName"))
     (normalize-service-affinity spec (and store (gethash (core-resource-key "services" namespace (gethash "name" metadata))
                                                          (pod-store-resources store))))
-    (unless (equal "Cluster" (gethash "internalTrafficPolicy" spec "Cluster"))
-      (invalid-pod "only cluster internal traffic policy is supported"))
-    (unless (equal "Cluster" (gethash "externalTrafficPolicy" spec "Cluster"))
-      (invalid-pod "only cluster external traffic policy is supported"))
+    ;; DenyServiceExternalIPs is off by default upstream, so external IPs are admitted.
+    (validate-service-addresses spec (and store (gethash (core-resource-key "services" namespace (gethash "name" metadata))
+                                                         (pod-store-resources store))))
     ;; gr8s allocates single-stack IPv4 (normalized below). Accept a Service that
     ;; is satisfiable that way -- SingleStack, or PreferDualStack (best-effort, as
     ;; on any single-stack cluster; controller-generated Services such as ate's
@@ -254,9 +406,7 @@ Turning affinity off clears the timeout a client read back with the Service."
                          (not (equal class (gethash "loadBalancerClass" (gethash "spec" existing)))))
                 (invalid-pod "loadBalancerClass is immutable while the type is LoadBalancer"))))
           (progn (remhash "allocateLoadBalancerNodePorts" spec) (remhash "loadBalancerClass" spec)))
-      (if (member type '("NodePort" "LoadBalancer") :test #'equal)
-          (setf (gethash "externalTrafficPolicy" spec) (gethash "externalTrafficPolicy" spec "Cluster"))
-          (remhash "externalTrafficPolicy" spec))
+      (normalize-service-traffic-policies spec (and existing (not (service-external-name-p existing)) existing))
       (let* ((specified (or (let ((given (gethash "clusterIP" spec))) (and (not (equal given "")) given))
                             ;; An update that omits the address keeps the allocated one.
                             (and existing (gethash "clusterIP" (gethash "spec" existing)))))
@@ -290,10 +440,11 @@ Turning affinity off clears the timeout a client read back with the Service."
             (invalid-pod "clusterIPs must match the single clusterIP")))
         (setf (gethash "clusterIP" spec) address (gethash "clusterIPs" spec) (vector address)))
       (setf (gethash "type" spec) type
-            (gethash "internalTrafficPolicy" spec) "Cluster"
             (gethash "ipFamilies" spec) #("IPv4") (gethash "ipFamilyPolicy" spec) "SingleStack")
       (assign-service-node-ports spec namespace (gethash "name" metadata)
                                  (and existing (not (service-external-name-p existing)) existing) store)
+      (assign-service-health-check-node-port spec namespace (gethash "name" metadata)
+                                             (and existing (not (service-external-name-p existing)) existing) store)
       (networking-keep-status object existing (core-object "loadBalancer" (core-object))))
     object))
 

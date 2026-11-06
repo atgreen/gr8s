@@ -524,6 +524,7 @@ bare positional state directory for backward compatibility.  A missing
         (setf node-runtime
               (make-node-runtime
                (agent-state-path options "runtime/") runtime manager))
+        (setf (node-runtime-node-name node-runtime) node-name)
         (unwind-protect
              (progn
                (start-node-runtime node-runtime)

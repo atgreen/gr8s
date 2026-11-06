@@ -5,7 +5,9 @@
 ;;;; Make a container's hostPort and a Service's node port real. The agent listens
 ;;;; on the node's address and relays each TCP connection or UDP flow to a Pod, for
 ;;;; as long as that Pod is a current target. The relay is in userspace, so a Pod
-;;;; sees the node rather than the original client as the source.
+;;;; sees the node rather than the original client as the source. Node ports honour
+;;;; externalTrafficPolicy as kube-proxy does, and a Local LoadBalancer's
+;;;; healthCheckNodePort answers whether this node has ready endpoints.
 
 (in-package #:gr8s)
 
@@ -197,54 +199,219 @@ SCTP host ports are scheduled but not relayed: this userspace relay carries only
 
 ;;; Service node ports
 
-(defun make-node-port-target (backends affinity-timeout)
+(defun host-local-address-p (address)
+  "True when ADDRESS (four octets) is one of this host's own, which only a local socket can bind."
+  (or (= 127 (aref address 0))
+      (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :datagram :protocol :udp)))
+        (unwind-protect
+             (handler-case (progn (sb-bsd-sockets:socket-bind socket address 0) t)
+               (error () nil))
+          (ignore-errors (sb-bsd-sockets:socket-close socket))))))
+
+(defun make-node-port-target (backends affinity-timeout &key local-origin local-addresses)
   "Return a chooser spreading clients over (address . port) BACKENDS.
-A nonnil AFFINITY-TIMEOUT holds each client address on one backend while it stays active."
-  (let ((clients (make-hash-table :test #'equalp)) (lock (bt:make-lock "gr8s node port affinity")))
-    (lambda (client)
-      (flet ((any-backend () (nth (random (length backends)) backends)))
-        (if (and affinity-timeout client)
-            (bt:with-lock-held (lock)
-              (let* ((now (get-universal-time))
-                     (held (gethash client clients))
-                     (backend (if (and held (<= (- now (cdr held)) affinity-timeout)
-                                       (member (car held) backends :test #'equal))
-                                  (car held)
-                                  (any-backend))))
-                (setf (gethash client clients) (cons backend now))
-                backend))
-            (any-backend))))))
+A client on this node itself, at one of LOCAL-ADDRESSES (dotted Pod addresses) or one of the
+host's own addresses, is spread over LOCAL-ORIGIN instead when that is given, as kube-proxy
+short-circuits node-local traffic to an externalTrafficPolicy Local node port. A nonnil
+AFFINITY-TIMEOUT holds each client address on one backend while it stays active and still serves."
+  (let ((clients (make-hash-table :test #'equalp)) (lock (bt:make-lock "gr8s node port affinity"))
+        (locality (make-hash-table :test #'equalp)))
+    (flet ((choices (client)
+             (if (and local-origin client
+                      (bt:with-lock-held (lock)
+                        (multiple-value-bind (known present) (gethash client locality)
+                          (if present known
+                              (setf (gethash client locality)
+                                    (or (and (member (format nil "~{~D~^.~}" (coerce client 'list)) local-addresses
+                                                     :test #'equal)
+                                             t)
+                                        (host-local-address-p client)))))))
+                 local-origin
+                 backends)))
+      (lambda (client)
+        (let ((candidates (choices client)))
+          (when candidates
+            (flet ((any-backend () (nth (random (length candidates)) candidates)))
+              (if (and affinity-timeout client)
+                  (bt:with-lock-held (lock)
+                    (let* ((now (get-universal-time))
+                           (held (gethash client clients))
+                           (backend (if (and held (<= (- now (cdr held)) affinity-timeout)
+                                             (member (car held) candidates :test #'equal))
+                                        (car held)
+                                        (any-backend))))
+                      (setf (gethash client clients) (cons backend now))
+                      backend))
+                  (any-backend)))))))))
 
-(defun desired-node-port-targets (store)
-  "Map (protocol \"\" . node-port) to the backends of STORE's Services with ready backends.
-With none there is no listener, so a client is refused exactly as at a ClusterIP."
-  (let ((targets (make-hash-table :test #'equal)))
+(defun node-local-pod-addresses (store)
+  "The addresses of the Pods this node runs, whose traffic to a node port is node-local."
+  (let ((addresses nil))
+    (dolist (pod (list-pods store) addresses)
+      (let* ((status (with-store-lock (store) (gethash (pod-uid pod) (pod-store-pod-observed-statuses store))))
+             (address (and status (gethash "podIP" status))))
+        (when (and (stringp address) (plusp (length address)))
+          (pushnew address addresses :test #'equal))))))
+
+(defun desired-node-port-targets (store &key node-name)
+  "Map (protocol \"\" . node-port) to a plan for each of STORE's proxied Services with backends:
+(external local-origin affinity-timeout), where EXTERNAL are the backends for clients elsewhere,
+which externalTrafficPolicy governs, and LOCAL-ORIGIN those for this node's own clients.
+With neither there is no listener, so a client is refused exactly as at a ClusterIP."
+  (let ((targets (make-hash-table :test #'equal))
+        (zone (service-node-zone store node-name)))
     (dolist (service (list-core-resources store "services") targets)
-      (loop for port across (gethash "ports" (gethash "spec" service) #())
-            for node-port = (gethash "nodePort" port)
-            for protocol = (gethash "protocol" port "TCP")
-            do (when (and (integerp node-port) (member protocol '("TCP" "UDP") :test #'equal))
-                 (let ((backends (sort (mapcar (lambda (endpoint) (cons (first endpoint) (second endpoint)))
-                                               (service-pod-endpoints store service port))
-                                       #'string< :key #'prin1-to-string)))
-                   (when backends
-                     (setf (gethash (list* protocol "" node-port) targets)
-                           (list backends (service-affinity-timeout service))))))))))
+      (when (service-proxied-p service)
+        (loop for port across (gethash "ports" (gethash "spec" service) #())
+              for node-port = (gethash "nodePort" port)
+              for protocol = (gethash "protocol" port "TCP")
+              do (when (and (integerp node-port) (member protocol '("TCP" "UDP") :test #'equal))
+                   (multiple-value-bind (internal external local-origin)
+                       (service-port-backends store service port :node-name node-name :zone zone)
+                     (declare (ignore internal))
+                     (flet ((ordered (endpoints)
+                              (sort (mapcar (lambda (endpoint) (cons (first endpoint) (second endpoint))) endpoints)
+                                    #'string< :key #'prin1-to-string)))
+                       (let ((external (ordered external)) (local-origin (ordered local-origin)))
+                         (when (or external local-origin)
+                           (setf (gethash (list* protocol "" node-port) targets)
+                                 (list external local-origin (service-affinity-timeout service)))))))))))))
 
-(defun converge-node-port-forwarders (forwarders store)
+(defun converge-node-port-forwarders (forwarders store &key node-name)
   "Relay STORE's Service node ports, replacing a chooser only when its Service's plan changes,
 so a client's affinity survives unrelated changes."
-  (let ((plans (desired-node-port-targets store)) (targets (make-hash-table :test #'equal)))
+  (let ((plans (desired-node-port-targets store :node-name node-name))
+        (targets (make-hash-table :test #'equal))
+        (local-addresses (node-local-pod-addresses store)))
     (maphash (lambda (key plan)
                (let* ((forwarder (gethash key forwarders))
-                      (current (and forwarder (host-port-forwarder-target forwarder))))
+                      (current (and forwarder (host-port-forwarder-target forwarder)))
+                      (identity (list plan local-addresses)))
                  (setf (gethash key targets)
-                       (if (and (consp current) (equal (car current) plan))
+                       (if (and (consp current) (equal (car current) identity))
                            current
-                           (let ((chooser (make-node-port-target (first plan) (second plan))))
-                             (cons plan chooser))))))
+                           (destructuring-bind (external local-origin timeout) plan
+                             (cons identity
+                                   (make-node-port-target external timeout
+                                                          :local-origin local-origin
+                                                          :local-addresses local-addresses)))))))
              plans)
     (converge-port-forwarders forwarders targets)))
+
+;;; Health check node ports
+
+(defstruct health-check-server
+  "A healthCheckNodePort listener answering, as kube-proxy does, whether this node has ready
+endpoints for one externalTrafficPolicy Local LoadBalancer Service."
+  listener thread (stopping nil) (namespace "") (name "") (count 0))
+
+(defun health-check-response (namespace name count)
+  "The HTTP response kube-proxy's service health server writes for a Service with COUNT local ready endpoints."
+  (let ((body (format nil "{~%	\"service\": {~%		\"namespace\": ~S,~%		\"name\": ~S~%	},~%	\"localEndpoints\": ~D,~%	\"serviceProxyHealthy\": true~%}"
+                      namespace name count)))
+    (trivial-utf-8:string-to-utf-8-bytes
+     (format nil "HTTP/1.1 ~A~C~CContent-Type: application/json~C~CX-Content-Type-Options: nosniff~C~CX-Load-Balancing-Endpoint-Weight: ~D~C~CContent-Length: ~D~C~CConnection: close~C~C~C~C~A"
+             (if (plusp count) "200 OK" "503 Service Unavailable") #\Return #\Newline #\Return #\Newline
+             #\Return #\Newline count #\Return #\Newline
+             (length (trivial-utf-8:string-to-utf-8-bytes body)) #\Return #\Newline #\Return #\Newline
+             #\Return #\Newline body))))
+
+(defun health-check-serve-connection (server client)
+  "Read one request head from CLIENT, answer it from SERVER's current count and close."
+  (unwind-protect
+       (handler-case
+           (let ((buffer (make-array 4096 :element-type '(unsigned-byte 8))) (seen 0)
+                 (descriptor (sb-bsd-sockets:socket-file-descriptor client)))
+             ;; The answer doesn't depend on the request, but a client expects it read first.
+             (loop while (and (< seen (length buffer)) (sb-sys:wait-until-fd-usable descriptor :input 5))
+                   do (multiple-value-bind (data length)
+                          (sb-bsd-sockets:socket-receive client buffer (- (length buffer) seen))
+                        (declare (ignore data))
+                        (when (or (null length) (zerop length)) (return))
+                        (incf seen length)
+                        (when (search #(13 10 13 10) buffer :end2 seen) (return))))
+             (let ((response (health-check-response (health-check-server-namespace server)
+                                                    (health-check-server-name server)
+                                                    (health-check-server-count server)))
+                   (sent 0))
+               (loop while (< sent (length response))
+                     do (incf sent (sb-bsd-sockets:socket-send client (subseq response sent) (- (length response) sent))))))
+         (error () nil))
+    (ignore-errors (sb-bsd-sockets:socket-close client))))
+
+(defun start-health-check-server (port)
+  "Listen for health checks on every address at PORT."
+  (let ((listener (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (handler-case
+        (progn
+          (setf (sb-bsd-sockets:sockopt-reuse-address listener) t
+                (sb-bsd-sockets:non-blocking-mode listener) t)
+          (sb-bsd-sockets:socket-bind listener #(0 0 0 0) port)
+          (sb-bsd-sockets:socket-listen listener 64))
+      (error (condition)
+        (ignore-errors (sb-bsd-sockets:socket-close listener))
+        (error condition)))
+    (let ((server (make-health-check-server :listener listener)))
+      (setf (health-check-server-thread server)
+            (bt:make-thread
+             (lambda ()
+               (let ((descriptor (sb-bsd-sockets:socket-file-descriptor listener)))
+                 (loop until (health-check-server-stopping server)
+                       do (when (sb-sys:wait-until-fd-usable descriptor :input 0.25)
+                            (let ((client (ignore-errors (sb-bsd-sockets:socket-accept listener))))
+                              (when client
+                                (setf (sb-bsd-sockets:non-blocking-mode client) nil)
+                                (bt:make-thread (lambda () (health-check-serve-connection server client))
+                                                :name "gr8s health check connection")))))))
+             :name "gr8s health check listener"))
+      server)))
+
+(defun stop-health-check-server (server)
+  "Stop answering health checks on SERVER's port."
+  (setf (health-check-server-stopping server) t)
+  (ignore-errors (bt:join-thread (health-check-server-thread server)))
+  (ignore-errors (sb-bsd-sockets:socket-close (health-check-server-listener server))))
+
+(defun desired-health-checks (store &key node-name)
+  "Map each healthCheckNodePort in STORE to (namespace name local-ready-count) for its Service."
+  (let ((checks (make-hash-table)))
+    (dolist (service (list-core-resources store "services") checks)
+      (let* ((spec (gethash "spec" service)) (metadata (gethash "metadata" service))
+             (port (gethash "healthCheckNodePort" spec)))
+        (when (and (integerp port) (service-proxied-p service))
+          (let ((addresses nil))
+            (loop for service-port across (gethash "ports" spec #())
+                  do (dolist (record (service-slice-endpoint-records store service service-port))
+                       (when (and (getf record :ready) node-name (equal node-name (getf record :node)))
+                         (pushnew (getf record :address) addresses :test #'equal))))
+            (setf (gethash port checks)
+                  (list (gethash "namespace" metadata) (gethash "name" metadata) (length addresses)))))))))
+
+(defun converge-health-check-servers (servers store &key node-name)
+  "Make the SERVERS table, keyed by port, answer for STORE's healthCheckNodePorts."
+  (let ((checks (desired-health-checks store :node-name node-name)))
+    (loop for port being the hash-keys of servers using (hash-value server)
+          unless (gethash port checks)
+            collect port into gone and do (stop-health-check-server server)
+          finally (dolist (port gone) (remhash port servers)))
+    (maphash (lambda (port check)
+               (let ((server (or (gethash port servers)
+                                 (handler-case (setf (gethash port servers) (start-health-check-server port))
+                                   (error (condition)
+                                     (format *error-output* "gr8s health check node port ~D is unavailable: ~A~%"
+                                             port condition)
+                                     nil)))))
+                 (when server
+                   (destructuring-bind (namespace name count) check
+                     (setf (health-check-server-namespace server) namespace
+                           (health-check-server-name server) name
+                           (health-check-server-count server) count)))))
+             checks)))
+
+(defun stop-health-check-servers (servers)
+  "Stop every health check server in the SERVERS table."
+  (maphash (lambda (port server) (declare (ignore port)) (stop-health-check-server server)) servers)
+  (clrhash servers))
 
 (defun stop-host-port-forwarders (forwarders)
   "Stop every forwarder in the FORWARDERS table."

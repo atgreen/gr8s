@@ -341,3 +341,93 @@
        :delete (lambda (m k) (push (list (whistler/loader:map-info-fd m) k) deletes)))
       (is (member (list 1 (gr8s::service-lb-vip-key "10.96.0.10" 80)) deletes :test #'equalp))
       (is (member (list 2 (gr8s::service-lb-backend-key 0)) deletes :test #'equalp)))))
+
+;;; Traffic policies and topology, as kube-proxy's CategorizeEndpoints decides them.
+
+(defun endpoint-record (address &key (ready t) (serving t) terminating node zone zone-hints node-hints)
+  (list :address address :port 80 :ready ready :serving serving :terminating terminating
+        :node node :zone zone :zone-hints zone-hints :node-hints node-hints))
+
+(defun traffic-spec (&rest pairs)
+  (let ((spec (gr8s::core-object "type" "ClusterIP" "internalTrafficPolicy" "Cluster")))
+    (loop for (key value) on pairs by #'cddr do (setf (gethash key spec) value))
+    spec))
+
+(test endpoints-categorize-by-traffic-policy
+  (let ((records (list (endpoint-record "10.0.0.1" :node "here")
+                       (endpoint-record "10.0.1.1" :node "there")
+                       (endpoint-record "10.0.0.2" :node "here" :ready nil :serving nil))))
+    (multiple-value-bind (cluster local ready-local)
+        (gr8s::categorize-service-endpoints records (traffic-spec) :node-name "here")
+      (is (equal '(("10.0.0.1" 80) ("10.0.1.1" 80)) cluster))
+      (is (null local))
+      (is (= 1 ready-local)))
+    (multiple-value-bind (cluster local)
+        (gr8s::categorize-service-endpoints records (traffic-spec "internalTrafficPolicy" "Local") :node-name "here")
+      (is (null cluster))
+      (is (equal '(("10.0.0.1" 80)) local)))
+    ;; A Local node port Service still keeps cluster endpoints for its ClusterIP.
+    (multiple-value-bind (cluster local)
+        (gr8s::categorize-service-endpoints records (traffic-spec "type" "NodePort" "externalTrafficPolicy" "Local")
+                                            :node-name "elsewhere")
+      (is (= 2 (length cluster)))
+      (is (null local)))))
+
+(test endpoints-fall-back-to-serving-terminating-ones
+  (let ((records (list (endpoint-record "10.0.0.1" :node "here" :ready nil :serving t :terminating t)
+                       (endpoint-record "10.0.1.1" :node "there" :ready nil :serving t :terminating t)
+                       (endpoint-record "10.0.1.2" :node "there" :ready nil :serving nil :terminating t))))
+    (multiple-value-bind (cluster local ready-local)
+        (gr8s::categorize-service-endpoints records (traffic-spec "internalTrafficPolicy" "Local") :node-name "here")
+      (is (null cluster))
+      (is (equal '(("10.0.0.1" 80)) local))
+      ;; Terminating endpoints still serve, but a health check reports none ready.
+      (is (= 0 ready-local)))
+    (is (equal '(("10.0.0.1" 80) ("10.0.1.1" 80))
+               (gr8s::categorize-service-endpoints records (traffic-spec) :node-name "here")))))
+
+(test endpoints-follow-topology-hints-only-when-every-ready-one-has-them
+  (let ((hinted (list (endpoint-record "10.0.0.1" :node "a" :zone "z1" :zone-hints '("z1") :node-hints '("a"))
+                      (endpoint-record "10.0.1.1" :node "b" :zone "z2" :zone-hints '("z2") :node-hints '("b")))))
+    (is (equal '(("10.0.0.1" 80)) (gr8s::categorize-service-endpoints hinted (traffic-spec) :node-name "a" :zone "z1")))
+    ;; Zone hints apply when no node hint names this node.
+    (is (equal '(("10.0.1.1" 80)) (gr8s::categorize-service-endpoints hinted (traffic-spec) :node-name "c" :zone "z2")))
+    ;; Hints that name neither this node nor its zone are ignored.
+    (is (= 2 (length (gr8s::categorize-service-endpoints hinted (traffic-spec) :node-name "c" :zone "z3")))))
+  (let ((partly (list (endpoint-record "10.0.0.1" :node "a" :zone-hints '("z1"))
+                      (endpoint-record "10.0.1.1" :node "b"))))
+    (is (= 2 (length (gr8s::categorize-service-endpoints partly (traffic-spec) :node-name "a" :zone "z1"))))))
+
+(test service-lb-plan-serves-external-addresses-from-shared-slots
+  (let ((service (fake-lb-service "10.96.0.10" :ports '(80))))
+    (setf (gethash "externalIPs" (gethash "spec" service)) #("203.0.113.250")
+          (gethash "status" service)
+          (gr8s::core-object "loadBalancer"
+                             (gr8s::core-object "ingress" (vector (gr8s::core-object "ip" "198.51.100.9")
+                                                                  (gr8s::core-object "ip" "198.51.100.10" "ipMode" "Proxy")))))
+    ;; The same backends: every address points at slot 0.
+    (multiple-value-bind (service-entries backend-entries slots)
+        (gr8s::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
+                                                (values '(("10.88.1.5" 8080)) '(("10.88.1.5" 8080)))))
+      (is (= 3 (length service-entries)))
+      (is (= 1 (length backend-entries)))
+      (is (= 1 slots))
+      (is (equalp (gr8s::service-lb-vip-key "203.0.113.250" 80) (car (second service-entries))))
+      (is (equalp (gr8s::service-lb-vip-key "198.51.100.9" 80) (car (third service-entries))))
+      (is (equalp (gr8s::service-lb-service-value 1 0) (cdr (third service-entries)))))
+    ;; internalTrafficPolicy Local on a node without endpoints: the ClusterIP has none, the
+    ;; external addresses still reach every endpoint.
+    (multiple-value-bind (service-entries backend-entries)
+        (gr8s::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
+                                                (values nil '(("10.88.1.5" 8080)))))
+      (is (equalp (gr8s::service-lb-service-value 0 0) (cdr (first service-entries))))
+      (is (equalp (gr8s::service-lb-service-value 1 0) (cdr (second service-entries))))
+      (is (= 1 (length backend-entries))))))
+
+(test services-labelled-for-another-proxy-are-left-alone
+  (let ((other (fake-lb-service "10.96.0.11")) (headless (fake-lb-service "10.96.0.12")))
+    (setf (gethash "labels" (gethash "metadata" other))
+          (gr8s::core-object "service.kubernetes.io/service-proxy-name" "foo-bar")
+          (gethash "labels" (gethash "metadata" headless))
+          (gr8s::core-object "service.kubernetes.io/headless" ""))
+    (is (null (gr8s::service-lb-plan (list other headless) (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080))))))))

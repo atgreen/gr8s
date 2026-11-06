@@ -452,3 +452,150 @@
   (multiple-value-bind (maps programs) (gr8s::compile-service-lb)
     (is (= 3 (length maps)))
     (is (= 1 (length programs)))))
+
+;;; Traffic policies, external IPs and health check node ports
+
+(defun update-service-spec (store name function)
+  "Read Service NAME back from STORE and send it again after FUNCTION changes its spec, as a client does."
+  (gr8s::update-core-resource store "services" "alpha" name
+                              (lambda (object) (funcall function (gethash "spec" object)) object)))
+
+(test local-traffic-policies-are-accepted-and-default-to-cluster
+  (with-temporary-store (store directory)
+    (values directory)
+    (let ((plain (gr8s::create-core-resource store "services" (network-service "plain") "alpha"))
+          (local (gr8s::create-core-resource store "services"
+                                             (network-service "local" "internalTrafficPolicy" "Local") "alpha"))
+          (node-port (gr8s::create-core-resource store "services"
+                                                 (network-service "edge" "type" "NodePort" "externalTrafficPolicy" "Local")
+                                                 "alpha")))
+      (is (equal "Cluster" (gethash "internalTrafficPolicy" (gethash "spec" plain))))
+      (is (null (gethash "externalTrafficPolicy" (gethash "spec" plain))))
+      (is (equal "Local" (gethash "internalTrafficPolicy" (gethash "spec" local))))
+      (is (equal "Local" (gethash "externalTrafficPolicy" (gethash "spec" node-port))))
+      ;; A NodePort Service needs no health check.
+      (is (null (gethash "healthCheckNodePort" (gethash "spec" node-port)))))
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "odd" "internalTrafficPolicy" "Nearby") "alpha"))
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services"
+                                  (network-service "odd" "type" "NodePort" "externalTrafficPolicy" "Nearby") "alpha"))
+    ;; Only an externally accessible Service takes an external policy.
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "odd" "externalTrafficPolicy" "Local") "alpha"))
+    ;; Going back to ClusterIP with the policy unchanged drops it, as upstream does.
+    (let ((back (update-service-spec store "edge" (lambda (spec) (setf (gethash "type" spec) "ClusterIP")))))
+      (is (null (gethash "externalTrafficPolicy" (gethash "spec" back))))
+      (is (null (service-node-port back))))))
+
+(test local-load-balancers-hold-a-health-check-node-port-only-while-local
+  (with-temporary-store (store directory)
+    (values directory)
+    (let* ((created (gr8s::create-core-resource
+                     store "services" (network-service "lb" "type" "LoadBalancer" "externalTrafficPolicy" "Local") "alpha"))
+           (health (gethash "healthCheckNodePort" (gethash "spec" created))))
+      (is (<= gr8s::+node-port-minimum+ health gr8s::+node-port-maximum+))
+      (is (/= health (service-node-port created)))
+      ;; No other Service may take it as a node port.
+      (let ((thief (network-service "thief" "type" "NodePort")))
+        (setf (gethash "nodePort" (aref (gethash "ports" (gethash "spec" thief)) 0)) health)
+        (signals kubernetes-error (gr8s::create-core-resource store "services" thief "alpha")))
+      ;; An update that omits it keeps it; changing it is refused.
+      (is (= health (gethash "healthCheckNodePort"
+                             (gethash "spec" (update-service-spec store "lb" (lambda (spec) (remhash "healthCheckNodePort" spec)))))))
+      (signals kubernetes-error
+        (update-service-spec store "lb" (lambda (spec) (setf (gethash "healthCheckNodePort" spec) (1+ health)))))
+      ;; Cluster releases it, and Local may then ask for the same one back.
+      (let ((cluster (update-service-spec store "lb" (lambda (spec) (setf (gethash "externalTrafficPolicy" spec) "Cluster")))))
+        (is (null (gethash "healthCheckNodePort" (gethash "spec" cluster)))))
+      (let ((again (update-service-spec store "lb" (lambda (spec)
+                                                     (setf (gethash "externalTrafficPolicy" spec) "Local"
+                                                           (gethash "healthCheckNodePort" spec) health)))))
+        (is (= health (gethash "healthCheckNodePort" (gethash "spec" again))))))
+    ;; Asking for one outside the range, or on a Service that can't use it, is refused.
+    (signals kubernetes-error
+      (gr8s::create-core-resource
+       store "services" (network-service "low" "type" "LoadBalancer" "externalTrafficPolicy" "Local" "healthCheckNodePort" 80)
+       "alpha"))
+    (signals kubernetes-error
+      (gr8s::create-core-resource
+       store "services" (network-service "np" "type" "NodePort" "healthCheckNodePort" 31999) "alpha"))))
+
+(test external-ips-source-ranges-and-traffic-distribution-are-validated
+  (with-temporary-store (store directory)
+    (values directory)
+    (let ((external (gr8s::create-core-resource
+                     store "services" (network-service "ext" "externalIPs" #("203.0.113.250") "trafficDistribution" "PreferClose")
+                     "alpha")))
+      (is (equalp #("203.0.113.250") (gethash "externalIPs" (gethash "spec" external))))
+      ;; External IPs make a ClusterIP Service externally accessible.
+      (is (equal "Cluster" (gethash "externalTrafficPolicy" (gethash "spec" external))))
+      (is (equal "PreferClose" (gethash "trafficDistribution" (gethash "spec" external)))))
+    (dolist (address '("127.0.0.1" "0.0.0.0" "169.254.1.1" "224.0.0.5" "010.1.1.1" "not-an-ip"))
+      (signals kubernetes-error
+        (gr8s::create-core-resource store "services" (network-service "bad" "externalIPs" (vector address)) "alpha")))
+    (let ((balancer (gr8s::create-core-resource
+                     store "services" (network-service "lb" "type" "LoadBalancer"
+                                                       "loadBalancerSourceRanges" #("192.0.2.0/24" " 198.51.100.7/32")
+                                                       "loadBalancerIP" "192.0.2.10")
+                     "alpha")))
+      (is (= 2 (length (gethash "loadBalancerSourceRanges" (gethash "spec" balancer)))))
+      (is (equal "192.0.2.10" (gethash "loadBalancerIP" (gethash "spec" balancer)))))
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "ranged" "loadBalancerSourceRanges" #("192.0.2.0/24")) "alpha"))
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "lb2" "type" "LoadBalancer"
+                                                                    "loadBalancerSourceRanges" #("192.0.2.0/33"))
+                                  "alpha"))
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "far" "trafficDistribution" "PreferFar") "alpha"))))
+
+(test node-port-chooser-sends-node-local-clients-to-every-endpoint
+  ;; externalTrafficPolicy Local spreads outside clients over this node's endpoints only, but a
+  ;; client on the node itself still reaches every endpoint, as kube-proxy short-circuits it.
+  (let* ((local '(("10.0.0.1" . 80)))
+         (all '(("10.0.0.1" . 80) ("10.0.1.1" . 80)))
+         (chooser (gr8s::make-node-port-target local nil :local-origin all :local-addresses '("10.0.0.7"))))
+    (is (every (lambda (choice) (equal choice '("10.0.0.1" . 80)))
+               (loop repeat 50 collect (funcall chooser #(198 51 100 4)))))
+    (is (= 2 (length (remove-duplicates (loop repeat 200 collect (funcall chooser #(10 0 0 7))) :test #'equal))))
+    (is (= 2 (length (remove-duplicates (loop repeat 200 collect (funcall chooser #(127 0 0 1))) :test #'equal)))))
+  ;; With no local endpoint an outside client is not relayed at all.
+  (let ((chooser (gr8s::make-node-port-target nil nil :local-origin '(("10.0.1.1" . 80)))))
+    (is (null (funcall chooser #(198 51 100 4))))
+    (is (equal '("10.0.1.1" . 80) (funcall chooser #(127 0 0 1))))))
+
+(defun http-get-status-line (port)
+  "Send a GET to 127.0.0.1:PORT and return the response's first line and its body."
+  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (unwind-protect
+         (progn
+           (sb-bsd-sockets:socket-connect socket #(127 0 0 1) port)
+           (let ((request (trivial-utf-8:string-to-utf-8-bytes
+                           (format nil "GET /healthz HTTP/1.1~C~CHost: x~C~C~C~C" #\Return #\Newline #\Return #\Newline #\Return #\Newline))))
+             (sb-bsd-sockets:socket-send socket request (length request)))
+           (let ((buffer (make-array 4096 :element-type '(unsigned-byte 8))) (seen 0))
+             (loop (multiple-value-bind (data length) (sb-bsd-sockets:socket-receive socket buffer (- 4096 seen))
+                     (declare (ignore data))
+                     (if (and length (plusp length)) (incf seen length) (return))))
+             (let* ((text (trivial-utf-8:utf-8-bytes-to-string (subseq buffer 0 seen)))
+                    (break (search (format nil "~C~C~C~C" #\Return #\Newline #\Return #\Newline) text)))
+               (values (subseq text 0 (position #\Return text)) (subseq text (+ break 4))))))
+      (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+
+(test health-check-node-port-reports-local-ready-endpoints
+  (let ((server (gr8s::start-health-check-server 0)))
+    (unwind-protect
+         (let ((port (nth-value 1 (sb-bsd-sockets:socket-name (gr8s::health-check-server-listener server)))))
+           (setf (gr8s::health-check-server-namespace server) "alpha"
+                 (gr8s::health-check-server-name server) "lb")
+           (multiple-value-bind (status body) (http-get-status-line port)
+             (is (equal "HTTP/1.1 503 Service Unavailable" status))
+             (let ((json (com.inuoe.jzon:parse body)))
+               (is (= 0 (gethash "localEndpoints" json)))
+               (is (equal "lb" (gethash "name" (gethash "service" json))))))
+           (setf (gr8s::health-check-server-count server) 2)
+           (multiple-value-bind (status body) (http-get-status-line port)
+             (is (equal "HTTP/1.1 200 OK" status))
+             (is (= 2 (gethash "localEndpoints" (com.inuoe.jzon:parse body))))))
+      (gr8s::stop-health-check-server server))))
