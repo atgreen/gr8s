@@ -34,6 +34,7 @@
                (:static-file "schema/certificates-v1.json")
                (:static-file "schema/endpointslices-v1.json")
                (:static-file "schema/networking-v1.json")
+               (:static-file "schema/openapi-v1.json")
                (:module "src"
                 :serial t
                 :components ((:file "package")
@@ -361,6 +362,7 @@
                              (:file "crd-conversion-test")
                              (:file "crd-validation-rules-test")
                              (:file "table-printing-test")
+                             (:file "openapi-test")
                              (:file "job-policy-test")
                              (:file "job-controller-test")
                              (:file "job-indexed-test")
