@@ -28,12 +28,12 @@
                    (gr8s::service-lb-vip-key "10.96.0.11" 80)))))
 
 (test service-lb-service-value-byte-layout
-  ;; count u16 @0, affinity u16 @2, base slot u32 @4, timeout u32 @8, epoch u32 @12,
+  ;; count u16 @0, affinity u16 @2, base slot u32 @4, timeout u32 @8, reserved u32 @12,
   ;; all little-endian (logical integers).
   (is (equalp #(#x01 #x00 #x00 #x00 #x07 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00)
               (gr8s::service-lb-service-value 1 7)))
-  (is (equalp #(#x00 #x02 #x01 #x00 #xD2 #x04 #x00 #x00 #x10 #x0E #x00 #x00 #x34 #x12 #x00 #x00)
-              (gr8s::service-lb-service-value 512 1234 :affinity-timeout 3600 :epoch #x1234))))
+  (is (equalp #(#x00 #x02 #x01 #x00 #xD2 #x04 #x00 #x00 #x10 #x0E #x00 #x00 #x00 #x00 #x00 #x00)
+              (gr8s::service-lb-service-value 512 1234 :affinity-timeout 3600))))
 
 (test service-lb-plan-keys-by-protocol-and-carries-affinity
   ;; The same port over two protocols gets two VIP entries, and ClientIP affinity
@@ -84,8 +84,8 @@
 
 (test service-lb-program-compiles-in-process
   (multiple-value-bind (map-specs prog-specs) (gr8s::compile-service-lb)
-    ;; Exactly the two maps, with the key/value sizes the encoders target.
-    (is (= 3 (length map-specs)))
+    ;; Exactly the five maps, with the key/value sizes the encoders target.
+    (is (= 5 (length map-specs)))
     (let ((service (find "gr8s_service_v4" map-specs
                          :key (lambda (s) (getf s :name)) :test #'string=))
           (backend (find "gr8s_backend_v4" map-specs
@@ -96,9 +96,10 @@
       (is (= 16 (getf service :value-size)))
       (is (= 4 (getf backend :key-size)))
       (is (= 8 (getf backend :value-size))))
-    ;; One connect4 program with real, 8-byte-aligned instruction bytes and the
-    ;; map-fd relocations the loader patches in (one per map lookup, at least).
-    (is (= 1 (length prog-specs)))
+    ;; A connect4 program first, then sendmsg4 and recvmsg4, with real, 8-byte-aligned
+    ;; instruction bytes and the map-fd relocations the loader patches in (one per map
+    ;; lookup, at least).
+    (is (= 3 (length prog-specs)))
     (let* ((prog (first prog-specs))
            (insns (getf prog :insns)))
       (is (string= "cgroup/connect4" (getf prog :section)))
@@ -138,7 +139,8 @@
                               (is (eq :program-specs specs))
                               (setf load-saw-maps maps)
                               (list (cons "gr8s_service_lb" (fake-lb-program 900003))))
-             :attach (lambda (program-fd cgroup) (setf attach-args (list program-fd cgroup)) :attachment))))
+             :attach (lambda (program-fd cgroup attach-type)
+                       (setf attach-args (list program-fd cgroup attach-type)) :attachment))))
       ;; Both maps are pinned, under the given bpffs directory, by their names.
       (is (= 2 (length pinned)))
       (is (member "/run/gr8s/bpf/service-lb/gr8s_service_v4" pinned
@@ -149,8 +151,8 @@
       ;; discoverable maps): the loader sees the already-created maps.
       (is (= 2 (length load-saw-maps)))
       ;; The program is attached to the given cgroup by its loaded fd.
-      (is (equal (list 900003 "/sys/fs/cgroup/gr8s") attach-args))
-      (is (eq :attachment (gr8s::service-lb-dataplane-attachment dataplane)))
+      (is (equal (list 900003 "/sys/fs/cgroup/gr8s" whistler/loader:+bpf-cgroup-inet4-connect+) attach-args))
+      (is (equal '(:attachment) (gr8s::service-lb-dataplane-attachment dataplane)))
       (is (not (null (gr8s::service-lb-service-table dataplane))))
       (is (not (null (gr8s::service-lb-backend-table dataplane)))))))
 
@@ -168,7 +170,7 @@
        :remove-path (lambda (path) (push (namestring path) removed))
        :load-programs (lambda (specs maps) (declare (ignore specs maps))
                         (error "verifier rejected the program"))
-       :attach (lambda (program-fd cgroup) (declare (ignore program-fd cgroup)) :attachment)))
+       :attach (lambda (program-fd cgroup attach-type) (declare (ignore program-fd cgroup attach-type)) :attachment)))
     ;; A failed load removes every pin it had created.
     (is (= 2 (length removed)))
     (is (member "/run/gr8s/bpf/service-lb/gr8s_service_v4" removed :test #'string=))
@@ -182,7 +184,7 @@
                     :maps (list (fake-lb-map "gr8s_service_v4" 900001)
                                 (fake-lb-map "gr8s_backend_v4" 900002))
                     :program (fake-lb-program 900003)
-                    :attachment :attachment)))
+                    :attachment '(:attachment))))
     (gr8s::stop-service-lb-dataplane
      dataplane
      :detach (lambda (attachment) (push attachment detached))
@@ -341,3 +343,180 @@
        :delete (lambda (m k) (push (list (whistler/loader:map-info-fd m) k) deletes)))
       (is (member (list 1 (gr8s::service-lb-vip-key "10.96.0.10" 80)) deletes :test #'equalp))
       (is (member (list 2 (gr8s::service-lb-backend-key 0)) deletes :test #'equalp)))))
+
+;;; Traffic policies and topology, as kube-proxy's CategorizeEndpoints decides them.
+
+(defun endpoint-record (address &key (ready t) (serving t) terminating node zone zone-hints node-hints)
+  (list :address address :port 80 :ready ready :serving serving :terminating terminating
+        :node node :zone zone :zone-hints zone-hints :node-hints node-hints))
+
+(defun traffic-spec (&rest pairs)
+  (let ((spec (gr8s::core-object "type" "ClusterIP" "internalTrafficPolicy" "Cluster")))
+    (loop for (key value) on pairs by #'cddr do (setf (gethash key spec) value))
+    spec))
+
+(test endpoints-categorize-by-traffic-policy
+  (let ((records (list (endpoint-record "10.0.0.1" :node "here")
+                       (endpoint-record "10.0.1.1" :node "there")
+                       (endpoint-record "10.0.0.2" :node "here" :ready nil :serving nil))))
+    (multiple-value-bind (cluster local ready-local)
+        (gr8s::categorize-service-endpoints records (traffic-spec) :node-name "here")
+      (is (equal '(("10.0.0.1" 80) ("10.0.1.1" 80)) cluster))
+      (is (null local))
+      (is (= 1 ready-local)))
+    (multiple-value-bind (cluster local)
+        (gr8s::categorize-service-endpoints records (traffic-spec "internalTrafficPolicy" "Local") :node-name "here")
+      (is (null cluster))
+      (is (equal '(("10.0.0.1" 80)) local)))
+    ;; A Local node port Service still keeps cluster endpoints for its ClusterIP.
+    (multiple-value-bind (cluster local)
+        (gr8s::categorize-service-endpoints records (traffic-spec "type" "NodePort" "externalTrafficPolicy" "Local")
+                                            :node-name "elsewhere")
+      (is (= 2 (length cluster)))
+      (is (null local)))))
+
+(test endpoints-fall-back-to-serving-terminating-ones
+  (let ((records (list (endpoint-record "10.0.0.1" :node "here" :ready nil :serving t :terminating t)
+                       (endpoint-record "10.0.1.1" :node "there" :ready nil :serving t :terminating t)
+                       (endpoint-record "10.0.1.2" :node "there" :ready nil :serving nil :terminating t))))
+    (multiple-value-bind (cluster local ready-local)
+        (gr8s::categorize-service-endpoints records (traffic-spec "internalTrafficPolicy" "Local") :node-name "here")
+      (is (null cluster))
+      (is (equal '(("10.0.0.1" 80)) local))
+      ;; Terminating endpoints still serve, but a health check reports none ready.
+      (is (= 0 ready-local)))
+    (is (equal '(("10.0.0.1" 80) ("10.0.1.1" 80))
+               (gr8s::categorize-service-endpoints records (traffic-spec) :node-name "here")))))
+
+(test endpoints-follow-topology-hints-only-when-every-ready-one-has-them
+  (let ((hinted (list (endpoint-record "10.0.0.1" :node "a" :zone "z1" :zone-hints '("z1") :node-hints '("a"))
+                      (endpoint-record "10.0.1.1" :node "b" :zone "z2" :zone-hints '("z2") :node-hints '("b")))))
+    (is (equal '(("10.0.0.1" 80)) (gr8s::categorize-service-endpoints hinted (traffic-spec) :node-name "a" :zone "z1")))
+    ;; Zone hints apply when no node hint names this node.
+    (is (equal '(("10.0.1.1" 80)) (gr8s::categorize-service-endpoints hinted (traffic-spec) :node-name "c" :zone "z2")))
+    ;; Hints that name neither this node nor its zone are ignored.
+    (is (= 2 (length (gr8s::categorize-service-endpoints hinted (traffic-spec) :node-name "c" :zone "z3")))))
+  (let ((partly (list (endpoint-record "10.0.0.1" :node "a" :zone-hints '("z1"))
+                      (endpoint-record "10.0.1.1" :node "b"))))
+    (is (= 2 (length (gr8s::categorize-service-endpoints partly (traffic-spec) :node-name "a" :zone "z1"))))))
+
+(test service-lb-plan-serves-external-addresses-from-shared-slots
+  (let ((service (fake-lb-service "10.96.0.10" :ports '(80))))
+    (setf (gethash "externalIPs" (gethash "spec" service)) #("203.0.113.250")
+          (gethash "status" service)
+          (gr8s::core-object "loadBalancer"
+                             (gr8s::core-object "ingress" (vector (gr8s::core-object "ip" "198.51.100.9")
+                                                                  (gr8s::core-object "ip" "198.51.100.10" "ipMode" "Proxy")))))
+    ;; The same backends: every address points at slot 0.
+    (multiple-value-bind (service-entries backend-entries slots)
+        (gr8s::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
+                                                (values '(("10.88.1.5" 8080)) '(("10.88.1.5" 8080)))))
+      (is (= 3 (length service-entries)))
+      (is (= 1 (length backend-entries)))
+      (is (= 1 slots))
+      (is (equalp (gr8s::service-lb-vip-key "203.0.113.250" 80) (car (second service-entries))))
+      (is (equalp (gr8s::service-lb-vip-key "198.51.100.9" 80) (car (third service-entries))))
+      (is (equalp (gr8s::service-lb-service-value 1 0) (cdr (third service-entries)))))
+    ;; internalTrafficPolicy Local on a node without endpoints: the ClusterIP has none, the
+    ;; external addresses still reach every endpoint.
+    (multiple-value-bind (service-entries backend-entries)
+        (gr8s::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
+                                                (values nil '(("10.88.1.5" 8080)))))
+      (is (equalp (gr8s::service-lb-service-value 0 0) (cdr (first service-entries))))
+      (is (equalp (gr8s::service-lb-service-value 1 0) (cdr (second service-entries))))
+      (is (= 1 (length backend-entries))))))
+
+(test services-labelled-for-another-proxy-are-left-alone
+  (let ((other (fake-lb-service "10.96.0.11")) (headless (fake-lb-service "10.96.0.12")))
+    (setf (gethash "labels" (gethash "metadata" other))
+          (gr8s::core-object "service.kubernetes.io/service-proxy-name" "foo-bar")
+          (gethash "labels" (gethash "metadata" headless))
+          (gr8s::core-object "service.kubernetes.io/headless" ""))
+    (is (null (gr8s::service-lb-plan (list other headless) (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080))))))))
+
+;;; Unconnected UDP and affinity that follows its backend
+
+(test service-lb-program-compiles-every-socket-hook
+  ;; connect4 and sendmsg4 steer, recvmsg4 restores the Service address on UDP replies.
+  (multiple-value-bind (maps programs) (gr8s::compile-service-lb)
+    (is (equal '("gr8s_service_v4" "gr8s_backend_v4" "gr8s_backend_index_v4" "gr8s_affinity_v4" "gr8s_reverse_v4")
+               (mapcar (lambda (spec) (getf spec :name)) maps)))
+    (is (equal '("cgroup/connect4" "cgroup/sendmsg4" "cgroup/recvmsg4")
+               (mapcar (lambda (spec) (getf spec :section)) programs)))
+    (is (equal (list whistler/loader:+bpf-cgroup-inet4-connect+ whistler/loader:+bpf-cgroup-udp4-sendmsg+ 19)
+               (mapcar (lambda (spec) (gr8s::service-lb-attach-type (getf spec :section))) programs)))))
+
+(test service-lb-affinity-index-finds-each-backend-by-identity
+  ;; An affinity Service indexes each backend's offset by (service key, backend value), so
+  ;; a client's held backend is found again wherever a change to the set moved it.
+  (multiple-value-bind (vip-key value backends indexed)
+      (gr8s::service-lb-entries "10.96.0.10" 80 5 '(("10.88.1.5" . 8080) ("10.88.1.6" . 8080)) :affinity-timeout 60)
+    (declare (ignore value))
+    (is (= 2 (length backends)))
+    (is (equalp (gr8s::service-lb-index-key vip-key (gr8s::service-lb-backend-value "10.88.1.6" 8080))
+                (car (second indexed))))
+    (is (equalp #(1 0 0 0) (cdr (second indexed))))
+    (is (= 16 (length (car (first indexed))))))
+  ;; Without affinity there is nothing to index.
+  (is (null (nth-value 3 (gr8s::service-lb-entries "10.96.0.10" 80 0 '(("10.88.1.5" . 8080)))))))
+
+(test service-lb-converge-retires-index-entries-of-departed-backends
+  (let* ((index-map (fake-lb-map "gr8s_backend_index_v4" 3))
+         (controller (gr8s::make-service-lb-controller
+                      nil (gr8s::%make-service-lb-dataplane
+                           :maps (list (fake-lb-map "gr8s_service_v4" 1) (fake-lb-map "gr8s_backend_v4" 2) index-map))))
+         (service (fake-lb-service "10.96.0.10" :ports '(80))))
+    (setf (gethash "sessionAffinity" (gethash "spec" service)) "ClientIP")
+    (let ((writes nil))
+      (gr8s::converge-service-lb-controller
+       controller :list-services (lambda () (list service))
+       :endpoints-of (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))
+       :update (lambda (m k v) (declare (ignore k v)) (push (whistler/loader:map-info-fd m) writes))
+       :delete (constantly nil))
+      ;; Backends, then their index entries, then the Service.
+      (is (equal '(2 2 3 3 1) (nreverse writes))))
+    (let ((deletes nil))
+      (gr8s::converge-service-lb-controller
+       controller :list-services (lambda () (list service))
+       :endpoints-of (lambda (s p) (declare (ignore s p)) '(("10.88.1.6" 8080)))
+       :update (constantly nil)
+       :delete (lambda (m k) (push (list (whistler/loader:map-info-fd m) k) deletes)))
+      (is (member (list 3 (gr8s::service-lb-index-key (gr8s::service-lb-vip-key "10.96.0.10" 80)
+                                                      (gr8s::service-lb-backend-value "10.88.1.5" 8080)))
+                  deletes :test #'equalp)))))
+
+;;; A Service with no endpoints anywhere is refused, as kube-proxy rejects it.
+
+(test service-lb-refuses-a-service-with-no-endpoints-anywhere
+  (is (= 1 (aref (gr8s::service-lb-service-value 0 0 :refuse t) 12)))
+  ;; Refusal never applies while there are backends.
+  (is (= 0 (aref (nth-value 1 (gr8s::service-lb-entries "10.96.0.10" 80 0 '(("10.88.1.5" . 8080)) :refuse t)) 12)))
+  (let ((service (fake-lb-service "10.96.0.10" :ports '(80))))
+    ;; No endpoints at all: refused.
+    (is (= 1 (aref (cdr (first (gr8s::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
+                                                                         (values nil nil t)))))
+                   12)))
+    ;; Endpoints only on other nodes (internalTrafficPolicy Local): left to time out, as kube-proxy drops it.
+    (is (= 0 (aref (cdr (first (gr8s::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
+                                                                         (values nil '(("10.88.1.5" 8080)) nil)))))
+                   12)))))
+
+(test endpoints-report-whether-any-exist
+  (is (null (nth-value 3 (gr8s::categorize-service-endpoints
+                          (list (endpoint-record "10.0.0.1" :ready nil :serving nil)) (traffic-spec)))))
+  (is (eq t (nth-value 3 (gr8s::categorize-service-endpoints
+                          (list (endpoint-record "10.0.1.1" :node "there"))
+                          (traffic-spec "internalTrafficPolicy" "Local") :node-name "here")))))
+
+(test service-lb-program-compiles-the-refusal
+  ;; The refusal calls bpf_set_retval (helper 187) in the connect4 and sendmsg4 hooks.
+  (multiple-value-bind (maps programs) (gr8s::compile-service-lb)
+    (declare (ignore maps))
+    (flet ((calls-helper-p (spec id)
+             (let ((insns (getf spec :insns)))
+               (loop for offset from 0 below (length insns) by 8
+                     thereis (and (= #x85 (aref insns offset)) (zerop (logand (aref insns (1+ offset)) #xf0))
+                                  (= id (aref insns (+ offset 4))))))))
+      (is (calls-helper-p (first programs) 187))
+      (is (calls-helper-p (second programs) 187))
+      (is (not (calls-helper-p (third programs) 187))))))

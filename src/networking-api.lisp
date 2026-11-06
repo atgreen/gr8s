@@ -18,7 +18,7 @@
   "The name upstream gives the ServiceCIDR that describes the cluster's own service range.")
 
 (defparameter +default-service-cidr+ "10.96.0.0/16"
-  "The range normalize-service-resource allocates ClusterIPs from.")
+  "The default range normalize-service-resource allocates ClusterIPs from, besides other ServiceCIDRs.")
 
 (defvar *networking-status-write* nil
   "True only while a status subresource write may replace an object's server-owned status.")
@@ -168,13 +168,14 @@ no class, by field or by the legacy kubernetes.io/ingress.class annotation, the 
   object)
 
 (defun service-cidr-ready-status (cidrs)
-  "Report Ready only for the range the allocator actually assigns addresses from."
-  (let ((served (equalp cidrs (vector +default-service-cidr+))))
+  "Report Ready for a range the allocator assigns addresses from: any IPv4 one, as ClusterIPs
+here are single-stack IPv4."
+  (let ((served (find-if-not (lambda (cidr) (find #\: cidr)) cidrs)))
     (core-object "conditions"
                  (vector (core-object "type" "Ready" "status" (if served "True" "False")
                                       "reason" (if served "" "NotServed")
                                       "message" (if served "Kubernetes Service CIDR is ready"
-                                                    "ClusterIPs are allocated only from the default range")
+                                                    "ClusterIPs are allocated only from IPv4 ranges")
                                       "lastTransitionTime" (current-timestamp))))))
 
 (defun normalize-service-cidr (object existing)

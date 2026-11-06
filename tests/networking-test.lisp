@@ -292,8 +292,8 @@
     (let ((cidr (check-core-status 201 "/apis/networking.k8s.io/v1/servicecidrs" :method :post
                                    :object (gr8s::core-object "metadata" (gr8s::core-object "name" "extra")
                                                               "spec" (gr8s::core-object "cidrs" (vector "203.0.113.0/24"))))))
-      ;; Nothing allocates from another range, so the object says so rather than claiming Ready.
-      (is (equal "False" (gethash "status" (aref (gethash "conditions" (gethash "status" cidr)) 0)))))
+      ;; ClusterIPs are allocated from every IPv4 range, so another one is Ready too.
+      (is (equal "True" (gethash "status" (aref (gethash "conditions" (gethash "status" cidr)) 0)))))
     (check-core-status 422 "/apis/networking.k8s.io/v1/servicecidrs" :method :post
                        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "hostbits")
                                                   "spec" (gr8s::core-object "cidrs" (vector "203.0.113.1/24"))))
@@ -449,9 +449,349 @@
         (gr8s::stop-host-port-forwarders forwarders)))))
 
 (test service-lb-program-compiles-with-affinity
+  ;; Service, backend, affinity index, affinity and UDP reverse maps; connect4, sendmsg4 and recvmsg4.
   (multiple-value-bind (maps programs) (gr8s::compile-service-lb)
-    (is (= 3 (length maps)))
-    (is (= 1 (length programs)))))
+    (is (= 5 (length maps)))
+    (is (= 3 (length programs)))))
+
+;;; Traffic policies, external IPs and health check node ports
+
+(defun update-service-spec (store name function)
+  "Read Service NAME back from STORE and send it again after FUNCTION changes its spec, as a client does."
+  (gr8s::update-core-resource store "services" "alpha" name
+                              (lambda (object) (funcall function (gethash "spec" object)) object)))
+
+(test local-traffic-policies-are-accepted-and-default-to-cluster
+  (with-temporary-store (store directory)
+    (values directory)
+    (let ((plain (gr8s::create-core-resource store "services" (network-service "plain") "alpha"))
+          (local (gr8s::create-core-resource store "services"
+                                             (network-service "local" "internalTrafficPolicy" "Local") "alpha"))
+          (node-port (gr8s::create-core-resource store "services"
+                                                 (network-service "edge" "type" "NodePort" "externalTrafficPolicy" "Local")
+                                                 "alpha")))
+      (is (equal "Cluster" (gethash "internalTrafficPolicy" (gethash "spec" plain))))
+      (is (null (gethash "externalTrafficPolicy" (gethash "spec" plain))))
+      (is (equal "Local" (gethash "internalTrafficPolicy" (gethash "spec" local))))
+      (is (equal "Local" (gethash "externalTrafficPolicy" (gethash "spec" node-port))))
+      ;; A NodePort Service needs no health check.
+      (is (null (gethash "healthCheckNodePort" (gethash "spec" node-port)))))
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "odd" "internalTrafficPolicy" "Nearby") "alpha"))
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services"
+                                  (network-service "odd" "type" "NodePort" "externalTrafficPolicy" "Nearby") "alpha"))
+    ;; Only an externally accessible Service takes an external policy.
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "odd" "externalTrafficPolicy" "Local") "alpha"))
+    ;; Going back to ClusterIP with the policy unchanged drops it, as upstream does.
+    (let ((back (update-service-spec store "edge" (lambda (spec) (setf (gethash "type" spec) "ClusterIP")))))
+      (is (null (gethash "externalTrafficPolicy" (gethash "spec" back))))
+      (is (null (service-node-port back))))))
+
+(test local-load-balancers-hold-a-health-check-node-port-only-while-local
+  (with-temporary-store (store directory)
+    (values directory)
+    (let* ((created (gr8s::create-core-resource
+                     store "services" (network-service "lb" "type" "LoadBalancer" "externalTrafficPolicy" "Local") "alpha"))
+           (health (gethash "healthCheckNodePort" (gethash "spec" created))))
+      (is (<= gr8s::+node-port-minimum+ health gr8s::+node-port-maximum+))
+      (is (/= health (service-node-port created)))
+      ;; No other Service may take it as a node port.
+      (let ((thief (network-service "thief" "type" "NodePort")))
+        (setf (gethash "nodePort" (aref (gethash "ports" (gethash "spec" thief)) 0)) health)
+        (signals kubernetes-error (gr8s::create-core-resource store "services" thief "alpha")))
+      ;; An update that omits it keeps it; changing it is refused.
+      (is (= health (gethash "healthCheckNodePort"
+                             (gethash "spec" (update-service-spec store "lb" (lambda (spec) (remhash "healthCheckNodePort" spec)))))))
+      (signals kubernetes-error
+        (update-service-spec store "lb" (lambda (spec) (setf (gethash "healthCheckNodePort" spec) (1+ health)))))
+      ;; Cluster releases it, and Local may then ask for the same one back.
+      (let ((cluster (update-service-spec store "lb" (lambda (spec) (setf (gethash "externalTrafficPolicy" spec) "Cluster")))))
+        (is (null (gethash "healthCheckNodePort" (gethash "spec" cluster)))))
+      (let ((again (update-service-spec store "lb" (lambda (spec)
+                                                     (setf (gethash "externalTrafficPolicy" spec) "Local"
+                                                           (gethash "healthCheckNodePort" spec) health)))))
+        (is (= health (gethash "healthCheckNodePort" (gethash "spec" again))))))
+    ;; Asking for one outside the range, or on a Service that can't use it, is refused.
+    (signals kubernetes-error
+      (gr8s::create-core-resource
+       store "services" (network-service "low" "type" "LoadBalancer" "externalTrafficPolicy" "Local" "healthCheckNodePort" 80)
+       "alpha"))
+    (signals kubernetes-error
+      (gr8s::create-core-resource
+       store "services" (network-service "np" "type" "NodePort" "healthCheckNodePort" 31999) "alpha"))))
+
+(test external-ips-source-ranges-and-traffic-distribution-are-validated
+  (with-temporary-store (store directory)
+    (values directory)
+    (let ((external (gr8s::create-core-resource
+                     store "services" (network-service "ext" "externalIPs" #("203.0.113.250") "trafficDistribution" "PreferClose")
+                     "alpha")))
+      (is (equalp #("203.0.113.250") (gethash "externalIPs" (gethash "spec" external))))
+      ;; External IPs make a ClusterIP Service externally accessible.
+      (is (equal "Cluster" (gethash "externalTrafficPolicy" (gethash "spec" external))))
+      (is (equal "PreferClose" (gethash "trafficDistribution" (gethash "spec" external)))))
+    (dolist (address '("127.0.0.1" "0.0.0.0" "169.254.1.1" "224.0.0.5" "010.1.1.1" "not-an-ip"))
+      (signals kubernetes-error
+        (gr8s::create-core-resource store "services" (network-service "bad" "externalIPs" (vector address)) "alpha")))
+    (let ((balancer (gr8s::create-core-resource
+                     store "services" (network-service "lb" "type" "LoadBalancer"
+                                                       "loadBalancerSourceRanges" #("192.0.2.0/24" " 198.51.100.7/32")
+                                                       "loadBalancerIP" "192.0.2.10")
+                     "alpha")))
+      (is (= 2 (length (gethash "loadBalancerSourceRanges" (gethash "spec" balancer)))))
+      (is (equal "192.0.2.10" (gethash "loadBalancerIP" (gethash "spec" balancer)))))
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "ranged" "loadBalancerSourceRanges" #("192.0.2.0/24")) "alpha"))
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "lb2" "type" "LoadBalancer"
+                                                                    "loadBalancerSourceRanges" #("192.0.2.0/33"))
+                                  "alpha"))
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "far" "trafficDistribution" "PreferFar") "alpha"))))
+
+(test node-port-chooser-sends-node-local-clients-to-every-endpoint
+  ;; externalTrafficPolicy Local spreads outside clients over this node's endpoints only, but a
+  ;; client on the node itself still reaches every endpoint, as kube-proxy short-circuits it.
+  (let* ((local '(("10.0.0.1" . 80)))
+         (all '(("10.0.0.1" . 80) ("10.0.1.1" . 80)))
+         (chooser (gr8s::make-node-port-target local nil :local-origin all :local-addresses '("10.0.0.7"))))
+    (is (every (lambda (choice) (equal choice '("10.0.0.1" . 80)))
+               (loop repeat 50 collect (funcall chooser #(198 51 100 4)))))
+    (is (= 2 (length (remove-duplicates (loop repeat 200 collect (funcall chooser #(10 0 0 7))) :test #'equal))))
+    (is (= 2 (length (remove-duplicates (loop repeat 200 collect (funcall chooser #(127 0 0 1))) :test #'equal)))))
+  ;; Only a Local policy keeps the client's address, and only for a client elsewhere.
+  (let ((keeping (gr8s::make-node-port-target '(("10.0.0.1" . 80)) nil :local-origin '(("10.0.0.1" . 80))
+                                              :keep-source t))
+        (cluster (gr8s::make-node-port-target '(("10.0.0.1" . 80)) nil :local-origin '(("10.0.0.1" . 80)))))
+    (is (eq t (nth-value 1 (funcall keeping #(198 51 100 4)))))
+    (is (null (nth-value 1 (funcall keeping #(127 0 0 1)))))
+    (is (null (nth-value 1 (funcall cluster #(198 51 100 4))))))
+  ;; With no local endpoint an outside client is not relayed at all.
+  (let ((chooser (gr8s::make-node-port-target nil nil :local-origin '(("10.0.1.1" . 80)))))
+    (is (null (funcall chooser #(198 51 100 4))))
+    (is (equal '("10.0.1.1" . 80) (funcall chooser #(127 0 0 1))))))
+
+(defun http-get-status-line (port)
+  "Send a GET to 127.0.0.1:PORT and return the response's first line and its body."
+  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (unwind-protect
+         (progn
+           (sb-bsd-sockets:socket-connect socket #(127 0 0 1) port)
+           (let ((request (trivial-utf-8:string-to-utf-8-bytes
+                           (format nil "GET /healthz HTTP/1.1~C~CHost: x~C~C~C~C" #\Return #\Newline #\Return #\Newline #\Return #\Newline))))
+             (sb-bsd-sockets:socket-send socket request (length request)))
+           (let ((buffer (make-array 4096 :element-type '(unsigned-byte 8))) (seen 0))
+             (loop (multiple-value-bind (data length) (sb-bsd-sockets:socket-receive socket buffer (- 4096 seen))
+                     (declare (ignore data))
+                     (if (and length (plusp length)) (incf seen length) (return))))
+             (let* ((text (trivial-utf-8:utf-8-bytes-to-string (subseq buffer 0 seen)))
+                    (break (search (format nil "~C~C~C~C" #\Return #\Newline #\Return #\Newline) text)))
+               (values (subseq text 0 (position #\Return text)) (subseq text (+ break 4))))))
+      (ignore-errors (sb-bsd-sockets:socket-close socket)))))
+
+(test health-check-node-port-reports-local-ready-endpoints
+  (let ((server (gr8s::start-health-check-server 0)))
+    (unwind-protect
+         (let ((port (nth-value 1 (sb-bsd-sockets:socket-name (gr8s::health-check-server-listener server)))))
+           (setf (gr8s::health-check-server-namespace server) "alpha"
+                 (gr8s::health-check-server-name server) "lb")
+           (multiple-value-bind (status body) (http-get-status-line port)
+             (is (equal "HTTP/1.1 503 Service Unavailable" status))
+             (let ((json (com.inuoe.jzon:parse body)))
+               (is (= 0 (gethash "localEndpoints" json)))
+               (is (equal "lb" (gethash "name" (gethash "service" json))))))
+           (setf (gr8s::health-check-server-count server) 2)
+           (multiple-value-bind (status body) (http-get-status-line port)
+             (is (equal "HTTP/1.1 200 OK" status))
+             (is (= 2 (gethash "localEndpoints" (com.inuoe.jzon:parse body))))))
+      (gr8s::stop-health-check-server server))))
+
+;;; ClusterIPs from every ServiceCIDR, each claimed by an IPAddress
+
+(defun service-ip-claim (store address)
+  (gr8s::get-core-resource store "ipaddresses" nil address))
+
+(test cluster-ips-come-from-every-service-cidr-and-are-claimed
+  (with-temporary-store (store directory)
+    (values directory)
+    (gr8s::ensure-default-service-cidr store)
+    (gr8s::create-core-resource store "servicecidrs"
+                                (gr8s::core-object "metadata" (gr8s::core-object "name" "extra")
+                                                   "spec" (gr8s::core-object "cidrs" (vector "203.0.113.0/24")))
+                                nil)
+    ;; A dynamic address comes from the default range, and its IPAddress names the Service.
+    (let* ((plain (gr8s::create-core-resource store "services" (network-service "plain") "alpha"))
+           (address (gethash "clusterIP" (gethash "spec" plain)))
+           (claim (service-ip-claim store address)))
+      (is (gr8s::service-ip-index address))
+      (is (equal "ipallocator.k8s.io"
+                 (gethash "ipaddress.kubernetes.io/managed-by" (gethash "labels" (gethash "metadata" claim)))))
+      (is (equal '("alpha" "plain") (gr8s::ip-address-parent-service claim))))
+    ;; An address in the other range is accepted and claimed; one in no range is refused.
+    (let ((extra (gr8s::create-core-resource store "services" (network-service "extra" "clusterIP" "203.0.113.10") "alpha")))
+      (is (equal "203.0.113.10" (gethash "clusterIP" (gethash "spec" extra))))
+      (is (service-ip-claim store "203.0.113.10")))
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "outside" "clusterIP" "198.51.100.10") "alpha"))
+    ;; Nor are a range's network and broadcast addresses, or an address another IPAddress holds.
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "edge" "clusterIP" "203.0.113.255") "alpha"))
+    (gr8s::create-core-resource store "ipaddresses"
+                                (gr8s::core-object "metadata" (gr8s::core-object "name" "203.0.113.11")
+                                                   "spec" (gr8s::core-object "parentRef"
+                                                                             (gr8s::core-object "group" "example.com" "resource" "things"
+                                                                                                "name" "held")))
+                                nil)
+    (signals kubernetes-error
+      (gr8s::create-core-resource store "services" (network-service "taken" "clusterIP" "203.0.113.11") "alpha"))
+    ;; A Service that goes away leaves a stale claim: an allocation may take the address over,
+    ;; and the repair pass removes it.
+    (gr8s::delete-core-resource store "services" "alpha" "extra")
+    (is (service-ip-claim store "203.0.113.10"))
+    (gr8s::create-core-resource store "services" (network-service "again" "clusterIP" "203.0.113.10") "beta")
+    (is (equal '("beta" "again") (gr8s::ip-address-parent-service (service-ip-claim store "203.0.113.10"))))
+    (gr8s::delete-core-resource store "services" "beta" "again")
+    (gr8s::reconcile-service-ip-addresses store)
+    (signals kubernetes-error (service-ip-claim store "203.0.113.10"))
+    ;; The user's own IPAddress is never touched.
+    (is (service-ip-claim store "203.0.113.11"))))
+
+(test service-ip-repair-claims-addresses-of-older-services
+  (with-temporary-store (store directory)
+    (values directory)
+    (let ((address (gethash "clusterIP" (gethash "spec" (gr8s::create-core-resource
+                                                          store "services" (network-service "old") "alpha")))))
+      ;; As if the Service predated IPAddress objects.
+      (gr8s::delete-core-resource store "ipaddresses" nil address)
+      (gr8s::reconcile-service-ip-addresses store)
+      (is (equal '("alpha" "old") (gr8s::ip-address-parent-service (service-ip-claim store address)))))))
+
+(defun sctp-available-p ()
+  "True when this kernel can open an SCTP socket."
+  (handler-case
+      (progn (sb-bsd-sockets:socket-close (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :sctp)) t)
+    (error () nil)))
+
+(test sctp-port-forwarder-relays-an-association
+  ;; SCTP host ports and node ports are relayed like TCP ones, as one-to-one associations.
+  (if (not (sctp-available-p))
+      (skip "this kernel has no SCTP")
+      (let ((server (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :sctp)))
+        (sb-bsd-sockets:socket-bind server #(127 0 0 1) 0)
+        (sb-bsd-sockets:socket-listen server 4)
+        (let* ((backend (nth-value 1 (sb-bsd-sockets:socket-name server)))
+               (echo (bt:make-thread
+                      (lambda ()
+                        (let ((peer (sb-bsd-sockets:socket-accept server))
+                              (buffer (make-array 64 :element-type '(unsigned-byte 8))))
+                          (unwind-protect
+                               (multiple-value-bind (data length) (sb-bsd-sockets:socket-receive peer buffer nil)
+                                 (declare (ignore data))
+                                 (sb-bsd-sockets:socket-send peer buffer length))
+                            (sb-bsd-sockets:socket-close peer))))))
+               (forwarder (gr8s::start-host-port-forwarder "127.0.0.1" 0 (cons "127.0.0.1" backend) "SCTP"))
+               (port (nth-value 1 (sb-bsd-sockets:socket-name (gr8s::host-port-forwarder-listener forwarder))))
+               (client (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :sctp))
+               (buffer (make-array 16 :element-type '(unsigned-byte 8))))
+          (unwind-protect
+               (progn
+                 (sb-bsd-sockets:socket-connect client #(127 0 0 1) port)
+                 (sb-bsd-sockets:socket-send client (coerce #(4 5 6) '(vector (unsigned-byte 8))) 3)
+                 (is (sb-sys:wait-until-fd-usable (sb-bsd-sockets:socket-file-descriptor client) :input 5))
+                 (multiple-value-bind (data length) (sb-bsd-sockets:socket-receive client buffer nil)
+                   (declare (ignore data))
+                   (is (eql 3 length))
+                   (is (equalp #(4 5 6) (subseq buffer 0 3)))))
+            (ignore-errors (sb-bsd-sockets:socket-close client))
+            (gr8s::stop-host-port-forwarder forwarder)
+            (ignore-errors (bt:join-thread echo :timeout 2))
+            (ignore-errors (sb-bsd-sockets:socket-close server)))))))
+
+(test sctp-node-ports-and-host-ports-are-planned
+  (with-temporary-store (store directory)
+    (values directory)
+    (let ((service (network-service "sctp" "type" "NodePort")))
+      (setf (gethash "protocol" (aref (gethash "ports" (gethash "spec" service)) 0)) "SCTP")
+      (let* ((created (gr8s::create-core-resource store "services" service "alpha"))
+             (node-port (service-node-port created)))
+        (gr8s::create-core-resource
+         store "endpointslices"
+         (gr8s::core-object "metadata" (gr8s::core-object "name" "sctp-manual"
+                                                          "labels" (gr8s::core-object "kubernetes.io/service-name" "sctp"))
+                            "addressType" "IPv4"
+                            "ports" (vector (gr8s::core-object "name" "http" "port" 8080 "protocol" "SCTP"))
+                            "endpoints" (vector (gr8s::core-object "addresses" (vector "192.0.2.5")
+                                                                   "conditions" (gr8s::core-object "ready" t))))
+         "alpha")
+        (let ((plan (gethash (list* "SCTP" "" node-port) (gr8s::desired-node-port-targets store))))
+          (is (equal '(("192.0.2.5" . 8080)) (first plan))))))))
+
+(test transparent-reply-rules-match-exactly-one-relayed-flow
+  ;; fib_rule_hdr for AF_INET /32 to /32 in the reply table, then the client as destination, the
+  ;; Pod as source, and the Pod's and relay's ports as one-port ranges.
+  (let ((message (gr8s::transparent-reply-rule-message "10.88.0.5" 8080 "192.0.2.7" 40001 "TCP")))
+    (is (equalp (vector 2 32 32 0 gr8s::+transparent-reply-table+ 0 0 1) (subseq message 0 8)))
+    (is (search #(8 0 1 0 192 0 2 7) message))
+    (is (search #(8 0 2 0 10 88 0 5) message))
+    (is (search (gr8s::netlink-octets #(8 0 23 0) (gr8s::netlink-integer 8080 2) (gr8s::netlink-integer 8080 2)) message))
+    (is (search (gr8s::netlink-octets #(8 0 24 0) (gr8s::netlink-integer 40001 2) (gr8s::netlink-integer 40001 2)) message))
+    (is (search #(5 0 22 0 6) message)))
+  (is (search #(5 0 22 0 17) (gr8s::transparent-reply-rule-message "10.88.0.5" 53 "192.0.2.7" 40001 "UDP"))))
+
+(test proxy-ignores-endpoint-slices-labelled-headless
+  ;; kube-proxy's slice informer skips service.kubernetes.io/headless; DNS still reads the slice.
+  (with-temporary-store (store directory)
+    (values directory)
+    (let ((service (gr8s::create-core-resource
+                    store "services"
+                    (gr8s::core-object "metadata" (gr8s::core-object "name" "custom")
+                                       "spec" (gr8s::core-object "ports" (vector (gr8s::core-object "name" "port80" "port" 80))))
+                    "alpha")))
+      (gr8s::create-core-resource
+       store "endpointslices"
+       (gr8s::core-object "metadata" (gr8s::core-object "name" "custom-slice"
+                                                        "labels" (gr8s::core-object "kubernetes.io/service-name" "custom"
+                                                                                    "service.kubernetes.io/headless" ""))
+                          "addressType" "IPv4"
+                          "ports" (vector (gr8s::core-object "name" "port80" "port" 8090 "protocol" "TCP"))
+                          "endpoints" (vector (gr8s::core-object "addresses" (vector "192.0.2.5")
+                                                                 "conditions" (gr8s::core-object "ready" t))))
+       "alpha")
+      (let ((port (aref (gethash "ports" (gethash "spec" service)) 0)))
+        (is (= 1 (length (gr8s::service-slice-endpoint-records store service port))))
+        (is (null (gr8s::service-slice-endpoint-records store service port :proxy t)))
+        (is (null (gr8s::service-port-backends store service port)))))))
+
+(test node-port-errors-use-upstream-wording
+  ;; e2e matches "<port>.*port is already allocated" and "<port>.*port is not in the valid range".
+  (with-temporary-store (store directory)
+    (values directory)
+    (let* ((first (gr8s::create-core-resource store "services" (network-service "first" "type" "NodePort") "alpha"))
+           (port (service-node-port first)))
+      (flet ((message (node-port)
+               (let ((input (network-service "second" "type" "NodePort")))
+                 (setf (gethash "nodePort" (aref (gethash "ports" (gethash "spec" input)) 0)) node-port)
+                 (handler-case (progn (gr8s::create-core-resource store "services" input "alpha") nil)
+                   (kubernetes-error (condition) (gr8s::kubernetes-error-message condition))))))
+        (is (cl-ppcre:scan (format nil "~D.*port is already allocated" port) (message port)))
+        (is (cl-ppcre:scan "40000.*port is not in the valid range" (message 40000)))))))
+
+(test udp-ports-are-bound-on-each-host-address
+  ;; A wildcard UDP listener would answer from the route's address, not the one the client used.
+  (let ((targets (make-hash-table :test #'equal)))
+    (setf (gethash (list* "UDP" "" 30001) targets) :udp
+          (gethash (list* "TCP" "" 30000) targets) :tcp
+          (gethash (list* "UDP" "192.0.2.1" 5353) targets) :pinned)
+    (gr8s::bind-udp-ports-per-address targets '("127.0.0.1" "10.0.2.15"))
+    (is (eq :udp (gethash (list* "UDP" "127.0.0.1" 30001) targets)))
+    (is (eq :udp (gethash (list* "UDP" "10.0.2.15" 30001) targets)))
+    (is (null (gethash (list* "UDP" "" 30001) targets)))
+    (is (eq :tcp (gethash (list* "TCP" "" 30000) targets)))
+    (is (eq :pinned (gethash (list* "UDP" "192.0.2.1" 5353) targets))))
+  ;; This host's own addresses come from rtnetlink, loopback among them.
+  (is (member "127.0.0.1" (gr8s::host-ipv4-addresses) :test #'equal)))
 
 ;;; Ingress classes and NetworkPolicy over the API
 

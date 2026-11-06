@@ -2,6 +2,7 @@
 
 (defstruct (node-runtime (:constructor %make-node-runtime))
   state-directory
+  (node-name nil)   ; the Node this agent runs, for Service traffic policies
   runtime
   manager
   network
@@ -36,6 +37,7 @@
   (host-port-forwarders (make-hash-table :test #'equal))
   ;; Listening Service node ports by (protocol ip . port), likewise.
   (node-port-forwarders (make-hash-table :test #'equal))
+  (health-check-servers (make-hash-table))
   ;; Gateway API L7 proxy listeners, reconciled from stored Gateway/HTTPRoute
   ;; objects. NIL until the first reconcile creates it.
   gateway-controller)
@@ -290,6 +292,7 @@
       (setf (node-runtime-worker node-runtime) nil))
     (stop-host-port-forwarders (node-runtime-host-port-forwarders node-runtime))
     (stop-host-port-forwarders (node-runtime-node-port-forwarders node-runtime))
+    (stop-health-check-servers (node-runtime-health-check-servers node-runtime))
     (stop-runtime-deletions (node-runtime-runtime node-runtime))))
 
 (defun call-with-agent-cni-server
@@ -330,7 +333,8 @@ the node from starting."
     (when dataplane
       (setf (node-runtime-service-lb node-runtime) dataplane
             (node-runtime-service-lb-controller node-runtime)
-            (make-service-lb-controller (node-runtime-store node-runtime) dataplane)))
+            (make-service-lb-controller (node-runtime-store node-runtime) dataplane
+                                        (node-runtime-node-name node-runtime))))
     (unwind-protect
          (funcall function)
       (when (node-runtime-gateway-controller node-runtime)
@@ -755,8 +759,13 @@ snapshot application."
           (error (condition)
             (format *error-output* "gr8s: Service LB convergence failed: ~A~%" condition))))
       (handler-case
-          (converge-node-port-forwarders (node-runtime-node-port-forwarders node-runtime)
-                                         (node-runtime-store node-runtime))
+          (progn
+            (converge-node-port-forwarders (node-runtime-node-port-forwarders node-runtime)
+                                           (node-runtime-store node-runtime)
+                                           :node-name (node-runtime-node-name node-runtime))
+            (converge-health-check-servers (node-runtime-health-check-servers node-runtime)
+                                           (node-runtime-store node-runtime)
+                                           :node-name (node-runtime-node-name node-runtime)))
         (error (condition)
           (format *error-output* "gr8s: node port convergence failed: ~A~%" condition)))
       ;; Attach per-Pod NetworkPolicy classifiers from the just-installed policy
