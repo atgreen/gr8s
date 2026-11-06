@@ -85,9 +85,10 @@ address octets read little-endian, then serializes that scalar; this reproduces 
            (key (logior (ash (service-lb-protocol-number protocol) 48) (ash vip 16) vport)))
       (service-lb-bytes key 8))))
 
-(defun service-lb-service-value (backend-count base-slot &key affinity-timeout)
+(defun service-lb-service-value (backend-count base-slot &key affinity-timeout refuse)
   "Return the 16-octet gr8s_service_v4 value: count u16 @0, affinity flag u16 @2, base
-slot u32 @4, affinity timeout seconds u32 @8, and a reserved zero u32 @12."
+slot u32 @4, affinity timeout seconds u32 @8, and flags u32 @12, whose bit 0 REFUSE asks the
+program to refuse connections, for a Service with no endpoints at all."
   (unless (typep backend-count '(integer 0 65535))
     (error "Service backend count ~S is out of range" backend-count))
   (let ((buffer (make-array 16 :element-type '(unsigned-byte 8) :initial-element 0)))
@@ -95,6 +96,7 @@ slot u32 @4, affinity timeout seconds u32 @8, and a reserved zero u32 @12."
     (replace buffer (service-lb-bytes (if affinity-timeout 1 0) 2) :start1 2)
     (replace buffer (service-lb-bytes base-slot 4) :start1 4)
     (replace buffer (service-lb-bytes (or affinity-timeout 0) 4) :start1 8)
+    (replace buffer (service-lb-bytes (if refuse 1 0) 4) :start1 12)
     buffer))
 
 (defun service-lb-backend-key (slot)
@@ -117,17 +119,18 @@ network byte order so the program copies them verbatim into the socket address."
 that identifies the backend."
   (concatenate '(vector (unsigned-byte 8)) vip-key backend-value))
 
-(defun service-lb-entries (address port base-slot backends &key (protocol "TCP") affinity-timeout)
+(defun service-lb-entries (address port base-slot backends &key (protocol "TCP") affinity-timeout refuse)
   "Plan the map entries for one ClusterIP:PORT/PROTOCOL over BACKENDS.
 BACKENDS is a list of (ip . target-port) conses, assigned consecutive slots from
 BASE-SLOT.  AFFINITY-TIMEOUT, in seconds, keeps each client on one backend while
-it is active.  Returns four values: the VIP key, the service value, a list of
+it is active.  REFUSE marks a Service with no endpoints at all.  Returns four values: the VIP key, the service value, a list of
 (backend-key . backend-value) octet-vector pairs, and, for an affinity Service, a
 list of (index-key . offset) pairs that find each backend's offset by its identity."
   (let ((vip-key (service-lb-vip-key address port protocol)))
     (values
      vip-key
-     (service-lb-service-value (length backends) base-slot :affinity-timeout affinity-timeout)
+     (service-lb-service-value (length backends) base-slot :affinity-timeout affinity-timeout
+                               :refuse (and refuse (null backends)))
      (loop for (ip . target-port) in backends
            for slot from base-slot
            collect (cons (service-lb-backend-key slot)

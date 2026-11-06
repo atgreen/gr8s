@@ -282,7 +282,7 @@ a node hint and one names NODE-NAME, else :zone likewise for ZONE, else NIL to i
 
 (defun categorize-service-endpoints (records spec &key node-name zone)
   "Split endpoint RECORDS for Service SPEC as kube-proxy's CategorizeEndpoints does.
-Returns (values cluster local local-ready-count): the ready endpoints the topology hints allow,
+Returns (values cluster local local-ready-count any), ANY being kube-proxy's hasAnyEndpoints: the ready endpoints the topology hints allow,
 or failing those every serving terminating one; this node's ready endpoints, or failing those its
 serving terminating ones; and how many ready endpoints are on this node. An endpoint without a
 node, as a selectorless manual one, is never local. Each list holds (address port) pairs."
@@ -309,7 +309,10 @@ node, as a selectorless manual one, is never local. Each list holds (address por
                       (remove-if-not (lambda (record) (and (funcall local-p record) (funcall fallback-p record))) records))))
     (flet ((pairs (list) (mapcar (lambda (record) (list (getf record :address) (getf record :port))) list)))
       (values (pairs cluster) (pairs local)
-              (count-if (lambda (record) (and (funcall local-p record) (getf record :ready))) records)))))
+              (count-if (lambda (record) (and (funcall local-p record) (getf record :ready))) records)
+              (and (or cluster
+                       (some (lambda (record) (or (getf record :ready) (funcall fallback-p record))) records))
+                   t)))))
 
 (defun service-node-zone (store node-name)
   "This node's zone as its own endpoints report it, or NIL. The agent has no Node objects, and
@@ -322,19 +325,20 @@ without a zone kube-proxy, too, ignores zone hints."
 
 (defun service-port-backends (store service port &key node-name zone)
   "Resolve the backends SERVICE's PORT sends each kind of traffic to on node NODE-NAME.
-Returns (values internal external local-origin local-ready-count) as (address port) lists:
+Returns (values internal external local-origin local-ready-count any) as (address port) lists:
 INTERNAL for the ClusterIP, which internalTrafficPolicy governs; EXTERNAL for node ports,
 external IPs and load balancer addresses reached from elsewhere, which externalTrafficPolicy
 governs; LOCAL-ORIGIN for those reached from this node itself, which kube-proxy short-circuits to
-every endpoint while the Service uses any; and the ready local endpoint count a health check reports."
+every endpoint while the Service uses any; the ready local endpoint count a health check reports;
+and whether the port has any usable endpoint anywhere, without which kube-proxy rejects traffic."
   (let ((spec (gethash "spec" service)))
     (multiple-value-bind (records found) (service-slice-endpoint-records store service port)
       (if (not found)
           ;; No slices yet: the agent's own selector-matched Pods, all on this node.
           (let ((endpoints (service-pod-endpoints store service port)))
-            (values endpoints endpoints endpoints (length endpoints)))
-          (multiple-value-bind (cluster local ready-local)
+            (values endpoints endpoints endpoints (length endpoints) (and endpoints t)))
+          (multiple-value-bind (cluster local ready-local any)
               (categorize-service-endpoints records spec :node-name node-name :zone zone)
             (let ((internal (if (equal "Local" (gethash "internalTrafficPolicy" spec)) local cluster))
                   (external (if (equal "Local" (gethash "externalTrafficPolicy" spec)) local cluster)))
-              (values internal external (or cluster local) ready-local)))))))
+              (values internal external (or cluster local) ready-local any)))))))

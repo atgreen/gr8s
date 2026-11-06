@@ -25,13 +25,16 @@
 ;; Whistler lists helpers by name; bpf_get_netns_cookie is available to these
 ;; programs from Linux 5.7 and identifies the connecting client's network namespace.
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  (pushnew '("GET-NETNS-COOKIE" . 122) whistler/compiler:*builtin-helpers* :test #'equal))
+  (pushnew '("GET-NETNS-COOKIE" . 122) whistler/compiler:*builtin-helpers* :test #'equal)
+  ;; bpf_set_retval (Linux 5.19) lets a cgroup hook fail connect(2) with an errno of its choosing.
+  (pushnew '("SET-RETVAL" . 187) whistler/compiler:*builtin-helpers* :test #'equal))
 
 ;; Map definitions, as evaluatable (whistler:defmap ...) forms.
 ;;
 ;;   gr8s_service_v4   key u64  (protocol << 48) | (vip << 16) | htons(port)
 ;;                     value 16 count u16 @0, affinity u16 @2, base slot u32 @4,
-;;                              affinity timeout seconds u32 @8, reserved u32 @12
+;;                              affinity timeout seconds u32 @8, flags u32 @12 (bit 0: refuse,
+;;                              set for a Service with no endpoints at all)
 ;;   gr8s_backend_v4   key u32  backend slot
 ;;                     value 8  addr u32 @0, port u16 @4 (both network byte order), zero u16 @6
 ;;   gr8s_backend_index_v4
@@ -65,8 +68,10 @@ Service VIP:port and protocol to a backend chosen uniformly at random, or for a
 ClientIP affinity Service to the backend this client last used while that is within
 the timeout and the backend still serves.  The client is its network namespace,
 which owns the source address a packet-level proxy would key on; a socket hook runs
-before any source address is chosen.  A Service with no backends keeps a zero count
-and is left untouched.  No DNAT, no conntrack: the socket talks to the real backend.
+before any source address is chosen.  A Service with no endpoints at all is refused
+with ECONNREFUSED, as kube-proxy rejects it; one whose endpoints are all elsewhere
+(internalTrafficPolicy Local) keeps a zero count and is left untouched, as kube-proxy
+drops it.  No DNAT, no conntrack: the socket talks to the real backend.
 For UDP the socket's (cookie, backend) is remembered, so the recvmsg4 hook can show
 replies as coming from the address the client sent to."
   `(defprog ,name (:type :cgroup-sock-addr :section ,section :license "GPL")
@@ -76,6 +81,9 @@ replies as coming from the address the client sent to."
             (key u64 (logior (<< proto 48) (logior (<< vip 16) vport))))
        (when-let ((service u64 (map-lookup gr8s-service-v4 key)))
          (let ((count u32 (cast u32 (load u16 service 0))))
+           (when (and (= count 0) (> (logand (load u32 service 12) 1) 0))
+             (set-retval #xffffff91)      ; -ECONNREFUSED as the int the helper takes
+             (return 0))
            (when (> count 0)
              (let* ((offset u32 (mod (get-prandom-u32) count))
                     (sticky u64 (load u16 service 2))

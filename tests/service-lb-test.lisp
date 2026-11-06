@@ -484,3 +484,39 @@
       (is (member (list 3 (gr8s::service-lb-index-key (gr8s::service-lb-vip-key "10.96.0.10" 80)
                                                       (gr8s::service-lb-backend-value "10.88.1.5" 8080)))
                   deletes :test #'equalp)))))
+
+;;; A Service with no endpoints anywhere is refused, as kube-proxy rejects it.
+
+(test service-lb-refuses-a-service-with-no-endpoints-anywhere
+  (is (= 1 (aref (gr8s::service-lb-service-value 0 0 :refuse t) 12)))
+  ;; Refusal never applies while there are backends.
+  (is (= 0 (aref (nth-value 1 (gr8s::service-lb-entries "10.96.0.10" 80 0 '(("10.88.1.5" . 8080)) :refuse t)) 12)))
+  (let ((service (fake-lb-service "10.96.0.10" :ports '(80))))
+    ;; No endpoints at all: refused.
+    (is (= 1 (aref (cdr (first (gr8s::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
+                                                                         (values nil nil t)))))
+                   12)))
+    ;; Endpoints only on other nodes (internalTrafficPolicy Local): left to time out, as kube-proxy drops it.
+    (is (= 0 (aref (cdr (first (gr8s::service-lb-plan (list service) (lambda (s p) (declare (ignore s p))
+                                                                         (values nil '(("10.88.1.5" 8080)) nil)))))
+                   12)))))
+
+(test endpoints-report-whether-any-exist
+  (is (null (nth-value 3 (gr8s::categorize-service-endpoints
+                          (list (endpoint-record "10.0.0.1" :ready nil :serving nil)) (traffic-spec)))))
+  (is (eq t (nth-value 3 (gr8s::categorize-service-endpoints
+                          (list (endpoint-record "10.0.1.1" :node "there"))
+                          (traffic-spec "internalTrafficPolicy" "Local") :node-name "here")))))
+
+(test service-lb-program-compiles-the-refusal
+  ;; The refusal calls bpf_set_retval (helper 187) in the connect4 and sendmsg4 hooks.
+  (multiple-value-bind (maps programs) (gr8s::compile-service-lb)
+    (declare (ignore maps))
+    (flet ((calls-helper-p (spec id)
+             (let ((insns (getf spec :insns)))
+               (loop for offset from 0 below (length insns) by 8
+                     thereis (and (= #x85 (aref insns offset)) (zerop (logand (aref insns (1+ offset)) #xf0))
+                                  (= id (aref insns (+ offset 4))))))))
+      (is (calls-helper-p (first programs) 187))
+      (is (calls-helper-p (second programs) 187))
+      (is (not (calls-helper-p (third programs) 187))))))

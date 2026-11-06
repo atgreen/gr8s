@@ -65,7 +65,8 @@ load balancer ingress addresses, except ones whose ipMode Proxy says the balance
 ENDPOINTS-OF is a function of (service port-object) returning two lists of (address
 target-port) pairs: the backends for the ClusterIP, and those for the Service's
 external IPs and load balancer addresses, which only this node's own clients reach
-through the socket hook.  Returns four values: the service entries (VIP key . value
+through the socket hook; and, as a third value, true when the port has no endpoints
+anywhere, so connections to it are refused rather than left to time out.  Returns four values: the service entries (VIP key . value
 conses), the backend entries (slot key . value conses), the total slot count, and the
 affinity index entries (index key . offset conses).
 Backends occupy consecutive slots from 0, assigned in a deterministic Service/port
@@ -79,7 +80,7 @@ order; a port's external addresses share its ClusterIP's slots when the backends
         (loop for port across (gethash "ports" (gethash "spec" service))
               for number = (gethash "port" port)
               for protocol = (gethash "protocol" port "TCP")
-              do (multiple-value-bind (internal external) (funcall endpoints-of service port)
+              do (multiple-value-bind (internal external none) (funcall endpoints-of service port)
                    (flet ((ordered (endpoints)
                             ;; Sorted so a client's backend offset means the same thing on every plan.
                             (sort (mapcar (lambda (endpoint) (cons (first endpoint) (second endpoint))) endpoints)
@@ -89,7 +90,8 @@ order; a port's external addresses share its ClusterIP's slots when the backends
                                 (let ((shared (assoc backends placed :test #'equal)))
                                   (multiple-value-bind (vip-key service-value packed indexed)
                                       (service-lb-entries vip number (if shared (cdr shared) slot) backends
-                                                          :protocol protocol :affinity-timeout timeout)
+                                                          :protocol protocol :affinity-timeout timeout
+                                                          :refuse none)
                                     (push (cons vip-key service-value) service-entries)
                                     (dolist (entry indexed) (push entry index-entries))
                                     (unless shared
@@ -126,10 +128,10 @@ order; a port's external addresses share its ClusterIP's slots when the backends
                   (node-name (service-lb-controller-node-name controller))
                   (zone (service-node-zone store node-name)))
              (lambda (service port)
-               (multiple-value-bind (internal external local-origin)
+               (multiple-value-bind (internal external local-origin ready-local any)
                    (service-port-backends store service port :node-name node-name :zone zone)
-                 (declare (ignore external))
-                 (values internal local-origin))))))
+                 (declare (ignore external ready-local))
+                 (values internal local-origin (not any)))))))
   "Recompute the desired LB table and apply the difference to the maps.
 Writes every backend before the service that references it (so the program never
 reads a VIP whose slots are missing), then removes freed backend slots and

@@ -8,7 +8,8 @@ access to the agnhost image. Unit tests show the plans; this shows what the kern
 does with them. The test process runs in the host cgroup tree, which the socket
 load balancer governs, so it is itself a node-local client:
 
-* a ClusterIP and its externalIPs reach the Service's Pods;
+* a ClusterIP and its externalIPs reach the Service's Pods, and a Service with no
+  endpoints refuses a connection at once, as kube-proxy rejects it;
 * an unconnected UDP sendto(2) to a ClusterIP is load balanced, and the reply comes
   back from the ClusterIP, as it does for a connected socket;
 * ClientIP session affinity keeps a client on its backend when another backend joins;
@@ -232,6 +233,23 @@ def main():
                             lambda: (lambda result: result if result[0] == 200 else None)(
                                 http_get(EXTERNAL_IP, 80, "/hostname")))
         check("externalIPReachesThePods", external[1] in ("web-0", "web-1"), external)
+
+        # A Service with no endpoints at all refuses the connection rather than letting it time out.
+        cluster.apply(service("empty", [HTTP], selector={"app": "nothing"}))
+        empty_ip = cluster.get("service", "empty")["spec"]["clusterIP"]
+
+        def refused():
+            """Return the connection error once it is a refusal."""
+            with socket.socket() as probe:
+                probe.settimeout(3)
+                try:
+                    probe.connect((empty_ip, 80))
+                    return None
+                except ConnectionRefusedError as error:
+                    return str(error)
+                except OSError:
+                    return None
+        check("serviceWithoutEndpointsRefuses", wait_for("refusal", 60, refused), empty_ip)
 
         # Unconnected and connected UDP: balanced, and answered from the ClusterIP.
         wait_for("UDP ClusterIP answers", 60, lambda: udp_hostname(cluster_ip, 81, False)[0])
