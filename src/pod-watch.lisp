@@ -17,6 +17,11 @@ Each holds two views of a Pod that nothing else does, which is what this limit b
 (defparameter +pod-watch-journal-minimum+ 4096
   "Keep this many Pod events however old, for a cluster too quiet to fill the time window.")
 
+(defparameter *pod-watch-journal-bytes* (* 96 1024 1024)
+  "The most memory, by APPROXIMATE-HEAP-BYTES, that the Pod events may hold in all.
+This wins over the count and the time window, which a burst of status changes could
+otherwise fill with tens of kilobytes an event.")
+
 (defparameter +revision-journal-trim-interval+ 1024
   "Events between looks for what has aged out of a journal, since each look walks it.")
 
@@ -72,40 +77,75 @@ Status-only revisions are newer than that write but do not make a client's spec 
   (pod-response-object pod (or (gethash (pod-uid pod) (pod-store-pod-published-statuses store))
                                (pod-status "Pending"))))
 
-(defun trim-revision-journal (journal length limit minimum)
-  "Return the newest of JOURNAL's LENGTH entries still worth keeping, their count and floor.
-That is at most LIMIT, and MINIMUM (or LIMIT, if lower) however old; the rest of the watch
-history window beyond that. Returns NIL when nothing is due to go."
-  (when (or (> length (* 2 limit)) (zerop (mod length +revision-journal-trim-interval+)))
+(defun trim-revision-journal (journal length bytes limit minimum byte-limit)
+  "Return the newest of JOURNAL's LENGTH entries still worth keeping, their count, floor and bytes.
+That is at most LIMIT entries and BYTE-LIMIT bytes, and otherwise MINIMUM (or LIMIT, if lower)
+however old and the rest of the watch history window. Each entry is (revision old new time bytes).
+Once over BYTE-LIMIT it keeps an eighth less, so a full journal is not walked for every event.
+Returns NIL when nothing is due to go."
+  (when (or (> length (* 2 limit)) (> bytes byte-limit)
+            (zerop (mod length +revision-journal-trim-interval+)))
     (let* ((minimum (min minimum limit))
+           (budget (if (> bytes byte-limit) (- byte-limit (floor byte-limit 8)) byte-limit))
            (now (funcall *podtemplate-clock*))
-           (keep (or (loop for (nil nil nil time) in journal
+           (kept 0)
+           (keep (or (loop for (nil nil nil time size) in journal
                            for count from 0
                            when (or (>= count limit)
+                                    ;; Always keep the newest, so the floor is one an event follows.
+                                    (and (plusp count) (> (+ kept size) budget))
                                     (and (>= count minimum) (> (- now time) *watch-history-seconds*)))
-                             return count)
+                             return count
+                           do (incf kept size))
                      length)))
       (when (< keep length)
         (let ((retained (subseq journal 0 keep)))
           ;; The oldest retained event must stay readable, so resume just before it.
-          (values retained keep (1- (first (car (last retained))))))))))
+          (values retained keep (1- (first (car (last retained)))) kept))))))
+
+(defun record-revision-journal-event (journal revision old new previous)
+  "Return JOURNAL with a transition from OLD to NEW at REVISION, newest first.
+The entry's fifth element is the memory it adds. PREVIOUS is the view the last event for
+this object ended with: when OLD still equals it, the event shares it, not a second copy."
+  (let ((shared (and old previous (core-json-equal-p old previous))))
+    (cons (list revision (if shared previous old) new (funcall *podtemplate-clock*)
+                (+ 64 (if (or shared (not (hash-table-p old))) 0 (approximate-heap-bytes old))
+                   (if (hash-table-p new) (approximate-heap-bytes new) 0)))
+          journal)))
+
+(defun pod-watch-view-uid (view)
+  "Return the UID of the Pod API VIEW, or NIL."
+  (and (hash-table-p view) (gethash "uid" (gethash "metadata" view))))
 
 (defun record-pod-watch-event-unlocked (store revision old new)
-  "Append one transition to the journal, compacting what has fallen out of its retention."
-  (push (list revision old new (funcall *podtemplate-clock*)) (pod-store-pod-watch-journal store))
-  (multiple-value-bind (retained length floor)
-      (trim-revision-journal (pod-store-pod-watch-journal store)
-                             (incf (pod-store-pod-watch-journal-length store))
-                             *pod-watch-journal-limit* +pod-watch-journal-minimum+)
-    (when retained
-      (setf (pod-store-pod-watch-floor store) floor
-            (pod-store-pod-watch-journal store) retained
-            (pod-store-pod-watch-journal-length store) length))))
+  "Append one transition to the journal, compacting what has fallen out of its retention.
+A store without a journal only moves its floor, so a watch of it fails rather than misses events."
+  (unless (pod-store-watch-journal-p store)
+    (setf (pod-store-pod-watch-floor store) revision)
+    (return-from record-pod-watch-event-unlocked nil))
+  (let* ((uid (or (pod-watch-view-uid new) (pod-watch-view-uid old)))
+         (views (pod-store-pod-watch-views store))
+         (journal (record-revision-journal-event (pod-store-pod-watch-journal store) revision old new
+                                                 (and uid (gethash uid views)))))
+    (setf (pod-store-pod-watch-journal store) journal)
+    (when uid
+      (if new (setf (gethash uid views) new) (remhash uid views)))
+    (multiple-value-bind (retained length floor bytes)
+        (trim-revision-journal journal
+                               (incf (pod-store-pod-watch-journal-length store))
+                               (incf (pod-store-pod-watch-journal-bytes store) (fifth (first journal)))
+                               *pod-watch-journal-limit* +pod-watch-journal-minimum+
+                               *pod-watch-journal-bytes*)
+      (when retained
+        (setf (pod-store-pod-watch-floor store) floor
+              (pod-store-pod-watch-journal store) retained
+              (pod-store-pod-watch-journal-length store) length
+              (pod-store-pod-watch-journal-bytes store) bytes)))))
 
 (defun publish-pod-spec-change-unlocked (store old pod)
   "Journal POD at its current revision; OLD is its prior API view, or NIL when created."
   (record-pod-watch-event-unlocked store (parse-integer (pod-resource-version pod))
-                                   old (pod-published-view store pod)))
+                                   old (and (pod-store-watch-journal-p store) (pod-published-view store pod))))
 
 (defun publish-pod-status-unlocked (store pod status)
   "Journal STATUS when it differs from what clients last saw for the current Pod."
@@ -113,15 +153,16 @@ history window beyond that. Returns NIL when nothing is due to go."
         (uid (pod-uid pod)))
     (when (and current (equal uid (pod-uid current))
                (not (equalp status (gethash uid (pod-store-pod-published-statuses store)))))
-      (let ((old (pod-published-view store current))
+      (let ((old (and (pod-store-watch-journal-p store) (pod-published-view store current)))
             (revision (next-pod-revision-unlocked store)))
         (setf (gethash uid (pod-store-pod-published-statuses store)) (copy-pod-status-value status)
               (pod-status-revision current) revision)
-        (record-pod-watch-event-unlocked store revision old (pod-published-view store current))))))
+        (record-pod-watch-event-unlocked store revision old
+                                         (and old (pod-published-view store current)))))))
 
 (defun publish-pod-removal-unlocked (store pod)
   "Journal POD's final API view as a deletion at a fresh revision."
-  (let ((old (pod-published-view store pod)))
+  (let ((old (and (pod-store-watch-journal-p store) (pod-published-view store pod))))
     (record-pod-watch-event-unlocked store (next-pod-revision-unlocked store) old nil)
     (remhash (pod-uid pod) (pod-store-pod-published-statuses store))))
 

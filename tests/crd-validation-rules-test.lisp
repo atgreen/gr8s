@@ -517,3 +517,31 @@
       (is (equal '(1 . 0) (gethash level gr8s::*flowcontrol-seats*)))
       (gr8s::flowcontrol-release-seat level)
       (remhash level gr8s::*flowcontrol-seats*))))
+
+(test policies-deny-before-storage-reports-a-name-in-use
+  ;; Upstream's storage reports AlreadyExists only after validating admission has run.
+  (with-core-api (store path)
+    (values store path)
+    (check-core-status 201 "/api/v1/namespaces" :method :post
+      :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace" "metadata" (gr8s::core-object "name" "alpha")))
+    (check-core-status 201 "/api/v1/namespaces/alpha/configmaps" :method :post :object (core-fixture "ConfigMap" "taken"))
+    (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies" :method :post
+      :object (gr8s::core-object
+               "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicy"
+               "metadata" (gr8s::core-object "name" "no-taken")
+               "spec" (gr8s::core-object
+                       "matchConstraints" (gr8s::core-object
+                                           "resourceRules" (vector (gr8s::core-object "apiGroups" #("") "apiVersions" #("v1")
+                                                                                      "operations" #("CREATE") "resources" #("configmaps"))))
+                       "validations" (vector (gr8s::core-object "expression" "object.metadata.name != 'taken'"
+                                                                "message" "that name is not for you")))))
+    (check-core-status 201 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings" :method :post
+      :object (gr8s::core-object
+               "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicyBinding"
+               "metadata" (gr8s::core-object "name" "no-taken")
+               "spec" (gr8s::core-object "policyName" "no-taken" "validationActions" #("Deny"))))
+    (let ((status (check-core-status 422 "/api/v1/namespaces/alpha/configmaps" :method :post :object (core-fixture "ConfigMap" "taken"))))
+      (is (search "that name is not for you" (gethash "message" status)) "~A" (gethash "message" status)))
+    ;; Admitted, the name in use is still refused.
+    (check-core-status 201 "/api/v1/namespaces/alpha/configmaps" :method :post :object (core-fixture "ConfigMap" "free"))
+    (check-core-status 409 "/api/v1/namespaces/alpha/configmaps" :method :post :object (core-fixture "ConfigMap" "free"))))
