@@ -109,7 +109,8 @@ def main():
               "isCertificationResult": False, "nativeSHA256": hashlib.sha256(args.gr8s.read_bytes()).hexdigest(),
               "stateDirectory": str(state), "reusedState": args.state_directory is not None,
               "debugServer": args.debug_slynk_port is not None, "containerdNoSync": args.containerd_no_sync,
-              "preloadedImages": args.image_archives is not None}
+              "preloadedImages": args.image_archives is not None,
+              "e2eKubernetesVersion": args.kubernetes_version}
     if args.image_archives:
         # The agent imports <state>/agent/images/*.tar at startup, before any Pod starts.
         staged = state / "agent" / "images"
