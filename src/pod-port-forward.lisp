@@ -6,7 +6,8 @@
 ;;;; forwarded connection, sharing a request ID, and each pair becomes one operation
 ;;;; on the Pod's node. Reading from a client stops while a connection's Pod isn't
 ;;;; keeping up, which is what a kubelet's server does too, so that holds up the same
-;;;; client's other connections but no other client's.
+;;;; client's other connections but no other client's. A client may instead speak the
+;;;; kubelet's WebSocket channel protocol, with two channels per port named in the query.
 
 (in-package #:gr8s)
 
@@ -190,11 +191,105 @@ It tries a WebSocket tunnel first, and falls back to SPDY if that upgrade is ref
            (make-upgraded-spdy-transport client)))
         (t (bad-exec-request "Port forwarding requires a WebSocket or SPDY upgrade"))))))
 
+(defparameter +port-forward-channel-protocol+ "v4.channel.k8s.io"
+  "The WebSocket protocol of a kubelet's channel port-forward: two channels per requested port.")
+
+(defun port-forward-query-ports ()
+  "Return the ports the request's ports parameters name, each of which may list several."
+  (loop for (key . value) in (hunchentoot:get-parameters*)
+        when (equal key "ports")
+          append (mapcar (lambda (text)
+                           (or (parse-port-forward-port (string-trim " " text))
+                               (bad-exec-request (format nil "invalid port ~S" text))))
+                         (uiop:split-string value :separator '(#\,)))))
+
+(defun channel-port-forward-requested-p ()
+  "Return whether the client asks for the WebSocket channel protocol rather than the SPDY tunnel."
+  (and (string-equal (hunchentoot:header-in* :upgrade) "websocket")
+       (let ((offered (uiop:split-string (or (hunchentoot:header-in* :sec-websocket-protocol) "")
+                                         :separator '(#\, #\Space #\Tab))))
+         (and (find +port-forward-channel-protocol+ offered :test #'string-equal)
+              (not (find +port-forward-tunnel-protocol+ offered :test #'string-equal))))))
+
+(defun serve-channel-port-forward (runtime uid)
+  "Serve a kubelet's WebSocket channel port-forward: for the Nth requested port, channel 2N
+carries its data and 2N+1 its errors, each opened with the port as two little-endian bytes."
+  (let ((ports (port-forward-query-ports)) (key (hunchentoot:header-in* :sec-websocket-key)))
+    (unless ports
+      (bad-exec-request "query parameter \"port\" is required"))
+    (unless (and key (plusp (length key)))
+      (bad-exec-request "Port forwarding requires Sec-WebSocket-Key"))
+    (setf (hunchentoot:return-code*) 101
+          (hunchentoot:content-type*) nil
+          (hunchentoot:header-out :connection) "Upgrade"
+          (hunchentoot:header-out :upgrade) "websocket"
+          (hunchentoot:header-out :sec-websocket-accept) (websocket-accept-value key)
+          (hunchentoot:header-out :sec-websocket-protocol) +port-forward-channel-protocol+)
+    (let* ((client (let ((stream (hunchentoot::start-output 101 nil))) (finish-output stream) stream))
+           (write-lock (bt:make-lock "gr8s port-forward websocket writer"))
+           (sessions (make-array (length ports) :initial-element nil))
+           (threads nil))
+      (flet ((send (channel data)
+               (bt:with-lock-held (write-lock)
+                 (write-kubernetes-channel-frame client channel data))))
+        (unwind-protect
+             (progn
+               (loop for port in ports for index from 0
+                     for prefix = (make-array 2 :element-type '(unsigned-byte 8)
+                                                :initial-contents (list (ldb (byte 8 0) port) (ldb (byte 8 8) port)))
+                     do (send (* 2 index) prefix)
+                        (send (1+ (* 2 index)) prefix))
+               (loop for port in ports for index from 0
+                     do (let ((index index))
+                          (handler-case
+                              (let ((session (runtime-start-port-forward runtime uid port)))
+                                (setf (aref sessions index) session)
+                                (push (bt:make-thread
+                                       (lambda ()
+                                         (let ((failure
+                                                 (handler-case
+                                                     (loop (multiple-value-bind (data done failure)
+                                                               (runtime-port-forward-next runtime session)
+                                                             (when done (return failure))
+                                                             (send (* 2 index) data)))
+                                                   ((or error sb-ext:timeout) (condition) (princ-to-string condition)))))
+                                           (when failure
+                                             (ignore-errors (send (1+ (* 2 index)) (trivial-utf-8:string-to-utf-8-bytes failure))))))
+                                       :name "gr8s port-forward channel output")
+                                      threads))
+                            ((or error sb-ext:timeout) (condition)
+                              (ignore-errors
+                               (send (1+ (* 2 index))
+                                     (trivial-utf-8:string-to-utf-8-bytes
+                                      (if (typep condition 'runtime-error)
+                                          (runtime-error-message condition)
+                                          (princ-to-string condition)))))))))
+               ;; Client frames: binary data on an even channel goes to that port's connection.
+               (handler-case
+                   (loop (multiple-value-bind (opcode payload) (read-websocket-frame client)
+                           (case opcode
+                             (8 (return))
+                             (9 (bt:with-lock-held (write-lock) (write-websocket-frame client 10 payload)))
+                             (2 (when (> (length payload) 0)
+                                  (let* ((channel (aref payload 0)) (index (floor channel 2))
+                                         (session (and (evenp channel) (< index (length sessions)) (aref sessions index))))
+                                    (when (and session (> (length payload) 1))
+                                      (handler-case (runtime-port-forward-send runtime session (subseq payload 1))
+                                        (error () nil)))))))))
+                 ((or error sb-ext:timeout) () nil)))
+          (loop for session across sessions
+                when session do (ignore-errors (runtime-cancel-port-forward runtime session "client disconnected")))
+          (dolist (thread threads) (ignore-errors (bt:join-thread thread)))
+          (loop for session across sessions
+                when session do (ignore-errors (runtime-release-port-forward runtime session))))))))
+
 (defun pod-port-forward-response (store reconciler name &optional (namespace "default"))
   "Offer a Pod port-forward to the webhooks, then serve its connections until the client goes."
   (let ((pod (get-pod store namespace name)))
     (admit-pod-port-forward store namespace name)
     (unless (upgrade-request-p)
       (bad-exec-request "Port forwarding requires an upgraded connection"))
-    (serve-port-forward-connection (reconciler-runtime reconciler) (pod-uid pod)
-                                   (begin-port-forward-transport))))
+    (if (channel-port-forward-requested-p)
+        (serve-channel-port-forward (reconciler-runtime reconciler) (pod-uid pod))
+        (serve-port-forward-connection (reconciler-runtime reconciler) (pod-uid pod)
+                                       (begin-port-forward-transport)))))
