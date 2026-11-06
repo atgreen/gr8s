@@ -528,6 +528,7 @@ Anything but Disabled needs a read-only mount whose propagation is None."
 (defun validate-runtime-pod-spec (spec)
   "Validate Pod-level volume, security, service account and scheduling fields."
   (validate-file-key-ref-volumes spec)
+  (validate-pod-host-users spec)
   ;; The API server defaults an absent Pod securityContext to an empty one, which clients
   ;; such as kubectl debug read without checking for nil.
   (when (member (gethash "securityContext" spec) '(nil null))
