@@ -219,9 +219,24 @@ An agent doesn't hold its own Node labels; the control plane already matched tho
             (return-from pod-node-storage-compatible-p nil)))
         (when candidate (push (storage-resource-name candidate) used))))))
 
+(defun storage-attributes-class-in-use-p (index name)
+  "Return whether a PV or PVC in INDEX names the VolumeAttributesClass NAME, as current,
+requested or target class, which Kubernetes' vac-protection controller also checks."
+  (loop for key being the hash-keys of index using (hash-value object)
+          thereis (let ((spec (gethash "spec" object (core-object))) (status (gethash "status" object (core-object))))
+                    (cond ((equal "persistentvolumes" (first key))
+                           (equal name (gethash "volumeAttributesClassName" spec)))
+                          ((equal "persistentvolumeclaims" (first key))
+                           (or (equal name (gethash "volumeAttributesClassName" spec))
+                               (equal name (gethash "currentVolumeAttributesClassName" status))
+                               (equal name (gethash "targetVolumeAttributesClassName"
+                                                    (gethash "modifyVolumeStatus" status (core-object))))))))))
+
 (defun storage-object-in-use-unlocked (store resource object)
   "Enforce implemented PV and PVC protection using exact persisted references."
   (cond ((equal resource "persistentvolumeclaims") (not (null (storage-claim-consumers-unlocked store object))))
+        ((equal resource "volumeattributesclasses")
+         (storage-attributes-class-in-use-p (pod-store-resources store) (storage-resource-name object)))
         ((equal resource "persistentvolumes")
          (let* ((ref (gethash "claimRef" (gethash "spec" object)))
                 (claim (and ref (gethash (core-resource-key "persistentvolumeclaims" (gethash "namespace" ref) (gethash "name" ref))
@@ -231,7 +246,8 @@ An agent doesn't hold its own Node labels; the control plane already matched tho
 (defun storage-protection-finalizer (resource)
   "Return the storage controller's own protection finalizer for RESOURCE."
   (cond ((equal resource "persistentvolumes") "kubernetes.io/pv-protection")
-        ((equal resource "persistentvolumeclaims") "kubernetes.io/pvc-protection")))
+        ((equal resource "persistentvolumeclaims") "kubernetes.io/pvc-protection")
+        ((equal resource "volumeattributesclasses") "kubernetes.io/vac-protection")))
 
 (defun prepare-storage-deletion-unlocked (store resource object)
   "Mark deletion and drop our finalizer only when the underlying reservation is unused."

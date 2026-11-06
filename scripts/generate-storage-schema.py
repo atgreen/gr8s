@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
 # SPDX-License-Identifier: MIT
-"""Generate typed storage schemas from checksum-pinned Kubernetes v1.36 inputs."""
+"""Generate typed storage schemas from checksum-pinned Kubernetes inputs.
+
+Core PersistentVolume and PersistentVolumeClaim types are pinned at v1.36. The
+storage.k8s.io/v1 group is pinned at v1.37, which serves VolumeAttributesClass
+there and adds CSINode status."""
 import argparse
 import importlib.util
 import json
@@ -13,9 +17,11 @@ spec = importlib.util.spec_from_file_location("gr8s_schema", ROOT / "scripts/gen
 shared = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(shared)
 EXTRA_SOURCES = {
-    "storage.proto": ("api/v0.36.0/storage/v1/generated.proto", "48e2d5a90d78c4c215b40c638ff5583308fd1c34ffac94e2c18ad3b7d3fad0fd"),
-    "storage-types.go": ("api/v0.36.0/storage/v1/types.go", "73a547a11d4b350d4d31b6e8aaa63a003314509360388f45da66b07b86d7f5a8"),
+    "storage.proto": ("api/v0.37.2/storage/v1/generated.proto", "3021e91e45d8e146823716ca61a712ae68cc48b265c85cca02b921ec2b81b530"),
+    "storage-types.go": ("api/v0.37.2/storage/v1/types.go", "3f2b51840358575fc39583e1412f068bbaaa80d57db5bbb113358908b812c50c"),
+    "swagger137.json": ("kubernetes/v1.37.2/api/openapi-spec/swagger.json", "465276aedf437726de5a6ed23a41b86d78bb0d347edf251a755ae26a93cdd8a6"),
 }
+V137_DEFINITIONS = ("io.k8s.api.storage.v1.",)
 
 
 def main():
@@ -28,7 +34,7 @@ def main():
     all_messages = shared.proto_messages(sources)
     roots = ["k8s.io.api.core.v1.PersistentVolume", "k8s.io.api.core.v1.PersistentVolumeClaim", "k8s.io.api.storage.v1.StorageClass",
              "k8s.io.api.storage.v1.CSIDriver", "k8s.io.api.storage.v1.CSINode", "k8s.io.api.storage.v1.VolumeAttachment",
-             "k8s.io.api.storage.v1.CSIStorageCapacity"]
+             "k8s.io.api.storage.v1.CSIStorageCapacity", "k8s.io.api.storage.v1.VolumeAttributesClass"]
     pending = list(roots)
     messages = {}
     while pending:
@@ -51,6 +57,9 @@ def main():
                     if field and not field.get("repeated") and not field.get("mapKey") and field["type"] in {"string", "bool", "int32", "int64"}:
                         field["omitEmpty"] = True
     all_definitions = json.loads(sources["swagger.json"])["definitions"]
+    # The storage.k8s.io group takes its structural definitions from the release its wire schema comes from.
+    all_definitions.update({name: value for name, value in json.loads(sources["swagger137.json"])["definitions"].items()
+                            if name.startswith(V137_DEFINITIONS)})
     for name, fields in messages.items():
         properties = all_definitions.get(name.replace("k8s.io.", "io.k8s.", 1), {}).get("properties", {})
         for field in fields.values():

@@ -125,7 +125,7 @@
 (test every-named-discovery-resource-exists
   ;; A misspelled table entry would silently publish nothing.
   (loop for (resource) in gr8s::*resource-discovery-names*
-        do (is (or (member resource '("pods" "nodes" "apiservices" "volumeattributesclasses" "componentstatuses") :test #'equal)
+        do (is (or (member resource '("pods" "nodes" "apiservices" "componentstatuses") :test #'equal)
                    (assoc resource gr8s::*stored-resource-types* :test #'equal))
                "~A is not a served resource" resource)))
 

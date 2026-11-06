@@ -51,7 +51,8 @@
     ((equal resource "csinodes")
      (loop for driver across (gethash "drivers" (require-object (gethash "spec" object) "spec") #())
            do (require-csi-driver-name (gethash "name" driver) "spec.drivers.name")
-              (require-nonempty-string (gethash "nodeID" driver) "spec.drivers.nodeID")))
+              (require-nonempty-string (gethash "nodeID" driver) "spec.drivers.nodeID"))
+     (normalize-csi-node-status object existing))
     ((equal resource "volumeattachments")
      (let ((spec (require-object (gethash "spec" object) "spec")))
        (require-csi-driver-name (gethash "attacher" spec) "spec.attacher")
@@ -66,6 +67,21 @@
            (remhash "status" object))))
     ((equal resource "csistoragecapacities")
      (require-nonempty-string (gethash "storageClassName" object) "storageClassName"))))
+
+(defun normalize-csi-node-status (object existing)
+  "Keep CSINode status server-owned outside its subresource. storageHealth needs the
+alpha CSIVolumeHealth gate, which Kubernetes leaves off, so like Kubernetes it is
+dropped unless the stored object already reports some."
+  (let ((old (and existing (gethash "status" existing))))
+    (if *storage-status-write*
+        (let ((status (gethash "status" object)))
+          (when (hash-table-p status)
+            (when (zerop (length (gethash "storageHealth" (or old (core-object)) #())))
+              (remhash "storageHealth" status))
+            (when (zerop (hash-table-count status)) (remhash "status" object))))
+        (if (and old (plusp (hash-table-count old)))
+            (setf (gethash "status" object) (copy-core-object old))
+            (remhash "status" object)))))
 
 (defun validate-csi-storage-update (resource before after)
   "Enforce the fields Kubernetes makes immutable on CSI objects."
@@ -153,8 +169,16 @@ A changed copy is committed by the caller; an unchanged claim is returned as is.
                                                   "source" (core-object "persistentVolumeName" (storage-resource-name volume))))))))))
     desired))
 
+(defun gr8s-volume-attachment-name-p (name)
+  "Return whether NAME has the form VOLUME-ATTACHMENT-NAME gives the attachments gr8s creates."
+  (and (= (length name) 68) (uiop:string-prefix-p "csi-" name)
+       (every (lambda (char) (digit-char-p char 16)) (subseq name 4))
+       (string= name (string-downcase name))))
+
 (defun reconcile-volume-attachments (store)
-  "Create attachments consumers need and delete those no consumer holds any more."
+  "Create attachments consumers need and delete those of ours no consumer holds any more.
+Attachments others created, such as a driver's tooling or a test's, are left alone, as
+Kubernetes' attach/detach controller leaves them."
   (let ((desired (with-store-lock (store) (desired-volume-attachments-unlocked store))))
     (flet ((tolerating-races (thunk)
              (handler-case (funcall thunk)
@@ -166,7 +190,8 @@ A changed copy is committed by the caller; an unchanged claim is returned as is.
                desired)
       (dolist (attachment (list-core-resources store "volumeattachments"))
         (let ((metadata (gethash "metadata" attachment)))
-          (unless (or (gethash (gethash "name" metadata) desired) (gethash "deletionTimestamp" metadata))
+          (unless (or (gethash (gethash "name" metadata) desired) (gethash "deletionTimestamp" metadata)
+                      (not (gr8s-volume-attachment-name-p (gethash "name" metadata))))
             (tolerating-races
              (lambda () (delete-core-resource store "volumeattachments" nil (gethash "name" metadata))))))))))
 
