@@ -1047,7 +1047,10 @@ The local agent serves the kubelet's endpoints on port 10250 (`serve --kubelet-p
 0 to turn them off): `/metrics/resource`, `/metrics/cadvisor`, `/stats/summary`, `/metrics` and
 `/healthz`, measured from CRI container statistics and the cgroup v2 files of each container,
 sandbox and the root. `/metrics/cadvisor` has cAdvisor's `container_*` and `machine_*` series
-with its labels (`container`, `id`, `image`, `name`, `namespace`, `pod`). They are served over TLS
+with its labels (`container`, `id`, `image`, `name`, `namespace`, `pod`). `/metrics` has the
+kubelet's own series: CRI runtime operations, errors and latency by `operation_type`, Pod start
+and Pod sync latency, running Pods and containers by state, and `process_*`. `/metrics/probes`
+has `prober_probe_total` and `prober_probe_duration_seconds`. They are served over TLS
 with a cluster-CA certificate for the node's address. Callers authenticate with a
 cluster-CA client certificate or a bearer token checked by TokenReview, and are authorized
 by SubjectAccessReview on `nodes/metrics`, `nodes/stats`, `nodes/healthz` or
