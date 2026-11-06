@@ -166,6 +166,9 @@ and, with it, every creation on the node (podster-uqb.123)."
   (:documentation "Return a one-time streaming URL attached to the running CONTAINER's own process."))
 (defparameter +port-forward-window-bytes+ (* 1024 1024)
   "How much each direction of a forwarded connection may have unacknowledged.")
+
+(defparameter +exec-output-window-bytes+ (* 1024 1024)
+  "How much exec or attach output a node may send the control plane before the client has taken it.")
 (defgeneric runtime-port-forward-url (runtime uid port)
   (:documentation "Return a one-time streaming URL reaching PORT in the Pod's network namespace."))
 (defmethod runtime-port-forward-url ((runtime t) uid port)

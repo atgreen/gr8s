@@ -384,6 +384,39 @@
           (gr8s::stop-node-runtime node-runtime)
           (ignore-errors (usocket:socket-close listener)))))))
 
+(test node-exec-output-waits-for-a-control-plane-that-acknowledges-it
+  (flet ((operation (acknowledges)
+           (gr8s::make-node-exec-operation
+            nil (make-instance 'gr8s.node.v1::operation-request :operation-id "window" :acknowledges-output acknowledges)
+            nil nil nil))
+         (acknowledge (operation sequence count)
+           (gr8s::write-node-exec-input
+            operation (make-instance 'gr8s.node.v1::operation-input
+                                     :operation-id "window" :sequence sequence
+                                     :channel gr8s.node.v1::+streamchannel-stream_channel_stdin+
+                                     :data (make-array 0 :element-type '(unsigned-byte 8))
+                                     :acknowledged-bytes count))))
+    ;; An older control plane never acknowledges, so its node sends as before.
+    (let ((legacy (operation nil)))
+      (setf (gr8s::node-exec-operation-unacknowledged-output legacy) (* 10 gr8s::+exec-output-window-bytes+))
+      (is-true (gr8s::wait-for-node-exec-output-window legacy 100)))
+    (let* ((windowed (operation t)) (sent nil)
+           (sender (progn
+                     (setf (gr8s::node-exec-operation-unacknowledged-output windowed) gr8s::+exec-output-window-bytes+)
+                     (bt:make-thread (lambda () (setf sent (gr8s::wait-for-node-exec-output-window windowed 100)))
+                                     :name "gr8s exec window test sender"))))
+      ;; A full window holds the output back until the client has taken some.
+      (is (not (wait-until (lambda () sent) :timeout 0.5)))
+      (acknowledge windowed 1 4096)
+      (is-true (wait-until (lambda () sent) :timeout 5))
+      (bt:join-thread sender)
+      (is (= (+ (- gr8s::+exec-output-window-bytes+ 4096) 100)
+             (gr8s::node-exec-operation-unacknowledged-output windowed)))
+      ;; A finished operation stops waiting.
+      (setf (gr8s::node-exec-operation-unacknowledged-output windowed) gr8s::+exec-output-window-bytes+
+            (gr8s::node-exec-operation-finished-p windowed) t)
+      (is (null (gr8s::wait-for-node-exec-output-window windowed 100))))))
+
 (test node-exec-status-reads-the-exit-code-of-a-status-frame
   (flet ((frame (text) (trivial-utf-8:string-to-utf-8-bytes text)))
     (is (= 0 (gr8s::node-exec-status-exit-code (gr8s::exec-exit-status-bytes 0))))

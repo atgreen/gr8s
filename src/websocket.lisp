@@ -35,12 +35,17 @@
       (when mask
         (dotimes (index 4)
           (setf (aref mask index) (read-required-byte stream))))
-      (dotimes (index length)
-        (let ((octet (read-required-byte stream)))
-          (setf (aref payload index)
-                (if mask
-                    (logxor octet (aref mask (mod index 4)))
-                    octet))))
+      ;; Whole reads: one byte at a time limits a stream to about a megabyte a second.
+      ;; A read of a TLS stream returns only what its current record holds, so read until full.
+      (loop with got = 0
+            while (< got length)
+            do (let ((next (read-sequence payload stream :start got)))
+                 (when (= next got)
+                   (error 'runtime-error :message "WebSocket stream ended inside a frame"))
+                 (setf got next)))
+      (when mask
+        (dotimes (index length)
+          (setf (aref payload index) (logxor (aref payload index) (aref mask (mod index 4))))))
       (values opcode payload fin-p masked-p))))
 
 (defun write-websocket-length (stream length masked-p)
@@ -67,13 +72,13 @@
                                  (loop repeat 4 collect (random 256))))))
     (write-byte (logior #x80 opcode) stream)
     (write-websocket-length stream (length payload) masked-p)
-    (when mask
-      (write-sequence mask stream))
-    (loop for octet across payload
-          for index from 0
-          do (write-byte
-              (if mask
-                  (logxor octet (aref mask (mod index 4)))
-                  octet)
-              stream))
+    (if mask
+        (let ((masked (make-array (length payload) :element-type '(unsigned-byte 8))))
+          (write-sequence mask stream)
+          (loop for octet across payload
+                for index from 0
+                do (setf (aref masked index) (logxor octet (aref mask (mod index 4)))))
+          (write-sequence masked stream))
+        ;; One write: a byte at a time limits exec output to about a megabyte a second.
+        (write-sequence payload stream))
     (finish-output stream)))

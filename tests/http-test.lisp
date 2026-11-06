@@ -475,6 +475,141 @@
         (ignore-errors (usocket:socket-close listener))
         (when upstream-thread (ignore-errors (bt:join-thread upstream-thread)))))))
 
+(test spdy-clients-exec-through-the-agent-as-through-a-kubelet
+  ;; kubectl falls back to SPDY when a WebSocket upgrade fails, and older client-go speaks only
+  ;; SPDY: a kubelet's streaming server serves both (pkg/kubelet/cri/streaming/remotecommand).
+  (with-temporary-store (store path)
+    (gr8s:register-node
+     store (gr8s:make-node-record :id "spdy-exec-node" :name "worker-spdy-exec" :pod-cidr "10.88.9.0/24"))
+    (let* ((node-server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0))
+           (fake-runtime (make-fake-runtime))
+           (node-runtime (gr8s::make-node-runtime
+                          (merge-pathnames "worker-spdy-exec/runtime/" path) fake-runtime nil))
+           (control-runtime (gr8s::make-control-plane-runtime store node-server))
+           (reconciler (make-reconciler store control-runtime))
+           (identity-path (merge-pathnames "worker-spdy-exec/identity.json" path))
+           (control (gr8s::make-node-session-control))
+           (listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :element-type '(unsigned-byte 8)))
+           (first-delivered nil) (upstream-input nil) (upstream-error nil)
+           (agent-thread nil) (upstream-thread nil) (http-server nil) (client nil))
+      (setf upstream-thread
+            (bt:make-thread
+             (lambda ()
+               (handler-case
+                   (let* ((socket (usocket:socket-accept listener :element-type '(unsigned-byte 8)))
+                          (stream (usocket:socket-stream socket)))
+                     (unwind-protect
+                          (let ((streams (fake-spdy-accept stream 4)))
+                            (flet ((send (name text &key fin octets)
+                                     (fake-spdy-send stream (cdr (assoc name streams :test #'equal)) text
+                                                     :fin fin :octets octets)))
+                              (send "stdout" "first\n")
+                              (unless (wait-until (lambda () first-delivered) :timeout 10)
+                                (error "the first output was not delivered while the command ran"))
+                              ;; What the client wrote on stdin reaches the command.
+                              (loop for frame = (fake-spdy-read-frame stream)
+                                    while frame
+                                    do (when (and (eq :data (first frame))
+                                                  (eql (second frame) (cdr (assoc "stdin" streams :test #'equal))))
+                                         (setf upstream-input
+                                               (concatenate 'string (or upstream-input "")
+                                                            (trivial-utf-8:utf-8-bytes-to-string (fourth frame))))
+                                         (when (third frame) (return))))
+                              (send "stderr" "warning\n" :fin t)
+                              (send "stdout" "last\n" :fin t)
+                              (send "error" nil :octets (gr8s::exec-exit-status-bytes 3) :fin t))
+                            (ignore-errors (loop while (fake-spdy-read-frame stream))))
+                       (ignore-errors (usocket:socket-close socket))))
+                 (error (condition) (setf upstream-error condition))))
+             :name "gr8s SPDY exec fake runtime"))
+      (gr8s::set-fake-runtime-exec-url
+       fake-runtime (format nil "http://127.0.0.1:~D/exec/token" (usocket:get-local-port listener)))
+      (unwind-protect
+           (progn
+             (gr8s::start-node-runtime node-runtime)
+             (setf agent-thread
+                   (bt:make-thread
+                    (lambda ()
+                      (gr8s:run-node-session
+                       "127.0.0.1" (gr8s:node-grpc-server-port node-server)
+                       "worker-spdy-exec" identity-path
+                       (lambda (snapshot) (gr8s::reconcile-node-snapshot node-runtime snapshot))
+                       :operation-handler
+                       (lambda (variant payload emit) (gr8s::dispatch-node-operation node-runtime variant payload emit))
+                       :reconnect-delay 0.01 :control control))
+                    :name "gr8s SPDY exec agent"))
+             (is-true (wait-until (lambda () (gr8s:node-record-ready-p (gr8s:get-node store "worker-spdy-exec")))
+                                  :timeout 5))
+             (let ((pod (create-pod store (parse-pod *valid-pod-json*))))
+               (reconcile-pod reconciler "default" "hello")
+               (is-true (wait-until (lambda () (runtime-observe fake-runtime (pod-uid pod))) :timeout 5)))
+             (setf http-server (start-http-test-server :store store :runtime control-runtime :reconciler reconciler))
+             (multiple-value-bind (socket session)
+                 (gr8s::connect-runtime-stream
+                  (format nil "http://127.0.0.1:~D/api/v1/namespaces/default/pods/hello/exec?command=cat&container=web&stdin=true&stdout=true&stderr=true"
+                          *http-test-port*)
+                  :protocol "v4.channel.k8s.io")
+               (setf client socket)
+               (setf (sb-impl::fd-stream-timeout (usocket:socket-stream socket)) 20.0)
+               ;; kubectl's stream order, which the server accepts in any order.
+               (let* ((error-stream (gr8s::spdy-open-stream session "error"))
+                      (stdin (gr8s::spdy-open-stream session "stdin"))
+                      (stdout (gr8s::spdy-open-stream session "stdout"))
+                      (stderr (gr8s::spdy-open-stream session "stderr"))
+                      (received (list (cons stdout "") (cons stderr "") (cons error-stream "")))
+                      (open (list stdout stderr error-stream)))
+                 (loop while open
+                       for frame = (gr8s::spdy-read-frame session)
+                       do (unless frame (return))
+                          (when (eq :data (first frame))
+                            (destructuring-bind (id fin data) (rest frame)
+                              (let ((entry (assoc id received)))
+                                (when entry
+                                  (setf (cdr entry) (concatenate 'string (cdr entry) (trivial-utf-8:utf-8-bytes-to-string data)))))
+                              (when (and (eql id stdout) (search "first" (cdr (assoc stdout received))) (not first-delivered))
+                                (setf first-delivered t)
+                                (gr8s::spdy-write-data session stdin (trivial-utf-8:string-to-utf-8-bytes "typed") :fin t))
+                              (when fin (setf open (remove id open))))))
+                 (is (null open))
+                 (is (string= "first\nlast\n" (cdr (assoc stdout received))))
+                 (is (string= "warning\n" (cdr (assoc stderr received))))
+                 ;; v4 sends the exit status as a Status on the error stream.
+                 (let ((status (com.inuoe.jzon:parse (cdr (assoc error-stream received)))))
+                   (is (string= "Failure" (gethash "status" status)))
+                   (is (string= "NonZeroExitCode" (gethash "reason" status))))))
+             (bt:join-thread upstream-thread)
+             (setf upstream-thread nil)
+             (is (null upstream-error) "~A" upstream-error)
+             (is (string= "typed" upstream-input)))
+        (when client (ignore-errors (usocket:socket-close client)))
+        (when http-server (stop-server http-server))
+        (gr8s::cancel-node-session control)
+        (when agent-thread (ignore-errors (bt:join-thread agent-thread)))
+        (gr8s::stop-node-runtime node-runtime)
+        (gr8s:stop-node-grpc-server node-server)
+        (ignore-errors (usocket:socket-close listener))
+        (when upstream-thread (ignore-errors (bt:join-thread upstream-thread)))))))
+
+(test spdy-remotecommand-streams-and-status-follow-the-negotiated-protocol
+  (flet ((options (&rest arguments) (apply #'gr8s::make-exec-options arguments)))
+    (is (equal '("error" "stdin" "stdout" "resize")
+               (gr8s::remotecommand-expected-streams (options :stdin t :stdout t :stderr t :tty t) "v4.channel.k8s.io")))
+    ;; v2 predates terminal resizing.
+    (is (equal '("error" "stdout") (gr8s::remotecommand-expected-streams (options :stdout t :tty t) "v2.channel.k8s.io")))
+    (is (equal '("error" "stdout" "stderr") (gr8s::remotecommand-expected-streams (options :stdout t :stderr t) "channel.k8s.io"))))
+  ;; Only v4 reports success; the older protocols send a failure's message alone.
+  (is (string= "Success" (gethash "status" (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string
+                                                                    (gr8s::spdy-remotecommand-status-bytes "v4.channel.k8s.io" 0))))))
+  (is (null (gr8s::spdy-remotecommand-status-bytes "v3.channel.k8s.io" 0)))
+  (is (string= "command terminated with exit code 2"
+               (trivial-utf-8:utf-8-bytes-to-string (gr8s::spdy-remotecommand-status-bytes "v2.channel.k8s.io" 2))))
+  ;; Terminal sizes arrive as JSON lines, possibly split across frames.
+  (multiple-value-bind (sizes rest)
+      (gr8s::remotecommand-terminal-sizes (make-array 0 :element-type '(unsigned-byte 8))
+                                          (trivial-utf-8:string-to-utf-8-bytes (format nil "{\"Width\":80,\"Height\":24}~%{\"Wid")))
+    (is (equal '((24 . 80)) sizes))
+    (is (equal '((50 . 132)) (gr8s::remotecommand-terminal-sizes rest (trivial-utf-8:string-to-utf-8-bytes (format nil "th\":132,\"Height\":50}~%")))))))
+
 (test pod-exec-refuses-a-stream-with-no-channels
   (with-temporary-store (store path)
     (values path)
