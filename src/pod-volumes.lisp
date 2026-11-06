@@ -307,8 +307,12 @@ The Pod's user namespace block is free again once nothing it owns remains."
     (let ((source (gethash "emptyDir" volume)))
       (when (and source (equal "Memory" (gethash "medium" source)))
         (ensure-pod-memory-volume directory source pod)))
-    ;; Applied after mounting because the tmpfs root replaces the directory's mode.
-    (set-pod-volume-permissions directory (if group #o2770 #o777) group)
+    ;; Applied after mounting because the tmpfs root replaces the directory's mode. As the
+    ;; kubelet does, the permission bits become 0777 and special bits such as a tmpfs root's
+    ;; sticky bit stay; SetVolumeOwnership then ORs in group rwx and setgid for fsGroup.
+    ;; So a disk emptyDir under fsGroup is 02777 and a tmpfs one 03777.
+    (let ((special (logand #o7000 (sb-posix:stat-mode (sb-posix:stat (namestring directory))))))
+      (set-pod-volume-permissions directory (logior special #o777 (if group #o2770 0)) group))
     (multiple-value-bind (files projection) (pod-volume-desired-files runtime pod volume)
       (when projection (publish-pod-volume-files directory files group)))
     directory))

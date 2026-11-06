@@ -80,7 +80,7 @@
       (core-resource-error 422 "Invalid" "spec.podManagementPolicy must be OrderedReady or Parallel"))
     (setf (gethash "podManagementPolicy" spec) policy
           (gethash "revisionHistoryLimit" spec) (workload-int (gethash "revisionHistoryLimit" spec) "spec.revisionHistoryLimit" 10))
-    (if (member service '(nil null ""))
+    (if (member service '(nil null "") :test #'equal)
         (remhash "serviceName" spec)
         (require-dns-label service "spec.serviceName"))
     (dolist (field '("whenDeleted" "whenScaled"))

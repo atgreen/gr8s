@@ -544,3 +544,23 @@
       (let ((condition (handler-case (gr8s::containerd-pod-mounts runtime failing (aref (pod-containers failing) 0))
                          (gr8s::container-image-pull-error (condition) condition))))
         (is (equal "ErrImagePull" (gr8s::container-config-error-reason condition)))))))
+
+(test fsgroup-volumes-keep-other-access-and-gain-setgid
+  ;; The kubelet ORs fsGroup's group bits and setgid into an emptyDir's 0777, giving 02777.
+  (with-temporary-store (store directory)
+    (declare (ignorable store))
+    (let* ((object (com.inuoe.jzon:parse *valid-pod-json*))
+           (spec (gethash "spec" object))
+           (runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "logs/" directory))))
+      (setf (gethash "name" (gethash "metadata" object)) "fsgroup"
+            (gethash "securityContext" spec) (gr8s::core-object "fsGroup" (sb-posix:getgid))
+            (gethash "volumes" spec) (vector (gr8s::core-object "name" "data" "emptyDir" (gr8s::core-object))))
+      (let* ((pod (parse-pod object))
+             (path (gr8s::materialize-pod-volume runtime pod (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0)))
+             (stat (sb-posix:stat (namestring path))))
+        (is (= #o2777 (logand #o7777 (sb-posix:stat-mode stat))))
+        (is (= (sb-posix:getgid) (sb-posix:stat-gid stat)))
+        ;; A tmpfs root starts sticky (1777), and keeps it: 03777.
+        (sb-posix:chmod (namestring path) #o1777)
+        (gr8s::materialize-pod-volume runtime pod (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0))
+        (is (= #o3777 (logand #o7777 (sb-posix:stat-mode (sb-posix:stat (namestring path))))))))))
