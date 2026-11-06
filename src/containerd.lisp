@@ -217,7 +217,7 @@ exiting mid-call still abandon it."
 
 (defmethod runtime-terminate-pod ((runtime containerd-runtime) pod deadline)
   "Carry out one cancellable native Pod shutdown job."
-  (stop-container-probes runtime (pod-uid pod))
+  (begin-terminating-container-probes runtime (pod-uid pod))
   (stop-pod-containers-in-order runtime pod deadline)
   (when (pod-finalizers-present-p pod)
     (capture-containerd-finalized-pod runtime pod deadline))
@@ -226,7 +226,7 @@ exiting mid-call still abandon it."
 
 (defmethod runtime-delete-pod ((runtime containerd-runtime) pod)
   "Poll the native Pod shutdown job without holding reconciliation until exit."
-  (stop-container-probes runtime (pod-uid pod))
+  (begin-terminating-container-probes runtime (pod-uid pod))
   (poll-runtime-pod-deletion (containerd-runtime-deletions runtime) runtime pod))
 
 (defmethod stop-runtime-deletions ((runtime containerd-runtime))
