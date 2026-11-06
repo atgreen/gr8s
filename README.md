@@ -1050,7 +1050,11 @@ sandbox and the root. `/metrics/cadvisor` has cAdvisor's `container_*` and `mach
 with its labels (`container`, `id`, `image`, `name`, `namespace`, `pod`). `/metrics` has the
 kubelet's own series: CRI runtime operations, errors and latency by `operation_type`, Pod start
 and Pod sync latency, running Pods and containers by state, and `process_*`. `/metrics/probes`
-has `prober_probe_total` and `prober_probe_duration_seconds`. They are served over TLS
+has `prober_probe_total` and `prober_probe_duration_seconds`. The API server's `/metrics` has upstream's
+`apiserver_request_total`, `apiserver_request_duration_seconds`,
+`apiserver_request_sli_duration_seconds`, `apiserver_longrunning_requests`,
+`apiserver_current_inflight_requests` and `process_*`, recorded as kube-apiserver records them: only
+requests a resource handler answers, once each when it returns. They are served over TLS
 with a cluster-CA certificate for the node's address. Callers authenticate with a
 cluster-CA client certificate or a bearer token checked by TokenReview, and are authorized
 by SubjectAccessReview on `nodes/metrics`, `nodes/stats`, `nodes/healthz` or

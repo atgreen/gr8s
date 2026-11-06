@@ -1304,6 +1304,13 @@ Watches are long-running requests, which that filter leaves alone."
                            timeout))))
 
 (defun handle-http-request (store runtime reconciler request)
+  "Answer the current API request, recording it for the API server's request metrics."
+  (call-recording-apiserver-request
+   (request-route-path (hunchentoot:script-name request)) (hunchentoot:request-method request)
+   (lambda () (answer-http-request store runtime reconciler request))))
+
+(defun answer-http-request (store runtime reconciler request)
+  "Route the current request and turn its failure into a Kubernetes Status response."
   (handler-case
       (let ((path (progn (read-request-body request) (request-route-path (hunchentoot:script-name request))))
             (method (hunchentoot:request-method request))
@@ -1332,10 +1339,14 @@ Watches are long-running requests, which that filter leaves alone."
         (cond
           ((and (uiop:string-prefix-p "/openapi/v3/" path) (not *openapi-v3-completing*))
            (openapi-v3-complete-response store runtime reconciler path))
-          ((nth-value 1 (aggregated-api-route store path)) (aggregated-api-response store path method))
+          ((nth-value 1 (aggregated-api-route store path))
+           ;; The aggregator's proxy is no resource route of this server's.
+           (setf *apiserver-request-routed* nil)
+           (aggregated-api-response store path method))
           ((string= path "/metrics")
            (setf (hunchentoot:content-type*) "text/plain; version=0.0.4; charset=utf-8")
-           (concatenate 'string (runtime-network-metrics runtime) (gateway-metrics-text) (volume-reclaim-metrics-text)
+           (concatenate 'string (apiserver-request-metrics-text) (process-metrics-text)
+                        (runtime-network-metrics runtime) (gateway-metrics-text) (volume-reclaim-metrics-text)
                         (if store (flowcontrol-metrics-text store) "")))
           ((string= path "/version") (version-response))
           ((nth-value 1 (component-status-route path))
@@ -1447,4 +1458,5 @@ Watches are long-running requests, which that filter leaves alone."
              (pod-http-proxy-response store namespace id method)))
           ((nth-value 2 (pod-route-parts path))
            (dispatch-pod-request store runtime reconciler path method))
-          (t (status-response "Failure" "NotFound" "route not found" 404)))))
+          (t (setf *apiserver-request-routed* nil)
+             (status-response "Failure" "NotFound" "route not found" 404)))))
