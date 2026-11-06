@@ -306,7 +306,8 @@ A container running as any user can write here, and a user mount at the path tak
            (mounts (containerd-container-mounts runtime pod spec sandbox-id environment))
            (security (containerd-pod-security-context
                       pod spec :target-id (containerd-ephemeral-target-id runtime pod spec)
-                               :image-user (lambda () (cri-image-user socket (container-spec-image spec)))))
+                               :image-user (lambda () (cri-image-user socket (container-spec-image spec)))
+                               :userns (containerd-pod-user-namespace runtime pod)))
            (termination (containerd-termination-file runtime pod spec attempt mounts))
            (termination-labels
              (when termination
@@ -320,13 +321,15 @@ A container running as any user can write here, and a user mount at the path tak
              :command (expand-container-command (container-spec-command spec) environment)
              :args (expand-container-command (container-spec-args spec) environment)
              :env environment
-             :mounts (if termination
-                         (append mounts
-                                 (list (make-instance
-                                        'gr8s.cri.v1::mount
-                                        :container-path (gethash "terminationMessagePath" (pod-runtime-container-object pod spec))
-                                        :host-path (namestring (car termination)))))
-                         mounts)
+             :mounts (map-mounts-into-user-namespace
+                      (if termination
+                          (append mounts
+                                  (list (make-instance
+                                         'gr8s.cri.v1::mount
+                                         :container-path (gethash "terminationMessagePath" (pod-runtime-container-object pod spec))
+                                         :host-path (namestring (car termination)))))
+                          mounts)
+                      (gr8s.cri.v1::userns-options (gr8s.cri.v1::namespace-options security)))
              :security-context security
              :resources (cri-linux-container-resources
                          ;; Without a pod cgroup of its own, a container is bounded by the Pod's limits.
@@ -350,7 +353,9 @@ A container running as any user can write here, and a user mount at the path tak
 
 (defmethod runtime-ensure ((runtime containerd-runtime) pod)
   "Converge native containers without destroying an unchanged sandbox or healthy siblings."
-  (call-containerd-runtime (lambda () (reconcile-container-probes runtime pod (converge-containerd-containers runtime pod)))))
+  (call-containerd-runtime
+   (lambda ()
+     (reconcile-container-probes runtime pod (counting-user-namespaced-pod-starts runtime pod #'converge-containerd-containers)))))
 
 (defmethod runtime-reconcile-containers ((runtime containerd-runtime) pod observed)
   "Retry only eligible native containers, even while a sibling keeps the Pod Running."

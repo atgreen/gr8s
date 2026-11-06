@@ -222,11 +222,15 @@
 
 (test pod-protobuf-retains-explicit-pointer-zero-and-unsupported-features
   (let* ((container (core-test-protobuf '((1 "main") (2 "web:v1"))))
-         (spec (core-test-protobuf (list (list 2 container) (list 21 0) (list 11 1) (list 37 1))))
+         ;; hostUsers (37) is an explicit false here: with hostNetwork (11) set, upstream's
+         ;; validateHostUsers (pkg/apis/core/validation/validation.go) forbids the Pod.
+         (spec (core-test-protobuf (list (list 2 container) (list 21 0) (list 11 1) (list 37 0))))
          (input (core-test-protobuf-envelope "Pod" (list (list 1 (core-test-protobuf '((1 "unsupported")))) (list 2 spec))))
          (decoded (gr8s::decode-core-resource-protobuf input "Pod")))
     (is (not (null (nth-value 1 (gethash "automountServiceAccountToken" (gethash "spec" decoded))))))
     (is (null (gethash "automountServiceAccountToken" (gethash "spec" decoded))))
+    (is (not (null (nth-value 1 (gethash "hostUsers" (gethash "spec" decoded))))))
+    (is (null (gethash "hostUsers" (gethash "spec" decoded))))
     (is (eq t (gethash "hostNetwork" (gethash "spec" decoded))))
     (with-core-api (store path)
       (values path)

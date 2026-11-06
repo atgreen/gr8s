@@ -180,7 +180,7 @@
 (defun make-cri-pod-sandbox-config
     (name uid namespace attempt log-directory host-network
      &key resource-version spec-fingerprint dns-servers dns-searches dns-options privileged hostname security
-          sysctls (pid-mode gr8s.cri.v1::+namespacemode-container+) host-ipc)
+          sysctls (pid-mode gr8s.cri.v1::+namespacemode-container+) host-ipc userns)
   "Build sandbox identity, ownership labels, hostname and native network/security configuration."
   (let ((metadata
           (make-instance 'gr8s.cri.v1::pod-sandbox-metadata
@@ -226,14 +226,15 @@
                      gr8s.cri.v1::+namespacemode-node+
                      gr8s.cri.v1::+namespacemode-pod+)
         :pid pid-mode
-        :ipc (if host-ipc gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+))
+        :ipc (if host-ipc gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
+        :userns-options userns)
        security)))))
 
 (defun cri-run-pod-sandbox
     (socket-path &key name uid (namespace "default") (attempt 0)
                    log-directory host-network resource-version spec-fingerprint
                    dns-servers dns-searches dns-options privileged hostname security runtime-handler
-                   sysctls (pid-mode gr8s.cri.v1::+namespacemode-container+) host-ipc (timeout 120))
+                   sysctls (pid-mode gr8s.cri.v1::+namespacemode-container+) host-ipc userns (timeout 120))
   "Create and start a CRI pod sandbox under RUNTIME-HANDLER, returning its runtime ID."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
@@ -245,7 +246,7 @@
                    :dns-servers dns-servers
                    :dns-searches dns-searches
                    :dns-options dns-options :privileged privileged :hostname hostname
-                   :security security :sysctls sysctls :pid-mode pid-mode :host-ipc host-ipc)))
+                   :security security :sysctls sysctls :pid-mode pid-mode :host-ipc host-ipc :userns userns)))
            (multiple-value-bind (response status)
                (gr8s.cri.v1::runtime-service-run-pod-sandbox
                 stub

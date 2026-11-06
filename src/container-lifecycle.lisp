@@ -339,6 +339,7 @@
      :hostname (pod-sandbox-hostname pod)
      :security (containerd-pod-sandbox-security pod)
      :sysctls (pod-sysctls pod) :pid-mode (pod-pid-namespace-mode pod) :host-ipc (pod-spec-flag-p pod "hostIPC")
+     :userns (containerd-pod-user-namespace runtime pod)
      :dns-servers servers :dns-searches searches :dns-options options)))
 
 (defun containerd-start-sandbox (runtime pod)
@@ -357,6 +358,7 @@
             :security (containerd-pod-sandbox-security pod)
             :runtime-handler (pod-runtime-handler pod)
             :sysctls (pod-sysctls pod) :pid-mode (pod-pid-namespace-mode pod) :host-ipc (pod-spec-flag-p pod "hostIPC")
+            :userns (containerd-pod-user-namespace runtime pod)
             :dns-servers servers :dns-searches searches :dns-options options)))))
 
 (defun containerd-prune-old-attempts (runtime infos &optional created-names)

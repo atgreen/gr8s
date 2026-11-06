@@ -324,7 +324,7 @@
             "securityContext" "serviceAccountName" "automountServiceAccountToken" "imagePullSecrets"
             "tolerations" "nodeSelector" "enableServiceLinks" "terminationGracePeriodSeconds" "hostname" "subdomain" "dnsConfig"
             "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
-            "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "shareProcessNamespace" "hostAliases" "ephemeralContainers"
+            "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "hostUsers" "shareProcessNamespace" "hostAliases" "ephemeralContainers"
             "readinessGates" "schedulerName" "hostnameOverride" "setHostnameAsFQDN" "serviceAccount"
             "topologySpreadConstraints" "schedulingGates" "resources" "schedulingGroup") "spec")
     ;; GenericWorkload is beta and off by default in v1.37, so the API server drops the field.

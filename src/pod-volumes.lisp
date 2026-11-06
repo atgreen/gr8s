@@ -261,8 +261,10 @@ statistics, and return PATH."
   path)
 
 (defun cleanup-pod-volumes (runtime uid)
-  "Unmount and delete a terminated Pod's volumes; a failed unmount leaves data for retry."
+  "Unmount and delete a terminated Pod's volumes; a failed unmount leaves data for retry.
+The Pod's user namespace block is free again once nothing it owns remains."
   (cleanup-pod-csi-volumes uid)
+  (release-containerd-user-namespace runtime uid)
   (let ((directory (merge-pathnames "volumes/" (containerd-pod-log-directory runtime uid))))
     (when (probe-file directory)
       (dolist (target (pod-volume-mount-targets directory))
@@ -608,7 +610,7 @@ IMAGE-USER returns the image's numeric user (or NIL) and its user name; an image
                   (container-config-error "container has runAsNonRoot and image has an invalid user id (~D). (Must be 1-(2147483647)) ~A"
                                           uid where)))))))))
 
-(defun containerd-pod-security-context (pod container &key target-id image-user)
+(defun containerd-pod-security-context (pod container &key target-id image-user userns)
   "Map effective Pod/container Linux identities, confinement and privileges to the CRI API.
 TARGET-ID names the running container whose PID namespace an ephemeral container joins;
 IMAGE-USER reports the user the container's image runs as, for runAsNonRoot."
@@ -636,7 +638,9 @@ IMAGE-USER reports the user the container's image runs as, for runAsNonRoot."
                                     (pod-pid-namespace-mode pod))
                            :target-id (or target-id "")
                            :ipc (if (pod-spec-flag-p pod "hostIPC") gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
-                           :network (if (pod-host-network-p pod) gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+))
+                           :network (if (pod-host-network-p pod) gr8s.cri.v1::+namespacemode-node+ gr8s.cri.v1::+namespacemode-pod+)
+                           ;; A container must name its sandbox's user namespace, as the kubelet passes it to both.
+                           :userns-options userns)
        :capabilities (let ((capabilities (gethash "capabilities" effective)))
                        (when capabilities
                          (make-instance 'gr8s.cri.v1::capability
