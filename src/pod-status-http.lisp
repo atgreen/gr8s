@@ -177,7 +177,7 @@ A hostNetwork Pod has no address of its own, so it reports its node's as its Pod
         (save-pod-client-status store pod client))
       (let* ((observed (if dry-run
                            (gethash "status" current)
-                           (reconcile-pod reconciler namespace name)))
+                           (reconcile-written-pod reconciler pod)))
              (answer (pod-response-object pod (copy-json-object observed)))
              (shown (gethash "status" answer)))
         (dolist (field '("phase" "message" "reason"))

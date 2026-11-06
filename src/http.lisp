@@ -500,8 +500,7 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
                                    (pod-resource-version existing))
                        (create-pod store (admit-in-cluster-pod store replacement)))))
           (json-response
-           (pod-response-object
-            pod (reconcile-pod reconciler namespace name))
+           (pod-response-object pod (reconcile-written-pod reconciler pod))
            (if existing 200 201)))))))
 
 (defun replace-pod-response (store reconciler name &optional (namespace "default"))
@@ -520,8 +519,7 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
                                (or (pod-resource-version replacement)
                                    (pod-resource-version (get-pod store namespace name))))))
           (json-response
-           (pod-response-object
-            pod (reconcile-pod reconciler namespace name))))))))
+           (pod-response-object pod (reconcile-written-pod reconciler pod))))))))
 
 (defun pod-delete-request-arguments ()
   "Decode JSON/protobuf DeleteOptions and query options without mutating desired state."

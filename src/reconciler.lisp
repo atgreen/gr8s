@@ -355,6 +355,18 @@ finishes stops the node starting Pods, and nothing else reports it (podster-uqb.
                            :reason "RuntimeError"
                            :message (runtime-error-message error)))))))))
 
+(defun reconcile-written-pod (reconciler pod)
+  "Reconcile POD, which a request has just written, for that request's response.
+A write that releases the last finalizer of a deleting Pod lets any reconciliation
+retire it, and another one can win the reconciler lock first. The write still
+succeeded, so answer as if this request had retired the Pod itself."
+  (handler-case (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))
+    (kubernetes-error (condition)
+      (if (and (= 404 (kubernetes-error-status-code condition)) (deletion-requested-p pod)
+               (not (pod-finalizers-present-p pod)))
+          (pod-status "Succeeded" :reason "Deleted")
+          (error condition)))))
+
 (defun delete-reconciled-pod (reconciler namespace name &key uid resource-version
                                                       (grace-period nil grace-supplied-p)
                                                       dry-run)
