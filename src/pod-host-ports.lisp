@@ -499,7 +499,7 @@ endpoints for one externalTrafficPolicy Local LoadBalancer Service."
         (when (and (integerp port) (service-proxied-p service))
           (let ((addresses nil))
             (loop for service-port across (gethash "ports" spec #())
-                  do (dolist (record (service-slice-endpoint-records store service service-port))
+                  do (dolist (record (service-slice-endpoint-records store service service-port :proxy t))
                        (when (and (getf record :ready) node-name (equal node-name (getf record :node)))
                          (pushnew (getf record :address) addresses :test #'equal))))
             (setf (gethash port checks)

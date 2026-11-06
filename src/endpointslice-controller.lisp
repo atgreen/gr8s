@@ -221,8 +221,9 @@ While admission is configured, each Service's writes are admitted first, outside
           (reconcile-service-endpointslices store service))))
   store)
 
-(defun service-slice-endpoint-records (store service port)
+(defun service-slice-endpoint-records (store service port &key proxy)
   "Read every endpoint of PORT's protocol from the Service's IPv4 slices, ready or not, as kube-proxy does.
+For the PROXY, as kube-proxy's informer does, a slice labelled service.kubernetes.io/headless is ignored.
 Returns (values records found). Each record is a plist with :address, :port, :ready, :serving,
 :terminating, :node, :zone, :zone-hints and :node-hints; an unset condition counts as true, except
 terminating, as upstream's proxy reads them."
@@ -236,7 +237,9 @@ terminating, as upstream's proxy reads them."
                                  (and (equal port-name (gethash "name" candidate ""))
                                       (equal (gethash "protocol" port "TCP") (gethash "protocol" candidate "TCP"))))
                                (gethash "ports" slice #()))))
-          (when (and target (integerp (gethash "port" target)))
+          (when (and target (integerp (gethash "port" target))
+                     (not (and proxy (nth-value 1 (gethash "service.kubernetes.io/headless"
+                                                            (gethash "labels" (gethash "metadata" slice) (core-object)))))))
             (loop for endpoint across (gethash "endpoints" slice #())
                   for conditions = (gethash "conditions" endpoint (core-object))
                   for hints = (gethash "hints" endpoint)
@@ -332,7 +335,7 @@ governs; LOCAL-ORIGIN for those reached from this node itself, which kube-proxy 
 every endpoint while the Service uses any; the ready local endpoint count a health check reports;
 and whether the port has any usable endpoint anywhere, without which kube-proxy rejects traffic."
   (let ((spec (gethash "spec" service)))
-    (multiple-value-bind (records found) (service-slice-endpoint-records store service port)
+    (multiple-value-bind (records found) (service-slice-endpoint-records store service port :proxy t)
       (if (not found)
           ;; No slices yet: the agent's own selector-matched Pods, all on this node.
           (let ((endpoints (service-pod-endpoints store service port)))

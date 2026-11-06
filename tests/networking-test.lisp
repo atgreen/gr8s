@@ -739,3 +739,41 @@
     (is (search (gr8s::netlink-octets #(8 0 24 0) (gr8s::netlink-integer 40001 2) (gr8s::netlink-integer 40001 2)) message))
     (is (search #(5 0 22 0 6) message)))
   (is (search #(5 0 22 0 17) (gr8s::transparent-reply-rule-message "10.88.0.5" 53 "192.0.2.7" 40001 "UDP"))))
+
+(test proxy-ignores-endpoint-slices-labelled-headless
+  ;; kube-proxy's slice informer skips service.kubernetes.io/headless; DNS still reads the slice.
+  (with-temporary-store (store directory)
+    (values directory)
+    (let ((service (gr8s::create-core-resource
+                    store "services"
+                    (gr8s::core-object "metadata" (gr8s::core-object "name" "custom")
+                                       "spec" (gr8s::core-object "ports" (vector (gr8s::core-object "name" "port80" "port" 80))))
+                    "alpha")))
+      (gr8s::create-core-resource
+       store "endpointslices"
+       (gr8s::core-object "metadata" (gr8s::core-object "name" "custom-slice"
+                                                        "labels" (gr8s::core-object "kubernetes.io/service-name" "custom"
+                                                                                    "service.kubernetes.io/headless" ""))
+                          "addressType" "IPv4"
+                          "ports" (vector (gr8s::core-object "name" "port80" "port" 8090 "protocol" "TCP"))
+                          "endpoints" (vector (gr8s::core-object "addresses" (vector "192.0.2.5")
+                                                                 "conditions" (gr8s::core-object "ready" t))))
+       "alpha")
+      (let ((port (aref (gethash "ports" (gethash "spec" service)) 0)))
+        (is (= 1 (length (gr8s::service-slice-endpoint-records store service port))))
+        (is (null (gr8s::service-slice-endpoint-records store service port :proxy t)))
+        (is (null (gr8s::service-port-backends store service port)))))))
+
+(test node-port-errors-use-upstream-wording
+  ;; e2e matches "<port>.*port is already allocated" and "<port>.*port is not in the valid range".
+  (with-temporary-store (store directory)
+    (values directory)
+    (let* ((first (gr8s::create-core-resource store "services" (network-service "first" "type" "NodePort") "alpha"))
+           (port (service-node-port first)))
+      (flet ((message (node-port)
+               (let ((input (network-service "second" "type" "NodePort")))
+                 (setf (gethash "nodePort" (aref (gethash "ports" (gethash "spec" input)) 0)) node-port)
+                 (handler-case (progn (gr8s::create-core-resource store "services" input "alpha") nil)
+                   (kubernetes-error (condition) (gr8s::kubernetes-error-message condition))))))
+        (is (cl-ppcre:scan (format nil "~D.*port is already allocated" port) (message port)))
+        (is (cl-ppcre:scan "40000.*port is not in the valid range" (message 40000)))))))

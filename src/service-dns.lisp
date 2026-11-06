@@ -20,7 +20,10 @@
     (when (equal kind "EndpointSlice")
       (setf (gethash "labels" metadata)
             (core-object "kubernetes.io/service-name"
-                         (gethash "kubernetes.io/service-name" (gethash "labels" source (core-object))))))
+                         (gethash "kubernetes.io/service-name" (gethash "labels" source (core-object)))))
+      ;; kube-proxy ignores a slice labelled headless, so the node's proxy must see the label.
+      (multiple-value-bind (value present) (gethash "service.kubernetes.io/headless" (gethash "labels" source (core-object)))
+        (when present (setf (gethash "service.kubernetes.io/headless" (gethash "labels" metadata)) value))))
     (setf (gethash "kind" result) kind
           (gethash "apiVersion" result) (cond ((equal kind "Service") "v1")
                                               ((equal kind "Secret") "v1")

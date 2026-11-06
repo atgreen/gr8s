@@ -263,9 +263,10 @@ An address someone else's IPAddress already names is left alone."
               do (if number
                      (progn
                        (unless (typep number `(integer ,+node-port-minimum+ ,+node-port-maximum+))
-                         (invalid-pod "nodePort ~A is not in the valid range ~D-~D" number +node-port-minimum+ +node-port-maximum+))
+                         (invalid-pod "spec.ports[].nodePort: Invalid value: ~A: provided port is not in the valid range. The range of valid ports is ~D-~D"
+                                      number +node-port-minimum+ +node-port-maximum+))
                        (when (gethash number used)
-                         (invalid-pod "nodePort ~A is already allocated" number))
+                         (invalid-pod "spec.ports[].nodePort: Invalid value: ~A: provided port is already allocated" number))
                        (when (member (cons number (gethash "protocol" port)) mine :test #'equal)
                          (invalid-pod "nodePort ~A is duplicated for protocol ~A" number (gethash "protocol" port)))
                        (push (cons number (gethash "protocol" port)) mine)
