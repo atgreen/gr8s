@@ -122,6 +122,10 @@
            (sb-posix:syscall-error (condition)
              (unless (= sb-posix:eexist (sb-posix:syscall-errno condition)) (error condition))))))
       (setf stat (stat-host-storage-path path)))
+    ;; An untyped hostPath is unchecked, as in Kubernetes: the CRI runtime creates a missing
+    ;; source as a directory, so gr8s still creates only what a type asks for.
+    (when (and (null stat) (not local) (equal type ""))
+      (return-from materialize-host-storage-source (pathname path)))
     (unless stat (error 'runtime-error :message "Persistent storage source does not exist on this node"))
     (let* ((kind (logand (sb-posix:stat-mode stat) #o170000))
            (expected (cond ((member type '("Directory" "DirectoryOrCreate") :test #'equal) #o040000)
