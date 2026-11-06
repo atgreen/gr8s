@@ -553,7 +553,9 @@ Keep the full reference after the archive path: a bare tag would be stored as
 `import-gr8s:TAG`. `scripts/save-image-archives.sh DIRECTORY` saves the images the
 upstream conformance selection uses. Each archive's import is logged, and one
 that fails to import is logged and skipped. Archives are imported again on every
-start; re-importing an image already present is quick but still reads the archive.
+start. An import saves the network but not the disk work: containerd still writes,
+flushes and unpacks every layer. On a virtual disk whose flushes are slow, the
+nine conformance archives took about 11 minutes, so the node became ready that much later.
 
 The pinned containerd 2.4.2 daemon, shim, and baseline CNI plugins 1.9.1 are
 built from Go source with cgo disabled; the pinned static runc release is

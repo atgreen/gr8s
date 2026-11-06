@@ -8,7 +8,8 @@
 #
 # Usage: save-image-archives.sh OUTPUT_DIRECTORY [--arch ARCH] [IMAGE...]
 # With no IMAGE, saves the images the upstream certified conformance selection
-# pulls on a native gr8s node, Sonobuoy's own included.
+# pulls on a native gr8s node: the Pod sandbox (pause) image, Sonobuoy's own, and
+# the e2e images.
 # Needs skopeo.
 set -euo pipefail
 output=$1; shift
@@ -17,6 +18,7 @@ if [ "${1:-}" = "--arch" ]; then arch=$2; shift 2; fi
 images=("$@")
 if [ ${#images[@]} -eq 0 ]; then
   images=(
+    registry.k8s.io/pause:3.10.2
     registry.k8s.io/conformance:v1.36.0
     docker.io/sonobuoy/sonobuoy:v0.57.5
     registry.k8s.io/e2e-test-images/agnhost:2.63.0
