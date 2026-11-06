@@ -388,10 +388,12 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
   (unless (safe-volume-relative-path-p relative) (invalid-pod "unsafe volume projection path"))
   (merge-pathnames (uiop:parse-native-namestring relative) directory))
 
-(defun volume-file-current-p (target bytes mode)
-  "Report whether TARGET already has exactly BYTES and permission MODE."
+(defun volume-file-current-p (target bytes mode &optional owner)
+  "Report whether TARGET already has exactly BYTES, permission MODE and, when given, OWNER."
   (and (probe-file target)
-       (= mode (logand #o777 (sb-posix:stat-mode (sb-posix:stat (uiop:native-namestring target)))))
+       (let ((stat (sb-posix:stat (uiop:native-namestring target))))
+         (and (= mode (logand #o777 (sb-posix:stat-mode stat)))
+              (or (null owner) (= owner (sb-posix:stat-uid stat)))))
        (equalp bytes (read-file-octets target))))
 
 (defun volume-directory-files (directory)
@@ -401,14 +403,15 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
                 append (volume-directory-files child))))
 
 (defun publish-pod-volume-files (directory files group)
-  "Make DIRECTORY hold exactly FILES, with GROUP readable when an fsGroup applies."
+  "Make DIRECTORY hold exactly FILES, (path bytes mode [owner]) entries, with GROUP readable when an
+fsGroup applies and a file given an OWNER owned by that user."
   (let ((wanted nil))
-    (loop for (relative bytes mode) in files
+    (loop for (relative bytes mode owner) in files
           do (let ((target (volume-file-pathname directory relative))
                    (actual (if group (logior mode #o440) mode)))
                (push (uiop:native-namestring target) wanted)
-               (unless (volume-file-current-p target bytes actual)
-                 (write-projected-volume-file target bytes actual group))))
+               (unless (volume-file-current-p target bytes actual owner)
+                 (write-projected-volume-file target bytes actual group owner))))
     (dolist (path (volume-directory-files directory))
       (unless (member (uiop:native-namestring path) wanted :test #'equal)
         (delete-file path)))))

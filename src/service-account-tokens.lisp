@@ -279,14 +279,31 @@ Returns the identity and the audiences it is valid for, intersected with REQUIRE
                      "metadata" (core-object "name" (projected-token-secret-name pod) "namespace" (pod-namespace pod))
                      "data" data)))))
 
+(defun pod-fs-user (pod)
+  "Return the one user every init and application container of POD runs as, or NIL, as the
+kubelet's FsUserFrom does: each container's own runAsUser, else the Pod's."
+  (let* ((spec (gethash "spec" (pod-to-object pod)))
+         (pod-user (gethash "runAsUser" (gethash "securityContext" spec (core-object))))
+         (users (loop for container across (concatenate 'vector (gethash "initContainers" spec #())
+                                                        (gethash "containers" spec #()))
+                      collect (or (gethash "runAsUser" (gethash "securityContext" container (core-object)))
+                                  pod-user))))
+    (when (and users (every #'integerp users) (every (lambda (user) (eql user (first users))) users))
+      (first users))))
+
 (defun projected-token-volume-files (runtime pod source default-mode)
-  "Return the (path bytes mode) entry writing the token a projection SOURCE asks for."
+  "Return the (path bytes mode owner) entry writing the token a projection SOURCE asks for.
+As the kubelet's projected volume plugin does, a Pod with one runAsUser or with an fsGroup gets
+a token readable only by its owner, that user, instead of DEFAULT-MODE; fsGroup adds group read."
   (let* ((secret (get-core-resource (containerd-runtime-resource-store runtime) "secrets" (pod-namespace pod)
                                     (projected-token-secret-name pod)))
          (encoded (gethash (projected-token-data-key source) (gethash "data" secret))))
     (unless encoded
       (error 'runtime-error :message "The control plane has not delivered this projected token"))
-    (list (list (gethash "path" source) (ag-grpc:base64-decode encoded) default-mode))))
+    (let ((user (pod-fs-user pod)))
+      (list (list (gethash "path" source) (ag-grpc:base64-decode encoded)
+                  (if (or user (pod-fs-group pod)) #o600 default-mode)
+                  user)))))
 
 (defun prune-projected-tokens (store)
   "Forget the cached tokens and podCertificate keys of Pods that no longer exist."

@@ -267,3 +267,39 @@
                           "containers"
                           (vector (gr8s::core-object "name" "main" "image" "busybox"
                                                      "env" (vector (funcall resource "BAD" "limits.hugepages-2Mi"))))))))))
+
+(defun token-ownership-pod (security)
+  "Return a Pod with a projected token volume and the Pod SECURITY context JSON."
+  (parse-pod (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"owner\",\"namespace\":\"default\",\"uid\":\"owner-uid\"},\"spec\":{\"securityContext\":~A,\"containers\":[{\"name\":\"c\",\"image\":\"busybox\"}],\"volumes\":[{\"name\":\"v\",\"projected\":{\"sources\":[{\"serviceAccountToken\":{\"path\":\"token\"}}]}}]}}"
+                     security)))
+
+(test projected-token-files-follow-run-as-user-and-fs-group
+  (with-temporary-store (store directory)
+    (let ((runtime (gr8s::%make-containerd-runtime :log-root directory :resource-store store)))
+      (flet ((entry (security)
+               (let* ((pod (token-ownership-pod security))
+                      (source (gethash "serviceAccountToken"
+                                       (aref (gethash "sources" (gethash "projected" (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0))) 0))))
+                 (ignore-errors
+                  (gr8s::create-core-resource
+                   store "secrets"
+                   (gr8s::core-object "metadata" (gr8s::core-object "name" (gr8s::projected-token-secret-name pod))
+                                      "data" (gr8s::core-object (gr8s::projected-token-data-key source) "dG9rZW4="))
+                   "default"))
+                 (first (gr8s::projected-token-volume-files runtime pod source #o644)))))
+        ;; As upstream's "should set ownership and permission when RunAsUser or FsGroup is present".
+        (is (equal (list "token" #o600 1000) (let ((e (entry "{\"runAsUser\":1000}"))) (list (first e) (third e) (fourth e)))))
+        (is (equal (list #o600 nil) (let ((e (entry "{\"fsGroup\":10000}"))) (list (third e) (fourth e)))))
+        (is (equal (list #o600 1000) (let ((e (entry "{\"runAsUser\":1000,\"fsGroup\":10000}"))) (list (third e) (fourth e)))))
+        (is (equal (list #o644 nil) (let ((e (entry "{}"))) (list (third e) (fourth e))))))
+      ;; Containers that run as different users leave no single owner.
+      (is (null (gr8s::pod-fs-user
+                 (parse-pod "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"two\"},\"spec\":{\"securityContext\":{\"runAsUser\":1000},\"containers\":[{\"name\":\"a\",\"image\":\"busybox\"},{\"name\":\"b\",\"image\":\"busybox\",\"securityContext\":{\"runAsUser\":2000}}]}}"))))
+      ;; Publication applies the owner, and fsGroup adds group read to the 0600 token.
+      (let ((target (merge-pathnames "published/" directory)) (me (sb-posix:getuid)))
+        (ensure-directories-exist target)
+        (gr8s::publish-pod-volume-files target (list (list "token" (trivial-utf-8:string-to-utf-8-bytes "t") #o600 me))
+                                        (sb-posix:getgid))
+        (let ((stat (sb-posix:stat (uiop:native-namestring (merge-pathnames "token" target)))))
+          (is (= #o640 (logand #o777 (sb-posix:stat-mode stat))))
+          (is (= me (sb-posix:stat-uid stat))))))))
