@@ -410,12 +410,6 @@
                        :stopper (lambda (process) (setf (car process) nil))
                        :supervision-interval 0.02))))
 
-(defun wait-until (predicate &key (timeout 5))
-  (let ((deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
-    (loop until (or (funcall predicate) (>= (get-internal-real-time) deadline))
-          do (sleep 0.01))
-    (funcall predicate)))
-
 (test managed-containerd-supervisor-restarts-a-dead-containerd-and-reports-the-outage
   (let* ((directory (merge-pathnames (format nil "gr8s-supervise-~36R/" (random (expt 36 8)))
                                      (uiop:temporary-directory)))
@@ -441,12 +435,12 @@
               (setf (car (first launches)) nil)
               ;; The CRI caller sees the outage at once, before the supervisor polls.
               (is (search "container runtime is down" (gr8s::runtime-availability-message availability)))
-              (is (wait-until (lambda () (gr8s::runtime-availability-down-message availability))))
-              (is (search "exit status 2" (gr8s::runtime-availability-down-message availability)))
+              (is (wait-until (lambda () (gr8s::runtime-availability-down-message availability)) :timeout 5))
+              (is (search "exit status 2" (gr8s::runtime-availability-message availability)))
               ;; It is restarted after the backoff, not in a hot loop.
               (is (= 1 (length launches)))
-              (is (wait-until (lambda () (= 2 (length launches)))))
-              (is (wait-until (lambda () (null (gr8s::runtime-availability-message availability)))))
+              (is (wait-until (lambda () (= 2 (length launches))) :timeout 5))
+              (is (wait-until (lambda () (null (gr8s::runtime-availability-message availability))) :timeout 5))
               (is (= 1 (gr8s::managed-containerd-restarts manager)))
               (is (= 1 (gr8s::runtime-availability-outages availability)))
               (is (eq (first launches) (gr8s::managed-containerd-process manager))))))
