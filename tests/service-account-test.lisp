@@ -170,10 +170,18 @@
       (let ((admitted (gr8s::admit-in-cluster-pod store (parse-pod object))))
         (is (null (gethash "volumes" (gethash "spec" (pod-to-object admitted)))))))))
 
+(defvar *tls-api-port* nil "The kernel-assigned port of the current in-cluster TLS API test server.")
+
+(defun start-test-tls-api (store runtime reconciler pki)
+  "Start an in-cluster TLS API on a kernel-assigned port, recording it in *TLS-API-PORT*."
+  (let ((server (gr8s::start-in-cluster-api store runtime reconciler pki :address "127.0.0.1" :port 0)))
+    (setf *tls-api-port* (hunchentoot:acceptor-port server))
+    server))
+
 (defun service-account-tls-status (pki path &optional token)
   "Read an HTTP response status over verified TLS using the test cluster CA."
   (sb-sys:with-deadline (:seconds 10)
-    (let* ((socket (usocket:socket-connect "127.0.0.1" 18091 :element-type '(unsigned-byte 8)))
+    (let* ((socket (usocket:socket-connect "127.0.0.1" *tls-api-port* :element-type '(unsigned-byte 8)))
            (tls nil))
       (unwind-protect
            (progn
@@ -202,11 +210,11 @@
   (with-temporary-store (store directory)
     (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
            (runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
-           (server nil))
+           (server nil) (*tls-api-port* nil))
       (service-account-test-store store)
       (unwind-protect
            (progn
-             (setf server (gr8s::start-in-cluster-api store runtime reconciler pki :address "127.0.0.1" :port 18091))
+             (setf server (start-test-tls-api store runtime reconciler pki))
              (let* ((secret (gr8s::ensure-service-account-credential store "alpha" "reader"))
                     (token (service-account-test-token secret)))
                (is (= 401 (service-account-tls-status pki "/version")))

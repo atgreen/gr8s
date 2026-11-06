@@ -225,7 +225,7 @@
         (is (equal '("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch") verbs)))
       (sb-sys:with-deadline (:seconds 10)
         (multiple-value-bind (stream code)
-            (drakma:http-request "http://127.0.0.1:18089/api/v1/nodes" :want-stream t
+            (drakma:http-request (core-api-url "/api/v1/nodes") :want-stream t
                                  :parameters `(("watch" . "true") ("resourceVersion" . ,revision) ("timeoutSeconds" . "3")))
           (unwind-protect
                (progn
@@ -356,7 +356,7 @@
   (with-core-api (store directory)
     (values store directory)
     (let* ((body "{\"apiVersion\":\"v1\",\"kind\":\"Namespace\",\"metadata\":{\"name\":\"chunked\"}}")
-           (socket (usocket:socket-connect "127.0.0.1" 18089 :element-type '(unsigned-byte 8)))
+           (socket (usocket:socket-connect "127.0.0.1" *core-api-port* :element-type '(unsigned-byte 8)))
            (stream (usocket:socket-stream socket)))
       (unwind-protect
            (progn
@@ -378,7 +378,7 @@
   (with-core-api (store directory)
     (values store directory)
     (multiple-value-bind (body status)
-        (drakma:http-request "http://127.0.0.1:18089/api/v1/componentstatuses"
+        (drakma:http-request (core-api-url "/api/v1/componentstatuses")
                              :accept "application/json;as=Table;v=v1;g=meta.k8s.io")
       (is (= 200 status))
       (let* ((table (com.inuoe.jzon:parse (if (stringp body) body (trivial-utf-8:utf-8-bytes-to-string body))))

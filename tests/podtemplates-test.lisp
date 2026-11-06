@@ -132,7 +132,7 @@
     (gr8s::create-core-resource store "podtemplates" (podtemplate-fixture "stream") "alpha")
     (sb-sys:with-deadline (:seconds 10)
       (multiple-value-bind (stream code)
-          (drakma:http-request "http://127.0.0.1:18089/api/v1/namespaces/alpha/podtemplates"
+          (drakma:http-request (core-api-url "/api/v1/namespaces/alpha/podtemplates")
                                :want-stream t :parameters '(("watch" . "true") ("resourceVersion" . "0") ("timeoutSeconds" . "2")))
         (unwind-protect
              (progn

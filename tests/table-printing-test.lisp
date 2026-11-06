@@ -14,7 +14,7 @@
 (defun table-test-get (path &key (accept +table-accept+) parameters)
   "GET PATH with an Accept header, returning the parsed body and status."
   (multiple-value-bind (body status)
-      (drakma:http-request (concatenate 'string "http://127.0.0.1:18089" path)
+      (drakma:http-request (core-api-url path)
                            :method :get :accept accept :parameters parameters)
     (values (com.inuoe.jzon:parse body :max-string-length (* 2 1024 1024)) status)))
 
@@ -204,7 +204,7 @@
         (is (hash-table-p schema) "~A misses ~A" (car entry) (cdr entry))))
     ;; Protobuf is what client-go asks for; anything else keeps JSON.
     (multiple-value-bind (body status headers)
-        (drakma:http-request "http://127.0.0.1:18089/openapi/v2" :force-binary t
+        (drakma:http-request (core-api-url "/openapi/v2") :force-binary t
                              :accept "application/com.github.proto-openapi.spec.v2@v1.0+protobuf")
       (is (= 200 status))
       (is (search "protobuf" (cdr (assoc :content-type headers))))

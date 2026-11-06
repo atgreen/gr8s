@@ -181,7 +181,7 @@
                            (t "watched")))
                (namespace (and namespaced "alpha"))
                (collection (if (equal version "v1") "/api/v1" (concatenate 'string "/apis/" version)))
-               (url (format nil "http://127.0.0.1:18089~A~A/~A" collection
+               (url (format nil "http://127.0.0.1:~D~A~A/~A" *core-api-port* collection
                             (if namespace (concatenate 'string "/namespaces/" namespace) "") resource)))
           (gr8s::create-core-resource store resource (durable-watch-fixture resource name) namespace)
           (sb-sys:with-deadline (:seconds 10)

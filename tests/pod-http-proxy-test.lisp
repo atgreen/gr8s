@@ -46,7 +46,7 @@
 (defun proxy-api-request (suffix &rest options)
   "Call the real control-plane HTTP listener with environment proxying disabled."
   (apply #'drakma:http-request
-         (concatenate 'string "http://127.0.0.1:18080/api/v1/namespaces/default/pods/hello/proxy" suffix)
+         (format nil "http://127.0.0.1:~D/api/v1/namespaces/default/pods/hello/proxy~A" *http-test-port* suffix)
          :proxy nil :redirect nil :force-binary t :preserve-uri t options))
 
 (test pod-proxy-target-uses-observed-uid-address-and-kubernetes-port-defaults
@@ -79,13 +79,14 @@
   (with-temporary-store (store path)
     (let* ((address (pod-proxy-test-address))
            (object (com.inuoe.jzon:parse *valid-pod-json*))
-           (upstream (make-instance 'pod-proxy-test-upstream :address address :port 18182 :access-log-destination nil))
+           (upstream (make-instance 'pod-proxy-test-upstream :address address :port 0 :access-log-destination nil))
            (frontend nil))
-      (setf (gethash "containerPort" (aref (gethash "ports" (aref (gethash "containers" (gethash "spec" object)) 0)) 0)) 18182)
       (hunchentoot:start upstream)
+      (setf (gethash "containerPort" (aref (gethash "ports" (aref (gethash "containers" (gethash "spec" object)) 0)) 0))
+            (hunchentoot:acceptor-port upstream))
       (unwind-protect
            (progn
-             (setf frontend (start-server :address "127.0.0.1" :port 18080 :store store :runtime (make-fake-runtime)))
+             (setf frontend (start-http-test-server :store store :runtime (make-fake-runtime)))
              (let ((pod (create-pod store (parse-pod object))))
                (gr8s::save-pod-observation store pod (gr8s::core-object "phase" "Running" "podIP" address)))
              (multiple-value-bind (bytes code)
@@ -96,7 +97,7 @@
                (is (equal "/results/dns@pod_name?file=a%2Fb&x=1" (getf actual :uri)))
                (is (equal "application-value" (getf actual :app))) (is (null (getf actual :authorization)))
                (is (equal "/api/v1/namespaces/default/pods/hello/proxy/results/dns@pod_name" (getf actual :forwarded-uri)))
-               (is (equal "127.0.0.1:18080" (getf actual :forwarded-host))))
+               (is (equal (format nil "127.0.0.1:~D" *http-test-port*) (getf actual :forwarded-host))))
              (multiple-value-bind (bytes code)
                  (sb-sys:with-deadline (:seconds 5)
                    (proxy-api-request "/chunks" :additional-headers '(("Connection" . "X-Hop, close") ("X-Hop" . "remove-me"))))

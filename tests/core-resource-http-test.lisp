@@ -2,16 +2,24 @@
 (def-suite core-resource-http :in gr8s)
 (in-suite core-resource-http)
 
+(defvar *core-api-port* nil "The kernel-assigned port of the current core API test server.")
+
+(defun core-api-url (path)
+  "Return the URL of PATH on the current core API test server."
+  (format nil "http://127.0.0.1:~D~A" *core-api-port* path))
+
 (defun core-api-request (path &key (method :get) object octets (content-type "application/json") parameters)
   (multiple-value-bind (body status)
-      (drakma:http-request (concatenate 'string "http://127.0.0.1:18089" path)
+      (drakma:http-request (core-api-url path)
                            :method method :content-type content-type :parameters parameters
                            :content (or octets (when object (com.inuoe.jzon:stringify object))))
     (values (com.inuoe.jzon:parse body :max-string-length (* 2 1024 1024)) status)))
 
 (defmacro with-core-api ((store path) &body body)
+  "Serve a fresh store on a kernel-assigned port, so no other suite's server can collide with it."
   `(with-temporary-store (,store ,path)
-     (let ((server (start-server :address "127.0.0.1" :port 18089 :store ,store :runtime (make-fake-runtime))))
+     (let* ((server (start-server :address "127.0.0.1" :port 0 :store ,store :runtime (make-fake-runtime)))
+            (*core-api-port* (hunchentoot:acceptor-port server)))
        (unwind-protect (progn ,@body) (stop-server server)))))
 
 (defun check-core-status (expected path &rest options)
@@ -280,7 +288,7 @@
   (with-core-api (store path)
     (values store path)
     (flet ((fetch (path)
-             (multiple-value-bind (body status) (drakma:http-request (concatenate 'string "http://127.0.0.1:18089" path))
+             (multiple-value-bind (body status) (drakma:http-request (core-api-url path))
                (values (if (stringp body) body (flexi-streams:octets-to-string body :external-format :utf-8)) status))))
       (is (equal "ok" (fetch "/livez")))
       (dolist (endpoint '("healthz" "livez" "readyz"))
@@ -316,7 +324,7 @@
                (com.inuoe.jzon:stringify document))))
   (with-core-api (store path)
     (values store path)
-    (let ((text (drakma:http-request "http://127.0.0.1:18089/openapi/v3/apis/rbac.authorization.k8s.io/v1")))
+    (let ((text (drakma:http-request (core-api-url "/openapi/v3/apis/rbac.authorization.k8s.io/v1"))))
       (setf text (if (stringp text) text (flexi-streams:octets-to-string text :external-format :utf-8)))
       (is (not (search "\"parameters\":[]" text))))))
 

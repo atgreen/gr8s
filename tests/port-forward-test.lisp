@@ -478,10 +478,11 @@ Forwarding URLs lead to STREAM-LISTENER, where the test plays the container runt
                         (progn
                           (create-pod ,store (parse-pod *valid-pod-json*))
                           (reconcile-pod ,reconciler "default" "hello")
-                          (setf ,server (start-server :address "127.0.0.1" :port 18097 :store ,store
+                          (setf ,server (start-server :address "127.0.0.1" :port 0 :store ,store
                                                       :runtime ,runtime :reconciler ,reconciler))
                           (with-open-file (out ,kubeconfig :direction :output :if-exists :supersede)
-                            (format out "apiVersion: v1~%kind: Config~%clusters:~%- name: c~%  cluster: {server: \"http://127.0.0.1:18097\"}~%contexts:~%- name: x~%  context: {cluster: c, user: u, namespace: default}~%current-context: x~%users:~%- name: u~%  user: {}~%"))
+                            (format out "apiVersion: v1~%kind: Config~%clusters:~%- name: c~%  cluster: {server: \"http://127.0.0.1:~D\"}~%contexts:~%- name: x~%  context: {cluster: c, user: u, namespace: default}~%current-context: x~%users:~%- name: u~%  user: {}~%"
+                                    (hunchentoot:acceptor-port ,server)))
                           ,@body)
                      (when ,server (ignore-errors (gr8s:stop-server ,server)))
                      (ignore-errors (usocket:socket-close ,listener)))))))))))

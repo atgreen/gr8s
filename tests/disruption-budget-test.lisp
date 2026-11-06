@@ -43,9 +43,10 @@
        ,@body)))
 
 (defmacro with-budget-api ((store runtime reconciler) &body body)
-  "Run BODY with a fake cluster served over HTTP on the fixed test port."
+  "Run BODY with a fake cluster served over HTTP on a kernel-assigned port."
   `(with-budget-cluster (,store ,runtime ,reconciler)
-     (let ((server (start-server :address "127.0.0.1" :port 18089 :store ,store :runtime ,runtime :reconciler ,reconciler)))
+     (let* ((server (start-server :address "127.0.0.1" :port 0 :store ,store :runtime ,runtime :reconciler ,reconciler))
+            (*core-api-port* (hunchentoot:acceptor-port server)))
        (unwind-protect (progn ,@body) (stop-server server)))))
 
 (defun settle-budgets (reconciler runtime store)

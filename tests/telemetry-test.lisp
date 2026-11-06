@@ -59,8 +59,7 @@
       (unwind-protect
            (progn
              (gr8s::start-node-runtime node-runtime)
-             (setf http (start-server :address "127.0.0.1" :port 18080
-                                       :store store :runtime control-runtime))
+             (setf http (start-http-test-server :store store :runtime control-runtime))
              (setf agent
                    (bt:make-thread
                     (lambda ()

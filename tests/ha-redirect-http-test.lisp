@@ -12,14 +12,14 @@
 
 (test ha-http-redirects-writes-and-serves-reads
   (let ((server (gr8s::start-server
-                 :address "127.0.0.1" :port 18091
+                 :address "127.0.0.1" :port 0
                  :leader-status-fn (lambda () (values nil "http://10.0.0.9:6443")))))
     (unwind-protect
          (progn
            ;; A write on the follower is redirected to the leader, path+query kept.
            (multiple-value-bind (body status headers)
                (drakma:http-request
-                "http://127.0.0.1:18091/api/v1/namespaces/default/configmaps?x=1"
+                (format nil "http://127.0.0.1:~D/api/v1/namespaces/default/configmaps?x=1" (hunchentoot:acceptor-port server))
                 :method :post :content "{}" :redirect nil)
              (declare (ignore body))
              (is (= 307 status) "a write on a follower is 307-redirected")
@@ -28,18 +28,18 @@
                  "the redirect preserves the path and query"))
            ;; Reads are served locally (health endpoint answers 200).
            (multiple-value-bind (body status)
-               (drakma:http-request "http://127.0.0.1:18091/livez" :redirect nil)
+               (drakma:http-request (format nil "http://127.0.0.1:~D/livez" (hunchentoot:acceptor-port server)) :redirect nil)
              (is (= 200 status) "reads are served locally on a follower")
              (is (string= "ok" body))))
       (gr8s::stop-server server))))
 
 (test ha-http-503-when-no-leader-known
   (let ((server (gr8s::start-server
-                 :address "127.0.0.1" :port 18092
+                 :address "127.0.0.1" :port 0
                  :leader-status-fn (lambda () (values nil nil)))))
     (unwind-protect
          (multiple-value-bind (body status)
-             (drakma:http-request "http://127.0.0.1:18092/api/v1/configmaps"
+             (drakma:http-request (format nil "http://127.0.0.1:~D/api/v1/configmaps" (hunchentoot:acceptor-port server))
                                   :method :post :content "{}" :redirect nil)
            (declare (ignore body))
            (is (= 503 status) "a write with no known leader is 503"))
