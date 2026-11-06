@@ -136,6 +136,35 @@
         (error 'runtime-error :message (format nil "Volume source is not the requested hostPath type ~A" type))))
     (pathname path)))
 
+(defun apply-volume-fs-group (root group &key readonly policy)
+  "Give the tree at ROOT to filesystem GROUP as the kubelet's SetVolumeOwnership does: each
+entry is lchowned to GROUP and gains group rw (r when READONLY), and each directory also gains
+group x and setgid. Links are re-owned but never followed or chmodded. With POLICY
+OnRootMismatch, a root already owned by GROUP with those bits is left as it is."
+  (let* ((root (string-right-trim "/" (namestring root)))
+         (mask (if readonly #o440 #o660))
+         (stat (sb-posix:lstat root)))
+    (unless (and (equal policy "OnRootMismatch")
+                 (= group (sb-posix:stat-gid stat))
+                 (= (logior mask #o2110) (logand (logior mask #o2110) (sb-posix:stat-mode stat))))
+      (labels ((own (path stat)
+                 (sb-posix:lchown path #xffffffff group)
+                 (let ((kind (logand #o170000 (sb-posix:stat-mode stat))))
+                   (unless (= kind #o120000)
+                     (sb-posix:chmod path (logior (logand #o7777 (sb-posix:stat-mode stat)) mask
+                                                  (if (= kind #o040000) #o2110 0)))
+                     (when (= kind #o040000)
+                       (let ((directory (sb-posix:opendir path)))
+                         (unwind-protect
+                              (loop for entry = (sb-posix:readdir directory)
+                                    until (sb-alien:null-alien entry)
+                                    do (let ((name (sb-posix:dirent-name entry)))
+                                         (unless (member name '("." "..") :test #'equal)
+                                           (let ((child (concatenate 'string path "/" name)))
+                                             (own child (sb-posix:lstat child))))))
+                           (sb-posix:closedir directory))))))))
+        (own root stat)))))
+
 (defun ensure-provisioned-local-directory (path)
   "Create a provisioned directory writable by whichever user a workload runs as."
   (unless (stat-host-storage-path path)
@@ -180,5 +209,10 @@
           (progn
             (when (equal provisioner +local-path-provisioner+)
               (ensure-provisioned-local-directory (gethash "path" (gethash kind spec))))
-            (values (materialize-host-storage-source (gethash kind spec) :local (equal kind "local"))
-                    claim-readonly))))))
+            (let ((path (materialize-host-storage-source (gethash kind spec) :local (equal kind "local")))
+                  (context (gethash "securityContext" (gethash "spec" (pod-to-object pod)))))
+              ;; As in Kubernetes, a local volume takes the Pod's fsGroup; hostPath does not.
+              (when (and (equal kind "local") (pod-fs-group pod))
+                (apply-volume-fs-group path (pod-fs-group pod) :readonly claim-readonly
+                                       :policy (and context (gethash "fsGroupChangePolicy" context))))
+              (values path claim-readonly)))))))
