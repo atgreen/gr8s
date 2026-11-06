@@ -230,8 +230,10 @@
                                (vector (gap-container "plain" "startupProbe" (gr8s::core-object "exec" (gr8s::core-object "command" #("true"))))))))
   (signals kubernetes-error
     (parse-pod (gap-pod-object "initContainers" (vector (gap-container "plain" "restartPolicy" "OnFailure")))))
+  ;; An application container may set its own restartPolicy (ContainerRestartRules), but only a valid one.
+  (is (gr8s::pod-name (parse-pod (gap-pod-object "containers" (vector (gap-container "app" "restartPolicy" "Always"))))))
   (signals kubernetes-error
-    (parse-pod (gap-pod-object "containers" (vector (gap-container "app" "restartPolicy" "Always"))))))
+    (parse-pod (gap-pod-object "containers" (vector (gap-container "app" "restartPolicy" "Sometimes"))))))
 
 (defun gap-sidecar-pod (store &optional (policy "Always"))
   "Create a Pod: sidecar, ordinary init container, then one application."
@@ -830,7 +832,8 @@
 (test a-node-reported-resize-wait-becomes-the-pod-condition
   (with-temporary-store (store path)
     (values path)
-    (let* ((pod (create-pod store (parse-pod (gap-pod-object))))
+    ;; Only a Pod a node has can wait on a resize; an unbound one reports just PodScheduled.
+    (let* ((pod (create-pod store (parse-pod (gap-pod-object "nodeName" "worker-a"))))
            (status (gr8s::core-object
                     "phase" "Running"
                     "conditions" (vector (gr8s::core-object "type" "PodResizePending" "status" "True"

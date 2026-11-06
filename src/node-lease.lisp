@@ -25,6 +25,12 @@ renew interval: a quarter of the lease duration.")
   (multiple-value-bind (second minute hour day month year) (decode-universal-time time 0)
     (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0D.000000Z" year month day hour minute second)))
 
+(defun node-lease-renew-time (lease)
+  "Return LEASE's renewTime as universal time to the second, or NIL when it has none."
+  (let ((text (gethash "renewTime" (gethash "spec" lease (core-object)))))
+    (when (and (stringp text) (>= (length text) 19))
+      (ignore-errors (pod-deletion-time (concatenate 'string (subseq text 0 19) "Z"))))))
+
 (defun node-lease-object (node now)
   "Return the Lease NODE holds, renewed at universal time NOW."
   (core-object "apiVersion" "coordination.k8s.io/v1" "kind" "Lease"
@@ -48,7 +54,7 @@ within the renew interval is left alone, so frequent heartbeats do not rewrite i
             (desired (node-lease-object node now)))
         (if (null existing)
             (create-core-resource store "leases" desired +node-lease-namespace+)
-            (let ((renewed (ignore-errors (pod-deletion-time (gethash "renewTime" (gethash "spec" existing))))))
+            (let ((renewed (node-lease-renew-time existing)))
               (when (or (null renewed) (>= (- now renewed) *node-lease-renew-interval-seconds*)
                         (not (equal name (gethash "holderIdentity" (gethash "spec" existing)))))
                 (update-core-resource store "leases" +node-lease-namespace+ name
