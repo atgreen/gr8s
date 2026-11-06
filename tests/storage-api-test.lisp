@@ -324,7 +324,13 @@
             (sb-posix:chmod (namestring (merge-pathnames "file" backing)) #o600)
             (setf (gethash "fsGroupChangePolicy" (gethash "securityContext" (gethash "spec" (pod-to-object pod)))) "OnRootMismatch")
             (gr8s::materialize-pod-volume runtime pod source)
-            (is (= #o600 (mode (merge-pathnames "file" backing))))))))))
+            (is (= #o600 (mode (merge-pathnames "file" backing))))
+            ;; A root that is itself a link, as a dir-link local PV is, is walked as its target.
+            (let ((link (string-right-trim "/" (namestring (merge-pathnames "link-root" path)))))
+              (sb-posix:symlink (string-right-trim "/" (namestring backing)) link)
+              (sb-posix:chmod (namestring (merge-pathnames "file" backing)) #o600)
+              (gr8s::apply-volume-fs-group link gid)
+              (is (= #o660 (mode (merge-pathnames "file" backing)))))))))))
 
 (test volume-gid-annotations-join-the-containers-supplemental-groups
   ;; The PersistentVolumes NFS specs check that a container's groups include the PV's
