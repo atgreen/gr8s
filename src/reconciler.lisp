@@ -413,6 +413,33 @@ the runtime finds none or has removed them, the status is the terminal one a kub
              (setf (gethash "phase" status) (kubelet-pod-phase pod status gone)))))
     status))
 
+(defun retain-terminated-container-statuses (store pod status)
+  "Keep each container clients last saw terminated terminated, unless a new attempt of it now exists,
+and a terminal phase terminal. The kubelet's status manager refuses both transitions too: a report
+without the container, or one still describing the exited attempt, can't make it waiting or running."
+  (let ((published (with-store-lock (store) (gethash (pod-uid pod) (pod-store-pod-published-statuses store)))))
+    (when (hash-table-p published)
+      (when (and (member (gethash "phase" published) '("Succeeded" "Failed") :test #'equal)
+                 (not (member (gethash "phase" status) '("Succeeded" "Failed") :test #'equal)))
+        (setf (gethash "phase" status) (gethash "phase" published)))
+      (dolist (field +pod-status-container-fields+)
+        (let ((before (gethash field published)) (current (gethash field status)))
+          (when (and (vectorp before) (not (stringp before)) (vectorp current) (not (stringp current)))
+            (setf (gethash field status)
+                  (map 'vector
+                       (lambda (item)
+                         (let ((old (and (hash-table-p item)
+                                         (find (gethash "name" item) before :test #'equal
+                                               :key (lambda (entry) (and (hash-table-p entry) (gethash "name" entry)))))))
+                           (if (and old (container-status-state-p old "terminated")
+                                    (not (container-status-state-p item "terminated"))
+                                    (member (gethash "containerID" item "") (list "" (gethash "containerID" old ""))
+                                            :test #'equal))
+                               (copy-core-object old)
+                               item)))
+                       current)))))))
+  status)
+
 (defun pod-published-status (store pod)
   "Return the status clients last saw for POD, or NIL."
   (with-store-lock (store)

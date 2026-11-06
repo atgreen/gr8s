@@ -186,3 +186,32 @@
         (let ((status (final running)))
           (is (equal "Running" (gethash "phase" status)))
           (is (equal "running" (status-state-name status "fail"))))))))
+
+(test a-container-clients-saw-terminated-stays-terminated-until-a-new-attempt-runs
+  ;; As the kubelet's status manager refuses the transition (checkContainerStateTransition).
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((pod (create-pod store (terminating-test-pod +fail-pod-spec+)))
+           (exited (test-container-status "fail" (cons "terminated" (gr8s::core-object "exitCode" 1))
+                                          "containerID" "containerd://first")))
+      (gr8s::add-pod-status-conditions store pod (gr8s::core-object "phase" "Failed" "containerStatuses" (vector exited)))
+      ;; A report missing the container, or still about the exited attempt, keeps the exit.
+      (dolist (report (list (gr8s::core-object "phase" "Pending")
+                            (gr8s::core-object "phase" "Running" "containerStatuses"
+                                               (vector (test-container-status "fail" (cons "running" (gr8s::core-object))
+                                                                              "containerID" "containerd://first")))))
+        (is (equal "terminated" (status-state-name (gr8s::add-pod-status-conditions store pod report) "fail"))))
+      ;; A new attempt that really runs is reported as it is.
+      (is (equal "running" (status-state-name
+                            (gr8s::add-pod-status-conditions
+                             store pod (gr8s::core-object "phase" "Running" "containerStatuses"
+                                                          (vector (test-container-status "fail" (cons "running" (gr8s::core-object))
+                                                                                         "containerID" "containerd://second"))))
+                            "fail"))))))
+
+(test a-terminal-phase-clients-saw-stays-terminal
+  (with-temporary-store (store path)
+    (values path)
+    (let ((pod (create-pod store (terminating-test-pod +fail-pod-spec+))))
+      (gr8s::add-pod-status-conditions store pod (gr8s::core-object "phase" "Failed"))
+      (is (equal "Failed" (gethash "phase" (gr8s::add-pod-status-conditions store pod (gr8s::core-object "phase" "Pending"))))))))
