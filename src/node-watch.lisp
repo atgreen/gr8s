@@ -16,6 +16,9 @@
 (defparameter +node-watch-journal-minimum+ 1024
   "Keep this many Node events however old, for a cluster too quiet to fill the time window.")
 
+(defparameter *node-watch-journal-bytes* (* 16 1024 1024)
+  "The most memory, by APPROXIMATE-HEAP-BYTES, that the Node events may hold in all.")
+
 (defparameter +node-selector-field-paths+ '("metadata.name" "spec.unschedulable")
   "The Node fields clients may name in field selectors.")
 
@@ -27,15 +30,22 @@
 
 (defun record-node-watch-event-unlocked (store revision old new)
   "Append one transition to the journal, compacting what has fallen out of its retention."
-  (push (list revision old new (funcall *podtemplate-clock*)) (pod-store-node-watch-journal store))
-  (multiple-value-bind (retained length floor)
-      (trim-revision-journal (pod-store-node-watch-journal store)
-                             (incf (pod-store-node-watch-journal-length store))
-                             *node-watch-journal-limit* +node-watch-journal-minimum+)
-    (when retained
-      (setf (pod-store-node-watch-floor store) floor
-            (pod-store-node-watch-journal store) retained
-            (pod-store-node-watch-journal-length store) length))))
+  (unless (pod-store-watch-journal-p store)
+    (setf (pod-store-node-watch-floor store) revision)
+    (return-from record-node-watch-event-unlocked nil))
+  (let ((journal (record-revision-journal-event (pod-store-node-watch-journal store) revision old new nil)))
+    (setf (pod-store-node-watch-journal store) journal)
+    (multiple-value-bind (retained length floor bytes)
+        (trim-revision-journal journal
+                               (incf (pod-store-node-watch-journal-length store))
+                               (incf (pod-store-node-watch-journal-bytes store) (fifth (first journal)))
+                               *node-watch-journal-limit* +node-watch-journal-minimum+
+                               *node-watch-journal-bytes*)
+      (when retained
+        (setf (pod-store-node-watch-floor store) floor
+              (pod-store-node-watch-journal store) retained
+              (pod-store-node-watch-journal-length store) length
+              (pod-store-node-watch-journal-bytes store) bytes)))))
 
 (defun publish-node-change-unlocked (store old node)
   "Persist NODE at a fresh revision and journal it, unless its API view still equals OLD.

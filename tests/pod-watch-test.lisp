@@ -194,6 +194,65 @@
       (is (= 1096 (gr8s::pod-store-node-watch-journal-length store)))
       (is (= 3000 (gr8s::pod-store-node-watch-floor store))))))
 
+(defun journal-test-view (uid phase)
+  "Return a Pod API view of a realistic size for UID in PHASE."
+  (gr8s::core-object "metadata" (gr8s::core-object "uid" uid "name" uid "namespace" "default"
+                                                   "annotations" (gr8s::core-object "note" (make-string 4000 :initial-element #\n)))
+                     "status" (gr8s::core-object "phase" phase)))
+
+(test pod-journal-stops-at-its-memory-limit-however-recent
+  (with-temporary-store (store directory)
+    (declare (ignorable directory))
+    (let ((gr8s::*pod-watch-journal-bytes* (* 1024 1024)))
+      (loop for revision from 1 to 400
+            do (gr8s::record-pod-watch-event-unlocked
+                store revision nil (journal-test-view (format nil "pod-~D" revision) "Running")))
+      (setf (gr8s::pod-store-pod-revision store) 400)
+      (let ((length (gr8s::pod-store-pod-watch-journal-length store))
+            (journal (gr8s::pod-store-pod-watch-journal store)))
+        (is (< 20 length 100))
+        (is (= length (length journal)))
+        (is (<= (gr8s::pod-store-pod-watch-journal-bytes store) (* 1024 1024)))
+        (is (= (gr8s::pod-store-pod-watch-journal-bytes store) (reduce #'+ journal :key #'fifth)))
+        ;; What it dropped is expired, and what it kept is all still readable.
+        (is (= (- 400 length) (gr8s::pod-store-pod-watch-floor store)))
+        (signals kubernetes-error (gr8s::pod-watch-events store nil "" "" (1- (gr8s::pod-store-pod-watch-floor store))))
+        (is (= length (length (gr8s::pod-watch-events store nil "" "" (gr8s::pod-store-pod-watch-floor store)))))))))
+
+(test pod-journal-events-share-the-view-their-predecessor-ended-with
+  (with-temporary-store (store directory)
+    (declare (ignorable directory))
+    (let ((pod (create-pod store (watch-test-pod "first"))))
+      (observe-status store pod (gr8s::core-object "phase" "Running"))
+      (observe-status store pod (gr8s::core-object "phase" "Succeeded"))
+      (destructuring-bind (newest older &rest rest) (gr8s::pod-store-pod-watch-journal store)
+        (declare (ignore rest))
+        (is (eq (third older) (second newest)))
+        ;; A shared view costs nothing more, and events still read as before.
+        (is (= (fifth newest) (+ 64 (gr8s::approximate-heap-bytes (third newest)))))
+        (is (equal '("ADDED" "MODIFIED" "MODIFIED")
+                   (mapcar #'first (watch-events store 0))))))))
+
+(test an-unwatched-store-keeps-no-journal-but-expires-old-revisions
+  (with-temporary-store (store directory)
+    (declare (ignorable directory))
+    (setf (gr8s::pod-store-watch-journal-p store) nil)
+    (let ((pod (create-pod store (watch-test-pod "first"))))
+      (observe-status store pod (gr8s::core-object "phase" "Running"))
+      (gr8s::record-node-watch-event-unlocked store (gr8s::pod-store-pod-revision store) nil nil)
+      (is (null (gr8s::pod-store-pod-watch-journal store)))
+      (is (null (gr8s::pod-store-node-watch-journal store)))
+      (is (= (gr8s::pod-store-pod-revision store) (gr8s::pod-store-pod-watch-floor store)))
+      (signals kubernetes-error (gr8s::pod-watch-events store nil "" "" 0)))))
+
+(test an-agent-store-keeps-no-watch-journal
+  (let ((directory (uiop:ensure-directory-pathname
+                    (sb-posix:mkdtemp (namestring (merge-pathnames "gr8s-test-XXXXXX" (uiop:temporary-directory)))))))
+    (unwind-protect
+         (let ((runtime (gr8s::make-node-runtime directory (gr8s::make-fake-runtime) nil)))
+           (is (not (gr8s::pod-store-watch-journal-p (gr8s::node-runtime-store runtime)))))
+      (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
+
 (test page-selects-start-revision-and-validates-it
   (with-temporary-store (store directory)
     (declare (ignorable directory))

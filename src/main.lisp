@@ -682,11 +682,13 @@ handler and never gets here. A busy host makes this race likely."
          (worker nil)
          (node-server nil)
          (ha nil)
+         (memory-monitor nil)
          (local-agent nil))
     (setf *shutdown-requested* nil)
     (install-shutdown-handlers)
     (unwind-protect
          (progn
+           (setf memory-monitor (start-memory-monitor store))
            (setf ha (maybe-start-ha-control-plane store pki options))
            (setf node-server
                  (start-node-grpc-server
@@ -773,7 +775,8 @@ handler and never gets here. A busy host makes this race likely."
                (setf (pod-store-in-cluster-config store) nil))))
       (when local-agent (stop-local-node-agent local-agent))
       (when ha (stop-ha-control-plane ha))
-      (when node-server (stop-node-grpc-server node-server))))
+      (when node-server (stop-node-grpc-server node-server))
+      (when memory-monitor (stop-memory-monitor memory-monitor))))
   0)
 
 (defun ensure-control-plane-pki (state-directory options)
@@ -843,7 +846,8 @@ handler and never gets here. A busy host makes this race likely."
                                    (:serve "control plane")
                                    (:agent "node agent")
                                    (:witness "witness arbiter")))
-              (install-stale-timeout-guard))
+              (install-stale-timeout-guard)
+              (install-memory-hooks))
             (case (getf options :command)
               (:help (print-help) 0)
               (:version (format t "gr8s ~A~%" +gr8s-version+) 0)
