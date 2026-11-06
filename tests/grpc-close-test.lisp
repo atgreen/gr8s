@@ -151,3 +151,22 @@
           (bt2:condition-broadcast (ag-http2::connection-flow-control-cv connection)))
         (dolist (worker (list thread reader flow-waiter))
           (when worker (bt:join-thread worker)))))))
+
+(test close-does-not-resend-frames-an-unwound-writer-left-buffered
+  ;; podster-uqb.138: SBCL resets an fd-stream's buffer only after write(2)
+  ;; returns, so a writer unwound there leaves a frame the peer already has.
+  ;; The farewell GOAWAY must not flush it a second time.
+  (with-http2-close-connection (connection socket peer listener)
+    (let ((stale (ag-http2::make-data-frame 1 (make-array 5 :element-type '(unsigned-byte 8) :initial-element 0)
+                                           :end-stream t)))
+      (setf (ag-http2:connection-state connection) :open)
+      (ag-http2:write-frame stale (usocket:socket-stream socket))
+      (ag-http2:connection-close connection)
+      (let ((received (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+        (sb-sys:with-deadline (:seconds 2)
+          (loop for byte = (read-byte (usocket:socket-stream peer) nil nil)
+                while byte do (vector-push-extend byte received)))
+        ;; Only the GOAWAY (type 7) arrived; no DATA frame (type 0).
+        (is (>= (length received) 9))
+        (is (= 7 (aref received 3)))
+        (is (= (length received) (+ 9 (+ (ash (aref received 0) 16) (ash (aref received 1) 8) (aref received 2)))))))))

@@ -980,18 +980,21 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
              (return))
            (sleep 0.25)))
 
-(defun agent-heartbeat (runtime-health)
-  "Return a heartbeat carrying why the node's runtime is down, as RUNTIME-HEALTH reports."
-  (make-instance 'gr8s.node.v1::heartbeat
-                 :runtime-down-message
-                 (or (and runtime-health (ignore-errors (funcall runtime-health))) "")))
+(defun agent-runtime-health (runtime-health)
+  "Return why the node's runtime is down, as RUNTIME-HEALTH reports, or the empty string."
+  (or (and runtime-health (ignore-errors (funcall runtime-health))) ""))
+
+(defun agent-heartbeat (runtime-health &optional (message (agent-runtime-health runtime-health)))
+  "Return a heartbeat carrying MESSAGE, why the node's runtime is down."
+  (make-instance 'gr8s.node.v1::heartbeat :runtime-down-message message))
 
 (defun agent-session-monitor
     (session control session-thread heartbeat-interval
      stop-predicate finished-p finish-session note-progress tag &optional runtime-health)
   (let ((next-heartbeat
           (+ (get-internal-real-time)
-             (* (funcall heartbeat-interval) internal-time-units-per-second))))
+             (* (funcall heartbeat-interval) internal-time-units-per-second)))
+        (reported-health (agent-runtime-health runtime-health)))
     (handler-case
         (with-node-session-interruption (tag)
           (loop until (funcall finished-p)
@@ -1005,9 +1008,12 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                      ;; gRPC cleanup path instead of destroying the thread.
                      (interrupt-node-session-thread session-thread tag)
                      (return))
-                   (when (>= (get-internal-real-time) next-heartbeat)
+                   ;; A runtime outage or recovery is reported at once, not at the next beat.
+                   (when (or (>= (get-internal-real-time) next-heartbeat)
+                             (not (equal reported-health (agent-runtime-health runtime-health))))
+                     (setf reported-health (agent-runtime-health runtime-health))
                      (send-agent-session-envelope
-                      session :heartbeat (agent-heartbeat runtime-health))
+                      session :heartbeat (agent-heartbeat runtime-health reported-health))
                      (funcall note-progress)
                      (setf next-heartbeat
                            (+ (get-internal-real-time)
