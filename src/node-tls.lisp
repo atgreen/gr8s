@@ -63,12 +63,35 @@
         (ignore-errors (usocket:socket-close socket))
         (error condition)))))
 
+(defparameter *tls-handshake-seconds* 10
+  "How long a listener lets a client negotiate TLS before dropping its connection.")
+
+(define-condition tls-handshake-timeout (error)
+  ((seconds :initarg :seconds :reader tls-handshake-timeout-seconds))
+  (:report (lambda (condition stream)
+             (format stream "TLS negotiation did not finish within ~A seconds"
+                     (tls-handshake-timeout-seconds condition))))
+  (:documentation "A peer took too long to negotiate TLS. Unlike SB-SYS:DEADLINE-TIMEOUT, which
+is a SERIOUS-CONDITION, it is an ERROR, so connection handlers that catch errors drop the
+connection instead of letting the condition kill the process."))
+
+(defmacro with-tls-handshake-deadline ((seconds) &body body)
+  "Run BODY, a TLS negotiation, signalling TLS-HANDSHAKE-TIMEOUT after SECONDS.
+Hunchentoot logs and drops a connection whose setup signals an ERROR, but nothing
+catches a bare deadline: one client that stalled its handshake for ten seconds
+ended the whole server (podster-uqb.138 focused run, 117b50c)."
+  (let ((limit (gensym "SECONDS")))
+    `(let ((,limit ,seconds))
+       (handler-case (sb-sys:with-deadline (:seconds ,limit) ,@body)
+         (sb-sys:deadline-timeout ()
+           (error 'tls-handshake-timeout :seconds ,limit))))))
+
 (defun make-node-tls-channel (host port &rest options &key timeout &allow-other-keys)
   ;; Socket connect timeouts alone do not bound TLS and HTTP/2 negotiation.
   ;; Every connection must present both identities. In particular a bootstrap
   ;; ticket must never resume a subsequent authenticated node session.
   (let ((pure-tls:*session-ticket-cache* (make-hash-table :test #'equal)))
-    (sb-sys:with-deadline (:seconds (or timeout 10))
+    (with-tls-handshake-deadline ((or timeout 10))
       (apply #'%make-node-tls-channel host port options))))
 
 (defun authenticate-node-peer (pki context node-name)

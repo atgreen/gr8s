@@ -271,7 +271,7 @@
 (defmethod hunchentoot:initialize-connection-stream ((acceptor gateway-tls-acceptor) stream)
   "Wrap the accepted connection in a server-side TLS stream before Hunchentoot
    reads the request (the same mechanism as the in-cluster API acceptor)."
-  (sb-sys:with-deadline (:seconds 10)
+  (with-tls-handshake-deadline (*tls-handshake-seconds*)
     (let ((pure-tls:*server-ticket-key* (ironclad:random-data 32)))
       (pure-tls:make-tls-server-stream stream
                                        :certificate (gateway-acceptor-certificate acceptor)
