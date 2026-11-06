@@ -37,9 +37,10 @@
     (signals kubernetes-error (parse-pod object))))
 
 (test unsupported-pod-spec-fields-are-rejected
+  ;; hostUsers is implemented now; resourceClaims (DRA) still needs a driver gr8s doesn't have.
   (signals kubernetes-error
     (parse-pod
-     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"hostUsers\":false,\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}")))
+     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"resourceClaims\":[{\"name\":\"gpu\",\"resourceClaimName\":\"claim\"}],\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}")))
 
 (test kubectl-generated-default-pod-fields-are-accepted
   (let ((pod
