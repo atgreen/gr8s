@@ -162,9 +162,15 @@ without a name yet and custom objects, which stay in the requested version."
         (progn
           (setf (admission-object attributes) (admission-input-view store resource input namespace attributes))
           (let* ((mutated (admission-mutate store attributes))
-                 ;; Upstream's storage refuses a set resourceVersion only after validating
-                 ;; admission has run, so the preview leaves it out and the commit refuses it.
-                 (preview (create-core-resource store resource (admission-preview-input mutated) namespace :dry-run t))
+                 ;; Upstream's storage refuses a set resourceVersion or a name in use only after
+                 ;; validating admission has run, so the preview leaves the revision out, a name
+                 ;; in use previews the object as submitted, and the commit refuses either.
+                 (preview (handler-case
+                              (create-core-resource store resource (admission-preview-input mutated) namespace :dry-run t)
+                            (kubernetes-error (condition)
+                              (if (equal "AlreadyExists" (kubernetes-error-reason condition))
+                                  (admission-input-view store resource (admission-preview-input mutated) namespace attributes)
+                                  (error condition)))))
                  (preview-metadata (gethash "metadata" preview))
                  (final (copy-core-object mutated)))
             (setf (admission-object attributes) (admission-stamp-object attributes preview)
