@@ -62,6 +62,26 @@ Call without STORE's lock. Writes that need no such lock use ADMITTED-CREATE-COR
               (admission-validate store attributes)
               mutated))))))
 
+(defun admit-controller-write (store resource input old namespace controller)
+  "Run CONTROLLER's create of INPUT, or its update of OLD to INPUT, through admission,
+returning what to commit. Call without STORE's lock."
+  (with-controller-admission (controller)
+    (let* ((name (gethash "name" (gethash "metadata" input)))
+           (attributes (admission-attributes-for store (if old "UPDATE" "CREATE") resource namespace name
+                                                 :options (admission-request-options
+                                                           (if old "UpdateOptions" "CreateOptions")))))
+      (if (not (admission-active-p store attributes))
+          input
+          (progn
+            (when old
+              (setf (admission-old-object attributes)
+                    (admission-stamp-object attributes (core-resource-update-view resource old))))
+            (setf (admission-object attributes) (admission-input-view store resource input namespace attributes))
+            (let ((mutated (admission-mutate store attributes)))
+              (setf (admission-object attributes) (admission-input-view store resource mutated namespace attributes))
+              (admission-validate store attributes)
+              mutated))))))
+
 (defun custom-resource-storage-view (store resource)
   "Return the definition and storage version of custom RESOURCE, which a controller has no request to name."
   (when (custom-resource-key-p resource)
