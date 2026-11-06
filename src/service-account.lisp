@@ -355,7 +355,13 @@
     names))
 
 (defun node-authorizer-allows-p (store identity verb group resource name namespace)
-  "Allow a node to get a Secret, ConfigMap or PersistentVolumeClaim a Pod bound to it uses."
+  "Allow a node to get a Secret, ConfigMap or PersistentVolumeClaim a Pod bound to it uses, and to
+review tokens and access for the requests its kubelet endpoints receive, as upstream's node rules do."
+  (when (and (node-identity-name identity) (equal verb "create")
+             (or (and (equal group "authentication.k8s.io") (equal resource "tokenreviews"))
+                 (and (equal group "authorization.k8s.io")
+                      (member resource '("subjectaccessreviews" "localsubjectaccessreviews") :test #'equal))))
+    (return-from node-authorizer-allows-p t))
   (let ((node (node-identity-name identity))
         (kind (and (equal group "") (cdr (assoc resource '(("secrets" . :secret) ("configmaps" . :configmap)
                                                             ("persistentvolumeclaims" . :claim))

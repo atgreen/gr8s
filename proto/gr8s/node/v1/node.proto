@@ -62,6 +62,8 @@ message NodeHello {
   repeated string capabilities = 6;
   string underlay_address = 7;
   map<string, string> capacity = 8;
+  // The port of the agent's authenticated kubelet endpoints, or 0 when it serves none.
+  uint32 kubelet_port = 9;
 }
 
 message Heartbeat {

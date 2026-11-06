@@ -691,7 +691,9 @@
            (UNDERLAY-ADDRESS :INITARG :UNDERLAY-ADDRESS :ACCESSOR
             GR8S.NODE.V1::UNDERLAY-ADDRESS :INITFORM "" :TYPE STRING)
            (CAPACITY :INITARG :CAPACITY :ACCESSOR GR8S.NODE.V1::CAPACITY
-            :INITFORM NIL :TYPE LIST))
+            :INITFORM NIL :TYPE LIST)
+           (KUBELET-PORT :INITARG :KUBELET-PORT :ACCESSOR
+            GR8S.NODE.V1::KUBELET-PORT :INITFORM 0 :TYPE (UNSIGNED-BYTE 32)))
           (:DOCUMENTATION "Proto message: NodeHello"))
 
 
@@ -758,6 +760,10 @@
          AG-PROTO::ENTRY-BUFFER)
         (AG-PROTO::WRITE-LENGTH-DELIMITED AG-PROTO::ENTRY-BUFFER
                                           AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'KUBELET-PORT)))
+      (WHEN (AND AG-PROTO::VALUE (NOT (EQL AG-PROTO::VALUE 0)))
+        (AG-PROTO::WRITE-FIELD-TAG 9 0 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-VARINT AG-PROTO::VALUE AG-PROTO::BUFFER)))
     AG-PROTO::BUFFER))
 
 
@@ -872,6 +878,9 @@
                                                           7))))))
                      (CONS AG-PROTO::KEY AG-PROTO::VALUE))
                    (SLOT-VALUE AG-PROTO::OBJ 'CAPACITY)))
+                 (9
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'KUBELET-PORT)
+                          (AG-PROTO::READ-VARINT AG-PROTO::BUFFER)))
                  (OTHERWISE
                   (AG-PROTO::SKIP-FIELD AG-PROTO::BUFFER
                                         AG-PROTO::WIRE-TYPE)))))

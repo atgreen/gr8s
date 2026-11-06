@@ -3,7 +3,8 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Route authenticated Pod and Service proxy requests to an exact observed address,
-;;;; and answer the Node proxy's kubelet reads from the Pods bound to that Node.
+;;;; and answer the Node proxy's kubelet reads from the Pods bound to that Node or
+;;;; forward them to its kubelet endpoint.
 ;;;; Forward ordinary HTTP methods, request bytes and real upstream status/body,
 ;;;; without following backend redirects or inheriting environment HTTP proxies.
 
@@ -277,8 +278,9 @@
     (when (and match (dns-subdomain-p (aref registers 0)))
       (values (aref registers 0) (aref registers 1) (or (aref registers 2) "/") t))))
 
-(defun node-http-proxy-response (store reconciler name suffix method)
-  "Answer the kubelet reads clients make through the Node proxy; no kubelet HTTP server exists to forward to."
+(defun node-http-proxy-response (store reconciler name suffix method &optional port)
+  "Answer the kubelet reads clients make through the Node proxy. The Pod list and health come from
+the control plane's own view; anything else goes to the node's kubelet endpoint, on PORT if given."
   (unless (with-store-lock (store) (gethash name (pod-store-nodes store)))
     (core-resource-error 404 "NotFound" "Node ~A was not found" name))
   (unless (member method '(:get :head))
@@ -295,4 +297,6 @@
     ((member suffix '("/healthz" "/healthz/ping") :test #'equal)
      (setf (hunchentoot:content-type*) "text/plain")
      "ok")
+    ((node-kubelet-endpoint store name)
+     (kubelet-proxy-response store name port suffix method))
     (t (core-resource-error 404 "NotFound" "The Node proxy does not serve ~A" suffix))))

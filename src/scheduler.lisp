@@ -249,6 +249,18 @@
     (publish-pod-spec-change-unlocked store old pod)
     pod))
 
+(defun update-node-kubelet-port (store node-name port)
+  "Persist the port NODE-NAME's agent serves kubelet endpoints on, which its Node advertises."
+  (with-store-lock (store)
+    (let ((node (get-node-unlocked store node-name)))
+      (when (and node (/= port (node-record-kubelet-port node)))
+        (let ((updated (copy-node-record node))
+              (old (node-api-object node)))
+          (setf (node-record-kubelet-port updated) port)
+          (persist-node store updated)
+          (setf (node-record-kubelet-port node) port)
+          (publish-node-change-unlocked store old node))))))
+
 (defun update-node-capacity (store node-name capacity)
   "Persist the quantities NODE-NAME's agent measured, leaving a missing report unchanged."
   (with-store-lock (store)

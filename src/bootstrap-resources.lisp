@@ -381,6 +381,7 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
                                                   "message" "Readiness follows the gr8s node session lease"))
                "addresses" (if (and address (plusp (length address)))
                                (vector (core-object "type" "InternalIP" "address" address)) #())
+               "daemonEndpoints" (core-object "kubeletEndpoint" (core-object "Port" (node-record-kubelet-port node)))
                "capacity" (node-resource-list node)
                "allocatable" (node-resource-list node)
                "nodeInfo" (core-object "operatingSystem" "linux" "architecture" (native-node-architecture)

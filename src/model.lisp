@@ -67,6 +67,8 @@
   name
   pod-cidr
   (underlay-address "")
+  ;; The port of the node's authenticated kubelet endpoints, or 0 when it serves none.
+  (kubelet-port 0)
   (ready-p nil)
   last-heartbeat
   lease-deadline
