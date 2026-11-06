@@ -111,11 +111,14 @@ list as 'nothing is running': Sonobuoy's worker takes it to mean all containers 
                        (when reason (setf (gethash "reason" result) reason))
                        (when message (setf (gethash "message" result) message))
                        (push result conditions))))
-            ;; Another scheduler's Pod says nothing about scheduling until that scheduler binds it.
-            (when (or scheduled (pod-for-this-scheduler-p pod))
-              (condition "PodScheduled" (if scheduled "True" "False")
-                         (unless scheduled "Unschedulable")
-                         (unless scheduled (pod-unschedulable-message store pod)))
+            ;; Another scheduler's Pod says nothing about scheduling until that scheduler binds it,
+            ;; unless gates hold every scheduler off, which the API server reports itself.
+            (when (or scheduled (pod-for-this-scheduler-p pod) (pod-scheduling-gated-p pod))
+              (cond (scheduled (condition "PodScheduled" "True"))
+                    ((pod-scheduling-gated-p pod)
+                     (condition "PodScheduled" "False" "SchedulingGated"
+                                "Scheduling is blocked due to non-empty scheduling gates"))
+                    (t (condition "PodScheduled" "False" "Unschedulable" (pod-unschedulable-message store pod))))
               ;; The scheduler records the generation it judged, before any node has seen the Pod.
               (unless (or scheduled generation)
                 (setf (gethash "observedGeneration" (first conditions))

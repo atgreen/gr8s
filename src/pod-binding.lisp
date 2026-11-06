@@ -28,6 +28,8 @@
             (core-resource-error 409 "Conflict" "Pod ~A is being deleted" name))
           (when (pod-node-name pod)
             (core-resource-error 409 "Conflict" "pod ~A is already assigned to node ~S" name (pod-node-name pod)))
+          (when (pod-scheduling-gated-p pod)
+            (core-resource-error 409 "Conflict" "pod ~A/~A has non-empty .spec.schedulingGates" namespace name))
           (unless (get-node-unlocked store (gethash "name" target))
             (core-resource-error 404 "NotFound" "Node ~S was not found" (gethash "name" target)))
           (persist-pod-assignment store pod (gethash "name" target)))))

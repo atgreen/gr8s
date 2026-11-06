@@ -240,6 +240,12 @@
         (when handler
           (unless (gethash "annotations" new-metadata) (setf (gethash "annotations" new-metadata) (core-object)))
           (setf (gethash +runtime-handler-annotation+ (gethash "annotations" new-metadata)) handler))))
+    ;; Scheduling gates can only be removed, as upstream validates.
+    (let ((before (map 'list (lambda (gate) (gethash "name" gate)) (gethash "schedulingGates" old #()))))
+      (loop for gate across (gethash "schedulingGates" new #())
+            unless (member (gethash "name" gate) before :test #'equal)
+              do (invalid-pod "spec.schedulingGates: Forbidden: only deletion is allowed, but found new scheduling gate '~A'"
+                              (gethash "name" gate))))
     (let ((old-deadline (gethash "activeDeadlineSeconds" old))
           (new-deadline (gethash "activeDeadlineSeconds" new)))
       (when old-deadline

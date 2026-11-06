@@ -314,7 +314,7 @@
             "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
             "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "shareProcessNamespace" "hostAliases" "ephemeralContainers"
             "readinessGates" "schedulerName" "hostnameOverride" "setHostnameAsFQDN" "serviceAccount"
-            "topologySpreadConstraints") "spec")
+            "topologySpreadConstraints" "schedulingGates") "spec")
     (dolist (field '("hostname" "subdomain"))
       (when (eq (gethash field spec) 'null) (remhash field spec))
       (let ((value (gethash field spec "")))

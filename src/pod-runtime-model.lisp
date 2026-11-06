@@ -538,6 +538,7 @@
   (validate-pod-tolerations spec)
   (validate-pod-policy-fields spec)
   (validate-pod-scheduler-name spec)
+  (validate-pod-scheduling-gates spec)
   (validate-pod-readiness-gates spec)
   (validate-pod-affinity spec))
 
@@ -557,6 +558,26 @@
 (defun pod-for-this-scheduler-p (pod)
   "Return whether gr8s's scheduler places POD; any other scheduler binds it through pods/binding."
   (equal +default-scheduler-name+ (pod-scheduler-name pod)))
+
+(defun validate-pod-scheduling-gates (spec)
+  "Validate spec.schedulingGates: unique qualified names, none left once a node is named."
+  (when (eq (gethash "schedulingGates" spec) 'null) (remhash "schedulingGates" spec))
+  (let ((names nil))
+    (loop for gate across (optional-vector spec "schedulingGates" "spec")
+          do (drop-null-fields (require-object gate "schedulingGate"))
+             (reject-unsupported-fields gate '("name") "schedulingGate")
+             (let ((name (gethash "name" gate)))
+               (unless (core-qualified-key-p name)
+                 (invalid-pod "spec.schedulingGates.name ~S must be a qualified name" name))
+               (when (member name names :test #'equal)
+                 (invalid-pod "spec.schedulingGates: Duplicate value: ~S" name))
+               (push name names)))
+    (when (and names (stringp (gethash "nodeName" spec)) (plusp (length (gethash "nodeName" spec))))
+      (invalid-pod "spec.nodeName: Forbidden: cannot be set until all schedulingGates have been cleared"))))
+
+(defun pod-scheduling-gated-p (pod)
+  "Return whether POD still carries scheduling gates, which keep every scheduler from placing it."
+  (plusp (length (gethash "schedulingGates" (gethash "spec" (pod-to-object pod)) #()))))
 
 (defun validate-pod-readiness-gates (spec)
   "Validate spec.readinessGates: each names a qualified condition type that Ready also waits for."

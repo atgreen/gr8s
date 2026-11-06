@@ -122,3 +122,31 @@
       (let ((entry (exit 6 "nginx")))
         (is (= now (gethash "nextStart" entry)))
         (is (= 10 (gethash "backoff" entry)))))))
+
+(defun gated-scheduling-pod-json (name gates &key node)
+  "Return a Pod named NAME held by scheduling GATES, optionally naming NODE."
+  (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":~S,\"namespace\":\"default\"},\"spec\":{~@[\"nodeName\":~S,~]\"schedulingGates\":[~{{\"name\":~S}~^,~}],\"containers\":[{\"name\":\"web\",\"image\":\"busybox:latest\"}]}}"
+          name node gates))
+
+(test scheduling-gates-hold-a-pod-until-they-are-all-removed
+  (signals kubernetes-error (parse-pod (gated-scheduling-pod-json "dup" '("foo" "foo"))))
+  (signals kubernetes-error (parse-pod (gated-scheduling-pod-json "bad" '("not a name"))))
+  ;; A node cannot be named while gates remain.
+  (signals kubernetes-error (parse-pod (gated-scheduling-pod-json "named" '("foo") :node "worker-a")))
+  (with-temporary-store (store path)
+    (values path)
+    (ready-node store "worker-a" "a" "10.64.0.0/20")
+    (let ((pod (create-pod store (parse-pod (gated-scheduling-pod-json "held" '("foo" "bar"))))))
+      (is (null (gr8s::schedule-pod store pod)))
+      (let ((condition (condition-status-for-test
+                        (gr8s::add-pod-status-conditions store pod (gr8s::pod-status "Pending")) "PodScheduled")))
+        (is (equal "False" (gethash "status" condition)))
+        (is (equal "SchedulingGated" (gethash "reason" condition)))
+        (is (equal "Scheduling is blocked due to non-empty scheduling gates" (gethash "message" condition))))
+      ;; Gates can only be removed.
+      (signals kubernetes-error
+        (update-pod store (parse-pod (gated-scheduling-pod-json "held" '("foo" "baz"))) (pod-resource-version pod)))
+      (setf pod (update-pod store (parse-pod (gated-scheduling-pod-json "held" '("bar"))) (pod-resource-version pod)))
+      (is (null (gr8s::schedule-pod store pod)))
+      (setf pod (update-pod store (parse-pod (gated-scheduling-pod-json "held" nil)) (pod-resource-version pod)))
+      (is (gr8s::schedule-pod store pod)))))

@@ -340,7 +340,7 @@
         (when requested-node
           (return-from schedule-pod (get-node-unlocked store requested-node)))
         ;; As kube-scheduler does, leave a Pod naming another scheduler for that one to bind.
-        (unless (pod-for-this-scheduler-p pod)
+        (unless (and (pod-for-this-scheduler-p pod) (not (pod-scheduling-gated-p pod)))
           (return-from schedule-pod nil)))
       (let* ((placeable (loop for candidate being the hash-values of (pod-store-nodes store)
                               when (pod-node-placeable-p store pod candidate) collect candidate))
