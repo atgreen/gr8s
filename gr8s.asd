@@ -14,7 +14,7 @@
   ;; The Kubernetes API version gr8s implements. The gr8s release itself is this
   ;; base plus a "-gr8s.N" suffix carried in a git tag (e.g. v1.36.0-gr8s.0),
   ;; surfaced through VERSION-STRING as +GR8S-VERSION+ (see src/version.lisp).
-  :version "1.36.0"
+  :version "1.37.0"
   :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cl-cancel"
                "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
                "pure-tls/acme" "drakma"

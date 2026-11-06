@@ -35,7 +35,7 @@
   "Preserve repeated headers while applying kubelet's special Host/User-Agent/Accept rules."
   (let* ((headers (loop for header across (gethash "httpHeaders" action #())
                         collect (cons (gethash "name" header) (gethash "value" header ""))))
-         (agent (or (cdr (assoc "User-Agent" headers :test #'string-equal)) "kube-probe/1.36"))
+         (agent (or (cdr (assoc "User-Agent" headers :test #'string-equal)) "kube-probe/1.37"))
          (accept (assoc "Accept" headers :test #'string-equal))
          (host (assoc "Host" headers :test #'string-equal)))
     (setf headers (remove-if (lambda (entry) (member (car entry) '("Host" "User-Agent") :test #'string-equal)) headers))
@@ -160,7 +160,7 @@
             (request (make-array 8 :element-type '(unsigned-byte 8) :fill-pointer 0 :adjustable t)))
        (when (plusp (length service))
          (ag-proto::write-field-tag 1 2 request) (ag-proto::write-length-delimited service request))
-       (let* ((ag-grpc::*grpc-user-agent* "kube-probe/1.36")
+       (let* ((ag-grpc::*grpc-user-agent* "kube-probe/1.37")
               (call (ag-grpc:call-unary channel "/grpc.health.v1.Health/Check" request :timeout timeout))
               (*core-protobuf-field-count* 0)
               (fields (and (ag-grpc:call-response call) (core-protobuf-fields (ag-grpc:call-response call)))))

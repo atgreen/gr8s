@@ -20,8 +20,8 @@
 (defun kubernetes-git-version ()
   "The Kubernetes-style gitVersion string clients see (e.g. in /version and a
    Node's kubeletVersion): the gr8s build version with a leading \"v\". A release
-   tag like v1.36.0-gr8s.0 is reported verbatim; an untagged build reports the
-   k8s base version with the commit hash (v1.36.0-g1a2b3c4)."
+   tag like v1.37.0-gr8s.0 is reported verbatim; an untagged build reports the
+   k8s base version with the commit hash (v1.37.0-g1a2b3c4)."
   (if (and (plusp (length +gr8s-version+)) (char-equal #\v (char +gr8s-version+ 0)))
       +gr8s-version+
       (format nil "v~A" +gr8s-version+)))
