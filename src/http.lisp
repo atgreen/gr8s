@@ -866,6 +866,7 @@ belong to another connection, so it must not shut SOCKET down after it has been 
               ;; octets belong to WebSocket/SPDY and must remain untouched.
               (let ((client (hunchentoot::start-output 101 nil)))
                 (finish-output client)
+                (extend-api-connection-idle-timeout)
                 (relay-runtime-stream client upstream socket))))
         (error (condition)
           (ignore-errors (usocket:socket-close socket))
@@ -1073,7 +1074,7 @@ already signalling, with its handlers unbound for the handler tests, and then fi
                 :stdout (exec-options-stdout options)
                 :stderr (exec-options-stderr options)
                 :tty (exec-options-tty options))))
-         (client (begin-kubernetes-websocket))
+         (client (prog1 (begin-kubernetes-websocket) (extend-api-connection-idle-timeout)))
          (write-lock (bt:make-lock "gr8s kubectl exec websocket writer"))
          (finished-lock (bt:make-lock "gr8s kubectl exec finished"))
          (finished-p nil)

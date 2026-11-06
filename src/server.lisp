@@ -26,6 +26,24 @@
                               :max-thread-count +api-connection-limit+
                               :max-accept-count (+ +api-connection-limit+ 128))))
 
+(defvar *api-connection-socket* nil
+  "The socket of the API connection this thread serves, for a stream that outlives its request.")
+
+(defmethod hunchentoot:process-connection :around ((acceptor gr8s-acceptor) socket)
+  (let ((*api-connection-socket* socket)) (call-next-method)))
+
+(defparameter +stream-idle-timeout-seconds+ (* 4 60 60)
+  "How long an upgraded exec or attach stream may wait for its client: kubelet's default
+StreamIdleTimeout. The connection's ordinary read timeout is Hunchentoot's 20 seconds.")
+
+(defun extend-api-connection-idle-timeout (&optional (seconds +stream-idle-timeout-seconds+))
+  "Let the current connection's client stay quiet for SECONDS. A command can run for minutes
+without input, and a client without WebSocket pings (any before v5.channel.k8s.io) sends none."
+  (let ((socket *api-connection-socket*))
+    (when socket
+      (ignore-errors (setf (sb-impl::fd-stream-timeout (usocket:socket-stream socket))
+                           (coerce seconds 'single-float))))))
+
 (defun ha-redirect-response (acceptor request)
   "When this member is not the Raft leader and REQUEST mutates, return a redirect
    to the leader (or a 503 if the leader is unknown); else NIL to serve locally."

@@ -1074,3 +1074,93 @@
                                (504 "Gateway Timeout") (505 "HTTP Version Not Supported")
                                (403 "Forbidden") (422 "Unprocessable Entity"))
         do (is (equal phrase (hunchentoot:reason-phrase code)) "~D" code)))
+
+(test a-quiet-exec-outlasts-the-connection-read-timeout
+  ;; A command may run for minutes without input, and a client before v5.channel.k8s.io sends
+  ;; no pings; kubelet's streams idle out after StreamIdleTimeout (4h), not the API's read timeout.
+  (with-temporary-store (store path)
+    (gr8s:register-node
+     store (gr8s:make-node-record :id "quiet-exec-node" :name "worker-quiet-exec" :pod-cidr "10.88.10.0/24"))
+    (let* ((node-server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0))
+           (fake-runtime (make-fake-runtime))
+           (node-runtime (gr8s::make-node-runtime
+                          (merge-pathnames "worker-quiet-exec/runtime/" path) fake-runtime nil))
+           (control-runtime (gr8s::make-control-plane-runtime store node-server))
+           (reconciler (make-reconciler store control-runtime))
+           (control (gr8s::make-node-session-control))
+           (listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :element-type '(unsigned-byte 8)))
+           (upstream-error nil) (agent-thread nil) (upstream-thread nil) (http-server nil) (client nil) (pod nil))
+      (setf upstream-thread
+            (bt:make-thread
+             (lambda ()
+               (handler-case
+                   (let* ((socket (usocket:socket-accept listener :element-type '(unsigned-byte 8)))
+                          (stream (usocket:socket-stream socket)))
+                     (unwind-protect
+                          (let ((streams (fake-spdy-accept stream 2)))
+                            ;; Quiet for three times the server's read timeout.
+                            (sleep 3)
+                            (fake-spdy-send stream (cdr (assoc "stdout" streams :test #'equal)) "done\n" :fin t)
+                            (fake-spdy-send stream (cdr (assoc "error" streams :test #'equal)) nil
+                                            :octets (gr8s::exec-exit-status-bytes 0) :fin t)
+                            (ignore-errors (loop while (fake-spdy-read-frame stream))))
+                       (ignore-errors (usocket:socket-close socket))))
+                 (error (condition) (setf upstream-error condition))))
+             :name "gr8s quiet exec fake runtime"))
+      (gr8s::set-fake-runtime-exec-url
+       fake-runtime (format nil "http://127.0.0.1:~D/exec/token" (usocket:get-local-port listener)))
+      (unwind-protect
+           (progn
+             (gr8s::start-node-runtime node-runtime)
+             (setf agent-thread
+                   (bt:make-thread
+                    (lambda ()
+                      (gr8s:run-node-session
+                       "127.0.0.1" (gr8s:node-grpc-server-port node-server) "worker-quiet-exec"
+                       (merge-pathnames "worker-quiet-exec/identity.json" path)
+                       (lambda (snapshot) (gr8s::reconcile-node-snapshot node-runtime snapshot))
+                       :operation-handler (lambda (variant payload emit)
+                                            (gr8s::dispatch-node-operation node-runtime variant payload emit))
+                       :reconnect-delay 0.01 :control control))
+                    :name "gr8s quiet exec agent"))
+             (is-true (wait-until (lambda () (gr8s:node-record-ready-p (gr8s:get-node store "worker-quiet-exec")))
+                                  :timeout 5))
+             (setf pod (create-pod store (parse-pod *valid-pod-json*)))
+             (reconcile-pod reconciler "default" "hello")
+             (is-true (wait-until (lambda () (runtime-observe fake-runtime (pod-uid pod))) :timeout 5))
+             ;; Hunchentoot reads the default when the acceptor is made.
+             (let ((hunchentoot:*default-connection-timeout* 1))
+               (setf http-server (start-http-test-server :store store :runtime control-runtime
+                                                         :reconciler reconciler)))
+             (setf client (usocket:socket-connect "127.0.0.1" *http-test-port* :element-type '(unsigned-byte 8)))
+             (let ((stream (usocket:socket-stream client)))
+               (setf (sb-impl::fd-stream-timeout stream) 20.0)
+               (write-sequence
+                (gr8s::ascii-octets
+                 (format nil "GET /api/v1/namespaces/default/pods/hello/exec?command=sleep&command=3&container=web&stdout=true HTTP/1.1~C~CHost: 127.0.0.1~C~CConnection: Upgrade~C~CUpgrade: websocket~C~CSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==~C~CSec-WebSocket-Version: 13~C~CSec-WebSocket-Protocol: v4.channel.k8s.io~C~CContent-Length: 0~C~C~C~C"
+                         #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+                         #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+                         #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed))
+                stream)
+               (finish-output stream)
+               (is (= 101 (gr8s::parse-http-response-head (gr8s::read-http-response-head stream))))
+               (multiple-value-bind (opcode payload) (read-test-websocket-frame stream)
+                 (is (= 2 opcode))
+                 (is (equalp (concatenate '(vector (unsigned-byte 8)) #(1) (trivial-utf-8:string-to-utf-8-bytes "done\n"))
+                             payload)))
+               (multiple-value-bind (opcode payload) (read-test-websocket-frame stream)
+                 (is (= 2 opcode))
+                 (is (= 3 (aref payload 0)))
+                 (is (string= "Success" (gethash "status" (com.inuoe.jzon:parse
+                                                           (trivial-utf-8:utf-8-bytes-to-string (subseq payload 1))))))))
+             (bt:join-thread upstream-thread)
+             (setf upstream-thread nil)
+             (is (null upstream-error) "~A" upstream-error))
+        (when client (ignore-errors (usocket:socket-close client)))
+        (when http-server (stop-server http-server))
+        (gr8s::cancel-node-session control)
+        (when agent-thread (ignore-errors (bt:join-thread agent-thread)))
+        (gr8s::stop-node-runtime node-runtime)
+        (gr8s:stop-node-grpc-server node-server)
+        (ignore-errors (usocket:socket-close listener))
+        (when upstream-thread (ignore-errors (bt:join-thread upstream-thread)))))))
