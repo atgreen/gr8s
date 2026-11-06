@@ -304,6 +304,9 @@ A client's own stale resourceVersion still fails, in the preview of the next att
 (defun admit-pod-input (store operation namespace name raw old)
   "Run the mutating webhooks over a Pod write and return the object to parse.
 Returns the attributes as a second value for the validating step."
+  ;; Upstream's built-in mutating plugins, DefaultTolerationSeconds among them, run before the webhooks.
+  (when (hash-table-p raw)
+    (default-pod-admission (gethash "spec" raw) (and old (gethash "spec" (pod-to-object old)))))
   (let ((attributes (admission-attributes-for store operation "pods" namespace name
                                               :options (admission-request-options
                                                         (if (equal operation "CREATE") "CreateOptions" "UpdateOptions"))

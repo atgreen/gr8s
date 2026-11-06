@@ -161,9 +161,11 @@
       (gr8s::create-core-resource store "namespaces" (gr8s::core-object "metadata" (gr8s::core-object "name" "default")) nil)
       (gr8s::ensure-namespace-root-ca store "default")
       (is (= 2 (length (gr8s::pod-referenced-resource-objects store pod))))
-      (let ((host (find "KUBERNETES_SERVICE_HOST" (gethash "env" container) :test #'equal
-                        :key (lambda (entry) (gethash "name" entry)))))
-        (is (equal "10.96.0.1" (gethash "value" host))))
+      ;; The API Service's variables are not stored in the spec: upstream's kubelet adds them as it
+      ;; starts the container (pkg/kubelet/kubelet_pods.go makeEnvironmentVariables, from
+      ;; getServiceEnvVarMap), and so does the runtime here (pod-service-environment).
+      (is (null (find "KUBERNETES_SERVICE_HOST" (gethash "env" container #()) :test #'equal
+                      :key (lambda (entry) (gethash "name" entry)))))
       (is (equalp (pod-to-object pod) (pod-to-object (gr8s::admit-in-cluster-pod store pod)))))
     (let* ((object (com.inuoe.jzon:parse *valid-pod-json*)) (spec (gethash "spec" object)))
       (setf (gethash "automountServiceAccountToken" spec) nil)
