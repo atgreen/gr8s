@@ -40,6 +40,7 @@
                              (:file "version")
                              (:file "grpc-close-compat")
                              (:file "grpc-inflate-compat")
+                             (:file "grpc-deflate-compat")
                              (:file "cri-v1-generated")
                              (:file "csi-v1-generated")
                              (:file "pluginregistration-v1-generated")

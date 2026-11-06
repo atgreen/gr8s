@@ -16,12 +16,27 @@
       (setf (aref octets index) (if (zerop (mod index 7)) (mod (* index 31) 251) (char-code #\a))))))
 
 (test compressed-messages-round-trip-at-every-size
-  ;; Not 0: the dependency's gzip-compress turns an empty message into 32768 zero octets.
-  (dolist (count '(1 4095 4096 70000 1000000))
+  ;; Including 0: the dependency's gzip-compress turned an empty message into 32768 zero octets.
+  (dolist (count '(0 1 4095 4096 70000 1000000))
     (let ((octets (inflate-test-octets count)))
       (is (equalp octets (ag-grpc::gzip-decompress (ag-grpc::gzip-compress octets))))
       (is (equalp octets (ag-grpc::decompress-grpc-message
                           (ag-grpc::compress-grpc-message octets "gzip") "gzip"))))))
+
+(test compression-costs-a-small-multiple-of-the-message
+  ;; podster-uqb.139: the dependency pushed every compressed octet separately.
+  (let ((octets (inflate-test-octets 1000000)))
+    (ag-grpc::gzip-compress octets)
+    (let ((before (sb-ext:get-bytes-consed)))
+      (ag-grpc::gzip-compress octets)
+      (is (< (- (sb-ext:get-bytes-consed) before) (* 4 1024 1024)))))
+  (dolist (encoding '("gzip" "deflate"))
+    (dolist (count '(0 5 70000))
+      (let ((octets (inflate-test-octets count)))
+        (multiple-value-bind (compressed compressed-p) (ag-grpc::compress-grpc-message octets encoding)
+          (is (eq t compressed-p))
+          (is (typep compressed '(simple-array (unsigned-byte 8) (*))))
+          (is (equalp octets (ag-grpc::decompress-grpc-message compressed encoding))))))))
 
 (test a-small-message-does-not-allocate-the-whole-limit
   (let* ((compressed (ag-grpc::gzip-compress (inflate-test-octets 150000)))
