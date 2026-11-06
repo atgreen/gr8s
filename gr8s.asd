@@ -42,6 +42,7 @@
                              (:file "cri-v1-generated")
                              (:file "csi-v1-generated")
                              (:file "pluginregistration-v1-generated")
+                             (:file "containerd-tasks-v1-generated")
                              (:file "cri-wire-compat")
                              (:file "node-v1-generated")
                              (:file "node-protocol")

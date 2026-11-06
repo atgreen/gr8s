@@ -1,0 +1,44 @@
+// SPDX-FileCopyrightText: 2026 Anthony Green
+// SPDX-License-Identifier: MIT
+//
+// The subset of containerd's native Tasks service (api/services/tasks/v1)
+// gr8s uses to reap a task CRI no longer tracks. Field numbers follow
+// containerd's own definitions; fields gr8s doesn't read are left out and
+// skipped on the wire.
+syntax = "proto3";
+
+package containerd.services.tasks.v1;
+
+service Tasks {
+  rpc Delete(DeleteTaskRequest) returns (DeleteResponse);
+  rpc Kill(KillRequest) returns (Empty);
+  rpc Wait(WaitRequest) returns (WaitResponse);
+}
+
+message Empty {}
+
+message DeleteTaskRequest {
+  string container_id = 1;
+}
+
+message DeleteResponse {
+  string id = 1;
+  uint32 pid = 2;
+  uint32 exit_status = 3;
+}
+
+message KillRequest {
+  string container_id = 1;
+  string exec_id = 2;
+  uint32 signal = 3;
+  bool all = 4;
+}
+
+message WaitRequest {
+  string container_id = 1;
+  string exec_id = 2;
+}
+
+message WaitResponse {
+  uint32 exit_status = 1;
+}

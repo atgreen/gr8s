@@ -85,6 +85,57 @@
     (validate-pod-finalizers metadata)
     metadata))
 
+(defun core-protobuf-time (bytes)
+  "Decode a metav1.Time { seconds (1), nanos (2) } as an RFC3339 string."
+  (let ((seconds (core-protobuf-value (core-protobuf-fields bytes) 1 0)))
+    (if seconds (rfc3339-from-unix seconds) "")))
+
+(defun core-protobuf-condition (bytes)
+  "Decode a metav1.Condition from protobuf into gr8s's object form."
+  (let* ((f (core-protobuf-fields bytes))
+         (c (core-object "type" (core-protobuf-string f 1) "status" (core-protobuf-string f 2)
+                         "reason" (core-protobuf-string f 5) "message" (core-protobuf-string f 6)))
+         (lt (core-protobuf-value f 4)) (og (core-protobuf-value f 3 0)))
+    (when lt (setf (gethash "lastTransitionTime" c) (core-protobuf-time lt)))
+    (when (and og (plusp og)) (setf (gethash "observedGeneration" c) og))
+    c))
+
+(defun decode-pod-certificate-request-protobuf (raw version)
+  "Decode a PodCertificateRequest (certificates.k8s.io/v1beta1) create or status
+   body from client-go protobuf: metadata (1), spec (2), status (3). The signer
+   writes status.certificateChain and conditions here over protobuf."
+  (let* ((fields (core-protobuf-fields raw))
+         (metadata (core-protobuf-value fields 1))
+         (spec-bytes (core-protobuf-value fields 2))
+         (status-bytes (core-protobuf-value fields 3))
+         (object (core-object "apiVersion" version "kind" "PodCertificateRequest"
+                              "metadata" (if metadata (core-protobuf-metadata metadata) (core-object)))))
+    (when spec-bytes
+      (let ((sf (core-protobuf-fields spec-bytes)) (spec (core-object)))
+        (loop for (number key) in '((1 "signerName") (2 "podName") (3 "podUID") (4 "serviceAccountName")
+                                    (5 "serviceAccountUID") (6 "nodeName") (7 "nodeUID"))
+              do (setf (gethash key spec) (core-protobuf-string sf number)))
+        (let ((max (core-protobuf-value sf 8 0))) (when max (setf (gethash "maxExpirationSeconds" spec) max)))
+        (loop for (number key) in '((9 "pkixPublicKey") (10 "proofOfPossession") (12 "stubPKCS10Request"))
+              for v = (core-protobuf-value sf number)
+              when v do (setf (gethash key spec) (ag-grpc:base64-encode v)))
+        (let ((ann (core-protobuf-map sf 11)))
+          (when (plusp (hash-table-count ann)) (setf (gethash "unverifiedUserAnnotations" spec) ann)))
+        (setf (gethash "spec" object) spec)))
+    (when status-bytes
+      (let ((sf (core-protobuf-fields status-bytes)) (status (core-object)) (conditions nil))
+        (dolist (field sf)
+          (when (and (= 1 (first field)) (= 2 (second field)))
+            (push (core-protobuf-condition (third field)) conditions)))
+        (when conditions (setf (gethash "conditions" status) (coerce (nreverse conditions) 'vector)))
+        (let ((chain (core-protobuf-string sf 2)))
+          (when (plusp (length chain)) (setf (gethash "certificateChain" status) chain)))
+        (loop for (number key) in '((4 "notBefore") (5 "beginRefreshAt") (6 "notAfter"))
+              for tb = (core-protobuf-value sf number)
+              when tb do (setf (gethash key status) (core-protobuf-time tb)))
+        (setf (gethash "status" object) status)))
+    object))
+
 (defun core-protobuf-delete-options (bytes)
   (let* ((fields (core-protobuf-fields bytes))
          (options (make-hash-table :test #'equal))
@@ -223,6 +274,26 @@
                 (when (and status *typed-api-status-write*)
                   (setf (gethash "status" object) (template-protobuf-message "k8s.io.api.core.v1.NamespaceStatus" status)))
                 (return-from decode-core-resource-protobuf object))))
+          (when (equal kind "PodCertificateRequest")
+            (return-from decode-core-resource-protobuf
+              (decode-pod-certificate-request-protobuf raw version)))
+          (when (equal kind "ClusterTrustBundle")
+            ;; metadata (1) + spec (2) { signerName (1), trustBundle (2) }. Agent
+            ;; Substrate's podcertcontroller creates these over client-go protobuf.
+            (let* ((fields (core-protobuf-fields raw))
+                   (metadata (core-protobuf-value fields 1))
+                   (spec-bytes (core-protobuf-value fields 2))
+                   (spec (core-object)))
+              (when spec-bytes
+                (let* ((sf (core-protobuf-fields spec-bytes))
+                       (signer (core-protobuf-string sf 1 ""))
+                       (bundle (core-protobuf-string sf 2 "")))
+                  (when (plusp (length signer)) (setf (gethash "signerName" spec) signer))
+                  (when (plusp (length bundle)) (setf (gethash "trustBundle" spec) bundle))))
+              (return-from decode-core-resource-protobuf
+                (core-object "apiVersion" version "kind" kind
+                             "metadata" (if metadata (core-protobuf-metadata metadata) (core-object))
+                             "spec" spec))))
           (unless (member kind '("ConfigMap" "Secret") :test #'equal) (error "Unsupported protobuf kind"))
           (let* ((fields (core-protobuf-fields raw))
                  (metadata (core-protobuf-value fields 1))

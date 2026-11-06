@@ -40,7 +40,27 @@
                                                                      "keyPath" "k" "maxExpirationSeconds" 60)))
     ;; Two output paths cannot collide.
     (signals gr8s:kubernetes-error (validate (pod-certificate-source "signerName" "s" "keyType" "ECDSAP256"
-                                                                     "keyPath" "same" "certificateChainPath" "same")))))
+                                                                     "keyPath" "same" "certificateChainPath" "same")))
+    ;; userAnnotations (string map, copied into unverifiedUserAnnotations) and
+    ;; user (file-owner UID) are accepted; a non-UID user is refused.
+    (finishes (validate (pod-certificate-source "signerName" "s" "keyType" "ECDSAP256" "keyPath" "k"
+                                                "userAnnotations" (gr8s::core-object "postgres.podcert.ate.dev/username" "owner")
+                                                "user" 65532)))
+    (signals gr8s:kubernetes-error (validate (pod-certificate-source "signerName" "s" "keyType" "ECDSAP256"
+                                                                     "keyPath" "k" "user" -1)))))
+
+(test pod-certificate-private-key-is-pkcs8-not-sec1
+  ;; KEP-4317 credential bundles carry the key as PKCS#8 (PEM "PRIVATE KEY").
+  ;; SEC1 ("EC PRIVATE KEY") is rejected by strict loaders such as Agent
+  ;; Substrate's objectstore-plugin ("unknown PEM block type EC PRIVATE KEY").
+  (multiple-value-bind (priv pub) (ironclad:generate-key-pair :secp256r1)
+    (declare (ignore pub))
+    (let ((pem (gr8s::ec-private-key-pkcs8-pem priv)))
+      (is (uiop:string-prefix-p "-----BEGIN PRIVATE KEY-----" pem))
+      (is (null (search "EC PRIVATE KEY" pem)))
+      ;; It parses back as a valid PKCS#8 key.
+      (finishes (pure-tls::parse-pkcs8-private-key
+                 (pure-tls::pem-decode (trivial-utf-8:string-to-utf-8-bytes pem) "PRIVATE KEY"))))))
 
 ;;; --- node: claim, gating, projection -----------------------------------------
 
@@ -65,7 +85,10 @@
           (is (string= "projected" (getf claim :pod-name)))
           (is (plusp (length (getf claim :pkix-public-key))))
           ;; The claim carries no private key material of any kind.
-          (is (null (getf claim :private-key-pem))))
+          (is (null (getf claim :private-key-pem)))
+          ;; A source that names no lifetime still gets the kubelet default, so
+          ;; signers that dereference maxExpirationSeconds don't see nil.
+          (is (eql 86400 (getf claim :max-expiration-seconds))))
         ;; The claim name is stable across retries (same keypair, same request).
         (signals gr8s:runtime-error (gr8s::pod-volume-desired-files runtime pod volume))
         (is (string= (getf (first (gr8s::node-pending-pod-certificate-claims store)) :name)
@@ -93,7 +116,7 @@
                     (second (find path files :key #'first :test #'equal)))))
             ;; The credential bundle is the private key PEM then the chain PEM.
             (let ((bundle (file-text "creds.pem")) (key (file-text "key.pem")) (chain (file-text "chain.pem")))
-              (is (uiop:string-prefix-p "-----BEGIN EC PRIVATE KEY-----" key))
+              (is (uiop:string-prefix-p "-----BEGIN PRIVATE KEY-----" key))
               (is (search "BEGIN CERTIFICATE" chain))
               (is (string= bundle (gr8s::pod-certificate-credential-bundle key chain))))))))))
 
@@ -104,7 +127,10 @@
   (gr8s::pod-certificate-claim-message (first (gr8s::node-pending-pod-certificate-claims store))))
 
 (test pod-certificate-control-plane-creates-and-signs
-  (with-projection (runtime store directory)
+  ;; Exercise gr8s's optional built-in signer (off by default) by opting this
+  ;; signer name in, as a standalone gr8s without Agent Substrate would.
+  (let ((gr8s::*pod-certificate-signers* '("podidentity.podcert.ate.dev/identity")))
+   (with-projection (runtime store directory)
     (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory)))
            (pod (create-pod store (projection-pod *pod-certificate-volume*)))
            (volume (aref (gethash "volumes" (gethash "spec" (gr8s::pod-to-object pod))) 0)))
@@ -131,10 +157,13 @@
           (is (plusp (length (gethash "notBefore" status)))))
         ;; With the signed request in its store, the node now mounts the bundle.
         (let ((files (gr8s::pod-volume-desired-files runtime pod volume)))
-          (is (= 3 (length files))))))))
+          (is (= 3 (length files)))))))))
 
 (test pod-certificate-signer-leaves-foreign-signers-pending
-  (with-temporary-store (store directory)
+  ;; The built-in signer owns one name here; a request for any other signer is
+  ;; left Pending for whatever controller owns it (e.g. Agent Substrate's).
+  (let ((gr8s::*pod-certificate-signers* '("podidentity.podcert.ate.dev/identity")))
+   (with-temporary-store (store directory)
     (let ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory))))
       (gr8s::create-core-resource
        store "podcertificaterequests"
@@ -144,7 +173,7 @@
        "default")
       (gr8s::reconcile-pod-certificate-requests store pki)
       (let ((pcr (gr8s::get-core-resource store "podcertificaterequests" "default" "foreign")))
-        (is (zerop (length (gethash "certificateChain" (gethash "status" pcr (gr8s::core-object)) ""))))))))
+        (is (zerop (length (gethash "certificateChain" (gethash "status" pcr (gr8s::core-object)) "")))))))))
 
 ;;; --- projection back to the node --------------------------------------------
 

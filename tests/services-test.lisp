@@ -16,6 +16,23 @@
                      "spec" (gr8s::core-object "selector" (gr8s::core-object "app" "web")
                                                "ports" (vector (gr8s::core-object "port" 8080 "targetPort" target)))))
 
+(test services-accept-preferdualstack-and-allocate-single-stack-ipv4
+  ;; PreferDualStack is best-effort; on a single-stack cluster it allocates IPv4
+  ;; (controller-generated Services such as ate's api set it). RequireDualStack
+  ;; and IPv6-only are refused. Accepted Services normalize to single-stack IPv4.
+  (with-temporary-store (store directory)
+    (flet ((svc (name policy &optional families)
+             (let ((s (service-test-object name)))
+               (setf (gethash "ipFamilyPolicy" (gethash "spec" s)) policy)
+               (when families (setf (gethash "ipFamilies" (gethash "spec" s)) families))
+               s)))
+      (let ((created (gr8s::create-core-resource store "services" (svc "pref" "PreferDualStack") "alpha")))
+        (is (equalp #("IPv4") (gethash "ipFamilies" (gethash "spec" created))))
+        (is (equal "SingleStack" (gethash "ipFamilyPolicy" (gethash "spec" created)))))
+      (finishes (gr8s::create-core-resource store "services" (svc "pref2" "PreferDualStack" #("IPv4" "IPv6")) "alpha"))
+      (signals gr8s:kubernetes-error (gr8s::create-core-resource store "services" (svc "req" "RequireDualStack") "alpha"))
+      (signals gr8s:kubernetes-error (gr8s::create-core-resource store "services" (svc "v6" "SingleStack" #("IPv6")) "alpha")))))
+
 (test services-allocate-durably-without-consuming-dry-run-addresses
   (with-temporary-store (store directory)
     (let* ((one (gr8s::create-core-resource store "services" (service-test-object "one") "alpha"))

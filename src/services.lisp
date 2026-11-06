@@ -188,10 +188,17 @@ Turning affinity off clears the timeout a client read back with the Service."
       (invalid-pod "only cluster internal traffic policy is supported"))
     (unless (equal "Cluster" (gethash "externalTrafficPolicy" spec "Cluster"))
       (invalid-pod "only cluster external traffic policy is supported"))
+    ;; gr8s allocates single-stack IPv4 (normalized below). Accept a Service that
+    ;; is satisfiable that way -- SingleStack, or PreferDualStack (best-effort, as
+    ;; on any single-stack cluster; controller-generated Services such as ate's
+    ;; api set it) as long as IPv4 is among its families -- and refuse only a hard
+    ;; dual-stack or IPv6-only request gr8s cannot honor.
     (unless (or (service-external-name-p object)
-                (and (equalp #("IPv4") (gethash "ipFamilies" spec #("IPv4")))
-                     (equal "SingleStack" (gethash "ipFamilyPolicy" spec "SingleStack"))))
-      (invalid-pod "Services support only single-stack IPv4"))
+                (let ((policy (gethash "ipFamilyPolicy" spec "SingleStack"))
+                      (families (gethash "ipFamilies" spec #("IPv4"))))
+                  (and (member policy '("SingleStack" "PreferDualStack") :test #'equal)
+                       (or (zerop (length families)) (find "IPv4" families :test #'equal)))))
+      (invalid-pod "Services support only single-stack IPv4 (SingleStack or PreferDualStack including IPv4)"))
     (when (and (nth-value 1 (gethash "publishNotReadyAddresses" spec))
                (not (member (gethash "publishNotReadyAddresses" spec) '(t nil))))
       (invalid-pod "publishNotReadyAddresses must be boolean"))

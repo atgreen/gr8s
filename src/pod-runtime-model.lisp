@@ -64,6 +64,7 @@
     (drop-null-fields (require-object context "securityContext"))
     (reject-unsupported-fields context
                                (if pod '("runAsUser" "runAsGroup" "runAsNonRoot" "fsGroup"
+                                         "fsGroupChangePolicy"
                                          "supplementalGroups" "seLinuxOptions" "seccompProfile" "sysctls")
                                    '("runAsUser" "runAsGroup" "runAsNonRoot" "privileged"
                                      "readOnlyRootFilesystem" "allowPrivilegeEscalation"
@@ -85,7 +86,12 @@
           (invalid-pod "securityContext.~A must be boolean" field))))
     (when (and (eq t (gethash "runAsNonRoot" context))
                (eql 0 (gethash "runAsUser" context)))
-      (invalid-pod "runAsNonRoot cannot be combined with runAsUser 0"))))
+      (invalid-pod "runAsNonRoot cannot be combined with runAsUser 0"))
+    ;; gr8s applies fsGroup ownership on volume setup; accept the policy knob
+    ;; (controller-generated specs set it) and validate its enum.
+    (let ((policy (gethash "fsGroupChangePolicy" context)))
+      (when (and policy (not (member policy '("Always" "OnRootMismatch") :test #'equal)))
+        (invalid-pod "securityContext.fsGroupChangePolicy must be Always or OnRootMismatch")))))
 
 (defun pod-metadata-subscript-reference (field)
   "Recognize a valid single-key label/annotation downward environment reference."
@@ -290,12 +296,21 @@
    Returns the paths it contributes, so the caller can keep them conflict-free."
   (drop-null-fields (require-object source "podCertificate"))
   (reject-unsupported-fields source '("signerName" "keyType" "maxExpirationSeconds"
-                                      "credentialBundlePath" "keyPath" "certificateChainPath")
+                                      "credentialBundlePath" "keyPath" "certificateChainPath"
+                                      "userAnnotations" "user")
                              "podCertificate")
   (require-nonempty-string (gethash "signerName" source) "podCertificate.signerName")
   (let ((key-type (gethash "keyType" source)))
     (unless (equal key-type "ECDSAP256")
       (invalid-pod "podCertificate.keyType must be ECDSAP256 (the only type gr8s issues)")))
+  ;; userAnnotations (copied verbatim into the request's unverifiedUserAnnotations
+  ;; for the signer) must be a string map; user is the file owner UID gr8s honors
+  ;; via fsGroup/ownership already.
+  (let ((annotations (gethash "userAnnotations" source)))
+    (when annotations (validate-core-string-map annotations "podCertificate.userAnnotations")))
+  (let ((user (gethash "user" source)))
+    (when (and user (not (typep user '(integer 0 4294967294))))
+      (invalid-pod "podCertificate.user must be a Linux UID")))
   (let ((seconds (gethash "maxExpirationSeconds" source)))
     (when (and seconds (not (and (integerp seconds) (<= 3600 seconds (expt 2 31)))))
       (invalid-pod "podCertificate.maxExpirationSeconds must be between 3600 and 2^31 seconds")))
