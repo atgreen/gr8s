@@ -224,3 +224,41 @@
       (gr8s::delete-core-resource store "validatingadmissionpolicybindings" nil "no-second-endpoint")
       (gr8s::reconcile-endpointslices store)
       (is (= 2 (length (gethash "endpoints" (first (gr8s::list-core-resources store "endpointslices" "alpha")))))))))
+
+(test generated-endpoints-pass-admission-as-the-controller
+  (with-temporary-store (store directory)
+    (values directory)
+    (gr8s:register-node store (gr8s:make-node-record :id "worker-id" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+    (gr8s:mark-node-ready store "worker-a" (get-universal-time))
+    (gr8s::create-core-resource store "validatingadmissionpolicies"
+      (gr8s::core-object
+       "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicy"
+       "metadata" (gr8s::core-object "name" "one-address")
+       "spec" (gr8s::core-object
+               "matchConstraints" (gr8s::core-object
+                                   "resourceRules" (vector (gr8s::core-object "apiGroups" #("") "apiVersions" #("v1")
+                                                                              "operations" #("CREATE" "UPDATE")
+                                                                              "resources" #("endpoints"))))
+               "validations" (vector (gr8s::core-object
+                                      "expression" "request.userInfo.username == 'system:serviceaccount:kube-system:endpoint-controller' && (!has(object.subsets) || object.subsets.all(s, !has(s.addresses) || size(s.addresses) < 2))"
+                                      "message" "one address"))))
+      nil)
+    (gr8s::create-core-resource store "validatingadmissionpolicybindings"
+      (gr8s::core-object
+       "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicyBinding"
+       "metadata" (gr8s::core-object "name" "one-address")
+       "spec" (gr8s::core-object "policyName" "one-address" "validationActions" #("Deny")))
+      nil)
+    (gr8s::create-core-resource store "services" (service-test-object "web" "http") "alpha")
+    (create-endpointslice-test-pod store "one" "alpha" "192.0.2.1")
+    (gr8s::reconcile-endpoints store)
+    (flet ((addresses ()
+             (let ((endpoints (gr8s::get-core-resource store "endpoints" "alpha" "web")))
+               (reduce #'+ (gethash "subsets" endpoints #()) :key (lambda (subset) (length (gethash "addresses" subset #())))))))
+      (is (= 1 (addresses)))
+      (create-endpointslice-test-pod store "two" "alpha" "192.0.2.2")
+      (gr8s::reconcile-endpoints store)
+      (is (= 1 (addresses)))
+      (gr8s::delete-core-resource store "validatingadmissionpolicybindings" nil "one-address")
+      (gr8s::reconcile-endpoints store)
+      (is (= 2 (addresses))))))
