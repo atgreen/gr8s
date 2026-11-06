@@ -415,6 +415,19 @@ any other, and a Job already failing, counts it at once."
         (when (job-condition-true-p next "Suspended")
           (set-job-condition next "Suspended" "False" "JobResumed" "Job resumed"))))))
 
+(defun job-unaccounted-terminal-p (store job observations)
+  "Report a tracked Pod in OBSERVATIONS that finished after this pass accounted its Pods.
+Until the next pass counts it, its index's failures and the Job's retry delay are
+stale, so creating replacements now could run an index past its backoff limit."
+  (let ((status (gethash "status" job (core-object)))
+        (state (gethash (gethash "uid" (workload-metadata job)) (pod-store-job-controller-states store) (core-object))))
+    (loop for (pod . observed) in observations
+          thereis (and (job-pod-tracked-p pod)
+                       (member (gethash "phase" observed) '("Succeeded" "Failed") :test #'equal)
+                       (not (member (pod-uid pod) (job-uncounted-uids status "succeeded") :test #'equal))
+                       (not (member (pod-uid pod) (job-uncounted-uids status "failed") :test #'equal))
+                       (not (member (pod-uid pod) (job-releasable-uids state) :test #'equal))))))
+
 (defun reconcile-job (reconciler job)
   "Drive one Job toward its goal from actual Pod observations and durable accounting."
   (let* ((store (reconciler-store reconciler))
@@ -449,6 +462,8 @@ any other, and a Job already failing, counts it at once."
              (lambda (next)
                (remhash "startTime" next)
                (set-job-condition next "Suspended" "True" "JobSuspended" "Job suspended"))))
+          ;; As upstream syncs from one Pod snapshot, a Pod that finished since accounting waits for the next pass.
+          ((job-unaccounted-terminal-p store job observations) nil)
           (t
            (multiple-value-bind (type reason message)
                (job-terminal-decision spec status (job-onfailure-restarts observations) start-time

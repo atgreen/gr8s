@@ -325,3 +325,37 @@
           (incf now 11)
           (reconcile-until-settled reconciler)
           (is (= 1 (length (remove (pod-uid pod) (list-pods store "alpha") :key #'pod-uid :test #'equal)))))))))
+
+(test a-pod-finishing-after-accounting-waits-for-the-next-pass
+  ;; podster-uqb.158: an index whose second failure landed between accounting and
+  ;; Pod creation got a third Pod, so status.failed read 5 where upstream expects 4.
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable directory))
+    (let* ((now 3000000001) (gr8s::*job-clock* (lambda () now))
+           (original (symbol-function 'gr8s::flush-job-terminal-accounting)) (fail-next nil))
+      (job-with-spec store "completionMode" "Indexed" "completions" 2 "parallelism" 2 "backoffLimitPerIndex" 1)
+      (gr8s::reconcile-jobs reconciler)
+      (finish-indexed-pod reconciler runtime store 1 "Failed" 1)
+      (reconcile-until-settled reconciler)
+      (incf now 11)
+      (reconcile-until-settled reconciler)
+      (is (= 2 (length (indexed-test-pods store 1))))
+      (incf now 100)
+      (unwind-protect
+           (progn
+             ;; The retry fails just after this pass has accounted its Pods.
+             (setf fail-next t
+                   (symbol-function 'gr8s::flush-job-terminal-accounting)
+                   (lambda (reconciler job observations)
+                     (prog1 (funcall original reconciler job observations)
+                       (when fail-next
+                         (setf fail-next nil)
+                         (finish-indexed-pod reconciler runtime store 1 "Failed" 1)))))
+             (gr8s::reconcile-jobs reconciler))
+        (setf (symbol-function 'gr8s::flush-job-terminal-accounting) original))
+      (is (= 2 (length (indexed-test-pods store 1))))
+      (reconcile-until-settled reconciler)
+      (let ((status (gethash "status" (job-now store))))
+        (is (equal "1" (gethash "failedIndexes" status)))
+        (is (= 2 (gethash "failed" status))))
+      (is (= 2 (length (indexed-test-pods store 1)))))))
