@@ -17,7 +17,7 @@
 (test egress-guard-compiles-in-process-to-the-policy-maps
   (multiple-value-bind (map-specs prog-specs) (gr8s::compile-egress-guard)
     ;; The maps the CNI pins, with the schemas endpoint-policy checks: the three guard
-    ;; maps and the six NetworkPolicy maps the agent writes.
+    ;; maps, the NetworkPolicy maps the agent writes, and the redirect tables.
     (is (= (length gr8s::+cni-policy-map-specs+) (length map-specs)))
     (loop for (name type key-size value-size max-entries flags) in gr8s::+cni-policy-map-specs+
           for spec = (egress-map-spec map-specs name)
@@ -71,6 +71,7 @@
     (is (member "traffic_stats" created :test #'string=))
     (is (member "netpol_egress_cidr" created :test #'string=))
     (is (member "netpol_flows" created :test #'string=))
+    (is (member "host_redirect_v4" created :test #'string=))
     ;; The reused map keeps its pinned fd; both programs load against every map.
     (is (= 555 (whistler/loader:map-info-fd
                 (gr8s::egress-policy-object-find-map object "endpoint_identity"))))

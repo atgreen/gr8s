@@ -132,6 +132,21 @@
     (error (condition)
       (invalid-cni "invalid node Pod CIDR ~A: ~A" cidr condition))))
 
+(defun reload-node-ipam-allocations (ipam)
+  "Re-read the persisted allocations file into IPAM's in-memory table. In managed
+   mode the CNI plugin runs out of process and persists every allocation to that
+   file, so a long-running agent must reload it to observe Pods added since the
+   ipam was opened -- otherwise its dataplane maps only ever reflect the Pods that
+   existed at startup. The file is the source of truth (allocate/release persist
+   immediately), so a wholesale reload is safe in both managed and in-process modes."
+  (bt:with-lock-held ((node-ipam-lock ipam))
+    (setf (node-ipam-allocations ipam)
+          (restore-node-ipam-allocations (node-ipam-state-path ipam)
+                                         (node-ipam-cidr ipam)
+                                         (node-ipam-network ipam)
+                                         (node-ipam-prefix ipam))))
+  ipam)
+
 (defun node-ipam-address-in-use-p (ipam address)
   (loop for allocated being the hash-values of (node-ipam-allocations ipam)
         thereis (string= address allocated)))

@@ -86,6 +86,17 @@ program is missing.  Used for optional host tools like firewall-cmd."
 ;;; ---------------------------------------------------------------------------
 ;;; The command.
 
+(defun doctor-node-pod-cidr (state-directory)
+  "Best-effort: this node's assigned Pod CIDR from a persisted agent network.json
+   under STATE-DIRECTORY, or NIL when the node has not joined/networked yet."
+  (let ((root (uiop:ensure-directory-pathname state-directory)))
+    (dolist (rel '("agent/runtime/network.json" "runtime/network.json" "agent/network.json"))
+      (let ((path (merge-pathnames rel root)))
+        (when (probe-file path)
+          (let ((net (ignore-errors (com.inuoe.jzon:parse path))))
+            (when (and (hash-table-p net) (gethash "nodePodCIDR" net))
+              (return-from doctor-node-pod-cidr (gethash "nodePodCIDR" net)))))))))
+
 (defun run-doctor (&key (cluster-pod-cidr +default-cluster-pod-cidr+)
                         (state-directory (namestring (default-state-directory)))
                         (firewall #'doctor-firewall-state))
@@ -157,6 +168,28 @@ program is missing.  Used for optional host tools like firewall-cmd."
                      "firewalld active without inbound :53; Pod DNS still served via the eBPF redirect-to-loopback"))
               (t (note :ok "firewall DNS" "inbound DNS is permitted"))))
         (error (c) (note :warn "firewall DNS" (format nil "could not check: ~A" c))))
+
+      ;; Host firewall vs the cross-node overlay (podster-vwy). Cross-node Pod
+      ;; traffic is kernel-routed, so an active firewalld must be told to admit
+      ;; the overlay; gr8s programs scoped ACCEPTs when the VXLAN comes up.
+      (handler-case
+          (let ((active (funcall firewall))
+                (cidr (doctor-node-pod-cidr state-directory)))
+            (cond
+              ((not active)
+               (note :ok "overlay firewall" "no active firewalld; the overlay needs no host-firewall rules"))
+              ((null cidr)
+               (note :ok "overlay firewall"
+                     "no node network yet; gr8s programs the overlay ACCEPTs when the node joins and the VXLAN comes up"))
+              ((overlay-firewall-present-p cidr)
+               (note :ok "overlay firewall"
+                     (format nil "firewalld admits the overlay (gr8s-vxlan + source ~A + ~D/udp)"
+                             cidr +node-vxlan-udp-port+)))
+              (t
+               (note :warn "overlay firewall"
+                     (format nil "firewalld is active but the overlay ACCEPTs for ~A are missing" cidr)
+                     "gr8s programs these when the VXLAN comes up; cross-node Pod traffic stays blocked until it does"))))
+        (error (c) (note :warn "overlay firewall" (format nil "could not check: ~A" c))))
 
       ;; The in-process eBPF programs compile (no ELF, no toolchain).
       (handler-case

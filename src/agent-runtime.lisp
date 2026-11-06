@@ -200,6 +200,13 @@
            (com.inuoe.jzon:stringify network)))
         (when (node-runtime-network-reconciler node-runtime)
           (funcall (node-runtime-network-reconciler node-runtime) network previous))
+        ;; Admit this node's overlay through an active host firewalld (podster-vwy):
+        ;; cross-node traffic is kernel-routed (conntrack-tracked), so firewalld
+        ;; would drop the forwarded/encapsulated packets without a scoped ACCEPT.
+        ;; No-op without firewalld; fail-soft. Only meaningful for a managed node.
+        (when (and (node-runtime-manager node-runtime)
+                   (plusp (length (gethash "underlayAddress" network ""))))
+          (ignore-errors (ensure-overlay-firewall (gethash "nodePodCIDR" network))))
         (when persist
           (write-private-text-atomically
            (node-runtime-network-path node-runtime)
@@ -233,7 +240,11 @@
   ;; Keep the gateway while Pods or partially installed leases outlive us.
   (when (and (node-runtime-manager node-runtime) (node-runtime-ipam node-runtime)
              (not (node-runtime-has-allocations-p node-runtime)))
-    (remove-node-gateway)))
+    (remove-node-gateway)
+    ;; The node is going away with no Pods left; withdraw the overlay firewall
+    ;; accepts we programmed (podster-vwy) so the host firewall is left as we
+    ;; found it. Fail-soft; a no-op without an active firewalld.
+    (ignore-errors (remove-overlay-firewall (node-ipam-cidr (node-runtime-ipam node-runtime))))))
 
 (defun reconcile-cached-node-network (node-runtime)
   ;; Kernel link events can flush permanent VXLAN FDB entries even when the
@@ -277,6 +288,14 @@
                 (node-runtime-reconciler node-runtime)
                 :before-reconcile (lambda ()
                                     (reconcile-cached-node-network node-runtime)
+                                    ;; Re-run dataplane convergence every tick, not only on a new
+                                    ;; control-plane snapshot: the out-of-process CNI plugin adds Pod
+                                    ;; allocations the agent must pick up to populate local/host/remote
+                                    ;; redirect tables for live Pods (podster-6yd). Fail-soft.
+                                    (handler-case
+                                        (converge-node-network-policies node-runtime)
+                                      (error (condition)
+                                        (format *error-output* "gr8s: NetworkPolicy convergence failed: ~A~%" condition)))
                                     (handler-case
                                         (converge-host-port-forwarders (node-runtime-host-port-forwarders node-runtime)
                                                                        (node-runtime-store node-runtime))
@@ -709,19 +728,45 @@ snapshot application."
         (ipam (node-runtime-ipam node-runtime))
         (store (node-runtime-store node-runtime)))
     (when (and manager ipam store)
+      ;; The out-of-process CNI plugin persists every allocation to the ipam file;
+      ;; reload it so the dataplane tables below cover Pods added since the agent's
+      ;; ipam was opened, not only those present at startup (podster-6yd).
+      (ignore-errors (reload-node-ipam-allocations ipam))
       (let ((root (managed-containerd-bpf-directory manager))
-            (specs (network-policy-specs-from-objects
-                    (list-core-resources store "networkpolicies")))
-            (ip-map (pod-ip-identity-map store))
             (endpoints (bt:with-lock-held ((node-ipam-lock ipam))
                          (loop for key being the hash-keys of (node-ipam-allocations ipam)
                                  using (hash-value address)
                                collect (list (car key) (cdr key) address)))))
-        (converge-pod-network-policies
-         specs endpoints
-         :pod-finder (lambda (address) (gethash address ip-map))
+        ;; Same-node Pod->Pod delivery table (epic podster-pnd): every local Pod
+        ;; gets the node-wide {dest IP -> ifindex/MAC} table so the egress guard
+        ;; can redirect in-cluster traffic past the host firewall's FORWARD reject.
+        ;; Populate it FIRST and independently: resolving an unsupported
+        ;; NetworkPolicy (below) can throw, and keeping that resolution out of this
+        ;; let's bindings is what lets the delivery table still be written.
+        (converge-node-local-pod-delivery
+         endpoints
          :directory-fn (lambda (sandbox)
-                         (nth-value 2 (cni-pin-paths root sandbox))))))))
+                         (nth-value 2 (cni-pin-paths root sandbox))))
+        ;; Pod->host delivery table (podster-9b1): every local Pod gets the node's
+        ;; host-local destinations (the API server 10.96.0.1, this node's own IP)
+        ;; so the egress guard redirects that traffic to lo, past the host
+        ;; firewall's INPUT reject. Independent and fail-soft, like the table above.
+        (converge-node-host-redirect
+         (mapcar #'first endpoints)
+         (ignore-errors (containerd-node-address (node-runtime-runtime node-runtime)))
+         :directory-fn (lambda (sandbox)
+                         (nth-value 2 (cni-pin-paths root sandbox))))
+        ;; NetworkPolicy, both directions (origin/main). Spec resolution can throw
+        ;; on an unsupported policy, so it stays after the delivery tables above,
+        ;; which must populate regardless.
+        (let ((specs (network-policy-specs-from-objects
+                      (list-core-resources store "networkpolicies")))
+              (ip-map (pod-ip-identity-map store)))
+          (converge-pod-network-policies
+           specs endpoints
+           :pod-finder (lambda (address) (gethash address ip-map))
+           :directory-fn (lambda (sandbox)
+                           (nth-value 2 (cni-pin-paths root sandbox)))))))))
 
 (defvar *runtime-outage-snapshot-wait-seconds* 2
   "How long a snapshot waits for a restarting container runtime before giving up this attempt.")

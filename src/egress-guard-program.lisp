@@ -44,6 +44,9 @@
 (defstruct netpol-port-key (prefixlen u32) (group u32) (proto u8) (pad u8) (port u16))
 (defstruct netpol-flow-key (peer u32) (pod-port u16) (peer-port u16) (proto u8) (pad0 u8) (pad1 u16))
 (defstruct netpol-flow-stamp (ns u64))
+;; Key for the same-node Pod delivery table: an LPM /32, same {prefixlen, addr}
+;; shape as netpol-lpm-key (which the program resolves identically and works).
+(defstruct local-pod-key (prefixlen u32) (addr u32))
 ;; A key or value held in a variable is a pointer, so these use map-lookup-ptr and
 ;; map-update-ptr: plain map-lookup would key the map by the pointer's own bytes.
 
@@ -98,7 +101,20 @@
     ;; Connections allowed in either direction -> when their last packet passed, so
     ;; that their replies pass the other direction's isolation.
     (defmap netpol-flows :type :lru-hash
-      :key-size 12 :value-size 8 :max-entries 4096)))
+      :key-size 12 :value-size 8 :max-entries 4096)
+    ;; Same-node Pod delivery table (agent-populated): destination Pod IPv4
+    ;; (network order) -> 16-byte value {dest host-veth ifindex (u32, host order),
+    ;; dest Pod MAC (6 bytes, wire order), dest host-veth MAC (6 bytes, wire order)}.
+    ;; A hit means the destination Pod lives on this node, so the packet can be
+    ;; delivered straight to its veth, bypassing the kernel forward path.
+    (defmap local-pod-v4 :type :lpm-trie
+      :key-size 8 :value-size 16 :max-entries 4096 :map-flags 1) ; /32 keys, like netpol-egress-cidr
+    ;; Host-local destinations (agent-populated): destination IPv4 (network order)
+    ;; that lives on this node -- the API server 10.96.0.1, this node's own IP --
+    ;; and must be delivered via the loopback ingress to dodge the host firewall's
+    ;; INPUT path (iif=lo is trusted), extending the DNS gateway lo-trick.
+    (defmap host-redirect-v4 :type :hash
+      :key-size 4 :value-size 1 :max-entries 64 :map-flags 1))) ; NO_PREALLOC
 
 (defparameter gr8s::*egress-guard-program-forms*
   '((defprog gr8s-egress-guard (:type :tc :section "classifier" :license "GPL")
@@ -161,6 +177,29 @@
                        (store u32 data 0 0)                        ; zero dst MAC bytes 0-3
                        (store u16 data 4 0)                        ; zero dst MAC bytes 4-5
                        (return (redirect 1 1))))                   ; lo = ifindex 1, BPF_F_INGRESS
+                   ;; Pod->host fast path (podster-9b1): a packet to a host-local
+                   ;; address -- the API server at 10.96.0.1:443, or this node's
+                   ;; own IP after the socket LB rewrote a ClusterIP to a host
+                   ;; backend -- would otherwise cross the host firewall's INPUT
+                   ;; path. Redirect it to the loopback ingress (iif=lo, which
+                   ;; firewalld trusts), exactly like the DNS gateway trick above:
+                   ;; zeroing the dst MAC makes lo classify it PACKET_HOST, and the
+                   ;; host service's reply is OUTPUT-routed back to the Pod. The
+                   ;; agent populates host-redirect-v4 with the node's host-local
+                   ;; destinations. The scalar u32 key is the dst in network order,
+                   ;; the same bytes the agent writes (see host-redirect-key).
+                   (when (/= (map-lookup host-redirect-v4 (load u32 ip 16)) 0)
+                     ;; The lookup reset the verifier's proven packet range; re-prove
+                     ;; the L2 bounds before rewriting the MAC header.
+                     (when (> (+ data 14) data-end) (drop-pod-packet :malformed))
+                     (add-pod-counter allowed-packets 1)
+                     (add-pod-counter allowed-bytes (ctx u32 0))
+                     (store u32 data 0 0)
+                     (store u16 data 4 0)
+                     (return (redirect 1 1)))
+                   ;; The host-redirect lookup above reset the proven packet range;
+                   ;; re-prove the IPv4 header bounds before the reads below.
+                   (when (> (+ data 34) data-end) (drop-pod-packet :malformed))
                    ;; NetworkPolicy (map-driven; the agent rewrites the maps on policy
                    ;; change). Egress isolation allows a packet that its rules allow, or
                    ;; that answers a connection the ingress guard admitted. Either
@@ -191,7 +230,31 @@
                                    (drop-pod-packet :policy)))))
                            (let ((stamp (make-netpol-flow-stamp)))
                              (setf (netpol-flow-stamp-ns stamp) now)
-                             (map-update-ptr netpol-flows fkey stamp 0))))))))
+                             (map-update-ptr netpol-flows fkey stamp 0))))))
+                   ;; Same-node Pod->Pod fast path. Policy has allowed the packet
+                   ;; above; if the destination is a Pod on this node, deliver it
+                   ;; straight to that Pod's veth via bpf_redirect, bypassing the
+                   ;; kernel forward path and the host firewall's FORWARD reject.
+                   ;; A map lookup resets the verifier's proven packet range, so
+                   ;; re-prove the L2 bounds before rewriting the MAC header.
+                   (when (> (+ data 34) data-end) (drop-pod-packet :malformed))
+                   (let ((lpk (make-local-pod-key)))
+                     (setf (local-pod-key-prefixlen lpk) 32
+                           (local-pod-key-addr lpk) (load u32 ip 16))
+                     ;; lpk is a variable (we setf its fields), so the key expr
+                     ;; is not a literal make- form -- lower-map-lookup can't see
+                     ;; it is a struct pointer and would spill the POINTER value
+                     ;; as the key. Use map-lookup-ptr so R2 = &lpk (its contents).
+                     (let ((ep (map-lookup-ptr local-pod-v4 lpk)))
+                       (when (/= ep 0)
+                         (when (> (+ data 14) data-end) (drop-pod-packet :malformed))
+                         (store u32 data 0 (load u32 ep 4))    ; dst MAC [0:4] = Pod MAC
+                         (store u16 data 4 (load u16 ep 8))    ; dst MAC [4:6]
+                         (store u32 data 6 (load u32 ep 10))   ; src MAC [0:4] = veth MAC
+                         (store u16 data 10 (load u16 ep 14))  ; src MAC [4:6]
+                         (add-pod-counter allowed-packets 1)
+                         (add-pod-counter allowed-bytes (ctx u32 0))
+                         (return (redirect (load u32 ep 0) 0)))))))
                 ((= protocol #x0806)
                  (when (> (+ data 42) data-end) (drop-pod-packet :malformed))
                  (let ((arp u64 (+ data 14)))
