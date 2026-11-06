@@ -47,9 +47,13 @@
                     (core-resource-error 422 "Invalid" "spec.updateStrategy.rollingUpdate.maxUnavailable: Invalid value: ~S: must not be greater than 100%" maximum)))))))))
 
 (defun normalize-statefulset-claim-templates (spec object namespace)
-  "Reduce each claim template to what a claim uses, after real claim admission accepts it."
+  "Reduce each claim template to what a claim uses, after real claim admission accepts it, with the
+defaults upstream gives a template. A set without templates has none, not an empty list."
   (let ((templates (let ((value (gethash "volumeClaimTemplates" spec))) (if (member value '(nil null)) #() value)))
         (seen nil))
+    (when (zerop (length templates))
+      (remhash "volumeClaimTemplates" spec)
+      (return-from normalize-statefulset-claim-templates nil))
     (setf (gethash "volumeClaimTemplates" spec)
           (map 'vector
                (lambda (template)
@@ -65,7 +69,9 @@
                           (claim (normalize-storage-resource "persistentvolumeclaims"
                                                              (statefulset-claim-object object reduced 0) namespace nil nil)))
                      (setf (gethash "spec" reduced) (gethash "spec" claim))
-                     reduced)))
+                     (when (hash-table-p (gethash "status" template))
+                       (setf (gethash "status" reduced) (copy-core-object (gethash "status" template))))
+                     (default-claim-template reduced))))
                templates))))
 
 (defun normalize-statefulset-spec (object namespace)
@@ -102,10 +108,15 @@
     object))
 
 (defun validate-statefulset-update (existing object)
-  "Refuse an update to any spec field upstream fixes at creation."
+  "Refuse an update to any spec field upstream fixes at creation. Claim templates compare with
+their defaults, so a set stored before them, or with an empty list, still matches."
   (flet ((fixed (candidate)
            (let ((copy (copy-core-object (gethash "spec" candidate))))
              (dolist (field +statefulset-mutable-fields+) (remhash field copy))
+             (let ((templates (gethash "volumeClaimTemplates" copy)))
+               (if (and (vectorp templates) (not (stringp templates)) (plusp (length templates)))
+                   (map nil #'default-claim-template templates)
+                   (remhash "volumeClaimTemplates" copy)))
              copy)))
     (unless (workload-equal-p (fixed existing) (fixed object))
       (core-resource-error 422 "Invalid" "updates to statefulset spec for fields other than ~{'~A'~^, ~} are forbidden"

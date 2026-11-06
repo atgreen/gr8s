@@ -325,4 +325,38 @@
             (setf (gethash "fsGroupChangePolicy" (gethash "securityContext" (gethash "spec" (pod-to-object pod)))) "OnRootMismatch")
             (gr8s::materialize-pod-volume runtime pod source)
             (is (= #o600 (mode (merge-pathnames "file" backing))))))))))
+
+(test volume-gid-annotations-join-the-containers-supplemental-groups
+  ;; The PersistentVolumes NFS specs check that a container's groups include the PV's
+  ;; pv.beta.kubernetes.io/gid, as a kubelet adds it.
+  (with-temporary-store (store path)
+    (flet ((volume (name gid)
+             (let ((object (storage-test-volume name (merge-pathnames (format nil "~A/" name) path))))
+               (setf (gethash "annotations" (gethash "metadata" object)) (gr8s::core-object "pv.beta.kubernetes.io/gid" gid))
+               (gr8s::create-core-resource store "persistentvolumes" object nil)))
+           (claim (name volume)
+             (let ((object (storage-test-claim name)))
+               (when volume (setf (gethash "volumeName" (gethash "spec" object)) volume))
+               (gr8s::create-core-resource store "persistentvolumeclaims" object "default"))))
+      (volume "annotated" "777") (claim "data" "annotated")
+      (volume "garbled" "not-a-gid") (claim "other" "garbled")
+      (claim "unbound" nil)
+      (gr8s::reconcile-storage-bindings store)
+      (let* ((object (pod-to-object (storage-test-pod "consumer" "data"))))
+        (setf (gethash "volumes" (gethash "spec" object))
+              (concatenate 'vector (gethash "volumes" (gethash "spec" object))
+                           (vector (gr8s::core-object "name" "other" "persistentVolumeClaim" (gr8s::core-object "claimName" "other"))
+                                   (gr8s::core-object "name" "unbound" "persistentVolumeClaim" (gr8s::core-object "claimName" "unbound"))))
+              (gethash "securityContext" (gethash "spec" object)) (gr8s::core-object "supplementalGroups" #(5 777)))
+        (let* ((pod (create-pod store (parse-pod object)))
+               (groups (gr8s::pod-volume-supplemental-groups store pod)))
+          (is (equal '(777) groups))
+          (is (equal '(5 777)
+                     (coerce (gr8s.cri.v1::supplemental-groups
+                              (gr8s::containerd-pod-security-context pod (aref (pod-containers pod) 0) :volume-groups groups))
+                             'list)))
+          (is (equal '(5 777 1234)
+                     (coerce (gr8s.cri.v1::supplemental-groups
+                              (gr8s::containerd-pod-security-context pod (aref (pod-containers pod) 0) :volume-groups '(1234)))
+                             'list))))))))
 (in-suite gr8s)
