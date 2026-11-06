@@ -212,6 +212,11 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
                    (is (some (lambda (review)
                                (equal "kube-apiserver-kubelet-client" (gr8s::table-get review "spec" "user")))
                              (car calls)))
+                   ;; The node's log directory, with its trailing slash kept on the way through.
+                   (multiple-value-bind (code body type) (fetch "node-a/proxy/logs/")
+                     (is (= 200 code))
+                     (is (equal "text/html; charset=utf-8" type))
+                     (is (search "<pre>" body)))
                    ;; The Pod list is still the control plane's own answer.
                    (is (= 200 (fetch "node-a/proxy/pods")))
                    (is (= 404 (fetch "node-b/proxy/metrics")))

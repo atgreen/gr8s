@@ -1429,7 +1429,9 @@ Watches are long-running requests, which that filter leaves alone."
           ((string= path "/openapi/v3/api/v1") (openapi-v3-response))
           ((string= path "/api/v1") (api-resources-response))
           ((nth-value 3 (node-http-proxy-route path))
-           (multiple-value-bind (name port suffix) (node-http-proxy-route path)
+           ;; Route on the trimmed path, but forward the path as sent: /logs/ is not /logs.
+           (multiple-value-bind (name port suffix)
+               (node-http-proxy-route (or (ignore-errors (hunchentoot:script-name*)) path))
              (node-http-proxy-response store reconciler name suffix method port)))
           ((node-status-route path) (dispatch-node-status-request store path method))
           ((and (eq method :get) (string= path "/api/v1/nodes"))
