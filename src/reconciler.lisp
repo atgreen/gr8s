@@ -589,30 +589,39 @@ succeeded, so answer as if this request had retired the Pod itself."
                            (pod-namespace pod) (pod-name pod) condition)
                    nil))))
 
+(defun call-with-runtime-serialized (reconciler function)
+  "Call FUNCTION under the reconciler lock when the runtime runs containers itself and so shares
+its state with reconciliation. A runtime that delegates to nodes only exchanges messages with
+them, and a node operation's wait, as long as a log read or an exec, must not stall every Pod
+read and write behind it."
+  (if (runtime-runs-containers-p (reconciler-runtime reconciler))
+      (bt:with-lock-held ((reconciler-lock reconciler)) (funcall function))
+      (funcall function)))
+
 (defun reconciler-logs (reconciler uid container &key tail previous)
-  (bt:with-lock-held ((reconciler-lock reconciler))
-    (runtime-logs (reconciler-runtime reconciler)
-                  uid container :tail tail :previous previous)))
+  (call-with-runtime-serialized
+   reconciler
+   (lambda ()
+     (runtime-logs (reconciler-runtime reconciler)
+                   uid container :tail tail :previous previous))))
 
 (defun reconciler-exec-url
     (reconciler uid container command &key stdin stdout stderr tty)
-  (bt:with-lock-held ((reconciler-lock reconciler))
-    (runtime-exec-url
-     (reconciler-runtime reconciler) uid container command
-     :stdin stdin :stdout stdout :stderr stderr :tty tty)))
-
-(defun reconciler-exec-sync
-    (reconciler uid container command &key (timeout 30))
-  (bt:with-lock-held ((reconciler-lock reconciler))
-    (runtime-exec-sync
-     (reconciler-runtime reconciler) uid container command :timeout timeout)))
+  (call-with-runtime-serialized
+   reconciler
+   (lambda ()
+     (runtime-exec-url
+      (reconciler-runtime reconciler) uid container command
+      :stdin stdin :stdout stdout :stderr stderr :tty tty))))
 
 (defun reconciler-start-exec-session
     (reconciler uid container command &key stdin stdout stderr tty)
-  (bt:with-lock-held ((reconciler-lock reconciler))
-    (runtime-start-exec-session
-     (reconciler-runtime reconciler) uid container command
-     :stdin stdin :stdout stdout :stderr stderr :tty tty)))
+  (call-with-runtime-serialized
+   reconciler
+   (lambda ()
+     (runtime-start-exec-session
+      (reconciler-runtime reconciler) uid container command
+      :stdin stdin :stdout stdout :stderr stderr :tty tty))))
 
 (defun reconciler-start-attach-session (reconciler uid container &key stdin stdout stderr tty)
   (runtime-start-attach-session (reconciler-runtime reconciler) uid container

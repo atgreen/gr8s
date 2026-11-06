@@ -945,34 +945,6 @@ its clients treat any other multi-byte frame as an error message."
         (json-object "apiVersion" "v1" "kind" "Status" "status" "Failure" "message" message
                      "reason" "InternalError" "code" 500)))))
 
-(defun serve-runtime-exec-sync (result stdout-p stderr-p)
-  (let ((key (hunchentoot:header-in* :sec-websocket-key))
-        (protocol (requested-kubernetes-websocket-protocol)))
-    (unless (and key (plusp (length key)))
-      (bad-exec-request "Pod exec requires Sec-WebSocket-Key"))
-    (unless protocol
-      (bad-exec-request "Pod exec requires a supported channel protocol"))
-    (setf (hunchentoot:return-code*) 101
-          (hunchentoot:content-type*) nil
-          (hunchentoot:header-out :connection) "Upgrade"
-          (hunchentoot:header-out :upgrade) "websocket"
-          (hunchentoot:header-out :sec-websocket-accept)
-          (websocket-accept-value key)
-          (hunchentoot:header-out :sec-websocket-protocol) protocol)
-    (let ((client (hunchentoot::start-output 101 nil)))
-      (finish-output client)
-      (when stdout-p
-        (write-kubernetes-channel-frame
-         client 1 (runtime-exec-result-stdout result)))
-      (when stderr-p
-        (write-kubernetes-channel-frame
-         client 2 (runtime-exec-result-stderr result)))
-      (let ((status (exec-status-frame-bytes (runtime-exec-result-exit-code result))))
-        (when status (write-kubernetes-channel-frame client 3 status)))
-      (write-websocket-frame
-       client 8 (make-array 2 :element-type '(unsigned-byte 8)
-                            :initial-contents '(3 232))))))
-
 (defvar *exec-input-reader-tag* nil
   "The catch tag of this thread's exec input reader, set only while its catch is established.")
 
@@ -1173,29 +1145,26 @@ already signalling, with its handlers unbound for the handler tests, and then fi
                (container-spec-name (aref (pod-containers pod) 0)))))
     (unless (exec-options-command options)
       (bad-exec-request "Pod exec requires at least one command argument"))
+    ;; kubelet's remotecommand.NewOptions refuses a stream with nothing to carry.
+    (unless (or (exec-options-stdin options) (exec-options-stdout options) (exec-options-stderr options))
+      (bad-exec-request "you must specify at least 1 of stdin, stdout, stderr"))
     (admit-pod-exec store namespace name options)
     (unless (find container (pod-all-containers pod)
                   :key #'container-spec-name :test #'string=)
       (bad-exec-request
        (format nil "container ~A is not valid for pod ~A" container name)))
-    (if (and (not (exec-options-stdin options))
-             (not (exec-options-tty options)))
-        (serve-runtime-exec-sync
-         (reconciler-exec-sync
+    ;; kubelet streams every exec, with or without input or a terminal, through the runtime's
+    ;; streaming server: output arrives as it is written and the command has no deadline.
+    (if (typep (reconciler-runtime reconciler) 'control-plane-runtime)
+        (serve-agent-exec-session
+         reconciler (pod-uid pod) container options)
+        (proxy-runtime-stream
+         (reconciler-exec-url
           reconciler (pod-uid pod) container (exec-options-command options)
-          :timeout 30)
-         (exec-options-stdout options)
-         (exec-options-stderr options))
-        (if (typep (reconciler-runtime reconciler) 'control-plane-runtime)
-            (serve-agent-exec-session
-             reconciler (pod-uid pod) container options)
-            (proxy-runtime-stream
-             (reconciler-exec-url
-              reconciler (pod-uid pod) container (exec-options-command options)
-              :stdin (exec-options-stdin options)
-              :stdout (exec-options-stdout options)
-              :stderr (exec-options-stderr options)
-              :tty (exec-options-tty options)))))))
+          :stdin (exec-options-stdin options)
+          :stdout (exec-options-stdout options)
+          :stderr (exec-options-stderr options)
+          :tty (exec-options-tty options))))))
 
 (defun attach-container-tty-p (pod container)
   "Return the TTY the container was created with, which an attach cannot change."

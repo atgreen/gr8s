@@ -142,6 +142,26 @@
     (bt:join-thread thread)
     (is (eq t finished))))
 
+(test node-log-reads-do-not-wait-for-reconciliation
+  ;; A node operation waits seconds for its agent; every Pod read and write would wait with it.
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0))
+           (reconciler (make-reconciler store (gr8s::make-control-plane-runtime store server)))
+           (finished nil)
+           (thread nil))
+      (unwind-protect
+           (bt:with-lock-held ((gr8s::reconciler-lock reconciler))
+             (setf thread
+                   (bt:make-thread
+                    (lambda ()
+                      (handler-case (reconciler-logs reconciler "absent-uid" "main")
+                        (runtime-error () nil))
+                      (setf finished t))))
+             (is-true (wait-until (lambda () finished) :timeout 5)))
+        (when thread (bt:join-thread thread))
+        (gr8s:stop-node-grpc-server server)))))
+
 (test fake-runtime-exec-records-the-complete-stream-request
   (let ((runtime (make-fake-runtime)))
     (gr8s::set-fake-runtime-exec-url

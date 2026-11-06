@@ -4,6 +4,14 @@
   "Connections served at once. Each open watch keeps one, and Hunchentoot's default of
 100 stops accepting at that point, leaving even short requests in a handshake timeout.")
 
+;; Clients read the status line, and some match its text: a kubectl request with a bad token
+;; logs it, and upstream's in-cluster config conformance spec expects "401 Unauthorized". These
+;; are the phrases Go's net/http (http.StatusText) sends where Hunchentoot's differ.
+(loop for (code phrase) in '((302 "Found") (401 "Unauthorized") (408 "Request Timeout")
+                             (414 "Request URI Too Long") (416 "Requested Range Not Satisfiable")
+                             (504 "Gateway Timeout") (505 "HTTP Version Not Supported"))
+      do (setf (gethash code hunchentoot::*http-reason-phrase-map*) phrase))
+
 (defclass gr8s-acceptor (hunchentoot:easy-acceptor)
   ((store :initarg :store :reader acceptor-store)
    (runtime :initarg :runtime :reader acceptor-runtime)
