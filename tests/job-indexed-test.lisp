@@ -359,3 +359,38 @@
         (is (equal "1" (gethash "failedIndexes" status)))
         (is (= 2 (gethash "failed" status))))
       (is (= 2 (length (indexed-test-pods store 1)))))))
+
+(test a-user-finalizer-holds-a-deleted-job-until-a-client-removes-it
+  ;; Upstream's TTLAfterFinished spec puts a finalizer on its Job and removes it in cleanup.
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable directory))
+    (let* ((now 3000000000) (gr8s::*job-clock* (lambda () now)))
+      (job-with-spec store "ttlSecondsAfterFinished" 10)
+      (gr8s::update-core-resource store "jobs" "alpha" "work"
+        (lambda (job) (setf (gethash "finalizers" (gethash "metadata" job)) #("example.com/hold")) job))
+      (gr8s::reconcile-jobs reconciler)
+      (finish-job-pods reconciler runtime store "Succeeded")
+      (reconcile-until-settled reconciler)
+      (incf now 11)
+      (reconcile-until-settled reconciler)
+      (dotimes (pass 4) (gr8s::reconcile-workloads reconciler) (reconcile-all reconciler))
+      (let ((metadata (gethash "metadata" (job-now store))))
+        (is-true (gethash "deletionTimestamp" metadata))
+        (is (equalp #("example.com/hold") (gethash "finalizers" metadata))))
+      (gr8s::update-core-resource store "jobs" "alpha" "work"
+        (lambda (job) (setf (gethash "finalizers" (gethash "metadata" job)) #()) job))
+      (signals gr8s::kubernetes-error (job-now store))))
+  ;; Background deletion is held the same way.
+  (with-job-controller-fixture (store runtime reconciler directory)
+    (declare (ignorable runtime reconciler directory))
+    (job-with-spec store)
+    (gr8s::update-core-resource store "jobs" "alpha" "work"
+      (lambda (job) (setf (gethash "finalizers" (gethash "metadata" job)) #("example.com/hold")) job))
+    (gr8s::delete-workload-resource store "jobs" "alpha" "work")
+    (is-true (gethash "deletionTimestamp" (gethash "metadata" (job-now store))))
+    (signals gr8s::kubernetes-error
+      (gr8s::update-core-resource store "jobs" "alpha" "work"
+        (lambda (job) (setf (gethash "finalizers" (gethash "metadata" job)) #("example.com/hold" "example.com/more")) job)))
+    (gr8s::update-core-resource store "jobs" "alpha" "work"
+      (lambda (job) (setf (gethash "finalizers" (gethash "metadata" job)) #()) job))
+    (signals gr8s::kubernetes-error (job-now store))))
