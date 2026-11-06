@@ -9,6 +9,9 @@ does with them. The test process runs in the host cgroup tree, which the socket
 load balancer governs, so it is itself a node-local client:
 
 * a ClusterIP and its externalIPs reach the Service's Pods;
+* an unconnected UDP sendto(2) to a ClusterIP is load balanced, and the reply comes
+  back from the ClusterIP, as it does for a connected socket;
+* ClientIP session affinity keeps a client on its backend when another backend joins;
 * internalTrafficPolicy Local keeps a ClusterIP on this node's endpoints, read from a
   hand-written EndpointSlice that also lists an unreachable endpoint on another node;
 * a Local LoadBalancer's healthCheckNodePort answers 200 with this node's ready
@@ -131,6 +134,23 @@ def service(name, ports, **spec):
 
 
 HTTP = {"name": "http", "port": 80, "targetPort": 8080, "protocol": "TCP"}
+UDP = {"name": "udp", "port": 81, "targetPort": 8081, "protocol": "UDP"}
+
+
+def udp_hostname(address, port, connected):
+    """Ask agnhost's UDP server for its hostname; return (reply, source address) or (None, error)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+        client.settimeout(2)
+        try:
+            if connected:
+                client.connect((address, port))
+                client.send(b"hostname")
+            else:
+                client.sendto(b"hostname", (address, port))
+            data, source = client.recvfrom(256)
+            return data.decode().strip(), source
+        except OSError as error:
+            return None, str(error)
 
 
 def main():
@@ -168,7 +188,7 @@ def main():
         addresses = {name: cluster.get("pod", name)["status"]["podIP"] for name in ("web-0", "web-1")}
 
         # A ClusterIP and its external IP, both through the socket hook.
-        cluster.apply(service("web", [HTTP], selector={"app": "web"}, externalIPs=[EXTERNAL_IP]))
+        cluster.apply(service("web", [HTTP, UDP], selector={"app": "web"}, externalIPs=[EXTERNAL_IP]))
         cluster_ip = cluster.get("service", "web")["spec"]["clusterIP"]
         wait_for("ClusterIP answers", 120, lambda: http_get(cluster_ip, 80, "/hostname")[0] == 200)
         hosts = {http_get(cluster_ip, 80, "/hostname")[1] for _ in range(30)}
@@ -177,6 +197,29 @@ def main():
                             lambda: (lambda result: result if result[0] == 200 else None)(
                                 http_get(EXTERNAL_IP, 80, "/hostname")))
         check("externalIPReachesThePods", external[1] in ("web-0", "web-1"), external)
+
+        # Unconnected and connected UDP: balanced, and answered from the ClusterIP.
+        wait_for("UDP ClusterIP answers", 60, lambda: udp_hostname(cluster_ip, 81, False)[0])
+        for connected in (False, True):
+            replies = [udp_hostname(cluster_ip, 81, connected) for _ in range(30)]
+            name = "connectedUDP" if connected else "unconnectedUDP"
+            check(name + "IsBalanced", {reply for reply, _ in replies} == {"web-0", "web-1"}, replies[:6])
+            check(name + "RepliesFromClusterIP", all(source == (cluster_ip, 81) for _, source in replies),
+                  sorted({str(source) for _, source in replies}))
+
+        # ClientIP affinity holds this client on its backend while a new backend joins.
+        cluster.apply(service("sticky", [HTTP], selector={"app": "web"}, sessionAffinity="ClientIP"))
+        sticky_ip = cluster.get("service", "sticky")["spec"]["clusterIP"]
+        wait_for("affinity ClusterIP answers", 60, lambda: http_get(sticky_ip, 80, "/hostname")[0] == 200)
+        held = {http_get(sticky_ip, 80, "/hostname")[1] for _ in range(10)}
+        check("affinityHoldsAClient", len(held) == 1, sorted(held))
+        cluster.apply(server_pod("web-2"))
+        wait_for("third backend in the slice", 300, lambda: len([
+            endpoint for slice_ in cluster.get("endpointslices", "-l", "kubernetes.io/service-name=sticky")["items"]
+            for endpoint in slice_.get("endpoints") or [] if endpoint.get("conditions", {}).get("ready")]) == 3)
+        time.sleep(3)
+        after = {http_get(sticky_ip, 80, "/hostname")[1] for _ in range(10)}
+        check("affinitySurvivesANewBackend", after == held, {"before": sorted(held), "after": sorted(after)})
 
         # internalTrafficPolicy Local over a slice listing a remote, unreachable endpoint.
         def manual(policy):
@@ -215,11 +258,11 @@ def main():
         check("localLoadBalancerHasHealthCheckNodePort", isinstance(health, int), lb)
         ready = wait_for("health check 200", 60, lambda: (lambda r: r if r[0] == 200 else None)(
             http_get("127.0.0.1", health, "/healthz")))
-        check("healthCheckReportsLocalEndpoints", json.loads(ready[1]).get("localEndpoints") == 2, ready)
+        check("healthCheckReportsLocalEndpoints", json.loads(ready[1]).get("localEndpoints") == 3, ready)
         node_port = lb["ports"][0]["nodePort"]
         local_origin = wait_for("Local node port from this node", 60, lambda: (lambda r: r if r[0] == 200 else None)(
             http_get("127.0.0.1", node_port, "/hostname")))
-        check("localNodePortServesThisNodesClients", local_origin[1] in ("web-0", "web-1"), local_origin)
+        check("localNodePortServesThisNodesClients", local_origin[1] in ("web-0", "web-1", "web-2"), local_origin)
         cluster.apply(service("lb", [HTTP], type="LoadBalancer", externalTrafficPolicy="Local",
                               healthCheckNodePort=health, selector={"app": "nothing"}))
         empty = wait_for("health check 503", 60, lambda: (lambda r: r if r[0] == 503 else None)(

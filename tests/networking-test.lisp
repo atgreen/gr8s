@@ -449,9 +449,10 @@
         (gr8s::stop-host-port-forwarders forwarders)))))
 
 (test service-lb-program-compiles-with-affinity
+  ;; Service, backend, affinity index, affinity and UDP reverse maps; connect4, sendmsg4 and recvmsg4.
   (multiple-value-bind (maps programs) (gr8s::compile-service-lb)
-    (is (= 3 (length maps)))
-    (is (= 1 (length programs)))))
+    (is (= 5 (length maps)))
+    (is (= 3 (length programs)))))
 
 ;;; Traffic policies, external IPs and health check node ports
 

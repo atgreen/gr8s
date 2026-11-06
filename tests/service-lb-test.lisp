@@ -28,12 +28,12 @@
                    (gr8s::service-lb-vip-key "10.96.0.11" 80)))))
 
 (test service-lb-service-value-byte-layout
-  ;; count u16 @0, affinity u16 @2, base slot u32 @4, timeout u32 @8, epoch u32 @12,
+  ;; count u16 @0, affinity u16 @2, base slot u32 @4, timeout u32 @8, reserved u32 @12,
   ;; all little-endian (logical integers).
   (is (equalp #(#x01 #x00 #x00 #x00 #x07 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x00)
               (gr8s::service-lb-service-value 1 7)))
-  (is (equalp #(#x00 #x02 #x01 #x00 #xD2 #x04 #x00 #x00 #x10 #x0E #x00 #x00 #x34 #x12 #x00 #x00)
-              (gr8s::service-lb-service-value 512 1234 :affinity-timeout 3600 :epoch #x1234))))
+  (is (equalp #(#x00 #x02 #x01 #x00 #xD2 #x04 #x00 #x00 #x10 #x0E #x00 #x00 #x00 #x00 #x00 #x00)
+              (gr8s::service-lb-service-value 512 1234 :affinity-timeout 3600))))
 
 (test service-lb-plan-keys-by-protocol-and-carries-affinity
   ;; The same port over two protocols gets two VIP entries, and ClientIP affinity
@@ -84,8 +84,8 @@
 
 (test service-lb-program-compiles-in-process
   (multiple-value-bind (map-specs prog-specs) (gr8s::compile-service-lb)
-    ;; Exactly the two maps, with the key/value sizes the encoders target.
-    (is (= 3 (length map-specs)))
+    ;; Exactly the five maps, with the key/value sizes the encoders target.
+    (is (= 5 (length map-specs)))
     (let ((service (find "gr8s_service_v4" map-specs
                          :key (lambda (s) (getf s :name)) :test #'string=))
           (backend (find "gr8s_backend_v4" map-specs
@@ -96,9 +96,10 @@
       (is (= 16 (getf service :value-size)))
       (is (= 4 (getf backend :key-size)))
       (is (= 8 (getf backend :value-size))))
-    ;; One connect4 program with real, 8-byte-aligned instruction bytes and the
-    ;; map-fd relocations the loader patches in (one per map lookup, at least).
-    (is (= 1 (length prog-specs)))
+    ;; A connect4 program first, then sendmsg4 and recvmsg4, with real, 8-byte-aligned
+    ;; instruction bytes and the map-fd relocations the loader patches in (one per map
+    ;; lookup, at least).
+    (is (= 3 (length prog-specs)))
     (let* ((prog (first prog-specs))
            (insns (getf prog :insns)))
       (is (string= "cgroup/connect4" (getf prog :section)))
@@ -138,7 +139,8 @@
                               (is (eq :program-specs specs))
                               (setf load-saw-maps maps)
                               (list (cons "gr8s_service_lb" (fake-lb-program 900003))))
-             :attach (lambda (program-fd cgroup) (setf attach-args (list program-fd cgroup)) :attachment))))
+             :attach (lambda (program-fd cgroup attach-type)
+                       (setf attach-args (list program-fd cgroup attach-type)) :attachment))))
       ;; Both maps are pinned, under the given bpffs directory, by their names.
       (is (= 2 (length pinned)))
       (is (member "/run/gr8s/bpf/service-lb/gr8s_service_v4" pinned
@@ -149,8 +151,8 @@
       ;; discoverable maps): the loader sees the already-created maps.
       (is (= 2 (length load-saw-maps)))
       ;; The program is attached to the given cgroup by its loaded fd.
-      (is (equal (list 900003 "/sys/fs/cgroup/gr8s") attach-args))
-      (is (eq :attachment (gr8s::service-lb-dataplane-attachment dataplane)))
+      (is (equal (list 900003 "/sys/fs/cgroup/gr8s" whistler/loader:+bpf-cgroup-inet4-connect+) attach-args))
+      (is (equal '(:attachment) (gr8s::service-lb-dataplane-attachment dataplane)))
       (is (not (null (gr8s::service-lb-service-table dataplane))))
       (is (not (null (gr8s::service-lb-backend-table dataplane)))))))
 
@@ -168,7 +170,7 @@
        :remove-path (lambda (path) (push (namestring path) removed))
        :load-programs (lambda (specs maps) (declare (ignore specs maps))
                         (error "verifier rejected the program"))
-       :attach (lambda (program-fd cgroup) (declare (ignore program-fd cgroup)) :attachment)))
+       :attach (lambda (program-fd cgroup attach-type) (declare (ignore program-fd cgroup attach-type)) :attachment)))
     ;; A failed load removes every pin it had created.
     (is (= 2 (length removed)))
     (is (member "/run/gr8s/bpf/service-lb/gr8s_service_v4" removed :test #'string=))
@@ -182,7 +184,7 @@
                     :maps (list (fake-lb-map "gr8s_service_v4" 900001)
                                 (fake-lb-map "gr8s_backend_v4" 900002))
                     :program (fake-lb-program 900003)
-                    :attachment :attachment)))
+                    :attachment '(:attachment))))
     (gr8s::stop-service-lb-dataplane
      dataplane
      :detach (lambda (attachment) (push attachment detached))
@@ -431,3 +433,54 @@
           (gethash "labels" (gethash "metadata" headless))
           (gr8s::core-object "service.kubernetes.io/headless" ""))
     (is (null (gr8s::service-lb-plan (list other headless) (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080))))))))
+
+;;; Unconnected UDP and affinity that follows its backend
+
+(test service-lb-program-compiles-every-socket-hook
+  ;; connect4 and sendmsg4 steer, recvmsg4 restores the Service address on UDP replies.
+  (multiple-value-bind (maps programs) (gr8s::compile-service-lb)
+    (is (equal '("gr8s_service_v4" "gr8s_backend_v4" "gr8s_backend_index_v4" "gr8s_affinity_v4" "gr8s_reverse_v4")
+               (mapcar (lambda (spec) (getf spec :name)) maps)))
+    (is (equal '("cgroup/connect4" "cgroup/sendmsg4" "cgroup/recvmsg4")
+               (mapcar (lambda (spec) (getf spec :section)) programs)))
+    (is (equal (list whistler/loader:+bpf-cgroup-inet4-connect+ whistler/loader:+bpf-cgroup-udp4-sendmsg+ 19)
+               (mapcar (lambda (spec) (gr8s::service-lb-attach-type (getf spec :section))) programs)))))
+
+(test service-lb-affinity-index-finds-each-backend-by-identity
+  ;; An affinity Service indexes each backend's offset by (service key, backend value), so
+  ;; a client's held backend is found again wherever a change to the set moved it.
+  (multiple-value-bind (vip-key value backends indexed)
+      (gr8s::service-lb-entries "10.96.0.10" 80 5 '(("10.88.1.5" . 8080) ("10.88.1.6" . 8080)) :affinity-timeout 60)
+    (declare (ignore value))
+    (is (= 2 (length backends)))
+    (is (equalp (gr8s::service-lb-index-key vip-key (gr8s::service-lb-backend-value "10.88.1.6" 8080))
+                (car (second indexed))))
+    (is (equalp #(1 0 0 0) (cdr (second indexed))))
+    (is (= 16 (length (car (first indexed))))))
+  ;; Without affinity there is nothing to index.
+  (is (null (nth-value 3 (gr8s::service-lb-entries "10.96.0.10" 80 0 '(("10.88.1.5" . 8080)))))))
+
+(test service-lb-converge-retires-index-entries-of-departed-backends
+  (let* ((index-map (fake-lb-map "gr8s_backend_index_v4" 3))
+         (controller (gr8s::make-service-lb-controller
+                      nil (gr8s::%make-service-lb-dataplane
+                           :maps (list (fake-lb-map "gr8s_service_v4" 1) (fake-lb-map "gr8s_backend_v4" 2) index-map))))
+         (service (fake-lb-service "10.96.0.10" :ports '(80))))
+    (setf (gethash "sessionAffinity" (gethash "spec" service)) "ClientIP")
+    (let ((writes nil))
+      (gr8s::converge-service-lb-controller
+       controller :list-services (lambda () (list service))
+       :endpoints-of (lambda (s p) (declare (ignore s p)) '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))
+       :update (lambda (m k v) (declare (ignore k v)) (push (whistler/loader:map-info-fd m) writes))
+       :delete (constantly nil))
+      ;; Backends, then their index entries, then the Service.
+      (is (equal '(2 2 3 3 1) (nreverse writes))))
+    (let ((deletes nil))
+      (gr8s::converge-service-lb-controller
+       controller :list-services (lambda () (list service))
+       :endpoints-of (lambda (s p) (declare (ignore s p)) '(("10.88.1.6" 8080)))
+       :update (constantly nil)
+       :delete (lambda (m k) (push (list (whistler/loader:map-info-fd m) k) deletes)))
+      (is (member (list 3 (gr8s::service-lb-index-key (gr8s::service-lb-vip-key "10.96.0.10" 80)
+                                                      (gr8s::service-lb-backend-value "10.88.1.5" 8080)))
+                  deletes :test #'equalp)))))

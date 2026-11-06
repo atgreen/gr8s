@@ -3,7 +3,7 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Encode ClusterIP Service load-balancing state into the byte layout the
-;;;; Whistler cgroup/connect4 program expects (src/service-lb-program.lisp).
+;;;; Whistler socket hooks expect (src/service-lb-program.lisp).
 ;;;; The agent writes these entries into the pinned gr8s_service_v4 and
 ;;;; gr8s_backend_v4 maps; the in-kernel program reads them to rewrite a
 ;;;; connect(2) from a Service VIP:port to a chosen backend Pod IP:targetPort.
@@ -85,9 +85,9 @@ address octets read little-endian, then serializes that scalar; this reproduces 
            (key (logior (ash (service-lb-protocol-number protocol) 48) (ash vip 16) vport)))
       (service-lb-bytes key 8))))
 
-(defun service-lb-service-value (backend-count base-slot &key affinity-timeout (epoch 0))
+(defun service-lb-service-value (backend-count base-slot &key affinity-timeout)
   "Return the 16-octet gr8s_service_v4 value: count u16 @0, affinity flag u16 @2, base
-slot u32 @4, affinity timeout seconds u32 @8, backend set epoch u32 @12."
+slot u32 @4, affinity timeout seconds u32 @8, and a reserved zero u32 @12."
   (unless (typep backend-count '(integer 0 65535))
     (error "Service backend count ~S is out of range" backend-count))
   (let ((buffer (make-array 16 :element-type '(unsigned-byte 8) :initial-element 0)))
@@ -95,13 +95,7 @@ slot u32 @4, affinity timeout seconds u32 @8, backend set epoch u32 @12."
     (replace buffer (service-lb-bytes (if affinity-timeout 1 0) 2) :start1 2)
     (replace buffer (service-lb-bytes base-slot 4) :start1 4)
     (replace buffer (service-lb-bytes (or affinity-timeout 0) 4) :start1 8)
-    (replace buffer (service-lb-bytes epoch 4) :start1 12)
     buffer))
-
-(defun service-lb-backend-epoch (backends)
-  "Identify a set of (ip . port) BACKENDS, so client affinity ends when the set changes.
-The program compares only 16 bits; a stale match still lands on a live backend."
-  (logand (sxhash (format nil "~S" backends)) #xffff))
 
 (defun service-lb-backend-key (slot)
   "Return the 4-octet gr8s_backend_v4 key for SLOT."
@@ -118,18 +112,28 @@ network byte order so the program copies them verbatim into the socket address."
           (aref buffer 5) (ldb (byte 8 0) port))
     buffer))
 
+(defun service-lb-index-key (vip-key backend-value)
+  "Return the 16-octet gr8s_backend_index_v4 key: the service key, then the backend value
+that identifies the backend."
+  (concatenate '(vector (unsigned-byte 8)) vip-key backend-value))
+
 (defun service-lb-entries (address port base-slot backends &key (protocol "TCP") affinity-timeout)
   "Plan the map entries for one ClusterIP:PORT/PROTOCOL over BACKENDS.
 BACKENDS is a list of (ip . target-port) conses, assigned consecutive slots from
 BASE-SLOT.  AFFINITY-TIMEOUT, in seconds, keeps each client on one backend while
-it is active.  Returns three values: the VIP key, the service value, and a list
-of (backend-key . backend-value) octet-vector pairs."
-  (values
-   (service-lb-vip-key address port protocol)
-   (service-lb-service-value (length backends) base-slot
-                             :affinity-timeout affinity-timeout
-                             :epoch (if affinity-timeout (service-lb-backend-epoch backends) 0))
-   (loop for (ip . target-port) in backends
-         for slot from base-slot
-         collect (cons (service-lb-backend-key slot)
-                       (service-lb-backend-value ip target-port)))))
+it is active.  Returns four values: the VIP key, the service value, a list of
+(backend-key . backend-value) octet-vector pairs, and, for an affinity Service, a
+list of (index-key . offset) pairs that find each backend's offset by its identity."
+  (let ((vip-key (service-lb-vip-key address port protocol)))
+    (values
+     vip-key
+     (service-lb-service-value (length backends) base-slot :affinity-timeout affinity-timeout)
+     (loop for (ip . target-port) in backends
+           for slot from base-slot
+           collect (cons (service-lb-backend-key slot)
+                         (service-lb-backend-value ip target-port)))
+     (when affinity-timeout
+       (loop for (ip . target-port) in backends
+             for offset from 0
+             collect (cons (service-lb-index-key vip-key (service-lb-backend-value ip target-port))
+                           (service-lb-bytes offset 4)))))))

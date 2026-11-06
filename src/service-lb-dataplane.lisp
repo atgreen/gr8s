@@ -3,9 +3,9 @@
 ;;;;
 ;;;; Purpose:
 ;;;; Own the node-local lifecycle of the ClusterIP socket load balancer: JIT the
-;;;; Whistler cgroup/connect4 program in-process, create and pin its maps on
-;;;; bpffs, load the program, and attach it to the node cgroup so every Pod's
-;;;; connect(2) is steered in-kernel.  No ELF is produced; the full compiler is
+;;;; Whistler connect4, sendmsg4 and recvmsg4 programs in-process, create and pin
+;;;; their maps on bpffs, load the programs, and attach them to the node cgroup so
+;;;; every Pod's connect(2) and unconnected UDP sendmsg(2) is steered in-kernel.  No ELF is produced; the full compiler is
 ;;;; already in the image (see src/service-lb-program.lisp).  Populating the
 ;;;; maps from Service/EndpointSlice state, and retiring the userspace proxy,
 ;;;; belong to the controller layer that drives this manager.
@@ -22,9 +22,43 @@
   cgroup-path
   pin-directory
   maps        ; alist of (name . map-info), e.g. "gr8s_service_v4"
-  program     ; prog-info for gr8s_service_lb
-  attachment  ; cgroup attachment handle returned by attach-cgroup
+  program     ; prog-info for gr8s_service_lb, the connect4 hook
+  programs    ; alist of (name . prog-info) for every hook, connect4 first
+  attachment  ; the cgroup attachment handles returned by attach-cgroup, one per hook
   (lock (bt:make-lock "gr8s service LB dataplane")))
+
+(defparameter +bpf-cgroup-udp4-recvmsg+ 19
+  "BPF_CGROUP_UDP4_RECVMSG, which Whistler's loader does not name.")
+
+(defun service-lb-attach-type (section)
+  "The cgroup attach type of the socket address hook at SECTION."
+  (cond ((equal section "cgroup/connect4") whistler/loader:+bpf-cgroup-inet4-connect+)
+        ((equal section "cgroup/sendmsg4") whistler/loader:+bpf-cgroup-udp4-sendmsg+)
+        ((equal section "cgroup/recvmsg4") +bpf-cgroup-udp4-recvmsg+)
+        (t (error "No socket address hook for section ~S" section))))
+
+(defun load-service-lb-programs (specs maps)
+  "Load the compiled program SPECS against MAPS, as Whistler's session loader does, but
+with each hook's attach type chosen here: that loader cannot place a recvmsg4 program.
+Returns an alist of (name . prog-info)."
+  (let ((descriptors (mapcar (lambda (entry) (cons (car entry) (whistler/loader:map-info-fd (cdr entry)))) maps)))
+    (mapcar
+     (lambda (spec)
+       (let ((instructions (copy-seq (getf spec :insns))) (section (getf spec :section)) (name (getf spec :name)))
+         ;; Each relocation is (instruction-offset map-index): a BPF_LD_IMM64 whose source
+         ;; register becomes BPF_PSEUDO_MAP_FD and whose immediate the map's descriptor.
+         (loop for (offset index) in (getf spec :relocs)
+               for descriptor = (cdr (assoc (car (nth index maps)) descriptors :test #'string=))
+               do (setf (aref instructions (+ offset 1)) (logior (logand (aref instructions (+ offset 1)) #x0f) (ash 1 4)))
+                  (loop for byte from 0 below 4
+                        do (setf (aref instructions (+ offset 4 byte)) (ldb (byte 8 (* 8 byte)) descriptor))))
+         (cons name (whistler/loader::make-prog-info
+                     :name name :section-name section
+                     :type whistler/loader:+bpf-prog-type-cgroup-sock-addr+ :insns instructions
+                     :fd (whistler/loader::load-program instructions whistler/loader:+bpf-prog-type-cgroup-sock-addr+
+                                                        (getf spec :license)
+                                                        :expected-attach-type (service-lb-attach-type section))))))
+     specs)))
 
 (defun service-lb-pin-directory (state-directory)
   "The bpffs directory under STATE-DIRECTORY that holds the pinned LB maps."
@@ -51,13 +85,12 @@
     (cgroup-path pin-directory
      &key (compile #'compile-service-lb)
           (create-maps (lambda (specs) (whistler/loader::session-create-maps specs)))
-          (load-programs (lambda (specs maps) (whistler/loader::session-load-progs specs maps)))
+          (load-programs #'load-service-lb-programs)
           (ensure-directory #'ensure-directories-exist)
           (pin-map #'service-lb-pin-map)
           (remove-path #'uiop:delete-file-if-exists)
-          (attach (lambda (program-fd cgroup)
-                    (whistler/loader:attach-cgroup
-                     program-fd cgroup whistler/loader:+bpf-cgroup-inet4-connect+))))
+          (attach (lambda (program-fd cgroup attach-type)
+                    (whistler/loader:attach-cgroup program-fd cgroup attach-type))))
   "Compile, create, pin, load, and attach the socket LB on this node.
 CGROUP-PATH is the cgroup2 directory whose subtree the program governs (the
 node's Pod cgroup root).  PIN-DIRECTORY is a bpffs directory for the map pins.
@@ -76,12 +109,24 @@ decides whether a dataplane failure is fatal to the node."
                 (funcall pin-map (cdr entry) path)
                 (push (namestring path) pinned)))
             (let* ((programs (funcall load-programs program-specs maps))
-                   (program (cdr (first programs)))
-                   (attachment (funcall attach (whistler/loader:prog-info-fd program) cgroup-path)))
+                   (attachments nil))
+              (handler-bind ((error (lambda (condition)
+                                      (declare (ignore condition))
+                                      ;; Detach what did attach, and close every program.
+                                      (dolist (attachment attachments)
+                                        (ignore-errors (whistler/loader:detach attachment)))
+                                      (dolist (entry programs)
+                                        (let ((fd (whistler/loader:prog-info-fd (cdr entry))))
+                                          (when (and (integerp fd) (plusp fd)) (ignore-errors (sb-posix:close fd))))))))
+                (dolist (entry programs)
+                  (push (funcall attach (whistler/loader:prog-info-fd (cdr entry)) cgroup-path
+                                 (service-lb-attach-type (whistler/loader::prog-info-section-name (cdr entry))))
+                        attachments)))
               (%make-service-lb-dataplane
                :cgroup-path cgroup-path
                :pin-directory (namestring (uiop:ensure-directory-pathname pin-directory))
-               :maps maps :program program :attachment attachment)))
+               :maps maps :program (cdr (first programs)) :programs programs
+               :attachment (nreverse attachments))))
         (error (condition)
           ;; Roll back pins and map fds so a half-start leaves nothing behind.
           (dolist (path pinned) (ignore-errors (funcall remove-path path)))
@@ -119,13 +164,17 @@ whose backend slots are not yet present."
   "Detach the program and release its fds.  When REMOVE-PINS is true (the
 default), also remove the pinned maps; pass NIL to keep them across a restart."
   (bt:with-lock-held ((service-lb-dataplane-lock dataplane))
-    (when (service-lb-dataplane-attachment dataplane)
-      (ignore-errors (funcall detach (service-lb-dataplane-attachment dataplane)))
-      (setf (service-lb-dataplane-attachment dataplane) nil))
-    (when (service-lb-dataplane-program dataplane)
-      (let ((fd (whistler/loader:prog-info-fd (service-lb-dataplane-program dataplane))))
-        (when (and fd (plusp fd)) (ignore-errors (sb-posix:close fd))))
-      (setf (service-lb-dataplane-program dataplane) nil))
+    (let ((attachments (service-lb-dataplane-attachment dataplane)))
+      (dolist (attachment (if (listp attachments) attachments (list attachments)))
+        (ignore-errors (funcall detach attachment))))
+    (setf (service-lb-dataplane-attachment dataplane) nil)
+    (dolist (program (remove-duplicates
+                      (remove nil (cons (service-lb-dataplane-program dataplane)
+                                        (mapcar #'cdr (service-lb-dataplane-programs dataplane))))))
+      (let ((fd (whistler/loader:prog-info-fd program)))
+        (when (and fd (plusp fd)) (ignore-errors (sb-posix:close fd)))))
+    (setf (service-lb-dataplane-program dataplane) nil
+          (service-lb-dataplane-programs dataplane) nil)
     (dolist (entry (service-lb-dataplane-maps dataplane))
       (let ((fd (whistler/loader:map-info-fd (cdr entry))))
         (when (and fd (plusp fd)) (ignore-errors (sb-posix:close fd))))
