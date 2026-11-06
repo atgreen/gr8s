@@ -696,18 +696,20 @@ snapshot application."
                          (loop for key being the hash-keys of (node-ipam-allocations ipam)
                                  using (hash-value address)
                                collect (list (car key) (cdr key) address)))))
+        ;; Same-node Pod->Pod delivery table (epic podster-pnd): every local Pod
+        ;; gets the node-wide {dest IP -> ifindex/MAC} table so the egress guard
+        ;; can redirect in-cluster traffic past the host firewall's FORWARD reject.
+        ;; Runs first and fail-soft so an unsupported NetworkPolicy below (which
+        ;; aborts the egress-policy convergence) can't skip it.
+        (converge-node-local-pod-delivery
+         endpoints
+         :directory-fn (lambda (sandbox)
+                         (nth-value 2 (cni-pin-paths root sandbox))))
         (converge-pod-egress-policies
          specs endpoints
          :pod-finder (lambda (address)
                        (let ((id (gethash address ip-map)))
                          (if id (values (car id) (cdr id)) (values nil nil))))
-         :directory-fn (lambda (sandbox)
-                         (nth-value 2 (cni-pin-paths root sandbox))))
-        ;; Same-node Pod->Pod delivery table (epic podster-pnd): every local Pod
-        ;; gets the node-wide {dest IP -> ifindex/MAC} table so the egress guard
-        ;; can redirect in-cluster traffic past the host firewall's FORWARD reject.
-        (converge-node-local-pod-delivery
-         endpoints
          :directory-fn (lambda (sandbox)
                          (nth-value 2 (cni-pin-paths root sandbox))))))))
 
