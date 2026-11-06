@@ -600,8 +600,13 @@
                         (list "restartPolicy" "Never"
                               "restartPolicyRules" (vector (gr8s::core-object "action" "Restart")))
                         (list "restartPolicy" "Never"
-                              "restartPolicyRules" (vector (gr8s::core-object "action" "RestartAllContainers"
+                              "restartPolicyRules" (vector (gr8s::core-object "action" "RestartEverything"
                                                                               "exitCodes" (gr8s::core-object "operator" "In" "values" #(42)))))))
     (signals kubernetes-error (apply #'restart-rules-pod "Never" fields)))
+  ;; RestartAllContainersOnContainerExits is beta and on in v1.37, so validateContainerRestartPolicy
+  ;; (pkg/apis/core/validation/validation.go) accepts the RestartAllContainers action.
+  (finishes (restart-rules-pod "Never" "restartPolicy" "Never"
+                               "restartPolicyRules" (vector (gr8s::core-object "action" "RestartAllContainers"
+                                                                               "exitCodes" (gr8s::core-object "operator" "In" "values" #(42))))))
   (finishes (restart-rules-pod "Never" "restartPolicy" "OnFailure"
                                "restartPolicyRules" (vector (exit-code-rule "In" 42 43) (exit-code-rule "NotIn" 1)))))
