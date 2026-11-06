@@ -104,6 +104,11 @@ def main():
             return {"containerID": statuses[0]["containerID"], "restartCount": statuses[0]["restartCount"]}
         return None
 
+    def owned_shims():
+        """Shims serving this cluster's containerd."""
+        return [line for line in subprocess.check_output(["ps", "-eo", "args="], text=True).splitlines()
+                if "containerd-shim" in line and str(root) in line]
+
     def log_text():
         return log_path.read_text(errors="replace")
 
@@ -161,6 +166,7 @@ def main():
             before = {name: running(name) for name in names}
         report["passed"] = True
     except BaseException as error:
+        report["passed"] = False
         report["error"] = repr(error)
         raise
     finally:
@@ -169,6 +175,9 @@ def main():
                 request(f"/api/v1/namespaces/default/pods/{name['metadata']['name']}", "DELETE")
             try:
                 wait(lambda: not request("/api/v1/namespaces/default/pods")[1].get("items"), 120, "Pods deleted")
+                # The API forgets a Pod before the agent has torn its sandbox down,
+                # and gr8s leaves running shims alone when it exits.
+                wait(lambda: not owned_shims(), 300, "Pod sandboxes torn down", interval=1)
             except Exception as error:
                 report["cleanupError"] = repr(error)
             native.terminate()
@@ -178,8 +187,9 @@ def main():
                 native.kill()
                 report["nativeExitCode"] = native.wait()
         report["containerdRemaining"] = containerd_pids()
-        report["ownedShimsRemaining"] = [line for line in subprocess.check_output(
-            ["ps", "-eo", "args="], text=True).splitlines() if "containerd-shim" in line and str(root) in line]
+        if report.get("cleanupError") or report.get("nativeExitCode") not in (0, None):
+            report["passed"] = False
+        report["ownedShimsRemaining"] = owned_shims()
         (root / "report.json").write_text(json.dumps(report, indent=2))
         print(json.dumps(report, indent=2), flush=True)
 
