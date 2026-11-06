@@ -1,5 +1,20 @@
 (require :asdf)
 
+;; The binary keeps the heap size of the SBCL that dumps it, so dump from one with the
+;; size gr8s needs: a control plane and its local agent outgrow SBCL's 1 GB default.
+;; "--dynamic-space-size SIZE" before gr8s's own arguments still overrides it.
+(defparameter *gr8s-dynamic-space-size* (* 2 1024 1024 1024))
+
+#+sbcl
+(when (< (sb-ext:dynamic-space-size) *gr8s-dynamic-space-size*)
+  (uiop:quit
+   (sb-ext:process-exit-code
+    (sb-ext:run-program sb-ext:*runtime-pathname*
+                        (list "--core" (namestring sb-ext:*core-pathname*)
+                              "--dynamic-space-size" (format nil "~DMB" (floor *gr8s-dynamic-space-size* (* 1024 1024)))
+                              "--noinform" "--non-interactive" "--load" "scripts/build-native.lisp")
+                        :output t :error t :input t))))
+
 (asdf:load-asd (truename "gr8s.asd"))
 (asdf:load-system :gr8s)
 (gr8s::embed-runtime-assets #P"build/containerd/")
@@ -10,7 +25,12 @@
 (setf gr8s:+gr8s-version+ (version-string:make-version-string :gr8s :include-git-p t))
 
 (defun gr8s-native-main ()
-  (uiop:quit (gr8s:main (uiop:command-line-arguments))))
+  ;; The runtime reads only a leading --dynamic-space-size or --control-stack-size, and
+  ;; passes the rest on. Older wrappers end the runtime's options explicitly.
+  (let ((arguments (uiop:command-line-arguments)))
+    (uiop:quit (gr8s:main (if (equal (first arguments) "--end-runtime-options")
+                              (rest arguments)
+                              arguments)))))
 
 (ensure-directories-exist #P"build/")
 
@@ -19,6 +39,7 @@
  #P"build/gr8s.bin"
  :toplevel #'gr8s-native-main
  :executable t
+ :save-runtime-options :accept-runtime-options
  :compression t
  :purify t)
 

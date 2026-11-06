@@ -87,8 +87,10 @@
         (loop for family across families do (setf (gethash (list family "[]") groups) (list #() nil)))))
     groups))
 
-(defun reconcile-service-endpointslices (store service)
-  "Commit one Service's generated slices atomically without changing manually managed slices. Caller holds the store lock."
+(defun reconcile-service-endpointslices (store service &key plan)
+  "Commit one Service's generated slices atomically without changing manually managed slices. Caller holds the store lock.
+With PLAN, commit nothing and return the writes, as (key object old) lists, the deletions, as
+(name old) lists, and the revision they were planned at."
   (let* ((metadata (gethash "metadata" service)) (namespace (gethash "namespace" metadata))
          (name (gethash "name" metadata)) (resources (copy-core-resource-index store))
          (revision (pod-store-resource-revision store)) (groups (endpointslice-service-groups store service))
@@ -101,7 +103,8 @@
                                                (let ((reference (gethash "targetRef" (aref endpoints 0))))
                                                  (if (hash-table-p reference) (gethash "uid" reference "") ""))
                                                (gethash "name" (gethash "metadata" object)))))))
-         (used (make-hash-table :test #'equal)))
+         (used (make-hash-table :test #'equal))
+         (planned-writes nil) (planned-deletes nil) (planned-at revision))
     (dolist (key (sort (loop for key being the hash-keys of groups collect key) #'string< :key #'prin1-to-string))
       (destructuring-bind (ports endpoints) (gethash key groups)
         (let ((remaining (nreverse endpoints)) (first t))
@@ -133,23 +136,78 @@
                                                   "endpoints" (coerce chunk 'vector)) namespace (gethash "name" slice-meta)))
                             (resource-key (core-resource-key "endpointslices" namespace (gethash "name" slice-meta))))
                        (when (or (null old) (not (equal (endpointslice-canonical-json old) (endpointslice-canonical-json object))))
-                         (prepare-endpointslice-write object old)
-                         (prepare-core-resource-metadata object old (incf revision))
-                         (setf (gethash resource-key resources) object))
+                         (if plan
+                             (push (list resource-key object old) planned-writes)
+                             (progn
+                               (prepare-endpointslice-write object old)
+                               (prepare-core-resource-metadata object old (incf revision))
+                               (setf (gethash resource-key resources) object))))
                        (setf (gethash (gethash "uid" (gethash "metadata" (or old object))) used) t)))))))
     (dolist (slice existing)
       (let ((slice-meta (gethash "metadata" slice)))
         (unless (gethash (gethash "uid" slice-meta) used)
-          (remhash (core-resource-key "endpointslices" namespace (gethash "name" slice-meta)) resources)
-          (incf revision))))
-    (unless (= revision (pod-store-resource-revision store)) (commit-core-resources store resources revision))))
+          (if plan
+              (push (list (gethash "name" slice-meta) slice) planned-deletes)
+              (progn
+                (remhash (core-resource-key "endpointslices" namespace (gethash "name" slice-meta)) resources)
+                (incf revision))))))
+    (if plan
+        (values (nreverse planned-writes) (nreverse planned-deletes) planned-at)
+        (unless (= revision (pod-store-resource-revision store)) (commit-core-resources store resources revision)))))
+
+(defun endpointslice-admission-configured-p (store)
+  "Report whether any webhook or admission policy exists that could select generated slices."
+  (some (lambda (resource) (list-core-resources store resource))
+        '("mutatingwebhookconfigurations" "validatingwebhookconfigurations"
+          "mutatingadmissionpolicies" "validatingadmissionpolicies")))
+
+(defun reconcile-service-endpointslices-admitted (store service)
+  "Plan one Service's slice writes, admit each as the endpointslice controller outside the store
+lock, as upstream's controller writes through the API, and commit what was admitted if
+nothing changed meanwhile. A refused write is left for a later pass."
+  (let* ((metadata (gethash "metadata" service)) (namespace (gethash "namespace" metadata)))
+    (multiple-value-bind (writes deletes planned-at)
+        (with-store-lock (store) (reconcile-service-endpointslices store service :plan t))
+      (when (or writes deletes)
+        (flet ((refused (condition)
+                 (format *error-output* "~&gr8s endpointslice controller: ~A~%" (kubernetes-error-message condition))
+                 nil))
+          (let ((admitted (loop for (key object old) in writes
+                                for result = (handler-case
+                                                 (admit-controller-write store "endpointslices" object old namespace
+                                                                         "endpointslice-controller")
+                                               (kubernetes-error (condition) (refused condition)))
+                                when result collect (list key result old)))
+                (removed (remove-if-not (lambda (entry)
+                                          (controller-delete-allowed-p store "endpointslices" namespace (first entry)
+                                                                       "endpointslice-controller"))
+                                        deletes)))
+            (with-store-lock (store)
+              ;; Anything else written meanwhile may have changed the plan: the next pass replans.
+              (when (= planned-at (pod-store-resource-revision store))
+                (let ((resources (copy-core-resource-index store)) (revision planned-at))
+                  (loop for (key object old) in admitted
+                        do (let ((object (normalize-endpointslice-resource object namespace (third key))))
+                             (prepare-endpointslice-write object old)
+                             (prepare-core-resource-metadata object old (incf revision))
+                             (setf (gethash key resources) object)))
+                  (loop for (name) in removed
+                        do (remhash (core-resource-key "endpointslices" namespace name) resources)
+                           (incf revision))
+                  (unless (= revision planned-at) (commit-core-resources store resources revision)))))))))))
 
 (defun reconcile-endpointslices (store)
-  "Publish selector Services from durable actual Pod observations under one store snapshot."
-  (with-store-lock (store)
-    (dolist (service (loop for object being the hash-values of (pod-store-resources store)
-                          when (equal "Service" (gethash "kind" object)) collect object))
-      (reconcile-service-endpointslices store service)))
+  "Publish selector Services from durable actual Pod observations under one store snapshot.
+While admission is configured, each Service's writes are admitted first, outside the lock."
+  (if (endpointslice-admission-configured-p store)
+      (dolist (service (with-store-lock (store)
+                         (loop for object being the hash-values of (pod-store-resources store)
+                               when (equal "Service" (gethash "kind" object)) collect object)))
+        (reconcile-service-endpointslices-admitted store service))
+      (with-store-lock (store)
+        (dolist (service (loop for object being the hash-values of (pod-store-resources store)
+                              when (equal "Service" (gethash "kind" object)) collect object))
+          (reconcile-service-endpointslices store service))))
   store)
 
 (defun service-slice-endpoints (store service port)

@@ -15,7 +15,7 @@
   ;; base plus a "-gr8s.N" suffix carried in a git tag (e.g. v1.37.2-gr8s.0),
   ;; surfaced through VERSION-STRING as +GR8S-VERSION+ (see src/version.lisp).
   :version "1.37.2"
-  :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cl-cancel"
+  :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "chipz" "cl-cancel"
                "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
                "pure-tls/acme" "drakma"
                "sb-posix" "slynk" "trivial-utf-8" "usocket" "version-string"
@@ -39,6 +39,7 @@
                 :components ((:file "package")
                              (:file "version")
                              (:file "grpc-close-compat")
+                             (:file "grpc-inflate-compat")
                              (:file "cri-v1-generated")
                              (:file "csi-v1-generated")
                              (:file "pluginregistration-v1-generated")
@@ -237,6 +238,7 @@
                              (:file "workload-http")
                              (:file "budget-http")
                              (:file "doctor")
+                             (:file "memory-monitor")
                              (:file "main"))))
   :in-order-to ((test-op (test-op "gr8s/tests"))))
 
@@ -285,6 +287,7 @@
                              (:file "agent-runtime-test")
                              (:file "grpc-unix-test")
                              (:file "grpc-close-test")
+                             (:file "grpc-inflate-test")
                              (:file "cri-test")
                              (:file "runtime-assets-test")
                              (:file "cni-test")

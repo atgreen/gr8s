@@ -378,3 +378,41 @@
         (is-false (allowed impostor "secrets" "mounted"))
         (is-false (allowed node "secrets" "mounted" "update"))
         (is-false (allowed node "secrets" nil "list"))))))
+
+(test namespace-defaults-pass-admission-as-their-controllers
+  ;; The default ServiceAccount and root CA ConfigMap are written as upstream's controllers
+  ;; write them, so admission sees them, under the controllers' own identities.
+  (with-temporary-store (store directory)
+    (values directory)
+    (setf (gr8s::pod-store-in-cluster-config store) (list :ca-pem "the-cluster-ca"))
+    (gr8s::create-core-resource store "validatingadmissionpolicies"
+      (gr8s::core-object
+       "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicy"
+       "metadata" (gr8s::core-object "name" "no-defaults")
+       "spec" (gr8s::core-object
+               "matchConstraints" (gr8s::core-object
+                                   "resourceRules" (vector (gr8s::core-object "apiGroups" #("") "apiVersions" #("v1")
+                                                                              "operations" #("CREATE" "UPDATE")
+                                                                              "resources" #("serviceaccounts" "configmaps"))))
+               "validations" (vector (gr8s::core-object
+                                      "expression" "!request.userInfo.username.startsWith('system:serviceaccount:kube-system:')"
+                                      "message" "controllers may not write here"))))
+      nil)
+    (gr8s::create-core-resource store "validatingadmissionpolicybindings"
+      (gr8s::core-object
+       "apiVersion" "admissionregistration.k8s.io/v1" "kind" "ValidatingAdmissionPolicyBinding"
+       "metadata" (gr8s::core-object "name" "no-defaults")
+       "spec" (gr8s::core-object "policyName" "no-defaults" "validationActions" #("Deny")))
+      nil)
+    (let ((namespace (gr8s::create-core-resource store "namespaces"
+                       (gr8s::core-object "metadata" (gr8s::core-object "name" "guarded")) nil)))
+      ;; Refused, the Namespace still stands and simply lacks them for now.
+      (finishes (gr8s::complete-created-bootstrap-resource store "namespaces" namespace nil))
+      (is (null (gr8s::list-core-resources store "serviceaccounts" "guarded")))
+      (is (null (gr8s::list-core-resources store "configmaps" "guarded")))
+      ;; Once the policy goes, the controller pass restores both.
+      (gr8s::delete-core-resource store "validatingadmissionpolicybindings" nil "no-defaults")
+      (gr8s::reconcile-namespace-defaults store)
+      (is (gr8s::get-core-resource store "serviceaccounts" "guarded" "default"))
+      (is (equal "the-cluster-ca"
+                 (gethash "ca.crt" (gethash "data" (gr8s::get-core-resource store "configmaps" "guarded" "kube-root-ca.crt"))))))))

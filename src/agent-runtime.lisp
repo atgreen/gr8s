@@ -45,6 +45,8 @@
                                  (when manager #'reconcile-node-vxlan-network)))
   (let* ((directory (uiop:ensure-directory-pathname state-directory))
          (store (open-store (merge-pathnames "desired/" directory))))
+    ;; The control plane serves every watch; a journal here would only repeat its own.
+    (setf (pod-store-watch-journal-p store) nil)
     (when (containerd-runtime-p runtime)
       (setf (containerd-runtime-resource-store runtime) store))
     (let ((node-runtime
