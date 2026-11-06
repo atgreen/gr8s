@@ -112,8 +112,18 @@
           (notify nil (princ-to-string condition))
           (error condition))))))
 
+(defun ensure-csi-kubelet-directories ()
+  "Create the kubelet directories CSI driver manifests mount as hostPath type Directory:
+a kubelet makes them at startup, mode 0750, so they must exist before a driver arrives."
+  (dolist (name '("pods/" "plugins/" "plugins_registry/"))
+    (let ((path (csi-kubelet-path name)))
+      (unless (ignore-errors (sb-posix:stat path))
+        (ensure-directories-exist path)
+        (sb-posix:chmod path #o750)))))
+
 (defun scan-csi-plugin-registry ()
   "Register new or restarted drivers and forget those whose registry socket has gone."
+  (ensure-csi-kubelet-directories)
   (let ((sockets (csi-registry-sockets)))
     (bt:with-lock-held (*csi-plugins-lock*)
       (loop for plugin being the hash-values of *csi-plugins* using (hash-key name)

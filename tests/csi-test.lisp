@@ -355,6 +355,11 @@
       (is (null (gr8s::csi-driver-registrations)))
       (gr8s::scan-csi-plugin-registry)
       (is (null calls))
+      ;; Driver manifests mount these as hostPath type Directory, as on a kubelet node.
+      (dolist (name '("pods/" "plugins/" "plugins_registry/"))
+        (let ((path (format nil "~A~A" gr8s::*csi-kubelet-root* name)))
+          (is-true (uiop:directory-exists-p path) "~A" name)
+          (is (= #o750 (logand #o7777 (sb-posix:stat-mode (sb-posix:stat path)))))))
       (multiple-value-bind (path socket) (make-registry-socket gr8s::*csi-kubelet-root* "csi.example.test-reg.sock")
         (unwind-protect
              (progn
