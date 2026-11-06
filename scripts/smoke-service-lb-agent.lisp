@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; End-to-end validation of the AGENT Service-LB path (podster-7q2.7), without
 ;;;; any Pod networking.  It drives the exact convergence the agent uses:

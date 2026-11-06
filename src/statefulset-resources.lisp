@@ -1,11 +1,11 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
 ;;;; Default and validate the fields only a StatefulSet has, on top of the admission
 ;;;; all workloads share. A template that cannot run and a claim template storage
-;;;; would refuse are refused here, and fields the controller does not perform,
-;;;; such as a rolling update's maxUnavailable, are refused rather than ignored.
+;;;; would refuse are refused here, and fields the controller does not perform
+;;;; are refused rather than ignored.
 
 (in-package #:gr8s)
 
@@ -23,7 +23,7 @@
     (if (member value '(nil null)) (core-object) (require-object value field))))
 
 (defun normalize-statefulset-update-strategy (spec)
-  "Default and validate updateStrategy, refusing a maxUnavailable above the one Pod gr8s replaces at a time."
+  "Default and validate updateStrategy, including a rolling update's maxUnavailable."
   (let* ((strategy (statefulset-object-field spec "updateStrategy"))
          (type (let ((value (gethash "type" strategy))) (if (member value '(nil null "") :test #'equal) "RollingUpdate" value))))
     (unless (member type '("RollingUpdate" "OnDelete") :test #'equal)
@@ -37,9 +37,14 @@
           (setf (gethash "partition" rolling) (workload-int (gethash "partition" rolling) "spec.updateStrategy.rollingUpdate.partition")
                 (gethash "rollingUpdate" strategy) rolling)
           (let ((maximum (gethash "maxUnavailable" rolling)))
-            (cond ((eq maximum 'null) (remhash "maxUnavailable" rolling))
-                  ((and maximum (not (eql maximum 1)))
-                   (core-resource-error 422 "Invalid" "gr8s replaces one StatefulSet Pod at a time: spec.updateStrategy.rollingUpdate.maxUnavailable must be 1"))))))))
+            ;; Upstream defaults it to one Pod while MaxUnavailableStatefulSet is enabled, as it is in 1.37.
+            (if (member maximum '(nil null))
+                (setf (gethash "maxUnavailable" rolling) 1)
+                (let ((count (workload-rollout-count maximum 100)))
+                  (when (zerop count)
+                    (core-resource-error 422 "Invalid" "spec.updateStrategy.rollingUpdate.maxUnavailable: Invalid value: ~S: cannot be 0" maximum))
+                  (when (and (stringp maximum) (> count 100))
+                    (core-resource-error 422 "Invalid" "spec.updateStrategy.rollingUpdate.maxUnavailable: Invalid value: ~S: must not be greater than 100%" maximum)))))))))
 
 (defun normalize-statefulset-claim-templates (spec object namespace)
   "Reduce each claim template to what a claim uses, after real claim admission accepts it."

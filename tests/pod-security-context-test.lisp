@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
 ;;;; Verify the Pod and container security context fields beyond identities:
@@ -154,3 +154,9 @@
                        "{\"seccompProfile\":{\"type\":\"RuntimeDefault\",\"localhostProfile\":\"x.json\"}}"
                        "{\"seccompProfile\":{\"type\":\"Other\"}}"))
     (signals kubernetes-error (parse-pod (security-context-test-object :container container)))))
+
+(test an-absent-pod-security-context-defaults-to-an-empty-one
+  ;; As the API server's SetDefaults_PodSpec does; kubectl debug dereferences it.
+  (let ((pod (parse-pod (security-context-test-object))))
+    (is (hash-table-p (gethash "securityContext" (gethash "spec" (pod-to-object pod)))))
+    (is (zerop (hash-table-count (gethash "securityContext" (gethash "spec" (pod-to-object pod))))))))

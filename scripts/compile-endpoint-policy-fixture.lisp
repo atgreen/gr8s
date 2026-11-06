@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Emit the egress-guard fixture the endpoint-policy test consumes, by
 ;;;; JIT-compiling the program in-process (no ELF).  The output is a small JSON

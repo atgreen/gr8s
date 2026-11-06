@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; End-to-end privileged smoke for the ClusterIP socket load balancer
 ;;;; (podster-7q2.4).  Requires real root (CAP_BPF, cgroup2, bpffs).

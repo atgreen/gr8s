@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Live progress monitor for a running gr8s conformance suite.
 
 A full `certified-conformance` run takes hours, and Sonobuoy's built-in

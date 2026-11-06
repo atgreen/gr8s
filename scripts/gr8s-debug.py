@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Evaluate Lisp forms in a running gr8s started with --debug-slynk-port.
 
 Speaks just enough of the Slynk protocol for scripted use: each message is six hex

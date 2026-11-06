@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Verify real ordered init execution and recovery in an owned privileged guest.
 
 This is supplemental native evidence. The unchanged upstream init-container

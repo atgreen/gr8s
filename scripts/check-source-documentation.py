@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Audit first-party source files for the gr8s documentation convention.
 
 The checker keeps a repository-wide documentation sweep measurable.  It checks
@@ -25,7 +25,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent.parent
 SPDX_COPYRIGHT = "SPDX-FileCopyrightText: 2026 Anthony Green"
-SPDX_LICENSE = "SPDX-License-Identifier: MIT"
+SPDX_LICENSE = "SPDX-License-Identifier: Apache-2.0"
 GENERATED = {
     Path("src/cri-v1-generated.lisp"),
     Path("src/node-v1-generated.lisp"),

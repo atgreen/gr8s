@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; In-process installation of optional runtime addons (gVisor, Kata) for the
 ;;;; `gr8s runtime install` CLI. Everything is native to the image: drakma
@@ -436,3 +436,4 @@
                 (format t "  ~20A UNVERIFIED (checksum/descriptor problem)~%" name))))))
     (unless found
       (format t "  (none)~%"))))
+

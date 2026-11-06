@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Generate typed storage schemas from checksum-pinned Kubernetes inputs.
 
 Core PersistentVolume and PersistentVolumeClaim types are pinned at v1.36. The

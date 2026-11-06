@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 gr8s contributors
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
 ;;;; Verify durable pool geometry, legacy assignment compatibility, CLI settings,

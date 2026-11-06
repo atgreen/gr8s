@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Anthony Green
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 //
 // The node-side subset of the Container Storage Interface v1. Field numbers
 // follow csi.proto from github.com/container-storage-interface/spec; controller
