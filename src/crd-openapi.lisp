@@ -262,6 +262,20 @@ kubectl falls back to the v2 document when a kind has no patch operation here."
                                     (vector (core-object "name" "fieldValidation" "in" "query"
                                                          "schema" (core-object "type" "string" "enum" #("Strict" "Warn" "Ignore")))))))))))
 
+(defun openapi-v3-drop-empty-fields (value)
+  "Remove the empty parameters lists and properties maps that kube-openapi's spec3 types omit,
+so that a client's decode and re-encode of the document gives back an equal document."
+  (cond ((hash-table-p value)
+         (loop for key in (loop for key being the hash-keys of value collect key)
+               for child = (gethash key value)
+               do (if (or (and (equal key "parameters") (vectorp child) (zerop (length child)))
+                          (and (equal key "properties") (hash-table-p child) (zerop (hash-table-count child))))
+                      (remhash key value)
+                      (openapi-v3-drop-empty-fields child))))
+        ((and (vectorp value) (not (stringp value)))
+         (map nil #'openapi-v3-drop-empty-fields value)))
+  value)
+
 (defun openapi-v3-complete-response (store runtime reconciler path)
   "Serve an OpenAPI v3 group document covering every resource its version discovers."
   (multiple-value-bind (group version found) (openapi-v3-document-group-version path)
@@ -296,6 +310,7 @@ kubectl falls back to the v2 document when a kind has no patch operation here."
                          (openapi-v3-kind-patched-p paths (gethash "kind" resource) group version))
                 do (openapi-v3-add-resource-paths paths resource group version))
         (openapi-v3-declare-field-validation paths)
+        (openapi-v3-drop-empty-fields document)
         (setf (hunchentoot:return-code*) 200
               (hunchentoot:content-type*) "application/json")
         (com.inuoe.jzon:stringify document)))))

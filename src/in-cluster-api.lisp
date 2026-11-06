@@ -136,13 +136,20 @@ so that a rule limited by resourceNames can allow reading and watching just that
            (let ((parts (remove "" (uiop:split-string path :separator '(#\/)) :test #'equal)))
              (and (member (length parts) '(2 3)) (equal "apis" (first parts)))))))
 
+(defun authenticated-health-request-p (path method)
+  "Recognize the health reads upstream's system:public-info-viewer role grants everyone."
+  (and (member method '(:get :head))
+       (cl-ppcre:scan "^/(healthz|livez|readyz)(/.*)?$" path)
+       t))
+
 (defun authenticated-self-review-request-p (path method)
-  "Recognize the self reviews upstream's system:basic-user role grants all authenticated users."
+  "Recognize the self reviews upstream's system:basic-user role grants all authenticated users.
+RBAC rules name no version, so the grant covers every version, served or not; an unserved
+one then answers 404 rather than 403, as upstream's does."
   (and (eq method :post)
-       (member path '("/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
-                      "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews"
-                      "/apis/authentication.k8s.io/v1/selfsubjectreviews")
-               :test #'equal)))
+       (cl-ppcre:scan "^/apis/(authorization\\.k8s\\.io/[^/]+/selfsubject(access|rules)reviews|authentication\\.k8s\\.io/[^/]+/selfsubjectreviews)$"
+                      path)
+       t))
 
 (defun authorize-in-cluster-request (store request)
   "Authenticate a verified certificate or live bearer token, then enforce current RBAC."
@@ -158,7 +165,8 @@ so that a rule limited by resourceNames can allow reading and watching just that
     (when identity (flowcontrol-note-request store identity path method))
     (unless identity (core-resource-error 401 "Unauthorized" "A valid client certificate or ServiceAccount bearer token is required"))
     (unless (or (authenticated-discovery-request-p path method)
-                (authenticated-self-review-request-p path method))
+                (authenticated-self-review-request-p path method)
+                (authenticated-health-request-p path method))
       (multiple-value-bind (verb group resource name namespace)
           (kubernetes-authorization-target path method :watch (true-parameter-p (hunchentoot:parameter "watch"))
                                                        :field-selector (hunchentoot:parameter "fieldSelector"))

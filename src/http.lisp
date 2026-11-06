@@ -1265,6 +1265,16 @@ than wait for the next, which truncates any body that spans records in flight."
         for parts = (mapcar (lambda (part) (string-trim " " part)) (uiop:split-string range :separator '(#\;)))
         when (plusp (length (first parts))) collect parts))
 
+(defun check-request-timeout-parameter ()
+  "Refuse a timeout query parameter that is not a Go duration, as upstream's request deadline filter does.
+Watches are long-running requests, which that filter leaves alone."
+  (let ((timeout (hunchentoot:get-parameter "timeout")))
+    (when (and timeout (plusp (length timeout))
+               (not (true-parameter-p (hunchentoot:get-parameter "watch")))
+               (null (cel-parse-duration timeout)))
+      (core-resource-error 400 "BadRequest" "invalid timeout specified in the request URL: time: invalid duration ~S"
+                           timeout))))
+
 (defun handle-http-request (store runtime reconciler request)
   (handler-case
       (let ((path (progn (read-request-body request) (request-route-path (hunchentoot:script-name request))))
@@ -1272,6 +1282,7 @@ than wait for the next, which truncates any body that spans records in flight."
             (*crd-field-validation* (crd-request-field-validation)))
         (when (and store (not *authenticated-api-identity*))
           (flowcontrol-note-request store (request-api-identity) path method))
+        (check-request-timeout-parameter)
         (multiple-value-bind (*table-request* *table-api-version*) (negotiate-table-request)
           (route-http-request store runtime reconciler path method)))
     (kubernetes-error (error)

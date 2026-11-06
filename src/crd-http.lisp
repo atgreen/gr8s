@@ -17,6 +17,15 @@
       (core-resource-error 400 "BadRequest" "fieldValidation must be Strict, Warn or Ignore"))
     (if (member mode '(nil "") :test #'equal) "Warn" mode)))
 
+(defun storage-version-hash (group version kind)
+  "Return upstream's discovery storageVersionHash: the first eight bytes of the SHA-256 of
+group/version/kind, base64 encoded, with the core group spelled core."
+  (ag-grpc:base64-encode
+   (subseq (ironclad:digest-sequence
+            :sha256 (trivial-utf-8:string-to-utf-8-bytes
+                     (format nil "~A/~A/~A" (if (equal group "") "core" group) version kind)))
+           0 8)))
+
 (defun crd-report-pruned-fields (fields)
   "Reject strict unknown fields or emit a real warning while retaining pruning."
   (report-field-problems (mapcar #'unknown-field-problem (reverse fields))))
@@ -135,7 +144,9 @@
                         append (let* ((names (gethash "names" spec))
                                       (resource (core-object "name" (gethash "plural" names) "singularName" (gethash "singular" names)
                                                             "namespaced" (equal "Namespaced" (gethash "scope" spec)) "kind" (gethash "kind" names)
-                                                            "verbs" #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch"))))
+                                                            "verbs" #("create" "delete" "deletecollection" "get" "list" "patch" "update" "watch")
+                                                            "storageVersionHash"
+                                                            (storage-version-hash group (gethash "name" (crd-storage-version definition)) (gethash "kind" names)))))
                                  (dolist (field '("shortNames" "categories")) (when (gethash field names) (setf (gethash field resource) (copy-core-object (gethash field names)))))
                                  (cons resource
                                        (append
