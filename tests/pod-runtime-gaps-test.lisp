@@ -81,9 +81,20 @@
     (parse-pod (gap-pod-object "hostNetwork" t
                                "containers" (vector (gap-container "web" "ports" (vector (gr8s::core-object "containerPort" 8080 "hostPort" 81))))))))
 
-(test pod-os-accepts-only-the-operating-system-nodes-run
+(test pod-os-is-validated-by-the-api-and-enforced-by-the-node
   (is (gr8s::pod-name (parse-pod (gap-pod-object "os" (gr8s::core-object "name" "linux")))))
-  (signals kubernetes-error (parse-pod (gap-pod-object "os" (gr8s::core-object "name" "windows")))))
+  (is (null (gr8s::pod-os-failure (parse-pod (gap-pod-object "os" (gr8s::core-object "name" "linux"))))))
+  ;; As upstream ("PodOSRejection"), the API accepts a Windows Pod and the Linux node refuses it.
+  (let ((failure (gr8s::pod-os-failure (parse-pod (gap-pod-object "os" (gr8s::core-object "name" "windows"))))))
+    (is (equal "PodOSNotSupported" (cdr failure)))
+    (is (equal "Failed to admit pod as the OS field doesn't match node OS" (car failure))))
+  (signals kubernetes-error (parse-pod (gap-pod-object "os" (gr8s::core-object "name" "plan9"))))
+  ;; Linux-only settings are forbidden for a Windows Pod.
+  (signals kubernetes-error
+    (parse-pod (gap-pod-object "os" (gr8s::core-object "name" "windows") "hostPID" t)))
+  (signals kubernetes-error
+    (parse-pod (gap-pod-object "os" (gr8s::core-object "name" "windows")
+                               "securityContext" (gr8s::core-object "runAsUser" 1000)))))
 
 (test qos-class-follows-cpu-and-memory-requests-and-limits
   (flet ((qos (&optional resources)

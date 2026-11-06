@@ -321,8 +321,11 @@
           (invalid-pod "spec.~A must be a DNS label or empty" field))))
     (let ((grace (gethash "terminationGracePeriodSeconds" spec 30)))
       (when (eq grace 'null) (setf grace 30))
+      ;; As the API server does, a negative grace period becomes the shortest one.
+      (when (and (integerp grace) (minusp grace) (>= grace (- #x8000000000000000)))
+        (setf grace 1))
       (unless (and (integerp grace) (<= 0 grace #x7fffffffffffffff))
-        (invalid-pod "spec.terminationGracePeriodSeconds must be a nonnegative int64"))
+        (invalid-pod "spec.terminationGracePeriodSeconds must be an int64"))
       (setf (gethash "terminationGracePeriodSeconds" spec) grace))
     (validate-pod-host-settings spec)
     (validate-pod-hostname-fields spec)

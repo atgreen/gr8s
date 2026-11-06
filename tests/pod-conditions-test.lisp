@@ -228,3 +228,29 @@
     (let ((pod (create-pod store (parse-pod *valid-pod-json*))))
       (is (null (gethash "containerStatuses"
                          (gr8s::add-pod-status-conditions store pod (gr8s::pod-status "Pending"))))))))
+
+(test an-unscheduled-pod-reports-only-its-scheduling
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
+           (conditions (gethash "conditions" (gr8s::add-pod-status-conditions store pod (gr8s::pod-status "Pending")))))
+      ;; As upstream's PodRejectionStatus spec reads it: one PodScheduled condition, for generation 1.
+      (is (= 1 (length conditions)))
+      (is (equal "PodScheduled" (gethash "type" (aref conditions 0))))
+      (is (equal "False" (gethash "status" (aref conditions 0))))
+      (is (eql 1 (gethash "observedGeneration" (aref conditions 0)))))))
+
+(test a-node-records-the-generation-it-refused
+  (with-temporary-store (store path)
+    (values path)
+    (let ((object (com.inuoe.jzon:parse *valid-pod-json*)))
+      (setf (gethash "os" (gethash "spec" object)) (gr8s::core-object "name" "windows")
+            (gethash "nodeName" (gethash "spec" object)) "worker-a")
+      (let ((pod (create-pod store (parse-pod object))))
+        (is-false (gr8s::admit-assigned-pod store pod))
+        (let ((status (gr8s::pod-observed-status store pod)))
+          (is (equal "Failed" (gethash "phase" status)))
+          (is (equal "PodOSNotSupported" (gethash "reason" status)))
+          (is (equal "Pod was rejected: Failed to admit pod as the OS field doesn't match node OS"
+                     (gethash "message" status)))
+          (is (eql 1 (gethash "observedGeneration" status))))))))

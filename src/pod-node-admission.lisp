@@ -77,7 +77,7 @@ no reservation; otherwise it competes as the scheduler charges it. Call with STO
   (let* ((status (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)))
          (reason (and status (gethash "reason" status))))
     (and (equal "Failed" (and status (gethash "phase" status))) (stringp reason)
-         (or (member reason '("NodePorts" "SysctlForbidden" "AppArmor") :test #'equal)
+         (or (member reason '("NodePorts" "SysctlForbidden" "AppArmor" "PodOSNotSupported") :test #'equal)
              (uiop:string-prefix-p "OutOf" reason)))))
 
 (defun admit-assigned-pod (store pod)
@@ -89,7 +89,8 @@ A Pod the node has reported on is past admission, however full the node is now."
               ((pod-admission-rejected-p store pod) (return-from admit-assigned-pod nil))
               ((or (deletion-requested-p pod) (gethash (pod-uid pod) (pod-store-pod-observed-phases store)))
                (return-from admit-assigned-pod t))
-              (t (or (pod-forbidden-sysctl-failure pod)
+              (t (or (pod-os-failure pod)
+                     (pod-forbidden-sysctl-failure pod)
                      (pod-apparmor-failure pod)
                      (let ((node (get-node-unlocked store (pod-node-name pod))))
                        (and node (first (node-pod-fit-failures store pod node :admission t))))))))))
@@ -97,7 +98,9 @@ A Pod the node has reported on is past admission, however full the node is now."
       (save-pod-observation
        store pod
        (core-object "phase" "Failed" "reason" (cdr failure)
-                    "message" (format nil "Pod was rejected: ~A" (car failure)))))
+                    "message" (format nil "Pod was rejected: ~A" (car failure))
+                    ;; The node judged this generation of the Pod.
+                    "observedGeneration" (gethash "generation" (gethash "metadata" (pod-to-object pod)) 1))))
     (null failure)))
 
 (defun pod-unschedulable-message (store pod)
