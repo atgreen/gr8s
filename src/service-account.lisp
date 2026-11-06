@@ -237,11 +237,13 @@
      bindings)))
 
 (defun ensure-default-service-account (store namespace)
-  "Create the namespace's default ServiceAccount without replacing an existing identity."
+  "Create the namespace's default ServiceAccount without replacing an existing identity.
+It passes admission as upstream's service account controller's create does."
   (handler-case
       (let ((*resource-quota-admission-exempt* t))
-        (create-core-resource store "serviceaccounts"
-         (core-object "metadata" (core-object "name" "default")) namespace))
+        (controller-create-core-resource store "serviceaccounts"
+                                         (core-object "metadata" (core-object "name" "default")) namespace
+                                         "service-account-controller"))
     (kubernetes-error (condition)
       (if (= 409 (kubernetes-error-status-code condition))
           (get-core-resource store "serviceaccounts" namespace "default")
@@ -288,17 +290,21 @@
         ((null existing)
          (let ((owner (get-core-resource store "namespaces" nil namespace)))
            (let ((*resource-quota-admission-exempt* t))
-             (create-core-resource store "configmaps"
+             (controller-create-core-resource
+              store "configmaps"
               (core-object "metadata" (core-object "name" "kube-root-ca.crt"
                                         "ownerReferences" (vector (core-object "apiVersion" "v1" "kind" "Namespace"
                                                                   "name" namespace "uid" (gethash "uid" (gethash "metadata" owner)))))
-                           "data" (core-object "ca.crt" ca)) namespace))))
+                           "data" (core-object "ca.crt" ca))
+              namespace "root-ca-cert-publisher"))))
         ((not (equal ca (gethash "ca.crt" (or (gethash "data" existing) (core-object)))))
-         (update-core-resource store "configmaps" namespace "kube-root-ca.crt"
+         (controller-update-core-resource
+          store "configmaps" namespace "kube-root-ca.crt"
           (lambda (object)
             (unless (gethash "data" object) (setf (gethash "data" object) (core-object)))
             (setf (gethash "ca.crt" (gethash "data" object)) ca)
-            object)))))))
+            object)
+          "root-ca-cert-publisher"))))))
 
 (defun ensure-native-namespace-root-cas (store)
   "Initialize CA ConfigMaps for persisted namespaces once the native CA is available."
@@ -309,8 +315,12 @@
   "Create the default account and API trust anchor after a real Namespace is admitted."
   (when (and (equal resource "namespaces") (not dry-run) (pod-store-in-cluster-config store))
     (let ((namespace (gethash "name" (gethash "metadata" object))))
-      (ensure-default-service-account store namespace)
-      (ensure-namespace-root-ca store namespace)))
+      ;; Admission may refuse either for now; the Namespace stands, and the
+      ;; controller pass tries again, as upstream's controllers retry.
+      (dolist (ensure (list #'ensure-default-service-account #'ensure-namespace-root-ca))
+        (handler-case (funcall ensure store namespace)
+          (kubernetes-error (condition)
+            (format *error-output* "~&Namespace ~A defaults: ~A~%" namespace (kubernetes-error-message condition)))))))
   object)
 
 ;;; Node authorization: a kubelet reads what the Pods bound to its node use, as

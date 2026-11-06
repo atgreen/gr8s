@@ -217,9 +217,13 @@
     (dolist (namespace (list-core-resources store "namespaces"))
       (unless (namespace-terminating-p namespace)
         (let ((name (gethash "name" (gethash "metadata" namespace))))
-          (unless (gethash (core-resource-key "serviceaccounts" name "default") (pod-store-resources store))
-            (ensure-default-service-account store name))
-          (ensure-namespace-root-ca store name))))))
+          (handler-case
+              (progn
+                (unless (gethash (core-resource-key "serviceaccounts" name "default") (pod-store-resources store))
+                  (ensure-default-service-account store name))
+                (ensure-namespace-root-ca store name))
+            ;; Refused by admission, most likely: try again on the next pass.
+            (kubernetes-error () nil)))))))
 
 ;;; Subresources
 
