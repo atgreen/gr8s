@@ -877,8 +877,8 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
 
 (defun print-help ()
   (multiple-value-bind (major minor) (kubernetes-api-version-components)
-    (format t "~&gr8s ~A — a Kubernetes-compatible control plane in Common Lisp~%" +gr8s-version+)
-    (format t "Kubernetes API v~A.~A · no Envoy, no kube-proxy, no etcd~%" major minor)
+    (format t "~&gr8s ~A — a self-contained, Kubernetes-compatible cluster~%" +gr8s-version+)
+    (format t "Kubernetes API v~A.~A~%" major minor)
     (format t "Copyright (C) 2026 Anthony Green · MIT License~%~%"))
   (format t "Usage: gr8s <command> [options]~%~%")
   (format t "Cluster:~%")
@@ -919,9 +919,9 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                   "   |___/"))
     (write-line line))
   (terpri)
-  (format t "   gr8s ~A · a Kubernetes-compatible control plane in Common Lisp~%" +gr8s-version+)
+  (format t "   gr8s ~A · a self-contained, Kubernetes-compatible cluster~%" +gr8s-version+)
   (multiple-value-bind (major minor) (kubernetes-api-version-components)
-    (format t "   Kubernetes API v~A.~A · ~A · no Envoy, no kube-proxy, no etcd~%~%" major minor role))
+    (format t "   Kubernetes API v~A.~A · ~A~%~%" major minor role))
   (finish-output))
 
 (defun main-with-environment (arguments environment cni-entry)
