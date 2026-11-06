@@ -35,6 +35,8 @@
         ((equal resource "deviceclasses") (spec))
         ((equal resource "resourceclaims") (setf (gethash "spec" object) claim))
         ((equal resource "resourceclaimtemplates") (spec "spec" claim))
+        ((equal resource "devicetaintrules") (spec "taint" (gr8s::core-object "key" "testing" "effect" "None")))
+        ((equal resource "storageversionmigrations") (spec "resource" (gr8s::core-object "group" "" "resource" "foo")))
         ((equal resource "resourceslices")
          (spec "driver" "example.com" "allNodes" t
                "pool" (gr8s::core-object "name" "pool" "generation" 1 "resourceSliceCount" 1)))

@@ -48,7 +48,7 @@
     (values store)
     (let ((groups (map 'list (lambda (group) (gethash "name" group)) (gethash "groups" (typed-check 200 "/apis")))))
       (dolist (group '("coordination.k8s.io" "flowcontrol.apiserver.k8s.io" "resource.k8s.io"
-                       "authorization.k8s.io" "authentication.k8s.io"))
+                       "storagemigration.k8s.io" "authorization.k8s.io" "authentication.k8s.io"))
         (is-true (member group groups :test #'equal))
         (is (equal group (gethash "name" (typed-check 200 (concatenate 'string "/apis/" group)))))))
     (dolist (name '("prioritylevelconfigurations" "prioritylevelconfigurations/status" "flowschemas"))
@@ -501,3 +501,72 @@
                (is (equal "ADDED" (gethash "type" event)))
                (is (equal "seen" (gethash "name" (gethash "metadata" (gethash "object" event)))))))
         (close stream)))))
+
+(test device-taint-rules-follow-the-v1-lifecycle
+  ;; GA at resource.k8s.io/v1 in Kubernetes 1.37 (DRADeviceTaintRules), with a status
+  ;; subresource, generation and a server-set taint.timeAdded.
+  (with-typed-http (store)
+    (values store)
+    (is-true (member "devicetaintrules" (typed-discovery-names "/apis/resource.k8s.io/v1") :test #'equal))
+    (is-true (member "devicetaintrules/status" (typed-discovery-names "/apis/resource.k8s.io/v1") :test #'equal))
+    (let* ((collection "/apis/resource.k8s.io/v1/devicetaintrules")
+           (item (concatenate 'string collection "/rule"))
+           (created (typed-check 201 collection :method :post
+                      :object (gr8s::core-object "metadata" (gr8s::core-object "name" "rule" "labels" (gr8s::core-object "e2e" "x"))
+                                                 "spec" (gr8s::core-object "taint" (gr8s::core-object "key" "testing" "effect" "None")))))
+           (added (gethash "timeAdded" (gethash "taint" (gethash "spec" created)))))
+      (is (stringp added))
+      (is (= 1 (gethash "generation" (gethash "metadata" created))))
+      (typed-check 422 collection :method :post
+        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "bad")
+                                   "spec" (gr8s::core-object "taint" (gr8s::core-object "key" "testing" "effect" "PreferNoSchedule"))))
+      (typed-check 422 collection :method :post
+        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "bad")
+                                   "spec" (gr8s::core-object "taint" (gr8s::core-object "key" "not a key" "effect" "None"))))
+      ;; Changing the effect bumps the generation; the status is not writable here.
+      (let ((patched (typed-check 200 item :method :patch :content-type "application/strategic-merge-patch+json"
+                       :object (gr8s::core-object "spec" (gr8s::core-object "taint" (gr8s::core-object "effect" "NoExecute"))
+                                                  "status" (gr8s::core-object "conditions" (vector (gr8s::core-object "type" "Ignored")))))))
+        (is (= 2 (gethash "generation" (gethash "metadata" patched))))
+        (is (equal "NoExecute" (gethash "effect" (gethash "taint" (gethash "spec" patched)))))
+        (is (null (gethash "status" patched))))
+      (let ((status (typed-check 200 (concatenate 'string item "/status") :method :patch
+                      :content-type "application/strategic-merge-patch+json"
+                      :object (gr8s::core-object "status" (gr8s::core-object "conditions"
+                                (vector (gr8s::core-object "type" "Testing" "status" "True" "reason" "E2E"
+                                                           "message" "m" "lastTransitionTime" "2026-01-01T00:00:00Z")))))))
+        (is (equal "Testing" (gethash "type" (aref (gethash "conditions" (gethash "status" status)) 0))))
+        (is (= 2 (gethash "generation" (gethash "metadata" status)))))
+      (typed-check 200 (concatenate 'string collection "?labelSelector=e2e=x") :method :delete)
+      (typed-check 404 item))))
+
+(test storage-version-migrations-keep-their-spec-immutable
+  ;; GA at storagemigration.k8s.io/v1 in Kubernetes 1.37 (StorageVersionMigrator).
+  (with-typed-http (store)
+    (values store)
+    (is (equal "storagemigration.k8s.io" (gethash "name" (typed-check 200 "/apis/storagemigration.k8s.io"))))
+    (is-true (member "storageversionmigrations/status"
+                     (typed-discovery-names "/apis/storagemigration.k8s.io/v1") :test #'equal))
+    (let* ((collection "/apis/storagemigration.k8s.io/v1/storageversionmigrations")
+           (item (concatenate 'string collection "/migrate"))
+           (created (typed-check 201 collection :method :post
+                      :object (gr8s::core-object "metadata" (gr8s::core-object "name" "migrate")
+                                                 "spec" (gr8s::core-object "resource" (gr8s::core-object "group" "" "resource" "foo"))))))
+      (typed-check 422 collection :method :post
+        :object (gr8s::core-object "metadata" (gr8s::core-object "name" "empty")
+                                   "spec" (gr8s::core-object "resource" (gr8s::core-object "group" "apps"))))
+      (let ((changed (gr8s::copy-core-object created)))
+        (setf (gethash "resource" (gethash "resource" (gethash "spec" changed))) "bar")
+        (typed-check 422 item :method :put :object changed))
+      (let ((labelled (typed-check 200 item :method :patch :content-type "application/json-patch+json"
+                        :object (vector (gr8s::core-object "op" "add" "path" "/metadata/labels"
+                                                           "value" (gr8s::core-object "test" "test"))))))
+        (is (equal "test" (gethash "test" (gethash "labels" (gethash "metadata" labelled))))))
+      (let ((status (typed-check 200 (concatenate 'string item "/status") :method :patch
+                      :content-type "application/merge-patch+json"
+                      :object (gr8s::core-object "status" (gr8s::core-object "conditions"
+                                (vector (gr8s::core-object "type" "TestCondition" "status" "True" "reason" "TestReason"
+                                                           "message" "m" "lastTransitionTime" "2026-01-01T00:00:00Z")))))))
+        (is (equal "TestCondition" (gethash "type" (aref (gethash "conditions" (gethash "status" status)) 0)))))
+      (typed-check 200 item :method :delete)
+      (typed-check 404 item))))

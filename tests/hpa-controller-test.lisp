@@ -166,3 +166,49 @@
     (is (equal "ReplicaSet" (gethash "kind" (gethash "scaleTargetRef" decoded))))
     (is (= 5 (gethash "maxReplicas" decoded)))
     (is (= 50 (gr8s::hpa-metric-cpu-utilization (aref (gethash "metrics" decoded) 0))))))
+
+(test hpa-status-subresource-is-served-in-both-versions
+  ;; Upstream serves horizontalpodautoscalers/status in autoscaling/v1 and v2; the
+  ;; 1.37 discovery fixture lists it, and status writers (the controller, kubectl)
+  ;; must not be able to change the spec through it.
+  (with-core-api (store directory)
+    (values store directory)
+    (dolist (version '("v1" "v2"))
+      (let ((entry (discovery-entry (check-core-status 200 (format nil "/apis/autoscaling/~A" version))
+                                    "horizontalpodautoscalers/status")))
+        (is (hash-table-p entry) "~A lacks horizontalpodautoscalers/status" version)
+        (is (equal '("get" "patch" "update") (coerce (gethash "verbs" entry) 'list)))))
+    (check-core-status 201 "/apis/autoscaling/v2/namespaces/default/horizontalpodautoscalers" :method :post
+      :object (gr8s::core-object "apiVersion" "autoscaling/v2" "kind" "HorizontalPodAutoscaler"
+                                 "metadata" (gr8s::core-object "name" "web")
+                                 "spec" (gr8s::core-object "scaleTargetRef" (gr8s::core-object "apiVersion" "apps/v1" "kind" "ReplicaSet" "name" "web")
+                                                           "maxReplicas" 5)))
+    (let* ((v2 "/apis/autoscaling/v2/namespaces/default/horizontalpodautoscalers/web/status")
+           (v1 "/apis/autoscaling/v1/namespaces/default/horizontalpodautoscalers/web/status")
+           (read (check-core-status 200 v2)))
+      (is (equal "autoscaling/v2" (gethash "apiVersion" read)))
+      ;; A status PUT changes the status and ignores a changed spec.
+      (setf (gethash "desiredReplicas" (gethash "status" read)) 3
+            (gethash "maxReplicas" (gethash "spec" read)) 9
+            (gethash "conditions" (gethash "status" read))
+            (vector (gr8s::core-object "type" "AbleToScale" "status" "True" "reason" "Test"
+                                       "lastTransitionTime" "2026-01-01T00:00:00Z")))
+      (let ((written (check-core-status 200 v2 :method :put :object read)))
+        (is (= 3 (gethash "desiredReplicas" (gethash "status" written))))
+        (is (= 5 (gethash "maxReplicas" (gethash "spec" written)))))
+      ;; A stale write conflicts.
+      (check-core-status 409 v2 :method :put :object read)
+      ;; v1 shows and patches the same status, keeping the conditions it cannot express.
+      (let ((patched (check-core-status 200 v1 :method :patch :content-type "application/merge-patch+json"
+                                        :object (gr8s::core-object "status" (gr8s::core-object "currentReplicas" 2
+                                                                                               "currentCPUUtilizationPercentage" 40)))))
+        (is (equal "autoscaling/v1" (gethash "apiVersion" patched)))
+        (is (= 40 (gethash "currentCPUUtilizationPercentage" (gethash "status" patched)))))
+      (let ((stored (check-core-status 200 v2)))
+        (is (= 2 (gethash "currentReplicas" (gethash "status" stored))))
+        (is (= 1 (length (gethash "conditions" (gethash "status" stored)))))
+        (is (= 40 (gethash "averageUtilization"
+                           (gethash "current" (gethash "resource" (aref (gethash "currentMetrics" (gethash "status" stored)) 0)))))))
+      (let ((patched (check-core-status 200 v2 :method :patch :content-type "application/json-patch+json"
+                                        :object (vector (gr8s::core-object "op" "replace" "path" "/status/desiredReplicas" "value" 4)))))
+        (is (= 4 (gethash "desiredReplicas" (gethash "status" patched))))))))

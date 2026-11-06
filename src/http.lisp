@@ -1353,6 +1353,7 @@ than wait for the next, which truncates any body that spans records in flight."
           ((string= path "/apis/autoscaling") (json-response (autoscaling-api-group)))
           ((string= path "/apis/autoscaling/v1") (autoscaling-discovery-response "v1"))
           ((string= path "/apis/autoscaling/v2") (autoscaling-discovery-response "v2"))
+          ((hpa-status-route path) (dispatch-hpa-status-request store path method))
           ((string= path "/apis/apiregistration.k8s.io") (json-response (apiservice-api-group)))
           ((string= path "/apis/apiregistration.k8s.io/v1") (apiservice-discovery-response))
           ((and (nth-value 1 (apiservice-route path))

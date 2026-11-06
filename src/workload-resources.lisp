@@ -20,11 +20,12 @@
 
 (defun workload-schema-name (resource suffix)
   "Name RESOURCE's pinned structural definition, with SUFFIX such as Status, in its API group."
-  (format nil "io.k8s.api.~A.v1.~A~A"
-          (cond ((batch-resource-p resource) "batch")
-                ((budget-resource-p resource) "policy")
-                ((equal resource "replicationcontrollers") "core")
-                (t "apps"))
+  (format nil "io.k8s.api.~A.~A~A"
+          (cond ((hpa-resource-p resource) "autoscaling.v2")
+                ((batch-resource-p resource) "batch.v1")
+                ((budget-resource-p resource) "policy.v1")
+                ((equal resource "replicationcontrollers") "core.v1")
+                (t "apps.v1"))
           (core-resource-kind resource) suffix))
 
 (defun workload-owner-resource (owner)
