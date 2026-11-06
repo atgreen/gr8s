@@ -321,13 +321,15 @@ A container running as any user can write here, and a user mount at the path tak
              :command (expand-container-command (container-spec-command spec) environment)
              :args (expand-container-command (container-spec-args spec) environment)
              :env environment
-             :mounts (if termination
-                         (append mounts
-                                 (list (make-instance
-                                        'gr8s.cri.v1::mount
-                                        :container-path (gethash "terminationMessagePath" (pod-runtime-container-object pod spec))
-                                        :host-path (namestring (car termination)))))
-                         mounts)
+             :mounts (map-mounts-into-user-namespace
+                      (if termination
+                          (append mounts
+                                  (list (make-instance
+                                         'gr8s.cri.v1::mount
+                                         :container-path (gethash "terminationMessagePath" (pod-runtime-container-object pod spec))
+                                         :host-path (namestring (car termination)))))
+                          mounts)
+                      (gr8s.cri.v1::userns-options (gr8s.cri.v1::namespace-options security)))
              :security-context security
              :resources (cri-linux-container-resources
                          ;; Without a pod cgroup of its own, a container is bounded by the Pod's limits.

@@ -73,3 +73,12 @@ A block is taken while any Pod directory under the log root records it."
   (bt:with-lock-held (*user-namespace-lock*)
     (let ((path (containerd-user-namespace-path runtime uid)))
       (when (probe-file path) (delete-file path)))))
+
+(defun map-mounts-into-user-namespace (mounts user-namespace)
+  "Give each of MOUNTS USER-NAMESPACE's ID mappings, so the runtime idmaps it, as the kubelet's
+applyPlatformSpecificContainerConfig does: files keep inside the Pod the owners they have on the node."
+  (when (and user-namespace (= gr8s.cri.v1::+namespacemode-pod+ (gr8s.cri.v1::mode user-namespace)))
+    (dolist (mount mounts)
+      (setf (slot-value mount 'gr8s.cri.v1::uidmappings) (gr8s.cri.v1::uids user-namespace)
+            (slot-value mount 'gr8s.cri.v1::gidmappings) (gr8s.cri.v1::gids user-namespace))))
+  mounts)

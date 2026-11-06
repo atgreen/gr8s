@@ -68,3 +68,19 @@
                        (gr8s.cri.v1::namespace-options
                         (gr8s.cri.v1::security-context (gr8s.cri.v1::linux sandbox))))))
     (is (eq namespace (gr8s.cri.v1::userns-options (gr8s.cri.v1::namespace-options container))))))
+
+(test every-mount-of-a-user-namespaced-pod-is-idmapped
+  ;; As the kubelet's applyPlatformSpecificContainerConfig does, so files keep their owners inside.
+  (let* ((mapping (make-instance 'gr8s.cri.v1::id-mapping :host-id 65536 :container-id 0 :length 65536))
+         (own (make-instance 'gr8s.cri.v1::user-namespace :mode gr8s.cri.v1::+namespacemode-pod+
+                                                          :uids (list mapping) :gids (list mapping)))
+         (mounts (list (make-instance 'gr8s.cri.v1::mount :container-path "/a" :host-path "/x")
+                       (make-instance 'gr8s.cri.v1::mount :container-path "/b" :host-path "/y"))))
+    (gr8s::map-mounts-into-user-namespace mounts own)
+    (dolist (mount mounts)
+      (is (equal (list mapping) (gr8s.cri.v1::uidmappings mount)))
+      (is (equal (list mapping) (gr8s.cri.v1::gidmappings mount))))
+    ;; A Pod in the node's user namespace mounts as it always did.
+    (let ((plain (list (make-instance 'gr8s.cri.v1::mount :container-path "/a" :host-path "/x"))))
+      (gr8s::map-mounts-into-user-namespace plain nil)
+      (is (null (gr8s.cri.v1::uidmappings (first plain)))))))
