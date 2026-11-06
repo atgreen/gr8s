@@ -666,6 +666,15 @@ handler and never gets here. A busy host makes this race likely."
           (error () nil)))))
   nil)
 
+(defun serve-bootstraps-cluster-p (options local-agent ha)
+  "Return whether serve creates the standard namespaces and default ClusterRoles at startup.
+A single control plane is a real cluster whether its agents are local or remote, so it
+always does. A Raft member does so only with a local managed containerd agent, as before:
+its writes need the Raft leader, which a member may not yet be (or ever be) at startup."
+  (or (null ha)
+      (and local-agent (equal "containerd" (getf options :runtime))
+           (equal "managed" (getf options :containerd-mode)))))
+
 (defun serve (options)
   (let* ((address (getf options :listen))
          (port (getf options :port))
@@ -707,9 +716,10 @@ handler and never gets here. A busy host makes this race likely."
                                                     :store store :reconciler reconciler)))
              (unwind-protect
                   (progn
+                    (when (serve-bootstraps-cluster-p options local-agent ha)
+                      (ensure-native-bootstrap-namespaces store))
                     (when (and local-agent (equal "containerd" (getf options :runtime))
                                (equal "managed" (getf options :containerd-mode)))
-                      (ensure-native-bootstrap-namespaces store)
                       (ensure-extension-apiserver-authentication store pki)
                       (setf aggregator (start-api-aggregator store pki))
                       (ensure-native-api-service store)
