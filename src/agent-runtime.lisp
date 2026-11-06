@@ -1187,12 +1187,11 @@ that reconnects or restarts gets the answer without a second deletion racing the
            ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_port_forward+)
             (start-node-port-forward-operation node-runtime payload emit))
-           ((or (= (slot-value payload 'gr8s.node.v1::kind)
-                   gr8s.node.v1::+operationkind-operation_kind_attach+)
-                (and (= (slot-value payload 'gr8s.node.v1::kind)
-                        gr8s.node.v1::+operationkind-operation_kind_exec+)
-                     (or (slot-value payload 'gr8s.node.v1::stdin)
-                         (slot-value payload 'gr8s.node.v1::tty))))
+           ;; Every exec streams through the runtime's streaming server, as kubelet's do: a
+           ;; synchronous one would hold this session's reader until the command ended.
+           ((member (slot-value payload 'gr8s.node.v1::kind)
+                    (list gr8s.node.v1::+operationkind-operation_kind_attach+
+                          gr8s.node.v1::+operationkind-operation_kind_exec+))
             (start-node-exec-operation node-runtime payload emit))
            (t
             (dolist (reply (handle-node-operation node-runtime payload))
