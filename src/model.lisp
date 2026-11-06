@@ -154,8 +154,9 @@
 
 (defun dns-subdomain-p (value)
   "Return true when VALUE is a valid Kubernetes-style DNS subdomain."
+  ;; UIOP splits "" into no labels at all, which EVERY would accept.
   (and (stringp value)
-       (<= (length value) 253)
+       (<= 1 (length value) 253)
        (every (lambda (label) (dns-label-p label 253))
               (uiop:split-string value :separator '(#\.)))))
 

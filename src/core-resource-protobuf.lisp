@@ -233,11 +233,15 @@
             (let ((object (template-protobuf-message "k8s.io.api.discovery.v1.EndpointSlice" raw)))
               (setf (gethash "apiVersion" object) version (gethash "kind" object) kind)
               (return-from decode-core-resource-protobuf object)))
-          (when (member kind '("PersistentVolume" "PersistentVolumeClaim" "StorageClass"
-                               "CSIDriver" "CSINode" "VolumeAttachment" "CSIStorageCapacity") :test #'equal)
+          (when (member kind '("PersistentVolume" "PersistentVolumeClaim" "StorageClass" "CSIDriver" "CSINode"
+                               "VolumeAttachment" "CSIStorageCapacity" "VolumeAttributesClass") :test #'equal)
+            ;; Go always sends metadata.name, empty when generateName is meant, so
+            ;; metadata goes through the decoder that drops empty request fields.
             (let ((object (template-protobuf-message
-                           (concatenate 'string (if (equal version "storage.k8s.io/v1") "k8s.io.api.storage.v1." "k8s.io.api.core.v1.") kind) raw)))
-              (setf (gethash "apiVersion" object) version (gethash "kind" object) kind)
+                           (concatenate 'string (if (equal version "storage.k8s.io/v1") "k8s.io.api.storage.v1." "k8s.io.api.core.v1.") kind) raw))
+                  (metadata (core-protobuf-value (core-protobuf-fields raw) 1)))
+              (setf (gethash "metadata" object) (if metadata (core-protobuf-metadata metadata) (core-object))
+                    (gethash "apiVersion" object) version (gethash "kind" object) kind)
               (return-from decode-core-resource-protobuf object)))
           (when (equal kind "Event")
             (return-from decode-core-resource-protobuf

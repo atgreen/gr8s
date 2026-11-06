@@ -745,6 +745,11 @@
         (or (table-get object "volumeBindingMode") "Immediate")
         (and (table-get object "allowVolumeExpansion") t) (table-age object)))
 
+(define-table-printer "VolumeAttributesClass"
+    (("DriverName" "string") ("Age" "string"))
+    (object)
+  (list (or (table-get object "driverName") "") (table-age object)))
+
 (define-table-printer "PersistentVolume"
     (("Capacity" "string") ("Access Modes" "string") ("Reclaim Policy" "string") ("Status" "string")
      ("Claim" "string") ("StorageClass" "string") ("VolumeAttributesClass" "string") ("Reason" "string") ("Age" "string"))

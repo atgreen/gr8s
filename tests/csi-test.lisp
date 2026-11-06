@@ -200,6 +200,26 @@
     (gr8s::reconcile-volume-attachments store)
     (is (null (gr8s::list-core-resources store "volumeattachments")))))
 
+(test attachments-gr8s-did-not-create-are-left-alone
+  ;; The VolumeAttachment conformance specs create attachments for PVs that don't exist.
+  (with-temporary-store (store path)
+    (values path)
+    (ready-node store "worker-a" "a" "10.64.0.0/20")
+    (let ((ours (gr8s::volume-attachment-name "csi.example.test" "gone" "worker-a")))
+      (dolist (name (list "va-e2e-2xjx6" ours))
+        (gr8s::create-core-resource
+         store "volumeattachments"
+         (gr8s::core-object "metadata" (gr8s::core-object "name" name)
+                            "spec" (gr8s::core-object "attacher" "e2e-test.storage.k8s.io" "nodeName" "worker-a"
+                                                      "source" (gr8s::core-object "persistentVolumeName" "pv-e2e-2xjx6")))
+         nil))
+      (is-true (gr8s::gr8s-volume-attachment-name-p ours))
+      (is-false (gr8s::gr8s-volume-attachment-name-p "va-e2e-2xjx6"))
+      (gr8s::reconcile-volume-attachments store)
+      (is (equal '("va-e2e-2xjx6")
+                 (mapcar (lambda (object) (gethash "name" (gethash "metadata" object)))
+                         (gr8s::list-core-resources store "volumeattachments")))))))
+
 (test csi-assignments-carry-only-what-their-own-volume-needs
   (with-temporary-store (store path)
     (values path)
