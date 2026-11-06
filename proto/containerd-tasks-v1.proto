@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Anthony Green
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 //
 // The subset of containerd's native Tasks service (api/services/tasks/v1)
 // gr8s uses to reap a task CRI no longer tracks. Field numbers follow

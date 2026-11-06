@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Isolated probe (root) for podster-sp5: does bpf_redirect(lo, BPF_F_INGRESS)
 ;;;; at a veth TC ingress let a Pod's DNS packet reach a host-local :53 listener

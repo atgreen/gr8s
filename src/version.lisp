@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; The gr8s version string. +GR8S-VERSION+ is the ASDF :version from gr8s.asd,
 ;;;; augmented with git state (tag, else base-gHASH, with a +dirty suffix) when

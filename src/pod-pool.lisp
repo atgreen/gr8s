@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 gr8s contributors
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
 ;;;; Persist controller Pod-pool settings independently of Pod objects, validate

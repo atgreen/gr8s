@@ -1,0 +1,32 @@
+gr8s
+Copyright 2026 Anthony Green
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+---------------------------------------------------------------------------
+Third-party components
+---------------------------------------------------------------------------
+
+The gr8s binary embeds the following third-party programs, each distributed
+under the Apache License, Version 2.0, and each the copyright of its
+respective authors. They are included unmodified. `gr8s notices` prints this
+attribution together with every vendored dependency's full license text.
+
+  containerd, containerd-shim-runc-v2
+    Copyright The containerd Authors
+    https://github.com/containerd/containerd
+
+  runc
+    Copyright The runc / Open Container Initiative Authors
+    https://github.com/opencontainers/runc
+
+  CNI plugins (bridge, host-local, loopback, firewall)
+    Copyright The CNI Authors
+    https://github.com/containernetworking/plugins
+
+gr8s also links the system libzstd (BSD-3-Clause, Copyright Meta Platforms,
+Inc.; https://github.com/facebook/zstd) at runtime for `gr8s runtime install`.
+
+Optional sandbox/microVM runtimes fetched by `gr8s runtime install` (gVisor,
+Kata Containers; both Apache-2.0) are downloaded on demand and are not part
+of this distribution.

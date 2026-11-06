@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 """Verify dynamic local and NFS volumes, ephemeral volumes and emptyDir limits on real mounts.
 
 Run as root on an isolated Linux test node with kubectl and the dumped gr8s

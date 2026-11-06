@@ -1,5 +1,5 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
-;;;; SPDX-License-Identifier: MIT
+;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; A minimal streaming tar extractor -- enough to unpack the runtime bundles
 ;;;; `gr8s runtime install` fetches. It reads a (already zstd-decompressed) tar
