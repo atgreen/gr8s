@@ -180,7 +180,15 @@
       (is-true (probe-file file))
       (signals gr8s::runtime-error (gr8s::materialize-host-storage-source (gr8s::core-object "path" (namestring directory) "type" "File")))
       (signals gr8s::runtime-error (gr8s::materialize-host-storage-source (gr8s::core-object "path" (namestring file) "type" "Directory")))
-      (signals gr8s::runtime-error (gr8s::materialize-host-storage-source (gr8s::core-object "path" (namestring (merge-pathnames "absent/" path)) "type" "Directory"))))))
+      (signals gr8s::runtime-error (gr8s::materialize-host-storage-source (gr8s::core-object "path" (namestring (merge-pathnames "absent/" path)) "type" "Directory")))
+      ;; Untyped, a missing source is left for the CRI runtime to create, as upstream StatefulSet tests expect.
+      (let ((untyped (merge-pathnames "untyped/" path)))
+        (is (equal (namestring untyped)
+                   (namestring (gr8s::materialize-host-storage-source (gr8s::core-object "path" (namestring untyped))))))
+        (is-false (uiop:directory-exists-p untyped)))
+      ;; A local PV's directory must already exist.
+      (signals gr8s::runtime-error
+        (gr8s::materialize-host-storage-source (gr8s::core-object "path" (namestring (merge-pathnames "absent/" path))) :local t)))))
 
 (test retroactive-default-class-respects-explicit-opt-out
   (with-temporary-store (store path)
