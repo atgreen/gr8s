@@ -3,9 +3,10 @@
 ;;;;
 ;;;; Purpose:
 ;;;; PodCertificateRequest (KEP-4317) is the namespaced certificates.k8s.io
-;;;; /v1beta1 object a node creates to get a short-lived pod X.509 from a
-;;;; signer, which fills status.certificateChain. Exercise its CRUD, the
-;;;; required signerName, that /status routes, and discovery.
+;;;; object a node creates to get a short-lived pod X.509 from a signer, which
+;;;; fills status.certificateChain. GA at v1 in Kubernetes 1.37, it is stored as
+;;;; v1 and also served at v1beta1. Exercise its CRUD, the required signerName,
+;;;; that /status routes in both versions, discovery and the node's stub request.
 
 (in-package #:gr8s/tests)
 
@@ -21,13 +22,14 @@
            "serviceAccountName" "sa" "nodeName" "gr8s-local"
            "pkixPublicKey" "AAAABBBB")))
 
-(test podcertificaterequest-is-a-namespaced-v1beta1-resource-with-status
+(test podcertificaterequest-is-a-namespaced-v1-resource-with-status
   (with-temporary-store (store directory)
     (gr8s::create-core-resource store "podcertificaterequests"
                                 (make-podcertificaterequest "pcr-1") "default")
     (let ((got (gr8s::get-core-resource store "podcertificaterequests" "default" "pcr-1")))
       (is (string= "PodCertificateRequest" (gethash "kind" got)))
-      (is (string= "certificates.k8s.io/v1beta1" (gethash "apiVersion" got)))
+      ;; A v1beta1 write is stored as v1, the version Kubernetes 1.37 made GA.
+      (is (string= "certificates.k8s.io/v1" (gethash "apiVersion" got)))
       (is (string= "podidentity.podcert.ate.dev/identity"
                    (gethash "signerName" (gethash "spec" got)))))
     (is (= 1 (length (gr8s::list-core-resources store "podcertificaterequests"))))
@@ -40,12 +42,13 @@
                           "spec" (gr8s::core-object))
        "default"))
     ;; The signer's status endpoint resolves (so it can write certificateChain).
-    (is (equal '("podcertificaterequests" "default" "pcr-1")
-               (gr8s::typed-status-route
-                "/apis/certificates.k8s.io/v1beta1/namespaces/default/podcertificaterequests/pcr-1/status"))))
-  ;; Discovery advertises it, namespaced, under certificates.k8s.io/v1beta1.
+    (dolist (version '("v1" "v1beta1"))
+      (is (equal '("podcertificaterequests" "default" "pcr-1")
+                 (gr8s::typed-status-route
+                  (format nil "/apis/certificates.k8s.io/~A/namespaces/default/podcertificaterequests/pcr-1/status" version))))))
+  ;; Discovery advertises it, namespaced, under certificates.k8s.io/v1.
   (let ((entry (find "podcertificaterequests"
-                     (gr8s::stored-resource-discovery "certificates.k8s.io/v1beta1")
+                     (gr8s::stored-resource-discovery "certificates.k8s.io/v1")
                      :key (lambda (r) (gethash "name" r)) :test #'equal)))
     (is (not (null entry)))
     (is (eq t (gethash "namespaced" entry)))
@@ -65,7 +68,8 @@
          (bytes (core-test-protobuf-envelope "PodCertificateRequest"
                                              (list (list 1 meta) (list 2 spec) (list 3 status))
                                              "certificates.k8s.io/v1beta1"))
-         (object (gr8s::decode-core-resource-protobuf bytes "PodCertificateRequest")))
+         ;; A v1beta1 body is decoded for a request to the v1beta1 URL.
+         (object (gr8s::decode-core-resource-protobuf bytes "PodCertificateRequest" "certificates.k8s.io/v1beta1")))
     (is (string= "PodCertificateRequest" (gethash "kind" object)))
     (is (string= "postgres-0-abc" (gethash "name" (gethash "metadata" object))))
     (is (string= "servicedns.podcert.ate.dev/identity" (gethash "signerName" (gethash "spec" object))))
@@ -100,7 +104,7 @@
                :max-expiration-seconds 3600))
          (spec (gethash "spec" pcr)))
     (is (string= "PodCertificateRequest" (gethash "kind" pcr)))
-    (is (string= "certificates.k8s.io/v1beta1" (gethash "apiVersion" pcr)))
+    (is (string= "certificates.k8s.io/v1" (gethash "apiVersion" pcr)))
     (is (string= "ate-system" (gethash "namespace" (gethash "metadata" pcr))))
     (is (string= "podidentity.podcert.ate.dev/identity" (gethash "signerName" spec)))
     (is (string= "QkFTRTY0REVS" (gethash "pkixPublicKey" spec)))
@@ -112,3 +116,15 @@
                (gr8s::pod-certificate-credential-bundle "KEY" (format nil "CHAIN~%"))))
   (is (string= (format nil "KEY~%CHAIN~%")
                (gr8s::pod-certificate-credential-bundle (format nil "KEY~%") (format nil "CHAIN~%")))))
+
+(test pod-certificate-stub-request-is-a-verifiable-pkcs10-for-the-pod-key
+  ;; certificates.k8s.io/v1 signers read the pod's key from stubPKCS10Request
+  ;; (x509.ParseCertificateRequest), so it must be a well-formed PKCS#10 signed by
+  ;; that key, carrying exactly the public key the node reports.
+  (multiple-value-bind (private-key public-key) (ironclad:generate-key-pair :secp256r1)
+    (let* ((der (gr8s::pod-certificate-stub-pkcs10-request private-key public-key))
+           (pem (pure-tls/acme::wrap-pem "CERTIFICATE REQUEST" der))
+           (parsed (gr8s::parse-and-verify-certificate-request (trivial-utf-8:string-to-utf-8-bytes pem))))
+      (is (equalp (pure-tls/acme::encode-ec-public-key public-key)
+                  (gr8s::parsed-certificate-request-spki-der parsed))))))
+

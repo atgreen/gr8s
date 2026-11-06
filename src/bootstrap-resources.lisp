@@ -158,6 +158,8 @@
     (return-from normalize-bootstrap-resource (normalize-service-resource input namespace name store)))
   (when (equal resource "podtemplates")
     (return-from normalize-bootstrap-resource (normalize-podtemplate input namespace name)))
+  (when (equal resource "podcertificaterequests")
+    (return-from normalize-bootstrap-resource (normalize-pod-certificate-request input namespace name store)))
   (let* ((object (copy-core-object (require-object input "resource")))
          (kind (core-resource-kind resource))
          (version (core-resource-api-version resource))
@@ -311,7 +313,7 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
       (member resource '("configmaps" "secrets" "serviceaccounts" "roles" "rolebindings" "clusterroles" "clusterrolebindings"
                          "networkpolicies" "services" "podtemplates" "events" "horizontalpodautoscalers" "deployments"
                          "replicasets" "replicationcontrollers" "daemonsets" "statefulsets" "controllerrevisions"
-                         "customresourcedefinitions")
+                         "customresourcedefinitions" "clustertrustbundles" "podcertificaterequests")
               :test #'equal)))
 
 (defun stored-resource-discovery (version)
