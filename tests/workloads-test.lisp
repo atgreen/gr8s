@@ -488,3 +488,55 @@
         (is (= 2 (gethash "replicas" (gethash "spec" (check-core-status 200 endpoint :method :put :object scale)))))
         (setf (gethash "resourceVersion" (gethash "metadata" scale)) "stale")
         (check-core-status 409 endpoint :method :put :object scale)))))
+
+;; Here rather than with the other autoscaler tests, as it needs the CRD test server.
+(test hpa-scales-a-custom-resource-through-its-scale-subresource
+  (with-crd-api (store path)
+    (values path)
+    (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
+           (state (gr8s::hpa-state-for store)) (now 3000000)
+           (gr8s::*workload-clock* (lambda () now))
+           (item "/apis/autoscalinge2e.example.com/v1/namespaces/alpha/testcrds/web"))
+      (crd-api-request 201 "/api/v1/namespaces" :method :post
+                       :object (gr8s::core-object "metadata" (gr8s::core-object "name" "alpha")))
+      ;; The upstream spec's definition: replicas in spec and status, and the selector in status.
+      (crd-api-request 201 "/apis/apiextensions.k8s.io/v1/customresourcedefinitions" :method :post
+                       :text "{\"apiVersion\":\"apiextensions.k8s.io/v1\",\"kind\":\"CustomResourceDefinition\",
+                               \"metadata\":{\"name\":\"testcrds.autoscalinge2e.example.com\"},
+                               \"spec\":{\"group\":\"autoscalinge2e.example.com\",\"scope\":\"Namespaced\",
+                                 \"names\":{\"plural\":\"testcrds\",\"singular\":\"testcrd\",\"kind\":\"TestCRD\",\"listKind\":\"TestCRDList\"},
+                                 \"versions\":[{\"name\":\"v1\",\"served\":true,\"storage\":true,
+                                   \"schema\":{\"openAPIV3Schema\":{\"type\":\"object\",\"x-kubernetes-preserve-unknown-fields\":true}},
+                                   \"subresources\":{\"status\":{},\"scale\":{\"specReplicasPath\":\".spec.replicas\",
+                                     \"statusReplicasPath\":\".status.replicas\",\"labelSelectorPath\":\".status.selector\"}}}]}}")
+      (crd-api-request 201 "/apis/autoscalinge2e.example.com/v1/namespaces/alpha/testcrds" :method :post
+                       :text "{\"apiVersion\":\"autoscalinge2e.example.com/v1\",\"kind\":\"TestCRD\",
+                               \"metadata\":{\"name\":\"web\"},\"spec\":{\"replicas\":1}}")
+      ;; The ReplicaSet stands in for whatever the custom resource's own controller runs.
+      (gr8s::create-core-resource store "replicasets" (hpa-test-replicaset 1) "alpha")
+      (run-workload-passes reconciler 2)
+      (mark-workload-pods-ready store runtime)
+      (gr8s::create-core-resource
+       store "horizontalpodautoscalers"
+       (hpa-test-autoscaler "scaleTargetRef" (gr8s::core-object "apiVersion" "autoscalinge2e.example.com/v1"
+                                                                "kind" "TestCRD" "name" "web"))
+       "alpha")
+      (flet ((sync () (gr8s::sync-horizontal-pod-autoscaler
+                       reconciler state (gr8s::get-core-resource store "horizontalpodautoscalers" "alpha" "web") now)))
+        ;; Without a selector in its scale nothing can be measured.
+        (sync)
+        (is (equal "SucceededGetScale" (gethash "reason" (hpa-test-condition store "AbleToScale"))))
+        (is (equal "InvalidSelector" (gethash "reason" (hpa-test-condition store "ScalingActive"))))
+        (crd-api-request 200 (concatenate 'string item "/status") :method :patch
+                         :content-type "application/merge-patch+json"
+                         :text "{\"status\":{\"replicas\":1,\"selector\":\"app=web\"}}")
+        ;; A root that keeps unknown fields keeps the undeclared status the subresource wrote.
+        (is (equal "app=web" (gethash "selector" (gethash "status" (crd-api-request 200 item)))))
+        ;; 200m on a 100m request at a 50% target asks for four replicas, written through specReplicasPath.
+        (hpa-test-usage state store 0 now)
+        (incf now 15)
+        (hpa-test-usage state store 3 now)
+        (sync)
+        (is (equal "ValidMetricFound" (gethash "reason" (hpa-test-condition store "ScalingActive"))))
+        (is (= 4 (gethash "replicas" (gethash "spec" (crd-api-request 200 (concatenate 'string item "/scale"))))))
+        (is (= 4 (gethash "desiredReplicas" (gethash "status" (gr8s::get-core-resource store "horizontalpodautoscalers" "alpha" "web")))))))))

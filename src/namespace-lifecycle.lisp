@@ -37,6 +37,9 @@
         (error 'kubernetes-error :status-code 403 :reason "Forbidden"
                :message (format nil "unable to create new content in namespace ~A because it is being terminated" namespace))))))
 
+(defparameter +namespace-name-label+ "kubernetes.io/metadata.name"
+  "The label upstream's Namespace strategy sets to the Namespace's own name.")
+
 (defun normalize-namespace-lifecycle (object existing)
   "Apply a Namespace write's strategy: its controller-owned fields survive ordinary updates."
   (let ((spec (gethash "spec" object)) (metadata (gethash "metadata" object)))
@@ -59,6 +62,12 @@
                (t (setf (gethash "status" object) (copy-core-object (gethash "status" existing (core-object "phase" "Active"))))))
          (let ((deleted (gethash "deletionTimestamp" old-metadata)))
            (if deleted (setf (gethash "deletionTimestamp" metadata) deleted) (remhash "deletionTimestamp" metadata))))))
+    ;; Every Namespace carries its own name as a label, so namespaceSelectors can pick one by name.
+    (let ((name (gethash "name" metadata)) (labels (gethash "labels" metadata)))
+      (when (stringp name)
+        (unless (hash-table-p labels)
+          (setf labels (core-object) (gethash "labels" metadata) labels))
+        (setf (gethash +namespace-name-label+ labels) name)))
     object))
 
 (defun delete-namespace-unlocked (store existing dry-run)

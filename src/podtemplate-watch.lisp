@@ -107,12 +107,13 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
                    (when initial-end (setf (gethash "annotations" metadata) (core-object "k8s.io/initial-events-end" "true")))
                    (write-event
                     (core-object "type" "BOOKMARK"
-                                 "object" (core-object "apiVersion" (cond (bookmark-api-version)
-                                                                          (*crd-view-definition*
-                                                                           (format nil "~A/~A" (gethash "group" (gethash "spec" *crd-view-definition*))
-                                                                                   *crd-request-version*))
-                                                                          (t *core-resource-view-version*))
-                                                       "kind" bookmark-kind "metadata" metadata))))))
+                                 "object" (watch-bookmark-representation
+                                           (core-object "apiVersion" (cond (bookmark-api-version)
+                                                                           (*crd-view-definition*
+                                                                            (format nil "~A/~A" (gethash "group" (gethash "spec" *crd-view-definition*))
+                                                                                    *crd-request-version*))
+                                                                           (t *core-resource-view-version*))
+                                                        "kind" bookmark-kind "metadata" metadata)))))))
         (handler-case
             (progn
               (when expired (error expired))

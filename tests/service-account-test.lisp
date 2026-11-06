@@ -269,3 +269,89 @@
     (gr8s::ensure-system-cluster-roles store)
     (is (= 1 (length (gethash "rules" (gr8s::get-core-resource store "clusterroles" nil "view")))))
     (is (< 1 (length (gethash "rules" (gr8s::get-core-resource store "clusterroles" nil "edit")))))))
+
+(test cluster-roles-aggregate-labelled-roles
+  (with-temporary-store (store directory)
+    (values directory)
+    (gr8s::ensure-system-cluster-roles store)
+    (flet ((rules (name) (gethash "rules" (gr8s::get-core-resource store "clusterroles" nil name)))
+           (grants-p (name resource)
+             (some (lambda (rule) (find resource (gethash "resources" rule) :test #'equal))
+                   (gethash "rules" (gr8s::get-core-resource store "clusterroles" nil name)))))
+      ;; admin, edit and view aggregate upstream's system:aggregate-to-* roles.
+      (is (gethash "aggregationRule" (gr8s::get-core-resource store "clusterroles" nil "edit")))
+      (is (grants-p "view" "pods"))
+      (is (grants-p "edit" "secrets"))
+      (is (grants-p "admin" "rolebindings"))
+      (is (not (grants-p "edit" "rolebindings")))
+      (is (not (grants-p "view" "secrets")))
+      ;; A chart's role labelled for edit adds its rules to edit and admin, not view.
+      (gr8s::create-core-resource store "clusterroles"
+        (gr8s::core-object "metadata" (gr8s::core-object "name" "widgets-edit"
+                                                         "labels" (gr8s::core-object "rbac.authorization.k8s.io/aggregate-to-edit" "true"
+                                                                                     "rbac.authorization.k8s.io/aggregate-to-admin" "true"))
+                           "rules" (vector (gr8s::core-object "apiGroups" #("example.test") "resources" #("widgets") "verbs" #("get"))))
+        nil)
+      (gr8s::reconcile-cluster-role-aggregation store)
+      (is (grants-p "edit" "widgets"))
+      (is (grants-p "admin" "widgets"))
+      (is (not (grants-p "view" "widgets")))
+      ;; A rule the sources share appears once, and the pass is idempotent.
+      (let ((before (length (rules "admin"))))
+        (gr8s::reconcile-cluster-role-aggregation store)
+        (is (= before (length (rules "admin")))))
+      ;; Removing the source takes its rules away again.
+      (gr8s::delete-core-resource store "clusterroles" nil "widgets-edit")
+      (gr8s::reconcile-cluster-role-aggregation store)
+      (is (not (grants-p "edit" "widgets")))
+      ;; Rules written by hand are replaced by what the selectors gather.
+      (gr8s::create-core-resource store "clusterroles"
+        (gr8s::core-object "metadata" (gr8s::core-object "name" "mine")
+                           "aggregationRule" (gr8s::core-object "clusterRoleSelectors"
+                                                                (vector (gr8s::core-object "matchLabels" (gr8s::core-object "team" "a"))))
+                           "rules" (vector (gr8s::core-object "apiGroups" #("") "resources" #("nodes") "verbs" #("get"))))
+        nil)
+      (gr8s::reconcile-cluster-role-aggregation store)
+      (is (zerop (length (rules "mine"))))
+      ;; An aggregationRule needs at least one valid selector.
+      (signals gr8s::kubernetes-error
+        (gr8s::create-core-resource store "clusterroles"
+          (gr8s::core-object "metadata" (gr8s::core-object "name" "empty")
+                             "aggregationRule" (gr8s::core-object "clusterRoleSelectors" #()))
+          nil))
+      (signals gr8s::kubernetes-error
+        (gr8s::create-core-resource store "clusterroles"
+          (gr8s::core-object "metadata" (gr8s::core-object "name" "bad")
+                             "aggregationRule" (gr8s::core-object "clusterRoleSelectors"
+                                                                  (vector (gr8s::core-object "matchExpressions"
+                                                                                             (vector (gr8s::core-object "key" "a" "operator" "Bogus"))))))
+          nil)))))
+
+(test nodes-read-only-what-their-pods-use
+  (with-temporary-store (store directory)
+    (values directory)
+    (let ((node (gr8s::make-api-user-identity :username "system:node:n1" :groups #("system:nodes" "system:authenticated")))
+          (other (gr8s::make-api-user-identity :username "system:node:n2" :groups #("system:nodes" "system:authenticated")))
+          (impostor (gr8s::make-api-user-identity :username "system:node:n1" :groups #("system:authenticated"))))
+      (create-pod store (parse-pod "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"user\",\"namespace\":\"alpha\"},
+        \"spec\":{\"nodeName\":\"n1\",\"imagePullSecrets\":[{\"name\":\"pull\"}],
+          \"containers\":[{\"name\":\"web\",\"image\":\"busybox:1.36.1\",
+            \"env\":[{\"name\":\"A\",\"valueFrom\":{\"configMapKeyRef\":{\"name\":\"settings\",\"key\":\"a\"}}}],
+            \"envFrom\":[{\"secretRef\":{\"name\":\"env-secret\"}}]}],
+          \"volumes\":[{\"name\":\"s\",\"secret\":{\"secretName\":\"mounted\"}},
+                       {\"name\":\"d\",\"persistentVolumeClaim\":{\"claimName\":\"data\"}},
+                       {\"name\":\"p\",\"projected\":{\"sources\":[{\"configMap\":{\"name\":\"projected\"}}]}}]}}"))
+      (flet ((allowed (identity resource name &optional (verb "get") (namespace "alpha"))
+               (gr8s::node-authorizer-allows-p store identity verb "" resource name namespace)))
+        (dolist (name '("pull" "env-secret" "mounted"))
+          (is-true (allowed node "secrets" name) "~A" name))
+        (dolist (name '("settings" "projected"))
+          (is-true (allowed node "configmaps" name) "~A" name))
+        (is-true (allowed node "persistentvolumeclaims" "data"))
+        ;; Nothing the Pod doesn't use, nothing for another node or a pretender, and only get.
+        (is-false (allowed node "secrets" "unrelated"))
+        (is-false (allowed node "secrets" "mounted" "get" "beta"))
+        (is-false (allowed other "secrets" "mounted"))
+        (is-false (allowed impostor "secrets" "mounted"))
+        (is-false (allowed node "secrets" "mounted" "update"))
+        (is-false (allowed node "secrets" nil "list"))))))

@@ -96,22 +96,23 @@
     (unless (find "customresourcecleanup.apiextensions.k8s.io" values :test #'equal)
       (setf (gethash "finalizers" metadata) (concatenate 'vector values #("customresourcecleanup.apiextensions.k8s.io"))))))
 
-(defun validate-crd-metadata (metadata namespace name)
-  "Apply common metadata checks while supporting genuine durable finalizers."
+(defun validate-crd-metadata (metadata namespace name &optional (prefix "metadata"))
+  "Apply common metadata checks while supporting genuine durable finalizers.
+PREFIX is the metadata's field path, which differs for an embedded resource's."
   (let ((unknown nil))
     (maphash (lambda (key value)
                (declare (ignore value))
                (unless (member key '("name" "generateName" "namespace" "uid" "resourceVersion" "generation"
                                       "creationTimestamp" "deletionTimestamp" "deletionGracePeriodSeconds" "labels" "annotations"
                                       "ownerReferences" "finalizers" "managedFields" "selfLink" "clusterName") :test #'equal)
-                 (push (concatenate 'string "metadata." key) unknown)
+                 (push (format nil "~A.~A" prefix key) unknown)
                  (remhash key metadata))) metadata)
     (when unknown (crd-report-pruned-fields unknown)))
   (dolist (field '("labels" "annotations" "finalizers" "ownerReferences"))
     (when (eq 'null (gethash field metadata)) (remhash field metadata)))
   (dolist (field '("labels" "annotations"))
     (when (and (nth-value 1 (gethash field metadata)) (not (hash-table-p (gethash field metadata))))
-      (crd-schema-error "metadata" "~A requires an object" field)))
+      (crd-schema-error prefix "~A requires an object" field)))
   (let ((copy (copy-core-object metadata)) (finalizers (gethash "finalizers" metadata)))
     (remhash "finalizers" copy)
     (validate-core-metadata copy namespace name)
@@ -121,13 +122,15 @@
             unless (core-qualified-key-p finalizer) do (crd-schema-error "metadata.finalizers" "invalid qualified finalizer")))
     metadata))
 
-(defun crd-prepare-embedded-metadata (input)
-  "Prune and validate embedded metadata without requiring an optional name."
+(defun crd-prepare-embedded-metadata (input &optional (prefix "metadata"))
+  "Prune and validate embedded metadata at field path PREFIX without requiring an optional name."
   (let* ((metadata (copy-core-object (require-object input "embedded metadata")))
          (present (nth-value 1 (gethash "name" metadata))))
     (unless present (setf (gethash "name" metadata) "embedded"))
-    (validate-crd-metadata metadata (let ((value (gethash "namespace" metadata))) (unless (member value '(nil "" null) :test #'equal) value)) nil)
+    (validate-crd-metadata metadata (let ((value (gethash "namespace" metadata))) (unless (member value '(nil "" null) :test #'equal) value)) nil prefix)
     (unless present (remhash "name" metadata))
+    ;; Upstream round-trips embedded metadata through ObjectMeta and drops a zero creationTimestamp.
+    (when (eq 'null (gethash "creationTimestamp" metadata)) (remhash "creationTimestamp" metadata))
     metadata))
 
 (defun crd-schema-at-json-path (schema path)
@@ -365,7 +368,10 @@
     (if namespace (setf (gethash "namespace" metadata) namespace) (remhash "namespace" metadata))
     (if (and status-p *crd-status-write* existing)
         (let* ((copy (crd-object-at-version definition existing version-name)) (copy-meta (gethash "metadata" copy))
-               (status-schema (gethash "status" (gethash "properties" (crd-schema version) (core-object)))))
+               (status-schema (or (gethash "status" (gethash "properties" (crd-schema version) (core-object)))
+                                  ;; A root that keeps unknown fields keeps an undeclared status too.
+                                  (and (eq t (gethash "x-kubernetes-preserve-unknown-fields" (crd-schema version)))
+                                       (core-object "type" "object" "x-kubernetes-preserve-unknown-fields" t)))))
           (dolist (field '("resourceVersion" "uid"))
             (when (nth-value 1 (gethash field metadata)) (setf (gethash field copy-meta) (gethash field metadata))))
           (if (and (nth-value 1 (gethash "status" object)) status-schema)

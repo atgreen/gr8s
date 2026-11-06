@@ -194,6 +194,15 @@ them at its root is published as a bare object."
             for key = (concatenate 'string "apis/" (gethash "groupVersion" version))
             do (setf (gethash key paths) (core-object "serverRelativeURL"
                                                      (format nil "/openapi/v3/~A?hash=~D" key (pod-store-resource-revision store))))))
+    ;; An aggregated version is listed while its server is available, as upstream's aggregator lists it.
+    (dolist (apiservice (stored-apiservices store))
+      (when (and (apiservice-service apiservice) (apiservice-available-p apiservice))
+        (let* ((spec (gethash "spec" apiservice))
+               (key (format nil "apis/~A/~A" (gethash "group" spec) (gethash "version" spec))))
+          (setf (gethash key paths)
+                (core-object "serverRelativeURL"
+                             (format nil "/openapi/v3/~A?hash=~A" key
+                                     (gethash "resourceVersion" (gethash "metadata" apiservice))))))))
     (json-response (core-object "paths" paths))))
 
 (defvar *openapi-v3-completing* nil
@@ -262,12 +271,33 @@ kubectl falls back to the v2 document when a kind has no patch operation here."
                                     (vector (core-object "name" "fieldValidation" "in" "query"
                                                          "schema" (core-object "type" "string" "enum" #("Strict" "Warn" "Ignore")))))))))))
 
+(defun openapi-v3-drop-empty-fields (value)
+  "Remove the empty parameters lists and properties maps that kube-openapi's spec3 types omit,
+so that a client's decode and re-encode of the document gives back an equal document."
+  (cond ((hash-table-p value)
+         (loop for key in (loop for key being the hash-keys of value collect key)
+               for child = (gethash key value)
+               do (if (or (and (equal key "parameters") (vectorp child) (zerop (length child)))
+                          (and (equal key "properties") (hash-table-p child) (zerop (hash-table-count child))))
+                      (remhash key value)
+                      (openapi-v3-drop-empty-fields child))))
+        ((and (vectorp value) (not (stringp value)))
+         (map nil #'openapi-v3-drop-empty-fields value)))
+  value)
+
 (defun openapi-v3-complete-response (store runtime reconciler path)
   "Serve an OpenAPI v3 group document covering every resource its version discovers."
   (multiple-value-bind (group version found) (openapi-v3-document-group-version path)
-    ;; An aggregated server's document isn't merged, and its discovery would be proxied here.
-    (when (and found (plusp (length group)) (aggregated-apiservice store group version))
-      (core-resource-error 404 "NotFound" "No OpenAPI document for aggregated ~A/~A" group version))
+    ;; An aggregated version's document is its own server's, which upstream's aggregator
+    ;; publishes as it stands; it is fetched when asked for rather than kept.
+    (when (and found (plusp (length group)))
+      (let ((apiservice (aggregated-apiservice store group version)))
+        (when apiservice
+          (unless (apiservice-available-p apiservice)
+            (core-resource-error 404 "NotFound" "No OpenAPI document for unavailable ~A/~A" group version))
+          (return-from openapi-v3-complete-response
+            (aggregated-api-proxy-response store apiservice :get
+                                           :target (format nil "/openapi/v3/apis/~A/~A" group version))))))
     (let* ((body (let ((*openapi-v3-completing* t)) (route-http-request store runtime reconciler path :get)))
            (status (hunchentoot:return-code*)))
       (unless found (return-from openapi-v3-complete-response body))
@@ -296,6 +326,7 @@ kubectl falls back to the v2 document when a kind has no patch operation here."
                          (openapi-v3-kind-patched-p paths (gethash "kind" resource) group version))
                 do (openapi-v3-add-resource-paths paths resource group version))
         (openapi-v3-declare-field-validation paths)
+        (openapi-v3-drop-empty-fields document)
         (setf (hunchentoot:return-code*) 200
               (hunchentoot:content-type*) "application/json")
         (com.inuoe.jzon:stringify document)))))

@@ -733,6 +733,7 @@ handler and never gets here. A busy host makes this race likely."
                                   :before-reconcile (lambda ()
                                       (reconcile-crd-deletions store)
                                       (reconcile-flowcontrol store)
+                                      (reconcile-cluster-role-aggregation store)
                                       (collect-orphaned-custom-resources store)
                                       (reconcile-certificate-signing-requests store pki)
                                       (reconcile-pod-certificate-requests store pki)

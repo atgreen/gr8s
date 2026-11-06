@@ -387,3 +387,38 @@
         (is (equal "Table" (gethash "kind" table)))
         (is (equal '("Name" "Status" "Message" "Error") columns))
         (is (equalp #("controller-manager" "Healthy" "ok" "") row))))))
+
+(test namespaces-carry-their-name-as-a-label
+  (with-core-api (store path)
+    (values store path)
+    (let ((created (check-core-status 201 "/api/v1/namespaces" :method :post
+                     :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace"
+                                                "metadata" (gr8s::core-object "name" "labelled"
+                                                                              "labels" (gr8s::core-object "team" "a"))))))
+      (is (equal "labelled" (gethash "kubernetes.io/metadata.name" (gethash "labels" (gethash "metadata" created)))))
+      (is (equal "a" (gethash "team" (gethash "labels" (gethash "metadata" created))))))
+    ;; An update cannot remove or change it.
+    (let ((updated (check-core-status 200 "/api/v1/namespaces/labelled" :method :put
+                     :object (gr8s::core-object "apiVersion" "v1" "kind" "Namespace"
+                                                "metadata" (gr8s::core-object "name" "labelled"
+                                                                              "labels" (gr8s::core-object "kubernetes.io/metadata.name" "other"))))))
+      (is (equal "labelled" (gethash "kubernetes.io/metadata.name" (gethash "labels" (gethash "metadata" updated))))))))
+
+(test bound-token-claims-and-self-reviews-reach-every-version
+  ;; Admission's userInfo carries a bound token's node and pod claims, which policies match on.
+  (let* ((extra (gr8s::core-object "authentication.kubernetes.io/node-name" #("gr8s-local")))
+         (actor (gr8s::api-identity-actor
+                 (gr8s::make-api-service-account-identity :namespace "ns" :name "default" :uid "u" :extra extra))))
+    (is (equal "system:serviceaccount:ns:default" (gethash "username" actor)))
+    (is (equalp #("gr8s-local") (gethash "authentication.kubernetes.io/node-name" (gethash "extra" actor)))))
+  ;; system:basic-user grants self reviews by group and resource, whatever the version.
+  (dolist (path '("/apis/authentication.k8s.io/v1/selfsubjectreviews"
+                  "/apis/authentication.k8s.io/v1alpha1/selfsubjectreviews"
+                  "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
+                  "/apis/authorization.k8s.io/v1beta1/selfsubjectrulesreviews"))
+    (is (gr8s::authenticated-self-review-request-p path :post) "~A" path))
+  (dolist (path '("/apis/authentication.k8s.io/v1/tokenreviews"
+                  "/apis/authorization.k8s.io/v1/subjectaccessreviews"
+                  "/apis/authentication.k8s.io/v1/selfsubjectreviews/x"))
+    (is (not (gr8s::authenticated-self-review-request-p path :post)) "~A" path))
+  (is (not (gr8s::authenticated-self-review-request-p "/apis/authentication.k8s.io/v1/selfsubjectreviews" :get))))
