@@ -395,9 +395,64 @@ goes with its worker."
       (write-prometheus-family out "process_start_time_seconds" "[ALPHA] Start time of the process since unix epoch in seconds." "gauge"
                                (list (list nil (- *kubelet-process-start-time* 2208988800)))))))
 
+(defparameter *kubelet-log-directory* #p"/var/log/"
+  "The directory the kubelet's /logs/ endpoint serves, as upstream's http.FileServer over /var/log.")
+
+(defun kubelet-log-pathname (path)
+  "Map a /logs/... request PATH to a pathname under *kubelet-log-directory*, or NIL when a
+segment is empty-named, . or .., which could leave the directory."
+  (let ((segments (uiop:split-string (subseq path (min (length path) (length "/logs/"))) :separator "/")))
+    (unless (some (lambda (segment) (member segment '("." "..") :test #'equal)) segments)
+      (let ((names (remove "" segments :test #'equal)))
+        (if (or (null names) (uiop:string-suffix-p path "/"))
+            (merge-pathnames (format nil "~{~A/~}" names) *kubelet-log-directory*)
+            (merge-pathnames (format nil "~{~A/~}~A" (butlast names) (car (last names))) *kubelet-log-directory*))))))
+
+(defun kubelet-html-escape (text)
+  "Escape TEXT for an HTML listing, as Go's htmlReplacer does."
+  (with-output-to-string (out)
+    (loop for character across text
+          do (case character
+               (#\& (write-string "&amp;" out)) (#\< (write-string "&lt;" out)) (#\> (write-string "&gt;" out))
+               (#\" (write-string "&#34;" out)) (#\' (write-string "&#39;" out))
+               (t (write-char character out))))))
+
+(defun kubelet-logs-response (path)
+  "Serve the node's log directory as the kubelet's /logs/ file server does: a directory as a
+sorted HTML listing, a file as itself, and a directory named without its trailing slash, or
+/logs itself, as a redirect to it."
+  (let ((pathname (kubelet-log-pathname path)))
+    (cond
+      ((or (null pathname) (equal path "/logs") (not (or (uiop:directory-exists-p pathname) (probe-file pathname))))
+       (if (equal path "/logs")
+           (progn (setf (hunchentoot:header-out :location) "/logs/")
+                  (kubelet-text-response 301 ""))
+           (kubelet-text-response 404 (format nil "404 page not found~%"))))
+      ((and (uiop:directory-exists-p (uiop:ensure-directory-pathname pathname)) (not (uiop:string-suffix-p path "/")))
+       (setf (hunchentoot:header-out :location) (concatenate 'string path "/"))
+       (kubelet-text-response 301 ""))
+      ((uiop:directory-exists-p pathname)
+       (let ((names (sort (append (mapcar (lambda (directory) (concatenate 'string (car (last (pathname-directory directory))) "/"))
+                                          (uiop:subdirectories pathname))
+                                  (mapcar #'file-namestring (uiop:directory-files pathname)))
+                          #'string<)))
+         (kubelet-text-response
+          200 (format nil "<!doctype html>~%<meta name=\"viewport\" content=\"width=device-width\">~%<pre>~%~{~A~}</pre>~%"
+                      (mapcar (lambda (name)
+                                ;; A directory's trailing slash stays a path separator in its link.
+                                (let ((directory (uiop:string-suffix-p name "/")))
+                                  (format nil "<a href=\"~A~:[~;/~]\">~A</a>~%"
+                                          (kubelet-html-escape (hunchentoot:url-encode (if directory (subseq name 0 (1- (length name))) name)))
+                                          directory (kubelet-html-escape name))))
+                              names))
+          "text/html; charset=utf-8")))
+      (t (hunchentoot:handle-static-file pathname "text/plain; charset=utf-8")))))
+
 (defun kubelet-endpoint-response (acceptor path method)
   "Serve PATH for a caller already allowed to read it."
   (cond
+    ((and (or (equal path "/logs") (uiop:string-prefix-p "/logs/" path)) (member method '(:get :head)))
+     (kubelet-logs-response path))
     ((and (equal path "/metrics/probes") (member method '(:get :head)))
      (kubelet-text-response 200 (kubelet-probe-metrics-text (funcall (kubelet-acceptor-probes-function acceptor)))
                             "text/plain; version=0.0.4; charset=utf-8"))

@@ -212,6 +212,11 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
                    (is (some (lambda (review)
                                (equal "kube-apiserver-kubelet-client" (gr8s::table-get review "spec" "user")))
                              (car calls)))
+                   ;; The node's log directory, with its trailing slash kept on the way through.
+                   (multiple-value-bind (code body type) (fetch "node-a/proxy/logs/")
+                     (is (= 200 code))
+                     (is (equal "text/html; charset=utf-8" type))
+                     (is (search "<pre>" body)))
                    ;; The Pod list is still the control plane's own answer.
                    (is (= 200 (fetch "node-a/proxy/pods")))
                    (is (= 404 (fetch "node-b/proxy/metrics")))
@@ -276,3 +281,35 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
       (is (search "# TYPE process_start_time_seconds gauge" text)))
     (is (search "process_start_time_seconds" (gr8s::kubelet-probe-metrics-text nil)))
     (is (not (search "prober_probe_total" (gr8s::kubelet-probe-metrics-text nil))))))
+
+(test kubelet-serves-the-node-log-directory
+  ;; The Node proxy's /logs/ reaches this file server, as upstream's kubelet serves /var/log.
+  (with-kubelet-test-pki (pki directory)
+    (gr8s::issue-kubelet-credentials pki directory "node-a" '("127.0.0.1"))
+    (let ((logs (uiop:ensure-directory-pathname (merge-pathnames "var-log/" directory))))
+      (ensure-directories-exist (merge-pathnames "journal/.keep" logs))
+      (with-open-file (out (merge-pathnames "messages" logs) :direction :output) (write-string "booted<ok>" out))
+      (multiple-value-bind (certificate key) (gr8s::kubelet-credential-paths directory)
+        ;; Set, not bound: the listener's threads read the global value.
+        (let* ((saved (shiftf gr8s::*kubelet-log-directory* logs))
+               (server (gr8s::start-kubelet-server
+                        :address "127.0.0.1" :port 0 :certificate certificate :key key :node-name "node-a"
+                        :auth (gr8s::make-kubelet-auth :client-ca (gr8s::cluster-pki-ca-certificate pki)
+                                                       :review (kubelet-test-review (list nil)))
+                        :stats-function #'kubelet-test-node-stats))
+               (port (hunchentoot:acceptor-port server)))
+          (unwind-protect
+               (multiple-value-bind (client client-key) (gr8s::ensure-apiserver-kubelet-client-credentials pki)
+                 (let ((credentials (list client client-key)))
+                   (multiple-value-bind (code text type) (kubelet-test-get pki port "/logs/" :client credentials)
+                     (is (= 200 code))
+                     (is (equal "text/html; charset=utf-8" type))
+                     (is (search "<a href=\"journal/\">journal/</a>" text))
+                     (is (search "<a href=\"messages\">messages</a>" text)))
+                   (multiple-value-bind (code text) (kubelet-test-get pki port "/logs/messages" :client credentials)
+                     (is (= 200 code))
+                     (is (equal "booted<ok>" text)))
+                   (is (= 404 (kubelet-test-get pki port "/logs/missing" :client credentials)))
+                   (is (= 404 (kubelet-test-get pki port "/logs/../etc/passwd" :client credentials)))))
+            (gr8s::stop-kubelet-server server)
+            (setf gr8s::*kubelet-log-directory* saved)))))))
