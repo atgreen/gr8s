@@ -791,10 +791,15 @@ snapshot application."
                                         (ensure-node-snapshot-current node-runtime snapshot)
                                         (put-assigned-pod (node-runtime-store node-runtime) pod)
                                         (ensure-node-snapshot-current node-runtime snapshot)
-                                        (cache-node-observation
-                                         node-runtime pod
-                                         (reconcile-pod (node-runtime-reconciler node-runtime)
-                                                        (pod-namespace pod) (pod-name pod))))
+                                        (let* ((started (get-internal-real-time))
+                                               (status (reconcile-pod (node-runtime-reconciler node-runtime)
+                                                                      (pod-namespace pod) (pod-name pod))))
+                                          ;; As the kubelet's pod workers and start latency measure them.
+                                          (ignore-errors
+                                           (note-pod-sync (pod-uid pod) (pod-resource-version pod) (deletion-requested-p pod)
+                                                          (/ (- (get-internal-real-time) started) internal-time-units-per-second))
+                                           (note-pod-phase (pod-uid pod) (gethash "phase" status)))
+                                          (cache-node-observation node-runtime pod status)))
                                     ;; The next Pod still has to run. Cancellation and
                                     ;; supersession aren't errors, so they still unwind this.
                                     (error (condition)
@@ -804,6 +809,8 @@ snapshot application."
                                       nil))
                      when status collect status)))
         (ensure-node-snapshot-current node-runtime snapshot)
+        (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
+          (forget-unassigned-pod-records (node-runtime-assigned-versions node-runtime)))
         (when (or failed (member nil parsed))
           (error 'node-snapshot-incomplete
                  :message (format nil "~D Pod assignment~:P not applied"
