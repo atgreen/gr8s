@@ -124,56 +124,17 @@
           (is (= 200 (gethash "averageUtilization"
                               (gethash "current" (gethash "resource" (aref (gethash "currentMetrics" status) 0)))))))))))
 
-(test hpa-reads-the-resource-metrics-api-when-one-is-registered
+(test native-resource-metrics-cannot-be-shadowed-by-an-aggregated-server
   (with-temporary-store (store path)
     (values path)
-    (let* ((runtime (make-fake-runtime)) (reconciler (make-reconciler store runtime))
-           (state (gr8s::hpa-state-for store)) (now 1000000) (answer nil) (asked nil)
-           (gr8s::*workload-clock* (lambda () now))
-           (gr8s::*hpa-pod-metrics-reader* (lambda (store namespace)
-                                             (declare (ignore store))
-                                             (push namespace asked)
-                                             answer)))
-      (gr8s::create-core-resource store "replicasets" (hpa-test-replicaset 1) "alpha")
-      (gr8s::create-core-resource store "horizontalpodautoscalers" (hpa-test-autoscaler) "alpha")
-      (gr8s::create-core-resource
-       store "apiservices"
-       (com.inuoe.jzon:parse "{\"apiVersion\":\"apiregistration.k8s.io/v1\",\"kind\":\"APIService\",
+    (let ((apiservice
+            (com.inuoe.jzon:parse "{\"apiVersion\":\"apiregistration.k8s.io/v1\",\"kind\":\"APIService\",
           \"metadata\":{\"name\":\"v1beta1.metrics.k8s.io\"},
           \"spec\":{\"group\":\"metrics.k8s.io\",\"version\":\"v1beta1\",\"insecureSkipTLSVerify\":true,
                   \"groupPriorityMinimum\":100,\"versionPriority\":100,
-                  \"service\":{\"namespace\":\"kube-system\",\"name\":\"metrics-server\",\"port\":443}}}")
-       nil)
-      (run-workload-passes reconciler 2)
-      (mark-workload-pods-ready store runtime)
-      (flet ((sync ()
-               (gr8s::sync-horizontal-pod-autoscaler
-                reconciler state (gr8s::get-core-resource store "horizontalpodautoscalers" "alpha" "web") now)))
-        ;; An unreachable metrics server is the reason given, as upstream's controller gives it.
-        (setf answer "unable to fetch metrics from resource metrics API: the server is currently unable to handle the request")
-        (sync)
-        (is (equal "FailedGetResourceMetric" (gethash "reason" (hpa-test-condition store "ScalingActive"))))
-        (is (search "unable to get metrics for resource cpu: unable to fetch metrics from resource metrics API"
-                    (gethash "message" (hpa-test-condition store "ScalingActive"))))
-        (is (equal '("alpha") asked))
-        ;; Its PodMetrics, 200m on a 100m request at a 50% target, ask for four Pods.
-        (setf answer (gr8s::pod-metrics-usage-table
-                      (gr8s::core-object
-                       "items" (map 'vector (lambda (pod)
-                                             (gr8s::core-object
-                                              "metadata" (gr8s::core-object "name" (pod-name pod) "namespace" "alpha")
-                                              "timestamp" "2026-11-05T00:00:00Z" "window" "15s"
-                                              "containers" (vector (gr8s::core-object
-                                                                    "name" "main"
-                                                                    "usage" (gr8s::core-object "cpu" "200000000n"
-                                                                                               "memory" "1024Ki")))))
-                                    (list-pods store "alpha")))))
-        (incf now 15)
-        (sync)
-        (is (equal "ValidMetricFound" (gethash "reason" (hpa-test-condition store "ScalingActive"))))
-        (is (= 4 (gethash "replicas" (gethash "spec" (gr8s::get-core-resource store "replicasets" "alpha" "web")))))
-        ;; The controller takes no samples of its own meanwhile.
-        (is (zerop (hash-table-count (gr8s::hpa-state-samples state))))))))
+                  \"service\":{\"namespace\":\"kube-system\",\"name\":\"metrics-server\",\"port\":443}}}")))
+      (signals gr8s::kubernetes-error
+        (gr8s::create-core-resource store "apiservices" apiservice nil)))))
 
 (test hpa-reports-metrics-it-cannot-measure-and-disabled-targets
   (with-temporary-store (store path)

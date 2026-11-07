@@ -165,7 +165,8 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
   "Describe the groups this server always serves, whatever its store holds."
   (let ((groups (vector (rbac-api-group)
                        (event-api-group) (workload-api-group) (batch-api-group) (budget-api-group) (storage-api-group) (csr-api-group) (endpointslice-api-group) (networking-api-group)
-                       (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group) (cert-manager-api-group))))
+                       (policy-api-group "node.k8s.io") (policy-api-group "scheduling.k8s.io") (admission-api-group-object) (gateway-api-group) (cert-manager-api-group)
+                       (resource-metrics-api-group))))
     (setf groups (concatenate 'vector groups (typed-api-groups) (auth-review-groups)))
     (setf groups (concatenate 'vector groups (vector (autoscaling-api-group) (apiservice-api-group))))
     groups))
@@ -1412,6 +1413,16 @@ Watches are long-running requests, which that filter leaves alone."
            (if (aggregated-discovery-requested-p)
                (aggregated-discovery-response store runtime reconciler "/apis")
                (api-groups-response store)))
+          ((string= path "/apis/metrics.k8s.io")
+           (json-response (resource-metrics-api-group)))
+          ((string= path "/apis/metrics.k8s.io/v1beta1")
+           (json-response (resource-metrics-discovery-object)))
+          ((uiop:string-prefix-p "/apis/metrics.k8s.io/v1beta1/" path)
+           (json-response
+            (resource-metrics-object
+             store (runtime-resource-metrics runtime) path method
+             :label-selector (hunchentoot:get-parameter "labelSelector")
+             :field-selector (hunchentoot:get-parameter "fieldSelector"))))
           ((string= path "/apis/admissionregistration.k8s.io") (json-response (admission-api-group-object)))
           ((string= path "/apis/admissionregistration.k8s.io/v1") (admission-discovery-response))
           ((string= path "/openapi/v3/apis/admissionregistration.k8s.io/v1") (openapi-v3-response +admission-api-version+))

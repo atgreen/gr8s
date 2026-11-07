@@ -1401,7 +1401,11 @@ that reconnects or restarts gets the answer without a second deletion racing the
   (bt:make-thread
    (lambda ()
      (handler-case
-         (let ((metrics (runtime-container-metrics (node-runtime-runtime node-runtime))))
+         (let ((metrics
+                 (kubelet-stats-summary-object
+                  (collect-kubelet-node-stats
+                   (node-runtime-runtime node-runtime)
+                   (node-runtime-node-name node-runtime)))))
            (funcall emit :operation-stream
                     (node-operation-stream
                      request gr8s.node.v1::+streamchannel-stream_channel_stdout+
