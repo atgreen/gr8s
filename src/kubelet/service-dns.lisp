@@ -11,7 +11,7 @@
   "Copy only public DNS fields; exclude arbitrary annotations and unrelated resources."
   (let* ((kind (gethash "kind" object)) (source (gethash "metadata" object))
          (metadata (core-object)) (result (core-object)))
-    (unless (member kind '("Service" "EndpointSlice" "NetworkPolicy"
+    (unless (member kind '("Service" "EndpointSlice" "NetworkPolicy" "Ingress" "IngressClass"
                            "GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute"
                            "Secret" "ClusterTrustBundle" "PodCertificateRequest") :test #'equal)
       (invalid-pod "unsupported public Service discovery kind"))
@@ -29,7 +29,8 @@
                                               ((equal kind "Secret") "v1")
                                               ((equal kind "ClusterTrustBundle") "certificates.k8s.io/v1")
                                               ((equal kind "PodCertificateRequest") "certificates.k8s.io/v1")
-                                              ((equal kind "NetworkPolicy") "networking.k8s.io/v1")
+                                              ((member kind '("NetworkPolicy" "Ingress" "IngressClass") :test #'equal)
+                                               "networking.k8s.io/v1")
                                               ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
                                                "gateway.networking.k8s.io/v1")
                                               (t "discovery.k8s.io/v1"))
@@ -69,10 +70,19 @@
        ;; The spec as network-policy-projection resolved it: podSelector, defaulted
        ;; policyTypes, and rules whose peers are addresses. The node needs nothing else.
        (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
-      ((member kind '("GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
+      ((member kind '("Ingress" "IngressClass"
+                      "GatewayClass" "Gateway" "HTTPRoute" "TCPRoute" "TLSRoute" "GRPCRoute") :test #'equal)
        ;; The agent's Gateway controller reconciles these into L7 proxy listeners,
        ;; so it needs the full spec (controllerName / listeners / parentRefs+rules).
-       (setf (gethash "spec" result) (copy-core-object (gethash "spec" object))))
+       (setf (gethash "spec" result) (copy-core-object (gethash "spec" object)))
+       (when (equal kind "Ingress")
+         (let ((annotations (gethash "annotations" source)) (kept (core-object)))
+           (when (hash-table-p annotations)
+             (dolist (key '("kubernetes.io/ingress.class" "gr8s.io/rate-limit-rps"))
+               (multiple-value-bind (value present) (gethash key annotations)
+                 (when present (setf (gethash key kept) value)))))
+           (when (plusp (hash-table-count kept))
+             (setf (gethash "annotations" metadata) kept)))))
       ((equal kind "Secret")
        ;; A Gateway HTTPS listener terminates TLS on the node, so the node needs
        ;; the referenced certificate and private key (podster-045.6). Only
@@ -134,6 +144,24 @@
                                (when secret (push secret secrets)))))))))))
     (nreverse secrets)))
 
+(defun ingress-referenced-tls-secrets (store)
+  "Return TLS Secrets named by any Ingress, deduplicated by namespace/name."
+  (let ((seen (make-hash-table :test #'equal)) (secrets nil))
+    (dolist (ingress (list-core-resources store "ingresses"))
+      (let* ((metadata (gethash "metadata" ingress))
+             (namespace (gethash "namespace" metadata))
+             (tls (gethash "tls" (gethash "spec" ingress))))
+        (when tls
+          (loop for entry across tls
+                for name = (gethash "secretName" entry)
+                for key = (and name (cons namespace name))
+                when (and key (not (gethash key seen)))
+                  do (setf (gethash key seen) t)
+                     (let ((secret (ignore-errors
+                                    (get-core-resource store "secrets" namespace name))))
+                       (when secret (push secret secrets)))))))
+    (nreverse secrets)))
+
 (defun service-discovery-projection (store)
   "Serialize each public Service and EndpointSlice once in stable key order."
   (mapcar (lambda (object)
@@ -143,6 +171,8 @@
                         (list-core-resources store "endpointslices")
                         ;; Resolved against the cluster's Pods and Namespaces, which nodes do not see.
                         (network-policy-projection store)
+                        (list-core-resources store "ingressclasses")
+                        (list-core-resources store "ingresses")
                         (list-core-resources store "gatewayclasses")
                         (list-core-resources store "gateways")
                         (list-core-resources store "httproutes")
@@ -151,7 +181,8 @@
                         (list-core-resources store "grpcroutes")
                         (list-core-resources store "clustertrustbundles")
                         (list-core-resources store "podcertificaterequests")
-                        (gateway-referenced-tls-secrets store))
+                        (gateway-referenced-tls-secrets store)
+                        (ingress-referenced-tls-secrets store))
                 #'string< :key (lambda (object)
                                  (let ((metadata (gethash "metadata" object)))
                                    (format nil "~A/~A/~A" (gethash "kind" object)
@@ -167,6 +198,8 @@
            (namespace (gethash "namespace" metadata)) (name (gethash "name" metadata))
            (resource (cond ((equal "Service" (gethash "kind" public)) "services")
                            ((equal "NetworkPolicy" (gethash "kind" public)) "networkpolicies")
+                           ((equal "IngressClass" (gethash "kind" public)) "ingressclasses")
+                           ((equal "Ingress" (gethash "kind" public)) "ingresses")
                            ((equal "GatewayClass" (gethash "kind" public)) "gatewayclasses")
                            ((equal "Gateway" (gethash "kind" public)) "gateways")
                            ((equal "HTTPRoute" (gethash "kind" public)) "httproutes")
@@ -178,9 +211,9 @@
                            ((equal "PodCertificateRequest" (gethash "kind" public)) "podcertificaterequests")
                            (t "endpointslices"))))
       (unless (and (stringp name) (plusp (length name))
-                   ;; GatewayClass and ClusterTrustBundle are cluster-scoped (no
+                   ;; GatewayClass, IngressClass and ClusterTrustBundle are cluster-scoped (no
                    ;; namespace); all others are namespaced.
-                   (if (member resource '("gatewayclasses" "clustertrustbundles") :test #'equal)
+                   (if (member resource '("gatewayclasses" "ingressclasses" "clustertrustbundles") :test #'equal)
                        (null namespace) (dns-label-p namespace)))
         (invalid-pod "public Service discovery metadata is invalid"))
       (setf (gethash (core-resource-key resource namespace name) resources) public))))

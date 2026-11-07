@@ -86,3 +86,24 @@
       (gr8s::converge-gateway-listeners controller)
       (is (= 2 (count :stop actions :key #'first)))
       (is (zerop (hash-table-count (gr8s::gateway-controller-listeners controller)))))))
+
+(test ingress-classes-routes-and-tls-secrets-cross-the-node-snapshot
+  (with-temporary-store (store directory)
+    (values directory)
+    (seed-ingress-controller-test store)
+    (let* ((projection (gr8s::service-discovery-projection store))
+           (objects (mapcar (lambda (bytes)
+                              (com.inuoe.jzon:parse
+                               (trivial-utf-8:utf-8-bytes-to-string bytes)))
+                            projection))
+           (resources (make-hash-table :test #'equal)))
+      (is (= 2 (count "IngressClass" objects :test #'equal
+                      :key (lambda (object) (gethash "kind" object)))))
+      (is (= 2 (count "Ingress" objects :test #'equal
+                      :key (lambda (object) (gethash "kind" object)))))
+      (is (= 1 (count "Secret" objects :test #'equal
+                      :key (lambda (object) (gethash "kind" object)))))
+      (gr8s::install-service-discovery-projection resources projection)
+      (is (gethash (gr8s::core-resource-key "ingressclasses" nil "gr8s") resources))
+      (is (gethash (gr8s::core-resource-key "ingresses" "default" "web") resources))
+      (is (gethash (gr8s::core-resource-key "secrets" "default" "web-tls") resources)))))
