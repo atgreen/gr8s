@@ -280,6 +280,14 @@
                                        :key (gateway-acceptor-private-key acceptor)
                                        :verify pure-tls:+verify-none+))))
 
+(defun gateway-service-port (service reference)
+  "Return SERVICE's port named or numbered by REFERENCE."
+  (find-if (lambda (port)
+             (if (integerp reference)
+                 (eql reference (gethash "port" port))
+                 (equal reference (gethash "name" port))))
+           (gethash "ports" (gethash "spec" service) #())))
+
 (defun make-service-backend-resolver (store)
   "A resolver mapping a GW-BACKEND (a Service reference) to an address. It
    prefers a randomly chosen ready Pod endpoint (direct dial, independent of the
@@ -290,15 +298,17 @@
            (service (ignore-errors (get-core-resource store "services" namespace
                                                        (gw-backend-name backend)))))
       (when service
-        (let ((endpoints (ignore-errors
-                          (service-pod-endpoints store service (gw-backend-port backend)))))
+        (let* ((service-port (gateway-service-port service (gw-backend-port backend)))
+               (endpoints (and service-port
+                               (ignore-errors
+                                (service-pod-endpoints store service service-port)))))
           (if endpoints
               (let ((endpoint (nth (random (length endpoints)) endpoints)))
                 (values (first endpoint) (second endpoint)))
               (let ((cluster-ip (gethash "clusterIP" (gethash "spec" service))))
-                (when (and (stringp cluster-ip) (plusp (length cluster-ip))
+                (when (and service-port (stringp cluster-ip) (plusp (length cluster-ip))
                            (not (equal cluster-ip "None")))
-                  (values cluster-ip (gw-backend-port backend))))))))))
+                  (values cluster-ip (gethash "port" service-port))))))))))
 
 (defun start-gateway-listener (&key (address "127.0.0.1") port router resolver (name "gateway") tls)
   "Start a Gateway listener acceptor on PORT. ROUTER is a compiled dispatch fn
