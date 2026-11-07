@@ -30,7 +30,6 @@ The comparisons have different meanings:
 |---|---|---|
 | Conformance | No current build has passed the certified-conformance suite. The checked-in ledger's newest full result is round 4 at 64/446 tests; it predates substantial current functionality, so it is evidence of neither current failure counts nor current parity. A fresh run is required before making a conformance claim. | [Conformance ledger](CONFORMANCE.md); documentation refresh `podster-9do` |
 | IP families | Allocated Pod and Service networking is IPv4-only. `PreferDualStack` is accepted but produces a single IPv4 family; `RequireDualStack` and IPv6-only Services are refused. IPv6 DNS enforcement is deferred with IPv6 Pod networking. | [Services](networking.md#services--load-balancing); `tests/services-test.lisp`; `podster-yge` |
-| Ingress | Ingress and IngressClass objects are stored, but no Ingress controller reconciles them. gr8s Gateway API support is a strong alternative, but it does not make existing Ingress workloads portable without conversion. | [Services and Ingress](networking.md#services--load-balancing) |
 | Registry credentials | Pod and ServiceAccount `imagePullSecrets` work, but node-wide registry credential files and kubelet credential-provider plugins are absent. | [Config, identity and secrets](kubernetes-surface.md#config-identity--secrets) |
 | Pod Security Admission | No implementation of the built-in Pod Security Admission policy or namespace enforcement modes is present. SecurityContext validation is not a substitute for the standard privileged/baseline/restricted policy contract. | Source audit; no matching controller or admission plugin |
 | Dynamic Resource Allocation | ResourceClaim and ResourceClaimTemplate storage APIs exist, but there is no allocator/controller that turns claims into device allocations. | `src/resources/typed-apis.lisp`; no ResourceClaim controller |
@@ -59,7 +58,7 @@ and [networking-services documentation](https://docs.k3s.io/networking/networkin
 |---|---|---|
 | Managed AddOn/manifests controller | There is no general manifests directory, AddOn resource/controller, or disable/uninstall lifecycle for packaged components. Runtime payload add-ons are a narrower mechanism. | Distribution gap |
 | CoreDNS | gr8s embeds its own DNS server instead of deploying CoreDNS. Current source implements ordinary, headless, ExternalName, SRV, and reverse records; equivalence beyond covered behavior depends on a fresh conformance run. | Intentional replacement |
-| Traefik Ingress | gr8s embeds a Gateway API proxy and does not install Traefik. Gateway traffic works through the agent, but ordinary Ingress objects have no controller. | Intentional replacement plus Ingress parity gap |
+| Traefik Ingress | gr8s embeds its own Gateway/Ingress proxy instead of installing Traefik. `networking.k8s.io/v1` Ingress routes, TLS Secrets, status addresses, and listener lifecycle are reconciled directly by each agent. | Equivalent outcome; intentional replacement |
 | local-path-provisioner | gr8s has an in-process default `local-path` provisioner rather than a provisioner Pod. | Equivalent outcome; intentional replacement |
 | metrics-server | gr8s replaces the addon with an in-process `metrics.k8s.io/v1beta1` API backed by the same node summaries used for autoscaling. No metrics-server Pod, Service, or APIService is required for `kubectl top` or dashboard CPU/MEM. | Equivalent outcome; intentional replacement |
 | ServiceLB | gr8s implements node relays and eBPF Service forwarding rather than Klipper ServiceLB Pods. It publishes ready node InternalIPs in `status.loadBalancer.ingress` with `ipMode: Proxy` and serves each LoadBalancer Service port on those addresses; `scripts/test-service-traffic.py` covers the native path. | Equivalent outcome; intentional replacement |
@@ -100,16 +99,15 @@ themselves:
 - Pure-Lisp Raft replaces SQLite/Kine/etcd for durable control-plane state.
 - The Whistler eBPF dataplane replaces Flannel plus kube-proxy/iptables.
 - In-process DNS replaces the CoreDNS deployment.
-- The in-agent Gateway API implementation replaces the default Traefik path for
-  supported Gateway resources.
+- The in-agent Gateway and Ingress implementation replaces the default Traefik path.
 - In-process local-path, NFS, Service, EndpointSlice, scheduler, and workload
   controllers replace separate upstream controller binaries or addon Pods.
 - A single `gr8s` executable supplies server and agent roles instead of bundling
   upstream Kubernetes component binaries.
 
 An intentional implementation choice ceases to be equivalent when it changes a
-portable API outcome. For example, using Gateway instead of Traefik is a valid
-choice; leaving Ingress objects unreconciled is still a compatibility gap.
+portable API outcome; the classifications above require the portable API result,
+not merely an alternative internal architecture.
 
 ## Audit boundaries
 
