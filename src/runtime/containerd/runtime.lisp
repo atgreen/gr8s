@@ -29,6 +29,8 @@
   dns-servers
   dns-searches
   dns-options
+  ;; Static node credentials, after parsing a Docker config at startup.
+  registry-credentials
   resource-store
   probes
   (lifecycle-lock (bt:make-lock "native lifecycle checkpoint writes"))
@@ -45,7 +47,7 @@
     (&key (socket-path "/run/containerd/containerd.sock")
           (log-root "/var/log/gr8s/pods/")
           (host-network t)
-          dns-servers dns-searches dns-options availability)
+          dns-servers dns-searches dns-options registry-credentials availability)
   "Build a CONTAINERD-RUNTIME, defaulting the CRI socket, Pod log root and
    host-network on. AVAILABILITY, when given, is a managed containerd's readiness
    handle; NIL trusts an external runtime to already be up."
@@ -56,7 +58,8 @@
    :host-network host-network
    :dns-servers dns-servers
    :dns-searches dns-searches
-   :dns-options dns-options))
+   :dns-options dns-options
+   :registry-credentials registry-credentials))
 
 (defun call-containerd-runtime (thunk)
   "Call THUNK and return its values. Re-signals a runtime-error or

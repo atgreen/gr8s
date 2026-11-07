@@ -95,6 +95,34 @@
     (is (equal '(("team" . "p") ("host" . "p"))
                (lookup "registry.example.test/team/a" "host" "team" "copy")))))
 
+(test node-registry-credentials-backstop-pod-pull-secrets
+  (uiop:with-temporary-file (:pathname file :stream stream :keep nil)
+    (write-string
+     "{\"auths\":{\"registry.example.test\":{\"username\":\"node\",\"password\":\"node-pass\"},\"registry.example.test/team\":{\"username\":\"team-node\",\"password\":\"team-pass\"}}}"
+     stream)
+    (finish-output stream)
+    (with-temporary-store (store directory)
+      (create-pull-secret store "pod"
+                          "{\"auths\":{\"registry.example.test/team\":{\"username\":\"pod\",\"password\":\"pod-pass\"}}}")
+      (let ((runtime (gr8s::make-containerd-runtime
+                      :log-root (merge-pathnames "logs/" directory)
+                      :registry-credentials (gr8s::load-node-registry-credentials file))))
+        (setf (gr8s::containerd-runtime-resource-store runtime) store)
+        (is (equal '(("pod" . "pod-pass") ("team-node" . "team-pass") ("node" . "node-pass"))
+                   (gr8s::pod-image-pull-credentials
+                    runtime (pull-secret-test-pod "pod") "c" "registry.example.test/team/a:1"))
+            "Pod credentials are attempted before node credentials")
+        (is (equal '(("node" . "node-pass"))
+                   (gr8s::pod-image-pull-credentials
+                    runtime (pull-secret-test-pod) "c" "registry.example.test/other/a:1")))))))
+
+(test malformed-node-registry-credential-files-fail-runtime-construction
+  (uiop:with-temporary-file (:pathname file :stream stream :keep nil)
+    (write-string "{\"auths\":7}" stream)
+    (finish-output stream)
+    (signals error
+      (gr8s::load-node-registry-credentials file))))
+
 (test missing-pull-secrets-are-skipped-and-reported
   (with-pull-credentials (lookup store)
     (create-pull-secret store "reg" "{\"auths\":{\"registry.example.test\":{\"username\":\"u\",\"password\":\"p\"}}}")
