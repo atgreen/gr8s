@@ -2,6 +2,18 @@
 
 (in-suite gr8s)
 
+(test containerd-runtime-has-an-explicit-package-boundary
+  (let ((package (find-package "GR8S.RUNTIME.CONTAINERD")))
+    (is (not (null package)))
+    (dolist (name '("MAKE-CONTAINERD-RUNTIME" "CONTAINERD-RUNTIME"
+                    "CONTAINERD-RUNTIME-P" "CRI-CONTAINER-INFO"
+                    "CRI-CONTAINER-STATUS"))
+      (multiple-value-bind (symbol status) (and package (find-symbol name package))
+        (is (not (null symbol)) "~A is present in GR8S.RUNTIME.CONTAINERD" name)
+        (is (eq :external status) "~A is exported from GR8S.RUNTIME.CONTAINERD" name)
+        (is (eq symbol (find-symbol name "GR8S"))
+            "GR8S preserves ~A's containerd symbol identity" name)))))
+
 (test containerd-reports-real-running-and-terminated-container-states
   (let* ((info (gr8s::make-cri-container-info
                 :id "actual-id" :name "e2e" :attempt 2 :image "registry.k8s.io/conformance:v1.36.0"

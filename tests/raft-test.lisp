@@ -2,7 +2,7 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
-;;;; Exercise the pure-Lisp Raft core (src/raft.lisp) under a deterministic
+;;;; Exercise the pure-Lisp Raft core (src/raft/core.lisp) under a deterministic
 ;;;; in-process simulator: leader election, log replication + apply, linearizable
 ;;;; compare-and-swap, leader failover across a partition, and the safety
 ;;;; guarantee that a partitioned minority leader cannot commit.
@@ -10,6 +10,15 @@
 (in-package #:gr8s/tests)
 (def-suite raft :in gr8s)
 (in-suite raft)
+
+(test raft-core-has-an-explicit-package-boundary
+  (let ((package (find-package "GR8S.RAFT")))
+    (is (not (null package)))
+    (dolist (name '("MAKE-RAFT-NODE" "RAFT-HANDLE-MESSAGE" "RAFT-TICK"
+                    "RAFT-PROPOSE" "OPEN-FILE-RAFT-STORAGE" "RECOVER-RAFT-NODE"))
+      (multiple-value-bind (symbol status) (and package (find-symbol name package))
+        (is (not (null symbol)) "~A is present in GR8S.RAFT" name)
+        (is (eq :external status) "~A is exported from GR8S.RAFT" name)))))
 
 ;;; A versioned key/value state machine with compare-and-swap. Commands:
 ;;;   (:set key val)              -> val

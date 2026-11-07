@@ -2,6 +2,15 @@
 
 (in-suite gr8s)
 
+(test domain-types-have-an-explicit-package-boundary
+  (let ((package (find-package "GR8S.MODEL")))
+    (is (not (null package)))
+    (dolist (name '("MAKE-POD" "POD-NAME" "MAKE-NODE-RECORD"
+                    "NODE-RECORD-NAME" "MAKE-CONTAINER-SPEC"))
+      (multiple-value-bind (symbol status) (and package (find-symbol name package))
+        (is (not (null symbol)) "~A is present in GR8S.MODEL" name)
+        (is (eq :external status) "~A is exported from GR8S.MODEL" name)))))
+
 (defparameter *valid-pod-json*
   "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"containers\":[{\"name\":\"web\",\"image\":\"docker.io/library/busybox:latest\",\"command\":[\"sh\",\"-c\"],\"args\":[\"echo hello\"],\"env\":[{\"name\":\"GREETING\",\"value\":\"hello\"}],\"ports\":[{\"containerPort\":8080}]}]}}")
 

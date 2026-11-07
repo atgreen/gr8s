@@ -2,6 +2,30 @@
 
 (in-suite gr8s)
 
+(test node-session-packages-own-their-public-entry-points
+  (dolist (name '("START-NODE-GRPC-SERVER"
+                  "STOP-NODE-GRPC-SERVER"
+                  "PUBLISH-NODE-DESIRED-STATE"))
+    (multiple-value-bind (facade facade-status) (find-symbol name '#:gr8s)
+      (multiple-value-bind (implementation implementation-status)
+          (find-symbol name '#:gr8s.apiserver)
+        (is (eq implementation-status :external))
+        (is (eq facade-status :external))
+        (is (eq facade implementation))
+        (is (eq (symbol-package implementation) (find-package '#:gr8s.apiserver))))))
+  (dolist (name '("RUN-NODE-SESSION"
+                  "MAKE-NODE-SESSION-CONTROL"
+                  "CANCEL-NODE-SESSION"))
+    (multiple-value-bind (facade facade-status) (find-symbol name '#:gr8s)
+      (multiple-value-bind (implementation implementation-status)
+          (find-symbol name '#:gr8s.agent)
+        (is (eq implementation-status :external))
+        (is (if (equal name "RUN-NODE-SESSION")
+                (eq facade-status :external)
+                (member facade-status '(:internal :external))))
+        (is (eq facade implementation))
+        (is (eq (symbol-package implementation) (find-package '#:gr8s.agent)))))))
+
 (defun wait-until (predicate &key (timeout 3))
   (let ((deadline (+ (get-internal-real-time)
                      (* timeout internal-time-units-per-second))))

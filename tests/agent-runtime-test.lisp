@@ -2,6 +2,24 @@
 
 (in-suite gr8s)
 
+(test node-agent-has-an-explicit-package-boundary
+  (let ((agent (find-package '#:gr8s.agent))
+        (composition (find-package '#:gr8s)))
+    (is-true agent)
+    (dolist (name '("NODE-RUNTIME"
+                    "MAKE-NODE-RUNTIME"
+                    "START-NODE-RUNTIME"
+                    "STOP-NODE-RUNTIME"
+                    "RECONCILE-NODE-SNAPSHOT"
+                    "DISPATCH-NODE-OPERATION"
+                    "START-NODE-PORT-FORWARD-OPERATION"))
+      (multiple-value-bind (implementation status)
+          (find-symbol name agent)
+        (is (eq :external status))
+        (is (eq implementation (find-symbol name composition)))))
+    (is (not (eq :external
+                 (nth-value 1 (find-symbol "FOR" agent)))))))
+
 (test cached-network-reconciliation-does-not-reprogram-firewalld
   (let ((runtime (gr8s::%make-node-runtime :manager t))
         (network (gr8s::node-network-object (node-network-for-test)))

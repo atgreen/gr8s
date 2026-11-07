@@ -1,0 +1,418 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; Purpose:
+;;;; Establish durable structural CRDs and normalize their genuine custom
+;;;; resources. Storage keys include group/plural and retain identity across
+;;;; served versions; request registries remain local to their owning store.
+
+(in-package #:gr8s.resources)
+
+(defvar *crd-request-version* nil)
+(defvar *crd-field-validation* nil)
+(defvar *crd-view-definition* nil)
+(defvar *crd-status-write* nil)
+(defparameter +crd-api-version+ "apiextensions.k8s.io/v1")
+
+(eval-when (:load-toplevel :execute)
+  (setf *stored-resource-types*
+        (append (remove "customresourcedefinitions" *stored-resource-types* :test #'equal :key #'first)
+                '(("customresourcedefinitions" "CustomResourceDefinition" "apiextensions.k8s.io/v1" nil)))))
+
+(defun custom-resource-key-p (resource)
+  "Recognize internal group/plural identifiers, never public collection names."
+  (and (stringp resource) (uiop:string-prefix-p "custom:" resource)))
+
+(defun crd-custom-key (definition)
+  "Return the durable group/plural identity shared by served versions."
+  (let ((spec (gethash "spec" definition)))
+    (format nil "custom:~A/~A" (gethash "group" spec) (gethash "plural" (gethash "names" spec)))))
+
+(defun crd-definition-unlocked (store resource)
+  "Find a custom resource's actual definition in STORE while its lock is held."
+  (loop for key being the hash-keys of (pod-store-resources store) using (hash-value definition)
+        when (and (equal "customresourcedefinitions" (first key)) (equal resource (crd-custom-key definition)))
+          return definition))
+
+(defun crd-definition-uid-unlocked (store resource)
+  "Identify the actual durable definition behind a custom collection."
+  (let ((definition (crd-definition-unlocked store resource)))
+    (and definition (gethash "uid" (gethash "metadata" definition)))))
+
+(defun check-crd-resource-context-unlocked (store resource &optional revision)
+  "Reject stale request identities and history from a previous CRD incarnation."
+  (when (custom-resource-key-p resource)
+    (let* ((definition (crd-definition-unlocked store resource))
+           (uid (and definition (gethash "uid" (gethash "metadata" definition)))))
+      (unless (and definition
+                   (or (not *crd-view-definition*)
+                       (and (equal uid (gethash "uid" (gethash "metadata" *crd-view-definition*)))
+                            (crd-version definition *crd-request-version* :served t))))
+        (core-resource-error 410 "Expired" "Custom definition identity or served version has changed"))
+      (when revision
+        (let ((birth (loop for entry in (pod-store-template-history store)
+                           for object = (gethash "new" entry)
+                           when (and (equal "customresourcedefinitions" (gethash "resource" entry))
+                                     (eq 'null (gethash "old" entry)) (hash-table-p object)
+                                     (equal uid (gethash "uid" (gethash "metadata" object))))
+                             return (gethash "revision" entry))))
+          (when (and birth (< revision birth))
+            (core-resource-error 410 "Expired" "Resource version belongs to an older custom definition")))))))
+
+(defun crd-storage-version (definition)
+  "Return the unique storage version established by admission."
+  (find-if (lambda (version) (eq t (gethash "storage" version))) (gethash "versions" (gethash "spec" definition))))
+
+(defun crd-version (definition version &key served)
+  "Read a declared version, requiring serving only for actual requests."
+  (let ((value (find version (gethash "versions" (gethash "spec" definition)) :test #'equal
+                           :key (lambda (entry) (gethash "name" entry)))))
+    (and value (or (not served) (eq t (gethash "served" value))) value)))
+
+(defun crd-schema (version)
+  "Read a version's admitted structural schema."
+  (gethash "openAPIV3Schema" (gethash "schema" version)))
+
+(defun crd-resource-types-unlocked (store)
+  "Describe custom collections only for this store, without global registrations."
+  (loop for key being the hash-keys of (pod-store-resources store) using (hash-value definition)
+        when (equal "customresourcedefinitions" (first key))
+          collect (let* ((spec (gethash "spec" definition)) (names (gethash "names" spec)))
+                    (list (crd-custom-key definition) (gethash "kind" names)
+                          (format nil "~A/~A" (gethash "group" spec) (gethash "name" (crd-storage-version definition)))
+                          (equal "Namespaced" (gethash "scope" spec))))))
+
+(defun crd-resource-types (store)
+  "Snapshot descriptors while respecting the store's existing transaction lock."
+  (with-store-lock (store) (crd-resource-types-unlocked store)))
+
+(defun crd-condition (type status reason message)
+  "Build a server-owned condition for genuinely installed CRD behavior."
+  (core-object "type" type "status" status "reason" reason "message" message "lastTransitionTime" (current-timestamp)))
+
+(defun crd-protection-finalizer (metadata)
+  "Retain cleanup responsibility until all persisted custom objects are removed."
+  (let ((values (gethash "finalizers" metadata #())))
+    (unless (find "customresourcecleanup.apiextensions.k8s.io" values :test #'equal)
+      (setf (gethash "finalizers" metadata) (concatenate 'vector values #("customresourcecleanup.apiextensions.k8s.io"))))))
+
+(defun validate-crd-metadata (metadata namespace name &optional (prefix "metadata"))
+  "Apply common metadata checks while supporting genuine durable finalizers.
+PREFIX is the metadata's field path, which differs for an embedded resource's."
+  (let ((unknown nil))
+    (maphash (lambda (key value)
+               (declare (ignore value))
+               (unless (member key '("name" "generateName" "namespace" "uid" "resourceVersion" "generation"
+                                      "creationTimestamp" "deletionTimestamp" "deletionGracePeriodSeconds" "labels" "annotations"
+                                      "ownerReferences" "finalizers" "managedFields" "selfLink" "clusterName") :test #'equal)
+                 (push (format nil "~A.~A" prefix key) unknown)
+                 (remhash key metadata))) metadata)
+    (when unknown (crd-report-pruned-fields unknown)))
+  (dolist (field '("labels" "annotations" "finalizers" "ownerReferences"))
+    (when (eq 'null (gethash field metadata)) (remhash field metadata)))
+  (dolist (field '("labels" "annotations"))
+    (when (and (nth-value 1 (gethash field metadata)) (not (hash-table-p (gethash field metadata))))
+      (crd-schema-error prefix "~A requires an object" field)))
+  (let ((copy (copy-core-object metadata)) (finalizers (gethash "finalizers" metadata)))
+    (remhash "finalizers" copy)
+    (validate-core-metadata copy namespace name)
+    (when (and (nth-value 1 (gethash "finalizers" metadata)) (not (eq finalizers 'null)))
+      (crd-check-string-array finalizers "metadata.finalizers")
+      (loop for finalizer across finalizers
+            unless (core-qualified-key-p finalizer) do (crd-schema-error "metadata.finalizers" "invalid qualified finalizer")))
+    metadata))
+
+(defun crd-prepare-embedded-metadata (input &optional (prefix "metadata"))
+  "Prune and validate embedded metadata at field path PREFIX without requiring an optional name."
+  (let* ((metadata (copy-core-object (require-object input "embedded metadata")))
+         (present (nth-value 1 (gethash "name" metadata))))
+    (unless present (setf (gethash "name" metadata) "embedded"))
+    (validate-crd-metadata metadata (let ((value (gethash "namespace" metadata))) (unless (member value '(nil "" null) :test #'equal) value)) nil prefix)
+    (unless present (remhash "name" metadata))
+    ;; Upstream round-trips embedded metadata through ObjectMeta and drops a zero creationTimestamp.
+    (when (eq 'null (gethash "creationTimestamp" metadata)) (remhash "creationTimestamp" metadata))
+    metadata))
+
+(defun crd-schema-at-json-path (schema path)
+  "Walk simple .a.b JSONPath segments through SCHEMA, or return NIL when it does not declare them."
+  (dolist (segment (uiop:split-string (string-left-trim "." path) :separator '(#\.)) schema)
+    (setf schema (and (hash-table-p schema) (plusp (length segment))
+                      (let ((properties (gethash "properties" schema)))
+                        (and (hash-table-p properties) (gethash segment properties)))))))
+
+(defun validate-crd-selectable-fields (version)
+  "Admit up to eight distinct selectable fields that name scalar schema properties."
+  (let ((fields (gethash "selectableFields" version)) (seen nil) (path "spec.versions[].selectableFields"))
+    (when (eq fields 'null) (remhash "selectableFields" version) (setf fields nil))
+    (when fields
+      (unless (and (crd-array-p fields) (every #'hash-table-p fields)) (crd-schema-error path "requires an array of objects"))
+      (when (> (length fields) 8) (crd-schema-error path "must have at most 8 items"))
+      (loop for field across fields
+            for json-path = (gethash "jsonPath" field)
+            do (reject-unsupported-fields field '("jsonPath") "selectable field")
+               (unless (and (stringp json-path) (cl-ppcre:scan "^(\\.[A-Za-z_][A-Za-z0-9_-]*)+$" json-path))
+                 (crd-schema-error path "jsonPath must be a simple field path"))
+               (when (member json-path seen :test #'equal) (crd-schema-error path "Duplicate value: ~S" json-path))
+               (push json-path seen)
+               (let ((declared (crd-schema-at-json-path (crd-schema version) json-path)))
+                 (unless declared (crd-schema-error path "~A does not resolve to a declared field" json-path))
+                 (unless (member (gethash "type" declared) '("string" "boolean" "integer") :test #'equal)
+                   (crd-schema-error path "~A must point to a field of type string, boolean or integer" json-path)))))))
+
+(defun crd-simple-json-path-p (path)
+  "Test for a simple JSONPath: dotted fields and bracketed quoted names from the root."
+  (and (stringp path) (plusp (length path))
+       (cl-ppcre:scan "^(\\.[A-Za-z0-9_-]+|\\['[^']+'\\])+$" path)))
+
+(defun validate-crd-scale-subresource (scale subresources)
+  "Admit scale paths under .spec and .status, which reading and writing scale use."
+  (require-object scale "scale subresource")
+  (admission-drop-nulls scale)
+  (reject-unsupported-fields scale '("specReplicasPath" "statusReplicasPath" "labelSelectorPath") "scale subresource")
+  (let ((spec (gethash "specReplicasPath" scale)) (status (gethash "statusReplicasPath" scale))
+        (selector (gethash "labelSelectorPath" scale)) (prefix "spec.versions[].subresources.scale"))
+    (unless (and (crd-simple-json-path-p spec) (uiop:string-prefix-p ".spec." spec))
+      (crd-schema-error (format nil "~A.specReplicasPath" prefix) "should be a json path under .spec"))
+    (unless (and (crd-simple-json-path-p status) (uiop:string-prefix-p ".status." status))
+      (crd-schema-error (format nil "~A.statusReplicasPath" prefix) "should be a json path under .status"))
+    (when selector
+      (unless (and (crd-simple-json-path-p selector)
+                   (or (uiop:string-prefix-p ".spec." selector) (uiop:string-prefix-p ".status." selector)))
+        (crd-schema-error (format nil "~A.labelSelectorPath" prefix) "should be a json path under either .spec or .status")))
+    subresources))
+
+(defun validate-crd-printer-columns (version)
+  "Admit printer columns with a name, known type and format, and a JSONPath."
+  (let ((columns (gethash "additionalPrinterColumns" version)) (path "spec.versions[].additionalPrinterColumns"))
+    (when (eq columns 'null) (remhash "additionalPrinterColumns" version) (setf columns nil))
+    (when columns
+      (unless (and (crd-array-p columns) (every #'hash-table-p columns)) (crd-schema-error path "requires an array of objects"))
+      (let ((seen nil))
+        (loop for column across columns
+              for name = (gethash "name" column)
+              do (admission-drop-nulls column)
+                 (reject-unsupported-fields column '("name" "type" "format" "description" "priority" "jsonPath") "printer column")
+                 (unless (and (stringp name) (plusp (length name))) (crd-schema-error path "name: Required value"))
+                 (when (member name seen :test #'equal) (crd-schema-error path "Duplicate value: ~S" name))
+                 (push name seen)
+                 (unless (member (gethash "type" column) '("integer" "number" "string" "boolean" "date") :test #'equal)
+                   (crd-schema-error path "type must be one of boolean,date,integer,number,string"))
+                 (when (plusp (length (gethash "format" column "")))
+                   (unless (member (gethash "format" column) '("int32" "int64" "float" "double" "byte" "date" "date-time" "password") :test #'equal)
+                     (crd-schema-error path "format must be one of byte,date,date-time,double,float,int32,int64,password")))
+                 (unless (and (stringp (gethash "jsonPath" column)) (plusp (length (gethash "jsonPath" column))))
+                   (crd-schema-error path "jsonPath: Required value"))
+                 (unless (table-json-path-steps (gethash "jsonPath" column))
+                   (crd-schema-error path "jsonPath must be a simple json path starting with .")))))))
+
+(defun validate-crd-conversion (conversion name)
+  "Admit strategy None, or a webhook whose target and review versions are usable."
+  (admission-drop-nulls conversion)
+  (reject-unsupported-fields conversion '("strategy" "webhook") "CRD conversion")
+  (let ((strategy (gethash "strategy" conversion)) (webhook (gethash "webhook" conversion)))
+    (unless (member strategy '("None" "Webhook") :test #'equal)
+      (crd-schema-error "spec.conversion.strategy" "Unsupported value: supported values: \"None\", \"Webhook\""))
+    (if (equal strategy "None")
+        (when webhook (crd-schema-error "spec.conversion.webhook" "should not be set when strategy is not set to Webhook"))
+        (let ((path "spec.conversion.webhook"))
+          (unless webhook (crd-schema-error path "required when strategy is set to Webhook"))
+          (require-object webhook path)
+          (admission-drop-nulls webhook)
+          (reject-unsupported-fields webhook '("clientConfig" "conversionReviewVersions") "CRD conversion webhook")
+          (unless (gethash "clientConfig" webhook) (crd-schema-error "spec.conversion.webhook.clientConfig" "Required value"))
+          (normalize-admission-client-config "CustomResourceDefinition" name "spec.conversion.webhook.clientConfig"
+                                             (gethash "clientConfig" webhook))
+          (let ((versions (gethash "conversionReviewVersions" webhook)))
+            (crd-check-string-array versions "spec.conversion.webhook.conversionReviewVersions" :nonempty t)
+            (unless (some (lambda (version) (member version '("v1" "v1beta1") :test #'equal)) versions)
+              (crd-schema-error "spec.conversion.webhook.conversionReviewVersions"
+                                "must include at least one of v1, v1beta1"))
+            (loop for version across versions
+                  unless (dns-label-p version)
+                    do (crd-schema-error "spec.conversion.webhook.conversionReviewVersions" "must be DNS labels")))))))
+
+(defun normalize-crd-resource (input namespace name store)
+  "Admit only executable structural CRDs and preserve their allocated API identity."
+  (when namespace (crd-schema-error "metadata.namespace" "CRDs are cluster scoped"))
+  (let* ((object (copy-core-object (require-object input "CustomResourceDefinition")))
+         (metadata (require-object (gethash "metadata" object) "metadata"))
+         (spec (require-object (gethash "spec" object) "spec"))
+         (names (require-object (gethash "names" spec) "spec.names"))
+         (group (gethash "group" spec)) (plural (gethash "plural" names)) (kind (gethash "kind" names))
+         (versions (gethash "versions" spec))
+         (existing (and store (gethash (core-resource-key "customresourcedefinitions" nil (gethash "name" metadata)) (pod-store-resources store)))))
+    (unless (and (equal +crd-api-version+ (gethash "apiVersion" object +crd-api-version+))
+                 (equal "CustomResourceDefinition" (gethash "kind" object "CustomResourceDefinition")))
+      (core-resource-error 400 "BadRequest" "Expected apiextensions.k8s.io/v1 CustomResourceDefinition"))
+    (reject-unsupported-fields object '("apiVersion" "kind" "metadata" "spec" "status") "CRD")
+    (reject-unsupported-fields spec '("group" "names" "scope" "versions" "conversion" "preserveUnknownFields") "CRD spec")
+    (reject-unsupported-fields names '("plural" "singular" "kind" "listKind" "shortNames" "categories") "CRD names")
+    (validate-crd-metadata metadata nil name)
+    (unless (and (dns-subdomain-p group) (find #\. group)
+                 (not (member group '("discovery.k8s.io" "certificates.k8s.io" "apiextensions.k8s.io" "rbac.authorization.k8s.io" "events.k8s.io" "storage.k8s.io") :test #'equal)))
+      (crd-schema-error "spec.group" "requires an unreserved DNS group with a domain suffix"))
+    (unless (and (dns-label-p plural) (cl-ppcre:scan "^[a-z]" plural)) (crd-schema-error "spec.names.plural" "invalid resource plural"))
+    (unless (equal (format nil "~A.~A" plural group) (gethash "name" metadata))
+      (crd-schema-error "metadata.name" "must equal plural.group"))
+    ;; Upstream validates the lowercased kind as a DNS-1035 label, which allows hyphens.
+    (unless (and (stringp kind) (dns-label-p (string-downcase kind)) (cl-ppcre:scan "^[A-Za-z]" kind))
+      (crd-schema-error "spec.names.kind" "the lowercased kind must be a DNS-1035 label"))
+    (unless (gethash "singular" names) (setf (gethash "singular" names) (string-downcase kind)))
+    (unless (gethash "listKind" names) (setf (gethash "listKind" names) (concatenate 'string kind "List")))
+    (unless (dns-label-p (gethash "singular" names)) (crd-schema-error "spec.names.singular" "requires a DNS label"))
+    (unless (and (stringp (gethash "listKind" names)) (dns-label-p (string-downcase (gethash "listKind" names))) (cl-ppcre:scan "^[A-Za-z]" (gethash "listKind" names))
+                 (not (equal kind (gethash "listKind" names)))) (crd-schema-error "spec.names.listKind" "invalid list kind"))
+    (dolist (field '("shortNames" "categories"))
+      (when (gethash field names)
+        (crd-check-string-array (gethash field names) field)
+        (loop for entry across (gethash field names) unless (dns-label-p entry) do (crd-schema-error field "invalid DNS label"))))
+    (unless (member (gethash "scope" spec) '("Namespaced" "Cluster") :test #'equal) (crd-schema-error "spec.scope" "requires Namespaced or Cluster"))
+    (when (and (nth-value 1 (gethash "preserveUnknownFields" spec)) (not (null (gethash "preserveUnknownFields" spec))))
+      (crd-schema-error "spec.preserveUnknownFields" "v1 CRDs require structural pruning"))
+    (setf (gethash "preserveUnknownFields" spec) nil)
+    (when (and (gethash "conversion" spec) (not (eq 'null (gethash "conversion" spec))))
+      (let ((conversion (require-object (gethash "conversion" spec) "conversion")))
+        (validate-crd-conversion conversion (gethash "name" metadata))))
+    (unless (gethash "conversion" spec) (setf (gethash "conversion" spec) (core-object "strategy" "None")))
+    (unless (and (crd-array-p versions) (plusp (length versions))) (crd-schema-error "spec.versions" "requires version definitions"))
+    (let ((seen nil) (storage 0) (served 0))
+      (loop for version across versions for version-name = (gethash "name" version)
+            do (reject-unsupported-fields version '("name" "served" "storage" "schema" "subresources" "deprecated" "deprecationWarning" "selectableFields" "additionalPrinterColumns") "CRD version")
+               (unless (and (dns-label-p version-name) (not (member version-name seen :test #'equal))) (crd-schema-error "spec.versions" "version names must be unique DNS labels"))
+               (push version-name seen)
+               (dolist (field '("served" "storage"))
+                 (unless (and (nth-value 1 (gethash field version)) (member (gethash field version) '(t nil)))
+                   (crd-schema-error "spec.versions" "served/storage require explicit booleans")))
+               (when (gethash "served" version) (incf served))
+               (when (gethash "storage" version) (incf storage))
+               (require-object (gethash "schema" version) "schema")
+               (reject-unsupported-fields (gethash "schema" version) '("openAPIV3Schema") "version schema")
+               (validate-crd-schema (crd-schema version))
+               (validate-crd-structural-node (crd-schema version) "openAPIV3Schema" t)
+               (unless (equal "object" (gethash "type" (crd-schema version))) (crd-schema-error "openAPIV3Schema" "root must have object type"))
+               (validate-crd-selectable-fields version)
+               (validate-crd-printer-columns version)
+               (crd-check-schema-rules (crd-schema version) "openAPIV3Schema" t)
+               (when (gethash "subresources" version)
+                 (let ((subresources (require-object (gethash "subresources" version) "subresources")))
+                   (reject-unsupported-fields subresources '("status" "scale") "CRD subresources")
+                   (when (nth-value 1 (gethash "status" subresources))
+                     (require-object (gethash "status" subresources) "status subresource"))
+                   (when (nth-value 1 (gethash "scale" subresources))
+                     (validate-crd-scale-subresource (gethash "scale" subresources) subresources)))))
+      (unless (and (= storage 1) (plusp served)) (crd-schema-error "spec.versions" "requires exactly one storage version and at least one served version")))
+    (when existing
+      (let ((before (gethash "spec" existing)))
+        (dolist (field '("group" "scope"))
+          (unless (equal (gethash field before) (gethash field spec)) (crd-schema-error "spec" "~A is immutable" field)))
+        (dolist (field '("plural" "kind" "listKind"))
+          (unless (equal (gethash field (gethash "names" before)) (gethash field names)) (crd-schema-error "spec.names" "~A is immutable" field)))
+        (loop for stored across (gethash "storedVersions" (gethash "status" existing) #())
+              unless (crd-version object stored) do (crd-schema-error "spec.versions" "cannot remove stored version ~A before actual migration" stored))))
+    (when store
+      (maphash (lambda (key other)
+                 (when (and (equal "customresourcedefinitions" (first key))
+                            (not (equal (gethash "name" metadata) (gethash "name" (gethash "metadata" other))))
+                            (equal group (gethash "group" (gethash "spec" other))))
+                   (let ((other-names (gethash "names" (gethash "spec" other))))
+                     (when (intersection (list plural (gethash "singular" names) kind (gethash "listKind" names))
+                                         (list (gethash "plural" other-names) (gethash "singular" other-names) (gethash "kind" other-names) (gethash "listKind" other-names)) :test #'equal)
+                       (crd-schema-error "spec.names" "API name conflicts with another established definition"))))) (pod-store-resources store)))
+    (setf (gethash "apiVersion" object) +crd-api-version+ (gethash "kind" object) "CustomResourceDefinition")
+    (remhash "namespace" metadata)
+    (crd-protection-finalizer metadata)
+    (let* ((old-status (and existing (gethash "status" existing)))
+           (storage-name (gethash "name" (crd-storage-version object)))
+           (stored (copy-seq (gethash "storedVersions" (or old-status (core-object)) #()))))
+      (unless (find storage-name stored :test #'equal) (setf stored (concatenate 'vector stored (vector storage-name))))
+      (setf (gethash "status" object)
+            (core-object "acceptedNames" (copy-core-object names) "storedVersions" stored
+                         "conditions" (if old-status (copy-core-object (gethash "conditions" old-status))
+                                          (vector (crd-condition "NamesAccepted" "True" "NoConflicts" "Names have no API collisions")
+                                                  (crd-condition "Established" "True" "InitialNamesAccepted" "Served routes and structural schemas are installed"))))))
+    (setf (gethash "generation" metadata)
+          (if existing (+ (gethash "generation" (gethash "metadata" existing) 1)
+                          (if (crd-json-equal-p spec (gethash "spec" existing)) 0 1)) 1))
+    (remhash "deletionTimestamp" metadata)
+    (when (and existing (gethash "deletionTimestamp" (gethash "metadata" existing)))
+      (unless (subsetp (coerce (gethash "finalizers" metadata #()) 'list)
+                       (coerce (gethash "finalizers" (gethash "metadata" existing) #()) 'list) :test #'equal)
+        (crd-schema-error "metadata.finalizers" "cannot add finalizers after deletion"))
+      (setf (gethash "deletionTimestamp" metadata) (gethash "deletionTimestamp" (gethash "metadata" existing))))
+    object))
+
+(defun normalize-custom-resource (resource input namespace name store)
+  "Validate a served version and store one canonical version with protected status."
+  (let* ((definition (or (crd-definition-unlocked store resource) (core-resource-error 404 "NotFound" "Custom resource definition is absent")))
+         (spec (gethash "spec" definition)) (names (gethash "names" spec))
+         (object (copy-core-object (require-object input "custom resource")))
+         (metadata (require-object (gethash "metadata" object) "metadata"))
+         (existing (gethash (core-resource-key resource namespace (gethash "name" metadata)) (pod-store-resources store)))
+         (version-name (or *crd-request-version* (car (last (uiop:split-string (gethash "apiVersion" object "") :separator '(#\/))))))
+         (version (or (crd-version definition version-name :served t) (core-resource-error 404 "NotFound" "Custom version is not served")))
+         (status-p (nth-value 1 (gethash "status" (gethash "subresources" version (core-object)))))
+         (storage-name (gethash "name" (crd-storage-version definition)))
+         (old-view (and existing (crd-prepare-value (crd-object-at-version definition existing version-name) (crd-schema version) t))))
+    (unless (and (equal (gethash "kind" names) (gethash "kind" object))
+                 (equal (format nil "~A/~A" (gethash "group" spec) version-name) (gethash "apiVersion" object)))
+      (core-resource-error 400 "BadRequest" "Incorrect custom resource kind or API version"))
+    (when (and (not existing) (gethash "deletionTimestamp" (gethash "metadata" definition)))
+      (core-resource-error 405 "MethodNotAllowed" "Custom definition is terminating"))
+    (when (and (equal "Cluster" (gethash "scope" spec)) namespace) (crd-schema-error "metadata.namespace" "resource is cluster scoped"))
+    ;; A metadata failure is reported along with the schema's, as upstream lists them all.
+    (let ((metadata-error (handler-case (progn (validate-crd-metadata metadata namespace name) nil)
+                            (kubernetes-error (condition)
+                              ;; A strict decoding refusal is a bad request, not a field to list.
+                              (unless (= 422 (kubernetes-error-status-code condition)) (error condition))
+                              (kubernetes-error-message condition)))))
+    (if namespace (setf (gethash "namespace" metadata) namespace) (remhash "namespace" metadata))
+    (if (and status-p *crd-status-write* existing)
+        (let* ((copy (crd-object-at-version definition existing version-name)) (copy-meta (gethash "metadata" copy))
+               (status-schema (or (gethash "status" (gethash "properties" (crd-schema version) (core-object)))
+                                  ;; A root that keeps unknown fields keeps an undeclared status too.
+                                  (and (eq t (gethash "x-kubernetes-preserve-unknown-fields" (crd-schema version)))
+                                       (core-object "type" "object" "x-kubernetes-preserve-unknown-fields" t)))))
+          ;; managedFields come from the write, which tracked the status fields it changed,
+          ;; as upstream's status strategy keeps them.
+          (dolist (field '("resourceVersion" "uid" "managedFields"))
+            (when (nth-value 1 (gethash field metadata)) (setf (gethash field copy-meta) (gethash field metadata))))
+          (if (and (nth-value 1 (gethash "status" object)) status-schema)
+              (let* ((*crd-track-pruning* t) (*crd-pruned-fields* nil)
+                     (status (crd-prepare-value (gethash "status" object) status-schema nil 0 "status")))
+                (when *crd-pruned-fields* (crd-report-pruned-fields *crd-pruned-fields*))
+                (crd-validate-all status status-schema "status"
+                                  :old (gethash "status" old-view) :has-old (nth-value 1 (gethash "status" old-view))
+                                  :prior (and metadata-error (list metadata-error)))
+                (setf (gethash "status" copy) status))
+              (remhash "status" copy))
+          (setf object copy))
+        (progn
+          (when status-p
+            (if (and existing (nth-value 1 (gethash "status" existing)))
+                (setf (gethash "status" object)
+                      (gethash "status" (crd-object-at-version definition existing version-name)))
+                (remhash "status" object)))
+          (let ((*crd-track-pruning* t) (*crd-pruned-fields* nil))
+            (setf object (crd-prepare-value object (crd-schema version) t))
+            (when *crd-pruned-fields* (crd-report-pruned-fields *crd-pruned-fields*)))
+          (crd-validate-all object (crd-schema version) "resource" :old old-view :has-old (and existing t)
+                            :prior (and metadata-error (list metadata-error)))))
+    (when metadata-error (core-resource-error 422 "Invalid" "~A" metadata-error)))
+    ;; Rules read the object as the client wrote it, against the old object at the same version.
+    (crd-enforce-validation-rules
+     (crd-schema version) object old-view (gethash "kind" names) (gethash "name" metadata))
+    (setf object (crd-object-at-version definition object storage-name)
+          metadata (gethash "metadata" object))
+    (remhash "deletionTimestamp" metadata)
+    (when existing
+      (when (gethash "deletionTimestamp" (gethash "metadata" existing))
+        (unless (subsetp (coerce (gethash "finalizers" metadata #()) 'list)
+                         (coerce (gethash "finalizers" (gethash "metadata" existing) #()) 'list) :test #'equal)
+          (crd-schema-error "metadata.finalizers" "cannot add finalizers after deletion"))
+        (setf (gethash "deletionTimestamp" metadata) (gethash "deletionTimestamp" (gethash "metadata" existing)))))
+    (let ((before (and existing (crd-object-at-version definition existing storage-name))) (after (copy-core-object object)))
+      (dolist (field '("metadata" "apiVersion")) (when before (remhash field before)) (remhash field after))
+      (when status-p (when before (remhash "status" before)) (remhash "status" after))
+      (setf (gethash "generation" metadata) (if existing (+ (gethash "generation" (gethash "metadata" existing) 1)
+                                                                       (if (crd-json-equal-p before after) 0 1)) 1)))
+    object))

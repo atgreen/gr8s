@@ -11,6 +11,17 @@
 (def-suite raft-transport :in gr8s)
 (in-suite raft-transport)
 
+(test raft-transport-has-an-explicit-package-boundary
+  (let ((package (find-package "GR8S.RAFT.TRANSPORT")))
+    (is (not (null package)))
+    (dolist (name '("START-RAFT-MEMBER" "STOP-RAFT-MEMBER"
+                    "RAFT-MEMBER-START" "RAFT-MEMBER-PROPOSE"
+                    "RAFT-CLUSTER-INIT" "RAFT-CLUSTER-JOIN"))
+      (multiple-value-bind (symbol status) (and package (find-symbol name package))
+        (is (not (null symbol)) "~A is present in GR8S.RAFT.TRANSPORT" name)
+        (is (eq :external status)
+            "~A is exported from GR8S.RAFT.TRANSPORT" name)))))
+
 (test raft-transport-serialization-round-trips
   (let* ((entries (list (gr8s::make-raft-entry :index 4 :term 2 :command '(:set "x" 7))
                         (gr8s::make-raft-entry :index 5 :term 2 :command '(:cas "y" nil "Z"))))

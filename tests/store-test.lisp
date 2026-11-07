@@ -2,6 +2,15 @@
 
 (in-suite gr8s)
 
+(test durable-store-has-an-explicit-package-boundary
+  (let ((package (find-package "GR8S.STORE")))
+    (is (not (null package)))
+    (dolist (name '("MAKE-POD-STORE" "POD-STORE-PATH" "POD-STORE-PODS"
+                    "POD-STORE-NODES" "POD-STORE-CONSENSUS-COMMIT-FN"))
+      (multiple-value-bind (symbol status) (and package (find-symbol name package))
+        (is (not (null symbol)) "~A is present in GR8S.STORE" name)
+        (is (eq :external status) "~A is exported from GR8S.STORE" name)))))
+
 (test generated-uids-have-rfc-4122-version-and-variant-bits
   (is (string=
        "00010203-0405-4607-8809-0a0b0c0d0e0f"
