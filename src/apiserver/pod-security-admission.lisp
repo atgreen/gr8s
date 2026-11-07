@@ -136,6 +136,35 @@
           (t (error 'kubernetes-error :status-code 400 :reason "BadRequest"
                     :message (format nil "invalid Pod Security level ~S" level))))))
 
+(defun pod-security-label-errors (namespace)
+  "Return invalid Pod Security namespace label descriptions for NAMESPACE."
+  (let ((labels (psa-field (psa-field namespace "metadata") "labels"))
+        (errors nil))
+    (dolist (mode '("enforce" "audit" "warn"))
+      (let* ((level-key (format nil "pod-security.kubernetes.io/~A" mode))
+             (version-key (format nil "~A-version" level-key))
+             (level (psa-field labels level-key))
+             (version (psa-field labels version-key)))
+        (when (and level (not (member level '("privileged" "baseline" "restricted") :test #'equal)))
+          (push (format nil "~A must be privileged, baseline, or restricted" level-key) errors))
+        (when version
+          (handler-case (psa-version-minor version)
+            (kubernetes-error ()
+              (push (format nil "~A must be latest or a version like v1.34" version-key) errors))))))
+    (nreverse errors)))
+
+(defun admit-pod-security-namespace (operation namespace &optional old-namespace)
+  "Validate Pod Security labels on a Namespace CREATE or UPDATE.
+An UPDATE may preserve an already-invalid set of labels, matching upstream's
+grandfathering behavior, but cannot introduce a different invalid set."
+  (let ((errors (pod-security-label-errors namespace)))
+    (when (and errors
+               (or (equal operation "CREATE")
+                   (not (equal errors (pod-security-label-errors old-namespace)))))
+      (error 'kubernetes-error :status-code 422 :reason "Invalid"
+             :message (format nil "Namespace has invalid Pod Security labels: ~{~A~^; ~}" errors))))
+  t)
+
 (defun psa-exempt-p (attributes pod)
   (let* ((username (psa-field (admission-user-info attributes) "username"))
          (runtime-class (psa-field (psa-field pod "spec") "runtimeClassName")))
