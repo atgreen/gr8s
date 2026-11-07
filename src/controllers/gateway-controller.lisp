@@ -114,7 +114,7 @@
 (defstruct (gateway-controller (:constructor %make-gateway-controller))
   store resolver cert-dir
   (listeners (make-hash-table))         ; HTTP/HTTPS port -> (handle . tls-signature)
-  start-fn stop-fn swap-fn
+  start-fn stop-fn swap-fn register-fn unregister-fn
   (l4-listeners (make-hash-table))      ; TCP/TLS port -> (mode . handle)
   l4-start-fn l4-stop-fn l4-swap-fn)
 
@@ -145,6 +145,7 @@
           (list :certificate (namestring cert-path) :key (namestring key-path)))))))
 
 (defun make-gateway-controller (store &key resolver cert-dir start-fn stop-fn swap-fn
+                                           register-fn unregister-fn
                                            l4-start-fn l4-stop-fn l4-swap-fn)
   "A controller over STORE. RESOLVER maps a GW-BACKEND to an address (defaults to
    the ClusterIP service resolver). CERT-DIR is where HTTPS listener certs are
@@ -160,6 +161,8 @@
    :stop-fn (or stop-fn #'stop-gateway-listener)
    :swap-fn (or swap-fn
                 (lambda (handle router) (setf (gateway-acceptor-router handle) router)))
+   :register-fn (or register-fn (lambda (port handle) (declare (ignore port handle))))
+   :unregister-fn (or unregister-fn (lambda (port) (declare (ignore port))))
    :l4-start-fn (or l4-start-fn
                     (lambda (port mode dispatcher resolver)
                       (start-l4-listener :port port :mode mode :dispatcher dispatcher :resolver resolver)))
@@ -203,6 +206,8 @@ protocol or TLS reference cannot share that socket and are ignored."
          (start-fn (gateway-controller-start-fn controller))
          (stop-fn (gateway-controller-stop-fn controller))
          (swap-fn (gateway-controller-swap-fn controller))
+         (register-fn (gateway-controller-register-fn controller))
+         (unregister-fn (gateway-controller-unregister-fn controller))
          (plan (merge-gateway-listener-plans
                 (gateway-listener-plan (list-core-resources store "gateways")
                                        (list-core-resources store "httproutes")
@@ -225,11 +230,17 @@ protocol or TLS reference cannot share that socket and are ignored."
                (if (and existing (equal (cdr existing) signature))
                    (funcall swap-fn (car existing) router)
                    (progn
-                     (when existing (funcall stop-fn (car existing)))
+                     (when existing
+                       (funcall unregister-fn port)
+                       (funcall stop-fn (car existing)))
                      (setf (gethash port running)
-                           (cons (funcall start-fn port router resolver tls-paths) signature))))))))))
+                           (cons (let ((handle (funcall start-fn port router resolver tls-paths)))
+                                   (funcall register-fn port handle)
+                                   handle)
+                                 signature))))))))))
     (dolist (port (loop for p being the hash-keys of running collect p))
       (unless (member port desired-ports)
+        (funcall unregister-fn port)
         (funcall stop-fn (car (gethash port running)))
         (remhash port running)))
     (gateway-controller-listeners controller)))
@@ -305,12 +316,18 @@ protocol or TLS reference cannot share that socket and are ignored."
           (if (and existing (eq (car existing) mode))
               (funcall (gateway-controller-l4-swap-fn controller) (cdr existing) dispatcher)
               (progn
-                (when existing (funcall (gateway-controller-l4-stop-fn controller) (cdr existing)))
+                (when existing
+                  (funcall (gateway-controller-unregister-fn controller) port)
+                  (funcall (gateway-controller-l4-stop-fn controller) (cdr existing)))
                 (setf (gethash port running)
-                      (cons mode (funcall (gateway-controller-l4-start-fn controller)
-                                          port mode dispatcher resolver))))))))
+                      (cons mode
+                            (let ((handle (funcall (gateway-controller-l4-start-fn controller)
+                                                   port mode dispatcher resolver)))
+                              (funcall (gateway-controller-register-fn controller) port handle)
+                              handle))))))))
     (dolist (port (loop for p being the hash-keys of running collect p))
       (unless (member port desired)
+        (funcall (gateway-controller-unregister-fn controller) port)
         (funcall (gateway-controller-l4-stop-fn controller) (cdr (gethash port running)))
         (remhash port running)))
     running))
@@ -319,13 +336,13 @@ protocol or TLS reference cannot share that socket and are ignored."
   "Stop every running listener this controller owns (node shutdown)."
   (let ((running (gateway-controller-listeners controller)))
     (maphash (lambda (port entry)
-               (declare (ignore port))
+               (ignore-errors (funcall (gateway-controller-unregister-fn controller) port))
                (ignore-errors (funcall (gateway-controller-stop-fn controller) (car entry))))
              running)
     (clrhash running))
   (let ((l4 (gateway-controller-l4-listeners controller)))
     (maphash (lambda (port entry)
-               (declare (ignore port))
+               (ignore-errors (funcall (gateway-controller-unregister-fn controller) port))
                (ignore-errors (funcall (gateway-controller-l4-stop-fn controller) (cdr entry))))
              l4)
     (clrhash l4)))

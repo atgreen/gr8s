@@ -60,6 +60,15 @@
            (if (equal argv '("firewall-cmd" "--state")) (values "" 1) (values "" 0))))
     (is (null (gr8s::ensure-control-plane-firewall 7443 :runner #'runner)))))
 
+(test gateway-listener-firewall-follows-listener-lifecycle
+  (let ((ran '()))
+    (flet ((runner (argv) (push argv ran) (values "" 0)))
+      (is (eq t (gr8s::ensure-gateway-listener-firewall 443 :runner #'runner)))
+      (is (eq t (gr8s::remove-gateway-listener-firewall 443 :runner #'runner)))
+      (let ((applied (reverse ran)))
+        (is (member '("firewall-cmd" "--add-port=443/tcp") applied :test #'equal))
+        (is (member '("firewall-cmd" "--remove-port=443/tcp") applied :test #'equal))))))
+
 (test remove-overlay-firewall-withdraws-all-three-when-active
   (let ((ran '()))
     (flet ((runner (argv) (push argv ran) (values "" 0)))

@@ -47,6 +47,16 @@
   "True when this kernel/build supports loading and attaching sk_lookup."
   (and (find-symbol "ATTACH-SK-LOOKUP" '#:whistler/loader) t))
 
+(defun gateway-listener-socket-fd (listener)
+  "Return the kernel descriptor for an L7 or L4 Gateway listening socket."
+  (typecase listener
+    (gateway-acceptor
+     (sb-bsd-sockets:socket-file-descriptor
+      (usocket:socket (hunchentoot::acceptor-listen-socket listener))))
+    (l4-listener
+     (sb-bsd-sockets:socket-file-descriptor (l4-listener-socket listener)))
+    (t (error "Unsupported Gateway listener handle ~S" listener))))
+
 (defun start-gateway-steering (&key (netns-path "/proc/self/ns/net"))
   "Compile and load the sk_lookup program, create the port->socket SOCKMAP, and
    attach the program to NETNS-PATH. Returns a GATEWAY-STEERING handle, or signals
