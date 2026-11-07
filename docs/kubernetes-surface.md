@@ -270,14 +270,17 @@ and `scheduler_pending_pods`, since the scheduler runs in the control plane. The
 are served over TLS with a cluster-CA certificate; callers authenticate with a
 client certificate or a bearer token (TokenReview) and are authorized by
 SubjectAccessReview on `nodes/metrics`/`nodes/stats`/`nodes/healthz`/`nodes/proxy`.
-So an unmodified metrics-server, installed from its release `components.yaml`,
-provides `metrics.k8s.io` and powers `kubectl top` and the CPU/MEM columns of k9s
-and Headlamp. A standalone `gr8s agent` doesn't serve these endpoints yet.
+The control plane also serves `metrics.k8s.io/v1beta1` directly from the node
+summaries. It implements discovery plus list/get for NodeMetrics and PodMetrics,
+including label and field selectors and ordinary Kubernetes RBAC. This powers
+`kubectl top` and the CPU/MEM columns of k9s and Headlamp without a metrics-server
+Pod, Service, or APIService. A standalone `gr8s agent` doesn't serve the kubelet
+endpoints yet.
 
 A HorizontalPodAutoscaler controller scales Deployments, ReplicaSets,
 ReplicationControllers, and StatefulSets on Resource and ContainerResource metrics,
-with upstream's tolerance, stabilization, and rate policies. When a
-`v1beta1.metrics.k8s.io` APIService is registered, it reads PodMetrics from it;
-otherwise each node reports CPU/memory from CRI statistics and the controller
-derives rates. There is no custom or external metrics source, so other metric types
-report a failed `ScalingActive` condition.
+with upstream's tolerance, stabilization, and rate policies. Each node reports
+CPU/memory from CRI statistics; the control plane uses that shared snapshot for
+the native resource-metrics API and derives the cumulative rates used by HPA.
+There is no custom or external metrics source, so other metric types report a
+failed `ScalingActive` condition.

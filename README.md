@@ -196,7 +196,7 @@ gr8s implements a broad and growing slice of Kubernetes, including:
 - **Storage** — PersistentVolumes/Claims, StorageClasses, a default `local-path`
   provisioner, NFS, and CSI driver support.
 - **Observability** — kubelet metrics endpoints, cAdvisor and apiserver/scheduler
-  series on `/metrics`, and metrics-server compatibility for `kubectl top`.
+  series on `/metrics`, and a native resource-metrics API for `kubectl top`.
 - **CRDs** — schema-backed custom resources with defaulting, pruning, validation,
   and finalizers.
 
