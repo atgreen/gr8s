@@ -91,9 +91,25 @@ Services. TCP headless Services and `publishNotReadyAddresses` are supported;
 generated Service addresses remain single-stack IPv4. Manual slices also admit
 IPv6 and deprecated FQDN address types.
 
-`networking.k8s.io/v1` also serves Ingress and IngressClass with no controller
-behind them, IPAddress as stored objects that allocation does not create, and
-ServiceCIDR, where only the default `kubernetes` range is `Ready`.
+`networking.k8s.io/v1` also serves IPAddress as stored objects that allocation
+does not create, and ServiceCIDR, where only the default `kubernetes` range is
+`Ready`.
+
+## Ingress
+
+The same in-agent proxy reconciles ordinary `networking.k8s.io/v1` Ingress
+resources owned by the `gr8s.io/ingress-controller` IngressClass. It supports
+exact and prefix paths, default backends, named or numeric Service ports, and TLS
+termination from `kubernetes.io/tls` Secrets. Each ready node serves ports 80 and
+443 and is published in `status.loadBalancer.ingress`; foreign IngressClasses
+remain untouched.
+
+Listeners bind only to agent loopback. A per-agent `sk_lookup` program steers
+node-address connections to those sockets, while the listener lifecycle admits
+and withdraws its TCP ports in an active firewalld. Removing the last Ingress for
+a port therefore removes the proxy listener, sockhash entry, and firewall rule.
+`scripts/test-ingress-native.py` proves HTTP and HTTPS through every advertised
+node in a three-node cluster and cleans up the fixture afterward.
 
 ## Gateway API — the agent is the gateway
 
