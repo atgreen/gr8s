@@ -93,6 +93,15 @@ nanocores, memory in bytes. A slot left NIL was not measured."
             sum))
     pod))
 
+(defun kubelet-container-stats-filter ()
+  "Return an unfiltered CRI container-stats filter.
+
+Container runtimes do not consistently make CRI labels available to
+ListContainerStats. Ownership is enforced when the results are joined to the
+already-filtered managed sandboxes, so filtering either container listing here
+can only hide valid samples."
+  (make-instance 'gr8s.cri.v1::container-stats-filter))
+
 (defun assemble-kubelet-pod-stats (sandboxes containers stats)
   "Join decoded CRI listings into Pod stats.
 SANDBOXES are (id name namespace uid created-at-nanos) of ready sandboxes, CONTAINERS
@@ -151,8 +160,7 @@ with optional writable-layer bytes and inodes as (container-id usage bytes inode
                   (multiple-value-bind (response status)
                       (gr8s.cri.v1::runtime-service-list-containers
                        stub (make-instance 'gr8s.cri.v1::list-containers-request
-                                           :filter (make-instance 'gr8s.cri.v1::container-filter
-                                                                  :label-selector managed))
+                                           :filter (make-instance 'gr8s.cri.v1::container-filter))
                        :timeout timeout)
                     (ensure-cri-status "ListContainers" status)
                     (loop for container in (gr8s.cri.v1::containers response)
@@ -167,8 +175,7 @@ with optional writable-layer bytes and inodes as (container-id usage bytes inode
                   (multiple-value-bind (response status)
                       (gr8s.cri.v1::runtime-service-list-container-stats
                        stub (make-instance 'gr8s.cri.v1::list-container-stats-request
-                                           :filter (make-instance 'gr8s.cri.v1::container-stats-filter
-                                                                  :label-selector managed))
+                                           :filter (kubelet-container-stats-filter))
                        :timeout timeout)
                     (ensure-cri-status "ListContainerStats" status)
                     (loop for entry in (gr8s.cri.v1::stats response)

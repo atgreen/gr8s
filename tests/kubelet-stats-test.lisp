@@ -21,6 +21,12 @@
   "Return a container measurement taken at TIME nanoseconds."
   (gr8s::make-kubelet-usage :time time :cpu-core-nanoseconds cpu :memory-working-set memory))
 
+(test container-stat-listings-are-not-filtered-by-label
+  ;; Some CRI implementations do not apply labels consistently to the stats
+  ;; listing. The join with managed sandboxes is the ownership boundary.
+  (is (null (gr8s.cri.v1::label-selector
+             (gr8s::kubelet-container-stats-filter)))))
+
 (test cri-listings-join-into-pods-of-running-containers
   (let ((pods (gr8s::assemble-kubelet-pod-stats
                '(("s1" "web" "default" "u1" 1700000000000000000)
