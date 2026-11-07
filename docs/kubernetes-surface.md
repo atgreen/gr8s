@@ -103,6 +103,14 @@ CSR and certificate issuance are served and replicated; see the
 
 ## Admission
 
+Pod Security Admission evaluates Pod creates and updates using the
+`pod-security.kubernetes.io/{enforce,audit,warn}` namespace labels. It implements
+the privileged, baseline, and restricted profiles at the selected Kubernetes
+minor version, validates policy labels on Namespace writes, emits Warning
+headers, and supports namespace, username, and RuntimeClass exemptions. These
+checks run alongside the existing typed `SecurityContext` validation rather
+than replacing it.
+
 `admissionregistration.k8s.io/v1` webhook configurations call their backends with
 AdmissionReview on API writes and Pod connections, over TLS verified against the
 `caBundle` and within `timeoutSeconds`, with rules, selectors, `failurePolicy`,
