@@ -12,6 +12,7 @@
                 (getf options :containerd-oci-runtime)))
     (is (string= "/var/log/gr8s/pods/"
                  (getf options :containerd-log-root)))
+    (is-false (getf options :registry-credentials-file))
     (is (= 7443 (getf options :node-port)))
     (is (string= "gr8s-local" (getf options :node-name)))
     (is-false (getf options :disable-agent))))
@@ -113,6 +114,7 @@
              "--containerd-mode" "external"
              "--containerd-socket" "/tmp/containerd.sock"
              "--containerd-log-root" "/tmp/gr8s-logs/"
+             "--registry-credentials-file" "/etc/gr8s/registry.json"
              "--kubeconfig" "/tmp/gr8s.conf"))))
     (is (eq :serve (getf options :command)))
     (is (string= "/tmp/gr8s-state" (getf options :state-directory)))
@@ -123,6 +125,8 @@
                  (getf options :containerd-socket)))
     (is (string= "/tmp/gr8s-logs/"
                  (getf options :containerd-log-root)))
+    (is (string= "/etc/gr8s/registry.json"
+                 (getf options :registry-credentials-file)))
     (is (string= "/tmp/gr8s.conf" (getf options :kubeconfig)))))
 
 (test managed-containerd-options-build-an-owned-runtime

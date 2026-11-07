@@ -95,6 +95,7 @@
                        :containerd-oci-runtime (default-containerd-oci-runtime)
                        :containerd-socket "/run/containerd/containerd.sock"
                        :containerd-log-root "/var/log/gr8s/pods/"
+                       :registry-credentials-file nil
                        :kubeconfig nil
                        :kubelet-port +kubelet-default-port+
                        :local-storage-path +default-local-storage-path+)))
@@ -153,6 +154,8 @@
                       (setf (getf options :containerd-oci-runtime) value))
                      ((string= option "--containerd-log-root")
                       (setf (getf options :containerd-log-root) value))
+                     ((string= option "--registry-credentials-file")
+                      (setf (getf options :registry-credentials-file) value))
                      ((string= option "--kubeconfig")
                       (setf (getf options :kubeconfig) value))
                      ((string= option "--kubelet-port")
@@ -199,7 +202,8 @@
                        :containerd-executable (default-containerd-executable)
                        :containerd-oci-runtime (default-containerd-oci-runtime)
                        :containerd-socket "/run/containerd/containerd.sock"
-                       :containerd-log-root "/var/log/gr8s/pods/")))
+                       :containerd-log-root "/var/log/gr8s/pods/"
+                       :registry-credentials-file nil)))
     (loop while arguments
           for option = (first arguments)
           for value = (option-value arguments option)
@@ -234,6 +238,8 @@
                 (setf (getf options :containerd-socket) value))
                ((string= option "--containerd-log-root")
                 (setf (getf options :containerd-log-root) value))
+               ((string= option "--registry-credentials-file")
+                (setf (getf options :registry-credentials-file) value))
                (t (error "unknown agent option: ~A" option)))
              (setf arguments (cddr arguments)))
     (dolist (required '(:server :node-name :state-directory))
@@ -523,6 +529,9 @@ bare positional state directory for backward compatibility.  A missing
              :dns-servers (list +dns-pod-server-address+)
              :dns-searches +dns-pod-searches+
              :dns-options +dns-pod-options+
+             :registry-credentials
+             (when (getf options :registry-credentials-file)
+               (load-node-registry-credentials (getf options :registry-credentials-file)))
              :availability (managed-containerd-availability manager))
             manager))
          (values
@@ -532,7 +541,10 @@ bare positional state directory for backward compatibility.  A missing
            :host-network nil
            :dns-servers (list +dns-pod-server-address+)
            :dns-searches +dns-pod-searches+
-           :dns-options +dns-pod-options+)
+           :dns-options +dns-pod-options+
+           :registry-credentials
+           (when (getf options :registry-credentials-file)
+             (load-node-registry-credentials (getf options :registry-credentials-file))))
           nil)))
     (t
      (values (make-fake-runtime) nil))))
@@ -1065,10 +1077,12 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (format t "  --kubeconfig FILE   --cluster-pod-cidr CIDR   --node-pod-prefix BITS   --disable-agent~%")
   (format t "  --runtime containerd|fake   --containerd-mode managed|external~%")
   (format t "  --containerd-{executable,oci-runtime,socket,log-root} PATH   --containerd-no-sync~%")
+  (format t "  --registry-credentials-file DOCKER-CONFIG.json~%")
   (format t "  --node-listen IPV4   --node-address IPV4   --debug-slynk-port PORT   --local-storage-path DIR~%~%")
   (format t "agent options:~%")
   (format t "  --server HOST:PORT   --node-name NAME   --state-directory DIR   --token TOKEN   --ca-pin SHA256~%")
-  (format t "  --node-address IPV4   --runtime containerd|fake   --containerd-mode managed|external~%~%")
+  (format t "  --node-address IPV4   --runtime containerd|fake   --containerd-mode managed|external~%")
+  (format t "  --registry-credentials-file DOCKER-CONFIG.json~%~%")
   (format t "runtime install options:~%")
   (format t "  --state-directory DIR   --version V   --hypervisor qemu|clh|fc|dragonball (kata)~%")
   (format t "  --sha256 HEX (kata; trust-on-first-use)   --bundle FILE (use a local bundle)   --release R (gvisor)~%~%")

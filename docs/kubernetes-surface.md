@@ -86,7 +86,9 @@ revokes the old token.
 
 Private registries work through the `imagePullSecrets` of a Pod or its
 ServiceAccount, matched as the kubelet matches them apart from `[...]` host
-patterns. There is no node-wide credential file or credential-provider plugin.
+patterns. `gr8s serve` and `gr8s agent` also accept a Docker `config.json` via
+`--registry-credentials-file`; Pod credentials are tried before these node-wide
+credentials. Executable kubelet credential-provider plugins are not implemented.
 
 ## RBAC, CSRs & certificates
 

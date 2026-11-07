@@ -172,6 +172,7 @@
    #:containerd-runtime-log-root
    #:containerd-runtime-pod-lister
    #:containerd-runtime-probes
+   #:containerd-runtime-registry-credentials
    #:containerd-runtime-resource-store
    #:containerd-runtime-socket-path
    #:containerd-termination-file

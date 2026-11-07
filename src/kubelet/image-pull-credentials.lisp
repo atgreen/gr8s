@@ -98,6 +98,21 @@
                 using (hash-value entry)
               collect (cons (docker-config-key location) (docker-config-credential entry)))))))
 
+(defun docker-config-entries (config context)
+  "Return registry key/credential pairs from Docker CONFIG, requiring its auths object."
+  (let ((registries (gethash "auths" (require-object config context))))
+    (loop for location being the hash-keys of (require-object registries context)
+            using (hash-value entry)
+          collect (cons (docker-config-key location) (docker-config-credential entry)))))
+
+(defun load-node-registry-credentials (path)
+  "Read Docker config JSON at PATH and return its validated registry credentials."
+  (handler-case
+      (docker-config-entries
+       (com.inuoe.jzon:parse (uiop:read-file-string path)) "node registry credential file")
+    (error ()
+      (error "Node registry credential file ~A is malformed" path))))
+
 (defun matching-registry-credentials (entries repository)
   "Return the credentials in ENTRIES for REPOSITORY, the most specific keys first.
 Every matching credential is returned, because the kubelet tries them all to allow for rotation."
@@ -135,6 +150,7 @@ Every matching credential is returned, because the kubelet tries them all to all
                              (error ()
                                (error 'container-image-pull-error
                                       :message (format nil "Image pull secret ~A is malformed" name))))))))
+    (setf entries (append entries (containerd-runtime-registry-credentials runtime)))
     (matching-registry-credentials entries (image-repository image))))
 
 (defun image-pull-job-key (image credentials)
