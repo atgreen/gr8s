@@ -124,9 +124,53 @@ lacks the defaults, still matches the same template stored since with them."
     (default-pod-spec-object defaulted)
     (core-json-equal-p spec defaulted)))
 
+(defparameter +default-toleration-taints+ '("node.kubernetes.io/not-ready" "node.kubernetes.io/unreachable")
+  "The NoExecute taints DefaultTolerationSeconds admission makes every Pod tolerate for a while.")
+
+(defparameter +default-toleration-seconds+ 300
+  "How long those tolerations last: upstream's --default-not-ready-toleration-seconds and
+--default-unreachable-toleration-seconds default.")
+
+(defun default-taint-tolerated-p (tolerations key)
+  "Report whether TOLERATIONS already cover the NoExecute taint KEY, as the plugin decides:
+a toleration with that key or none, and with effect NoExecute or none."
+  (flet ((text (toleration field)
+           (let ((value (gethash field toleration))) (if (stringp value) value ""))))
+    (some (lambda (toleration)
+            (and (member (text toleration "key") (list key "") :test #'equal)
+                 (member (text toleration "effect") '("NoExecute" "") :test #'equal)))
+          tolerations)))
+
+(defun pod-default-tolerations-p (spec)
+  "Report whether a Pod SPEC tolerates both taints DefaultTolerationSeconds covers."
+  (let ((tolerations (json-items spec "tolerations")))
+    (every (lambda (key) (default-taint-tolerated-p tolerations key)) +default-toleration-taints+)))
+
+(defun default-pod-tolerations (spec)
+  "Admit a Pod SPEC as upstream's DefaultTolerationSeconds plugin does: append a NoExecute
+toleration with tolerationSeconds 300 for each of the not-ready and unreachable taints it does
+not already tolerate. Upstream runs it on Pod creates and updates, before the webhooks."
+  (when (hash-table-p spec)
+    (let* ((tolerations (json-items spec "tolerations"))
+           (added (loop for key in +default-toleration-taints+
+                        unless (default-taint-tolerated-p tolerations key)
+                          collect (core-object "key" key "operator" "Exists" "effect" "NoExecute"
+                                               "tolerationSeconds" +default-toleration-seconds+))))
+      (when added
+        (setf (gethash "tolerations" spec) (concatenate 'vector (spec-tolerations spec) added)))))
+  spec)
+
+(defun default-pod-admission (spec old-spec)
+  "Apply the default tolerations to a Pod SPEC being created, or written over OLD-SPEC when that
+already has them. A Pod stored without them keeps its spec, which its runtime fingerprint covers."
+  (when (or (null old-spec) (pod-default-tolerations-p old-spec))
+    (default-pod-tolerations spec))
+  spec)
+
 (defun default-created-pod (pod)
   "Default a Pod being created, and return it."
   (default-pod-spec-object (gethash "spec" (pod-to-object pod)))
+  (default-pod-admission (gethash "spec" (pod-to-object pod)) nil)
   pod)
 
 (defun default-updated-pod (existing replacement)
@@ -134,4 +178,55 @@ lacks the defaults, still matches the same template stored since with them."
 default does not change the Pod. A Pod stored without them keeps the representation it has."
   (when (pod-spec-defaulted-p (gethash "spec" (pod-to-object existing)))
     (default-pod-spec-object (gethash "spec" (pod-to-object replacement))))
+  (default-pod-admission (gethash "spec" (pod-to-object replacement)) (gethash "spec" (pod-to-object existing)))
   replacement)
+
+;;;; Defaults of other kinds, from the same upstream v1.37.2 files: core/v1's
+;;;; SetObjectDefaults_PersistentVolume, apps/v1's SetObjectDefaults_StatefulSet and
+;;;; networking/v1's SetObjectDefaults_NetworkPolicy.
+
+(defun default-persistent-volume-source (kind source)
+  "Default the PersistentVolume SOURCE of KIND as SetObjectDefaults_PersistentVolume does:
+SetDefaults_HostPathVolumeSource, and the rbd, iscsi, azureDisk and scaleIO +default markers."
+  (when (hash-table-p source)
+    (cond ((equal kind "hostPath") (default-json-pointer-field source "type" ""))
+          ((equal kind "rbd")
+           (default-json-field source "pool" "rbd")
+           (default-json-field source "user" "admin")
+           (default-json-field source "keyring" "/etc/ceph/keyring"))
+          ((equal kind "iscsi") (default-json-field source "iscsiInterface" "default"))
+          ((equal kind "azureDisk")
+           (default-json-pointer-field source "cachingMode" "ReadWrite")
+           (default-json-pointer-field source "fsType" "ext4")
+           (default-json-pointer-field source "readOnly" nil)
+           (default-json-pointer-field source "kind" "Shared"))
+          ((equal kind "scaleIO")
+           (default-json-field source "storageMode" "ThinProvisioned")
+           (default-json-field source "fsType" "xfs"))))
+  source)
+
+(defun default-claim-template (template)
+  "Default a StatefulSet's claim TEMPLATE as SetObjectDefaults_StatefulSet does, through
+SetDefaults_PersistentVolumeClaim (status.phase Pending) and SetDefaults_PersistentVolumeClaimSpec
+(spec.volumeMode Filesystem)."
+  (when (hash-table-p template)
+    (let ((spec (json-child template "spec"))
+          (status (or (json-child template "status") (setf (gethash "status" template) (core-object)))))
+      (default-json-pointer-field spec "volumeMode" "Filesystem")
+      (default-json-field status "phase" "Pending")))
+  template)
+
+(defun default-network-policy-spec (spec)
+  "Default a NetworkPolicy SPEC as SetObjectDefaults_NetworkPolicy does: policyTypes, when it
+names none, is Ingress, with Egress too when there are egress rules (SetDefaults_NetworkPolicy),
+and every rule's port without a protocol has TCP (SetDefaults_NetworkPolicyPort)."
+  (when (hash-table-p spec)
+    (let ((types (gethash "policyTypes" spec)))
+      (when (or (member types '(nil null)) (and (vectorp types) (not (stringp types)) (zerop (length types))))
+        (setf (gethash "policyTypes" spec)
+              (if (json-items spec "egress") (vector "Ingress" "Egress") (vector "Ingress")))))
+    (dolist (direction '("ingress" "egress"))
+      (dolist (rule (json-items spec direction))
+        (dolist (port (json-items rule "ports"))
+          (default-json-pointer-field port "protocol" "TCP")))))
+  spec)

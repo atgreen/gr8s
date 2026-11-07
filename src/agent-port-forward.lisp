@@ -18,8 +18,8 @@
   data-stream
   error-stream
   ;; (DATA . EOF) entries for the Pod, in order. The control plane's window bounds them.
+  ;; Output not yet acknowledged is the UNACKNOWLEDGED-OUTPUT an exec operation also counts.
   (input nil)
-  (unacknowledged-output 0)
   writer
   (changed (bt:make-condition-variable :name "gr8s port-forward operation")))
 

@@ -113,7 +113,9 @@
                                                                                    "fieldPath" "metadata.namespace")))))))))
 
 (defun admit-in-cluster-pod (store pod)
-  "Run Pod policy admission, then inject service environment and credential mounts when the API is enabled."
+  "Run Pod policy admission, then add the account's pull secrets and credential mounts when the API
+is enabled. The KUBERNETES_SERVICE_* variables are not stored: the runtime adds them as it starts a
+container, from the kubernetes Service, as upstream's kubelet does."
   (require-namespace-accepts-content store (pod-namespace pod))
   (let ((pod (admit-pod-policies store pod))
         (config (pod-store-in-cluster-config store)))
@@ -143,15 +145,7 @@
       (when volume
         (setf (gethash "volumes" spec) (concatenate 'vector (gethash "volumes" spec #()) (vector volume))))
       (loop for container across containers
-            do (dolist (pair (list (cons "KUBERNETES_SERVICE_HOST" (getf config :host))
-                                  (cons "KUBERNETES_SERVICE_PORT" (write-to-string (getf config :port)))
-                                  (cons "KUBERNETES_SERVICE_PORT_HTTPS" (write-to-string (getf config :port)))))
-                 (unless (find (car pair) (gethash "env" container #()) :test #'equal
-                               :key (lambda (entry) (gethash "name" entry)))
-                   (setf (gethash "env" container)
-                         (concatenate 'vector (gethash "env" container #())
-                                      (vector (core-object "name" (car pair) "value" (cdr pair)))))))
-               (when (and volume (find container unmounted :test #'eq))
+            do (when (and volume (find container unmounted :test #'eq))
                  (setf (gethash "volumeMounts" container)
                        (concatenate 'vector (gethash "volumeMounts" container #())
                                     (vector (core-object "name" (gethash "name" volume)

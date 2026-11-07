@@ -116,6 +116,64 @@
         (is (equal "Always" (json-path (pod-to-object updated) "spec" "containers" 0 "imagePullPolicy")))
         (is (eql 1 (gethash "generation" (gethash "metadata" (pod-to-object updated)))))))))
 
+(defun pod-tolerations-of (object)
+  "Return (key effect seconds) for each toleration of a Pod OBJECT."
+  (map 'list (lambda (toleration)
+               (list (gethash "key" toleration) (gethash "effect" toleration) (gethash "tolerationSeconds" toleration)))
+       (gethash "tolerations" (gethash "spec" object) #())))
+
+(defparameter *default-tolerations*
+  '(("node.kubernetes.io/not-ready" "NoExecute" 300) ("node.kubernetes.io/unreachable" "NoExecute" 300))
+  "What upstream's DefaultTolerationSeconds admission (plugin/pkg/admission/defaulttolerationseconds)
+appends to a Pod that does not already tolerate those taints.")
+
+(test created-pods-tolerate-not-ready-and-unreachable-nodes-for-five-minutes
+  (with-core-api (store path)
+    (values store path)
+    (flet ((create (name tolerations)
+             (let ((object (com.inuoe.jzon:parse *valid-pod-json*)))
+               (setf (gethash "name" (gethash "metadata" object)) name)
+               (when tolerations (setf (gethash "tolerations" (gethash "spec" object)) (com.inuoe.jzon:parse tolerations)))
+               (check-core-status 201 "/api/v1/namespaces/default/pods" :method :post :object object)
+               (check-core-status 200 (format nil "/api/v1/namespaces/default/pods/~A" name)))))
+      (let ((plain (create "plain" nil)))
+        (is (equal *default-tolerations* (pod-tolerations-of plain)))
+        (is (equal "Exists" (json-path plain "spec" "tolerations" 0 "operator"))))
+      ;; A toleration of the not-ready taint, or of every NoExecute taint, is left alone.
+      (is (equal '(("node.kubernetes.io/not-ready" "NoExecute" 60) ("node.kubernetes.io/unreachable" "NoExecute" 300))
+                 (pod-tolerations-of (create "own" "[{\"key\":\"node.kubernetes.io/not-ready\",\"operator\":\"Exists\",\"effect\":\"NoExecute\",\"tolerationSeconds\":60}]"))))
+      (is (equal '((nil "NoExecute" nil))
+                 (pod-tolerations-of (create "every" "[{\"operator\":\"Exists\",\"effect\":\"NoExecute\"}]"))))
+      (is (equal '(("dedicated" "NoSchedule" nil) ("node.kubernetes.io/not-ready" "NoExecute" 300)
+                   ("node.kubernetes.io/unreachable" "NoExecute" 300))
+                 (pod-tolerations-of (create "other" "[{\"key\":\"dedicated\",\"operator\":\"Exists\",\"effect\":\"NoSchedule\"}]"))))
+      ;; Upstream admits updates too: a PUT that leaves them out keeps them.
+      (let ((current (check-core-status 200 "/api/v1/namespaces/default/pods/plain")))
+        (remhash "tolerations" (gethash "spec" current))
+        (is (equal *default-tolerations*
+                   (pod-tolerations-of (check-core-status 200 "/api/v1/namespaces/default/pods/plain" :method :put :object current))))))))
+
+(test controller-and-template-pods-follow-the-toleration-admission
+  (with-temporary-store (store path)
+    (values path)
+    ;; Pods created in process, as controllers do, are admitted the same way.
+    (is (equal *default-tolerations* (pod-tolerations-of (pod-to-object (create-pod store (parse-pod *valid-pod-json*))))))
+    ;; The plugin admits Pods, not the templates of the workloads that make them.
+    (is (null (pod-tolerations-of (gr8s::defaulted-pod-template (com.inuoe.jzon:parse *valid-pod-json*)))))))
+
+(test updating-a-pod-stored-without-default-tolerations-keeps-its-spec
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((pod (create-pod store (parse-pod *valid-pod-json*))))
+      ;; As an older gr8s stored it, with no admitted tolerations.
+      (remhash "tolerations" (gethash "spec" (pod-to-object pod)))
+      (let* ((fingerprint (gr8s::pod-runtime-spec-fingerprint pod))
+             (replacement (parse-pod (com.inuoe.jzon:stringify (pod-to-object pod)))))
+        (setf (gethash "labels" (gethash "metadata" (pod-to-object replacement))) (gr8s::core-object "edited" "yes"))
+        (let ((updated (update-pod store replacement (pod-resource-version pod))))
+          (is (equal fingerprint (gr8s::pod-runtime-spec-fingerprint updated)))
+          (is (null (pod-tolerations-of (pod-to-object updated)))))))))
+
 (test nodes-carry-a-durable-creation-timestamp
   (with-temporary-store (store path)
     (gr8s:register-node store (gr8s:make-node-record :id "created-node" :name "worker-created" :pod-cidr "10.88.9.0/24"))
@@ -147,3 +205,83 @@
                        :object (com.inuoe.jzon:parse "{\"apiVersion\":\"networking.k8s.io/v1\",\"kind\":\"IngressClass\",\"metadata\":{\"name\":\"scoped\"},\"spec\":{\"controller\":\"example.com/x\",\"parameters\":{\"kind\":\"K\",\"name\":\"p\"}}}"))
     (is (equal "Cluster" (json-path (check-core-status 200 "/apis/networking.k8s.io/v1/ingressclasses/scoped")
                                     "spec" "parameters" "scope")))))
+
+;;; Defaults of other kinds: core/v1 SetObjectDefaults_PersistentVolume, apps/v1
+;;; SetObjectDefaults_StatefulSet and networking/v1 SetObjectDefaults_NetworkPolicy (v1.37.2).
+
+(test network-policies-carry-their-policy-types-and-port-protocols
+  (with-temporary-store (store path)
+    (values path)
+    (flet ((create (name spec)
+             (gethash "spec" (gr8s::create-core-resource
+                              store "networkpolicies"
+                              (gr8s::core-object "metadata" (gr8s::core-object "name" name) "spec" (com.inuoe.jzon:parse spec))
+                              "default"))))
+      (let ((ingress (create "ingress" "{\"podSelector\":{},\"ingress\":[{\"ports\":[{\"port\":80},{\"port\":53,\"protocol\":\"UDP\"}]}]}")))
+        (is (equalp #("Ingress") (gethash "policyTypes" ingress)))
+        (is (equal "TCP" (json-path ingress "ingress" 0 "ports" 0 "protocol")))
+        (is (equal "UDP" (json-path ingress "ingress" 0 "ports" 1 "protocol"))))
+      (let ((both (create "both" "{\"podSelector\":{},\"egress\":[{\"ports\":[{\"port\":443}]}]}")))
+        (is (equalp #("Ingress" "Egress") (gethash "policyTypes" both)))
+        (is (equal "TCP" (json-path both "egress" 0 "ports" 0 "protocol"))))
+      ;; Named types are kept, whatever rules there are.
+      (is (equalp #("Egress") (gethash "policyTypes" (create "named" "{\"podSelector\":{},\"policyTypes\":[\"Egress\"]}")))))))
+
+(test persistent-volumes-default-their-source-and-get-no-class
+  (with-temporary-store (store path)
+    (let ((volume (gr8s::create-core-resource
+                   store "persistentvolumes"
+                   (gr8s::core-object "metadata" (gr8s::core-object "name" "plain")
+                                      "spec" (gr8s::core-object "capacity" (gr8s::core-object "storage" "1Gi")
+                                                                "accessModes" #("ReadWriteOnce")
+                                                                "hostPath" (gr8s::core-object "path" (namestring path))))
+                   nil)))
+      (is (equal "" (json-path volume "spec" "hostPath" "type")))
+      ;; DefaultStorageClass admission defaults only claims.
+      (is (not (nth-value 1 (gethash "storageClassName" (gethash "spec" volume)))))
+      (is (equal "Filesystem" (json-path volume "spec" "volumeMode")))
+      (is (equal "Retain" (json-path volume "spec" "persistentVolumeReclaimPolicy"))))
+    ;; A volume stored before these defaults can still be updated, and gains them.
+    (let ((volume (gr8s::create-core-resource
+                   store "persistentvolumes"
+                   (gr8s::core-object "metadata" (gr8s::core-object "name" "legacy")
+                                      "spec" (gr8s::core-object "capacity" (gr8s::core-object "storage" "1Gi")
+                                                                "accessModes" #("ReadWriteOnce") "storageClassName" ""
+                                                                "hostPath" (gr8s::core-object "path" (namestring path))))
+                   nil)))
+      (remhash "type" (json-path volume "spec" "hostPath"))
+      (setf (gethash (gr8s::core-resource-key "persistentvolumes" nil "legacy") (gr8s::pod-store-resources store)) volume)
+      (let ((updated (gr8s::update-core-resource store "persistentvolumes" nil "legacy"
+                                                 (lambda (object)
+                                                   (setf (gethash "labels" (gethash "metadata" object)) (gr8s::core-object "edited" "yes"))
+                                                   object))))
+        (is (equal "" (json-path updated "spec" "hostPath" "type")))
+        (is (equal "" (json-path updated "spec" "storageClassName")))))))
+
+(test stateful-sets-default-their-claim-templates
+  (with-temporary-store (store path)
+    (values path)
+    (gr8s::create-core-resource store "namespaces" (gr8s::core-object "metadata" (gr8s::core-object "name" "alpha")) nil)
+    ;; A set without templates stores none, not an empty list.
+    (is (not (nth-value 1 (gethash "volumeClaimTemplates"
+                                   (gethash "spec" (gr8s::create-core-resource store "statefulsets" (stateful-fixture "plain") "alpha"))))))
+    (let* ((template (stateful-claim-template "data"))
+           (created (gr8s::create-core-resource store "statefulsets" (stateful-fixture "web" :claims (vector template)) "alpha")))
+      (is (equal "Filesystem" (json-path created "spec" "volumeClaimTemplates" 0 "spec" "volumeMode")))
+      (is (equal "Pending" (json-path created "spec" "volumeClaimTemplates" 0 "status" "phase")))
+      ;; A set stored before the defaults, with templates lacking them, can still be scaled.
+      (let ((stored (gr8s::copy-core-object created)))
+        (remhash "status" (json-path stored "spec" "volumeClaimTemplates" 0))
+        (remhash "volumeMode" (json-path stored "spec" "volumeClaimTemplates" 0 "spec"))
+        (setf (gethash (gr8s::core-resource-key "statefulsets" "alpha" "web") (gr8s::pod-store-resources store)) stored))
+      (let ((scaled (gr8s::update-core-resource store "statefulsets" "alpha" "web"
+                                                (lambda (object) (setf (gethash "replicas" (gethash "spec" object)) 1) object))))
+        (is (= 1 (json-path scaled "spec" "replicas")))
+        (is (equal "Pending" (json-path scaled "spec" "volumeClaimTemplates" 0 "status" "phase")))))
+    ;; So can one stored with an empty list.
+    (let ((stored (gr8s::copy-core-object (gr8s::get-core-resource store "statefulsets" "alpha" "plain"))))
+      (setf (gethash "volumeClaimTemplates" (gethash "spec" stored)) #())
+      (setf (gethash (gr8s::core-resource-key "statefulsets" "alpha" "plain") (gr8s::pod-store-resources store)) stored)
+      (is (= 1 (json-path (gr8s::update-core-resource store "statefulsets" "alpha" "plain"
+                                                      (lambda (object) (setf (gethash "replicas" (gethash "spec" object)) 1) object))
+                          "spec" "replicas"))))))

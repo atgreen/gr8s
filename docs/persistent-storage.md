@@ -106,7 +106,9 @@ parameters:
 The agent mounts through `mount(2)`, so hosts need the kernel NFS client but not
 `mount.nfs` or `nfs-common`:
 
-- **Versions:** it tries NFSv4.2, 4.1 and 4.0 unless `vers` or `nfsvers` is set.
+- **Versions:** it tries NFSv4.2, 4.1, 4.0 and then NFSv3 unless `vers` or `nfsvers`
+  is set, as `mount.nfs` does. NFSv4 moves on to NFSv3 when the path isn't found,
+  which happens with a Linux server exporting it with `fsid=0`.
 - **NFSv3:** this defaults to `nolock`, because `rpc.statd` isn't assumed. Add the
   `lock` option only if the host runs it. NFSv4 has no such limit.
 - **Server names:** these are resolved by the host, so a cluster Service name or
@@ -206,7 +208,9 @@ Install a driver with its usual manifests, using its sidecars. gr8s plays the
 kubelet's part and the Kubernetes controllers' part:
 
 - **Registration:** the agent watches `/var/lib/kubelet/plugins_registry`, which
-  `node-driver-registrar` uses, and publishes a CSINode object for each node.
+  `node-driver-registrar` uses, and publishes a CSINode object for each node. As a
+  kubelet does, it creates the kubelet directories driver manifests mount, and labels
+  the Node with each driver's topology segments.
 - **Provisioning:** claims of a class with a third-party provisioner get the
   annotations `external-provisioner` watches for, including the selected node for
   `WaitForFirstConsumer`. It creates the PV, which then binds as normal.
@@ -223,7 +227,7 @@ privileged container, as upstream requires. `/var/lib/kubelet` must be on a shar
 mount, which is the systemd default. Leases are served for sidecar leader election.
 
 Not implemented yet: `NodeExpandVolume`, `NodeGetVolumeStats`, raw block volumes, `fsGroup`
-delegation, service account tokens for drivers and Node topology labels. Snapshot
+delegation and service account tokens for drivers. Snapshot
 and clone data sources are passed through to `external-provisioner`, but gr8s
 doesn't serve the snapshot APIs, which come from a driver's own CRDs.
 

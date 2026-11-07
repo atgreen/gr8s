@@ -654,6 +654,14 @@ named Nodes are replaced or deleted; unrelated records remain untouched."
              :message (format nil "Pod ~A already exists" (pod-name pod))))
     (enforce-resource-quotas-unlocked store "pods" (pod-namespace pod) (pod-to-object pod))
     (merge-topology-spread-match-label-keys pod)
+    ;; The creating manager owns every field it set, the defaults included, as upstream records it.
+    (when *apply-update-manager*
+      (let ((tracked (copy-json-object (pod-to-object pod))))
+        (apply-track-write nil tracked "pods")
+        (multiple-value-bind (entries present) (gethash "managedFields" (gethash "metadata" tracked))
+          (if present
+              (setf (gethash "managedFields" (gethash "metadata" (pod-to-object pod))) entries)
+              (remhash "managedFields" (gethash "metadata" (pod-to-object pod)))))))
     (let ((metadata (gethash "metadata" (pod-to-object pod))))
       (remhash "deletionTimestamp" metadata)
       (remhash "deletionGracePeriodSeconds" metadata)

@@ -1145,7 +1145,10 @@ unsupported kind, becomes a single failed response."
   (last-input-sequence 0)
   (exit-code 0)
   (finished-p nil)
-  (lock (bt:make-lock "gr8s interactive exec operation")))
+  ;; Output sent to a control plane that acknowledges it, and not yet acknowledged.
+  (unacknowledged-output 0)
+  (lock (bt:make-lock "gr8s interactive exec operation"))
+  (output-window (bt:make-condition-variable :name "gr8s exec output window")))
 
 (defun find-node-exec-operation (node-runtime operation-id)
   "Return the live node operation registered under OPERATION-ID, or NIL. Holds the
@@ -1230,6 +1233,22 @@ on \"Success\", otherwise the ExitCode cause, defaulting to 1 (also 1 on any par
                 1)))
     (error () 1)))
 
+(defun wait-for-node-exec-output-window (operation size)
+  "Return once SIZE more output bytes may go to the control plane, or NIL if the operation has
+finished. Only a control plane that acknowledges output asks for this: then a slow client holds
+up this exec's reads from the runtime, as a kubelet's streams do, instead of its output piling up."
+  (if (not (slot-value (node-exec-operation-request operation) 'gr8s.node.v1::acknowledges-output))
+      t
+      (bt:with-lock-held ((node-exec-operation-lock operation))
+        (loop
+          (when (node-exec-operation-finished-p operation) (return nil))
+          (when (< (node-exec-operation-unacknowledged-output operation) +exec-output-window-bytes+)
+            (incf (node-exec-operation-unacknowledged-output operation) size)
+            (return t))
+          ;; FINISH-NODE-EXEC-OPERATION doesn't signal this variable, so look again regularly.
+          (bt:condition-wait (node-exec-operation-output-window operation)
+                             (node-exec-operation-lock operation) :timeout 0.2)))))
+
 (defun emit-node-exec-stream (operation channel data)
   "Emit one OPERATION-STREAM frame of DATA on CHANNEL for OPERATION, assigning the next
 sequence number under the operation lock."
@@ -1271,10 +1290,12 @@ sequence number under the operation lock."
                        (:data
                         (destructuring-bind (id fin data) (rest frame)
                           (case (channel-of id)
-                            (:stdout (when (plusp (length data))
+                            (:stdout (when (and (plusp (length data))
+                                                (wait-for-node-exec-output-window operation (length data)))
                                        (emit-node-exec-stream
                                         operation gr8s.node.v1::+streamchannel-stream_channel_stdout+ data)))
-                            (:stderr (when (plusp (length data))
+                            (:stderr (when (and (plusp (length data))
+                                                (wait-for-node-exec-output-window operation (length data)))
                                        (emit-node-exec-stream
                                         operation gr8s.node.v1::+streamchannel-stream_channel_stderr+ data)))
                             (:error (loop for octet across data do (vector-push-extend octet status))))
@@ -1347,7 +1368,12 @@ channel. Holds the operation lock while advancing the last-input sequence."
     (bt:with-lock-held ((node-exec-operation-lock operation))
       (unless (> sequence (node-exec-operation-last-input-sequence operation))
         (error 'runtime-error :message "Interactive input sequence is stale"))
-      (setf (node-exec-operation-last-input-sequence operation) sequence))
+      (setf (node-exec-operation-last-input-sequence operation) sequence)
+      (let ((acknowledged (slot-value input 'gr8s.node.v1::acknowledged-bytes)))
+        (when (plusp acknowledged)
+          (setf (node-exec-operation-unacknowledged-output operation)
+                (max 0 (- (node-exec-operation-unacknowledged-output operation) acknowledged)))
+          (bt:condition-notify (node-exec-operation-output-window operation)))))
     (case (slot-value input 'gr8s.node.v1::channel)
       (#.gr8s.node.v1::+streamchannel-stream_channel_stdin+
        (let ((stdin (cdr (assoc :stdin streams))) (data (slot-value input 'gr8s.node.v1::data))

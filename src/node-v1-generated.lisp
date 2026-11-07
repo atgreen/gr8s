@@ -2385,7 +2385,9 @@
             (MAKE-ARRAY 0 :ELEMENT-TYPE '(UNSIGNED-BYTE 8)) :TYPE
             (VECTOR (UNSIGNED-BYTE 8)))
            (PORT :INITARG :PORT :ACCESSOR GR8S.NODE.V1::PORT :INITFORM 0 :TYPE
-            (UNSIGNED-BYTE 32)))
+            (UNSIGNED-BYTE 32))
+           (ACKNOWLEDGES-OUTPUT :INITARG :ACKNOWLEDGES-OUTPUT :ACCESSOR
+            GR8S.NODE.V1::ACKNOWLEDGES-OUTPUT :INITFORM NIL :TYPE BOOLEAN))
           (:DOCUMENTATION "Proto message: OperationRequest"))
 
 
@@ -2475,6 +2477,14 @@
       (WHEN (AND AG-PROTO::VALUE (NOT (EQL AG-PROTO::VALUE 0)))
         (AG-PROTO::WRITE-FIELD-TAG 14 0 AG-PROTO::BUFFER)
         (AG-PROTO::WRITE-VARINT AG-PROTO::VALUE AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'ACKNOWLEDGES-OUTPUT)))
+      (WHEN AG-PROTO::VALUE
+        (AG-PROTO::WRITE-FIELD-TAG 15 0 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-VARINT
+         (IF AG-PROTO::VALUE
+             1
+             0)
+         AG-PROTO::BUFFER)))
     AG-PROTO::BUFFER))
 
 
@@ -2547,6 +2557,10 @@
                  (14
                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'PORT)
                           (AG-PROTO::READ-VARINT AG-PROTO::BUFFER)))
+                 (15
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'ACKNOWLEDGES-OUTPUT)
+                          (NOT
+                           (ZEROP (AG-PROTO::READ-VARINT AG-PROTO::BUFFER)))))
                  (OTHERWISE
                   (AG-PROTO::SKIP-FIELD AG-PROTO::BUFFER
                                         AG-PROTO::WIRE-TYPE)))))

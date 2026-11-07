@@ -67,8 +67,13 @@
                (template-strategic-merge old (require-object patch "patch") schema))
               (t (core-resource-error 415 "UnsupportedMediaType" "Unsupported workload subresource patch format"))))))
 
-(defun workload-update-status-request (store resource namespace name input dry-run)
-  "Write only status, preserving spec, generation and protected resource identity."
+(defun workload-applied-status-input (resource namespace name old)
+  "Return OLD with the request's applied status configuration merged in, ownership recorded."
+  (apply-status-configuration old (apply-read-configuration resource namespace name) resource))
+
+(defun workload-update-status-request (store resource namespace name input dry-run &key applied)
+  "Write only status, preserving spec, generation and protected resource identity.
+An APPLIED write brings the ownership it recorded; any other write's manager comes to own what it changed."
   (let* ((metadata (require-object (gethash "metadata" input) "metadata"))
          (status (require-object (gethash "status" input) "status")))
     (unless (and (equal (core-resource-kind resource) (gethash "kind" input (core-resource-kind resource)))
@@ -93,6 +98,13 @@
           (multiple-value-bind (value present) (gethash field metadata)
             (when (and present (not (eq value 'null)))
               (setf (gethash field (workload-metadata copy)) (copy-core-object value)))))
+        ;; A subresource write cannot set managedFields: tracking starts from the live ones.
+        (if applied
+            (let ((entries (gethash "managedFields" metadata)))
+              (if entries
+                  (setf (gethash "managedFields" (workload-metadata copy)) (copy-core-object entries))
+                  (remhash "managedFields" (workload-metadata copy))))
+            (apply-track-write existing copy resource))
         ;; An unchanged status keeps its revision and sends no watch event, as upstream.
         (unless (crd-json-equal-p copy existing)
           (prepare-core-resource-metadata copy existing revision)
@@ -111,8 +123,14 @@
       (cond ((eq method :get) (json-response representation))
             ((member method '(:put :patch))
              (let* ((dry-run (core-resource-dry-run-p))
+                    (applied (and (not scale) (eq method :patch)
+                                  (equal (request-media-type) "application/apply-patch+yaml")))
+                    ;; An apply records its own ownership; only other status writes are Update managers.
+                    (*apply-update-manager* (unless (or scale applied) (list (apply-default-manager) "status")))
                     (input (admit-subresource-write store resource subresource namespace name
-                                                    (workload-read-subresource-input representation kind schema method)
+                                                    (if applied
+                                                        (workload-applied-status-input resource namespace name representation)
+                                                        (workload-read-subresource-input representation kind schema method))
                                                     representation
                                                     :kind (when scale "Scale") :kind-api-version (when scale "autoscaling/v1")
                                                     :dry-run dry-run))
@@ -135,7 +153,8 @@
                                          (when (gethash "uid" metadata) (setf (gethash "uid" (workload-metadata current)) (gethash "uid" metadata)))
                                          (setf (gethash "replicas" (gethash "spec" current)) count) current) :dry-run dry-run)))
                        (json-response (workload-scale-object updated))))
-                   (json-response (workload-update-status-request store resource namespace name input dry-run)))))
+                   (json-response (workload-update-status-request store resource namespace name input dry-run
+                                                                  :applied applied)))))
             (t (core-resource-error 405 "MethodNotAllowed" "Unsupported workload subresource method"))))))
 
 (defun add-workload-openapi-paths (paths)

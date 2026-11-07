@@ -174,7 +174,9 @@ A template equal to an older revision makes that revision the newest again, whic
        store set
        (with-store-lock (store)
          (when (workload-current-unlocked store "statefulsets" set :generation t)
-           (create-pod-unlocked store pod)))))))
+           (let ((*apply-update-manager* (list "kube-controller-manager" nil)))
+             ;; Upstream's controllers create Pods as kube-controller-manager.
+             (create-pod-unlocked store pod))))))))
 
 (defun statefulset-delete-pod (reconciler member &optional set)
   "Start deleting one exact member Pod, tolerating one that is already gone."

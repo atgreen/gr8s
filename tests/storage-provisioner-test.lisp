@@ -260,7 +260,8 @@
       (gr8s::nfs-mount-attempts '("noatime" "ro" "hard" "timeo=30") "10.0.0.5")
     (is (equal '(("nfs4" . "vers=4.2,addr=10.0.0.5,hard,timeo=30")
                  ("nfs4" . "vers=4.1,addr=10.0.0.5,hard,timeo=30")
-                 ("nfs4" . "vers=4.0,addr=10.0.0.5,hard,timeo=30"))
+                 ("nfs4" . "vers=4.0,addr=10.0.0.5,hard,timeo=30")
+                 ("nfs" . "vers=3,addr=10.0.0.5,nolock,hard,timeo=30"))
                attempts))
     ;; MS_RDONLY|MS_NOSUID|MS_NODEV|MS_NOATIME: the kernel NFS parser would reject these as text.
     (is (= (logior 1 2 4 #x400) flags)))
@@ -341,6 +342,20 @@
     (with-fake-nfs (calls directory :mount-result (constantly sb-posix:eacces))
       (signals gr8s::nfs-mount-error
         (gr8s::mount-nfs-filesystem "10.0.0.5" "/share" (namestring (merge-pathnames "t2" directory)) nil))
+      (is (= 1 (length calls))))
+    ;; An fsid=0 export hides its v3 path from NFSv4, so ENOENT goes straight on to NFSv3.
+    (with-fake-nfs (calls directory
+                    :mount-result (lambda (source target type flags data)
+                                    (declare (ignore source target flags data))
+                                    (if (equal type "nfs") 0 sb-posix:enoent)))
+      (gr8s::mount-nfs-filesystem "10.0.0.5" "/exports" (namestring (merge-pathnames "t3" directory)) nil)
+      (is (equal '("nfs" "nfs4") (mapcar #'third calls)))
+      (is (search "vers=3" (fifth (first calls))))
+      (is (search "nolock" (fifth (first calls)))))
+    ;; A version the mount names is the only one tried.
+    (with-fake-nfs (calls directory :mount-result (constantly sb-posix:enoent))
+      (signals gr8s::nfs-mount-error
+        (gr8s::mount-nfs-filesystem "10.0.0.5" "/missing" (namestring (merge-pathnames "t4" directory)) '("vers=4.1")))
       (is (= 1 (length calls))))))
 
 (test a-provisioned-nfs-volume-creates-its-directory-on-first-use
@@ -359,11 +374,13 @@
                       runtime pod "data"
                       (gr8s::core-object "server" "10.0.0.5" "path" "/share/pvc-abc") #("hard")
                       :share "/share")))
-          (is (equal '("10.0.0.5:/share/pvc-abc" "10.0.0.5:/share" "10.0.0.5:/share/pvc-abc")
-                     (remove-duplicates (reverse (mapcar #'first calls)) :from-end nil :test (constantly nil))))
+          ;; The missing directory is looked for over NFSv4 and then NFSv3, as mount.nfs does.
+          (is (equal '(("10.0.0.5:/share/pvc-abc" "nfs4") ("10.0.0.5:/share/pvc-abc" "nfs")
+                       ("10.0.0.5:/share" "nfs4") ("10.0.0.5:/share/pvc-abc" "nfs4"))
+                     (mapcar (lambda (call) (list (first call) (third call))) (reverse calls))))
           (is (uiop:directory-pathname-p path))
           ;; The share is staged briefly and the volume's own directory now exists in it.
-          (let ((staging (second (second (reverse calls)))))
+          (let ((staging (second (third (reverse calls)))))
             (is (probe-file (format nil "~A/pvc-abc/" staging)))))))))
 
 (test a-blocked-nfs-server-delays-only-its-caller
@@ -651,3 +668,12 @@
         (when agent-thread (ignore-errors (bt:join-thread agent-thread)))
         (gr8s::stop-node-runtime node-runtime)
         (gr8s:stop-node-grpc-server server)))))
+
+
+(test ephemeral-claim-templates-accept-the-empty-name-go-sends
+  ;; Go sends name "" and generateName "" in a template's metadata; only a real name is refused.
+  (flet ((pod-with (metadata)
+           (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"p\"},\"spec\":{\"volumes\":[{\"name\":\"scratch\",\"ephemeral\":{\"volumeClaimTemplate\":{\"metadata\":~A,\"spec\":{\"accessModes\":[\"ReadWriteOnce\"],\"resources\":{\"requests\":{\"storage\":\"1Gi\"}}}}}}],\"containers\":[{\"name\":\"c\",\"image\":\"busybox\"}]}}" metadata)))
+    (is-true (parse-pod (pod-with "{\"name\":\"\",\"generateName\":\"\",\"labels\":{\"a\":\"b\"}}")))
+    (signals kubernetes-error (parse-pod (pod-with "{\"name\":\"fixed\"}")))
+    (signals kubernetes-error (parse-pod (pod-with "{\"generateName\":\"fixed-\"}")))))

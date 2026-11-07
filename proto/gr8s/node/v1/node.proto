@@ -252,6 +252,10 @@ message OperationRequest {
   bytes volume_json = 13;
   // The port in the Pod's network namespace PORT_FORWARD connects to.
   uint32 port = 14;
+  // EXEC and ATTACH: the control plane acknowledges output as it reaches the client
+  // (OperationInput.acknowledged_bytes), so the node may hold output back while too
+  // much is unacknowledged. An older control plane never acknowledges, and leaves this false.
+  bool acknowledges_output = 15;
 }
 
 message OperationInput {
@@ -262,7 +266,8 @@ message OperationInput {
   uint32 rows = 5;
   uint32 columns = 6;
   bool eof = 7;
-  // PORT_FORWARD: how much more output has reached the client.
+  // PORT_FORWARD, and EXEC or ATTACH that ACKNOWLEDGES_OUTPUT: how much more output has
+  // reached the client.
   uint64 acknowledged_bytes = 8;
 }
 

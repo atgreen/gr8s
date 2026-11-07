@@ -207,6 +207,7 @@
                              (:file "apiserver-metrics")
                              (:file "http")
                              (:file "pod-port-forward")
+                             (:file "pod-exec-spdy")
                              (:file "pod-binding")
                              (:file "aggregated-discovery")
                              (:file "core-resource-http")

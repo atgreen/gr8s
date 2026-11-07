@@ -497,7 +497,9 @@ not be changed; add or replace entries instead."
 
 (defun create-pod-response (store reconciler &optional (namespace "default"))
   "Admit a new Pod; a dry run runs every admission and quota check but stores nothing."
-  (let ((raw (core-resource-request-object "Pod")))
+  (let ((raw (core-resource-request-object "Pod"))
+        ;; The client comes to own the fields it created, as an Update.
+        (*apply-update-manager* (list (apply-default-manager) nil)))
     ;; The API server defaults a request as it decodes it, so admission sees the defaults.
     (when (hash-table-p raw) (default-pod-spec-object (gethash "spec" raw)))
     (multiple-value-bind (admitted attributes)
@@ -1198,7 +1200,11 @@ already signalling, with its handlers unbound for the handler tests, and then fi
     (#.gr8s.node.v1::+streamchannel-stream_channel_stderr+ 2)))
 
 (defun serve-agent-exec-session (reconciler uid container options &key attach)
-  "Bridge the client's WebSocket to a node exec, or with ATTACH to the container's own process."
+  "Bridge the client's WebSocket to a node exec, or with ATTACH to the container's own process.
+A client that asks for SPDY instead is served as a kubelet's streaming server serves it."
+  (when (spdy-remotecommand-requested-p)
+    (return-from serve-agent-exec-session
+      (serve-spdy-exec-session reconciler uid container options :attach attach)))
   (let* ((session
            (if attach
                (reconciler-start-attach-session

@@ -298,7 +298,10 @@
        (let ((spec (gethash "spec" object)))
          (when (and spec (not (hash-table-p spec)))
            (core-resource-error 422 "Invalid" "NetworkPolicy spec must be an object"))
-         (when spec (validate-network-policy-spec spec))))
+         ;; Upstream defaults a request as it decodes it, before validating it.
+         (when spec
+           (default-network-policy-spec spec)
+           (validate-network-policy-spec spec))))
       ((member resource '("gatewayclasses" "gateways" "httproutes"
                           "tcproutes" "tlsroutes" "grpcroutes") :test #'equal)
        (validate-gateway-resource resource object))

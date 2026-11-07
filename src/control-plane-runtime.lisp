@@ -245,8 +245,12 @@
 (defstruct (control-plane-exec-session
              (:constructor make-control-plane-exec-session
                  (operation)))
+  "One exec or attach on a node. Its output is acknowledged as the client takes it, so a slow
+client holds the node back instead of its output piling up here."
   operation
   (input-sequence 0)
+  ;; Output bytes returned by the last NEXT call, acknowledged by the one after it.
+  (delivered 0)
   (lock (bt:make-lock "gr8s control-plane exec session")))
 
 (defun start-control-plane-stream-session
@@ -268,7 +272,8 @@
        :pod-uid uid
        :container container
        :command command
-       :stdin stdin :stdout stdout :stderr stderr :tty tty)))))
+       :stdin stdin :stdout stdout :stderr stderr :tty tty
+       :acknowledges-output t)))))
 
 (defmethod runtime-start-exec-session
     ((runtime control-plane-runtime) uid container command
@@ -397,31 +402,44 @@ direction waits for acknowledgements, so a long download neither piles up here n
 
 (defmethod runtime-send-exec-session-input
     ((runtime control-plane-runtime) (session control-plane-exec-session)
-     channel data &key (rows 0) (columns 0) eof)
-  (let ((sequence nil)
-        (operation (control-plane-exec-session-operation session)))
+     channel data &key (rows 0) (columns 0) eof (acknowledged 0))
+  (let ((operation (control-plane-exec-session-operation session)))
+    ;; The node refuses input out of order, and input and acknowledgements come from two
+    ;; threads, so each takes its sequence number and goes out under the lock.
     (bt:with-lock-held ((control-plane-exec-session-lock session))
-      (setf sequence (incf (control-plane-exec-session-input-sequence session))))
-    (send-node-operation-input
-     (control-plane-runtime-node-server runtime) operation
-     (make-instance
-      'gr8s.node.v1::operation-input
-      :operation-id
-      (operation-request-id (pending-node-operation-request operation))
-      :sequence sequence :channel channel :data data
-      :rows rows :columns columns :eof eof))))
+      (send-node-operation-input
+       (control-plane-runtime-node-server runtime) operation
+       (make-instance
+        'gr8s.node.v1::operation-input
+        :operation-id
+        (operation-request-id (pending-node-operation-request operation))
+        :sequence (incf (control-plane-exec-session-input-sequence session))
+        :channel channel :data data
+        :rows rows :columns columns :eof eof :acknowledged-bytes acknowledged)))))
 
 (defmethod runtime-next-exec-session-output
     ((runtime control-plane-runtime) (session control-plane-exec-session)
      cursor &key timeout)
-  "Return the next output, consuming it: an exec's output can be far too long to hold."
-  (declare (ignore runtime))
+  "Return the next output, consuming it: an exec's output can be far too long to hold.
+Asking for more means the last output reached the client, so it is acknowledged first."
+  (let ((delivered (control-plane-exec-session-delivered session)))
+    (when (plusp delivered)
+      (setf (control-plane-exec-session-delivered session) 0)
+      ;; An older node ignores this: empty input without an end writes nothing. The
+      ;; operation may just have ended, and then nobody needs to know.
+      (ignore-errors
+       (runtime-send-exec-session-input
+        runtime session gr8s.node.v1::+streamchannel-stream_channel_stdin+
+        (make-array 0 :element-type '(unsigned-byte 8)) :acknowledged delivered))))
   (multiple-value-bind (message done-p)
       (take-next-node-operation-message
        (control-plane-exec-session-operation session) :timeout timeout)
     (if done-p
         (values nil cursor t)
-        (values message (1+ cursor) nil))))
+        (progn
+          (setf (control-plane-exec-session-delivered session)
+                (length (slot-value message 'gr8s.node.v1::data)))
+          (values message (1+ cursor) nil)))))
 
 (defmethod runtime-exec-session-exit-code
     ((runtime control-plane-runtime) (session control-plane-exec-session))

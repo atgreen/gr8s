@@ -348,7 +348,9 @@ A container running as any user can write here, and a user mount at the path tak
            (security (containerd-pod-security-context
                       pod spec :target-id (containerd-ephemeral-target-id runtime pod spec)
                                :image-user (lambda () (cri-image-user socket (container-spec-image spec)))
-                               :userns (containerd-pod-user-namespace runtime pod)))
+                               :userns (containerd-pod-user-namespace runtime pod)
+                               :volume-groups (pod-volume-supplemental-groups
+                                               (containerd-runtime-resource-store runtime) pod)))
            (termination (containerd-termination-file runtime pod spec attempt mounts))
            (termination-labels
              (when termination
