@@ -66,7 +66,10 @@
   (health-check-servers (make-hash-table))
   ;; Gateway API L7 proxy listeners, reconciled from stored Gateway/HTTPRoute
   ;; objects. NIL until the first reconcile creates it.
-  gateway-controller)
+  gateway-controller
+  ;; sk_lookup attachment that exposes loopback Gateway/Ingress listeners on
+  ;; their destination ports without opening host-wide listening sockets.
+  gateway-steering)
 
 (defun make-node-runtime (state-directory runtime manager
                           &key (network-reconciler
@@ -445,11 +448,18 @@ the node from starting."
             (node-runtime-service-lb-controller node-runtime)
             (make-service-lb-controller (node-runtime-store node-runtime) dataplane
                                         (node-runtime-node-name node-runtime))))
+    (handler-case
+        (setf (node-runtime-gateway-steering node-runtime) (start-gateway-steering))
+      (error (condition)
+        (format *error-output* "gr8s: Gateway listener steering unavailable: ~A~%" condition)))
     (unwind-protect
          (funcall function)
       (when (node-runtime-gateway-controller node-runtime)
         (ignore-errors (stop-gateway-controller (node-runtime-gateway-controller node-runtime)))
         (setf (node-runtime-gateway-controller node-runtime) nil))
+      (when (node-runtime-gateway-steering node-runtime)
+        (ignore-errors (stop-gateway-steering (node-runtime-gateway-steering node-runtime)))
+        (setf (node-runtime-gateway-steering node-runtime) nil))
       (when (node-runtime-service-lb node-runtime)
         (ignore-errors (stop-service-lb-dataplane (node-runtime-service-lb node-runtime)))
         (setf (node-runtime-service-lb node-runtime) nil
@@ -964,10 +974,21 @@ so the revision is retried."
           (progn
             (unless (node-runtime-gateway-controller node-runtime)
               (setf (node-runtime-gateway-controller node-runtime)
-                    (make-gateway-controller
-                     (node-runtime-store node-runtime)
-                     :cert-dir (merge-pathnames "gateway-certs/"
-                                                (node-runtime-state-directory node-runtime)))))
+                    (let ((steering (node-runtime-gateway-steering node-runtime)))
+                      (make-gateway-controller
+                       (node-runtime-store node-runtime)
+                       :cert-dir (merge-pathnames "gateway-certs/"
+                                                  (node-runtime-state-directory node-runtime))
+                       :register-fn
+                       (lambda (port listener)
+                         (when steering
+                           (gateway-steering-register
+                            steering port (gateway-listener-socket-fd listener)))
+                         (ensure-gateway-listener-firewall port))
+                       :unregister-fn
+                       (lambda (port)
+                         (remove-gateway-listener-firewall port)
+                         (when steering (gateway-steering-unregister steering port)))))))
             (converge-gateway-listeners (node-runtime-gateway-controller node-runtime))
             (converge-gateway-l4-listeners (node-runtime-gateway-controller node-runtime)))
         (error (condition)

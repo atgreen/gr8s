@@ -95,6 +95,14 @@
      :runner runner)
     t))
 
+(defun ensure-gateway-listener-firewall (port &key (runner #'host-firewall-run))
+  "Admit TCP traffic to a live Gateway or Ingress listener through firewalld."
+  (when (and port (plusp port) (host-firewalld-active-p :runner runner))
+    (apply-overlay-firewall-commands
+     (list (list "firewall-cmd" (format nil "--add-port=~D/tcp" port)))
+     :runner runner)
+    t))
+
 (defun remove-overlay-firewall
     (node-pod-cidr &key (runner #'host-firewall-run)
                         (vxlan-interface +node-vxlan-interface+)
@@ -116,6 +124,14 @@
   (when (and node-port (plusp node-port) (host-firewalld-active-p :runner runner))
     (apply-overlay-firewall-commands
      (list (list "firewall-cmd" (format nil "--remove-port=~D/tcp" node-port)))
+     :runner runner)
+    t))
+
+(defun remove-gateway-listener-firewall (port &key (runner #'host-firewall-run))
+  "Withdraw the TCP port opened by ENSURE-GATEWAY-LISTENER-FIREWALL."
+  (when (and port (plusp port) (host-firewalld-active-p :runner runner))
+    (apply-overlay-firewall-commands
+     (list (list "firewall-cmd" (format nil "--remove-port=~D/tcp" port)))
      :runner runner)
     t))
 
