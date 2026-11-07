@@ -1,3 +1,25 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; The container-runtime protocol the reconciler drives, with its conditions and
+;;;; an in-memory fake-runtime for tests.
+;;;;
+;;;; A runtime observes, ensures, reconciles, and deletes a Pod's containers and
+;;;; serves its logs, exec, attach, and port-forward streams. It may run containers
+;;;; in this process or delegate to remote nodes (runtime-runs-containers-p), which
+;;;; decides whether reconciliation serializes on the reconciler lock and how a
+;;;; deleting Pod is finalized. The generic functions carry default methods that
+;;;; either refuse an unsupported operation or fall back -- e.g. a whole-Pod restart
+;;;; for an adapter with no per-container lifecycle. A runtime-pod is a runtime's
+;;;; observation of one Pod; its spec fingerprint identifies container-affecting
+;;;; spec content so a metadata-only revision bump does not force a rebuild and
+;;;; containers created by an older gr8s are still adopted. Running-Pod creation is
+;;;; cancellable at any instruction so a deletion need not wait on it, except within
+;;;; WITH-RUNNING-POD-CANCELLATION-DEFERRED, which protects the few steps (such as
+;;;; containerd's StartContainer then pid read) that must not be abandoned halfway
+;;;; or a Pod's deletion -- and with it every creation on the node -- never ends
+;;;; (podster-uqb.123).
+
 (in-package #:gr8s)
 
 (defparameter +gr8s-managed-label+ "io.gr8s.managed")
@@ -236,15 +258,21 @@ name to \"cpu\" (cumulative nanoseconds) and \"memory\" (working set bytes)."))
   failure)
 
 (defun set-fake-runtime-failure (runtime message)
+  "Arm RUNTIME so its next FAIL-IF-REQUESTED signals a RUNTIME-ERROR carrying
+   MESSAGE (a test hook). The arming is consumed when it fires."
   (setf (fake-runtime-failure runtime) message))
 
 (defun set-fake-runtime-exec-url (runtime url)
+  "Set the exec URL RUNTIME hands back (a test hook)."
   (setf (fake-runtime-exec-url runtime) url))
 
 (defun set-fake-runtime-exec-result (runtime result)
+  "Set the exec result RUNTIME hands back for synchronous exec (a test hook)."
   (setf (fake-runtime-exec-result runtime) result))
 
 (defun fail-if-requested (runtime)
+  "Signal the RUNTIME-ERROR previously armed on RUNTIME by SET-FAKE-RUNTIME-FAILURE,
+   if any, clearing the arming first so it fires only once; otherwise return NIL."
   (when (fake-runtime-failure runtime)
     (let ((message (fake-runtime-failure runtime)))
       (setf (fake-runtime-failure runtime) nil)

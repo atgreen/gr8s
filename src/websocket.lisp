@@ -1,12 +1,32 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; Minimal RFC 6455 WebSocket framing: read and write single frames.
+;;;;
+;;;; gr8s speaks the WebSocket wire format directly rather than pulling in a
+;;;; client library, because its only use is tunnelling the Kubernetes streaming
+;;;; endpoints (exec, attach, port-forward) over the same HTTP server. Just the
+;;;; frame layer lives here -- opcode, FIN, the 7/16/64-bit payload length, and
+;;;; the client-side masking the spec mandates -- not the opening handshake or
+;;;; the control-frame protocol. Every incoming frame is bounded by
+;;;; *MAX-WEBSOCKET-FRAME-SIZE* so a hostile length field cannot force a huge
+;;;; allocation, and an EOF inside a frame is treated as a protocol error, not a
+;;;; clean close.
+
 (in-package #:gr8s)
 
 (defparameter *max-websocket-frame-size* (* 16 1024 1024))
 
 (defun read-required-byte (stream)
+  "Read one byte from STREAM, or signal a RUNTIME-ERROR when the stream has
+   already ended -- an EOF mid-frame is a protocol error, not a clean close."
   (or (read-byte stream nil nil)
       (error 'runtime-error :message "WebSocket stream ended inside a frame")))
 
 (defun websocket-payload-length (stream encoded-length)
+  "Resolve an RFC 6455 payload length from its 7-bit ENCODED-LENGTH: read two
+   further big-endian bytes from STREAM when it is 126, eight when 127, and
+   otherwise take ENCODED-LENGTH as the length itself."
   (case encoded-length
     (126 (+ (ash (read-required-byte stream) 8)
             (read-required-byte stream)))
@@ -44,6 +64,9 @@
       (values opcode payload fin-p masked-p))))
 
 (defun write-websocket-length (stream length masked-p)
+  "Write the RFC 6455 payload-length prefix for LENGTH to STREAM, OR-ing the mask
+   bit into its first byte when MASKED-P: one byte for <=125, a 126 marker plus a
+   16-bit length for <=65535, else a 127 marker plus a 64-bit length. Big-endian."
   (let ((mask-bit (if masked-p #x80 0)))
     (cond
       ((<= length 125)

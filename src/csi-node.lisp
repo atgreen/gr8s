@@ -51,6 +51,9 @@
   "Make a CSI RPC, taking the socket, an operation keyword and the request.")
 
 (defun csi-kubelet-path (control &rest arguments)
+  "Build a path under the kubelet root (*csi-kubelet-root*) by formatting CONTROL with
+ARGUMENTS and appending the result to it. Returns a string. The shared prefix is the
+point: drivers mount these paths by the kubelet's own name, so they must match it."
   (concatenate 'string *csi-kubelet-root* (apply #'format nil control arguments)))
 
 (defun csi-registry-sockets ()
@@ -69,6 +72,8 @@
           (sb-posix:closedir handle))))))
 
 (defun csi-plugin-version-supported-p (versions)
+  "True when VERSIONS advertises some CSI 1.x version, which is the only spec version
+this node speaks. A plugin offering none is refused at registration."
   (some (lambda (version) (uiop:string-prefix-p "1." version)) versions))
 
 (defun register-csi-plugin (socket inode)
@@ -141,10 +146,15 @@
           #'string< :key (lambda (registration) (slot-value registration 'gr8s.node.v1::name)))))
 
 (defun csi-plugin-for (driver)
+  "Return the registered CSI-PLUGIN named DRIVER, taking the plugins lock for the lookup.
+Signals a RUNTIME-ERROR when no driver by that name is registered on this node."
   (or (bt:with-lock-held (*csi-plugins-lock*) (gethash driver *csi-plugins*))
       (error 'runtime-error :message (format nil "CSI driver ~A is not registered on this node" driver))))
 
 (defun csi-volume-directory (uid name)
+  "The per-Pod directory (a string under the kubelet root) that holds the CSI volume NAME
+for the Pod with UID. This is the kubelet's own layout, so a driver's bind mounts land
+where its manifest expects."
   (csi-kubelet-path "pods/~A/volumes/kubernetes.io~~csi/~A/" uid name))
 
 (defun csi-staging-path (driver handle)
@@ -162,6 +172,9 @@
           (t 1))))
 
 (defun csi-volume-capability (fs-type mount-flags access-mode)
+  "Build a CSI VOLUME-CAPABILITY for a mount-type volume with FS-TYPE, MOUNT-FLAGS and
+ACCESS-MODE (a CSI access-mode integer). A NIL FS-TYPE or MOUNT-FLAGS becomes empty. The
+result is always a mount capability, never block."
   (let ((capability
           (make-instance 'gr8s.csi.v1::volume-capability
                          :mount (make-instance 'gr8s.csi.v1::mount-volume

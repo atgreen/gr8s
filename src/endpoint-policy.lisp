@@ -1,10 +1,30 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; Endpoint policy state for the Whistler eBPF CNI data path.
+;;;;
+;;;; Each Pod endpoint pins a small set of Whistler maps and a TCX link under its
+;;;; sandbox directory. This file is the control-plane side of that state: it
+;;;; verifies a pinned object really matches the schema gr8s expects before
+;;;; trusting it (BPF_OBJ_GET_INFO_BY_FD, because the kernel copies its own
+;;;; value_size, not ours), writes and checks the endpoint identity -- the Pod's
+;;;; IPv4 address and MAC -- that the datapath enforces against spoofing, confirms
+;;;; the TCX link is attached to the intended interface and direction, and reads
+;;;; back the spoof and traffic counters for status reporting.
+
 (in-package #:gr8s)
 
 (defun cni-policy-map-path (map-path name)
+  "Resolve the pin path for the Whistler map NAME. The \"rejected_spoofs\" map
+   lives at MAP-PATH itself; any other map is a sibling file of that name in the
+   same directory."
   (if (string= name "rejected_spoofs") map-path
       (namestring (merge-pathnames name (uiop:pathname-directory-pathname map-path)))))
 
 (defun bpf-object-kernel-info (fd)
+  "Query the kernel's info record for the BPF object FD (BPF_OBJ_GET_INFO_BY_FD)
+   and return it as a 256-byte vector, so a pinned object's real schema can be
+   checked before buffers are handed to it."
   ;; BPF_OBJ_GET_INFO_BY_FD. Validate pinned map sizes before passing buffers to
   ;; map-lookup/update: the kernel copies its actual value_size, not ours.
   (let ((attribute (whistler/loader::make-attr-buf))
@@ -17,6 +37,10 @@
     info))
 
 (defun cni-policy-map-info (fd name &key (object-info #'bpf-object-kernel-info))
+  "Return a Whistler MAP-INFO for the pinned map FD named NAME, after verifying
+   its kernel type, key and value sizes, capacity and flags against the expected
+   spec in +CNI-POLICY-MAP-SPECS+. Signals INVALID-CNI on any schema mismatch.
+   OBJECT-INFO is the info query, injectable for tests."
   (let* ((spec (assoc name +cni-policy-map-specs+ :test #'string=))
          (info (funcall object-info fd)))
     (destructuring-bind (&optional sname type key-size value-size max-entries flags) spec
@@ -33,6 +57,9 @@
        :max-entries max-entries :flags flags :fd fd))))
 
 (defun encode-cni-endpoint-identity (address mac)
+  "Encode the datapath endpoint-identity value from the Pod's ADDRESS (dotted
+   IPv4) and 6-byte MAC: the IPv4 integer, the MAC split across two words, and a
+   trailing 1. Signals INVALID-CNI when MAC is missing or not 6 bytes long."
   (unless (and mac (= 6 (length mac)))
     (invalid-cni "the Pod interface has no Ethernet identity"))
   (netlink-octets
@@ -42,6 +69,9 @@
    (netlink-integer 1 4)))
 
 (defun cni-endpoint-identity (configuration context)
+  "Build the endpoint-identity value for the Pod described by CONFIGURATION and
+   CONTEXT, reading the Pod interface's MAC from inside its network namespace.
+   Signals INVALID-CNI when the agent has assigned no endpoint address."
   (let ((address (cni-configuration-endpoint-address configuration)))
     (unless address (invalid-cni "the agent has not assigned an endpoint address"))
     (encode-cni-endpoint-identity
@@ -51,15 +81,24 @@
       (lambda () (gethash 1 (network-link-attributes (cni-context-interface-name context))))))))
 
 (defun initialize-cni-identity (map configuration context)
+  "Write the Pod's endpoint identity into MAP at key 0, the entry the datapath
+   checks on every packet."
   (whistler/loader:map-update map (netlink-integer 0 4)
                               (cni-endpoint-identity configuration context)))
 
 (defun check-cni-identity (map configuration context)
+  "Signal INVALID-CNI unless MAP's key-0 identity equals the one derived from
+   CONFIGURATION and CONTEXT -- i.e. the pinned map still matches the agent's
+   IPAM and the live Pod link."
   (unless (equalp (whistler/loader:map-lookup map (netlink-integer 0 4))
                   (cni-endpoint-identity configuration context))
     (invalid-cni "Whistler endpoint identity does not match agent IPAM and the Pod link")))
 
 (defun check-cni-tcx-link (fd index direction &key (object-info #'bpf-object-kernel-info))
+  "Signal INVALID-CNI unless the pinned link FD is a TCX link attached to
+   interface INDEX in DIRECTION (\"egress\", otherwise ingress), confirming the
+   policy program guards the intended Pod interface. OBJECT-INFO is injectable for
+   tests."
   (let ((info (funcall object-info fd)))
     (unless (and (>= (length info) 24)
                  (= 11 (netlink-read-integer info 0 4)) ; TCX
@@ -69,9 +108,15 @@
       (invalid-cni "pinned TCX link does not enforce the selected Pod interface"))))
 
 (defun cni-policy-staged-links (link-path)
+  "List the staged (not-yet-committed) link pins for LINK-PATH -- the files
+   matching its \"_pending_*\" suffix."
   (directory (concatenate 'string link-path "_pending_*")))
 
 (defun read-cni-policy-counters (root sandbox-id)
+  "Read the Whistler policy counters for SANDBOX-ID under ROOT and return them in
+   a hash table keyed by status-field name: \"rejectedSpoofs\" from the spoof map,
+   and the six allowed/dropped/malformed/unsupported packet and byte counters
+   from the traffic-stats map. Opens and closes each pinned map."
   (multiple-value-bind (map-path link-path directory) (cni-pin-paths root sandbox-id)
     (declare (ignore link-path directory))
     (let ((result (make-hash-table :test #'equal)))

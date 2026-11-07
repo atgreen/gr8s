@@ -76,8 +76,12 @@
   "List every declared container of an assigned, unfinished Pod, as a kubelet does.
 A container the agent has not reported yet is waiting, and the Pod is Pending. Clients cannot read an empty
 list as 'nothing is running': Sonobuoy's worker takes it to mean all containers exited."
-  (when (and (pod-node-name pod)
-             (member (gethash "phase" status) '("Pending" "Running") :test #'equal))
+  (let ((phase (gethash "phase" status)))
+    (when (and (pod-node-name pod)
+               (or (null phase) (member phase '("Pending" "Running" "Unknown") :test #'equal)))
+      ;; A replicated assignment can reach a follower before any agent observation.
+      ;; Absence of a phase is still pre-runtime Pending, not evidence of completion.
+      (unless phase (setf (gethash "phase" status) "Pending"))
     ;; Reports stay untouched, so readiness still sees any malformed or duplicate entry.
     (let* ((reported (gethash "containerStatuses" status #()))
            (unreported
@@ -90,7 +94,7 @@ list as 'nothing is running': Sonobuoy's worker takes it to mean all containers 
                                           "state" (core-object "waiting" (core-object "reason" "ContainerCreating"))))))
       (setf (gethash "containerStatuses" status) (concatenate 'vector reported unreported))
       ;; The runtime sees only containers it has created; one still to come keeps the Pod Pending.
-      (when (and unreported (plusp (length reported))) (setf (gethash "phase" status) "Pending"))))
+      (when (and unreported (plusp (length reported))) (setf (gethash "phase" status) "Pending")))))
   status)
 
 (defun add-pod-status-conditions (store pod status)

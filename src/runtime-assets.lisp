@@ -1,3 +1,18 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; The container runtime binaries gr8s ships inside its own image, and how they
+;;;; reach the filesystem at run time.
+;;;;
+;;;; gr8s is distributed as a single executable, so the containerd/runc/CNI
+;;;; binaries it needs are embedded in the image (*embedded-runtime-assets*) and
+;;;; written out at startup onto a private tmpfs -- nosuid and nodev, but mounted
+;;;; so its files may be executed. The CNI plugin is the awkward case: containerd
+;;;; execs it on every sandbox add and delete, and a compressed save-lisp image
+;;;; re-inflates all of its embedded assets each time (~0.67s and 185MB on a test
+;;;; VM), so an uncompressed, asset-free plugin image is prepared once and the CNI
+;;;; link points at it instead. Everything here is Linux-only.
+
 (in-package #:gr8s)
 
 (defparameter +runtime-asset-names+
@@ -24,6 +39,8 @@
   (flags sb-alien:int))
 
 (defun read-file-octets (path)
+  "Return the entire contents of PATH as a freshly allocated (unsigned-byte 8)
+   vector."
   (with-open-file (stream path :direction :input
                                 :element-type '(unsigned-byte 8))
     (let ((octets (make-array (file-length stream)
@@ -32,6 +49,9 @@
       octets)))
 
 (defun load-runtime-assets (directory)
+  "Read every runtime asset named in +runtime-asset-names+ from DIRECTORY's bin/
+   subdirectory, returning them as a list of RUNTIME-ASSET. Signals an error
+   naming the first missing file."
   (let ((root (uiop:ensure-directory-pathname directory)))
     (loop for name in +runtime-asset-names+
           for path = (merge-pathnames (format nil "bin/~A" name) root)
@@ -42,6 +62,9 @@
                    :octets (read-file-octets path)))))
 
 (defun write-runtime-asset (asset directory)
+  "Write ASSET's bytes to a file of its name under DIRECTORY (creating parents),
+   make it executable (0755), and return its path. An existing file is
+   overwritten."
   (let ((path (merge-pathnames
                (runtime-asset-name asset)
                (uiop:ensure-directory-pathname directory))))
@@ -56,12 +79,18 @@
     path))
 
 (defun materialize-runtime-assets (assets directory)
+  "Write every asset in ASSETS to DIRECTORY (see write-runtime-asset) and return
+   their paths."
   (mapcar (lambda (asset)
             (write-runtime-asset asset directory))
           assets))
 
 (defun filesystem-mounted-at-p (directory filesystem
                                 &key (mount-info (uiop:read-file-string #P"/proc/thread-self/mountinfo")))
+  "True when DIRECTORY is itself a mount point carrying a FILESYSTEM-type
+   filesystem, read from MOUNT-INFO (the thread's /proc mountinfo by default). The
+   directory's real path is matched against the mountinfo mount-point field, with
+   its special characters octal-escaped as the kernel writes them."
   (let* ((target (string-right-trim "/" (namestring (truename directory))))
          (encoded
            (with-output-to-string (stream)
@@ -80,6 +109,9 @@
                        (string= filesystem (nth (1+ separator) fields))))))
 
 (defun mount-runtime-tmpfs (directory)
+  "Mount a fresh 128 MiB tmpfs for the runtime assets at DIRECTORY (MS_NOSUID |
+   MS_NODEV; executable mappings allowed). Signals an error with the errno string
+   on failure, and signals on a non-Linux build."
   #+linux
   (let ((target (namestring (uiop:ensure-directory-pathname directory))))
     (ensure-directories-exist (merge-pathnames ".mount-point" target))
@@ -92,6 +124,8 @@
   (error "embedded runtime assets require Linux"))
 
 (defun unmount-runtime-tmpfs (directory)
+  "Unmount the runtime tmpfs at DIRECTORY, signaling an error with the errno
+   string on failure. Does nothing on a non-Linux build."
   #+linux
   (let ((target (namestring (uiop:ensure-directory-pathname directory))))
     (unless (zerop (%linux-umount target 0))
@@ -101,6 +135,8 @@
   (declare (ignore directory)))
 
 (defun runtime-asset-paths (assets directory)
+  "Return an alist mapping each asset's name to the path it has (or would have)
+   under DIRECTORY, without touching the filesystem."
   (mapcar (lambda (asset)
             (cons (runtime-asset-name asset)
                   (merge-pathnames
@@ -109,6 +145,8 @@
           assets))
 
 (defun current-native-executable ()
+  "Return the path of the running executable (/proc/self/exe). Signals an error on
+   a non-Linux build."
   #+linux (truename #P"/proc/self/exe")
   #-linux (error "the gr8s CNI executable requires Linux"))
 
@@ -149,6 +187,8 @@ runtime assets each time, which takes about 0.67s and 185MB on a test VM."
       nil)))
 
 (defun install-cni-executable-link (directory executable)
+  "Create a symlink named \"gr8s\" under DIRECTORY pointing at EXECUTABLE's real
+   path, replacing any existing one, and return the link's path."
   (let ((link (merge-pathnames
                "gr8s"
                (uiop:ensure-directory-pathname directory)))
@@ -163,6 +203,12 @@ runtime assets each time, which takes about 0.67s and 185MB on a test VM."
           (unmounter #'unmount-runtime-tmpfs)
           (cni-executable (current-native-executable))
           (cni-image-preparer (when (embedded-runtime-assets-p) #'prepare-cni-plugin-image)))
+  "Mount a runtime tmpfs at DIRECTORY, write ASSETS into it, install the CNI
+   plugin link, then call FUNCTION with the asset name->path alist, unmounting and
+   cleaning up on exit. When the assets are embedded, the CNI link points at an
+   uncompressed plugin image prepared beside the tmpfs rather than at this
+   executable, falling back to this executable if preparation fails. MOUNTER,
+   UNMOUNTER, CNI-EXECUTABLE, and CNI-IMAGE-PREPARER are injectable for testing."
   (let* ((root (uiop:ensure-directory-pathname directory))
          ;; The runtime tmpfs is sized for the assets, so this goes beside it.
          (image-directory (merge-pathnames "cni-plugin/" (uiop:pathname-parent-directory-pathname root))))
@@ -181,7 +227,10 @@ runtime assets each time, which takes about 0.67s and 185MB on a test VM."
         (uiop:delete-directory-tree image-directory :validate t :if-does-not-exist :ignore)))))
 
 (defun embed-runtime-assets (directory)
+  "Load the runtime assets from DIRECTORY into *embedded-runtime-assets*, so this
+   image carries them, and return the loaded assets."
   (setf *embedded-runtime-assets* (load-runtime-assets directory)))
 
 (defun embedded-runtime-assets-p ()
+  "True when this image was built with embedded runtime assets."
   (not (null *embedded-runtime-assets*)))

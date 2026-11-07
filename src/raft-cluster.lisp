@@ -127,6 +127,12 @@
         (lambda (request context) (raft-member-handle-join member request context :pki pki))))
 
 (defun raft-member-handle-join (member request context &key pki)
+  "Handle a Join RPC on MEMBER (see RAFT-CLUSTER-INSTALL-JOIN-HANDLER). Authenticates
+   the joiner -- by its peer certificate when MEMBER uses TLS, else by validating its
+   join token against PKI. A non-leader replies accepted=false with the last known
+   leader's address so the joiner can retry there; the leader proposes the add-member
+   config change and replies accepted=true with the member address book. Returns the
+   JoinResponse."
   (let* ((node (raft-member-node member))
          (credentials (raft-member-credentials member))
          (id (gr8s.node.v1::member-id request))
@@ -218,8 +224,9 @@
    state-machine result. The commit callback fires under the member lock (from
    the proposing or a delivery thread) and hands the result to this waiter
    through a separate mailbox lock, so there is no lock-order hazard. Returns
-   (values result t) on commit, (values nil :not-leader) if MEMBER is not the
-   leader, or (values nil :timeout) if the entry does not commit in time."
+   (values result t index) on commit, (values nil :not-leader nil) if MEMBER is
+   not the leader, or (values nil :timeout nil) if the entry does not commit in
+   time."
   (let ((lock (bt:make-lock "gr8s raft propose-sync"))
         (cv (bt:make-condition-variable))
         (done nil) (result nil))
@@ -229,9 +236,8 @@
                                (bt:with-lock-held (lock)
                                  (setf result r done t)
                                  (bt:condition-notify cv))))
-      (declare (ignore index))
       (if (not ok)
-          (values nil :not-leader)
+          (values nil :not-leader nil)
           (bt:with-lock-held (lock)
             (let ((deadline (+ (get-internal-real-time)
                                (* timeout internal-time-units-per-second))))
@@ -240,4 +246,6 @@
                                            internal-time-units-per-second)))
                          (when (<= remaining 0) (return))
                          (bt:condition-wait cv lock :timeout remaining)))
-              (if done (values result t) (values nil :timeout))))))))
+              (if done
+                  (values result t index)
+                  (values nil :timeout nil))))))))

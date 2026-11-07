@@ -1,3 +1,21 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; The control plane's implementation of the RUNTIME protocol.
+;;;;
+;;;; The same RUNTIME generic interface the node agent implements with real
+;;;; containers is implemented here by the control plane, which runs none: it
+;;;; schedules each Pod to a node and publishes that node's desired-state
+;;;; snapshot over the node gRPC server, then observes the agent's reported
+;;;; status. A Pod read before its agent has reported it (RUNTIME-ENSURE) is the
+;;;; hot path, so a snapshot is published only when the node does not already
+;;;; carry the Pod's exact revision -- otherwise listing N Pending Pods would cost
+;;;; O(N^2) in Pod JSON to discover nothing changed. Snapshots are authoritative:
+;;;; omitting a Pod is how a node is told to stop it, and a graceful deletion
+;;;; keeps its assignment until the node acknowledges the exact revision Deleted.
+;;;; Logs, exec, attach and port-forward are proxied to the owning node as node
+;;;; operations.
+
 (in-package #:gr8s)
 
 (defstruct (control-plane-runtime
@@ -6,10 +24,15 @@
   node-server)
 
 (defun control-plane-pod-by-uid (runtime uid)
+  "Return the Pod with UID from RUNTIME's store, or NIL when none matches."
   (find uid (list-pods (control-plane-runtime-store runtime))
         :key #'pod-uid :test #'string=))
 
 (defun pod-assignment (pod &optional store)
+  "Build the node-protocol POD-ASSIGNMENT for POD: its namespace, name, uid and
+   resource version, the Pod serialized as JSON, its deleting flag, and -- only
+   when STORE is given and the Pod is not being deleted -- the JSON of the
+   resources it references."
   (make-instance
    'gr8s.node.v1::pod-assignment
    :namespace (pod-namespace pod)
@@ -28,6 +51,9 @@
              (pod-referenced-resource-objects store pod)))))
 
 (defun node-desired-state-snapshot (store node-name &key excluded-uid)
+  "Build NODE-NAME's desired-state snapshot from STORE: the service-discovery
+   projection and a POD-ASSIGNMENT for each admitted Pod assigned to NODE-NAME,
+   skipping EXCLUDED-UID, ordered by namespace/name."
   (make-instance
    'gr8s.node.v1::desired-state-snapshot
    :service-discovery-objects-json (service-discovery-projection store)
@@ -44,6 +70,8 @@
      #'string< :key (lambda (pod) (format nil "~A/~A" (pod-namespace pod) (pod-name pod)))))))
 
 (defun publish-node-snapshot (runtime node-name &key excluded-uid)
+  "Build NODE-NAME's desired-state snapshot and publish it to that agent over the
+   node server, deduplicating against the last snapshot sent."
   (publish-node-desired-state
    (control-plane-runtime-node-server runtime)
    node-name
@@ -58,6 +86,8 @@
     (publish-node-snapshot runtime (node-record-name node))))
 
 (defun control-plane-observation (runtime pod)
+  "Build the RUNTIME-POD observation for POD from RUNTIME's store: its observed
+   resource version, scheduling phase, status, and podIP (\"\" when none)."
   (make-runtime-pod
    :uid (pod-uid pod)
    :resource-version (pod-observed-resource-version (control-plane-runtime-store runtime) pod)
@@ -170,6 +200,8 @@
          :message "Node-agent exec proxying is not implemented yet"))
 
 (defun node-operation-channel-data (operation channel)
+  "Collect every byte OPERATION streamed on CHANNEL into one adjustable octet
+   vector, in arrival order."
   (let ((output
           (make-array 0 :element-type '(unsigned-byte 8)
                         :adjustable t :fill-pointer 0)))

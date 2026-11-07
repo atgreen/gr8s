@@ -1,3 +1,20 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; The HTTP front end: the Hunchentoot acceptor that serves the Kubernetes API.
+;;;;
+;;;; This is the listener and request dispatch, not the handlers (see http.lisp).
+;;;; It answers the health endpoints (/healthz, /livez, /readyz) the way upstream's
+;;;; healthz package does, and -- when configured for HA -- redirects mutating
+;;;; requests to the Raft leader so writes land where consensus happens. Three
+;;;; choices here exist for compatibility rather than cleanliness: the connection
+;;;; limit is raised well above Hunchentoot's default because every open watch
+;;;; holds a connection; several HTTP reason phrases are overridden to match Go's
+;;;; net/http, which conformance clients match on; and upgraded exec/attach streams
+;;;; get a long idle timeout since a command may sit silent for hours. v1 binds
+;;;; loopback only. The STOP override force-wakes the listener to work around an
+;;;; intermittent shutdown hang (podster-uqb.82).
+
 (in-package #:gr8s)
 
 (defparameter +api-connection-limit+ 1024
@@ -138,6 +155,12 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
 
 (defun start-server (&key (address "127.0.0.1") (port 8080)
                           store runtime reconciler leader-status-fn)
+  "Start the gr8s API server on ADDRESS:PORT and return the running acceptor.
+   Signals an error unless ADDRESS is 127.0.0.1 (v1 listens only on loopback).
+   STORE, RUNTIME, and RECONCILER default from one another: a RECONCILER supplies
+   its store and runtime, a missing runtime becomes a fake one, and a missing
+   reconciler is built from the store. LEADER-STATUS-FN, when given, drives HA
+   redirection of mutating requests to the Raft leader."
   (unless (string= address "127.0.0.1")
     (error "gr8s v1 only listens on 127.0.0.1"))
   (let* ((actual-store (or store
@@ -177,4 +200,6 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
       (setf stopped t))))
 
 (defun stop-server (server)
+  "Stop the API server SERVER (a running acceptor), blocking until its listener
+   exits."
   (hunchentoot:stop server))

@@ -31,6 +31,10 @@
    error if a join does not succeed. With PKI, which 'gr8s serve' always supplies,
    members use mutual TLS under its Raft directory; a joiner enrolls with TOKEN,
    trusting CA-PIN. Without it they use plain gRPC, which only in-process tests do."
+  ;; Enrollment can happen before any Pod needs a token. Founders must therefore
+  ;; create the cluster key now so the first voter receives it with the other
+  ;; shared private credentials.
+  (when (and pki init) (load-service-account-signing-key store))
   (let* ((member nil)
          (credentials
            (when pki
@@ -44,15 +48,19 @@
                      (when (consp command)
                        (case (car command)
                          (:core-state (install-core-state-blob store (second command)))
-                         ;; The leader already applied the Pod/node write locally
-                         ;; before proposing; only followers install it (8ia.2/8ia.4).
-                         ;; apply-fn runs under the member lock, so use the
-                         ;; lock-free role predicate, not raft-member-leader-p
-                         ;; (which would re-acquire the lock and deadlock).
-                         (:pod-state (unless (raft-leader-p (raft-member-node member))
-                                       (install-pod-state-blob store (second command))))
-                         (:node-state (unless (raft-leader-p (raft-member-node member))
-                                        (install-node-state-blob store (second command)))))))))
+                         (:core-delta (install-core-state-delta store (second command)))
+                         ;; Install every committed state on every member. This is
+                         ;; idempotent for a leader-local write and necessary when
+                         ;; the leader committed a proposal forwarded by a follower.
+                         (:pod-state (install-pod-state-blob store (second command)))
+                         (:node-state (install-node-state-blob store (second command)))
+                         (:node-delta (install-node-state-delta store (second command)))
+                         ;; Enrollment is an operation rather than a follower-authored
+                         ;; whole-index snapshot: allocation occurs at this exact log
+                         ;; position against the same preceding state on every replica.
+                         (:node-enrollment
+                          (apply #'install-node-enrollment-command
+                                 store (second command))))))))
     (when credentials (setf (raft-credentials-node-pki credentials) pki))
     (setf member (start-raft-member id :host host :port port :apply-fn apply-fn :credentials credentials))
     (cond
@@ -70,18 +78,20 @@
       (t (stop-raft-member member)
          (error "start-ha-control-plane requires :init or :join-host")))
     ;; Durable writes now go through Raft: the leader proposes and commits; a
-    ;; follower's propose returns :not-leader, surfaced to the HTTP layer. TAG is
-    ;; :core-state or :pod-state; the proposed command installs on every replica.
+    ;; follower proposals are forwarded to the leader. TAG is :core-delta,
+    ;; :pod-state, or :node-delta; each committed command applies on every replica.
     (setf (pod-store-consensus-commit-fn store)
           (lambda (tag json)
             (multiple-value-bind (result committed)
-                (raft-member-propose-sync member (list tag json) :timeout 10)
-              (declare (ignore result))
+                (if (raft-member-leader-p member)
+                    (raft-member-propose-sync member (list tag json) :timeout 10)
+                    (raft-member-forward-propose-sync member (list tag json) :timeout 10))
               ;; PROPOSE-SYNC returns T only on commit; a reason keyword
               ;; (:not-leader / :timeout) otherwise -- both truthy, so test for T.
               (unless (eq committed t)
                 (core-resource-error 503 "ServiceUnavailable"
-                                     "This control-plane member is not the Raft leader")))))
+                                     "This control-plane member is not the Raft leader"))
+              result)))
     (make-ha-control-plane :member member :store store)))
 
 (defun ha-control-plane-leader-p (hcp)
@@ -95,7 +105,52 @@
               (raft-member-leader-api-url (ha-control-plane-member hcp)))
       (values t nil)))
 
+(defun ha-control-plane-node-endpoints (hcp node-port)
+  "Return every known control-plane node endpoint as (HOST PORT), with this
+   member first. Raft and node gRPC use different ports but the same advertised
+   host. A local agent must enroll locally because its one-time node token lives
+   in this member's PKI store; subsequent follower writes are forwarded through
+   Raft, and the remaining endpoints retain session failover coverage."
+  (let ((member (ha-control-plane-member hcp)))
+    (bt:with-lock-held ((raft-member-lock member))
+      (let* ((node (raft-member-node member))
+             (self (raft-node-id node))
+             (members
+               (sort
+                (loop for id being the hash-keys of (raft-node-peer-addresses node)
+                        using (hash-value address)
+                      collect (cons id (list (first address) node-port)))
+                #'string< :key #'car))
+             (self-entry (assoc self members :test #'equal)))
+        (mapcar #'cdr
+                (if self-entry
+                    (cons self-entry (remove self-entry members :test #'eq))
+                    members))))))
+
+(defun ha-control-plane-node-session-endpoints (hcp node-port)
+  "Return control-plane node endpoints with the currently known Raft leader first.
+Enrollment remains local-first because its token is member-local; after enrollment,
+agents session with the leader so all observed readiness is visible to the active
+API and controllers. Remaining members retain reconnect failover coverage."
+  (let ((member (ha-control-plane-member hcp)))
+    (bt:with-lock-held ((raft-member-lock member))
+      (let* ((node (raft-member-node member))
+             (leader (raft-node-leader-id node))
+             (members
+               (sort
+                (loop for id being the hash-keys of (raft-node-peer-addresses node)
+                        using (hash-value address)
+                      collect (cons id (list (first address) node-port)))
+                #'string< :key #'car))
+             (leader-entry (and leader (assoc leader members :test #'equal))))
+        (mapcar #'cdr
+                (if leader-entry
+                    (cons leader-entry (remove leader-entry members :test #'eq))
+                    members))))))
+
 (defun stop-ha-control-plane (hcp)
+  "Tear down the HA control plane: detach the store's consensus commit hook so no
+further writes are proposed to Raft, then stop the member. A no-op when HCP is NIL."
   (when hcp
     (setf (pod-store-consensus-commit-fn (ha-control-plane-store hcp)) nil)
     (stop-raft-member (ha-control-plane-member hcp))))

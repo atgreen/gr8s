@@ -95,6 +95,82 @@
                    "a restarted member reuses its credentials without a new token"))
           (gr8s::stop-ha-control-plane joiner))))))
 
+(test voters-share-the-service-account-signing-key
+  (with-founded-cluster (founder)
+    (let* ((founder-store (gr8s::ha-control-plane-store founder))
+           (founder-key (gr8s::load-service-account-signing-key founder-store)))
+      (gr8s::create-core-resource
+       founder-store "serviceaccounts"
+       (gr8s::core-object "metadata" (gr8s::core-object "name" "runner"))
+       "conformance")
+      (with-temporary-store (store path)
+        (let ((joiner (join-control-plane founder store path "cp2")))
+          (unwind-protect
+               (progn
+                 (is (poll-until
+                      (lambda ()
+                        (ignore-errors
+                          (gr8s::get-core-resource store "serviceaccounts" "conformance" "runner")))
+                      :timeout 20))
+                 (let* ((account (gr8s::get-core-resource founder-store "serviceaccounts"
+                                                          "conformance" "runner"))
+                        (token (gr8s::mint-service-account-token founder-store account))
+                        (joiner-key (gr8s::load-service-account-signing-key store)))
+                   (is (equal (gr8s::service-account-key-id founder-key)
+                              (gr8s::service-account-key-id joiner-key))
+                       "every voter publishes and verifies tokens with one cluster key")
+                   (is (gr8s::authenticate-service-account-token store token)
+                       "a token minted by one control plane authenticates on another")))
+            (gr8s::stop-ha-control-plane joiner)))))))
+
+(test follower-writes-forward-to-the-leader-over-mutual-tls
+  (with-founded-cluster (founder)
+    (with-temporary-store (store path)
+      (let ((joiner (join-control-plane founder store path "cp2")))
+        (unwind-protect
+             (progn
+               (is (poll-until
+                    (lambda ()
+                      (= 2 (count :voter
+                                  (gr8s::raft-cluster-members
+                                   (gr8s::ha-control-plane-member founder))
+                                  :key #'cdr)))
+                    :timeout 20))
+               (gr8s::create-core-resource
+                store "configmaps" (configmap-input "forwarded" "k" "tls") "default")
+               (is (poll-until
+                    (lambda ()
+                      (and (equal "tls" (configmap-value store "forwarded" "k"))
+                           (equal "tls"
+                                  (configmap-value
+                                   (gr8s::ha-control-plane-store founder) "forwarded" "k"))))
+                    :timeout 15))
+               (gr8s:register-node
+                store (gr8s:make-node-record :id "node-2" :name "worker-2"
+                                              :pod-cidr "10.88.16.0/20"))
+               (is (poll-until
+                    (lambda ()
+                      (and (ignore-errors (gr8s:get-node store "worker-2"))
+                           (ignore-errors
+                             (gr8s:get-node (gr8s::ha-control-plane-store founder)
+                                            "worker-2"))))
+                    :timeout 15))
+               (let* ((node-pki (raft-tls-test-pki path))
+                      (server (gr8s:start-node-grpc-server store :pki node-pki :port 0))
+                      (directory (merge-pathnames "enrolled/" path)))
+                 (unwind-protect
+                      (progn
+                        (gr8s:enroll-node-over-grpc
+                         "127.0.0.1" (gr8s:node-grpc-server-port server)
+                         "worker-enrolled" (gr8s:create-join-token node-pki "worker-enrolled")
+                         (gr8s:cluster-pki-ca-fingerprint node-pki)
+                         (merge-pathnames "node.key" directory)
+                         (merge-pathnames "node.crt" directory)
+                         (merge-pathnames "ca.crt" directory))
+                        (is (probe-file (merge-pathnames "node.crt" directory))))
+                   (gr8s:stop-node-grpc-server server))))
+          (gr8s::stop-ha-control-plane joiner))))))
+
 (test raft-requires-a-member-certificate
   (with-founded-cluster (founder node-pki)
     (let* ((port (control-plane-port founder))

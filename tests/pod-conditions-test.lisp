@@ -209,6 +209,12 @@
       (let ((status (gr8s::add-pod-status-conditions store pod (gr8s::pod-status "Pending"))))
         (is (equal '("first" "second") (funcall names status)))
         (is (gethash "waiting" (gethash "state" (aref (gethash "containerStatuses" status) 1)))))
+      ;; A follower can know the replicated assignment before it has received an
+      ;; agent observation. Its empty status must not look like every container exited.
+      (let ((status (gr8s::add-pod-status-conditions store pod (gr8s::core-object))))
+        (is (equal "Pending" (gethash "phase" status)))
+        (is (equal '("first" "second") (funcall names status)))
+        (is (gethash "waiting" (gethash "state" (aref (gethash "containerStatuses" status) 0)))))
       ;; Real reports win; only the missing container is added.
       (let* ((running (gr8s::core-object "name" "second" "ready" t "state"
                                          (gr8s::core-object "running" (gr8s::core-object))))
@@ -218,9 +224,12 @@
         (is (eq running (aref (gethash "containerStatuses" status) 0)))
         (is (equal "False" (gethash "status" (find "Ready" (gethash "conditions" status) :test #'equal
                                                    :key (lambda (item) (gethash "type" item)))))))
-      ;; Deletion and terminal reports stay exactly what was observed.
+      ;; Unknown is not a terminal phase. A follower without an observation must
+      ;; still prevent clients from mistaking an empty status list for completion.
       (let ((status (gr8s::add-pod-status-conditions store pod (gr8s::pod-status "Unknown"))))
-        (is (null (funcall names status)))))))
+        (is (equal "Unknown" (gethash "phase" status)))
+        (is (equal '("first" "second") (funcall names status)))
+        (is (gethash "waiting" (gethash "state" (aref (gethash "containerStatuses" status) 0))))))))
 
 (test unassigned-pods-have-no-container-statuses-yet
   (with-temporary-store (store path)

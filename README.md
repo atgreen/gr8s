@@ -13,6 +13,14 @@ It is not a fork or a repackaging of upstream Kubernetes. Almost everything
 above the container runtime is written from scratch in Common Lisp. The result
 is a cluster you can read, reason about, and run from one file.
 
+**Post-quantum secure by default.** gr8s carries its own pure-Lisp TLS 1.3 stack
+— no OpenSSL, no C — and every internal channel (the Kubernetes API, the node
+agent protocol, and Raft) prefers **post-quantum hybrid key exchange
+(X25519MLKEM768, FIPS 203 ML-KEM-768)** on every handshake. Because gr8s owns
+both ends of its own mutually-authenticated TLS, that traffic actually lands on
+the hybrid — so cluster communications resist "harvest-now, decrypt-later"
+attacks out of the box, with classical X25519/P-256 as automatic fallback.
+
 > **Status:** gr8s is young and ambitious. It implements a large and growing
 > slice of the Kubernetes API, but it has **not** passed Kubernetes conformance,
 > and we say so plainly ([details](docs/CONFORMANCE.md)). It is a great place to

@@ -65,6 +65,8 @@
   (:report (lambda (c s) (format s "~A" (gateway-route-error-message c)))))
 
 (defun gw-route-error (fmt &rest args)
+  "Signal a GATEWAY-ROUTE-ERROR whose message is (format nil FMT ARGS). Never
+   returns."
   (error 'gateway-route-error :message (apply #'format nil fmt args)))
 
 (defun gw-string-list (value)
@@ -98,12 +100,17 @@
                           (or (gethash "value" h) ""))))))
 
 (defun gw-parse-match (match-object)
+  "Normalize one HTTPRoute match object into a GW-MATCH (its path type and value,
+   method, and exact header matches)."
   (multiple-value-bind (path-type path) (gw-parse-path match-object)
     (make-gw-match :path-type path-type :path path
                    :method (gethash "method" match-object)
                    :headers (gw-parse-headers match-object))))
 
 (defun gw-parse-backend (ref route-namespace)
+  "Normalize a backendRef into a GW-BACKEND, defaulting its namespace to
+   ROUTE-NAMESPACE and its weight to 1. Signals a GATEWAY-ROUTE-ERROR when the
+   ref has no name or no port."
   (make-gw-backend
    :name (or (gethash "name" ref) (gw-route-error "backendRef needs a name"))
    :namespace (or (gethash "namespace" ref) route-namespace)
@@ -158,6 +165,9 @@
       (t (gw-route-error "unsupported HTTPRoute filter type ~S" type)))))
 
 (defun gw-parse-rule (rule-object route-namespace)
+  "Normalize one HTTPRoute rule into a GW-RULE (its matches, filters and
+   backends). An empty match list becomes the Gateway-API default of PathPrefix
+   \"/\"."
   (let* ((matches (gethash "matches" rule-object))
          (filters (gethash "filters" rule-object))
          (backend-refs (gethash "backendRefs" rule-object)))
@@ -232,11 +242,15 @@ NIL uses cl:random.")
 ;;; and the first hit wins.
 
 (defun gw-host-tier (hostname)          ; higher = more specific
+  "Hostname specificity tier for precedence: 0 for no host, 1 for a \"*.\"
+   wildcard, 2 for an exact host."
   (cond ((null hostname) 0)
         ((and (> (length hostname) 2) (string= hostname "*." :end1 2)) 1) ; wildcard
         (t 2)))                         ; exact
 
 (defun gw-host-nonwild-length (hostname)
+  "The hostname length used as a precedence tiebreak: the suffix length (less the
+   leading \"*.\") for a wildcard, the full length for an exact host, 0 for none."
   (cond ((null hostname) 0)
         ((= 1 (gw-host-tier hostname)) (- (length hostname) 2)) ; drop "*."
         (t (length hostname))))
@@ -255,12 +269,18 @@ path (Exact > longer PathPrefix), then method present, then #headers."
         (length (gw-match-headers match))))
 
 (defun gw-key> (a b)
+  "Lexicographic greater-than over two precedence key lists, compared element by
+   element; NIL when A is not greater (including equal)."
   (loop for x in a for y in b
         when (> x y) return t
         when (< x y) return nil
         finally (return nil)))
 
 (defun gw-route-candidates (routes)
+  "Expand ROUTES into one GW-CANDIDATE per (route, rule, match, hostname) and
+   return them sorted by descending Gateway-API precedence, so the first match
+   in the generated dispatch wins. The sort is stable, preserving source order
+   among equal-precedence candidates."
   (let ((cands '()))
     (dolist (route routes)
       (let ((route-key (format nil "~A/~A" (or (gw-route-namespace route) "")
@@ -282,6 +302,9 @@ path (Exact > longer PathPrefix), then method present, then #headers."
 ;;; The compiler: candidates -> a Lisp form -> a NATIVE function via (compile).
 
 (defun gw-host-test-form (hostname)
+  "Return a Lisp form testing the request variable HOST against HOSTNAME: T for
+   no host, a suffix comparison for a \"*.\" wildcard, or a STRING= for an exact
+   host. Spliced into the compiled router."
   (cond ((null hostname) t)
         ((= 1 (gw-host-tier hostname))
          (let ((suffix (subseq hostname 1)))  ; "*.example.com" -> ".example.com"
@@ -291,6 +314,9 @@ path (Exact > longer PathPrefix), then method present, then #headers."
         (t `(string= host ,hostname))))
 
 (defun gw-match-test-form (match)
+  "Return a Lisp form, over the request variables PATH, METHOD and HEADERS, that
+   is true when MATCH's path, its optional method, and all its header matches
+   hold. Spliced into the compiled router."
   `(and ,(ecase (gw-match-path-type match)
            (:exact `(string= path ,(gw-match-path match)))
            (:prefix `(gw-path-prefix-match-p path ,(gw-match-path match))))
@@ -299,6 +325,10 @@ path (Exact > longer PathPrefix), then method present, then #headers."
                 collect `(gw-header-match-p headers ,name ,value))))
 
 (defun gw-candidate-clause (candidate)
+  "Return a COND clause for CANDIDATE: when its host and match tests pass, build
+   a GW-DISPATCH carrying the rule's filters, the matched GW-MATCH, the route
+   identity and the rate limit. Spliced into the compiled router; the weighted
+   backend pick runs at dispatch time, once per request."
   `((and ,(gw-host-test-form (gw-candidate-hostname candidate))
          ,(gw-match-test-form (gw-candidate-match candidate)))
     (make-gw-dispatch :backend (gw-pick-weighted ',(gw-candidate-backends candidate))

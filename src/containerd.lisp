@@ -1,3 +1,21 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; The containerd Pod runtime backend, driving Pods over containerd's CRI socket.
+;;;;
+;;;; This implements the runtime generic-function protocol (runtime-ensure,
+;;;; runtime-reconcile-containers, runtime-exec-url and the rest) against a real
+;;;; containerd via CRI. gr8s owns only the sandboxes and containers it creates:
+;;;; it stamps them with +gr8s-managed-label+ and +gr8s-uid-label+ and finds its
+;;;; own work by those labels, so it can share a host with other CRI clients.
+;;;; Around CRI it adds what Kubernetes semantics need but CRI does not give for
+;;;; free -- image pull policy and credentials, mounts and projected volumes,
+;;;; security and user namespaces, termination-message capture, lifecycle hooks,
+;;;; and a durable record of container events for status. Convergence is
+;;;; non-destructive: an unchanged sandbox and healthy sibling containers are left
+;;;; running. CRI and other errors are funnelled through CALL-CONTAINERD-RUNTIME
+;;;; so callers see a single runtime-error type from this layer.
+
 (in-package #:gr8s)
 
 (defstruct (containerd-runtime (:constructor %make-containerd-runtime))
@@ -28,6 +46,9 @@
           (log-root "/var/log/gr8s/pods/")
           (host-network t)
           dns-servers dns-searches dns-options availability)
+  "Build a CONTAINERD-RUNTIME, defaulting the CRI socket, Pod log root and
+   host-network on. AVAILABILITY, when given, is a managed containerd's readiness
+   handle; NIL trusts an external runtime to already be up."
   (%make-containerd-runtime
    :availability availability
    :socket-path socket-path
@@ -38,6 +59,9 @@
    :dns-options dns-options))
 
 (defun call-containerd-runtime (thunk)
+  "Call THUNK and return its values. Re-signals a runtime-error or
+   kubernetes-error unchanged, and wraps any other error as a runtime-error, so
+   callers see one error type from the CRI layer."
   (handler-case
       (funcall thunk)
     ((or runtime-error kubernetes-error) (condition)
@@ -46,26 +70,37 @@
       (error 'runtime-error :message (princ-to-string condition)))))
 
 (defun containerd-ownership-labels (uid)
+  "The CRI label alist that marks a sandbox or container as gr8s-managed and tags
+   it with Pod UID."
   (list (cons +gr8s-managed-label+ "true")
         (cons +gr8s-uid-label+ uid)))
 
 (defun containerd-owned-sandbox (runtime uid)
+  "The gr8s-owned sandbox for Pod UID on RUNTIME: the READY one if any, else the
+   first found, or NIL when none exists."
   (let ((sandboxes (cri-list-pod-sandboxes (containerd-runtime-socket-path runtime)
                                           :labels (containerd-ownership-labels uid))))
     (or (find gr8s.cri.v1::+podsandboxstate-sandbox_ready+ sandboxes :key #'cri-pod-sandbox-info-state)
         (first sandboxes))))
 
 (defun containerd-containers (runtime sandbox)
+  "The gr8s-managed containers in SANDBOX on RUNTIME."
   (cri-list-containers
    (containerd-runtime-socket-path runtime)
    :sandbox-id (cri-pod-sandbox-info-id sandbox)
    :labels (list (cons +gr8s-managed-label+ "true"))))
 
 (defun containerd-pod-log-directory (runtime uid)
+  "The log directory for Pod UID: UID/ under RUNTIME's log root."
   (merge-pathnames (format nil "~A/" uid)
                    (containerd-runtime-log-root runtime)))
 
 (defun containerd-phase (runtime containers &optional details)
+  "The Kubernetes Pod phase for CONTAINERS by their CRI states: \"Pending\" when
+   there are none, \"Running\" when any is running, and when all have exited
+   \"Failed\" if any exited non-zero else \"Succeeded\"; otherwise \"Pending\".
+   DETAILS supplies already-fetched container statuses for exit codes; any missing
+   one is fetched from RUNTIME."
   (cond
     ((null containers) "Pending")
     ((find gr8s.cri.v1::+containerstate-container_running+
@@ -295,6 +330,12 @@ A container running as any user can write here, and a user mount at the path tak
         (cri-container-summary-id container)))))
 
 (defun containerd-create-container (runtime pod sandbox-id sandbox-config spec &key (attempt 0))
+  "Create and start container SPEC in SANDBOX-ID for POD on RUNTIME, and return
+   its CRI container id. Pulls the image per its pull policy (with the Pod's
+   credentials), assembles environment, mounts, security context and user
+   namespace, wires up termination-message capture, records Created and Started
+   lifecycle events, and runs the post-start hook. ATTEMPT is the restart attempt
+   number, used for the log path and termination file."
   (let ((socket (containerd-runtime-socket-path runtime)))
     (let ((policy (gethash "imagePullPolicy" (pod-runtime-container-object pod spec)
                            (default-image-pull-policy (container-spec-image spec)))))
@@ -429,6 +470,9 @@ A container running as any user can write here, and a user mount at the path tak
          (if (probe-file path) (uiop:read-file-string path) ""))))))
 
 (defun containerd-owned-container (runtime uid container-name)
+  "Find the gr8s-owned container named CONTAINER-NAME in Pod UID's sandbox on
+   RUNTIME, as a CRI-CONTAINER-SUMMARY, or NIL when the sandbox or the container
+   is absent. Merges recorded lifecycle history into the live CRI status."
   (let ((sandbox (containerd-owned-sandbox runtime uid)))
     (and sandbox
          (let* ((state (incorporate-container-log-history runtime uid (load-container-lifecycle-state runtime uid)))

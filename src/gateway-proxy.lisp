@@ -69,6 +69,8 @@
   "Prometheus label string -> request count.")
 
 (defun gateway-count-request (gateway route code)
+  "Increment the Prometheus request counter for GATEWAY, ROUTE and HTTP status
+   CODE (labels sanitized), under the metrics lock."
   (let ((key (format nil "gateway=\"~A\",route=\"~A\",code=\"~A\""
                      (prometheus-label (or gateway "")) (prometheus-label (or route "")) code)))
     (bt:with-lock-held (*gateway-metrics-lock*)
@@ -313,4 +315,5 @@
                       :router router :resolver resolver :gateway-name name))))
 
 (defun stop-gateway-listener (acceptor)
+  "Stop the gateway's Hunchentoot ACCEPTOR, ending its listener."
   (hunchentoot:stop acceptor))

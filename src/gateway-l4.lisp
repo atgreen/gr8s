@@ -36,6 +36,8 @@
     (nreverse backends)))
 
 (defun parse-tcproute (object)
+  "Parse a stored TCPRoute into an L4-TCP-ROUTE: its namespace and the weighted
+   GW-BACKENDs flattened from every rule (TCP routing is host-agnostic)."
   (let ((namespace (gethash "namespace" (gethash "metadata" object))))
     (make-l4-tcp-route :namespace namespace :backends (l4-route-backends object namespace))))
 
@@ -209,6 +211,9 @@
   (setf (l4-listener-dispatcher listener) dispatcher))
 
 (defun stop-l4-listener (listener)
+  "Stop LISTENER: set its stop flag, unblock the accept loop with a throwaway
+   self-connection, join the accept thread, and close the listening socket. A
+   no-op when LISTENER is NIL; each teardown step is best-effort."
   (when listener
     (setf (l4-listener-stop listener) t)
     ;; Wake the blocked accept with a throwaway self-connection, then join.

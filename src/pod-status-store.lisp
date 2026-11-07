@@ -86,13 +86,21 @@
 
 (defun save-pod-observation (store pod status)
   "Persist an actual observation only while POD's exact desired UID/revision exists."
-  (with-store-lock (store)
-    (unless (current-status-pod-p store pod) (return-from save-pod-observation nil))
-    (let ((uid (pod-uid pod)) (copy (copy-pod-status-value status)))
-      (unless (and (equal (pod-resource-version pod) (gethash uid (pod-store-pod-observed-resource-versions store)))
-                   (equalp copy (gethash uid (pod-store-pod-observed-statuses store))))
-        (persist-pod-status-state store pod :status copy :resource-version (pod-resource-version pod))
-        (setf (gethash uid (pod-store-pod-observed-statuses store)) copy
-              (gethash uid (pod-store-pod-observed-resource-versions store)) (pod-resource-version pod)
-              (gethash uid (pod-store-pod-observed-phases store)) (gethash "phase" copy "Unknown")))
-      copy)))
+  (let ((copy (copy-pod-status-value status)) (changed nil))
+    (with-store-lock (store)
+      (unless (current-status-pod-p store pod) (return-from save-pod-observation nil))
+      (let ((uid (pod-uid pod)))
+        (unless (and (equal (pod-resource-version pod) (gethash uid (pod-store-pod-observed-resource-versions store)))
+                     (equalp copy (gethash uid (pod-store-pod-observed-statuses store))))
+          (persist-pod-status-state store pod :status copy :resource-version (pod-resource-version pod))
+          (setf (gethash uid (pod-store-pod-observed-statuses store)) copy
+                (gethash uid (pod-store-pod-observed-resource-versions store)) (pod-resource-version pod)
+                (gethash uid (pod-store-pod-observed-phases store)) (gethash "phase" copy "Unknown")
+                changed t))))
+    (when changed
+      ;; Assign the client-visible status revision before serializing HA state.
+      ;; Otherwise each member derives the same status lazily under a different
+      ;; local revision and a follower's resumable watch can never replay it.
+      (add-pod-status-conditions store pod (copy-pod-status-value copy))
+      (with-store-lock (store) (note-pod-state-change store)))
+    copy))

@@ -467,6 +467,94 @@
              (is (gr8s:node-record-ready-p (gr8s:get-node store "worker-b"))))
         (gr8s:stop-node-grpc-server server)))))
 
+(test repeated-node-enrollment-preserves-the-committed-identity
+  (with-temporary-store (store path)
+    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0 :pki pki))
+           (directory (merge-pathnames "worker-retry/" path))
+           (private-key (merge-pathnames "node.key" directory))
+           (certificate (merge-pathnames "node.crt" directory))
+           (ca-certificate (merge-pathnames "ca.crt" directory)))
+      (unwind-protect
+           (let* ((first-id
+                    (gr8s:enroll-node-over-grpc
+                     "127.0.0.1" (gr8s:node-grpc-server-port server)
+                     "worker-retry" (gr8s:create-join-token pki "worker-retry")
+                     (gr8s:cluster-pki-ca-fingerprint pki)
+                     private-key certificate ca-certificate))
+                  ;; A control-plane response can be lost after the replicated
+                  ;; node record commits.  A fresh, name-bound token and the
+                  ;; same persisted key must recover that committed identity.
+                  (retry-id
+                    (gr8s:enroll-node-over-grpc
+                     "127.0.0.1" (gr8s:node-grpc-server-port server)
+                     "worker-retry" (gr8s:create-join-token pki "worker-retry")
+                     (gr8s:cluster-pki-ca-fingerprint pki)
+                     private-key certificate ca-certificate)))
+             (is (string= first-id retry-id))
+             (is (string= retry-id
+                          (gr8s:node-record-id (gr8s:get-node store "worker-retry")))))
+        (gr8s:stop-node-grpc-server server)))))
+
+(test ha-enrollment-replicates-an-ordered-node-operation
+  (with-temporary-store (store path)
+    (gr8s:register-node
+     store (gr8s:make-node-record :id "existing-id" :name "existing"
+                                  :pod-cidr "10.80.0.0/20"))
+    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (commits nil)
+           (server nil)
+           (directory (merge-pathnames "worker-ordered/" path)))
+      (setf (gr8s::pod-store-consensus-commit-fn store)
+            (lambda (tag payload)
+              (push tag commits)
+              (ecase tag
+                (:node-state (gr8s::install-node-state-blob store payload))
+                (:node-delta (gr8s::install-node-state-delta store payload))
+                (:node-enrollment
+                 (apply #'gr8s::install-node-enrollment-command store payload)))))
+      (setf server (gr8s:start-node-grpc-server
+                    store :host "127.0.0.1" :port 0 :pki pki
+                    :cluster-pod-cidr "10.80.0.0/12" :node-prefix 20))
+      (unwind-protect
+           (progn
+             (gr8s:enroll-node-over-grpc
+              "127.0.0.1" (gr8s:node-grpc-server-port server)
+              "worker-ordered" (gr8s:create-join-token pki "worker-ordered")
+              (gr8s:cluster-pki-ca-fingerprint pki)
+              (merge-pathnames "node.key" directory)
+              (merge-pathnames "node.crt" directory)
+              (merge-pathnames "ca.crt" directory))
+             (is (equal '(:node-enrollment) commits))
+             (is (string= "10.80.16.0/20"
+                          (gr8s:node-record-pod-cidr
+                           (gr8s:get-node store "worker-ordered"))))
+             (is (gr8s:get-node store "existing")))
+        (when server (gr8s:stop-node-grpc-server server))))))
+
+(test agent-enrollment-falls-through-to-a-live-control-plane-endpoint
+  (with-temporary-store (store path)
+    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (token (gr8s:create-join-token pki "worker-failover"))
+           (server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0 :pki pki))
+           (dead-listener (make-instance 'hunchentoot:easy-acceptor :address "127.0.0.1" :port 0))
+           (dead-port (progn (hunchentoot:start dead-listener)
+                             (prog1 (hunchentoot:acceptor-port dead-listener)
+                               (hunchentoot:stop dead-listener))))
+           (directory (merge-pathnames "worker-failover/" path)))
+      (unwind-protect
+           (let ((node-id
+                   (gr8s::enroll-node-over-endpoints
+                    (list (list "127.0.0.1" dead-port)
+                          (list "127.0.0.1" (gr8s:node-grpc-server-port server)))
+                    "worker-failover" token (gr8s:cluster-pki-ca-fingerprint pki)
+                    (merge-pathnames "node.key" directory)
+                    (merge-pathnames "node.crt" directory)
+                    (merge-pathnames "ca.crt" directory))))
+             (is (string= node-id
+                          (gr8s:node-record-id (gr8s:get-node store "worker-failover")))))
+        (gr8s:stop-node-grpc-server server)))))
+
 (test local-agent-starts-through-grpc-and-stops-cleanly
   (with-temporary-store (store path)
     (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" path)))
@@ -635,6 +723,129 @@
           (ignore-errors (bt:join-thread agent-thread)))
         (gr8s::stop-node-runtime node-runtime)
         (gr8s:stop-node-grpc-server server)))))
+
+(test node-operation-crosses-the-control-plane-member-owning-the-agent-session
+  (with-temporary-store (origin-store origin-path)
+    (with-temporary-store (owner-store owner-path)
+      (declare (ignore origin-path))
+      (dolist (store (list origin-store owner-store))
+        (gr8s:register-node
+         store (gr8s:make-node-record :id "node-relayed" :name "worker-relayed"
+                                      :pod-cidr "10.88.9.0/24")))
+      (let* ((origin (gr8s:start-node-grpc-server origin-store :host "127.0.0.1" :port 0))
+             (owner (gr8s:start-node-grpc-server owner-store :host "127.0.0.1" :port 0))
+             (origin-member (gr8s::start-raft-member "origin" :port 0))
+             (owner-member (gr8s::start-raft-member "owner" :port 0))
+             (control (gr8s::make-node-session-control))
+             (agent nil))
+        (unwind-protect
+             (progn
+               (gr8s::raft-member-set-peers
+                origin-member
+                (list (list "owner" "127.0.0.1"
+                            (gr8s::raft-member-port owner-member))))
+               (gr8s::raft-member-set-peers
+                owner-member
+                (list (list "origin" "127.0.0.1"
+                            (gr8s::raft-member-port origin-member))))
+               (gr8s::configure-raft-node-operation-routing origin-member origin)
+               (gr8s::configure-raft-node-operation-routing owner-member owner)
+               (setf agent
+                     (bt:make-thread
+                      (lambda ()
+                        (gr8s:run-node-session
+                         "127.0.0.1" (gr8s:node-grpc-server-port owner)
+                         "worker-relayed"
+                         (merge-pathnames "worker-relayed/identity.json" owner-path)
+                         (lambda (snapshot) (declare (ignore snapshot)))
+                         :operation-handler
+                         (lambda (variant payload emit)
+                           (when (eq variant :operation-request)
+                             (let ((id (slot-value payload 'gr8s.node.v1::operation-id)))
+                               (funcall emit :operation-stream
+                                        (make-instance 'gr8s.node.v1::operation-stream
+                                                       :operation-id id :sequence 1
+                                                       :channel gr8s.node.v1::+streamchannel-stream_channel_stdout+
+                                                       :data (gr8s::ascii-octets "relayed")))
+                               (funcall emit :operation-response
+                                        (make-instance 'gr8s.node.v1::operation-response
+                                                       :operation-id id
+                                                       :status gr8s.node.v1::+operationstatus-operation_status_complete+
+                                                       :exit-code 0)))))
+                         :control control :reconnect-delay 0.01))
+                      :name "gr8s relayed operation agent"))
+               (is-true
+                (wait-until
+                 (lambda ()
+                   (bt:with-lock-held ((gr8s::node-grpc-server-lock owner))
+                     (gethash "worker-relayed"
+                              (gr8s::node-grpc-server-sessions owner))))
+                 :timeout 5))
+               (let* ((request
+                        (make-instance 'gr8s.node.v1::operation-request
+                                       :operation-id "relayed-operation"
+                                       :kind gr8s.node.v1::+operationkind-operation_kind_exec+))
+                      (operation
+                        (gr8s::request-node-operation
+                         origin "worker-relayed" request :timeout 3)))
+                 (is (string= "owner"
+                              (gr8s::pending-node-operation-remote-member operation)))
+                 (is (equalp (gr8s::ascii-octets "relayed")
+                             (gr8s::node-operation-channel-data
+                              operation gr8s.node.v1::+streamchannel-stream_channel_stdout+)))
+                 (is (= 0 (slot-value (gr8s::pending-node-operation-response operation)
+                                      'gr8s.node.v1::exit-code)))))
+          (gr8s::cancel-node-session control)
+          (when agent (ignore-errors (bt:join-thread agent)))
+          (gr8s::stop-raft-member owner-member)
+          (gr8s::stop-raft-member origin-member)
+          (gr8s:stop-node-grpc-server owner)
+          (gr8s:stop-node-grpc-server origin))))))
+
+(test a-transient-peer-routing-miss-does-not-strand-a-node-operation-locally
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (gr8s:register-node
+     store (gr8s:make-node-record :id "node-rerouted" :name "worker-rerouted"
+                                  :pod-cidr "10.88.10.0/24"))
+    (let* ((server (gr8s::%make-node-grpc-server :store store))
+           (attempts 0)
+           (seen-variants nil)
+           (seen-node-names nil)
+           (request
+             (make-instance 'gr8s.node.v1::operation-request
+                            :operation-id "reroute-after-miss"
+                            :kind gr8s.node.v1::+operationkind-operation_kind_exec+))
+           (operation nil))
+      (setf (gr8s::node-grpc-server-operation-router server)
+            (lambda (variant target-member node-name payload)
+              (declare (ignore target-member payload))
+              (push variant seen-variants)
+              (push node-name seen-node-names)
+              (when (> (incf attempts) 1) "owner")))
+      (unwind-protect
+           (progn
+             (setf operation
+                   (gr8s::queue-node-operation server "worker-rerouted" request))
+             (is-true
+              (wait-until
+               (lambda ()
+                 (equal "owner"
+                        (gr8s::pending-node-operation-remote-member operation)))
+               :timeout 1))
+             (is (>= attempts 2))
+             (is (every (lambda (variant) (eq :operation-request variant))
+                        seen-variants))
+             (is (every (lambda (node-name)
+                          (string= "worker-rerouted" node-name))
+                        seen-node-names))
+             (bt:with-lock-held ((gr8s::node-grpc-server-lock server))
+               (is (null (gethash "worker-rerouted"
+                                  (gr8s::node-grpc-server-operation-queues server))))))
+        (setf (gr8s::node-grpc-server-stopping-p server) t)
+        (when operation
+          (gr8s::finish-node-operation operation :error "test cleanup")
+          (gr8s::release-node-operation server operation))))))
 
 (test operation-input-and-cancel-follow-the-correlated-node-session
   (with-temporary-store (store path)

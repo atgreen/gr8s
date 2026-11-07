@@ -1,3 +1,17 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; Package definitions for gr8s and its generated protobuf namespaces.
+;;;;
+;;;; GR8S is the one implementation package the whole system lives in; its
+;;;; explicit :export list is the module's public surface. The GR8S.*.V1 packages
+;;;; hold code generated from external protobuf schemas (the CRI, CSI, kubelet
+;;;; plugin-registration, containerd, and the gr8s node protocols). Each shadows
+;;;; the CL symbols a generated message or field would otherwise clash with
+;;;; (LABELS, SOME, TYPE, BLOCK, SIGNAL, PHASE), so this file must load before any
+;;;; code in those packages reads clean. Keep the shadow lists in step with the
+;;;; generated sources.
+
 (defpackage #:gr8s.cri.v1
   (:use #:cl)
   (:shadow #:labels #:some))

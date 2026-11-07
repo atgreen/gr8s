@@ -25,9 +25,6 @@ otherwise fill with tens of kilobytes an event.")
 (defparameter +revision-journal-trim-interval+ 1024
   "Events between looks for what has aged out of a journal, since each look walks it.")
 
-(defparameter *pod-revision-reservation* 1024
-  "Durably reserve this many revisions at once, so restarts never reuse a number.")
-
 (defun pod-revision-ceiling-path (store)
   "Return STORE's durable revision ceiling.
 It needs a file type, since atomic renames merge a missing one from the temporary file."

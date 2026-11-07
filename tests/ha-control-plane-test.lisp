@@ -42,15 +42,28 @@
                                     (equal "v1" (configmap-value s2 "cm1" "k"))))
                     :timeout 10)
                    "the write replicates from the leader to the follower control plane")
-               ;; A write attempted on the follower's store is refused (not leader).
-               (is (poll-until
-                    (lambda ()
-                      (handler-case
-                          (progn (gr8s::create-core-resource s2 "configmaps"
-                                                             (configmap-input "cm2" "k" "x") "default")
-                                 nil)
-                        (gr8s::kubernetes-error () t)))
-                    :timeout 5)
-                   "a durable write on a follower is refused for redirect to the leader"))
+               ;; Internal writers such as node enrollment and heartbeats run on
+               ;; every member.  A follower forwards their consensus proposal to
+               ;; the leader, and the committed state returns to every replica.
+               (let ((original (symbol-function 'gr8s::install-core-state-delta)))
+                 (unwind-protect
+                      (progn
+                        ;; A leader can acknowledge the forwarded proposal before
+                        ;; its commit notification returns to the authoring follower.
+                        ;; Make that local apply gap deterministic: the write must
+                        ;; still not return until this follower can read its result.
+                        (setf (symbol-function 'gr8s::install-core-state-delta)
+                              (lambda (store json)
+                                (when (eq store s2) (sleep 0.2))
+                                (funcall original store json)))
+                        (gr8s::create-core-resource s2 "configmaps"
+                                                    (configmap-input "cm2" "k" "x") "default")
+                        (is (equal "x" (configmap-value s2 "cm2" "k"))
+                            "a forwarded write has read-after-write consistency locally")
+                        (is (poll-until
+                             (lambda () (equal "x" (configmap-value s1 "cm2" "k")))
+                             :timeout 10)
+                            "a durable follower write is forwarded through the leader"))
+                   (setf (symbol-function 'gr8s::install-core-state-delta) original))))
           (gr8s::stop-ha-control-plane h2)
           (gr8s::stop-ha-control-plane h1))))))

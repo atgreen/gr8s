@@ -250,7 +250,9 @@ when both were on the server and it came first, so entries new to the list lead 
 
 (defun delete-template-collection (store namespace labels fields &key dry-run (resource "podtemplates"))
   "Delete selector-matched stored objects in one atomic durable transaction."
-  (let ((label-test (core-selector-predicate labels)) (field-test (core-selector-predicate fields :fields t :field-paths (core-resource-field-paths resource))))
+  (let ((label-test (core-selector-predicate labels))
+        (field-test (core-selector-predicate fields :fields t :field-paths (core-resource-field-paths resource)))
+        (*local-plane-write* (local-plane-resource-p resource)))
     (with-store-lock (store)
       (let ((index (copy-core-resource-index store)) (changed nil))
         (maphash (lambda (key object)

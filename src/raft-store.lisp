@@ -27,6 +27,7 @@
 (defstruct raft-resource-record uid (resource-version 0 :type fixnum) value)
 
 (defun raft-resource-get (store key)
+  "Return the RAFT-RESOURCE-RECORD stored under KEY in STORE, or NIL when absent."
   (gethash key (raft-resource-store-resources store)))
 
 (defun raft-resource-apply (store command)

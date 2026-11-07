@@ -1,3 +1,35 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; The node-session protocol: the long-lived bidirectional gRPC stream between
+;;;; the control plane and each node agent, both ends of it in one file.
+;;;;
+;;;; The control-plane side (NODE-GRPC-SERVER) accepts an agent's Connect stream,
+;;;; authenticates the peer, and keeps that node converged on a desired-state
+;;;; SNAPSHOT: a revision-numbered projection of the node's Pods, overlay topology
+;;;; and service discovery. Snapshots carry a monotonic revision; the server may
+;;;; send a DELTA against what a session last delivered (podster-uqb.139), so a
+;;;; delta is computed under the session's send lock and never reordered ahead of
+;;;; its base. The same stream relays node operations (exec/attach-style
+;;;; request/input/cancel/stream/response), carries agent heartbeats that renew
+;;;; the node lease, and enrolls new nodes (CSR signing + Pod-CIDR allocation).
+;;;;
+;;;; The agent side (AGENT-NODE-SESSION) dials the control plane -- rotating over
+;;;; the HA members on reconnect (podster-c2d.7.4) -- applies each snapshot in
+;;;; revision order on a dedicated worker, and persists lastAppliedRevision BEFORE
+;;;; acking so a crash never claims work it did not persist. Two invariants are
+;;;; load-bearing and easy to break:
+;;;;
+;;;;   * Revision monotonicity across restarts. A restarted control plane rebuilds
+;;;;     revisions from durable state (PREPARE-NODE-CONNECT-SNAPSHOT bumps past both
+;;;;     the agent's last-applied and the in-memory counter) so it can never strand
+;;;;     an agent ahead of its new server.
+;;;;   * Cooperative thread wakeups. Closing a socket does not reliably wake a
+;;;;     thread blocked in poll(2) or a flow-controlled send, so the session's
+;;;;     helper threads (heartbeat monitor, status reporter, watchdog, outbox) are
+;;;;     unwound by a THROW to a catch tag, and the reading/owner thread never sends
+;;;;     directly -- it hands sends to the outbox so it alone reads frames.
+
 (in-package #:gr8s)
 
 (defstruct (node-grpc-server
@@ -19,6 +51,9 @@
   (operations (make-hash-table :test #'equal))
   (operation-queues (make-hash-table :test #'equal))
   (sessions (make-hash-table :test #'equal))
+  ;; (VARIANT TARGET-MEMBER NODE-NAME PAYLOAD) -> accepting member id or NIL.
+  ;; HA installs this peer relay; single-node servers leave it NIL.
+  operation-router
   (lock (bt:make-lock "gr8s node sessions"))
   monitor-thread
   (stopping-p nil))
@@ -116,6 +151,10 @@ concurrent publications cannot reorder a delta ahead of its base."
   node-name
   request
   session
+  ;; On the API member, the peer that owns the agent session. On that peer,
+  ;; ORIGIN-MEMBER names the member to which agent output must be returned.
+  remote-member
+  origin-member
   response
   (stream-messages nil)
   error
@@ -124,48 +163,215 @@ concurrent publications cannot reorder a delta ahead of its base."
   (finished (bt:make-condition-variable :name "gr8s node operation finished")))
 
 (defun operation-request-id (request)
+  "The operation-id string identifying REQUEST."
   (slot-value request 'gr8s.node.v1::operation-id))
 
 (defun send-node-agent-envelope (session envelope)
+  "Send ENVELOPE to the agent over SESSION's stream, serialized with the session
+   send lock so concurrent publications and operations never interleave frames."
   (bt:with-lock-held ((node-agent-session-lock session))
     (ag-grpc:stream-send (node-agent-session-stream session) envelope)))
 
+(defun remove-queued-node-operation (server operation)
+  "Remove OPERATION from its node's local delivery queue.
+SERVER's lock must already be held."
+  (let* ((node-name (pending-node-operation-node-name operation))
+         (queue (delete operation
+                        (gethash node-name
+                                 (node-grpc-server-operation-queues server))
+                        :test #'eq)))
+    (if queue
+        (setf (gethash node-name (node-grpc-server-operation-queues server)) queue)
+        (remhash node-name (node-grpc-server-operation-queues server)))))
+
+(defun send-pending-node-operation (operation session)
+  "Deliver OPERATION's request to SESSION, finishing it if the send fails."
+  (handler-case
+      (send-node-agent-envelope
+       session
+       (make-server-envelope
+        :operation-request (pending-node-operation-request operation) :sequence 0))
+    (error (condition)
+      (finish-node-operation operation :error (princ-to-string condition)))))
+
+(defun retry-node-operation-route (server operation)
+  "Retry peer discovery for a locally queued OPERATION until a peer accepts it,
+a local agent session appears, or the operation is released. Routing happens
+outside SERVER's lock because a peer RPC may take seconds."
+  (let ((operation-id
+          (operation-request-id (pending-node-operation-request operation)))
+        (node-name (pending-node-operation-node-name operation))
+        (router (node-grpc-server-operation-router server)))
+    (loop
+      (sleep 0.05)
+      (let ((session nil)
+            (active-p nil))
+        ;; Remove the operation from the local queue before dropping the lock.
+        ;; Otherwise a concurrent Connect could deliver it while peer routing
+        ;; is accepting the same request.
+        (bt:with-lock-held ((node-grpc-server-lock server))
+          (setf active-p
+                (and (not (node-grpc-server-stopping-p server))
+                     (eq operation
+                         (gethash operation-id
+                                  (node-grpc-server-operations server)))))
+          (when active-p
+            (setf session (gethash node-name
+                                   (node-grpc-server-sessions server)))
+            (remove-queued-node-operation server operation)
+            (when session
+              (setf (pending-node-operation-session operation) session))))
+        (unless active-p (return))
+        (when session
+          (send-pending-node-operation operation session)
+          (return))
+        (let ((owner (funcall router :operation-request nil node-name
+                              (pending-node-operation-request operation))))
+          (when owner
+            (bt:with-lock-held ((node-grpc-server-lock server))
+              (when (eq operation
+                        (gethash operation-id
+                                 (node-grpc-server-operations server)))
+                (setf (pending-node-operation-remote-member operation) owner)))
+            (return)))
+        ;; Peer discovery ran without the server lock, so session ownership may
+        ;; have changed. Recheck locally before exposing the operation to the
+        ;; next Connect and routing attempt.
+        (bt:with-lock-held ((node-grpc-server-lock server))
+          (setf active-p
+                (and (not (node-grpc-server-stopping-p server))
+                     (eq operation
+                         (gethash operation-id
+                                  (node-grpc-server-operations server)))))
+          (when active-p
+            (setf session (gethash node-name
+                                   (node-grpc-server-sessions server))
+                  (pending-node-operation-session operation) session)
+            (unless session
+              (setf (gethash node-name
+                             (node-grpc-server-operation-queues server))
+                    (nconc (gethash node-name
+                                    (node-grpc-server-operation-queues server))
+                           (list operation))))))
+        (unless active-p (return))
+        (when session
+          (send-pending-node-operation operation session)
+          (return))))))
+
+(defun start-node-operation-route-retry (server operation)
+  (bt:make-thread
+   (lambda () (retry-node-operation-route server operation))
+   :name (format nil "gr8s route node operation ~A"
+                 (operation-request-id
+                  (pending-node-operation-request operation)))))
+
 (defun queue-node-operation (server node-name request)
+  "Register REQUEST as a pending operation for NODE-NAME and deliver it to that
+   node's live agent session, or hold it in the node's queue until the agent
+   connects. Errors if NODE-NAME is unknown (GET-NODE) or an operation with the
+   same id is already registered. If the immediate send fails, the operation is
+   finished with that error. Returns the PENDING-NODE-OPERATION."
   (get-node (node-grpc-server-store server) node-name)
   (let* ((operation (make-pending-node-operation node-name request))
          (operation-id (operation-request-id request))
-         (session nil))
+         (session nil)
+         (router (node-grpc-server-operation-router server)))
     (bt:with-lock-held ((node-grpc-server-lock server))
       (when (gethash operation-id (node-grpc-server-operations server))
         (error "Node operation ~A already exists" operation-id))
       (setf (gethash operation-id (node-grpc-server-operations server))
             operation
             session (gethash node-name (node-grpc-server-sessions server))
-            (pending-node-operation-session operation) session)
-      (unless session
-        (setf (gethash node-name (node-grpc-server-operation-queues server))
-              (nconc (gethash node-name
-                              (node-grpc-server-operation-queues server))
-                     (list operation)))))
-    (when session
-      (handler-case
-          (send-node-agent-envelope
-           session
-           (make-server-envelope :operation-request request :sequence 0))
-        (error (condition)
-          (finish-node-operation operation :error (princ-to-string condition)))))
+            (pending-node-operation-session operation) session))
+    (cond
+      (session
+       (send-pending-node-operation operation session))
+      ((and router
+            (let ((owner (funcall router :operation-request nil node-name request)))
+              (when owner
+                (setf (pending-node-operation-remote-member operation) owner)
+                t))))
+      (t
+       ;; Peer discovery ran without the server lock. Recheck local ownership
+       ;; before queueing so a concurrent Connect cannot strand the operation.
+       (bt:with-lock-held ((node-grpc-server-lock server))
+         (setf session (gethash node-name (node-grpc-server-sessions server))
+               (pending-node-operation-session operation) session)
+         (unless session
+           (setf (gethash node-name (node-grpc-server-operation-queues server))
+                 (nconc (gethash node-name
+                                 (node-grpc-server-operation-queues server))
+                        (list operation)))))
+       (when session
+         (send-pending-node-operation operation session))
+       (unless session
+         (when router
+           (start-node-operation-route-retry server operation)))))
     operation))
 
+(defun accept-routed-node-operation (server origin-member node-name variant payload)
+  "Accept a peer's routed operation frame when this member owns NODE-NAME's live
+agent session. REQUEST creates a shadow operation bound to ORIGIN-MEMBER; INPUT
+and CANCEL follow that operation's local agent session. Returns true only when
+the frame was accepted here."
+  (ecase variant
+    (:operation-request
+     (let* ((operation-id (operation-request-id payload))
+            (operation (make-pending-node-operation node-name payload))
+            (session nil))
+       (bt:with-lock-held ((node-grpc-server-lock server))
+         (setf session (gethash node-name (node-grpc-server-sessions server)))
+         (when session
+           (when (gethash operation-id (node-grpc-server-operations server))
+             (return-from accept-routed-node-operation nil))
+           (setf (pending-node-operation-session operation) session
+                 (pending-node-operation-origin-member operation) origin-member
+                 (gethash operation-id (node-grpc-server-operations server)) operation)))
+       (when session
+         (handler-case
+             (send-node-agent-envelope
+              session (make-server-envelope :operation-request payload :sequence 0))
+           (error (condition)
+             (finish-node-operation operation :error (princ-to-string condition))
+             (release-node-operation server operation)
+             (return-from accept-routed-node-operation nil)))
+         t)))
+    ((:operation-input :operation-cancel)
+     (let* ((operation-id (slot-value payload 'gr8s.node.v1::operation-id))
+            (operation (find-node-operation server operation-id)))
+       (when (and operation
+                  (equal origin-member (pending-node-operation-origin-member operation)))
+         (send-node-operation-envelope server operation variant payload operation-id)
+         t)))))
+
+(defun deliver-routed-node-operation (server variant payload)
+  "Deliver an agent STREAM or RESPONSE relayed by the owning member to the API
+member that originated it. Returns true when the operation is still registered."
+  (let ((operation
+          (find-node-operation server
+                               (slot-value payload 'gr8s.node.v1::operation-id))))
+    (when operation
+      (ecase variant
+        (:operation-stream (record-node-operation-stream operation payload))
+        (:operation-response (record-node-operation-response operation payload)))
+      t)))
+
 (defun take-node-operations (server node-name)
+  "Atomically remove and return NODE-NAME's list of queued (not-yet-delivered)
+   operations."
   (bt:with-lock-held ((node-grpc-server-lock server))
     (prog1 (gethash node-name (node-grpc-server-operation-queues server))
       (remhash node-name (node-grpc-server-operation-queues server)))))
 
 (defun find-node-operation (server operation-id)
+  "The registered PENDING-NODE-OPERATION for OPERATION-ID, or NIL."
   (bt:with-lock-held ((node-grpc-server-lock server))
     (gethash operation-id (node-grpc-server-operations server))))
 
 (defun finish-node-operation (operation &key response error)
+  "Mark OPERATION complete with RESPONSE and/or ERROR and wake its waiters.
+   Idempotent: a second call on an already-finished operation is a no-op, so the
+   first terminal outcome wins. Returns OPERATION."
   (bt:with-lock-held ((pending-node-operation-lock operation))
     (unless (pending-node-operation-done-p operation)
       (setf (pending-node-operation-response operation) response
@@ -175,17 +381,25 @@ concurrent publications cannot reorder a delta ahead of its base."
   operation)
 
 (defun release-node-operation (server operation)
+  "Remove OPERATION from the server's registry, but only while it is still the one
+   registered under its id (a replacement is left alone). Returns OPERATION."
   (let ((operation-id
           (operation-request-id
            (pending-node-operation-request operation))))
     (bt:with-lock-held ((node-grpc-server-lock server))
       (when (eq operation
                 (gethash operation-id (node-grpc-server-operations server)))
-        (remhash operation-id (node-grpc-server-operations server)))))
+        (remhash operation-id (node-grpc-server-operations server))
+        (remove-queued-node-operation server operation))))
   operation)
 
 (defun wait-for-next-node-operation-message
     (operation cursor &key timeout)
+  "Block until OPERATION has a stream message at index CURSOR, or the operation
+   finishes. Returns (values message (1+ cursor) nil) for a message, or
+   (values nil cursor t) once it is done with nothing more. Messages are retained
+   (CURSOR indexes them), unlike TAKE-NEXT-NODE-OPERATION-MESSAGE. With TIMEOUT
+   seconds and nothing arriving, signals a RUNTIME-ERROR."
   (let ((deadline
           (and timeout
                (+ (get-internal-real-time)
@@ -235,6 +449,9 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
                                (pending-node-operation-lock operation)))))))
 
 (defun wait-for-node-operation (server operation &key (timeout 10))
+  "Block until OPERATION completes or TIMEOUT seconds pass, marking it timed-out on
+   expiry. Releases it from the server registry, then signals a RUNTIME-ERROR if it
+   ended in error. Returns OPERATION on success."
   (let ((deadline (+ (get-internal-real-time)
                      (* timeout internal-time-units-per-second))))
     (bt:with-lock-held ((pending-node-operation-lock operation))
@@ -257,10 +474,16 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
     operation))
 
 (defun request-node-operation (server node-name request &key (timeout 10))
+  "Queue REQUEST to NODE-NAME and block for its result: QUEUE-NODE-OPERATION then
+   WAIT-FOR-NODE-OPERATION. Returns the finished operation, or signals its error or
+   a timeout."
   (wait-for-node-operation
    server (queue-node-operation server node-name request) :timeout timeout))
 
 (defun live-node-operation-session (server operation operation-id)
+  "Return OPERATION's live agent session, after checking OPERATION-ID matches it,
+   it is still registered, and it has not finished. Signals a RUNTIME-ERROR on any
+   of those, or when it has no live session."
   (unless (string= operation-id
                    (operation-request-id
                     (pending-node-operation-request operation)))
@@ -274,21 +497,42 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
         (error 'runtime-error :message "Node operation has no live session"))))
 
 (defun send-node-operation-envelope (server operation variant payload operation-id)
-  (let ((session (live-node-operation-session server operation operation-id)))
-    (handler-case
-        (send-node-agent-envelope
-         session (make-server-envelope variant payload :sequence 0))
-      (error (condition)
-        (finish-node-operation operation :error (princ-to-string condition))
-        (error condition))))
+  "Send (VARIANT . PAYLOAD) to OPERATION's live session (verified by OPERATION-ID).
+   On a send failure, finishes the operation with the error and re-signals it.
+   Returns OPERATION."
+  (let ((remote (pending-node-operation-remote-member operation)))
+    (if remote
+        (progn
+          (unless (and (string= operation-id
+                                (operation-request-id
+                                 (pending-node-operation-request operation)))
+                       (eq operation (find-node-operation server operation-id))
+                       (not (pending-node-operation-done-p operation)))
+            (error 'runtime-error :message "Node operation is no longer active"))
+          (let ((router (node-grpc-server-operation-router server)))
+            (unless (and router
+                         (funcall router variant remote
+                                  (pending-node-operation-node-name operation) payload))
+              (finish-node-operation operation :error "Remote node operation owner is unavailable")
+              (error 'runtime-error :message "Remote node operation owner is unavailable"))))
+        (let ((session (live-node-operation-session server operation operation-id)))
+          (handler-case
+              (send-node-agent-envelope
+               session (make-server-envelope variant payload :sequence 0))
+            (error (condition)
+              (finish-node-operation operation :error (princ-to-string condition))
+              (error condition))))))
   operation)
 
 (defun send-node-operation-input (server operation input)
+  "Forward INPUT (stdin/resize for a running operation) to the session of the
+   operation named by INPUT's own operation-id."
   (send-node-operation-envelope
    server operation :operation-input input
    (slot-value input 'gr8s.node.v1::operation-id)))
 
 (defun cancel-node-operation (server operation reason)
+  "Ask the agent to cancel OPERATION, sending an OPERATION-CANCEL carrying REASON."
   (let ((operation-id
           (operation-request-id (pending-node-operation-request operation))))
     (send-node-operation-envelope
@@ -297,33 +541,68 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
                     :operation-id operation-id :reason reason)
      operation-id)))
 
+(defun record-node-operation-stream (operation message)
+  "Append MESSAGE to OPERATION locally and wake its output waiter."
+  (bt:with-lock-held ((pending-node-operation-lock operation))
+    (setf (pending-node-operation-stream-messages operation)
+          (nconc (pending-node-operation-stream-messages operation)
+                 (list message)))
+    (bt:condition-notify (pending-node-operation-finished operation)))
+  operation)
+
 (defun note-node-operation-stream (server message)
+  "Append MESSAGE locally, or return it to the peer that originated a routed
+operation. No-op when no operation matches MESSAGE's id."
   (let ((operation
           (find-node-operation
            server (slot-value message 'gr8s.node.v1::operation-id))))
     (when operation
-      (bt:with-lock-held ((pending-node-operation-lock operation))
-        (setf (pending-node-operation-stream-messages operation)
-              (nconc (pending-node-operation-stream-messages operation)
-                     (list message)))
-        (bt:condition-notify (pending-node-operation-finished operation))))))
+      (let ((origin (pending-node-operation-origin-member operation)))
+        (if origin
+            (let ((router (node-grpc-server-operation-router server)))
+              (unless (and router
+                           (funcall router :operation-stream origin
+                                    (pending-node-operation-node-name operation) message))
+                (finish-node-operation operation :error "Operation origin is unavailable")))
+            (record-node-operation-stream operation message))))))
+
+(defun record-node-operation-response (operation response)
+  "Record terminal RESPONSE on OPERATION. Returns true for a terminal response."
+  (when (member (slot-value response 'gr8s.node.v1::status)
+                (list gr8s.node.v1::+operationstatus-operation_status_complete+
+                      gr8s.node.v1::+operationstatus-operation_status_failed+))
+    (finish-node-operation
+     operation :response response
+     :error (when (= (slot-value response 'gr8s.node.v1::status)
+                     gr8s.node.v1::+operationstatus-operation_status_failed+)
+              (slot-value response 'gr8s.node.v1::error-message)))
+    t))
 
 (defun note-node-operation-response (server response)
+  "Finish the matching operation when RESPONSE is terminal (complete or failed),
+   carrying the response and, on failure, its error message. No-op for a
+   non-terminal status or an unknown operation id."
   (let ((operation
           (find-node-operation
            server (slot-value response 'gr8s.node.v1::operation-id))))
-    (when (and operation
-               (member (slot-value response 'gr8s.node.v1::status)
-                       (list
-                        gr8s.node.v1::+operationstatus-operation_status_complete+
-                        gr8s.node.v1::+operationstatus-operation_status_failed+)))
-      (finish-node-operation
-       operation :response response
-       :error (when (= (slot-value response 'gr8s.node.v1::status)
-                       gr8s.node.v1::+operationstatus-operation_status_failed+)
-                (slot-value response 'gr8s.node.v1::error-message))))))
+    (when operation
+      (let ((origin (pending-node-operation-origin-member operation)))
+        (if origin
+            (let ((terminal
+                    (member (slot-value response 'gr8s.node.v1::status)
+                            (list gr8s.node.v1::+operationstatus-operation_status_complete+
+                                  gr8s.node.v1::+operationstatus-operation_status_failed+)))
+                  (router (node-grpc-server-operation-router server)))
+              (unless (and router
+                           (funcall router :operation-response origin
+                                    (pending-node-operation-node-name operation) response))
+                (finish-node-operation operation :error "Operation origin is unavailable"))
+              (when terminal (release-node-operation server operation)))
+            (record-node-operation-response operation response))))))
 
 (defun fail-node-session-operations (server session)
+  "Finish every still-pending operation bound to SESSION with \"Node disconnected\".
+   Called as a session tears down so no caller waits on a dead agent."
   (let ((operations nil))
     (bt:with-lock-held ((node-grpc-server-lock server))
       (maphash
@@ -337,12 +616,17 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
         (finish-node-operation operation :error "Node disconnected")))))
 
 (defun node-envelope-payload (envelope variant)
+  "The payload ENVELOPE carries for VARIANT. Errors unless ENVELOPE's active payload
+   case is exactly VARIANT."
   (unless (eq variant (slot-value envelope 'gr8s.node.v1::payload-case))
     (error "Expected node-session payload ~S, received ~S"
            variant (slot-value envelope 'gr8s.node.v1::payload-case)))
   (slot-value envelope (find-symbol (symbol-name variant) :gr8s.node.v1)))
 
 (defun assigned-node-network (server node-name)
+  "The NodeNetworkConfig for NODE-NAME: the cluster and this node's Pod CIDRs, the
+   cluster DNS address, the node's underlay address, and the fixed overlay VNI 42
+   and MTU 1450. Errors if NODE-NAME is unknown."
   (let ((node (get-node (node-grpc-server-store server) node-name)))
     (make-instance 'gr8s.node.v1::node-network-config
                    :cluster-pod-cidr (node-grpc-server-cluster-pod-cidr server)
@@ -352,6 +636,9 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
                    :vni 42 :mtu 1450)))
 
 (defun assigned-node-routes (server node-name)
+  "The overlay routes from NODE-NAME to every OTHER node that has both an underlay
+   address and a Pod CIDR, ordered by node name. NIL until this node itself has an
+   underlay address."
   (when (string= "" (node-record-underlay-address
                      (get-node (node-grpc-server-store server) node-name)))
     (return-from assigned-node-routes nil))
@@ -366,6 +653,8 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
                                  :underlay-address (node-record-underlay-address node))))
 
 (defun attach-node-topology (server node-name snapshot)
+  "Fill SNAPSHOT's network and routes slots for NODE-NAME from the store, in place,
+   and return SNAPSHOT."
   (setf (slot-value snapshot 'gr8s.node.v1::network)
         (assigned-node-network server node-name)
         (slot-value snapshot 'gr8s.node.v1::routes)
@@ -373,6 +662,8 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
   snapshot)
 
 (defun same-node-snapshot-topology-p (left right)
+  "Whether LEFT and RIGHT are non-NIL and carry byte-identical network and route
+   topology (LEFT must have a network). Compares serialized proto bytes."
   (and left right
        (slot-value left 'gr8s.node.v1::network)
        (equalp (ag-proto:serialize-to-bytes (slot-value left 'gr8s.node.v1::network))
@@ -383,6 +674,9 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
                        (slot-value right 'gr8s.node.v1::routes)))))
 
 (defun refresh-node-peer-topology (server changed-node)
+  "After CHANGED-NODE's topology changed, recompute every OTHER node's snapshot and
+   republish it to any node whose topology now differs, so peers learn the new route
+   set. Skips CHANGED-NODE itself."
   (dolist (node (list-nodes (node-grpc-server-store server)))
     (let ((name (node-record-name node)))
       (unless (string= name changed-node)
@@ -394,6 +688,12 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
             (publish-node-desired-state server name snapshot)))))))
 
 (defun prepare-node-connect-snapshot (server node-name last-applied)
+  "The desired-state snapshot a (re)connecting agent whose last applied revision is
+   LAST-APPLIED should receive, reusing the published one when its content is
+   unchanged and its revision is at least LAST-APPLIED, else assigning a revision
+   strictly above both LAST-APPLIED and the in-memory counter and recording it.
+   Guarantees a restarted control plane never hands back a revision an agent has
+   already moved past."
   ;; Rebuild from durable desired state after a control-plane restart. Revision
   ;; counters in memory must never strand an agent ahead of its new server.
   (let ((snapshot (node-desired-state-snapshot
@@ -412,11 +712,16 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
                   (gethash node-name (node-grpc-server-snapshots server)) snapshot)))))))
 
 (defun current-node-snapshot (server node-name)
+  "The snapshot currently published to NODE-NAME, or a fresh empty
+   DesiredStateSnapshot when none has been published yet."
   (bt:with-lock-held ((node-grpc-server-lock server))
     (or (gethash node-name (node-grpc-server-snapshots server))
         (make-instance 'gr8s.node.v1::desired-state-snapshot))))
 
 (defun note-node-snapshot-ack (server node-name ack)
+  "Record NODE-NAME's acknowledged revision from ACK when it advances convergence:
+   only when ACK is applied, its revision exceeds the last ack, and does not run
+   ahead of what the server has published. Old or impossible acks are ignored."
   (let ((revision (slot-value ack 'gr8s.node.v1::revision)))
     (when (slot-value ack 'gr8s.node.v1::applied)
       (bt:with-lock-held ((node-grpc-server-lock server))
@@ -433,6 +738,13 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
                   revision)))))))
 
 (defun handle-node-agent-envelope (server node-name envelope)
+  "Dispatch one inbound envelope from NODE-NAME's agent after checking its protocol
+   version. A heartbeat renews the node's readiness and lease and records runtime
+   health; a snapshot-ack advances the acked revision; a status report updates CSI
+   registrations, each Pod's observed status, runtime events and finalization, and
+   any PodCertificateRequests -- each wrapped so one failure never drops the rest of
+   the report or ends the session; operation responses and streams are routed to
+   their pending operation. Errors on any other payload."
   (ensure-node-protocol-version
    (slot-value envelope 'gr8s.node.v1::protocol-version))
   (case (slot-value envelope 'gr8s.node.v1::payload-case)
@@ -514,6 +826,8 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
             (slot-value envelope 'gr8s.node.v1::payload-case)))))
 
 (defun send-node-protocol-error (stream condition &optional envelope)
+  "Best-effort: send STREAM a protocol-error describing CONDITION (echoing
+   ENVELOPE's received protocol version when given). Swallows any send failure."
   (ignore-errors
     (ag-grpc:stream-send
      stream
@@ -530,6 +844,13 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
       :sequence 1))))
 
 (defun handle-node-connect-internal (server context stream)
+  "Serve one agent Connect stream end to end: read and authenticate the NodeHello,
+   update the node's underlay address/capacity/kubelet port, build its connect
+   snapshot, then -- holding the session send lock so nothing races the handshake --
+   register the session, send ServerHello and the initial complete snapshot, and
+   flush any queued operations. Then loop handling inbound envelopes until the stream
+   ends. On exit deregisters the session and fails its pending operations. Refreshes
+   peer topology when this node's underlay address changed."
   (let ((first (ag-grpc:stream-recv stream)))
     (unless first (error "Node session ended before its hello"))
     (ensure-node-protocol-version (slot-value first 'gr8s.node.v1::protocol-version))
@@ -599,6 +920,9 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
         (fail-node-session-operations server session)))))
 
 (defun handle-node-connect (server context stream)
+  "Run HANDLE-NODE-CONNECT-INTERNAL, turning any error into a protocol-error sent
+   back on STREAM so only this RPC ends; the listener and other sessions are
+   untouched."
   (handler-case
       (handle-node-connect-internal server context stream)
     (error (condition)
@@ -627,6 +951,8 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
                   (ag-http2:connection-close (ag-grpc::server-stream-connection stream))))))))
 
 (defun monitor-node-heartbeats (server)
+  "Until SERVER is stopping, every 50ms expire node leases past the heartbeat
+   timeout and evict sessions that have gone silent."
   (loop until (node-grpc-server-stopping-p server)
         do (let ((now (get-universal-time)))
              (expire-node-heartbeats
@@ -636,31 +962,63 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
            (sleep 0.05)))
 
 (defun handle-node-enrollment (server request context)
+  "Enroll the node named in REQUEST: validate its join token and sign its CSR,
+   allocate a node id and a Pod CIDR, register the node, and return an EnrollResponse
+   with the signed node certificate and the cluster CA. Errors when enrollment is
+   disabled (no PKI)."
   (declare (ignore context))
   (let ((pki (node-grpc-server-pki server)))
     (unless pki
       (error "Node enrollment is disabled"))
     (ensure-node-protocol-version
      (slot-value request 'gr8s.node.v1::protocol-version))
-    (let* ((node-name (slot-value request 'gr8s.node.v1::node-name))
+    (let* ((store (node-grpc-server-store server))
+           (node-name (slot-value request 'gr8s.node.v1::node-name))
            (token (slot-value request 'gr8s.node.v1::join-token))
            (csr (slot-value request 'gr8s.node.v1::certificate-request))
            (certificate
              (enroll-node-csr pki node-name token
                               (cluster-pki-ca-fingerprint pki) csr))
-           (node-id (generate-uid))
-           (pod-cidr
-             (allocate-node-pod-cidr
-              (node-grpc-server-store server)
-              (node-grpc-server-cluster-pod-cidr server)
-              (node-grpc-server-node-prefix server))))
-      (register-node
-       (node-grpc-server-store server)
-       (make-node-record :id node-id :name node-name :pod-cidr pod-cidr))
+           ;; A forwarded registration can commit before its gRPC response is
+           ;; lost to a leadership change.  A new name-bound token plus the
+           ;; agent's persisted key must recover that committed record rather
+           ;; than manufacture a conflicting node identity. A new HA enrollment
+           ;; is itself a Raft operation, so its ID and CIDR are added against
+           ;; the log-ordered node index rather than a follower's stale snapshot.
+           (node
+             (or (handler-case (get-node store node-name)
+                   (kubernetes-error () nil))
+                 (let ((commit (pod-store-consensus-commit-fn store)))
+                   (if commit
+                       (let ((payload
+                               (list (generate-uid) node-name
+                                     (node-grpc-server-cluster-pod-cidr server)
+                                     (node-grpc-server-node-prefix server)
+                                     (current-timestamp))))
+                         (funcall commit :node-enrollment payload)
+                         ;; A leader returns its apply result directly. A follower's
+                         ;; forwarding RPC can return just before the commit heartbeat
+                         ;; reaches this replica, so briefly wait for local apply.
+                         (or (loop repeat 200
+                                   for enrolled = (handler-case (get-node store node-name)
+                                                    (kubernetes-error () nil))
+                                   when enrolled return enrolled
+                                   do (sleep 0.05))
+                             (error "Committed enrollment for node ~A was not applied locally"
+                                    node-name)))
+                       (register-node
+                        store
+                        (make-node-record
+                         :id (generate-uid) :name node-name
+                         :pod-cidr
+                         (allocate-node-pod-cidr
+                          store
+                          (node-grpc-server-cluster-pod-cidr server)
+                          (node-grpc-server-node-prefix server)))))))))
       (make-instance
        'gr8s.node.v1::enroll-response
        :protocol-version +node-protocol-version+
-       :node-id node-id
+       :node-id (node-record-id node)
        :node-certificate (pki-ascii-octets certificate)
        :ca-certificate
        (pki-ascii-octets
@@ -671,6 +1029,11 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
                                             pki
                                             (cluster-pod-cidr +default-cluster-pod-cidr+)
                                             (node-prefix +default-node-pod-prefix+))
+  "Create and start the node control-plane gRPC server on HOST:PORT: register the
+   Connect service (and the Enrollment service when PKI is given), spawn its accept
+   thread and the heartbeat monitor, and block until it is listening. Errors on a
+   non-positive heartbeat timeout or if the listener never comes up. Returns the
+   NODE-GRPC-SERVER (with its actual bound port)."
   (unless (plusp heartbeat-timeout-seconds)
     (error "Heartbeat timeout must be positive"))
   (let* ((grpc-server (apply #'ag-grpc:make-grpc-server port :host host
@@ -710,6 +1073,9 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
     server))
 
 (defun stop-node-grpc-server (server)
+  "Stop SERVER: signal its loops to stop, stop the gRPC server, and join its monitor
+   and accept threads with a bounded wait, destroying a thread still wedged in
+   accept(2) as the last resort. Returns SERVER."
   (setf (node-grpc-server-stopping-p server) t)
   (ignore-errors (ag-grpc:server-stop (node-grpc-server-grpc-server server)))
   (dolist (thread (list (node-grpc-server-monitor-thread server)
@@ -739,6 +1105,11 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
        (every #'same-pod-assignment-p (slot-value left 'gr8s.node.v1::pods) (slot-value right 'gr8s.node.v1::pods))))
 
 (defun publish-node-desired-state (server node-name snapshot &key deduplicate)
+  "Publish SNAPSHOT as NODE-NAME's new desired state: attach topology, assign the
+   next revision, store it, and deliver it to the live session if any (fail-soft).
+   With DEDUPLICATE, returns the existing revision unchanged when the content is
+   identical. Errors if NODE-NAME is unknown or SNAPSHOT is not a
+   DesiredStateSnapshot. Returns the resulting revision."
   (get-node (node-grpc-server-store server) node-name)
   (unless (typep snapshot 'gr8s.node.v1::desired-state-snapshot)
     (error "Desired state must be a DesiredStateSnapshot"))
@@ -761,13 +1132,17 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
     revision))
 
 (defun node-session-acknowledged-revision (server node-name)
+  "The highest desired-state revision NODE-NAME has acknowledged applying, or 0."
   (bt:with-lock-held ((node-grpc-server-lock server))
     (gethash node-name (node-grpc-server-acknowledged-revisions server) 0)))
 
 (defun ascii-octets-to-string (octets)
+  "OCTETS decoded as ASCII, one CODE-CHAR per byte."
   (map 'string #'code-char octets))
 
 (defun verify-enrollment-ca-pin (ca-pem expected-fingerprint)
+  "Signal PKI-FAIL unless the certificate in CA-PEM has fingerprint
+   EXPECTED-FINGERPRINT; returns NIL on a match."
   (let* ((certificate (certificate-from-pem ca-pem))
          (fingerprint
            (octets-to-hex (pure-tls:certificate-fingerprint certificate))))
@@ -777,6 +1152,11 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
 
 (defun enroll-node-over-grpc (host port node-name token ca-fingerprint
                               private-key-path certificate-path ca-certificate-path)
+  "Agent-side enrollment: generate NODE-NAME's key and CSR (written to
+   PRIVATE-KEY-PATH), dial HOST:PORT with the server cert pinned to CA-FINGERPRINT,
+   send the join TOKEN and CSR, verify the returned CA against the same pin, and
+   write the issued node certificate and CA certificate atomically. Returns the
+   server-assigned node id."
   (let* ((csr (generate-node-key-and-csr node-name private-key-path))
          (channel (make-node-tls-channel host port :timeout 10 :ca-pin ca-fingerprint)))
     (unwind-protect
@@ -806,7 +1186,28 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
                (slot-value response 'gr8s.node.v1::node-id))))
       (ignore-errors (ag-grpc:channel-close channel)))))
 
+(defun enroll-node-over-endpoints (endpoints node-name token ca-fingerprint
+                                   private-key-path certificate-path ca-certificate-path)
+  "Enroll NODE-NAME through the first reachable control-plane in ENDPOINTS.
+   Each endpoint is (HOST PORT).  Failed attempts retain the generated private
+   key and move to the next member; if none succeeds, re-signal the last error."
+  (unless endpoints (error "Node enrollment requires at least one control-plane endpoint"))
+  (let ((last-error nil))
+    (dolist (endpoint endpoints)
+      (destructuring-bind (host port) endpoint
+        (handler-case
+            (return-from enroll-node-over-endpoints
+              (enroll-node-over-grpc host port node-name token ca-fingerprint
+                                     private-key-path certificate-path ca-certificate-path))
+          (error (condition)
+            (format *error-output* "gr8s node enrollment through ~A:~D failed: ~A~%"
+                    host port condition)
+            (setf last-error condition)))))
+    (error last-error)))
+
 (defun make-agent-identity (node-name &key (node-id "") (revision 0))
+  "A fresh agent-identity hash-table for NODE-NAME holding nodeName, nodeId and
+   lastAppliedRevision."
   (let ((identity (make-hash-table :test #'equal)))
     (setf (gethash "nodeName" identity) node-name
           (gethash "nodeId" identity) node-id
@@ -814,6 +1215,8 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
     identity))
 
 (defun load-agent-identity (path node-name)
+  "Load the persisted agent identity at PATH, or a fresh one for NODE-NAME when
+   absent. Errors if the stored identity belongs to another node."
   (if (probe-file path)
       (let ((identity (com.inuoe.jzon:parse path)))
         (unless (string= node-name (gethash "nodeName" identity ""))
@@ -823,12 +1226,15 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
       (make-agent-identity node-name)))
 
 (defun persist-agent-identity (path identity)
+  "Write IDENTITY to PATH as JSON, atomically and with private permissions."
   (write-private-text-atomically
    path
    (with-output-to-string (stream)
      (com.inuoe.jzon:stringify identity :stream stream))))
 
 (defun require-server-envelope (envelope variant)
+  "The payload ENVELOPE carries for VARIANT, after checking its protocol version.
+   Errors if ENVELOPE is NIL (the session closed while awaiting VARIANT)."
   (unless envelope
     (error "Node session closed while waiting for ~S" variant))
   (ensure-node-protocol-version
@@ -850,6 +1256,7 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
   received)
 
 (defun pod-assignment-sort-key (pod)
+  "POD's \"namespace/name\", the stable key agent and server sort assignments by."
   (format nil "~A/~A" (slot-value pod 'gr8s.node.v1::namespace) (slot-value pod 'gr8s.node.v1::name)))
 
 (defun assemble-node-snapshot (session snapshot)
@@ -886,6 +1293,10 @@ complete snapshot to the next one."
                           #'string< :key #'pod-assignment-sort-key))))))))
 
 (defun accept-agent-server-hello (identity identity-path hello)
+  "Validate HELLO against the persisted IDENTITY and record its allocation. Errors
+   if the server's node id or assigned Pod CIDR changed from what was persisted, if
+   the node id is empty, or if the CIDR is invalid. On success persists the node id
+   and Pod CIDR to IDENTITY-PATH, even when this reconnect brings no newer snapshot."
   (let ((node-id (slot-value hello 'gr8s.node.v1::node-id))
         (cidr (slot-value hello 'gr8s.node.v1::assigned-pod-cidr))
         (persisted-node-id (gethash "nodeId" identity ""))
@@ -958,6 +1369,11 @@ applicable method for NIL rather than finding a closed connection."
 
 (defun apply-node-snapshot-and-respond
     (session identity identity-path snapshot apply-snapshot &key replay)
+  "Apply SNAPSHOT when its revision is newer than the last applied (or equal, when
+   REPLAY), persist the new lastAppliedRevision BEFORE acking so a crash never acks
+   unpersisted work, send any Pod statuses APPLY-SNAPSHOT returned, and always send a
+   snapshot-ack for the revision. Rejects a snapshot whose Pod CIDR contradicts the
+   durable node allocation."
   (let ((revision (slot-value snapshot 'gr8s.node.v1::revision))
         (last-applied (gethash "lastAppliedRevision" identity 0))
         (statuses nil))
@@ -991,6 +1407,11 @@ applicable method for NIL rather than finding a closed connection."
 
 (defun handle-node-server-envelope
     (session envelope identity identity-path apply-snapshot operation-handler &optional snapshot-worker)
+  "Agent-side dispatch of one server ENVELOPE after a protocol-version check: a
+   desired-state is assembled (a delta rebuilt against the last snapshot) and either
+   queued to SNAPSHOT-WORKER or applied inline; an operation request/input/cancel is
+   handed to OPERATION-HANDLER with a reply sink; a protocol-error is raised. Errors
+   on any other payload, or on an operation payload without a handler."
   (ensure-node-protocol-version
    (slot-value envelope 'gr8s.node.v1::protocol-version))
   (case (slot-value envelope 'gr8s.node.v1::payload-case)
@@ -1024,12 +1445,16 @@ applicable method for NIL rather than finding a closed connection."
   (lock (bt:make-lock "gr8s node session cancellation")))
 
 (defun make-node-session-control ()
+  "A NODE-SESSION-CONTROL wrapping a fresh cancellable context, for cancelling a
+   running node session."
   (multiple-value-bind (context cancel-function)
       (cl-cancel:with-cancel (cl-cancel:background))
     (%make-node-session-control
      :context context :cancel-function cancel-function)))
 
 (defun cancel-node-session (control)
+  "Cancel CONTROL's session, calling its cancel function once and clearing it so a
+   repeat call is a no-op. Returns NIL."
   (let ((cancel-function nil))
     (bt:with-lock-held ((node-session-control-lock control))
       (setf cancel-function (node-session-control-cancel-function control)
@@ -1039,6 +1464,7 @@ applicable method for NIL rather than finding a closed connection."
   nil)
 
 (defun node-session-cancelled-p (control)
+  "Whether CONTROL's session has been cancelled."
   (cl-cancel:done-p (node-session-control-context control)))
 
 (defvar *node-session-interruption-tag* nil
@@ -1105,6 +1531,11 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
 (defun agent-session-monitor
     (session control session-thread heartbeat-interval
      stop-predicate finished-p finish-session note-progress tag &optional runtime-health)
+  "The agent's heartbeat-and-cancellation loop, on its own thread: until FINISHED-P,
+   send a heartbeat each HEARTBEAT-INTERVAL (or at once when runtime health changes)
+   and NOTE-PROGRESS; on cancellation or STOP-PREDICATE, cancel the session, finish
+   it, and interrupt the owning SESSION-THREAD so it unwinds through normal gRPC
+   cleanup. Always finishes the session on exit."
   (let ((next-heartbeat
           (+ (get-internal-real-time)
              (* (funcall heartbeat-interval) internal-time-units-per-second)))
@@ -1272,6 +1703,8 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
       (uiop:string-prefix-p "127." host)))
 
 (defun node-channel-underlay-address (channel)
+  "CHANNEL's local IPv4 address in canonical underlay form, or \"\" when it is a
+   loopback or non-IPv4 socket (so the server does not learn a useless address)."
   (let* ((connection (ag-grpc::channel-connection channel))
          (socket (ag-http2::connection-socket connection))
          (address (usocket:get-local-address socket)))
@@ -1284,6 +1717,13 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
      one-shot-p control stop-predicate underlay-address status-provider
      ca-certificate-path certificate-path private-key-path &optional snapshot-observer (kubelet-port 0)
                                                                      runtime-health)
+  "Run one agent session to the control plane at HOST:PORT from connect to close:
+   dial (TLS when a CA path is given), send the hello and first heartbeat, perform
+   the ServerHello handshake, then apply the initial and subsequent snapshots in
+   revision order (inline in ONE-SHOT-P mode, else on a snapshot worker) and dispatch
+   operations until the stream ends or CONTROL/STOP-PREDICATE fire. Spawns and tears
+   down the heartbeat, status, watchdog and outbox threads. Returns :INTERRUPTED when
+   unwound by cancellation, otherwise NIL."
   (let* ((identity (load-agent-identity identity-path node-name))
          (session-thread (bt:current-thread))
          (session-timeout (and one-shot-p 5))

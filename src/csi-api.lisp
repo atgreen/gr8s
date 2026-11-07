@@ -24,6 +24,8 @@
   (and (stringp name) (<= 1 (length name) 63) (dns-subdomain-p name)))
 
 (defun require-csi-driver-name (name context)
+  "Signal a 422 Invalid error naming CONTEXT unless NAME is a valid CSI driver
+   name (a DNS subdomain of at most 63 characters). Returns NIL when it accepts."
   (unless (csi-driver-name-valid-p name)
     (core-resource-error 422 "Invalid" "~A must be a CSI driver name" context)))
 

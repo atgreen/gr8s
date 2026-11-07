@@ -2,6 +2,19 @@
 
 (in-suite gr8s)
 
+(test cached-network-reconciliation-does-not-reprogram-firewalld
+  (let ((runtime (gr8s::%make-node-runtime :manager t))
+        (network (gr8s::node-network-object (node-network-for-test)))
+        (calls 0))
+    (setf (gethash "underlayAddress" network) "192.0.2.1")
+    (flet ((ensure (cidr)
+             (declare (ignore cidr))
+             (incf calls)
+             t))
+      (gr8s::ensure-node-runtime-overlay-firewall runtime network :ensure #'ensure)
+      (gr8s::ensure-node-runtime-overlay-firewall runtime network :ensure #'ensure))
+    (is (= 1 calls))))
+
 (defun pod-assignment-for-test (pod)
   (make-instance
    'gr8s.node.v1::pod-assignment

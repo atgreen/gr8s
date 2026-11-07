@@ -23,6 +23,54 @@
   (let ((object (ignore-errors (gr8s::get-core-resource store "configmaps" "default" name))))
     (and object (gethash key (gethash "data" object)))))
 
+(defun apply-ha-core-command (store command)
+  "Apply one captured HA core command to STORE, as the Raft state machine does."
+  (case (first command)
+    (:core-state (gr8s::install-core-state-blob store (second command)))
+    (:core-delta (gr8s::install-core-state-delta store (second command)))
+    (t (error "Unsupported HA core command ~S" (first command)))))
+
+(test stale-member-core-commands-preserve-unrelated-commits
+  ;; Two members can prepare writes from the same committed base before either
+  ;; sees the other's log entry. Applying those entries in Raft order must merge
+  ;; their key-level effects; a later stale whole-index snapshot must not erase
+  ;; the earlier acknowledged key (podster-7bw).
+  (with-temporary-store (left left-path)
+    (with-temporary-store (right right-path)
+      (with-temporary-store (replica replica-path)
+        (declare (ignore left-path right-path replica-path))
+        (let ((left-command nil) (right-command nil))
+          (setf (gr8s::pod-store-consensus-commit-fn left)
+                (lambda (tag payload) (setf left-command (list tag payload)))
+                (gr8s::pod-store-consensus-commit-fn right)
+                (lambda (tag payload) (setf right-command (list tag payload))))
+          (gr8s::create-core-resource left "configmaps"
+                                      (configmap-input "from-left" "k" "left") "default")
+          (gr8s::create-core-resource right "configmaps"
+                                      (configmap-input "from-right" "k" "right") "default")
+          (apply-ha-core-command replica left-command)
+          (apply-ha-core-command replica right-command)
+          (is (equal "left" (configmap-value replica "from-left" "k"))
+              "the later stale member command preserves the earlier committed key")
+          (is (equal "right" (configmap-value replica "from-right" "k"))
+              "the later member's own key is committed too"))))))
+
+(test leader-installs-its-own-synchronously-committed-delta
+  ;; The real Raft proposer may synchronously invoke this member's apply callback
+  ;; before WITH-STORE-LOCK has unwound its dynamic *CORE-WRITE-ACTIVE* binding.
+  ;; Applying a committed delta must publish it locally, not mistake it for a new
+  ;; author-side transaction and stash it for a second proposal (podster-7bw).
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (setf (gr8s::pod-store-consensus-commit-fn store)
+          (lambda (tag payload)
+            (apply-ha-core-command store (list tag payload))))
+    (gr8s::create-core-resource store "configmaps"
+                                (configmap-input "leader-local" "k" "committed")
+                                "default")
+    (is (equal "committed" (configmap-value store "leader-local" "k"))
+        "the proposing leader publishes its own committed delta")))
+
 (defun ha-member-for-store (id store)
   "A member whose state machine installs replicated core-state blobs on STORE."
   (gr8s::start-raft-member
@@ -30,8 +78,10 @@
                   (when (consp command)
                     (case (car command)
                       (:core-state (gr8s::install-core-state-blob store (second command)))
+                      (:core-delta (gr8s::install-core-state-delta store (second command)))
                       (:pod-state (gr8s::install-pod-state-blob store (second command)))
-                      (:node-state (gr8s::install-node-state-blob store (second command))))))))
+                      (:node-state (gr8s::install-node-state-blob store (second command)))
+                      (:node-delta (gr8s::install-node-state-delta store (second command))))))))
 
 (defun wire-ha-store (store member)
   "Make STORE's durable writes replicate through MEMBER's Raft log."

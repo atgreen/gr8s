@@ -14,9 +14,11 @@
 (in-package #:gr8s)
 
 (defun gw-u16 (bytes offset)
+  "Return the big-endian unsigned 16-bit integer at OFFSET in BYTES."
   (logior (ash (aref bytes offset) 8) (aref bytes (1+ offset))))
 
 (defun gw-u24 (bytes offset)
+  "Return the big-endian unsigned 24-bit integer at OFFSET in BYTES."
   (logior (ash (aref bytes offset) 16)
           (ash (aref bytes (+ offset 1)) 8)
           (aref bytes (+ offset 2))))

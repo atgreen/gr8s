@@ -67,7 +67,7 @@ client can see, so they cost neither a revision nor an event."
     (when (probe-file path) (delete-file path))
     (remhash (node-record-name node) (pod-store-nodes store))
     (record-node-watch-event-unlocked store (next-node-revision-unlocked store node) old nil)
-    (note-node-desired-change store)))
+    (note-node-desired-change store (node-record-name node))))
 
 (defun check-node-watch-revision-unlocked (store revision)
   "Reject REVISION when its later events are gone or have not yet been issued."

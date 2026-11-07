@@ -12,6 +12,9 @@
 
 (defvar *apply-update-manager* nil)
 
+(defparameter *pod-revision-reservation* 1024
+  "Durably reserve this many revisions at once, so restarts never reuse a number.")
+
 (defstruct (pod-store (:constructor make-pod-store (path)))
   "Hold durable paths, in-memory indexes, observed status, and the store lock."
   path
@@ -105,16 +108,17 @@
                  ;; Replicate whatever the body committed, once the store lock is
                  ;; released: core API resources, Pod desired state, node desired state.
                  (when *pending-consensus-commit*
-                   (funcall (pod-store-consensus-commit-fn ,s) :core-state *pending-consensus-commit*))
+                   (funcall (pod-store-consensus-commit-fn ,s) :core-delta *pending-consensus-commit*))
                  (when *pending-pod-commit*
                    (funcall (pod-store-consensus-commit-fn ,s) :pod-state *pending-pod-commit*))
                  (when *pending-node-commit*
-                   (funcall (pod-store-consensus-commit-fn ,s) :node-state *pending-node-commit*)))))
+                   (funcall (pod-store-consensus-commit-fn ,s) :node-delta
+                            (node-state-delta-json *pending-node-commit*))))))
            (bt:with-lock-held ((pod-store-lock ,s)) ,@body)))))
 
 (defvar *pending-consensus-commit* nil
-  "Bound by WITH-CORE-WRITE; COMMIT-CORE-RESOURCES stashes the committed state
-   blob here (instead of publishing) when STORE is in HA consensus mode, so the
+  "Bound by WITH-CORE-WRITE; COMMIT-CORE-RESOURCES stashes the key-level state
+   delta here (instead of publishing) when STORE is in HA consensus mode, so the
    write can be replicated after the store lock is released.")
 
 (defvar *core-write-active* nil
@@ -135,10 +139,8 @@
    the other members after the store lock is released (podster-8ia.2).")
 
 (defvar *pending-node-commit* nil
-  "Bound by WITH-STORE-LOCK; set to the serialized node index when a node
-   DESIRED-state write (CIDR assignment, taints, labels) happens on an HA store.
-   Node heartbeat/lease writes deliberately do NOT set this -- they are observed
-   state, re-reported by agents after they reconnect (podster-8ia.4).")
+  "Bound by WITH-STORE-LOCK; node changes collect their names here so the
+   committed command carries only those keys after the store lock is released.")
 
 (defmacro with-core-write ((store) &body body)
   "Historical alias: WITH-STORE-LOCK is now itself HA-aware, so a durable write
@@ -300,61 +302,197 @@
   pod)
 
 ;;; ---------------------------------------------------------------------------
-;;; HA Pod desired-state replication (podster-8ia.2).
+;;; HA Pod state replication (podster-8ia.2).
 ;;;
 ;;; Pods live outside the core-resource index: each is persisted in its own file,
-;;; and the persisted object is the DESIRED state (its observed status is kept
-;;; separately and merged on read). To replicate, the leader applies a Pod write
-;;; locally as always and then ships the whole Pod desired-state index; followers
-;;; reconcile their Pod files and index to match. Observed status is never
-;;; replicated -- agents re-report it after they reconnect to the new leader.
+;;; and the persisted object is desired state while agent observations are kept
+;;; separately and merged on read. The replicated blob carries both: followers
+;;; reconcile Pod files/indexes and install changed observations, so any member's
+;;; local API serves the same phase and container status. Only changed observations
+;;; propose a blob; unchanged periodic reports do not churn the Raft log.
 
-(defun pod-desired-state-json (store)
-  "Serialize every Pod's authoritative (desired-state) object."
+(defun pod-state-json (store)
+  "Serialize every Pod's authoritative desired state and current observation."
   (com.inuoe.jzon:stringify
    (let ((table (make-hash-table :test #'equal)))
      (setf (gethash "pods" table)
            (coerce (loop for pod being the hash-values of (pod-store-pods store)
                          collect (pod-to-object pod))
-                   'vector))
+                   'vector)
+           (gethash "resourceVersion" table)
+           (write-to-string (pod-store-pod-revision store))
+           (gethash "observations" table)
+           (coerce
+            (loop for pod being the hash-values of (pod-store-pods store)
+                  for uid = (pod-uid pod)
+                  for status = (gethash uid (pod-store-pod-observed-statuses store))
+                  when status
+                    collect (core-object
+                             "uid" uid
+                             "resourceVersion"
+                             (or (gethash uid (pod-store-pod-observed-resource-versions store))
+                                 (pod-resource-version pod))
+                             "status" status))
+            'vector)
+           ;; API watches consume the derived status, not the raw agent report.
+           ;; Carry both it and the revision assigned when it was published so
+           ;; every HA member can expose the same resumable transition.
+           (gethash "published" table)
+           (coerce
+            (loop for pod being the hash-values of (pod-store-pods store)
+                  for uid = (pod-uid pod)
+                  collect (core-object
+                           "uid" uid
+                           "resourceVersion"
+                           (write-to-string (or (pod-status-revision pod)
+                                               (parse-integer (pod-resource-version pod))))
+                           "status"
+                           (or (gethash uid (pod-store-pod-published-statuses store))
+                               (pod-status "Pending"))))
+            'vector))
      table)))
 
-(defun note-pod-desired-change (store)
-  "On an HA store, stash the Pod desired-state index so WITH-STORE-LOCK replicates
-   it after the lock is released. A no-op off the consensus path (e.g. the node
-   agent's own store, or a write outside WITH-STORE-LOCK)."
+(defun pod-desired-state-json (store)
+  "Compatibility name for the complete replicated Pod state blob."
+  (pod-state-json store))
+
+(defun note-pod-state-change (store)
+  "On an HA store, stash current Pod state for replication after the lock release."
   (when (and *core-write-active* (pod-store-consensus-commit-fn store))
-    (setf *pending-pod-commit* (pod-desired-state-json store))))
+    (setf *pending-pod-commit* (pod-state-json store))))
+
+(defun note-pod-desired-change (store)
+  "Replicate a Pod desired-state write after STORE's lock is released."
+  (note-pod-state-change store))
+
+(defun replicated-pod-entry-table (entries)
+  "Index replicated ENTRIES by their Pod UID."
+  (let ((table (make-hash-table :test #'equal)))
+    (loop for entry across entries
+          for uid = (and (hash-table-p entry) (gethash "uid" entry))
+          when (stringp uid) do (setf (gethash uid table) entry))
+    table))
+
+(defun replicated-pod-revision (text &optional (default 0))
+  "Parse a replicated Pod revision TEXT, returning DEFAULT when absent or invalid."
+  (if (and (stringp text) (plusp (length text)) (every #'digit-char-p text))
+      (parse-integer text)
+      default))
+
+(defun advance-replicated-pod-revision-unlocked (store revision)
+  "Advance STORE to replicated REVISION and durably prevent its reuse after failover."
+  (when (> revision (pod-store-pod-revision store))
+    (setf (pod-store-pod-revision store) revision))
+  (when (> revision (pod-store-pod-revision-ceiling store))
+    (let ((ceiling (+ revision *pod-revision-reservation*)))
+      (write-private-text-atomically (pod-revision-ceiling-path store) (write-to-string ceiling))
+      (setf (pod-store-pod-revision-ceiling store) ceiling))))
+
+(defun local-replicated-pod-event-revision-unlocked (store incoming-revision)
+  "Return a local watch revision for an incoming replicated transition.
+Members allocate revisions concurrently for the agent sessions they own.  Reuse
+the incoming number only when it is newer than every revision this member has
+served; otherwise allocate a fresh local number so an existing ListWatch
+checkpoint cannot hide the transition."
+  (if (> incoming-revision (pod-store-pod-revision store))
+      (progn
+        (advance-replicated-pod-revision-unlocked store incoming-revision)
+        incoming-revision)
+      (next-pod-revision-unlocked store)))
+
+(defun clear-replicated-pod-state-unlocked (store pod)
+  "Forget every replicated observation belonging to POD's UID."
+  (let ((uid (pod-uid pod)))
+    (remhash uid (pod-store-pod-observed-statuses store))
+    (remhash uid (pod-store-pod-observed-resource-versions store))
+    (remhash uid (pod-store-pod-observed-phases store))
+    (remhash uid (pod-store-pod-published-statuses store))))
 
 (defun install-pod-state-blob (store json)
-  "Install a replicated Pod desired-state blob on this replica: make the Pod files
-   and index match it exactly. Uses the RAW store lock (see INSTALL-CORE-STATE-BLOB)."
+  "Install a replicated Pod state snapshot and publish its exact watch transitions.
+The snapshot watermark and published statuses make ListWatch behavior identical on
+every HA member, including a member that did not own the reporting agent session."
   (bt:with-lock-held ((pod-store-lock store))
-    (let ((state (com.inuoe.jzon:parse json))
-          (seen (make-hash-table :test #'equal)))
-      (loop for object across (gethash "pods" state)
-            for pod = (parse-pod object)
-            for key = (pod-key (pod-namespace pod) (pod-name pod))
-            do (setf (gethash key seen) t)
-               (persist-pod store pod)
-               (index-pod store pod))
-      ;; Drop Pods the leader no longer has.
-      (loop for key being the hash-keys of (pod-store-pods store)
-            for pod = (gethash key (pod-store-pods store))
-            unless (gethash key seen)
-              do (ignore-errors (delete-file (pod-path store pod)))
-                 (remhash key (pod-store-pods store))))))
+    (let* ((state (com.inuoe.jzon:parse json))
+           (observations (replicated-pod-entry-table (gethash "observations" state #())))
+           (published (replicated-pod-entry-table (gethash "published" state #())))
+           (watermark (replicated-pod-revision (gethash "resourceVersion" state)))
+           (seen (make-hash-table :test #'equal)))
+      (let ((*core-write-active* nil))
+        (loop for object across (gethash "pods" state)
+              for pod = (parse-pod object)
+              for key = (pod-key (pod-namespace pod) (pod-name pod))
+              for old = (gethash key (pod-store-pods store))
+              for old-view = (and old (pod-published-view store old))
+              for uid = (pod-uid pod)
+              for observation = (gethash uid observations)
+              for publication = (gethash uid published)
+              for desired-revision = (replicated-pod-revision (pod-resource-version pod))
+              for published-revision = (replicated-pod-revision
+                                         (and publication (gethash "resourceVersion" publication))
+                                         desired-revision)
+              for incoming-revision = (max desired-revision published-revision)
+              for previous-local-revision = (and old-view
+                                                 (replicated-pod-revision
+                                                  (gethash "resourceVersion"
+                                                           (gethash "metadata" old-view))))
+              do (setf (gethash key seen) t)
+                 (when publication
+                   ;; Compare API contents while retaining the follower's local
+                   ;; revision.  Incoming revisions are member-local and may be
+                   ;; lower without representing an older object here.
+                   (setf (pod-status-revision pod)
+                         (or previous-local-revision published-revision)))
+                 (persist-pod store pod)
+                 (index-pod store pod)
+                 (clear-replicated-pod-state-unlocked store pod)
+                 (when observation
+                   (let ((status (gethash "status" observation))
+                         (revision (gethash "resourceVersion" observation)))
+                     (when (and (hash-table-p status) (stringp revision))
+                       (let ((copy (copy-pod-status-value status)))
+                         (persist-pod-status-state store pod :status copy :resource-version revision)
+                         (setf (gethash uid (pod-store-pod-observed-statuses store)) copy
+                               (gethash uid (pod-store-pod-observed-resource-versions store)) revision
+                               (gethash uid (pod-store-pod-observed-phases store))
+                               (gethash "phase" copy "Unknown"))))))
+                 (when publication
+                   (setf (gethash uid (pod-store-pod-published-statuses store))
+                         (copy-pod-status-value (gethash "status" publication))))
+                 (let ((new-view (pod-published-view store pod)))
+                   (unless (and old-view (core-json-equal-p old-view new-view))
+                     (let ((event-revision
+                             (local-replicated-pod-event-revision-unlocked
+                              store incoming-revision)))
+                       (setf (pod-status-revision pod) event-revision
+                             new-view (pod-published-view store pod))
+                       (record-pod-watch-event-unlocked
+                        store event-revision old-view new-view)))))
+        ;; Drop Pods the committed snapshot no longer has, journalling deletion
+        ;; at the snapshot watermark so a resumed watch cannot silently miss it.
+        (loop for key being the hash-keys of (pod-store-pods store)
+              for pod = (gethash key (pod-store-pods store))
+              unless (gethash key seen)
+                do (let ((old-view (pod-published-view store pod)))
+                     (ignore-errors (delete-file (pod-path store pod)))
+                     (remhash key (pod-store-pods store))
+                     (clear-replicated-pod-state-unlocked store pod)
+                     (record-pod-watch-event-unlocked
+                      store
+                      (local-replicated-pod-event-revision-unlocked store watermark)
+                      old-view nil)))
+      (advance-replicated-pod-revision-unlocked store watermark)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; HA node desired-state replication (podster-8ia.4).
 ;;;
 ;;; Node records mix desired state (the control-plane-assigned podCIDR, taints,
 ;;; labels) with observed state (ready/lastHeartbeat/leaseDeadline, re-reported by
-;;; the agent). Only DESIRED writes call NOTE-NODE-DESIRED-CHANGE; heartbeat
-;;; writes do not, so a node's lease churn never hits the Raft log. The critical
-;;; field is podCIDR: a control-plane allocation that is not re-derivable, so a
-;;; new leader must keep it or it could hand the node a different CIDR than the
-;;; one its agent is already running.
+;;; the agent). Desired writes, readiness transitions, and deadline renewals
+;;; replicate. Every member runs the expiry monitor, so all must see the deadline
+;;; even though only one member owns a particular agent stream.
+;;; The critical durable field is podCIDR: a new leader must keep it or it could
+;;; hand the node a different CIDR than the one its agent is already running.
 
 (defun node-desired-state-json (store)
   "Serialize every node record for replication."
@@ -366,11 +504,42 @@
                    'vector))
      table)))
 
-(defun note-node-desired-change (store)
-  "Stash the node index so WITH-STORE-LOCK replicates it after the lock is
-   released. Call only from node DESIRED-state writes, never heartbeat writes."
+(defun node-state-delta-json (changes)
+  "Serialize the Nodes actually changed by one transaction. A missing named
+Node is a tombstone. Unrelated stale member state never enters the command."
+  (com.inuoe.jzon:stringify
+   (core-object
+    "version" 1
+    "changes"
+    (coerce
+     (loop for (name . object-json) in (reverse changes)
+           collect (core-object "name" name
+                                "object" (if object-json
+                                             (com.inuoe.jzon:parse object-json)
+                                             'null)))
+     'vector))))
+
+(defun note-node-state-change (store node-or-name)
+  "Record the one Node changed by this transaction for replication after the
+store lock is released. NODE-OR-NAME may name a just-deleted Node. Heartbeat
+renewals use the same compact one-key delta without changing resourceVersion."
   (when (and *core-write-active* (pod-store-consensus-commit-fn store))
-    (setf *pending-node-commit* (node-desired-state-json store))))
+    (let* ((name (etypecase node-or-name
+                   (node-record (node-record-name node-or-name))
+                   (string node-or-name)))
+           (node (gethash name (pod-store-nodes store)))
+           ;; Freeze the changed value while the store lock is held. Raft apply
+           ;; threads do not take the author-side consensus lock, so serializing
+           ;; the live hash table after releasing this lock would race them.
+           (object-json (and node
+                             (com.inuoe.jzon:stringify (node-record-to-object node)))))
+      (setf *pending-node-commit*
+            (acons name object-json
+                   (remove name *pending-node-commit* :key #'car :test #'equal))))))
+
+(defun note-node-desired-change (store node-or-name)
+  "Replicate a node desired-state write after STORE's lock is released."
+  (note-node-state-change store node-or-name))
 
 (defun install-node-state-blob (store json)
   "Install a replicated node desired-state blob on this replica: make the node
@@ -388,6 +557,23 @@
             unless (gethash name seen)
               do (ignore-errors (delete-file (node-path store node)))
                  (remhash name (pod-store-nodes store))))))
+
+(defun install-node-state-delta (store json)
+  "Apply one committed key-level Node transaction in Raft log order. Only the
+named Nodes are replaced or deleted; unrelated records remain untouched."
+  (bt:with-lock-held ((pod-store-lock store))
+    (let ((delta (com.inuoe.jzon:parse json)))
+      (loop for change across (gethash "changes" delta #())
+            for name = (gethash "name" change)
+            for object = (gethash "object" change)
+            do (if (eq object 'null)
+                   (let ((existing (gethash name (pod-store-nodes store))))
+                     (when existing
+                       (ignore-errors (delete-file (node-path store existing)))
+                       (remhash name (pod-store-nodes store))))
+                   (let ((node (parse-node-record object)))
+                     (persist-node store node)
+                     (setf (gethash name (pod-store-nodes store)) node)))))))
 
 (defun open-store (path)
   "Open or create a durable store at PATH and rebuild its in-memory indexes."
@@ -568,8 +754,10 @@
         (when (probe-file status-path) (delete-file status-path)))
       (delete-file (pod-path store pod))
       (remhash (pod-key namespace name) (pod-store-pods store))
-      (note-pod-desired-change store)
       (publish-pod-removal-unlocked store pod)
+      ;; Serialize only after allocating the deletion's watch revision; followers
+      ;; need that watermark to replay the tombstone to a resumed ListWatch.
+      (note-pod-desired-change store)
       (remhash (pod-uid pod) (pod-store-pod-finalization-states store))
       (remhash (pod-uid pod) (pod-store-pod-observed-phases store))
       (remhash (pod-uid pod) (pod-store-pod-observed-statuses store))

@@ -20,9 +20,13 @@
 ;; program form is compiled (compile-bpf-forms macroexpands the body), so they
 ;; live here alongside the forms rather than inside the quoted data.
 (defmacro add-pod-counter (pointer delta)
+  "Atomically add DELTA to the counter at POINTER, skipping the update when POINTER
+   is null (a map lookup that missed)."
   `(when (/= ,pointer 0) (atomic-add ,pointer 0 ,delta)))
 
 (defmacro drop-pod-packet (reason)
+  "Count a dropped packet and its bytes, bump the per-REASON counter (:spoof,
+   :malformed, :unsupported or :policy), and return TC_ACT_SHOT from the program."
   `(progn
      (add-pod-counter dropped-packets 1)
      (add-pod-counter dropped-bytes (ctx u32 0))
@@ -54,6 +58,10 @@
 ;; the packet carries no readable L4 ports, which then matches only rules that
 ;; allow every port of the protocol (or every protocol).
 (defmacro netpol-allowed (cidr-map port-map addr proto port has-port)
+  "Expand to an expression that is 1 when (ADDR, PROTO, PORT) is admitted by the CIDR
+   trie CIDR-MAP and the port trie PORT-MAP, else 0. When HAS-PORT is 0 the packet has
+   no readable L4 port, so only rules allowing every port of the protocol (or every
+   protocol) match."
   `(let ((verdict u32 0)
          (lkey (make-netpol-lpm-key)))
      (setf (netpol-lpm-key-prefixlen lkey) 32
@@ -72,6 +80,8 @@
 
 ;; How long a connection's replies stay allowed after its last packet.
 (defmacro netpol-flow-lifetime (proto)
+  "Nanoseconds a connection's replies stay admitted after its last packet: 2h for TCP
+   (PROTO 6), 3min otherwise."
   `(if (= ,proto 6) 7200000000000 180000000000))
 
 (defparameter gr8s::*egress-guard-map-forms*

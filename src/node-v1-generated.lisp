@@ -2993,6 +2993,273 @@
     AG-PROTO::OBJ))
 
 
+(DEFCLASS GR8S.NODE.V1::ROUTED-OPERATION (AG-PROTO:PROTO-MESSAGE)
+          ((SOURCE-MEMBER :INITARG :SOURCE-MEMBER :ACCESSOR
+            GR8S.NODE.V1::SOURCE-MEMBER :INITFORM "" :TYPE STRING)
+           (NODE-NAME :INITARG :NODE-NAME :ACCESSOR GR8S.NODE.V1::NODE-NAME
+            :INITFORM "" :TYPE STRING)
+           (OPERATION-REQUEST :INITARG :OPERATION-REQUEST :ACCESSOR
+            GR8S.NODE.V1::OPERATION-REQUEST :INITFORM NIL :TYPE T)
+           (OPERATION-INPUT :INITARG :OPERATION-INPUT :ACCESSOR
+            GR8S.NODE.V1::OPERATION-INPUT :INITFORM NIL :TYPE T)
+           (OPERATION-CANCEL :INITARG :OPERATION-CANCEL :ACCESSOR
+            GR8S.NODE.V1::OPERATION-CANCEL :INITFORM NIL :TYPE T)
+           (OPERATION-STREAM :INITARG :OPERATION-STREAM :ACCESSOR
+            GR8S.NODE.V1::OPERATION-STREAM :INITFORM NIL :TYPE T)
+           (OPERATION-RESPONSE :INITARG :OPERATION-RESPONSE :ACCESSOR
+            GR8S.NODE.V1::OPERATION-RESPONSE :INITFORM NIL :TYPE T)
+           (GR8S.NODE.V1::PAYLOAD-CASE :INITFORM NIL :ACCESSOR
+            GR8S.NODE.V1::PAYLOAD-CASE :DOCUMENTATION
+            "Which payload variant is set (field name keyword or nil)"))
+          (:DOCUMENTATION "Proto message: RoutedOperation"))
+
+
+(DEFMETHOD AG-PROTO:SERIALIZE-TO-BYTES
+           ((AG-PROTO::OBJ GR8S.NODE.V1::ROUTED-OPERATION))
+  (LET ((AG-PROTO::BUFFER
+         (MAKE-ARRAY 64 :ELEMENT-TYPE '(UNSIGNED-BYTE 8) :FILL-POINTER 0
+                     :ADJUSTABLE T)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'SOURCE-MEMBER)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 1 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'NODE-NAME)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 2 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    (WHEN (EQ (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE) :OPERATION-REQUEST)
+      (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-REQUEST)))
+        (WHEN AG-PROTO::VALUE
+          (AG-PROTO::WRITE-FIELD-TAG 10 2 AG-PROTO::BUFFER)
+          (AG-PROTO::WRITE-LENGTH-DELIMITED
+           (AG-PROTO:SERIALIZE-TO-BYTES AG-PROTO::VALUE) AG-PROTO::BUFFER))))
+    (WHEN (EQ (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE) :OPERATION-INPUT)
+      (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-INPUT)))
+        (WHEN AG-PROTO::VALUE
+          (AG-PROTO::WRITE-FIELD-TAG 11 2 AG-PROTO::BUFFER)
+          (AG-PROTO::WRITE-LENGTH-DELIMITED
+           (AG-PROTO:SERIALIZE-TO-BYTES AG-PROTO::VALUE) AG-PROTO::BUFFER))))
+    (WHEN (EQ (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE) :OPERATION-CANCEL)
+      (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-CANCEL)))
+        (WHEN AG-PROTO::VALUE
+          (AG-PROTO::WRITE-FIELD-TAG 12 2 AG-PROTO::BUFFER)
+          (AG-PROTO::WRITE-LENGTH-DELIMITED
+           (AG-PROTO:SERIALIZE-TO-BYTES AG-PROTO::VALUE) AG-PROTO::BUFFER))))
+    (WHEN (EQ (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE) :OPERATION-STREAM)
+      (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-STREAM)))
+        (WHEN AG-PROTO::VALUE
+          (AG-PROTO::WRITE-FIELD-TAG 13 2 AG-PROTO::BUFFER)
+          (AG-PROTO::WRITE-LENGTH-DELIMITED
+           (AG-PROTO:SERIALIZE-TO-BYTES AG-PROTO::VALUE) AG-PROTO::BUFFER))))
+    (WHEN (EQ (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE) :OPERATION-RESPONSE)
+      (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-RESPONSE)))
+        (WHEN AG-PROTO::VALUE
+          (AG-PROTO::WRITE-FIELD-TAG 14 2 AG-PROTO::BUFFER)
+          (AG-PROTO::WRITE-LENGTH-DELIMITED
+           (AG-PROTO:SERIALIZE-TO-BYTES AG-PROTO::VALUE) AG-PROTO::BUFFER))))
+    AG-PROTO::BUFFER))
+
+
+(DEFMETHOD AG-PROTO:DESERIALIZE-FROM-BYTES
+           ((TYPE (EQL 'GR8S.NODE.V1::ROUTED-OPERATION)) AG-PROTO::DATA)
+  (LET ((AG-PROTO::OBJ (MAKE-INSTANCE 'GR8S.NODE.V1::ROUTED-OPERATION))
+        (AG-PROTO::BUFFER (CONS AG-PROTO::DATA 0)))
+    (LOOP AG-PROTO::WHILE (< (REST AG-PROTO::BUFFER) (LENGTH AG-PROTO::DATA))
+          DO (LET* ((AG-PROTO::TAG (AG-PROTO::READ-VARINT AG-PROTO::BUFFER))
+                    (AG-PROTO::FIELD-NUMBER (ASH AG-PROTO::TAG -3))
+                    (AG-PROTO::WIRE-TYPE (LOGAND AG-PROTO::TAG 7)))
+               (CASE AG-PROTO::FIELD-NUMBER
+                 (1
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'SOURCE-MEMBER)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (2
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'NODE-NAME)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (10
+                  (PROGN
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-INPUT) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-CANCEL) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-STREAM) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-RESPONSE) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-REQUEST)
+                           (LET ((AG-PROTO::DATA
+                                  (AG-PROTO::READ-LENGTH-DELIMITED
+                                   AG-PROTO::BUFFER)))
+                             (WHEN
+                                 (AND AG-PROTO:*MAX-RECURSION-DEPTH*
+                                      (>= AG-PROTO:*CURRENT-RECURSION-DEPTH*
+                                          AG-PROTO:*MAX-RECURSION-DEPTH*))
+                               (ERROR 'AG-PROTO:WIRE-FORMAT-ERROR :MESSAGE
+                                      (FORMAT NIL
+                                              "Maximum recursion depth ~D exceeded"
+                                              AG-PROTO:*MAX-RECURSION-DEPTH*)))
+                             (LET ((AG-PROTO:*CURRENT-RECURSION-DEPTH*
+                                    (1+ AG-PROTO:*CURRENT-RECURSION-DEPTH*)))
+                               (AG-PROTO:DESERIALIZE-FROM-BYTES
+                                'OPERATION-REQUEST AG-PROTO::DATA))))
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE)
+                           :OPERATION-REQUEST)))
+                 (11
+                  (PROGN
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-REQUEST) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-CANCEL) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-STREAM) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-RESPONSE) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-INPUT)
+                           (LET ((AG-PROTO::DATA
+                                  (AG-PROTO::READ-LENGTH-DELIMITED
+                                   AG-PROTO::BUFFER)))
+                             (WHEN
+                                 (AND AG-PROTO:*MAX-RECURSION-DEPTH*
+                                      (>= AG-PROTO:*CURRENT-RECURSION-DEPTH*
+                                          AG-PROTO:*MAX-RECURSION-DEPTH*))
+                               (ERROR 'AG-PROTO:WIRE-FORMAT-ERROR :MESSAGE
+                                      (FORMAT NIL
+                                              "Maximum recursion depth ~D exceeded"
+                                              AG-PROTO:*MAX-RECURSION-DEPTH*)))
+                             (LET ((AG-PROTO:*CURRENT-RECURSION-DEPTH*
+                                    (1+ AG-PROTO:*CURRENT-RECURSION-DEPTH*)))
+                               (AG-PROTO:DESERIALIZE-FROM-BYTES
+                                'OPERATION-INPUT AG-PROTO::DATA))))
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE)
+                           :OPERATION-INPUT)))
+                 (12
+                  (PROGN
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-REQUEST) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-INPUT) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-STREAM) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-RESPONSE) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-CANCEL)
+                           (LET ((AG-PROTO::DATA
+                                  (AG-PROTO::READ-LENGTH-DELIMITED
+                                   AG-PROTO::BUFFER)))
+                             (WHEN
+                                 (AND AG-PROTO:*MAX-RECURSION-DEPTH*
+                                      (>= AG-PROTO:*CURRENT-RECURSION-DEPTH*
+                                          AG-PROTO:*MAX-RECURSION-DEPTH*))
+                               (ERROR 'AG-PROTO:WIRE-FORMAT-ERROR :MESSAGE
+                                      (FORMAT NIL
+                                              "Maximum recursion depth ~D exceeded"
+                                              AG-PROTO:*MAX-RECURSION-DEPTH*)))
+                             (LET ((AG-PROTO:*CURRENT-RECURSION-DEPTH*
+                                    (1+ AG-PROTO:*CURRENT-RECURSION-DEPTH*)))
+                               (AG-PROTO:DESERIALIZE-FROM-BYTES
+                                'OPERATION-CANCEL AG-PROTO::DATA))))
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE)
+                           :OPERATION-CANCEL)))
+                 (13
+                  (PROGN
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-REQUEST) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-INPUT) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-CANCEL) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-RESPONSE) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-STREAM)
+                           (LET ((AG-PROTO::DATA
+                                  (AG-PROTO::READ-LENGTH-DELIMITED
+                                   AG-PROTO::BUFFER)))
+                             (WHEN
+                                 (AND AG-PROTO:*MAX-RECURSION-DEPTH*
+                                      (>= AG-PROTO:*CURRENT-RECURSION-DEPTH*
+                                          AG-PROTO:*MAX-RECURSION-DEPTH*))
+                               (ERROR 'AG-PROTO:WIRE-FORMAT-ERROR :MESSAGE
+                                      (FORMAT NIL
+                                              "Maximum recursion depth ~D exceeded"
+                                              AG-PROTO:*MAX-RECURSION-DEPTH*)))
+                             (LET ((AG-PROTO:*CURRENT-RECURSION-DEPTH*
+                                    (1+ AG-PROTO:*CURRENT-RECURSION-DEPTH*)))
+                               (AG-PROTO:DESERIALIZE-FROM-BYTES
+                                'OPERATION-STREAM AG-PROTO::DATA))))
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE)
+                           :OPERATION-STREAM)))
+                 (14
+                  (PROGN
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-REQUEST) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-INPUT) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-CANCEL) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-STREAM) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-RESPONSE)
+                           (LET ((AG-PROTO::DATA
+                                  (AG-PROTO::READ-LENGTH-DELIMITED
+                                   AG-PROTO::BUFFER)))
+                             (WHEN
+                                 (AND AG-PROTO:*MAX-RECURSION-DEPTH*
+                                      (>= AG-PROTO:*CURRENT-RECURSION-DEPTH*
+                                          AG-PROTO:*MAX-RECURSION-DEPTH*))
+                               (ERROR 'AG-PROTO:WIRE-FORMAT-ERROR :MESSAGE
+                                      (FORMAT NIL
+                                              "Maximum recursion depth ~D exceeded"
+                                              AG-PROTO:*MAX-RECURSION-DEPTH*)))
+                             (LET ((AG-PROTO:*CURRENT-RECURSION-DEPTH*
+                                    (1+ AG-PROTO:*CURRENT-RECURSION-DEPTH*)))
+                               (AG-PROTO:DESERIALIZE-FROM-BYTES
+                                'OPERATION-RESPONSE AG-PROTO::DATA))))
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE)
+                           :OPERATION-RESPONSE)))
+                 (OTHERWISE
+                  (AG-PROTO::SKIP-FIELD AG-PROTO::BUFFER
+                                        AG-PROTO::WIRE-TYPE)))))
+    AG-PROTO::OBJ))
+
+
+(DEFCLASS GR8S.NODE.V1::ROUTED-OPERATION-RESULT (AG-PROTO:PROTO-MESSAGE)
+          ((ACCEPTED :INITARG :ACCEPTED :ACCESSOR GR8S.NODE.V1::ACCEPTED
+            :INITFORM NIL :TYPE BOOLEAN)
+           (ERROR-MESSAGE :INITARG :ERROR-MESSAGE :ACCESSOR
+            GR8S.NODE.V1::ERROR-MESSAGE :INITFORM "" :TYPE STRING))
+          (:DOCUMENTATION "Proto message: RoutedOperationResult"))
+
+
+(DEFMETHOD AG-PROTO:SERIALIZE-TO-BYTES
+           ((AG-PROTO::OBJ GR8S.NODE.V1::ROUTED-OPERATION-RESULT))
+  (LET ((AG-PROTO::BUFFER
+         (MAKE-ARRAY 64 :ELEMENT-TYPE '(UNSIGNED-BYTE 8) :FILL-POINTER 0
+                     :ADJUSTABLE T)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'ACCEPTED)))
+      (WHEN AG-PROTO::VALUE
+        (AG-PROTO::WRITE-FIELD-TAG 1 0 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-VARINT
+         (IF AG-PROTO::VALUE
+             1
+             0)
+         AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'ERROR-MESSAGE)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 2 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    AG-PROTO::BUFFER))
+
+
+(DEFMETHOD AG-PROTO:DESERIALIZE-FROM-BYTES
+           ((TYPE (EQL 'GR8S.NODE.V1::ROUTED-OPERATION-RESULT)) AG-PROTO::DATA)
+  (LET ((AG-PROTO::OBJ (MAKE-INSTANCE 'GR8S.NODE.V1::ROUTED-OPERATION-RESULT))
+        (AG-PROTO::BUFFER (CONS AG-PROTO::DATA 0)))
+    (LOOP AG-PROTO::WHILE (< (REST AG-PROTO::BUFFER) (LENGTH AG-PROTO::DATA))
+          DO (LET* ((AG-PROTO::TAG (AG-PROTO::READ-VARINT AG-PROTO::BUFFER))
+                    (AG-PROTO::FIELD-NUMBER (ASH AG-PROTO::TAG -3))
+                    (AG-PROTO::WIRE-TYPE (LOGAND AG-PROTO::TAG 7)))
+               (CASE AG-PROTO::FIELD-NUMBER
+                 (1
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'ACCEPTED)
+                          (NOT
+                           (ZEROP (AG-PROTO::READ-VARINT AG-PROTO::BUFFER)))))
+                 (2
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'ERROR-MESSAGE)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (OTHERWISE
+                  (AG-PROTO::SKIP-FIELD AG-PROTO::BUFFER
+                                        AG-PROTO::WIRE-TYPE)))))
+    AG-PROTO::OBJ))
+
+
 (DEFCLASS GR8S.NODE.V1::RENEW-MEMBER-REQUEST (AG-PROTO:PROTO-MESSAGE)
           ((CERTIFICATE-REQUEST :INITARG :CERTIFICATE-REQUEST :ACCESSOR
             GR8S.NODE.V1::CERTIFICATE-REQUEST :INITFORM
@@ -3168,7 +3435,10 @@
            (NODE-CA-CERTIFICATE :INITARG :NODE-CA-CERTIFICATE :ACCESSOR
             GR8S.NODE.V1::NODE-CA-CERTIFICATE :INITFORM "" :TYPE STRING)
            (NODE-CA-PRIVATE-KEY :INITARG :NODE-CA-PRIVATE-KEY :ACCESSOR
-            GR8S.NODE.V1::NODE-CA-PRIVATE-KEY :INITFORM "" :TYPE STRING))
+            GR8S.NODE.V1::NODE-CA-PRIVATE-KEY :INITFORM "" :TYPE STRING)
+           (SERVICE-ACCOUNT-SIGNING-KEY :INITARG :SERVICE-ACCOUNT-SIGNING-KEY
+            :ACCESSOR GR8S.NODE.V1::SERVICE-ACCOUNT-SIGNING-KEY :INITFORM ""
+            :TYPE STRING))
           (:DOCUMENTATION "Proto message: EnrollMemberResponse"))
 
 
@@ -3200,6 +3470,12 @@
     (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'NODE-CA-PRIVATE-KEY)))
       (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
         (AG-PROTO::WRITE-FIELD-TAG 5 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE
+           (SLOT-VALUE AG-PROTO::OBJ 'SERVICE-ACCOUNT-SIGNING-KEY)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 6 2 AG-PROTO::BUFFER)
         (AG-PROTO::WRITE-LENGTH-DELIMITED
          (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
     AG-PROTO::BUFFER))
@@ -3236,6 +3512,11 @@
                             AG-PROTO::BUFFER))))
                  (5
                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'NODE-CA-PRIVATE-KEY)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (6
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'SERVICE-ACCOUNT-SIGNING-KEY)
                           (AG-PROTO::UTF8-TO-STRING
                            (AG-PROTO::READ-LENGTH-DELIMITED
                             AG-PROTO::BUFFER))))
@@ -3313,6 +3594,106 @@
                     (AG-PROTO::FIELD-NUMBER (ASH AG-PROTO::TAG -3))
                     (AG-PROTO::WIRE-TYPE (LOGAND AG-PROTO::TAG 7)))
                (CASE AG-PROTO::FIELD-NUMBER
+                 (OTHERWISE
+                  (AG-PROTO::SKIP-FIELD AG-PROTO::BUFFER
+                                        AG-PROTO::WIRE-TYPE)))))
+    AG-PROTO::OBJ))
+
+
+(DEFCLASS GR8S.NODE.V1::RAFT-PROPOSAL (AG-PROTO:PROTO-MESSAGE)
+          ((COMMAND :INITARG :COMMAND :ACCESSOR GR8S.NODE.V1::COMMAND :INITFORM
+            (MAKE-ARRAY 0 :ELEMENT-TYPE '(UNSIGNED-BYTE 8)) :TYPE
+            (VECTOR (UNSIGNED-BYTE 8))))
+          (:DOCUMENTATION "Proto message: RaftProposal"))
+
+
+(DEFMETHOD AG-PROTO:SERIALIZE-TO-BYTES
+           ((AG-PROTO::OBJ GR8S.NODE.V1::RAFT-PROPOSAL))
+  (LET ((AG-PROTO::BUFFER
+         (MAKE-ARRAY 64 :ELEMENT-TYPE '(UNSIGNED-BYTE 8) :FILL-POINTER 0
+                     :ADJUSTABLE T)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'COMMAND)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 1 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED AG-PROTO::VALUE AG-PROTO::BUFFER)))
+    AG-PROTO::BUFFER))
+
+
+(DEFMETHOD AG-PROTO:DESERIALIZE-FROM-BYTES
+           ((TYPE (EQL 'GR8S.NODE.V1::RAFT-PROPOSAL)) AG-PROTO::DATA)
+  (LET ((AG-PROTO::OBJ (MAKE-INSTANCE 'GR8S.NODE.V1::RAFT-PROPOSAL))
+        (AG-PROTO::BUFFER (CONS AG-PROTO::DATA 0)))
+    (LOOP AG-PROTO::WHILE (< (REST AG-PROTO::BUFFER) (LENGTH AG-PROTO::DATA))
+          DO (LET* ((AG-PROTO::TAG (AG-PROTO::READ-VARINT AG-PROTO::BUFFER))
+                    (AG-PROTO::FIELD-NUMBER (ASH AG-PROTO::TAG -3))
+                    (AG-PROTO::WIRE-TYPE (LOGAND AG-PROTO::TAG 7)))
+               (CASE AG-PROTO::FIELD-NUMBER
+                 (1
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'COMMAND)
+                          (AG-PROTO::READ-LENGTH-DELIMITED-VIEW
+                           AG-PROTO::BUFFER)))
+                 (OTHERWISE
+                  (AG-PROTO::SKIP-FIELD AG-PROTO::BUFFER
+                                        AG-PROTO::WIRE-TYPE)))))
+    AG-PROTO::OBJ))
+
+
+(DEFCLASS GR8S.NODE.V1::RAFT-PROPOSAL-RESULT (AG-PROTO:PROTO-MESSAGE)
+          ((COMMITTED :INITARG :COMMITTED :ACCESSOR GR8S.NODE.V1::COMMITTED
+            :INITFORM NIL :TYPE BOOLEAN)
+           (REASON :INITARG :REASON :ACCESSOR GR8S.NODE.V1::REASON :INITFORM ""
+            :TYPE STRING)
+           (INDEX :INITARG :INDEX :ACCESSOR GR8S.NODE.V1::INDEX :INITFORM 0
+            :TYPE (UNSIGNED-BYTE 64)))
+          (:DOCUMENTATION "Proto message: RaftProposalResult"))
+
+
+(DEFMETHOD AG-PROTO:SERIALIZE-TO-BYTES
+           ((AG-PROTO::OBJ GR8S.NODE.V1::RAFT-PROPOSAL-RESULT))
+  (LET ((AG-PROTO::BUFFER
+         (MAKE-ARRAY 64 :ELEMENT-TYPE '(UNSIGNED-BYTE 8) :FILL-POINTER 0
+                     :ADJUSTABLE T)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'COMMITTED)))
+      (WHEN AG-PROTO::VALUE
+        (AG-PROTO::WRITE-FIELD-TAG 1 0 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-VARINT
+         (IF AG-PROTO::VALUE
+             1
+             0)
+         AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'REASON)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 2 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'INDEX)))
+      (WHEN (AND AG-PROTO::VALUE (NOT (EQL AG-PROTO::VALUE 0)))
+        (AG-PROTO::WRITE-FIELD-TAG 3 0 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-VARINT AG-PROTO::VALUE AG-PROTO::BUFFER)))
+    AG-PROTO::BUFFER))
+
+
+(DEFMETHOD AG-PROTO:DESERIALIZE-FROM-BYTES
+           ((TYPE (EQL 'GR8S.NODE.V1::RAFT-PROPOSAL-RESULT)) AG-PROTO::DATA)
+  (LET ((AG-PROTO::OBJ (MAKE-INSTANCE 'GR8S.NODE.V1::RAFT-PROPOSAL-RESULT))
+        (AG-PROTO::BUFFER (CONS AG-PROTO::DATA 0)))
+    (LOOP AG-PROTO::WHILE (< (REST AG-PROTO::BUFFER) (LENGTH AG-PROTO::DATA))
+          DO (LET* ((AG-PROTO::TAG (AG-PROTO::READ-VARINT AG-PROTO::BUFFER))
+                    (AG-PROTO::FIELD-NUMBER (ASH AG-PROTO::TAG -3))
+                    (AG-PROTO::WIRE-TYPE (LOGAND AG-PROTO::TAG 7)))
+               (CASE AG-PROTO::FIELD-NUMBER
+                 (1
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'COMMITTED)
+                          (NOT
+                           (ZEROP (AG-PROTO::READ-VARINT AG-PROTO::BUFFER)))))
+                 (2
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'REASON)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (3
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'INDEX)
+                          (AG-PROTO::READ-VARINT AG-PROTO::BUFFER)))
                  (OTHERWISE
                   (AG-PROTO::SKIP-FIELD AG-PROTO::BUFFER
                                         AG-PROTO::WIRE-TYPE)))))
@@ -3750,6 +4131,34 @@ Each keyword arg is a handler function for the corresponding RPC method."
               (FUNCALL AG-PROTO::STATUS-FN AG-PROTO::CALL) AG-PROTO::CALL))))
 
 
+(DEFMETHOD GR8S.NODE.V1::RAFT-TRANSPORT-PROPOSE
+           ((AG-PROTO::STUB GR8S.NODE.V1::RAFT-TRANSPORT-STUB)
+            AG-PROTO::REQUEST
+            &KEY AG-PROTO::METADATA AG-PROTO::TIMEOUT)
+  "Call RaftTransport.Propose unary RPC"
+  (LET* ((AG-PROTO::GRPC-PKG (FIND-PACKAGE :AG-GRPC))
+         (AG-PROTO::CALL-FN
+          (AND AG-PROTO::GRPC-PKG
+               (SYMBOL-FUNCTION
+                (FIND-SYMBOL "CALL-UNARY" AG-PROTO::GRPC-PKG))))
+         (AG-PROTO::RESPONSE-FN
+          (AND AG-PROTO::GRPC-PKG
+               (FDEFINITION (FIND-SYMBOL "CALL-RESPONSE" AG-PROTO::GRPC-PKG))))
+         (AG-PROTO::STATUS-FN
+          (AND AG-PROTO::GRPC-PKG
+               (FDEFINITION (FIND-SYMBOL "CALL-STATUS" AG-PROTO::GRPC-PKG)))))
+    (UNLESS AG-PROTO::CALL-FN
+      (ERROR
+       "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
+    (LET ((AG-PROTO::CALL
+           (FUNCALL AG-PROTO::CALL-FN (AG-PROTO:STUB-CHANNEL AG-PROTO::STUB)
+                    "/gr8s.node.v1.RaftTransport/Propose" AG-PROTO::REQUEST
+                    :RESPONSE-TYPE 'GR8S.NODE.V1::RAFT-PROPOSAL-RESULT
+                    :METADATA AG-PROTO::METADATA :TIMEOUT AG-PROTO::TIMEOUT)))
+      (VALUES (FUNCALL AG-PROTO::RESPONSE-FN AG-PROTO::CALL)
+              (FUNCALL AG-PROTO::STATUS-FN AG-PROTO::CALL) AG-PROTO::CALL))))
+
+
 (DEFMETHOD GR8S.NODE.V1::RAFT-TRANSPORT-JOIN
            ((AG-PROTO::STUB GR8S.NODE.V1::RAFT-TRANSPORT-STUB)
             AG-PROTO::REQUEST
@@ -3835,10 +4244,41 @@ Each keyword arg is a handler function for the corresponding RPC method."
               (FUNCALL AG-PROTO::STATUS-FN AG-PROTO::CALL) AG-PROTO::CALL))))
 
 
+(DEFMETHOD GR8S.NODE.V1::RAFT-TRANSPORT-RELAY-OPERATION
+           ((AG-PROTO::STUB GR8S.NODE.V1::RAFT-TRANSPORT-STUB)
+            AG-PROTO::REQUEST
+            &KEY AG-PROTO::METADATA AG-PROTO::TIMEOUT)
+  "Call RaftTransport.RelayOperation unary RPC"
+  (LET* ((AG-PROTO::GRPC-PKG (FIND-PACKAGE :AG-GRPC))
+         (AG-PROTO::CALL-FN
+          (AND AG-PROTO::GRPC-PKG
+               (SYMBOL-FUNCTION
+                (FIND-SYMBOL "CALL-UNARY" AG-PROTO::GRPC-PKG))))
+         (AG-PROTO::RESPONSE-FN
+          (AND AG-PROTO::GRPC-PKG
+               (FDEFINITION (FIND-SYMBOL "CALL-RESPONSE" AG-PROTO::GRPC-PKG))))
+         (AG-PROTO::STATUS-FN
+          (AND AG-PROTO::GRPC-PKG
+               (FDEFINITION (FIND-SYMBOL "CALL-STATUS" AG-PROTO::GRPC-PKG)))))
+    (UNLESS AG-PROTO::CALL-FN
+      (ERROR
+       "ag-grpc package not loaded. Load ag-grpc before calling RPC methods."))
+    (LET ((AG-PROTO::CALL
+           (FUNCALL AG-PROTO::CALL-FN (AG-PROTO:STUB-CHANNEL AG-PROTO::STUB)
+                    "/gr8s.node.v1.RaftTransport/RelayOperation"
+                    AG-PROTO::REQUEST :RESPONSE-TYPE
+                    'GR8S.NODE.V1::ROUTED-OPERATION-RESULT :METADATA
+                    AG-PROTO::METADATA :TIMEOUT AG-PROTO::TIMEOUT)))
+      (VALUES (FUNCALL AG-PROTO::RESPONSE-FN AG-PROTO::CALL)
+              (FUNCALL AG-PROTO::STATUS-FN AG-PROTO::CALL) AG-PROTO::CALL))))
+
+
 (DEFUN GR8S.NODE.V1::REGISTER-RAFT-TRANSPORT-SERVICE
        (AG-PROTO::SERVER
-        &KEY GR8S.NODE.V1::DELIVER-HANDLER GR8S.NODE.V1::JOIN-HANDLER
-        GR8S.NODE.V1::ENROLL-MEMBER-HANDLER GR8S.NODE.V1::RENEW-MEMBER-HANDLER)
+        &KEY GR8S.NODE.V1::DELIVER-HANDLER GR8S.NODE.V1::PROPOSE-HANDLER
+        GR8S.NODE.V1::JOIN-HANDLER GR8S.NODE.V1::ENROLL-MEMBER-HANDLER
+        GR8S.NODE.V1::RENEW-MEMBER-HANDLER
+        GR8S.NODE.V1::RELAY-OPERATION-HANDLER)
   "Register all RaftTransport service handlers with SERVER.
 Uses compile-time dispatch on method path (no hash-table lookup per request).
 Each keyword arg is a handler function for the corresponding RPC method."
@@ -3854,6 +4294,19 @@ Each keyword arg is a handler function for the corresponding RPC method."
                  GR8S.NODE.V1::DELIVER-HANDLER :REQUEST-TYPE
                  'GR8S.NODE.V1::RAFT-ENVELOPE :RESPONSE-TYPE
                  'GR8S.NODE.V1::RAFT-ACK :CLIENT-STREAMING NIL
+                 :SERVER-STREAMING NIL))))
+  (WHEN GR8S.NODE.V1::PROPOSE-HANDLER
+    (LET* ((AG-PROTO::GRPC-PKG (FIND-PACKAGE :AG-GRPC))
+           (AG-PROTO::REGISTER-FN
+            (AND AG-PROTO::GRPC-PKG
+                 (FDEFINITION
+                  (FIND-SYMBOL "SERVER-REGISTER-HANDLER" AG-PROTO::GRPC-PKG)))))
+      (WHEN AG-PROTO::REGISTER-FN
+        (FUNCALL AG-PROTO::REGISTER-FN AG-PROTO::SERVER
+                 "/gr8s.node.v1.RaftTransport/Propose"
+                 GR8S.NODE.V1::PROPOSE-HANDLER :REQUEST-TYPE
+                 'GR8S.NODE.V1::RAFT-PROPOSAL :RESPONSE-TYPE
+                 'GR8S.NODE.V1::RAFT-PROPOSAL-RESULT :CLIENT-STREAMING NIL
                  :SERVER-STREAMING NIL))))
   (WHEN GR8S.NODE.V1::JOIN-HANDLER
     (LET* ((AG-PROTO::GRPC-PKG (FIND-PACKAGE :AG-GRPC))
@@ -3892,6 +4345,19 @@ Each keyword arg is a handler function for the corresponding RPC method."
                  GR8S.NODE.V1::RENEW-MEMBER-HANDLER :REQUEST-TYPE
                  'GR8S.NODE.V1::RENEW-MEMBER-REQUEST :RESPONSE-TYPE
                  'GR8S.NODE.V1::RENEW-MEMBER-RESPONSE :CLIENT-STREAMING NIL
+                 :SERVER-STREAMING NIL))))
+  (WHEN GR8S.NODE.V1::RELAY-OPERATION-HANDLER
+    (LET* ((AG-PROTO::GRPC-PKG (FIND-PACKAGE :AG-GRPC))
+           (AG-PROTO::REGISTER-FN
+            (AND AG-PROTO::GRPC-PKG
+                 (FDEFINITION
+                  (FIND-SYMBOL "SERVER-REGISTER-HANDLER" AG-PROTO::GRPC-PKG)))))
+      (WHEN AG-PROTO::REGISTER-FN
+        (FUNCALL AG-PROTO::REGISTER-FN AG-PROTO::SERVER
+                 "/gr8s.node.v1.RaftTransport/RelayOperation"
+                 GR8S.NODE.V1::RELAY-OPERATION-HANDLER :REQUEST-TYPE
+                 'GR8S.NODE.V1::ROUTED-OPERATION :RESPONSE-TYPE
+                 'GR8S.NODE.V1::ROUTED-OPERATION-RESULT :CLIENT-STREAMING NIL
                  :SERVER-STREAMING NIL))))
   AG-PROTO::SERVER)
 

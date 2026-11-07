@@ -29,6 +29,8 @@
 ;;; Time helpers (RFC 3339, UTC, over Common Lisp universal time).
 
 (defun cm-rfc3339 (universal-time)
+  "Format UNIVERSAL-TIME as an RFC 3339 UTC timestamp (\"YYYY-MM-DDThh:mm:ssZ\"),
+   the form cert-manager status fields use."
   (multiple-value-bind (second minute hour day month year)
       (decode-universal-time universal-time 0)
     (format nil "~4,'0D-~2,'0D-~2,'0DT~2,'0D:~2,'0D:~2,'0DZ"
@@ -132,6 +134,8 @@
 ;;; Secret + status writes.
 
 (defun cm-tls-secret-data (cert-pem key-pem)
+  "Build the data map for a kubernetes.io/tls Secret: base64-encoded \"tls.crt\"
+   and \"tls.key\" entries from CERT-PEM and KEY-PEM."
   (core-object "tls.crt" (ag-grpc:base64-encode (trivial-utf-8:string-to-utf-8-bytes cert-pem))
                "tls.key" (ag-grpc:base64-encode (trivial-utf-8:string-to-utf-8-bytes key-pem))))
 
@@ -164,6 +168,9 @@
     (- not-after renew-before)))
 
 (defun cm-set-ready-status (store namespace name not-before not-after renewal-time)
+  "Write the Ready status onto the Certificate NAMESPACE/NAME in STORE: a
+   Ready/True condition and the notBefore, notAfter and renewalTime timestamps.
+   Best-effort -- a failed status write is swallowed."
   (ignore-errors
    (update-core-resource store "certificates" namespace name
      (lambda (certificate)

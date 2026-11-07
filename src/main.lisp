@@ -1,8 +1,26 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; The gr8s command-line entry point: argument parsing and the run loops.
+;;;;
+;;;; Every invocation lands in MAIN, which dispatches on CNI_COMMAND (containerd
+;;;; runs this same binary as its CNI plugin) and otherwise on the subcommand --
+;;;; serve, agent, witness, join-token, kubeconfig, runtime, doctor and the
+;;;; informational ones. Each subcommand parses its own arguments into an options
+;;;; plist; SERVE and AGENT own the long-running processes. SERVE wires the store,
+;;;; PKI, node gRPC server, runtime, reconciliation worker and (unless disabled)
+;;;; an in-process local agent together and tears them down in reverse on
+;;;; shutdown; AGENT enrolls a node and runs its session against a control plane.
+;;;; Shutdown is cooperative: signal handlers set *SHUTDOWN-REQUESTED* and the run
+;;;; loops poll it.
+
 (in-package #:gr8s)
 
 (defvar *shutdown-requested* nil)
 
 (defun default-state-directory ()
+  "The default gr8s state directory: gr8s/ under $XDG_STATE_HOME, or under
+   ~/.local/state/ when that variable is unset."
   (merge-pathnames
    "gr8s/"
    (uiop:ensure-directory-pathname
@@ -25,16 +43,21 @@
        (uiop:getcwd))))
 
 (defun default-containerd-executable ()
+  "The default managed-containerd binary path: build/containerd/bin/containerd
+   under the gr8s root (see GR8S-ROOT-DIRECTORY)."
   (namestring
    (merge-pathnames "build/containerd/bin/containerd"
                     (gr8s-root-directory))))
 
 (defun default-containerd-oci-runtime ()
+  "The default OCI runtime path: build/containerd/bin/runc under the gr8s root."
   (namestring
    (merge-pathnames "build/containerd/bin/runc"
                     (gr8s-root-directory))))
 
 (defun parse-port (value)
+  "Parse VALUE as a port integer in 1..65535, or signal an error naming the bad
+   value."
   (handler-case
       (let ((port (parse-integer value :junk-allowed nil)))
         (unless (<= 1 port 65535)
@@ -44,11 +67,17 @@
       (error "invalid port: ~A" value))))
 
 (defun option-value (arguments option)
+  "The value following OPTION in ARGUMENTS (its second element), or signal an
+   error that OPTION requires a value."
   (unless (rest arguments)
     (error "~A requires a value" option))
   (second arguments))
 
 (defun parse-serve-options (arguments)
+  "Parse `gr8s serve' ARGUMENTS into an options plist on top of the serve
+   defaults. Signals on an unknown option, a missing option value, or an out-of-
+   range value, and -- because gr8s v1 serves only on loopback -- unless --listen
+   is 127.0.0.1."
   (let ((options (list :command :serve
                        :state-directory (namestring (default-state-directory))
                        :listen "127.0.0.1"
@@ -155,6 +184,10 @@
     options))
 
 (defun parse-agent-options (arguments)
+  "Parse `gr8s agent' ARGUMENTS into an options plist. Signals on an unknown
+   option, when any of --server, --node-name or --state-directory is missing, or
+   -- when the state directory holds no enrollment (node.key, node.crt, ca.crt)
+   -- when --token or --ca-pin is missing."
   (let ((options (list :command :agent
                        :server nil
                        :token nil
@@ -215,6 +248,9 @@
     options))
 
 (defun parse-join-token-options (arguments)
+  "Parse `gr8s join-token' ARGUMENTS into an options plist (role defaults to
+   \"node\"). Signals on an unknown option, an invalid --role, or a missing
+   --node-name."
   (let ((options (list :command :join-token :role "node"
                        :state-directory (namestring (default-state-directory)))))
     (loop while arguments
@@ -296,6 +332,10 @@
       0)))
 
 (defun print-node-join-token (options &optional (output *standard-output*))
+  "Mint a join token from the control plane's existing cluster PKI and write it,
+   with the node name and CA pin, as JSON to OUTPUT. A control-plane role reads
+   the PKI under raft/. Signals when the selected state directory holds no cluster
+   CA, rather than minting a fresh trust identity. Returns 0."
   (let* ((state (uiop:ensure-directory-pathname (getf options :state-directory)))
          (root (merge-pathnames "pki/" state))
          ;; Control-plane tokens have their own store and CA, so a token for a
@@ -319,6 +359,8 @@
   0)
 
 (defun parse-kubeconfig-options (arguments)
+  "Parse `gr8s kubeconfig' ARGUMENTS into an options plist (--output file,
+   --server URL). Signals on an unknown option."
   (let ((options (list :command :kubeconfig
                        :output nil
                        :server "http://127.0.0.1:8080")))
@@ -359,6 +401,9 @@ bare positional state directory for backward compatibility.  A missing
     options))
 
 (defun parse-cli-options (arguments)
+  "Dispatch ARGUMENTS to the matching subcommand option parser and return its
+   options plist. No arguments, or help/version/notices, yield a bare :command
+   plist. Signals on an unknown command."
   (cond
     ((or (null arguments)
          (member (first arguments) '("help" "--help" "-h") :test #'string=))
@@ -416,6 +461,8 @@ bare positional state directory for backward compatibility.  A missing
                 (or subcommand "<none>"))))))
 
 (defun print-kubeconfig (stream server-url)
+  "Write a minimal gr8s kubeconfig -- one cluster, context and anonymous user
+   pointing at SERVER-URL -- to STREAM."
   (format stream
           "apiVersion: v1~%kind: Config~%clusters:~%  - name: gr8s~%    cluster:~%      server: ~A~%contexts:~%  - name: gr8s~%    context:~%      cluster: gr8s~%      namespace: default~%      user: gr8s~%current-context: gr8s~%users:~%  - name: gr8s~%    user: {}~%"
           server-url))
@@ -436,6 +483,11 @@ bare positional state directory for backward compatibility.  A missing
   (merge-pathnames "kubeconfig" (uiop:ensure-directory-pathname (getf options :state-directory))))
 
 (defun runtime-from-options (options)
+  "Construct the Pod runtime OPTIONS select, returning (values runtime manager).
+   For containerd in managed mode MANAGER is a supervised containerd and the
+   runtime talks to its socket; in external mode the runtime talks to the
+   configured socket and MANAGER is NIL; any other runtime is the fake runtime
+   with MANAGER NIL."
   (cond
     ((string= (getf options :runtime) "containerd")
      (if (string= (getf options :containerd-mode) "managed")
@@ -486,6 +538,8 @@ bare positional state directory for backward compatibility.  A missing
      (values (make-fake-runtime) nil))))
 
 (defun parse-agent-server (server)
+  "Split SERVER as HOST:PORT at its last colon, returning (values host port) with
+   PORT parsed and range-checked. Signals unless both parts are non-empty."
   (let ((separator (position #\: server :from-end t)))
     (unless (and separator (plusp separator) (< separator (1- (length server))))
       (error "agent server must be HOST:PORT"))
@@ -493,6 +547,7 @@ bare positional state directory for backward compatibility.  A missing
             (parse-port (subseq server (1+ separator))))))
 
 (defun agent-state-path (options name)
+  "The pathname of NAME inside the agent's --state-directory."
   (merge-pathnames name
                    (uiop:ensure-directory-pathname
                     (getf options :state-directory))))
@@ -508,7 +563,18 @@ bare positional state directory for backward compatibility.  A missing
 
 (defun agent (options &key control
                             (stop-predicate (lambda () *shutdown-requested*)))
-  (multiple-value-bind (host port) (parse-agent-server (getf options :server))
+  "Run a node agent against the control plane at --server until STOP-PREDICATE is
+   true, then return 0. Enrolls the node (writing node.key, node.crt and ca.crt)
+   when it is not yet enrolled, builds and starts the runtime and the kubelet
+   server, then runs the node session -- reconciling desired-state snapshots and
+   dispatching operations -- and stops the kubelet and runtime on exit. CONTROL,
+   when given, is the session control handle (used by the in-process agent)."
+  (let* ((enrollment-endpoints (parse-agent-servers (getf options :server)))
+         (session-endpoints
+           (parse-agent-servers (or (getf options :session-server)
+                                    (getf options :server))))
+         (host (first (first session-endpoints)))
+         (port (second (first session-endpoints))))
     (let ((node-name (getf options :node-name))
           (private-key (agent-state-path options "node.key"))
           (certificate (agent-state-path options "node.crt"))
@@ -519,8 +585,8 @@ bare positional state directory for backward compatibility.  A missing
       (unless (and (probe-file private-key)
                    (probe-file certificate)
                    (probe-file ca-certificate))
-        (enroll-node-over-grpc
-         host port node-name (getf options :token) (getf options :ca-pin)
+        (enroll-node-over-endpoints
+         enrollment-endpoints node-name (getf options :token) (getf options :ca-pin)
          private-key certificate ca-certificate))
       (multiple-value-bind (runtime manager) (runtime-from-options options)
         (setf node-runtime
@@ -535,7 +601,7 @@ bare positional state directory for backward compatibility.  A missing
                 host port node-name identity
                 (lambda (snapshot)
                   (reconcile-node-snapshot node-runtime snapshot))
-                :endpoints (parse-agent-servers (getf options :server))
+                :endpoints session-endpoints
                 :snapshot-observer (lambda (snapshot) (receive-node-snapshot-intent node-runtime snapshot))
                 :operation-handler
                 (lambda (variant payload emit)
@@ -557,7 +623,14 @@ bare positional state directory for backward compatibility.  A missing
   control)
 
 (defun start-local-node-agent
-    (server pki node-name state-directory &optional runtime-options)
+    (server pki node-name state-directory &optional runtime-options
+     &key endpoints session-endpoints)
+  "Start serve's in-process node agent on its own thread and return the
+   LOCAL-NODE-AGENT handle. Points the agent at the local node SERVER over
+   loopback, mints a join token from PKI when STATE-DIRECTORY holds no enrollment
+   yet, and issues kubelet credentials only for a managed containerd node with a
+   kubelet port (otherwise the kubelet is disabled). RUNTIME-OPTIONS seed the
+   agent's options; without them it runs the fake runtime."
   (let* ((directory (uiop:ensure-directory-pathname state-directory))
          (certificate (merge-pathnames "node.crt" directory))
          (token (unless (probe-file certificate)
@@ -568,10 +641,25 @@ bare positional state directory for backward compatibility.  A missing
                       (list :runtime "fake"))))
     (setf (getf options :command) :agent
           (getf options :server)
-          (format nil "~A:~D"
-                  (let ((host (getf options :node-listen "127.0.0.1")))
-                    (if (string= host "0.0.0.0") "127.0.0.1" host))
-                  (node-grpc-server-port server))
+          (format nil "~{~A~^,~}"
+                  (mapcar (lambda (endpoint)
+                            (format nil "~A:~D" (first endpoint) (second endpoint)))
+                          (or endpoints
+                              (list
+                               (list
+                                (let ((host (getf options :node-listen "127.0.0.1")))
+                                  (if (string= host "0.0.0.0") "127.0.0.1" host))
+                                (node-grpc-server-port server))))))
+          (getf options :session-server)
+          (format nil "~{~A~^,~}"
+                  (mapcar (lambda (endpoint)
+                            (format nil "~A:~D" (first endpoint) (second endpoint)))
+                          (or session-endpoints endpoints
+                              (list
+                               (list
+                                (let ((host (getf options :node-listen "127.0.0.1")))
+                                  (if (string= host "0.0.0.0") "127.0.0.1" host))
+                                (node-grpc-server-port server))))))
           (getf options :token) token
           (getf options :ca-pin) (cluster-pki-ca-fingerprint pki)
           (getf options :node-name) node-name
@@ -597,6 +685,8 @@ bare positional state directory for backward compatibility.  A missing
     worker))
 
 (defun stop-local-node-agent (worker)
+  "Stop the in-process node agent WORKER: cancel its session, wait briefly for its
+   thread to exit, forcibly destroy it if it will not, and join it. Returns NIL."
   (cancel-node-session (local-node-agent-control worker))
   (let ((thread (local-node-agent-thread worker)))
     (when thread
@@ -609,6 +699,8 @@ bare positional state directory for backward compatibility.  A missing
   nil)
 
 (defun request-shutdown (&rest ignored)
+  "Request cooperative shutdown by setting *SHUTDOWN-REQUESTED*. Ignores its
+   arguments so it can serve directly as a signal handler."
   (declare (ignore ignored))
   (setf *shutdown-requested* t))
 
@@ -639,6 +731,8 @@ handler and never gets here. A busy host makes this race likely."
               (when previous (funcall previous condition hook)))))))
 
 (defun install-shutdown-handlers ()
+  "On SBCL, install signal handlers: SIGINT and SIGTERM request cooperative
+   shutdown, and SIGUSR1 dumps thread backtraces."
   #+sbcl
   (progn
     (sb-sys:enable-interrupt sb-unix:sigint #'request-shutdown)
@@ -662,10 +756,17 @@ handler and never gets here. A busy host makes this race likely."
   (wake-up (bt:make-condition-variable :name "gr8s reconciliation wake-up")))
 
 (defun reconciliation-worker-stopping-p (worker)
+  "True when WORKER has been asked to stop (read under its lock)."
   (bt:with-lock-held ((reconciliation-worker-lock worker))
     (reconciliation-worker-stop-requested worker)))
 
 (defun reconciliation-worker-loop (worker)
+  "Drive WORKER's reconciliation passes until it is asked to stop. Each iteration,
+   when the leader gate is absent or returns true, runs the before-reconcile hook
+   and a full reconcile pass; errors and stray timeouts are logged, not
+   propagated, so one bad pass never kills the loop. Between passes it waits on the
+   wake-up condition for up to the configured interval, so a stop or a notify wakes
+   it promptly."
   (loop until (reconciliation-worker-stopping-p worker)
         do (handler-case
                ;; Only drive controllers when we hold leadership; a follower
@@ -688,6 +789,10 @@ handler and never gets here. A busy host makes this race likely."
 
 (defun start-reconciliation-worker (reconciler &key (interval 1.0) observer before-reconcile
                                                      leader-gate)
+  "Create a reconciliation worker around RECONCILER and start its thread, then
+   return the worker. INTERVAL bounds the wait between passes; OBSERVER and
+   BEFORE-RECONCILE are passed through; LEADER-GATE, when set, gates each pass on
+   leadership."
   (let ((worker (make-reconciliation-worker
                  :reconciler reconciler :interval interval :observer observer
                  :before-reconcile before-reconcile :leader-gate leader-gate)))
@@ -698,6 +803,9 @@ handler and never gets here. A busy host makes this race likely."
     worker))
 
 (defun stop-reconciliation-worker (worker)
+  "Ask WORKER to stop and wake its thread, wait up to the worker's shutdown
+   timeout for the thread to exit, forcibly destroy it (with a warning) if it
+   overruns, then join it. Returns NIL."
   (bt:with-lock-held ((reconciliation-worker-lock worker))
     (setf (reconciliation-worker-stop-requested worker) t)
     (bt:condition-notify (reconciliation-worker-wake-up worker)))
@@ -727,6 +835,14 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
            (equal "managed" (getf options :containerd-mode)))))
 
 (defun serve (options)
+  "Run the gr8s control plane until shutdown, returning 0. Opens the store and
+   PKI, starts the memory monitor, optional HA/Raft, and the node gRPC server
+   (opening its firewalld port when it listens off loopback); unless
+   --disable-agent, starts an in-process local node agent, and on a managed
+   containerd node also brings up the in-cluster API server, aggregator and
+   Service network. Writes a kubeconfig, serves the HTTP API, and runs the
+   reconciliation worker. On *SHUTDOWN-REQUESTED* it tears every component down in
+   reverse, withdrawing the firewalld port it opened."
   (let* ((address (getf options :listen))
          (port (getf options :port))
          (state-directory
@@ -758,6 +874,9 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                   :port (getf options :node-port)
                   :pki pki :cluster-pod-cidr (gethash "clusterPodCIDR" pool)
                   :node-prefix (gethash "nodePrefix" pool)))
+           (when ha
+             (configure-raft-node-operation-routing
+              (ha-control-plane-member ha) node-server))
            ;; When the node server is exposed for remote agents, open its port in
            ;; an active host firewalld so agents can enroll (podster-vwy). A
            ;; 127.0.0.1 listener (single-node) needs nothing. No-op without
@@ -771,27 +890,54 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                      (start-local-node-agent
                       node-server pki (getf options :node-name)
                       (merge-pathnames "agent/" state-directory)
-                      options)))
+                      options
+                      :endpoints (when ha
+                                   (ha-control-plane-node-endpoints
+                                    ha (getf options :node-port)))
+                      :session-endpoints (when ha
+                                           (ha-control-plane-node-session-endpoints
+                                            ha (getf options :node-port))))))
              (when (getf options :debug-slynk-port)
                (setf debug-port (start-debug-server (getf options :debug-slynk-port) state-directory
                                                     :store store :reconciler reconciler)))
              (unwind-protect
                   (progn
-                    (when (serve-bootstraps-cluster-p options local-agent ha)
-                      (ensure-native-bootstrap-namespaces store))
-                    (when (and local-agent (equal "containerd" (getf options :runtime))
-                               (equal "managed" (getf options :containerd-mode)))
-                      (ensure-extension-apiserver-authentication store pki)
-                      (setf aggregator (start-api-aggregator store pki))
-                      (ensure-native-api-service store)
-                      (setf service-network-created (ensure-in-cluster-network pki))
-                      (setf api-server (start-in-cluster-api store runtime reconciler pki))
-                      (setf (pod-store-in-cluster-config store)
-                            (list :host "10.96.0.1" :port 443
-                                  :ca-pem (uiop:read-file-string (cluster-pki-ca-certificate-path pki))))
-                      (ensure-native-namespace-root-cas store))
-                    (seed-default-storage-class store state-directory
-                                                :path (getf options :local-storage-path))
+                    ;; podster-40i: in HA the one-shot bootstrap writes go
+                    ;; through Raft and 503 ("not the Raft leader") until this
+                    ;; member has won election, so they must wait for leadership.
+                    ;; The founder (--raft-init) waits briefly to win it; a joiner
+                    ;; (--raft-join) never performs them -- the leader's writes
+                    ;; replicate to it. Per-member runtime (the aggregator, the
+                    ;; service VIP, and this member's own in-cluster API listener)
+                    ;; still comes up on every member, leader or not.
+                    (let ((leaderp
+                            (cond ((null ha) t)
+                                  ((getf options :raft-join) nil)
+                                  (t (let ((won (loop repeat 100
+                                                      when (ha-control-plane-leader-p ha) return t
+                                                      do (sleep 0.1))))
+                                       (unless won
+                                         (format *error-output*
+                                                 "~&[serve] HA founder has not won election in 10s; skipping one-shot bootstrap writes (podster-40i)~%"))
+                                       won)))))
+                      (when (and leaderp (serve-bootstraps-cluster-p options local-agent ha))
+                        (ensure-native-bootstrap-namespaces store))
+                      (when (and local-agent (equal "containerd" (getf options :runtime))
+                                 (equal "managed" (getf options :containerd-mode)))
+                        (when leaderp
+                          (ensure-extension-apiserver-authentication store pki)
+                          (ensure-native-api-service store))
+                        (setf aggregator (start-api-aggregator store pki))
+                        (setf service-network-created (ensure-in-cluster-network pki))
+                        (setf api-server (start-in-cluster-api store runtime reconciler pki))
+                        (setf (pod-store-in-cluster-config store)
+                              (list :host "10.96.0.1" :port 443
+                                    :ca-pem (uiop:read-file-string (cluster-pki-ca-certificate-path pki))))
+                        (when leaderp
+                          (ensure-native-namespace-root-cas store)))
+                      (when leaderp
+                        (seed-default-storage-class store state-directory
+                                                    :path (getf options :local-storage-path))))
                     (start-volume-reclaimer store node-server (lambda () *shutdown-requested*))
                     (setf server
                           (start-server
@@ -892,6 +1038,8 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          :pki pki)))))
 
 (defun print-help ()
+  "Print the gr8s version line and the command and option usage to standard
+   output."
   (multiple-value-bind (major minor) (kubernetes-api-version-components)
     (format t "~&gr8s ~A — a self-contained, Kubernetes-compatible cluster~%" +gr8s-version+)
     (format t "Kubernetes API v~A.~A~%" major minor)
@@ -942,6 +1090,13 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (finish-output))
 
 (defun main-with-environment (arguments environment cni-entry)
+  "The gr8s entry point, with its environment reader and CNI handler injected so
+   tests can drive it. Writes the CNI plugin image when the first argument is the
+   CNI-image command; runs CNI-ENTRY when ENVIRONMENT reports CNI_COMMAND
+   (containerd invokes this binary as its CNI plugin); otherwise parses ARGUMENTS
+   and runs the chosen subcommand, printing a banner and installing the
+   timeout/memory guards for the long-running ones. Returns the process exit code,
+   and 2 for any error it catches."
   (when (equal (first arguments) +cni-image-command+)
     (write-cni-plugin-image (second arguments)))
   (if (funcall environment "CNI_COMMAND")
@@ -999,6 +1154,9 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
           2))))
 
 (defun main (&optional (arguments (uiop:command-line-arguments)))
+  "The gr8s process entry point: dispatch ARGUMENTS (the command-line arguments by
+   default) with the real environment and CNI handler. Returns the process exit
+   code."
   (main-with-environment arguments
                          #'uiop:getenv
                          (lambda () (cni-main))))

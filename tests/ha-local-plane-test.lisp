@@ -58,3 +58,25 @@
                  (is (not (ha-has-event s2 "e1")) "the event did not replicate to follower cp2")
                  (is (not (ha-has-event s3 "e1")) "the event did not replicate to follower cp3"))
             (dolist (h (list h1 h2 h3)) (when h (ignore-errors (gr8s::stop-ha-control-plane h))))))))))
+
+(test event-delete-collection-stays-on-the-local-plane
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((control-plane nil))
+      (unwind-protect
+           (progn
+             (setf control-plane
+                   (gr8s::start-ha-control-plane store :id "cp1" :init t))
+             (is (poll-until
+                  (lambda () (gr8s::ha-control-plane-leader-p control-plane))))
+             (let* ((event (ha-event-input "selected"))
+                    (metadata (gethash "metadata" event)))
+               (setf (gethash "labels" metadata)
+                     (gr8s::core-object "testevent-set" "true"))
+               (gr8s::create-core-resource store "events" event "default"))
+             (is (ha-has-event store "selected"))
+             (gr8s::delete-template-collection
+              store "default" "testevent-set=true" "" :resource "events")
+             (is-false (ha-has-event store "selected")))
+        (when control-plane
+          (ignore-errors (gr8s::stop-ha-control-plane control-plane)))))))

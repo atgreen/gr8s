@@ -56,9 +56,12 @@ service or a port range covering 53), so the gateway DNS would be rejected."
 ;;; Data gathering (degrades gracefully; a probe failure becomes a warn).
 
 (defun doctor-proc-string (path)
+  "Read PATH and return its contents with surrounding whitespace trimmed (for
+single-value /proc files)."
   (string-trim '(#\Space #\Newline #\Tab) (uiop:read-file-string path)))
 
 (defun doctor-mounts ()
+  "Return the contents of /proc/mounts, or \"\" when it cannot be read."
   (handler-case (uiop:read-file-string "/proc/mounts") (error () "")))
 
 (defun doctor-firewall-state (&key (runner #'doctor-run))

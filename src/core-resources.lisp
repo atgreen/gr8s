@@ -1,3 +1,26 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; Durable storage and create/read/update/delete for the Kubernetes core, typed,
+;;;; and custom resources the API server serves (the collections in
+;;;; *stored-resource-types*: ConfigMaps, Secrets, Namespaces, RBAC, workloads,
+;;;; Gateway and cert-manager kinds, and the rest).
+;;;;
+;;;; State lives in memory as an index keyed by (resource namespace name) and is
+;;;; made durable by a checkpoint (objects/state.json) plus an append-only journal
+;;;; (objects/journal.jsonl): each commit appends only what it changed, and a new
+;;;; checkpoint is rewritten once the journal outgrows its bound, so a commit costs
+;;;; a bounded multiple of what it touched whatever the store's total size. Only
+;;;; the last journal record can be torn -- by a crash mid-append -- and damage
+;;;; anywhere else is an error. On an HA store a commit instead stashes the full
+;;;; state blob for the caller to replicate through Raft once the lock is released,
+;;;; and every member reinstalls it; high-churn, self-expiring kinds (events) are
+;;;; kept off the consensus plane (podster-8ia.3) but still live in the on-disk
+;;;; state. Objects are copied at the store boundary so callers cannot mutate
+;;;; indexed state; writes run under WITH-CORE-WRITE with optimistic
+;;;; resourceVersion concurrency and mirror upstream validation, immutability,
+;;;; finalizer, and resource-quota semantics.
+
 (in-package #:gr8s)
 
 (defvar *core-resource-view-version* nil)
@@ -43,11 +66,14 @@
 ;; Core and bootstrap resources share a durable transaction and revision sequence.
 ;; Objects are copied at the boundary so clients cannot mutate indexed state.
 (defun core-object (&rest pairs)
+  "Return an EQUAL hash table holding the flat KEY VALUE PAIRS -- gr8s's JSON-object constructor."
   (let ((object (make-hash-table :test #'equal)))
     (loop for (key value) on pairs by #'cddr do (setf (gethash key object) value))
     object))
 
 (defun copy-core-object (object)
+  "Return a deep copy of a parsed-JSON value: hash tables, strings, and vectors are
+   copied recursively so nothing is shared with OBJECT; other atoms are returned as is."
   (cond ((hash-table-p object)
          (let ((copy (make-hash-table :test #'equal)))
            (maphash (lambda (key value) (setf (gethash (copy-seq key) copy) (copy-core-object value))) object)
@@ -108,6 +134,8 @@
       (error "Unknown stored resource ~S" resource)))
 
 (defun core-resource-kind (resource)
+  "Return the Kind string RESOURCE's objects serialize as (e.g. \"ConfigMap\" for
+   \"configmaps\"); signals when RESOURCE is not a known stored collection."
   (second (stored-resource-type resource)))
 
 (defun core-resource-api-version (resource)
@@ -119,13 +147,17 @@
   (fourth (stored-resource-type resource)))
 
 (defun core-resource-error (code reason control &rest arguments)
+  "Signal a KUBERNETES-ERROR carrying HTTP status CODE and REASON, with a message
+   formatted from CONTROL and ARGUMENTS. Does not return."
   (error 'kubernetes-error :status-code code :reason reason
          :message (apply #'format nil control arguments)))
 
 (defun core-resource-key (resource namespace name)
+  "Return the index key identifying one stored object: the list (RESOURCE NAMESPACE NAME)."
   (list resource namespace name))
 
 (defun core-resource-state-path (store)
+  "Return the pathname of STORE's core-resource checkpoint (objects/state.json)."
   (merge-pathnames "objects/state.json" (pod-store-path store)))
 
 (defun core-journal-path (store)
@@ -138,6 +170,8 @@ A journal may also grow to the size of the checkpoint, so writing checkpoints co
 each commit a bounded multiple of what it changed, whatever the size of the store.")
 
 (defun core-resource-key-from-object (resource object)
+  "Return the index key for OBJECT in collection RESOURCE, reading its namespace and
+   name from OBJECT's metadata."
   (let ((metadata (gethash "metadata" object)))
     (core-resource-key resource (gethash "namespace" metadata) (gethash "name" metadata))))
 
@@ -270,6 +304,14 @@ whether the journal must be rewritten (a torn record) and its complete bytes."
             (values state nil 0))))))
 
 (defun load-core-resources (store)
+  "Load STORE's durable core-resource state -- the checkpoint with its journal
+   replayed -- into memory: set the revision, workload-deletion, job-controller,
+   event-expiration, template-history and -floor, resource-history-start, template
+   token key, and checkpoint/journal byte-count slots, then rebuild the resource
+   index from the persisted items and custom-resource items. Signals on a duplicate
+   persisted key, an unknown stored kind, or a persisted custom resource with no
+   matching definition. A no-op leaving the store empty when nothing was ever
+   committed. Returns STORE."
   (multiple-value-bind (state torn journal-bytes) (read-durable-core-state store)
     (when state
       (setf (pod-store-resource-revision store) (gethash "revision" state)
@@ -315,6 +357,8 @@ whether the journal must be rewritten (a torn record) and its complete bytes."
    full on-disk state still includes them.")
 
 (defun local-plane-resource-p (resource)
+  "Return whether RESOURCE is a local-plane kind (events): kept off the consensus
+   plane, published per-member, and excluded from the HA replication blob."
   (member resource *raft-local-plane-resources* :test #'equal))
 
 (defun core-checkpoint-object (store resources revision workload-deletions job-controller-states
@@ -352,6 +396,46 @@ whether the journal must be rewritten (a torn record) and its complete bytes."
                                        history floor token-key event-expirations
                                        :omit-local-plane omit-local-plane))
               history floor token-key event-expirations added))))
+
+(defun core-state-delta-json (store resources revision workload-deletions job-controller-states)
+  "Serialize one HA core transaction as key-level effects against STORE's base.
+The effects are merged at Raft apply time, so a command prepared by a lagging
+follower cannot replace unrelated keys committed earlier in the log."
+  (let ((changes nil)
+        (base (pod-store-resource-revision store))
+        (keys (make-hash-table :test #'equal))
+        (record (core-object)))
+    (dolist (index (list (pod-store-resources store) resources))
+      (maphash (lambda (key object)
+                 (declare (ignore object))
+                 (setf (gethash key keys) t))
+               index))
+    (maphash
+     (lambda (key present)
+       (declare (ignore present))
+       (let ((old (gethash key (pod-store-resources store)))
+             (new (gethash key resources)))
+         (unless (or (eq old new) (local-plane-resource-p (first key)))
+           (push (core-object "resource" (first key)
+                              "namespace" (or (second key) 'null)
+                              "name" (third key)
+                              "object" (or new 'null))
+                 changes))))
+     keys)
+    (setf (gethash "version" record) 1
+          (gethash "baseRevision" record) base
+          ;; Preserve the transaction's revision width (for example a Service
+          ;; plus its IPAddress claim), but rebase it on committed apply state.
+          (gethash "revisionSpan" record) (max 1 (- revision base))
+          (gethash "changes" record) (coerce changes 'vector)
+          (gethash "templateTokenKey" record)
+          (ag-grpc:base64-encode
+           (or (pod-store-template-token-key store) (secure-random-octets 32))))
+    (let ((delta (core-map-delta (pod-store-workload-deletions store) workload-deletions)))
+      (when delta (setf (gethash "workloadDeletions" record) delta)))
+    (let ((delta (core-map-delta (pod-store-job-controller-states store) job-controller-states)))
+      (when delta (setf (gethash "jobControllerStates" record) delta)))
+    (com.inuoe.jzon:stringify record)))
 
 (defun core-map-delta (old new)
   "Describe how the string-keyed JSON map NEW differs from OLD, or NIL when it does not."
@@ -435,6 +519,10 @@ An object is streamed to the file, never held as one string as large as the stor
           (pod-store-core-checkpoint-needed store) (not deleted))))
 
 (defun core-checkpoint-due-p (store)
+  "Return whether STORE's next commit must write a full checkpoint rather than
+   append to the journal: because a torn record needs rewriting, no template token
+   key exists yet, or the journal has outgrown both its size bound and the current
+   checkpoint."
   (or (pod-store-core-checkpoint-needed store)
       (null (pod-store-template-token-key store))
       (> (pod-store-core-journal-bytes store)
@@ -457,8 +545,7 @@ An object is streamed to the file, never held as one string as large as the stor
     ;; write never replicates -- it falls through to the local publish below.
     ((and *core-write-active* (not *local-plane-write*) (pod-store-consensus-commit-fn store))
      (setf *pending-consensus-commit*
-           (core-state-json store resources revision workload-deletions job-controller-states
-                            :omit-local-plane t)))
+           (core-state-delta-json store resources revision workload-deletions job-controller-states)))
     (t
      (multiple-value-bind (history floor added) (next-template-history store resources revision)
        (let ((token-key (or (pod-store-template-token-key store) (secure-random-octets 32)))
@@ -507,13 +594,62 @@ An object is streamed to the file, never held as one string as large as the stor
       ;; The carried objects are only in memory: the next commit writes them all.
       (setf (pod-store-core-checkpoint-needed store) t))))
 
+(defun install-core-state-delta (store json)
+  "Apply one committed key-level core transaction to STORE in Raft log order.
+The command's revision span is rebased on this replica's committed revision;
+unrelated keys already present in STORE are never replaced by a stale author."
+  (bt:with-lock-held ((pod-store-lock store))
+    (let* ((delta (com.inuoe.jzon:parse json))
+           (resources (copy-core-resource-index store))
+           (revision (+ (pod-store-resource-revision store)
+                        (gethash "revisionSpan" delta 1)))
+           (workload-deletions (pod-store-workload-deletions store))
+           (job-controller-states (pod-store-job-controller-states store)))
+      (loop for change across (gethash "changes" delta #())
+            for namespace = (gethash "namespace" change)
+            for key = (core-resource-key
+                       (gethash "resource" change)
+                       (unless (eq namespace 'null) namespace)
+                       (gethash "name" change))
+            for object = (gethash "object" change)
+            do (if (eq object 'null)
+                   (remhash key resources)
+                   (setf (gethash key resources) object)))
+      (when (gethash "workloadDeletions" delta)
+        (setf workload-deletions
+              (apply-core-map-delta workload-deletions
+                                    (gethash "workloadDeletions" delta))))
+      (when (gethash "jobControllerStates" delta)
+        (setf job-controller-states
+              (apply-core-map-delta job-controller-states
+                                    (gethash "jobControllerStates" delta))))
+      ;; The first committed writer chooses the cluster-wide continuation-token
+      ;; key; subsequent commands carry the same value from replicated state.
+      (unless (pod-store-template-token-key store)
+        (setf (pod-store-template-token-key store)
+              (ag-grpc:base64-decode (gethash "templateTokenKey" delta))))
+      ;; A leader can synchronously run its own Raft apply callback from inside
+      ;; the dynamic extent of WITH-STORE-LOCK's author-side write. This is an
+      ;; apply, not another transaction to propose: force the durable publish
+      ;; path so the leader installs the same committed entry as its followers.
+      (let ((*core-write-active* nil)
+            (*local-plane-write* nil))
+        (commit-core-resources store resources revision
+                               :workload-deletions workload-deletions
+                               :job-controller-states job-controller-states)))))
+
 (defun copy-core-resource-index (store)
+  "Return a shallow copy of STORE's resource index: a fresh EQUAL table that shares
+   the stored objects. This is the mutable working set a write prepares and mutates
+   before it commits, leaving the live index untouched until then."
   (let ((copy (make-hash-table :test #'equal)))
     (maphash (lambda (key value) (setf (gethash key copy) value))
              (pod-store-resources store))
     copy))
 
 (defun core-data-key-p (key)
+  "Return whether KEY is a valid ConfigMap/Secret data key: 1 to 253 characters of
+   ASCII letters, digits, '-', '_', or '.'."
   (and (stringp key) (<= 1 (length key) 253)
        (every (lambda (character)
                 (or (find character "-_.")
@@ -522,6 +658,9 @@ An object is streamed to the file, never held as one string as large as the stor
                     (digit-char-p character))) key)))
 
 (defun validate-core-string-map (object context &key data-keys)
+  "Require OBJECT to be a JSON object whose keys and values are all strings -- and,
+   with DATA-KEYS, whose keys are valid data keys -- signalling a 422 under CONTEXT
+   otherwise. Returns OBJECT."
   (require-object object context)
   (maphash (lambda (key value)
              (unless (and (stringp key) (stringp value)
@@ -531,6 +670,9 @@ An object is streamed to the file, never held as one string as large as the stor
   object)
 
 (defun core-base64-bytes (value context)
+  "Decode VALUE, a canonical base64 string (carriage returns and linefeeds removed
+   first), to its bytes. Signals a 400 under CONTEXT when VALUE is not a string, is
+   not valid base64, or is not canonically encoded."
   (unless (stringp value)
     (core-resource-error 400 "BadRequest" "~A must be a base64 string" context))
   (let ((normalized (remove-if (lambda (character) (find character '(#\Return #\Linefeed))) value)))
@@ -542,6 +684,9 @@ An object is streamed to the file, never held as one string as large as the stor
       (error () (core-resource-error 400 "BadRequest" "~A is not valid base64" context)))))
 
 (defun core-label-name-p (value &key empty)
+  "Return whether VALUE is a valid label value: at most 63 characters of ASCII
+   letters, digits, '-', '_', or '.', beginning and ending alphanumeric. An empty
+   VALUE is accepted only when EMPTY."
   (and (stringp value) (<= (length value) 63)
        (if (zerop (length value)) empty
            (and (alphanumericp (char value 0)) (alphanumericp (char value (1- (length value))))))
@@ -551,6 +696,8 @@ An object is streamed to the file, never held as one string as large as the stor
                     (digit-char-p character) (find character "-_."))) value)))
 
 (defun core-qualified-key-p (value)
+  "Return whether VALUE is a valid qualified key: a bare label name, or a DNS-
+   subdomain prefix and a label name joined by a single '/'."
   (when (stringp value)
     (let ((parts (uiop:split-string value :separator '(#\/))))
       (or (and (= 1 (length parts)) (core-label-name-p (first parts)))
@@ -566,6 +713,14 @@ An object is streamed to the file, never held as one string as large as the stor
   (member resource '("roles" "rolebindings" "clusterroles" "clusterrolebindings") :test #'equal))
 
 (defun validate-core-metadata (metadata namespace name &key allow-finalizers name-test)
+  "Validate an object's METADATA in place, returning it, and signal a 4xx core-
+   resource-error on any violation: NAMESPACE must be a DNS label and must match
+   metadata.namespace when that is set; NAME, when given, must equal metadata.name,
+   which must satisfy NAME-TEST (a DNS subdomain by default); labels and
+   annotations must be string maps with qualified keys (label values also valid),
+   and annotations must stay within 256 KiB; owner references are validated.
+   Finalizers are accepted and checked only when ALLOW-FINALIZERS; otherwise only
+   the propagation-policy finalizers foregroundDeletion and orphan are tolerated."
   (require-object metadata "metadata")
   (when (and namespace (not (dns-label-p namespace)))
     (core-resource-error 422 "Invalid" "metadata.namespace must be a DNS label"))
@@ -606,6 +761,12 @@ An object is streamed to the file, never held as one string as large as the stor
   metadata)
 
 (defun validate-core-secret-type (object)
+  "Validate a Secret's type and the data its type demands, defaulting an unset or
+   empty type to \"Opaque\" and storing the result back in OBJECT. Signals a 422
+   when the type is not a nonempty string, or when a well-known type
+   (kubernetes.io/tls, ssh-auth, basic-auth, dockercfg/dockerconfigjson,
+   service-account-token) is missing a required data key, a valid JSON dockercfg,
+   or the service-account name annotation. Returns the stored type."
   (let* ((specified (gethash "type" object "Opaque"))
          (type (if (member specified '(null "") :test #'equal) "Opaque" specified))
          (data (gethash "data" object)))
@@ -639,6 +800,14 @@ An object is streamed to the file, never held as one string as large as the stor
     (setf (gethash "type" object) type)))
 
 (defun normalize-core-resource (resource input namespace &optional name store)
+  "Return the normalized, validated stored form of INPUT for collection RESOURCE in
+   NAMESPACE (and NAME on update), never mutating INPUT. Delegates to the per-kind
+   normalizer for cronjob, batch, budget, HPA, policy, typed-API, networking,
+   admission-config, CSR, endpointslice, CRD, custom, storage, and bootstrap
+   resources; handles ConfigMaps and Secrets directly -- copying INPUT, requiring
+   apiVersion v1 and the right Kind, rejecting unsupported fields, validating
+   metadata, base64-encoding binary data, folding Secret stringData into data, and
+   signalling a 422 when the data exceeds 1 MiB."
   (when (cronjob-resource-p resource)
     (return-from normalize-core-resource (normalize-cronjob-resource input namespace name)))
   (when (batch-resource-p resource)
@@ -725,16 +894,26 @@ An object is streamed to the file, never held as one string as large as the stor
     object))
 
 (defun get-core-resource-unlocked (store resource namespace name)
+  "Return the live stored object for RESOURCE NAMESPACE NAME, or signal a 404.
+   Assumes the caller holds the store lock and returns the indexed object without
+   copying, so the caller must not mutate it."
   (or (gethash (core-resource-key resource namespace name) (pod-store-resources store))
       (core-resource-error 404 "NotFound" "~A ~A/~A was not found" (core-resource-kind resource) namespace name)))
 
 (defun get-core-resource (store resource namespace name)
+  "Return a private copy of the stored object for RESOURCE NAMESPACE NAME, or signal
+   a 404. Takes the store lock, checks the CRD request context, and expires due
+   events first."
   (with-store-lock (store)
     (check-crd-resource-context-unlocked store resource)
     (expire-core-events-unlocked store)
     (copy-core-object (get-core-resource-unlocked store resource namespace name))))
 
 (defun list-core-resources (store resource &optional namespace)
+  "Return (values OBJECTS RESOURCE-VERSION): private copies of every stored object
+   in collection RESOURCE, optionally restricted to NAMESPACE, sorted by
+   namespace/name, and the store's current resource revision as a string. Takes the
+   store lock and expires due events first."
   (with-store-lock (store)
     (expire-core-events-unlocked store)
     (values
@@ -750,6 +929,10 @@ An object is streamed to the file, never held as one string as large as the stor
   "UID a new object must take, because admission webhooks have already seen it.")
 
 (defun prepare-core-resource-metadata (object existing revision)
+  "Stamp OBJECT's metadata for a write at REVISION, returning OBJECT: set
+   resourceVersion to REVISION; when EXISTING, carry its uid and creationTimestamp;
+   otherwise assign a uid (the admission-assigned *core-resource-assigned-uid* when
+   bound, else a fresh one) and the current timestamp."
   (let ((metadata (gethash "metadata" object)))
     (setf (gethash "uid" metadata) (if existing
                                        (gethash "uid" (gethash "metadata" existing))
@@ -760,9 +943,12 @@ An object is streamed to the file, never held as one string as large as the stor
   object)
 
 (defun core-resource-immutable-p (object)
+  "Return whether OBJECT is marked immutable (its \"immutable\" field is true)."
   (eq t (gethash "immutable" object)))
 
 (defun core-resource-data-equal-p (left right)
+  "Return whether LEFT and RIGHT hold the same \"data\" and \"binaryData\" maps,
+   compared by key and value regardless of map order."
   ;; JSON's map order is insignificant.
   (labels ((map-equal (a b)
              (and (= (if a (hash-table-count a) 0) (if b (hash-table-count b) 0))
@@ -772,6 +958,14 @@ An object is streamed to the file, never held as one string as large as the stor
          (map-equal (gethash "binaryData" left) (gethash "binaryData" right)))))
 
 (defun create-core-resource (store resource input namespace &key dry-run)
+  "Create a new object in collection RESOURCE under NAMESPACE from INPUT, returning
+   a private copy of the stored result. Runs under WITH-CORE-WRITE with deferred
+   CRD conversions: expires due events, enforces namespace admission and resource
+   quotas, allocates a generated name when generateName is given, rejects a client-
+   set resourceVersion, normalizes and validates the object, stamps its metadata at
+   the next revision, and commits -- signalling 409 AlreadyExists on a key
+   collision. A Service's ClusterIP is claimed by its IPAddress object in the same
+   commit. With DRY-RUN, validates and prepares everything but does not commit."
   (let ((*local-plane-write* (local-plane-resource-p resource)))
    (with-crd-deferred-conversions
     (with-core-write (store)
@@ -859,6 +1053,18 @@ watch event is sent, so a repeated apply or update shows no drift."
     (crd-json-equal-p candidate existing)))
 
 (defun update-core-resource (store resource namespace name transform &key dry-run)
+  "Apply TRANSFORM to the current object for RESOURCE NAMESPACE NAME and store the
+   result, returning a private copy. Runs under WITH-CORE-WRITE with deferred CRD
+   conversions: enforces optimistic concurrency on resourceVersion (409 Conflict on
+   mismatch; an omitted version is an unconditional update except for custom
+   resources), rejects changes to immutable fields (roleRef, Service clusterIP,
+   Secret type, immutable resource data, a changed uid), runs per-kind update
+   validation and quota enforcement, and preserves a pending deletionTimestamp and
+   its finalizers (no new finalizer may be added while deleting). A write that
+   stores exactly what already exists is skipped -- no new revision, no watch
+   event. When the transform clears the last finalizer of a deleting object (or
+   finalizes a CSR), the object is removed instead. With DRY-RUN, prepares
+   everything but does not commit."
   (let ((*local-plane-write* (local-plane-resource-p resource)))
    (with-crd-deferred-conversions
     (with-core-write (store)
@@ -937,6 +1143,15 @@ watch event is sent, so a repeated apply or update shows no drift."
            (copy-core-object object)))))))))
 
 (defun delete-core-resource (store resource namespace name &key uid resource-version dry-run)
+  "Delete the object for RESOURCE NAMESPACE NAME, returning a private copy of what
+   was removed or, for a finalizer-held deletion, the object now marked deleting.
+   Runs under WITH-CORE-WRITE: enforces the optional UID and RESOURCE-VERSION
+   preconditions (409 Conflict on mismatch) and delegates CRD, custom, CSR,
+   storage, namespace, and typed-API kinds to their own deletion paths. An object
+   still holding non-propagation finalizers is stamped with a deletionTimestamp and
+   kept until its last finalizer is removed; otherwise it is removed outright, and a
+   selector Service's Endpoints go with it. With DRY-RUN, prepares everything but
+   does not commit."
   ;; A COND (not RETURN-FROM) so WITH-CORE-WRITE's consensus flush always runs on
   ;; the delegated CRD/CSR/storage delete paths too (they stash via COMMIT-CORE-RESOURCES).
   (let ((*local-plane-write* (local-plane-resource-p resource)))

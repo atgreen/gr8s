@@ -27,6 +27,46 @@
       (is (= 2 (gr8s::raft-entry-term e)))
       (is (equal '(:cas "y" nil "Z") (gr8s::raft-entry-command e))))))
 
+(test raft-link-coalesces-unsent-append-retries
+  (let* ((link (gr8s::make-raft-peer-link :id "b"))
+         (vote (list :type :request-vote :term 2 :from "a"))
+         (old-append (list :type :append-entries :term 2 :from "a"
+                           :prev-log-index 3 :entries nil :leader-commit 3))
+         (new-append (list :type :append-entries :term 2 :from "a"
+                           :prev-log-index 3 :entries nil :leader-commit 4)))
+    (gr8s::raft-link-enqueue link vote)
+    (gr8s::raft-link-enqueue link old-append)
+    (gr8s::raft-link-enqueue link new-append)
+    (let ((items (gr8s::raft-peer-link-items link)))
+      (is (= 2 (length items)) "a disconnected peer retains at most one unsent AppendEntries")
+      (is (eq :request-vote (getf (first items) :type)))
+      (is (eq :append-entries (getf (second items) :type)))
+      (is (= 4 (getf (second items) :leader-commit))
+          "the newest AppendEntries supersedes the stale retry"))))
+
+(test idle-raft-link-waits-until-enqueue-signals-it
+  (let* ((member (gr8s::make-raft-member :running t))
+         (link (gr8s::make-raft-peer-link :id "b"))
+         (message (list :type :request-vote :term 2 :from "a"))
+         (done nil)
+         (batch nil)
+         (thread
+           (bt:make-thread
+            (lambda ()
+              (setf batch (gr8s::raft-link-wait-batch member link)
+                    done t)))))
+    (unwind-protect
+         (progn
+           (sleep 0.05)
+           (is-false done "an empty peer link blocks instead of polling")
+           (gr8s::raft-link-enqueue link message)
+           (is (poll-until (lambda () done) :timeout 1))
+           (is (equal (list message) batch)))
+      (setf (gr8s::raft-member-running member) nil)
+      (bt:with-lock-held ((gr8s::raft-peer-link-lock link))
+        (bt:condition-notify (gr8s::raft-peer-link-changed link)))
+      (when (bt:thread-alive-p thread) (bt:join-thread thread)))))
+
 (defun poll-until (predicate &key (timeout 10) (interval 0.05))
   (let ((deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
     (loop (when (funcall predicate) (return t))

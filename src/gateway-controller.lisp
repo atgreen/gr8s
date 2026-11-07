@@ -45,6 +45,9 @@
          (or (null port) (eql port listener-port)))))
 
 (defun gateway-route-attaches-p (httproute gateway-namespace gateway-name listener-name listener-port)
+  "True when HTTPROUTE has at least one parentRef attaching it to the given Gateway
+   listener (GATEWAY-NAMESPACE, GATEWAY-NAME, LISTENER-NAME, LISTENER-PORT); false
+   when it has no parentRefs."
   (let* ((metadata (gethash "metadata" httproute))
          (route-namespace (gethash "namespace" metadata))
          (spec (gethash "spec" httproute))
@@ -116,6 +119,7 @@
   l4-start-fn l4-stop-fn l4-swap-fn)
 
 (defun gateway-write-octets (path octets)
+  "Write OCTETS to PATH as a binary file, creating it or truncating any existing one."
   (with-open-file (stream path :direction :output :element-type '(unsigned-byte 8)
                                :if-exists :supersede :if-does-not-exist :create)
     (write-sequence octets stream)))

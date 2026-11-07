@@ -1,3 +1,25 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; The gr8s CNI plugin and the node agent's eBPF policy datapath behind it.
+;;;;
+;;;; gr8s ships as a chained CNI plugin. The thin `gr8s` binary (CNI-MAIN) only
+;;;; reads the CNI_* environment and the network configuration on stdin, relays
+;;;; the request to the local node agent over the Unix socket named in the
+;;;; config, and writes the agent's result (or a CNI error object) back to the
+;;;; container runtime. All privileged datapath work runs in the agent, which
+;;;; owns the pinned BPF maps and can enter a Pod's network namespace.
+;;;;
+;;;; On the agent side (INSTALL / CHECK / REMOVE-CNI-POLICY), gr8s compiles the
+;;;; Whistler object in-process, attaches an egress and an ingress TCX program to
+;;;; the Pod's interface (the guards enforce the per-Pod NetworkPolicy carried as
+;;;; data in the netpol_* maps -- no program recompile), and pins the programs and
+;;;; maps under a per-container directory keyed by CNI_CONTAINERID. Link pins are
+;;;; swapped atomically: a replacement is pinned to a staging name and renamed
+;;;; into place, so the old guard stays live until the new one is attached. Every
+;;;; step is idempotent and cleans up its partial state on failure, so a repeated
+;;;; ADD reconverges rather than failing.
+
 (in-package #:gr8s)
 
 #+sbcl
@@ -16,6 +38,8 @@
              (write-string (cni-error-message condition) stream))))
 
 (defun invalid-cni (control &rest arguments)
+  "Signal a CNI-ERROR whose message is CONTROL formatted with ARGUMENTS. Does not
+   return."
   (error 'cni-error :message (apply #'format nil control arguments)))
 
 (defparameter +cni-policy-map-specs+
@@ -43,6 +67,8 @@
   "Pins that endpoints created by earlier agents may still hold, removed with the endpoint.")
 
 (defun cni-opposite-direction (direction)
+  "Return the complementary guard direction: \"ingress\" for \"egress\", and
+   \"egress\" for anything else."
   (if (string= direction "egress") "ingress" "egress"))
 
 (defun cni-ingress-guard-link-path (link-path direction)
@@ -66,18 +92,27 @@
   add check delete status prepare)
 
 (defun required-cni-string (object key)
+  "Return OBJECT's KEY as a non-empty string, or signal a CNI-ERROR when it is
+   absent or not a non-empty string."
   (let ((value (gethash key object)))
     (unless (and (stringp value) (plusp (length value)))
       (invalid-cni "network configuration requires ~A" key))
     value))
 
 (defun absolute-cni-path (object key)
+  "Return OBJECT's KEY as a string naming an absolute path, signalling a
+   CNI-ERROR when it is missing, empty, or relative."
   (let ((value (required-cni-string object key)))
     (unless (uiop:absolute-pathname-p (pathname value))
       (invalid-cni "~A must be an absolute path" key))
     value))
 
 (defun parse-cni-configuration (text &key require-previous)
+  "Parse the CNI network configuration TEXT (JSON) into a CNI-CONFIGURATION,
+   defaulting name and type to \"gr8s\" and direction to \"egress\". Signals a
+   CNI-ERROR on invalid JSON, a non-object, an unsupported direction, or -- when
+   REQUIRE-PREVIOUS -- a missing prevResult (gr8s must be chained). A \"program\"
+   ELF path is accepted but ignored."
   (let ((object (handler-case
                     (com.inuoe.jzon:parse text)
                   (error (condition)
@@ -103,6 +138,8 @@
        :previous-result previous))))
 
 (defun safe-cni-container-id-p (container-id)
+  "True when CONTAINER-ID is safe to use as a BPF pin directory name: a non-empty
+   string, neither \".\" nor \"..\", of alphanumerics and -_. only."
   (and (stringp container-id)
        (plusp (length container-id))
        (not (member container-id '("." "..") :test #'string=))
@@ -112,6 +149,9 @@
               container-id)))
 
 (defun cni-pin-paths (root container-id &optional (direction "egress"))
+  "Return (values MAP-PATH LINK-PATH DIRECTORY) for CONTAINER-ID's pins under
+   ROOT: the rejected_spoofs map path, the tcx-DIRECTION link path, and the
+   containing directory. Signals a CNI-ERROR when CONTAINER-ID is unsafe."
   (unless (safe-cni-container-id-p container-id)
     (invalid-cni "container ID ~S is unsafe for a BPF pin" container-id))
   (let ((directory
@@ -121,10 +161,14 @@
             directory)))
 
 (defun cni-version-result ()
+  "The CNI VERSION result object: cniVersion 1.1.0 and the supported version list."
   (json-object "cniVersion" "1.1.0"
                "supportedVersions" #( "0.4.0" "1.0.0" "1.1.0")))
 
 (defun require-cni-context (context &key network-namespace)
+  "Signal a CNI-ERROR unless CONTEXT carries a safe container ID, and -- when
+   NETWORK-NAMESPACE -- a non-empty CNI_NETNS and CNI_IFNAME. Returns NIL when the
+   context is complete."
   (unless (safe-cni-container-id-p (cni-context-container-id context))
     (invalid-cni "CNI_CONTAINERID is required"))
   (when network-namespace
@@ -136,6 +180,12 @@
       (invalid-cni "CNI_IFNAME is required"))))
 
 (defun dispatch-cni-command (command input context operations &key (chained t))
+  "Dispatch a CNI COMMAND against OPERATIONS, having parsed the configuration from
+   INPUT. VERSION returns the version result; STATUS runs the status op; GC is a
+   no-op; ADD, CHECK and DEL require CONTEXT, resolve the per-container pin paths,
+   and invoke the matching operation (ADD returning the previous result, the
+   others NIL). When CHAINED, ADD and CHECK require a prevResult. Signals a
+   CNI-ERROR on an unsupported command."
   (when (string= command "VERSION")
     (return-from dispatch-cni-command (cni-version-result)))
   (let* ((require-previous (member command '("ADD" "CHECK") :test #'string=))
@@ -171,20 +221,28 @@
            (t (invalid-cni "unsupported CNI command ~A" command))))))))
 
 (defun ensure-cni-pin-directory (directory)
+  "Ensure DIRECTORY exists, creating parents, and return it."
   (ensure-directories-exist (merge-pathnames ".pin" (pathname directory)))
   directory)
 
 (defun remove-cni-path (path)
+  "Delete the pin at PATH, ignoring a missing file. Always returns NIL."
   (handler-case (delete-file path)
     (file-error () nil))
   nil)
 
 (defun remove-empty-cni-directory (directory)
+  "Remove DIRECTORY when empty, ignoring the error when it is absent or not
+   empty. Always returns NIL."
   (handler-case (sb-posix:rmdir directory)
     (sb-posix:syscall-error () nil))
   nil)
 
 (defun call-with-cni-network-namespace (path operation)
+  "Call OPERATION with the current thread moved into the network namespace at
+   PATH, restoring the original namespace afterward even on a non-local exit.
+   Signals when the namespace cannot be entered or restored. SBCL/Linux only;
+   errors elsewhere."
   #+sbcl
   (let ((original (sb-posix:open "/proc/thread-self/ns/net" sb-posix:o-rdonly 0))
         (target nil))
@@ -207,11 +265,16 @@
   (error "CNI network namespaces currently require SBCL on Linux"))
 
 (defun native-interface-index (name)
+  "The kernel ifindex for interface NAME via if_nametoindex (0 when unknown, or
+   on non-SBCL)."
   #+sbcl (%linux-if-nametoindex name)
   #-sbcl (declare (ignore name))
   #-sbcl 0)
 
 (defun cni-interface-index (name &key (resolver #'native-interface-index))
+  "Resolve interface NAME to its kernel ifindex via RESOLVER. Signals a CNI-ERROR
+   when NAME is unsafe (empty, over 15 characters, or not alphanumeric/-_.), or
+   when the interface is not found (index 0)."
   (unless (and (plusp (length name))
                (<= (length name) 15)
                (every (lambda (character)
@@ -226,6 +289,10 @@
 
 (defun call-with-cni-policy-interface
     (configuration context operation call-in-netns interface-index)
+  "Call OPERATION with the ifindex of the interface the guards attach to. When
+   CONFIGURATION names a host policy interface (the routed agent's host veth),
+   resolve it on the host; otherwise enter CONTEXT's Pod namespace via
+   CALL-IN-NETNS and resolve CONTEXT's Pod interface there."
   ;; The routed agent sets this internal field from its host veth identity.
   ;; Chained callers still select their Pod interface inside its namespace.
   (let ((host-interface (cni-configuration-policy-interface-name configuration)))
@@ -259,6 +326,14 @@
                      (whistler/loader:attach-tcx fd index :direction direction)))
        (close-fd #'sb-posix:close)
        (close-object #'close-egress-policy-object))
+  "Install, or re-converge, this Pod's egress and ingress guards and their BPF
+   maps. Opens and validates any already-pinned maps, compiles and loads the
+   Whistler object, seeds the endpoint-identity map, pins the maps, and attaches
+   each TCX guard -- pinning each replacement link to a staging name and renaming
+   it into place so the previous guard stays live until the new one is attached.
+   On any failure, new pins and staged links are removed (a guard already renamed
+   into place is kept, and its maps stay pinned). Idempotent; returns NIL. The
+   keyword arguments inject every external operation for testing."
   (let ((directory (namestring (uiop:pathname-directory-pathname map-path)))
         (opened nil) (object nil) (new-pins nil) (link-fd nil)
         ;; A link pinned but not yet renamed into place.
@@ -333,6 +408,11 @@
        (close-fd #'sb-posix:close)
        (call-in-netns #'call-with-cni-network-namespace)
        (interface-index #'cni-interface-index))
+  "Verify this Pod's installed policy: open and validate each pinned map
+   (checking the endpoint identity on endpoint_identity), then confirm each
+   guard's TCX link is attached on the expected interface in the expected
+   direction. Signals through its check/validate operations on any discrepancy;
+   returns NIL when consistent."
   (dolist (spec +cni-policy-map-specs+)
     (let* ((name (first spec))
            (fd (funcall open-pinned (cni-policy-map-path map-path name))))
@@ -359,6 +439,10 @@
      &key (remove-path #'remove-cni-path)
        (staged-links #'cni-policy-staged-links)
        (remove-directory #'remove-empty-cni-directory))
+  "Remove this Pod's policy: unpin both guard links and any staged leftovers,
+   delete every policy map (current and legacy), and remove the now-empty
+   directory. Tolerates missing files, derives the guard direction from LINK-PATH
+   when CONFIGURATION is NIL, and returns NIL."
   (declare (ignore context))
   (dolist (link (list link-path (cni-ingress-guard-link-path
                                  link-path (if configuration (cni-configuration-direction configuration)
@@ -371,24 +455,32 @@
   nil)
 
 (defun check-cni-status (configuration)
+  "Signal a CNI-ERROR unless CONFIGURATION's Whistler map pin root exists and is
+   a directory; otherwise returns NIL."
   (let ((root (probe-file (cni-configuration-map-pin-root configuration))))
     (unless (and root (uiop:directory-pathname-p root))
       (invalid-cni "Whistler map pin root is unavailable")))
   nil)
 
 (defun write-cni-json (object output)
+  "Write OBJECT as JSON to OUTPUT followed by a newline, and flush."
   (com.inuoe.jzon:stringify object :stream output)
   (terpri output)
   (finish-output output))
 
 (defun cni-error-result
     (message &optional (version "1.1.0") (code 100) (details ""))
+  "Build a CNI error result object (cniVersion, code, msg, details) reporting
+   MESSAGE. CODE defaults to 100."
   (json-object "cniVersion" version
                "code" code
                "msg" message
                "details" details))
 
 (defun cni-agent-socket-path (configuration-text)
+  "Parse CONFIGURATION-TEXT (JSON) and return its \"socket\" as an absolute path
+   -- the Unix socket of the node agent to relay to. Signals a CNI-ERROR on
+   invalid JSON, a non-object, or a missing/relative socket."
   (let ((configuration
           (handler-case
               (com.inuoe.jzon:parse configuration-text)
@@ -399,6 +491,8 @@
     (absolute-cni-path configuration "socket")))
 
 (defun cni-request-from-environment (command configuration-text environment)
+  "Build the node-agent CNI-REQUEST for COMMAND from CONFIGURATION-TEXT and the
+   CNI_* variables read through ENVIRONMENT (each absent variable becomes \"\")."
   (make-instance
    'gr8s.node.v1::cni-request
    :protocol-version +node-protocol-version+
@@ -412,6 +506,9 @@
    :plugin-path (or (funcall environment "CNI_PATH") "")))
 
 (defun write-agent-cni-result (response output)
+  "Render the agent's RESPONSE to OUTPUT and return the process exit code: 0,
+   writing the result JSON, on success; 1, writing a CNI error object, on
+   failure. Signals when RESPONSE's protocol version is unsupported."
   (ensure-node-protocol-version
    (slot-value response 'gr8s.node.v1::protocol-version))
   (if (slot-value response 'gr8s.node.v1::success)
@@ -437,6 +534,11 @@
                       (environment #'uiop:getenv)
                       (agent-call #'call-agent-cni)
                       (timeout 5))
+  "The `gr8s` CNI binary entry point. Reads CNI_COMMAND and the configuration
+   from INPUT, answers VERSION locally, and otherwise relays the request to the
+   node agent at the configuration's socket via AGENT-CALL, writing the result to
+   OUTPUT. Returns the process exit code; any error is reported as a CNI error
+   object (code 100) with exit 1."
   (handler-case
       (let* ((command (or (funcall environment "CNI_COMMAND")
                           (invalid-cni "CNI_COMMAND is required")))

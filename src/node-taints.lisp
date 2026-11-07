@@ -129,7 +129,7 @@
               (core-resource-error 409 "AlreadyExists" "nodes ~S already exists" name))
             (publish-node-change-unlocked store nil node)
             (setf (gethash name (pod-store-nodes store)) node)
-            (note-node-desired-change store)   ; desired API write (8ia.4)
+            (note-node-desired-change store node)   ; desired API write (8ia.4)
             (json-response (node-api-object node) 201))))))
 
 (defun delete-node-response (store name)

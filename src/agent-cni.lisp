@@ -1,3 +1,18 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; The agent's CNI control socket: a local request/response channel between the
+;;;; short-lived CNI plugin and the long-running node agent.
+;;;;
+;;;; The plugin cannot touch host networking itself, so it forwards each CNI
+;;;; command to the agent over a Unix-domain stream socket and relays the reply.
+;;;; A frame is a 4-byte big-endian length prefix followed by a protobuf
+;;;; CniRequest/CniResponse (ag-proto), capped at 16 MiB. The listening socket is
+;;;; mode 0600, and every connection is authenticated by SO_PEERCRED -- by default
+;;;; the peer's effective UID must equal the server's -- so only a same-user
+;;;; process can drive host networking. A handler fault is turned into a
+;;;; CniResponse carrying an error code rather than dropping the connection.
+
 (in-package #:gr8s)
 
 (defconstant +agent-cni-maximum-frame-size+ (* 16 1024 1024))
@@ -29,6 +44,9 @@
   (lock (bt:make-lock "gr8s agent CNI server")))
 
 (defun agent-cni-peer-credentials (socket)
+  "Return (values PID UID GID) for SOCKET's connected peer via SO_PEERCRED.
+   Signals INVALID-CNI when the kernel call fails or returns an unexpected
+   credential size; on non-Linux, where SO_PEERCRED is unavailable, errors."
   #+linux
   (sb-alien:with-alien ((credentials linux-ucred)
                         (length sb-alien:unsigned-int 12))
@@ -50,10 +68,15 @@
   (error "agent CNI peer credentials require Linux"))
 
 (defun authorize-agent-cni-peer (pid uid gid)
+  "The default peer authorizer: admit the connection only when its UID equals the
+   server process's effective UID. PID and GID are ignored."
   (declare (ignore pid gid))
   (= uid (sb-posix:geteuid)))
 
 (defun write-agent-cni-frame (stream message)
+  "Serialize MESSAGE (an ag-proto object) and write it to STREAM as a 4-byte
+   big-endian length followed by the bytes, then flush. Signals INVALID-CNI when
+   the payload exceeds the 16 MiB frame limit."
   (let* ((payload (ag-proto:serialize-to-bytes message))
          (length (length payload)))
     (when (> length +agent-cni-maximum-frame-size+)
@@ -67,6 +90,9 @@
     (finish-output stream)))
 
 (defun read-agent-cni-frame (stream type)
+  "Read one length-prefixed frame from STREAM and deserialize it as the ag-proto
+   TYPE. Signals INVALID-CNI when the peer closes before a frame arrives, when
+   the declared length exceeds the 16 MiB limit, or when the body is truncated."
   (let ((first (read-byte stream nil nil)))
     (unless first
       (invalid-cni "agent CNI peer closed without a response"))
@@ -85,6 +111,9 @@
         (ag-proto:deserialize-from-bytes type payload)))))
 
 (defun agent-cni-error-response (condition)
+  "Build a failed CniResponse (success NIL, error code 100) whose message is the
+   printed CONDITION, so a handler fault travels back to the caller as an ordinary
+   reply."
   (make-instance
    'gr8s.node.v1::cni-response
    :protocol-version +node-protocol-version+
@@ -93,10 +122,15 @@
    :error-message (princ-to-string condition)))
 
 (defun empty-octet-vector ()
+  "A fresh, empty (unsigned-byte 8) vector."
   (make-array 0 :element-type '(unsigned-byte 8)))
 
 (defun handle-agent-cni-request
     (request &key (operations (make-cni-operations)) (chained t))
+  "The default request handler: validate REQUEST's protocol version, dispatch its
+   CNI command against OPERATIONS (CHAINED selects chained-plugin behavior), and
+   return a CniResponse carrying the result as JSON (empty when the command has
+   none). Any error is caught and returned as a failed CniResponse."
   (handler-case
       (progn
         (ensure-node-protocol-version
@@ -130,6 +164,11 @@
       (agent-cni-error-response condition))))
 
 (defun serve-agent-cni-client (server socket)
+  "Handle one accepted client on SOCKET for SERVER: wrap it in a byte stream,
+   authorize the peer by its credentials, read one CniRequest, run SERVER's
+   handler, and write back the CniResponse. Any error -- authorization, protocol,
+   or handler -- is written as a failed CniResponse instead; the stream or socket
+   is always closed."
   (let ((stream nil))
     (unwind-protect
          (progn
@@ -169,10 +208,14 @@
           (ignore-errors (sb-bsd-sockets:socket-close socket))))))
 
 (defun agent-cni-server-stopping-p (server)
+  "True when SERVER has been asked to stop; read under the server lock."
   (bt:with-lock-held ((agent-cni-server-lock server))
     (agent-cni-server-stop-requested-p server)))
 
 (defun run-agent-cni-server (server)
+  "SERVER's accept loop: until a stop is requested, wait briefly for a connection
+   and serve each accepted client, logging and swallowing per-connection errors
+   so one bad client cannot end the loop. Runs on the server thread."
   (loop until (agent-cni-server-stopping-p server)
         do (when (sb-sys:wait-until-fd-usable
                   (sb-bsd-sockets:socket-file-descriptor
@@ -191,6 +234,10 @@
 
 (defun start-agent-cni-server
     (path handler &key (peer-authorizer #'authorize-agent-cni-peer))
+  "Bind a listening Unix-domain socket at PATH (mode 0600, replacing any stale
+   file), start its accept thread, and return the AGENT-CNI-SERVER. HANDLER
+   processes each CniRequest and PEER-AUTHORIZER vets each connecting peer. On
+   failure closes the socket, removes the file, and resignals. SBCL only."
   #+sbcl
   (let* ((socket-path (namestring (pathname path)))
          (directory (uiop:pathname-directory-pathname (pathname socket-path)))
@@ -224,6 +271,8 @@
   (error "gr8s agent CNI sockets require SBCL on Linux"))
 
 (defun stop-agent-cni-server (server)
+  "Stop SERVER: flag the accept loop, close the listening socket, join its thread
+   (unless called from that thread), and remove the socket file. Returns NIL."
   (let ((thread nil))
     (bt:with-lock-held ((agent-cni-server-lock server))
       (setf (agent-cni-server-stop-requested-p server) t
@@ -236,6 +285,9 @@
   nil)
 
 (defun call-agent-cni (path request &key (timeout 5))
+  "Connect to the agent CNI socket at PATH, send REQUEST, and return the
+   CniResponse (whose protocol version is validated). Bounded by TIMEOUT seconds;
+   a timeout or any transport failure is reported as INVALID-CNI. SBCL only."
   #+sbcl
   (let ((socket
           (make-instance 'sb-bsd-sockets:local-socket

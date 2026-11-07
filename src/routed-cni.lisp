@@ -1,10 +1,32 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; The "routed" CNI data plane: attach a Pod to the gr8s overlay over a
+;;;; point-to-point veth pair, with the agent -- not the client -- owning
+;;;; addressing and the policy boundary.
+;;;;
+;;;; Each Pod gets a host-side veth and an in-netns peer. The Pod carries its
+;;;; address as a /32 with a host route back over the veth and a permanent
+;;;; neighbor for the link-local node gateway (169.254.1.1), so no subnet is on
+;;;; the wire and every packet is routed. Addresses come from agent-owned IPAM
+;;;; keyed by (container-id, interface); client IPAM settings are never trusted.
+;;;; The lifecycle wraps an inner policy CNI (the eBPF enforcement layer): ADD
+;;;; installs the link, then the policy, and keeps the durable address lease
+;;;; until DEL has torn both down, so a crash mid-ADD still cleans up. The
+;;;; enforcement boundary is always the agent-owned host veth ingress, regardless
+;;;; of the direction or interface the client requests.
+
 (in-package #:gr8s)
 
 (defun routed-cni-owner (context)
+  "The ownership tag gr8s stamps on this endpoint's links,
+   \"gr8s:<container-id>/<interface>\", so a link can be matched back to the
+   endpoint that created it."
   (format nil "gr8s:~A/~A" (cni-context-container-id context)
           (cni-context-interface-name context)))
 
 (defun routed-cni-host-name (context)
+  "The host-side veth name for CONTEXT's (container-id, interface) endpoint."
   (routed-veth-name (cni-context-container-id context)
                     (cni-context-interface-name context)))
 
@@ -32,6 +54,11 @@
              (invalid-cni "routed Pod endpoint, routes or permanent gateway neighbor is misconfigured"))))))))
 
 (defun remove-routed-cni-link (context)
+  "Delete this endpoint's host veth, which also removes its peer and connected
+   routes -- idempotent and safe even after the Pod netns is gone. A no-op when
+   the link is already absent (interface index 0). Refuses, via INVALID-CNI, to
+   remove a link tagged as owned by a different endpoint, and re-signals any
+   rtnetlink error other than ENODEV."
   ;; Deleting either end deletes the pair and its connected routes. This works
   ;; even after containerd has already destroyed the Pod network namespace.
   (handler-case
@@ -44,6 +71,9 @@
       (unless (= 19 (rtnetlink-error-errno condition)) (error condition)))))
 
 (defun routed-cni-result (configuration context host address dns-address)
+  "Build the CNI ADD result object: the HOST and Pod interfaces, the Pod's
+   ADDRESS as a /32 with gateway 169.254.1.1, a default route via that gateway,
+   and DNS-ADDRESS as the sole nameserver."
   (json-object
    "cniVersion" (cni-configuration-version configuration)
    "interfaces"

@@ -29,10 +29,18 @@ NODE-PKI is the control plane's own, whose CA is shared with voters it enrolls."
   "Return the Raft credentials directory within control-plane PKI's own."
   (merge-pathnames "raft/" (cluster-pki-root pki)))
 
-(defun raft-ca-certificate-path (root) (merge-pathnames "pki/cluster-ca.crt" root))
-(defun raft-ca-key-path (root) (merge-pathnames "pki/cluster-ca.key" root))
-(defun raft-member-certificate-path (root) (merge-pathnames "member.crt" root))
-(defun raft-member-key-path (root) (merge-pathnames "member.key" root))
+(defun raft-ca-certificate-path (root)
+  "Path under ROOT of the Raft cluster CA certificate, the trust anchor every member shares."
+  (merge-pathnames "pki/cluster-ca.crt" root))
+(defun raft-ca-key-path (root)
+  "Path under ROOT of the Raft cluster CA private key. Only a voter holds it; its presence is how the credentials carry a PKI."
+  (merge-pathnames "pki/cluster-ca.key" root))
+(defun raft-member-certificate-path (root)
+  "Path under ROOT of this member's own certificate. Written last on enrollment, so its presence means enrollment is complete."
+  (merge-pathnames "member.crt" root))
+(defun raft-member-key-path (root)
+  "Path under ROOT of this member's private key."
+  (merge-pathnames "member.key" root))
 
 (defun load-raft-credentials (root)
   "Load the enrolled credentials under ROOT, including the PKI when this member holds the CA key."
@@ -119,6 +127,12 @@ NODE-PKI is the control plane's own, whose CA is shared with voters it enrolls."
                        :node-ca-private-key
                        (if (and voter node-pki)
                            (uiop:read-file-string (cluster-pki-ca-private-key-path node-pki))
+                           "")
+                       :service-account-signing-key
+                       (if (and voter node-pki)
+                           (uiop:read-file-string
+                            (service-account-signing-key-path-under-pki-root
+                             (cluster-pki-root node-pki)))
                            ""))))))
 
 (defun install-shared-node-ca (node-root certificate-pem key-pem)
@@ -161,6 +175,10 @@ A voter given NODE-ROOT also stores the cluster's shared node CA there."
            (when (and node-root (plusp (length (gr8s.node.v1::node-ca-certificate response))))
              (install-shared-node-ca node-root (gr8s.node.v1::node-ca-certificate response)
                                      (gr8s.node.v1::node-ca-private-key response)))
+           (when (and node-root
+                      (plusp (length (gr8s.node.v1::service-account-signing-key response))))
+             (install-shared-service-account-signing-key
+              node-root (gr8s.node.v1::service-account-signing-key response)))
            (write-private-text-atomically (raft-ca-certificate-path root) ca-pem)
            (when (plusp (length key-pem))
              (write-private-text-atomically (raft-ca-key-path root) key-pem))

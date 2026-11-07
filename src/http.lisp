@@ -1,6 +1,29 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; The Kubernetes REST surface: HTTP requests in, Kubernetes JSON out.
+;;;;
+;;;; This file turns API requests into store and reconciler calls and encodes the
+;;;; replies the way kubectl and client-go expect them. It holds three things a
+;;;; real kube-apiserver keeps apart: the JSON object/response helpers every
+;;;; handler shares; the Pod lifecycle handlers (create, get, list/watch, apply,
+;;;; replace, delete, logs) and the discovery documents that advertise them (API
+;;;; groups and resources, OpenAPI v2 and v3); and the exec/attach bridge, which
+;;;; upgrades the client connection to the Kubernetes remotecommand channel
+;;;; protocol and either drives a node exec session or proxies containerd's local
+;;;; streaming server. The guiding constraint throughout is byte-level fidelity to
+;;;; upstream's wire behaviour -- media types, status reasons, resourceVersion
+;;;; ordering -- because conformance clients compare it literally.
+;;;;
+;;;; See https://kubernetes.io/docs/reference/using-api/api-concepts/ for the
+;;;; list/watch and resourceVersion semantics the Pod handlers implement.
+
 (in-package #:gr8s)
 
 (defun json-object (&rest pairs)
+  "Build a JSON object (an EQUAL hash-table) from alternating KEY VALUE PAIRS; a
+   later key overwrites an earlier one. The unit every response here is assembled
+   from."
   (let ((object (make-hash-table :test #'equal)))
     (loop for (key value) on pairs by #'cddr
           do (setf (gethash key object) value))
@@ -34,6 +57,11 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
         object)))
 
 (defun json-response (object &optional (status 200))
+  "Set the response code to STATUS and the content type to application/json, then
+   return OBJECT serialized as the body. OBJECT passes through the event, CRD, and
+   table-representation views, and built-in list items have their type metadata
+   stripped, before encoding. The content type carries no charset parameter on
+   purpose (see the comment)."
   (setf (hunchentoot:return-code*) status
         ;; client-go v0.27 discovery compares this media type literally. JSON
         ;; is UTF-8 already; a charset parameter breaks its legacy fallback.
@@ -53,6 +81,8 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
     (json-response object code)))
 
 (defun kubernetes-error-response (error)
+  "Render ERROR, a kubernetes-error, as a Kubernetes Status of kind Failure,
+   carrying its reason, message, status code, and details."
   (status-response "Failure"
                    (kubernetes-error-reason error)
                    (kubernetes-error-message error)
@@ -60,9 +90,14 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
                    (kubernetes-error-details error)))
 
 (defun copy-json-object (object)
+  "Return an independent deep copy of OBJECT, by serializing it to JSON and
+   parsing it back."
   (com.inuoe.jzon:parse (com.inuoe.jzon:stringify object)))
 
 (defun pod-response-object (pod status)
+  "Return POD encoded as a Kubernetes object with STATUS as its status subobject.
+   When POD carries a status revision, metadata.resourceVersion is set to it (as a
+   string). The source object is copied, so POD is left unchanged."
   (let ((object (copy-json-object (pod-to-object pod))))
     (setf (gethash "status" object) status)
     (when (pod-status-revision pod)
@@ -82,16 +117,23 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
     (parse-pod object :allow-generate-name allow-generate-name)))
 
 (defun request-object (&optional (namespace "default"))
+  "Decode the current request body as a Pod bound to NAMESPACE, validating and
+   defaulting its metadata.namespace."
   (request-pod-in-namespace
    (core-resource-request-object "Pod")
    namespace))
 
 (defun request-json-object ()
+  "Parse the current request body as a JSON object, signaling a Kubernetes error
+   if it is not one. Used for patch bodies."
   (require-object
    (com.inuoe.jzon:parse (hunchentoot:raw-post-data :force-text t))
    "patch"))
 
 (defun merge-json-object (target patch)
+  "Apply PATCH to TARGET in place with JSON Merge Patch semantics (RFC 7386): a
+   null value deletes its key, two objects merge recursively, and any other value
+   replaces. Mutates and returns TARGET."
   (maphash
    (lambda (key patch-value)
      (cond
@@ -106,6 +148,8 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
   target)
 
 (defun version-response ()
+  "Answer /version with the Kubernetes version gr8s reports. The build metadata
+   (commit, tree state, date, compiler, platform) is fixed placeholder detail."
   (multiple-value-bind (major minor) (kubernetes-api-version-components)
     (json-response
      (json-object "major" major
@@ -119,6 +163,7 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
                   "platform" "linux/amd64"))))
 
 (defun api-versions-response ()
+  "Answer /api with the single core API version (v1) this server serves."
   (json-response
    (json-object "apiVersion" "v1"
                 "kind" "APIVersions"
@@ -143,6 +188,8 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
     (json-response (json-object "apiVersion" "v1" "kind" "APIGroupList" "groups" groups))))
 
 (defun api-resources-response ()
+  "Answer /api/v1 discovery: the core v1 resources and subresources this server
+   serves, each with its allowed verbs."
   (json-response
    (json-object
     "apiVersion" "v1" "groupVersion" "v1" "kind" "APIResourceList"
@@ -185,6 +232,8 @@ lists keep them, as upstream's unstructured encoding does. OBJECT itself is left
 (defvar *schema-reference-prefix* "#/definitions/")
 
 (defun reference-schema (name)
+  "Return a JSON Schema reference to NAME under the current
+   *schema-reference-prefix* (definitions for v2, components for v3)."
   (json-object "$ref" (format nil "~A~A" *schema-reference-prefix* name)))
 
 (defparameter *upstream-openapi*
@@ -332,15 +381,20 @@ not be changed; add or replace entries instead."
     definitions))
 
 (defun openapi-document ()
+  "Build gr8s's OpenAPI v2 (Swagger 2.0) document: every vendored v2 definition,
+   with the CSR endpoints as its paths."
   (json-object "swagger" "2.0"
                "info" (json-object "title" "gr8s" "version" "v1")
                "paths" (add-csr-openapi-v2-paths (make-hash-table :test #'equal))
                "definitions" (openapi-definitions)))
 
 (defun pod-group-version-kind ()
+  "The group/version/kind object for a core v1 Pod."
   (json-object "group" "" "version" "v1" "kind" "Pod"))
 
 (defun openapi-v3-pod-paths ()
+  "Build the OpenAPI v3 path items for the namespaced Pod collection (POST create)
+   and a named Pod (PATCH), referencing the core v1 Pod schema."
   (json-object
    "/api/v1/namespaces/{namespace}/pods"
    (json-object
@@ -415,6 +469,9 @@ not be changed; add or replace entries instead."
                      (reference-schema "io.k8s.api.core.v1.Pod")))))))))
 
 (defun openapi-v3-response (&optional (version "v1"))
+  "Answer /openapi/v3 for VERSION (a group version such as \"v1\" or \"apps/v1\"):
+   a 3.0.0 document whose paths and component schemas are those of that group
+   version. Schema references use the v3 components prefix."
   (let ((*schema-reference-prefix* "#/components/schemas/"))
     (json-response
      (json-object
@@ -458,7 +515,7 @@ not be changed; add or replace entries instead."
                 (enforce-resource-quotas-unlocked store "pods" namespace (pod-to-object final)))
               (json-response (pod-response-object (default-created-pod final) (pod-status "Pending")) 201))
             (let* ((pod (create-pod store final))
-                   (status (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))))
+                   (status (reconcile-written-pod reconciler pod)))
               (json-response (pod-response-object pod status) 201)))))))
 
 (defun pod-list-observed-object (store reconciler snapshot)
@@ -473,6 +530,11 @@ not be changed; add or replace entries instead."
       (unless (= 404 (kubernetes-error-status-code condition)) (error condition)))))
 
 (defun list-pods-response (store reconciler &optional (namespace "default"))
+  "Answer a GET on the Pod collection in NAMESPACE. With ?watch, stream changes
+   via pod-watch-response. Otherwise return a PodList: items in namespace/name
+   order, each reconciled to its current status and kept only if it passes the
+   request's label and field selectors, with the list's resourceVersion read
+   before the items so a following watch never misses a change."
   (when (true-parameter-p (hunchentoot:parameter "watch"))
     (return-from list-pods-response (pod-watch-response store namespace)))
   (let ((labels (core-selector-predicate (hunchentoot:parameter "labelSelector")))
@@ -493,6 +555,8 @@ not be changed; add or replace entries instead."
                                    collect object) 'vector)))))
 
 (defun get-pod-response (store reconciler name &optional (namespace "default"))
+  "Answer a GET on one Pod: its object with the status a fresh reconcile reports.
+   Signals a 404 (via get-pod) when NAME is absent in NAMESPACE."
   (let ((pod (get-pod store namespace name)))
     (json-response
      (pod-response-object pod (reconcile-pod reconciler namespace name)))))
@@ -517,6 +581,11 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
     object))
 
 (defun apply-pod-response (store reconciler name &optional (namespace "default"))
+  "Serve a PATCH (or server-side apply) on NAME in NAMESPACE. Decodes the body by
+   content type -- JSON Patch, strategic merge, or apply-patch+yaml, else a JSON
+   merge patch -- runs admission, and on a dry run returns the would-be object
+   without storing. Otherwise updates an existing Pod or creates one from an
+   apply, returning the stored Pod with 200 (updated) or 201 (created)."
   (let* ((content-type (first (uiop:split-string (or (hunchentoot:header-in* :content-type) "") :separator '(#\;))))
          (applied (equal content-type "application/apply-patch+yaml"))
          (structured (member content-type '("application/json-patch+json" "application/strategic-merge-patch+json" "application/apply-patch+yaml")
@@ -553,6 +622,10 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
            (if existing 200 201)))))))
 
 (defun replace-pod-response (store reconciler name &optional (namespace "default"))
+  "Serve a PUT replacing NAME in NAMESPACE. Defaults and admits the request as an
+   UPDATE, requires metadata.name to match NAME, and on a dry run returns the
+   would-be object without storing. An omitted resourceVersion is an
+   unconditional update. Returns the stored Pod."
   (let ((raw (core-resource-request-object "Pod"))
         (*apply-update-manager* (list (apply-default-manager) nil)))
     ;; The API server defaults a request as it decodes it, so admission sees the defaults.
@@ -629,6 +702,10 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
         (json-response (pod-response-object pod (or status (pod-status "Running" :reason "Terminating")))))))
 
 (defun pod-logs-response (store reconciler name &optional (namespace "default"))
+  "Answer GET pods/NAME/log in NAMESPACE. Defaults the container to the Pod's
+   first, and signals 400 for an unknown container or one still waiting to start.
+   Returns the log text as text/plain, streams it over WebSocket for an upgrade
+   request, or follows it live for ?follow (except with ?previous)."
   (let* ((pod (get-pod store namespace name))
          (container (or (hunchentoot:parameter "container")
                         (container-spec-name (aref (pod-containers pod) 0)))))
@@ -670,6 +747,8 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
   (and value (member value '("1" "t" "T" "true" "TRUE" "True") :test #'string=) t))
 
 (defun exec-options-from-parameters (parameters)
+  "Build an EXEC-OPTIONS from the request's query PARAMETERS: every \"command\"
+   value in order, the container, and the stdin/stdout/stderr/tty booleans."
   (make-exec-options
    :command (loop for (name . value) in parameters
                   when (string= name "command") collect value)
@@ -688,9 +767,14 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
     :sec-websocket-protocol :x-stream-protocol-version :origin :user-agent))
 
 (defun header-name (keyword)
+  "Render a header KEYWORD as its capitalized HTTP spelling
+   (e.g. :user-agent -> \"User-Agent\")."
   (string-capitalize (symbol-name keyword)))
 
 (defun runtime-upgrade-request (target host port headers)
+  "Format the HTTP/1.1 POST request that forwards a client's stream upgrade to
+   containerd at HOST:PORT for TARGET, copying only the upgrade-relevant headers
+   (*runtime-upgrade-request-headers*) from HEADERS."
   (with-output-to-string (output)
     (format output "POST ~A HTTP/1.1~C~CHost: ~A:~D~C~C"
             target #\Return #\Linefeed host port #\Return #\Linefeed)
@@ -702,6 +786,9 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
     (format output "~C~C" #\Return #\Linefeed)))
 
 (defun parse-runtime-stream-url (url)
+  "Split a containerd streaming URL into (values HOST PORT TARGET). Signals a
+   RUNTIME-ERROR unless URL is an http:// URL whose host is loopback (127.0.0.1,
+   localhost, or [::1]) and whose port is in 1-65535."
   (let ((prefix "http://"))
     (unless (and (>= (length url) (length prefix))
                  (string-equal prefix url :end2 (length prefix)))
@@ -734,6 +821,8 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
     :x-stream-protocol-version))
 
 (defun ascii-octets (string)
+  "Return STRING's characters as a vector of their byte codes, one octet per
+   character."
   (let ((octets (make-array (length string)
                             :element-type '(unsigned-byte 8))))
     (loop for character across string
@@ -742,9 +831,14 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
     octets))
 
 (defun octets-as-ascii (octets)
+  "Return OCTETS as a string, one character per byte (the inverse of
+   ascii-octets)."
   (map 'string #'code-char octets))
 
 (defun read-http-response-head (stream)
+  "Read from STREAM up to and including the blank line that ends an HTTP response
+   head, returning the raw octets. Signals a RUNTIME-ERROR if the stream ends
+   first or the head exceeds 64 KiB."
   (let ((head (make-array 512 :element-type '(unsigned-byte 8)
                           :adjustable t :fill-pointer 0))
         (state 0))
@@ -767,9 +861,13 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
                  :message "containerd returned oversized exec headers"))))))
 
 (defun trim-http-line (line)
+  "Return LINE without its trailing carriage return or line feed."
   (string-right-trim '(#\Return #\Linefeed) line))
 
 (defun parse-http-response-head (octets)
+  "Parse the HTTP response head in OCTETS into (values STATUS-CODE HEADERS), where
+   HEADERS is an alist of keyword header name to trimmed value. Signals a
+   RUNTIME-ERROR when no status code can be read."
   (with-input-from-string (input (octets-as-ascii octets))
     (let* ((status-line (trim-http-line (or (read-line input nil) "")))
            (first-space (position #\Space status-line))
@@ -799,6 +897,8 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
       (values status (nreverse headers)))))
 
 (defun upgrade-request-p ()
+  "True when the current request asks to upgrade the connection: it carries an
+   Upgrade header and \"upgrade\" among its Connection tokens."
   (let ((connection (hunchentoot:header-in* :connection))
         (upgrade (hunchentoot:header-in* :upgrade)))
     (and connection upgrade
@@ -807,6 +907,9 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
                :test #'string-equal))))
 
 (defun copy-binary-stream (input output)
+  "Copy bytes from INPUT to OUTPUT until INPUT reaches end of file, flushing
+   OUTPUT after each batch. Blocks on the first byte of each batch, so it forwards
+   data as soon as it arrives."
   (let ((buffer (make-array 16384 :element-type '(unsigned-byte 8))))
     (loop for first = (read-byte input nil nil)
           while first
@@ -839,6 +942,11 @@ belong to another connection, so it must not shut SOCKET down after it has been 
         (ignore-errors (usocket:socket-close socket))))))
 
 (defun proxy-runtime-stream (url)
+  "Bridge the client's upgraded connection to containerd's streaming server at
+   URL: connect, replay the upgrade request, require a 101 response, forward the
+   accepted upgrade headers back to the client, then relay the two streams until
+   either side ends. Signals a RUNTIME-ERROR on any failure, closing the upstream
+   socket."
   (multiple-value-bind (host port target)
       (parse-runtime-stream-url url)
     (let* ((socket (usocket:socket-connect
@@ -885,6 +993,9 @@ belong to another connection, so it must not shut SOCKET down after it has been 
   '("v5.channel.k8s.io" "v4.channel.k8s.io" "channel.k8s.io"))
 
 (defun requested-kubernetes-websocket-protocol ()
+  "Return the Kubernetes channel subprotocol to use for the current request: the
+   most preferred of *kubernetes-websocket-protocols* that the client offered in
+   Sec-WebSocket-Protocol, or NIL if none match."
   (let ((requested
           (uiop:split-string
            (or (hunchentoot:header-in* :sec-websocket-protocol) "")
@@ -894,6 +1005,8 @@ belong to another connection, so it must not shut SOCKET down after it has been 
              *kubernetes-websocket-protocols*)))
 
 (defun websocket-accept-value (key)
+  "Compute the Sec-WebSocket-Accept value for a client's Sec-WebSocket-KEY: base64
+   of its SHA-1 with the WebSocket GUID appended."
   (ag-grpc:base64-encode
    (ironclad:digest-sequence
     :sha1
@@ -901,6 +1014,8 @@ belong to another connection, so it must not shut SOCKET down after it has been 
      (concatenate 'string key "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")))))
 
 (defun write-kubernetes-channel-frame (stream channel data)
+  "Write DATA to STREAM as one binary WebSocket frame on the Kubernetes
+   remotecommand CHANNEL, the channel number prefixed as the first payload byte."
   (let ((payload (make-array (1+ (length data))
                              :element-type '(unsigned-byte 8))))
     (setf (aref payload 0) channel)
@@ -908,6 +1023,9 @@ belong to another connection, so it must not shut SOCKET down after it has been 
     (write-websocket-frame stream 2 payload)))
 
 (defun exec-exit-status-bytes (exit-code)
+  "Return the UTF-8 bytes of the Kubernetes Status that reports an exec's
+   EXIT-CODE: a Success status when zero, otherwise a Failure carrying reason
+   NonZeroExitCode and the code in its causes."
   (when (zerop exit-code)
     (return-from exec-exit-status-bytes
       (trivial-utf-8:string-to-utf-8-bytes
@@ -977,6 +1095,10 @@ already signalling, with its handlers unbound for the handler tests, and then fi
           (throw *exec-input-reader-tag* nil)))))))
 
 (defun begin-kubernetes-websocket ()
+  "Complete the WebSocket upgrade handshake for a Pod stream and return the client
+   octet stream, having set the chosen channel subprotocol. Signals a 400
+   (bad-exec-request) when the request lacks a Sec-WebSocket-Key or offers no
+   supported protocol."
   (let ((key (hunchentoot:header-in* :sec-websocket-key))
         (protocol (requested-kubernetes-websocket-protocol)))
     (unless (and key (plusp (length key)))
@@ -995,6 +1117,8 @@ already signalling, with its handlers unbound for the handler tests, and then fi
       client)))
 
 (defun terminal-size-from-channel-data (data)
+  "Parse a terminal-resize payload (JSON with height and width) into
+   (values HEIGHT WIDTH), each defaulting to 0 when absent."
   (let ((size
           (com.inuoe.jzon:parse
            (trivial-utf-8:utf-8-bytes-to-string data))))
@@ -1003,6 +1127,12 @@ already signalling, with its handlers unbound for the handler tests, and then fi
 
 (defun forward-kubernetes-exec-input
     (reconciler session stream write-lock finished-p)
+  "Read client WebSocket frames from STREAM and drive the exec SESSION until
+   FINISHED-P returns true or the client closes. Binary frames carry stdin
+   (channel 0), terminal resize (channel 4), and close-stdin (channel 255) to the
+   node; pings are answered with pongs under WRITE-LOCK. Runs under
+   with-exec-input-reader-stop, and on a close frame or any error cancels the
+   session unless it has already finished."
   (handler-case
       (with-exec-input-reader-stop
        (loop until (funcall finished-p)
@@ -1061,6 +1191,8 @@ already signalling, with its handlers unbound for the handler tests, and then fi
            reconciler session (princ-to-string condition)))))))
 
 (defun operation-stream-wire-channel (message)
+  "Map a node stream MESSAGE's channel to its Kubernetes wire channel number: 1
+   for stdout, 2 for stderr, NIL for anything else."
   (case (slot-value message 'gr8s.node.v1::channel)
     (#.gr8s.node.v1::+streamchannel-stream_channel_stdout+ 1)
     (#.gr8s.node.v1::+streamchannel-stream_channel_stderr+ 2)))
@@ -1139,10 +1271,16 @@ already signalling, with its handlers unbound for the handler tests, and then fi
           (ignore-errors (bt:join-thread input-thread)))))))
 
 (defun bad-exec-request (message)
+  "Signal a 400 BadRequest kubernetes-error carrying MESSAGE."
   (error 'kubernetes-error :status-code 400 :reason "BadRequest"
          :message message))
 
 (defun pod-exec-response (store reconciler name &optional (namespace "default"))
+  "Serve a Pod exec on NAME in NAMESPACE over an upgraded connection. Signals 400
+   unless the request upgrades, names a command, asks for at least one of
+   stdin/stdout/stderr, and names a valid container. After admission, bridges to
+   the node's exec session on a control-plane runtime, or proxies the local
+   runtime's streaming server otherwise."
   (unless (upgrade-request-p)
     (bad-exec-request "Pod exec requires an upgraded connection"))
   (let* ((pod (get-pod store namespace name))
@@ -1216,6 +1354,10 @@ already signalling, with its handlers unbound for the handler tests, and then fi
       (values (nthcdr 6 parts) (fifth parts) t))))
 
 (defun dispatch-pod-request (store runtime reconciler path method)
+  "Route a Pod request PATH and METHOD to the matching handler -- the collection,
+   a named Pod, or a subresource (status, resize, ephemeralcontainers, log, exec,
+   eviction, attach, portforward, binding) -- answering a 404 Status when nothing
+   matches. RUNTIME is unused."
   (declare (ignore runtime))
   (multiple-value-bind (parts namespace matched) (pod-route-parts path)
     (declare (ignore matched))

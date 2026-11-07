@@ -305,6 +305,10 @@ message CniResponse {
 // as their own Deliver calls, matching the core's fire-and-forget send model.
 service RaftTransport {
   rpc Deliver(RaftEnvelope) returns (RaftAck);
+  // A follower forwards an internal durable-store write to the current leader.
+  // Mutual Raft TLS authenticates the caller; the leader commits the serialized
+  // command through the same log used by local writers.
+  rpc Propose(RaftProposal) returns (RaftProposalResult);
   // A new member asks the cluster to admit it (podster-c2d.10). Call it on any
   // member; a follower answers with accepted=false and the current leader's
   // address so the joiner can retry there. The leader authenticates the joiner,
@@ -316,6 +320,27 @@ service RaftTransport {
   rpc EnrollMember(EnrollMemberRequest) returns (EnrollMemberResponse);
   // Exchange a member's still-valid certificate for a new one with the same name.
   rpc RenewMember(RenewMemberRequest) returns (RenewMemberResponse);
+  // Relay an exec/attach/port-forward-style operation frame to the control-plane
+  // member that owns the target node's one live agent session. The same call
+  // carries agent output back to the member that accepted the API stream.
+  rpc RelayOperation(RoutedOperation) returns (RoutedOperationResult);
+}
+
+message RoutedOperation {
+  string source_member = 1;
+  string node_name = 2;
+  oneof payload {
+    OperationRequest operation_request = 10;
+    OperationInput operation_input = 11;
+    OperationCancel operation_cancel = 12;
+    OperationStream operation_stream = 13;
+    OperationResponse operation_response = 14;
+  }
+}
+
+message RoutedOperationResult {
+  bool accepted = 1;
+  string error_message = 2;
 }
 
 message RenewMemberRequest {
@@ -341,6 +366,8 @@ message EnrollMemberResponse {
   // Voters only, so agents and API clients keep working when another member takes over.
   string node_ca_certificate = 4;
   string node_ca_private_key = 5;
+  // Voters must mint and verify every Pod's projected token with one cluster key.
+  string service_account_signing_key = 6;
 }
 
 message RaftEnvelope {
@@ -349,6 +376,18 @@ message RaftEnvelope {
 }
 
 message RaftAck {
+}
+
+message RaftProposal {
+  bytes command = 1;
+}
+
+message RaftProposalResult {
+  bool committed = 1;
+  string reason = 2;
+  // The committed log position lets the forwarding member delay its API
+  // response until its own state machine has applied the write.
+  uint64 index = 3;
 }
 
 message RaftMember {

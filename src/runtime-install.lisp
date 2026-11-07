@@ -18,6 +18,8 @@
              (format stream "~A" (runtime-install-error-message condition)))))
 
 (defun runtime-install-error (format-control &rest arguments)
+  "Signal a RUNTIME-INSTALL-ERROR whose message is FORMAT-CONTROL formatted with
+   ARGUMENTS. Does not return."
   (error 'runtime-install-error :message (apply #'format nil format-control arguments)))
 
 (defun runtime-machine-arch ()
@@ -210,6 +212,12 @@
 ;;; ---------------------------------------------------------------------------
 
 (defun install-gvisor-runtime (state-directory &key (release "latest"))
+  "Download the gVisor RELEASE bundle and its SHA-512 for this machine's arch, verify
+   the checksum, unpack runsc and its containerd shim into a fresh
+   <state>/runtime-addons/gvisor/, mark them executable, and write the addon.json
+   descriptor. The scratch download directory is always removed. Errors
+   (RUNTIME-INSTALL-ERROR) on a checksum mismatch or a missing binary. Returns
+   (values addon-directory \"gvisor\")."
   (let* ((arch (ecase (runtime-machine-arch) (:amd64 "x86_64") (:arm64 "aarch64")))
          (base (format nil "https://storage.googleapis.com/gvisor/releases/release/~A/~A"
                        release arch))
@@ -305,6 +313,15 @@
 
 (defun install-kata-runtime (state-directory &key (version "4.3.1") (hypervisor "qemu") sha256
                                                   bundle-path)
+  "Install the Kata Containers VERSION bundle for HYPERVISOR into a fresh
+   <state>/runtime-addons/kata/. Downloads the release tarball (or uses a local
+   BUNDLE-PATH) and verifies it against SHA256 -- which is mandatory: with none pinned
+   it errors, printing the downloaded file's hash for trust-on-first-use. Unpacks under
+   opt/kata, relocates the compiled-in /opt/kata paths in the configs, symlinks the
+   shim onto the addon PATH, re-checksums the kernel/image/initrd the chosen config
+   boots, writes addon.json, and points /opt/kata at the bundle. Errors
+   (RUNTIME-INSTALL-ERROR) on an unsupported hypervisor, a checksum mismatch, or a
+   missing config/shim. Returns (values addon-directory \"kata\")."
   (let ((config-relative (cdr (assoc hypervisor +kata-configuration-names+ :test #'string=))))
     (unless config-relative
       (runtime-install-error "unsupported kata hypervisor: ~A" hypervisor))

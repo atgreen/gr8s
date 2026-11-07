@@ -21,6 +21,8 @@
    first use rather than at load/build time so the saved image carries no handle.")
 
 (defun ensure-libzstd ()
+  "Open the system libzstd in this process on first call and flag it loaded; a
+   no-op once loaded. Idempotent. Signals when no libzstd can be found."
   (unless *libzstd-loaded*
     (cffi:use-foreign-library libzstd)
     (setf *libzstd-loaded* t)))

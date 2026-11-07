@@ -31,8 +31,36 @@
         (concatenate 'string standard (make-string padding :initial-element #\=)))))))
 
 (defun service-account-signing-key-path (store)
-  "Return the private signing key record's path."
+  "Return the cluster-wide private signing key record's path under the shared PKI root."
+  (merge-pathnames "pki/service-account-signing-key.json" (pod-store-path store)))
+
+(defun legacy-service-account-signing-key-path (store)
+  "Return the pre-HA location of STORE's ServiceAccount signing key."
   (merge-pathnames "credentials/service-account-signing-key.json" (pod-store-path store)))
+
+(defun service-account-signing-key-path-under-pki-root (root)
+  "Return the ServiceAccount signing key path beneath a control plane's PKI ROOT."
+  (merge-pathnames "service-account-signing-key.json" (uiop:ensure-directory-pathname root)))
+
+(defun service-account-signing-key-from-record (record)
+  "Decode and validate the private key in parsed JSON RECORD."
+  (ironclad:make-private-key :secp256r1
+                             :x (hex-to-octets (gethash "d" record))
+                             :y (hex-to-octets (gethash "q" record))))
+
+(defun install-shared-service-account-signing-key (pki-root json)
+  "Install the cluster ServiceAccount signing key beneath PKI-ROOT without replacing a different one."
+  (let* ((path (service-account-signing-key-path-under-pki-root pki-root))
+         (incoming (service-account-signing-key-from-record (com.inuoe.jzon:parse json))))
+    (when (probe-file path)
+      (let ((existing (service-account-signing-key-from-record (com.inuoe.jzon:parse path))))
+        (unless (equal (service-account-key-id existing) (service-account-key-id incoming))
+          (pki-fail "service-account-signing-key-conflict"
+                    "~A already has a different ServiceAccount signing key" pki-root))
+        (return-from install-shared-service-account-signing-key path)))
+    (ensure-directories-exist path)
+    (write-private-text-atomically path json)
+    path))
 
 (defun load-service-account-signing-key (store)
   "Return the cluster's signing key, generating and persisting it once."
@@ -40,19 +68,25 @@
       (bt:with-lock-held ((pod-store-credential-lock store))
         (or (pod-store-service-account-signing-key store)
             (let* ((path (service-account-signing-key-path store))
-                   (key (if (probe-file path)
-                            (let ((record (com.inuoe.jzon:parse path)))
-                              (ironclad:make-private-key :secp256r1
-                                                         :x (hex-to-octets (gethash "d" record))
-                                                         :y (hex-to-octets (gethash "q" record))))
-                            (let* ((private (ironclad:generate-key-pair :secp256r1))
-                                   (parts (ironclad:destructure-private-key private)))
-                              (ensure-directories-exist path)
-                              (write-private-text-atomically
-                               path (com.inuoe.jzon:stringify
-                                     (core-object "d" (octets-to-hex (getf parts :x))
-                                                  "q" (octets-to-hex (getf parts :y)))))
-                              private))))
+                   (legacy (legacy-service-account-signing-key-path store))
+                   (key
+                     (cond
+                       ((probe-file path)
+                        (service-account-signing-key-from-record (com.inuoe.jzon:parse path)))
+                       ((probe-file legacy)
+                        (let ((json (uiop:read-file-string legacy)))
+                          (install-shared-service-account-signing-key
+                           (merge-pathnames "pki/" (pod-store-path store)) json)
+                          (service-account-signing-key-from-record (com.inuoe.jzon:parse json))))
+                       (t
+                        (let* ((private (ironclad:generate-key-pair :secp256r1))
+                               (parts (ironclad:destructure-private-key private)))
+                          (ensure-directories-exist path)
+                          (write-private-text-atomically
+                           path (com.inuoe.jzon:stringify
+                                 (core-object "d" (octets-to-hex (getf parts :x))
+                                              "q" (octets-to-hex (getf parts :y)))))
+                          private)))))
               (setf (pod-store-service-account-signing-key store) key))))))
 
 (defun service-account-public-point (key)

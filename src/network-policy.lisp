@@ -82,6 +82,7 @@ POLICY-TYPES (\"Ingress\"/\"Egress\")."
        (or ports #())))
 
 (defun %np-selector (selector)
+  "SELECTOR when it is a hash table (a parsed label selector), else NIL."
   (and (hash-table-p selector) selector))
 
 (defun %np-parse-peer (peer)
@@ -165,6 +166,8 @@ peers allows every peer."
                  pods))
 
 (defun np-ip-block (cidr &optional except)
+  "An ipBlock peer object for CIDR, carrying an \"except\" array when EXCEPT is
+   given."
   (core-object "ipBlock" (if except
                              (core-object "cidr" cidr "except" (coerce except 'vector))
                              (core-object "cidr" cidr))))
@@ -391,6 +394,7 @@ every protocol and port NIL for every port. Group 0 allows nothing."
 ;;; Map encodings, matching the structs in src/egress-guard-program.lisp.
 
 (defun %netpol-u32-le (value)
+  "VALUE as a fresh 4-byte little-endian octet vector."
   (let ((bytes (make-array 4 :element-type '(unsigned-byte 8))))
     (dotimes (i 4 bytes) (setf (aref bytes i) (ldb (byte 8 (* 8 i)) value)))))
 
@@ -400,6 +404,8 @@ every protocol and port NIL for every port. Group 0 allows nothing."
     (netpol-prefix-lpm-key network length)))
 
 (defun netpol-prefix-lpm-key (network length)
+  "The eBPF LPM-trie key for the prefix NETWORK/LENGTH: the prefix LENGTH as a
+   little-endian u32, then NETWORK's four octets in network (big-endian) order."
   (concatenate '(vector (unsigned-byte 8)) (%netpol-u32-le length)
                (vector (ldb (byte 8 24) network) (ldb (byte 8 16) network)
                        (ldb (byte 8 8) network) (ldb (byte 8 0) network))))

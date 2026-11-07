@@ -1,3 +1,26 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; The per-node Pod reconciler: it drives each Pod's observed runtime state toward
+;;;; its stored spec and derives the status gr8s publishes, the way a kubelet's sync
+;;;; loop does.
+;;;;
+;;;; A reconciler pairs a store with a container RUNTIME, which may run containers
+;;;; itself or delegate to nodes. Running Pods converge under a cancellable
+;;;; operation so a durable urgent deletion can preempt blocked creation:
+;;;; cancellation throws to a per-operation catch tag rather than signalling, so it
+;;;; survives an interrupt that lands inside SBCL's %SIGNAL (podster-uqb.114), and
+;;;; deletions themselves never register as cancellable and fence creation capacity
+;;;; on the node until their physical cleanup completes (podster-uqb.123). Phase and
+;;;; container-status derivation mirror the kubelet (getPhase, the exit-137
+;;;; ContainerStatusUnknown, and the stickiness of a terminal phase and of
+;;;; terminated container statuses) so clients never see a Pod forget a container or
+;;;; revert a terminal phase. When the runtime is down, synchronization is skipped
+;;;; and the last observation is reported rather than a fabricated Pending. Exec,
+;;;; attach, logs, and port-forward are thin pass-throughs to the runtime,
+;;;; serialized under the reconciler lock only when the runtime runs containers in
+;;;; this process.
+
 (in-package #:gr8s)
 
 (defstruct (reconciler (:constructor make-reconciler (store runtime)))
@@ -153,11 +176,14 @@ finishes stops the node starting Pods, and nothing else reports it (podster-uqb.
     status))
 
 (defun deletion-requested-p (pod)
+  "Return whether POD's metadata has a deletionTimestamp set -- true once its
+   deletion has been requested (the key's presence, even if its value is null)."
   (nth-value 1
              (gethash "deletionTimestamp"
                       (gethash "metadata" (pod-to-object pod)))))
 
 (defun pod-status (phase &key reason message)
+  "Return a fresh status object carrying PHASE and, when supplied, REASON and MESSAGE."
   (let ((status (make-hash-table :test #'equal)))
     (setf (gethash "phase" status) phase)
     (when reason
@@ -167,6 +193,9 @@ finishes stops the node starting Pods, and nothing else reports it (podster-uqb.
     status))
 
 (defun observed-status (runtime-pod)
+  "Return the status object for an observed RUNTIME-POD: its reported status (or a
+   bare phase when it has none), with the phase overwritten from the observation and
+   podIP/podIPs added when it has a Pod IP."
   (let ((status (if (runtime-pod-status runtime-pod)
                     (com.inuoe.jzon:parse (com.inuoe.jzon:stringify (runtime-pod-status runtime-pod)))
                     (pod-status (runtime-pod-phase runtime-pod)))))
@@ -263,6 +292,14 @@ finishes stops the node starting Pods, and nothing else reports it (podster-uqb.
       (copy-core-object status))))
 
 (defun converge-running-pod (reconciler pod)
+  "Converge a running (non-deleting) POD one pass and return the status to publish.
+   On a runtime that runs containers, a Pod past its active deadline is stopped and
+   failed, and a Pod already recorded evicted keeps that status. Otherwise the
+   containers are observed and, when the stored resourceVersion differs from what
+   runs, ensured, else reconciled in place -- adoption is proved by the durable
+   spec fingerprint, so a metadata-only revision bump does not re-ensure; a Pod over
+   its ephemeral-storage limit is evicted. The returned status carries
+   observedGeneration once the observation matches the Pod's resourceVersion."
   (when (runtime-runs-containers-p (reconciler-runtime reconciler))
     (when (pod-active-deadline-exceeded-p pod)
       (return-from converge-running-pod (fail-pod-past-deadline (reconciler-runtime reconciler) pod)))
@@ -462,6 +499,15 @@ terminal phase clients saw, even when a node rebuilt its acknowledgement from le
                                                      (pod-observed-resource-version store pod))))))))
 
 (defun converge-deleting-pod (reconciler pod)
+  "Converge a deleting POD one pass and return the status to publish. When the Pod
+   has finalizers or an in-flight finalization, this delegates to the finalized-
+   deletion path. Otherwise it advances runtime shutdown: once the runtime reports
+   deletion complete it publishes the terminal status clients last saw, forgets the
+   runtime's finalization record, releases the Pod's urgent-deletion fence, removes
+   the Pod from the store, and returns a status reasoned \"Deleted\"; while shutdown
+   is still in progress it returns the current terminating status reasoned
+   \"Terminating\", keeping real container observations and observedGeneration
+   through the grace period."
   (when (or (pod-finalizers-present-p pod) (pod-finalization-state (reconciler-store reconciler) pod))
     (return-from converge-deleting-pod (converge-finalized-pod-deletion reconciler pod)))
   (let* ((store (reconciler-store reconciler))
@@ -504,6 +550,13 @@ terminal phase clients saw, even when a node rebuilt its acknowledgement from le
           status))))
 
 (defun reconcile-pod (reconciler namespace name)
+  "Reconcile the Pod named NAMESPACE/NAME one pass under the reconciler lock and
+   return the status produced, with its status conditions added. Converges a
+   deletion or a running Pod as appropriate. If the runtime is unavailable,
+   synchronization is skipped and the Pod's last observed status is reported (or
+   Pending/ContainerRuntimeUnavailable when there is none), as a kubelet does with a
+   dead runtime; a runtime error that is not an outage yields a Pending/RuntimeError
+   status, or the retained finalization status for a deleting Pod."
   (bt:with-lock-held ((reconciler-lock reconciler))
     (let ((pod (get-pod (reconciler-store reconciler) namespace name)))
       (handler-case
@@ -542,21 +595,37 @@ terminal phase clients saw, even when a node rebuilt its acknowledgement from le
                            :reason "RuntimeError"
                            :message (runtime-error-message error)))))))))
 
-(defun reconcile-written-pod (reconciler pod)
+(defun reconcile-written-pod (reconciler pod &key (reconcile #'reconcile-pod))
   "Reconcile POD, which a request has just written, for that request's response.
 A write that releases the last finalizer of a deleting Pod lets any reconciliation
 retire it, and another one can win the reconciler lock first. The write still
-succeeded, so answer as if this request had retired the Pod itself."
-  (handler-case (reconcile-pod reconciler (pod-namespace pod) (pod-name pod))
-    (kubernetes-error (condition)
-      (if (and (= 404 (kubernetes-error-status-code condition)) (deletion-requested-p pod)
-               (not (pod-finalizers-present-p pod)))
-          (pod-status "Succeeded" :reason "Deleted")
-          (error condition)))))
+succeeded, so answer as if this request had retired the Pod itself. In HA, a
+follower-authored whole-index proposal can briefly be displaced by an earlier
+committed snapshot; wait for this write's committed view instead of returning a
+spurious 404 from the same request that created the Pod."
+  (let ((store (reconciler-store reconciler))
+        (deadline (+ (get-internal-real-time) (* 2 internal-time-units-per-second))))
+    (loop
+      (handler-case
+          (return (funcall reconcile reconciler (pod-namespace pod) (pod-name pod)))
+        (kubernetes-error (condition)
+          (cond
+            ((and (= 404 (kubernetes-error-status-code condition)) (deletion-requested-p pod)
+                  (not (pod-finalizers-present-p pod)))
+             (return (pod-status "Succeeded" :reason "Deleted")))
+            ((and (= 404 (kubernetes-error-status-code condition))
+                  (pod-store-consensus-commit-fn store)
+                  (< (get-internal-real-time) deadline))
+             (sleep 0.01))
+            (t (error condition))))))))
 
 (defun delete-reconciled-pod (reconciler namespace name &key uid resource-version
                                                       (grace-period nil grace-supplied-p)
                                                       dry-run)
+  "Mark the Pod NAMESPACE/NAME for deletion and converge that deletion one pass,
+   under the reconciler lock. Returns (values STATUS POD): the published deletion
+   status (NIL on DRY-RUN) and the marked Pod. UID, RESOURCE-VERSION, and
+   GRACE-PERIOD are passed through to MARK-POD-DELETING as deletion preconditions."
   (bt:with-lock-held ((reconciler-lock reconciler))
     (let ((pod (apply #'mark-pod-deleting (reconciler-store reconciler) namespace name
                       :uid uid :resource-version resource-version :dry-run dry-run
@@ -566,6 +635,11 @@ succeeded, so answer as if this request had retired the Pod itself."
                                           (converge-deleting-pod reconciler pod))) pod))))
 
 (defun reconcile-all (reconciler &key observer)
+  "Reconcile every Pod in the store one pass -- deletions first, then by descending
+   spec priority -- and return the list of statuses produced. A no-op returning NIL
+   while the runtime is unavailable. A superseded creation is dropped silently; any
+   other per-Pod error is logged and skipped so one Pod cannot starve the rest.
+   OBSERVER, when given, is called with each Pod and its status."
   ;; kubelet skips Pod synchronization while its runtime is down; the runtime
   ;; supervisor reports the outage once instead of every Pod failing each pass.
   (when (runtime-unavailable-message (reconciler-runtime reconciler))
@@ -599,6 +673,9 @@ read and write behind it."
       (funcall function)))
 
 (defun reconciler-logs (reconciler uid container &key tail previous)
+  "Return CONTAINER's logs for the Pod UID from the runtime -- TAIL lines, or the
+   PREVIOUS instance -- serialized under the reconciler lock when the runtime runs
+   containers in this process."
   (call-with-runtime-serialized
    reconciler
    (lambda ()
@@ -607,6 +684,9 @@ read and write behind it."
 
 (defun reconciler-exec-url
     (reconciler uid container command &key stdin stdout stderr tty)
+  "Return a one-time streaming exec URL for running COMMAND in CONTAINER of the Pod
+   UID, with the requested stdin/stdout/stderr/tty streams, from the runtime;
+   serialized under the reconciler lock when the runtime runs containers in-process."
   (call-with-runtime-serialized
    reconciler
    (lambda ()
@@ -616,6 +696,9 @@ read and write behind it."
 
 (defun reconciler-start-exec-session
     (reconciler uid container command &key stdin stdout stderr tty)
+  "Start an interactive exec of COMMAND in CONTAINER of the Pod UID and return its
+   session, with the requested streams; serialized under the reconciler lock when
+   the runtime runs containers in-process."
   (call-with-runtime-serialized
    reconciler
    (lambda ()
@@ -624,30 +707,41 @@ read and write behind it."
       :stdin stdin :stdout stdout :stderr stderr :tty tty))))
 
 (defun reconciler-start-attach-session (reconciler uid container &key stdin stdout stderr tty)
+  "Start an interactive attach to CONTAINER of the Pod UID and return its session,
+   with the requested streams, delegating straight to the runtime."
   (runtime-start-attach-session (reconciler-runtime reconciler) uid container
                                 :stdin stdin :stdout stdout :stderr stderr :tty tty))
 
 (defun reconciler-attach-url (reconciler uid container &key stdin stdout stderr tty)
+  "Return a one-time streaming attach URL for CONTAINER of the Pod UID, with the
+   requested streams, from the runtime."
   (runtime-attach-url (reconciler-runtime reconciler) uid container
                       :stdin stdin :stdout stdout :stderr stderr :tty tty))
 
 (defun reconciler-send-exec-session-input
     (reconciler session channel data &key rows columns eof)
+  "Send DATA on CHANNEL of exec SESSION to the runtime, optionally resizing to ROWS
+   by COLUMNS or signalling EOF on the channel."
   (runtime-send-exec-session-input
    (reconciler-runtime reconciler) session channel data
    :rows rows :columns columns :eof eof))
 
 (defun reconciler-next-exec-session-output
     (reconciler session cursor &key timeout)
+  "Return the next output from exec SESSION after CURSOR from the runtime, waiting
+   up to TIMEOUT."
   (runtime-next-exec-session-output
    (reconciler-runtime reconciler) session cursor :timeout timeout))
 
 (defun reconciler-exec-session-exit-code (reconciler session)
+  "Return the exit code of exec SESSION from the runtime."
   (runtime-exec-session-exit-code (reconciler-runtime reconciler) session))
 
 (defun reconciler-cancel-exec-session (reconciler session reason)
+  "Cancel exec SESSION with REASON through the runtime."
   (runtime-cancel-exec-session
    (reconciler-runtime reconciler) session reason))
 
 (defun reconciler-release-exec-session (reconciler session)
+  "Release exec SESSION's resources through the runtime."
   (runtime-release-exec-session (reconciler-runtime reconciler) session))

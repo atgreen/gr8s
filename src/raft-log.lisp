@@ -34,6 +34,9 @@ It holds replicated state including Secrets, so only its owner may read it."
                                     :if-exists :append :if-does-not-exist :create)))
 
 (defun file-raft-write (storage form)
+  "Append FORM to STORAGE's WAL as one compact, single-line record (printer
+   specials bound off), then terminate the line, flush, and best-effort fsync so a
+   committed record survives a crash."
   (let ((stream (file-raft-storage-stream storage))
         (*print-readably* nil) (*print-circle* nil) (*print-pretty* nil))
     (prin1 form stream)
@@ -55,6 +58,7 @@ It holds replicated state including Secrets, so only its owner may read it."
   (file-raft-write storage (list :snapshot index term state)))
 
 (defun close-file-raft-storage (storage)
+  "Close STORAGE's WAL stream, ignoring any error."
   (ignore-errors (close (file-raft-storage-stream storage))))
 
 ;;; ---------------------------------------------------------------------------

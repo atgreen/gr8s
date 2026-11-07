@@ -63,10 +63,25 @@
   (match-index (make-hash-table :test 'equal))
   ;; candidate volatile
   (votes (make-hash-table :test 'equal))
+  ;; pre-candidate volatile (Pre-Vote, Raft dissertation §9.6): a node that times
+  ;; out first asks whether it COULD win, at a hypothetical next term, WITHOUT
+  ;; incrementing its own term. Only a quorum of grants promotes it to a real
+  ;; candidate. This stops a joining or partitioned member from bumping the term
+  ;; and deposing a healthy leader (podster-8r7). PRE-VOTE-TERM is the hypothetical
+  ;; term of the round in flight, or NIL when not pre-campaigning.
+  (pre-votes (make-hash-table :test 'equal))
+  pre-vote-term
   ;; logical timers (ticks)
   (election-elapsed 0 :type fixnum)
   (heartbeat-elapsed 0 :type fixnum)
   (election-timeout 10 :type fixnum)
+  ;; Ticks since this node last heard a valid AppendEntries from the leader, reset
+  ;; only by that heartbeat (NOT by starting a pre-election). Pre-Vote grants are
+  ;; keyed on this, not ELECTION-ELAPSED, so a node pre-electing does not reset its
+  ;; own leader-liveness view and a follower still hearing the leader refuses to
+  ;; grant -- which is what protects the leader. Starts "stale" so a fresh cluster
+  ;; (no leader yet) elects promptly (podster-8r7).
+  (leader-contact-elapsed 1000000 :type fixnum)
   (heartbeat-timeout 1 :type fixnum)
   ;; injectables
   send-fn                               ; (lambda (to message-plist))
@@ -93,6 +108,8 @@
   (:method ((storage null) index term state) (declare (ignore index term state)) nil))
 
 (defun raft-persist-hard-state (node)
+  "Persist NODE's current term and vote to durable storage so they survive a
+   crash (Raft §5). A no-op when NODE has no storage (the volatile simulator)."
   (raft-storage-save-hard-state (raft-node-storage node)
                                 (raft-node-current-term node) (raft-node-voted-for node)))
 
@@ -117,8 +134,14 @@
         ((< index (raft-node-snapshot-index node)) (raft-node-snapshot-term node))
         (t (let ((e (raft-log-entry node index))) (if e (raft-entry-term e) 0)))))
 
-(defun raft-last-log-index (node) (raft-log-length node))
-(defun raft-last-log-term (node) (raft-log-term node (raft-log-length node)))
+(defun raft-last-log-index (node)
+  "The absolute index of NODE's last log entry (the snapshot boundary when the
+   in-memory tail is empty)."
+  (raft-log-length node))
+(defun raft-last-log-term (node)
+  "The term of NODE's last log entry (snapshot-term when the tail is empty, 0 for
+   a wholly empty log)."
+  (raft-log-term node (raft-log-length node)))
 
 (defun raft-log-truncate (node index)
   "Drop every entry at absolute INDEX and beyond."
@@ -127,6 +150,8 @@
   (raft-storage-truncate (raft-node-storage node) index))
 
 (defun raft-log-append (node entry)
+  "Append ENTRY to NODE's log, stamp its index slot with its new absolute
+   position, persist it, and return ENTRY."
   (vector-push-extend entry (raft-node-log node))
   (setf (raft-entry-index entry) (raft-log-length node))
   (raft-storage-append-entry (raft-node-storage node) entry)
@@ -162,11 +187,18 @@
   (when (raft-node-restore-fn node) (funcall (raft-node-restore-fn node) state)))
 
 (defun raft-majority (node)
+  "The quorum size: a strict majority of the cluster, floor(N/2)+1 for N = this
+   node plus its peers."
   (1+ (floor (1+ (length (raft-node-peers node))) 2)))  ; floor((N+1)/2)+ -> strict majority of N
 
-(defun raft-cluster-size (node) (1+ (length (raft-node-peers node))))
+(defun raft-cluster-size (node)
+  "The cluster size: this node plus its peers."
+  (1+ (length (raft-node-peers node))))
 
-(defun raft-member-role (node id) (gethash id (raft-node-roles node) :voter))
+(defun raft-member-role (node id)
+  "ID's role in NODE's cluster (:voter, :witness or :learner), defaulting to
+   :voter when unrecorded."
+  (gethash id (raft-node-roles node) :voter))
 
 (defun raft-replicate-ids (node)
   "Everyone the leader replicates to: quorum peers, members being added, and
@@ -199,27 +231,67 @@
 ;;; Role transitions.
 
 (defun raft-reset-election-timer (node)
+  "Restart NODE's election timer: zero the elapsed count and draw a fresh
+   timeout from its timeout-fn (randomized in production)."
   (setf (raft-node-election-elapsed node) 0
         (raft-node-election-timeout node) (funcall (raft-node-timeout-fn node))))
 
 (defun raft-become-follower (node term &optional leader-id)
+  "Revert NODE to a follower at TERM (optionally knowing LEADER-ID): clear its
+   vote, abandon any in-flight membership add and removal delivery, persist the
+   hard state, and restart the election timer."
   (setf (raft-node-role node) :follower
         (raft-node-current-term node) term
         (raft-node-voted-for node) nil
-        (raft-node-leader-id node) leader-id)
+        (raft-node-leader-id node) leader-id
+        (raft-node-pre-vote-term node) nil         ; abandon any in-flight pre-election
+        ;; Stepping down without a known leader means no recent leader contact, so
+        ;; a fresh pre-election may proceed; adopting a leader resets contact below.
+        (raft-node-leader-contact-elapsed node) (if leader-id 0 1000000))
   (clrhash (raft-node-pending-members node))   ; abandon any in-flight add on leadership loss
   (clrhash (raft-node-departing-members node)) ; a new leader restarts removal delivery
   (raft-persist-hard-state node)
   (raft-reset-election-timer node))
 
 (defun raft-send (node to message)
+  "Hand MESSAGE to NODE's injected transport for delivery to member TO."
   (funcall (raft-node-send-fn node) to message))
 
 (defun raft-broadcast (node message-fn)
+  "Send each peer the message (MESSAGE-FN peer) returns, via NODE's transport.
+   Peers only -- not members being added or dropped."
   (dolist (peer (raft-node-peers node))
     (raft-send node peer (funcall message-fn peer))))
 
+(defun raft-begin-pre-election (node)
+  "Pre-Vote (Raft dissertation §9.6): without touching term, role, or vote, ask
+   peers whether this node could win at the next term. Reset the election timer,
+   grant self, and -- unless a one-node quorum already suffices -- broadcast a
+   :pre-vote for term (1+ current). Only a quorum of grants promotes to a real
+   candidate; short of that the term is never bumped, so a member that cannot win
+   (it is behind, or a healthy leader still rules) cannot depose the leader
+   (podster-8r7)."
+  (when (eq (raft-node-self-role node) :voter)
+    (setf (raft-node-pre-vote-term node) (1+ (raft-node-current-term node)))
+    (clrhash (raft-node-pre-votes node))
+    (setf (gethash (raft-node-id node) (raft-node-pre-votes node)) t)
+    (raft-reset-election-timer node)
+    (if (>= (hash-table-count (raft-node-pre-votes node)) (raft-majority node))
+        (raft-become-candidate node)
+        (raft-broadcast node
+                        (lambda (peer)
+                          (declare (ignore peer))
+                          (list :type :pre-vote
+                                :term (raft-node-pre-vote-term node)
+                                :from (raft-node-id node)
+                                :last-log-index (raft-last-log-index node)
+                                :last-log-term (raft-last-log-term node)))))))
+
 (defun raft-become-candidate (node)
+  "Start an election: advance to the next term as a candidate, vote for self,
+   persist the hard state, restart the election timer, and request votes from
+   every peer. Wins at once in a single-node cluster."
+  (setf (raft-node-pre-vote-term node) nil)
   (setf (raft-node-role node) :candidate)
   (incf (raft-node-current-term node))
   (setf (raft-node-voted-for node) (raft-node-id node)
@@ -240,11 +312,15 @@
   (raft-maybe-become-leader node))
 
 (defun raft-maybe-become-leader (node)
+  "Promote NODE to leader when it is still a candidate and has collected a quorum
+   of votes; otherwise a no-op."
   (when (and (eq (raft-node-role node) :candidate)
              (>= (hash-table-count (raft-node-votes node)) (raft-majority node)))
     (raft-become-leader node)))
 
 (defun raft-become-leader (node)
+  "Assume leadership: reset the per-peer next/match-index for everyone replicated
+   to and broadcast an immediate AppendEntries to assert the new term."
   (setf (raft-node-role node) :leader
         (raft-node-leader-id node) (raft-node-id node))
   (clrhash (raft-node-next-index node))
@@ -259,6 +335,9 @@
 ;;; Leader replication.
 
 (defun raft-append-message (node peer)
+  "Build the AppendEntries message for PEER: the entries from its next-index
+   onward, the preceding entry's index and term for the log-match check, and the
+   leader's commit index."
   (let* ((next (gethash peer (raft-node-next-index node) (1+ (raft-last-log-index node))))
          (prev-index (1- next))
          (entries (loop for i from next to (raft-last-log-index node)
@@ -272,6 +351,9 @@
           :leader-commit (raft-node-commit-index node))))
 
 (defun raft-broadcast-append (node)
+  "Send every replicated member (peers, joiners, and departing members) an
+   AppendEntries and reset the heartbeat timer. Stops tracking a departing member
+   once its match-index shows it has stored its own removal entry."
   (setf (raft-node-heartbeat-elapsed node) 0)
   (dolist (peer (raft-replicate-ids node))
     (raft-send node peer (raft-append-message node peer)))
@@ -299,6 +381,10 @@
 ;;; Apply committed entries to the state machine.
 
 (defun raft-apply-committed (node)
+  "Apply every newly committed entry to the state machine in log order, advancing
+   last-applied up to commit-index. A :raft-config entry reconfigures membership
+   instead of calling apply-fn; each entry's result resolves and clears any
+   pending client callback registered for its index."
   (loop while (< (raft-node-last-applied node) (raft-node-commit-index node))
         do (incf (raft-node-last-applied node))
            (let* ((index (raft-node-last-applied node))
@@ -421,6 +507,11 @@
     t))
 
 (defun raft-handle-request-vote (node msg)
+  "Handle a RequestVote: step down first if MSG's term is newer, then grant the
+   vote only when the terms match, this node has not already voted for someone
+   else, and the candidate's log is at least as up-to-date (Raft §5.4.1). A
+   granted vote is recorded, persisted, and resets the election timer; either way
+   a reply goes back to the candidate."
   (raft-step-down-if-stale node (getf msg :term))
   (let* ((term (getf msg :term))
          (candidate (getf msg :from))
@@ -439,6 +530,9 @@
                      :from (raft-node-id node) :granted grant))))
 
 (defun raft-handle-request-vote-reply (node msg)
+  "Handle a RequestVote reply: step down if MSG's term is newer, else -- while
+   still a candidate for this term -- count a granted vote and promote to leader
+   on reaching quorum."
   (raft-step-down-if-stale node (getf msg :term))
   (when (and (eq (raft-node-role node) :candidate)
              (= (getf msg :term) (raft-node-current-term node))
@@ -446,7 +540,44 @@
     (setf (gethash (getf msg :from) (raft-node-votes node)) t)
     (raft-maybe-become-leader node)))
 
+(defun raft-handle-pre-vote (node msg)
+  "Answer a Pre-Vote: grant iff this node is not itself the leader, its own
+   election timer has expired (it sees no live leader), the candidate's log is at
+   least as up-to-date (Raft §5.4.1), and the candidate's hypothetical term is not
+   behind ours. Granting changes neither our term nor our vote, and never resets
+   our election timer -- so a flood of pre-votes cannot keep a follower from timing
+   out, and a follower still hearing a leader's heartbeats refuses, which is what
+   protects a healthy leader (podster-8r7)."
+  (let* ((up-to-date (or (> (getf msg :last-log-term) (raft-last-log-term node))
+                         (and (= (getf msg :last-log-term) (raft-last-log-term node))
+                              (>= (getf msg :last-log-index) (raft-last-log-index node)))))
+         (grant (and (not (eq (raft-node-role node) :leader))
+                     (>= (raft-node-leader-contact-elapsed node) (raft-node-election-timeout node))
+                     (> (getf msg :term) (raft-node-current-term node))
+                     up-to-date)))
+    (raft-send node (getf msg :from)
+               (list :type :pre-vote-reply :term (raft-node-current-term node)
+                     :pre-term (getf msg :term) :from (raft-node-id node) :granted grant))))
+
+(defun raft-handle-pre-vote-reply (node msg)
+  "Count a Pre-Vote grant for the round in flight; on a quorum, become a real
+   candidate for that term. A reply revealing a higher term means this node is
+   behind, so adopt it and stand down. Replies for a stale round are ignored."
+  (raft-step-down-if-stale node (getf msg :term))
+  (when (and (raft-node-pre-vote-term node)
+             (eql (getf msg :pre-term) (raft-node-pre-vote-term node))
+             (getf msg :granted)
+             (not (eq (raft-node-role node) :leader)))
+    (setf (gethash (getf msg :from) (raft-node-pre-votes node)) t)
+    (when (>= (hash-table-count (raft-node-pre-votes node)) (raft-majority node))
+      (raft-become-candidate node))))
+
 (defun raft-handle-append-entries (node msg)
+  "Handle an AppendEntries from a leader: reject (success nil) when MSG's term is
+   stale or the previous-entry log-match check fails; otherwise accept leadership
+   for the term, append or overwrite the entries, advance the commit index
+   (capped at the last new entry), apply, and reply with the matched index. A
+   valid leader resets the election timer."
   (let ((term (getf msg :term)) (leader (getf msg :from)))
     (raft-step-down-if-stale node term)
     (cond
@@ -458,6 +589,7 @@
        ;; Valid leader for our term.
        (when (eq (raft-node-role node) :candidate) (raft-become-follower node term leader))
        (setf (raft-node-leader-id node) leader)
+       (setf (raft-node-leader-contact-elapsed node) 0)   ; heard the leader: Pre-Vote stickiness
        (raft-reset-election-timer node)
        (let ((prev-index (getf msg :prev-log-index))
              (prev-term (getf msg :prev-log-term)))
@@ -486,6 +618,10 @@
                                               :success t :match-index last-new))))))))))
 
 (defun raft-handle-append-entries-reply (node msg)
+  "Handle an AppendEntries reply as leader: on success record the peer's
+   match/next-index and advance the commit index (applying anything newly
+   committed); on failure back the peer's next-index up by one for the next
+   round. Steps down first if MSG's term is newer."
   (raft-step-down-if-stale node (getf msg :term))
   (when (and (eq (raft-node-role node) :leader)
              (= (getf msg :term) (raft-node-current-term node)))
@@ -501,7 +637,11 @@
                 (max 1 (1- (gethash peer (raft-node-next-index node) 1))))))))
 
 (defun raft-handle-message (node msg)
+  "Dispatch MSG to the handler for its :type (request-vote and its reply,
+   append-entries and its reply). Signals on an unknown type."
   (ecase (getf msg :type)
+    (:pre-vote (raft-handle-pre-vote node msg))
+    (:pre-vote-reply (raft-handle-pre-vote-reply node msg))
     (:request-vote (raft-handle-request-vote node msg))
     (:request-vote-reply (raft-handle-request-vote-reply node msg))
     (:append-entries (raft-handle-append-entries node msg))
@@ -517,11 +657,14 @@
   (unless (raft-node-removed node)
     (case (raft-node-role node)
       ((:follower :candidate)
+       (incf (raft-node-leader-contact-elapsed node))   ; time since a leader heartbeat (Pre-Vote)
        (when (eq (raft-node-self-role node) :voter)
          (when (>= (incf (raft-node-election-elapsed node)) (raft-node-election-timeout node))
-           (raft-become-candidate node))))
+           (raft-begin-pre-election node))))
       (:leader
        (when (>= (incf (raft-node-heartbeat-elapsed node)) (raft-node-heartbeat-timeout node))
          (raft-broadcast-append node))))))
 
-(defun raft-leader-p (node) (eq (raft-node-role node) :leader))
+(defun raft-leader-p (node)
+  "True when NODE currently holds the leader role."
+  (eq (raft-node-role node) :leader))

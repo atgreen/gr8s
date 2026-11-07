@@ -1,3 +1,24 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; A node agent's self-managed containerd: launch, configure, supervise and
+;;;; stop the container runtime the agent owns, as a node's service manager would
+;;;; (podster-uqb.138).
+;;;;
+;;;; The agent writes containerd's config.toml and the gr8s CNI conflist under a
+;;;; per-node state directory, launches containerd, and waits for its CRI socket
+;;;; to answer before declaring it ready. A supervisor thread restarts the
+;;;; process whenever it exits, backing off exponentially up to RESTART-MAX-DELAY
+;;;; and resetting once an instance has run RESTART-STABLE-SECONDS; running Pods
+;;;; survive the outage because their shims outlive containerd, which reconnects
+;;;; to them on restart. RUNTIME-AVAILABILITY lets the rest of the agent see the
+;;;; gap: while containerd is down it pauses Pod synchronization and reports the
+;;;; Node NotReady, as kubelet does for a dead runtime. The managed bpffs is
+;;;; mounted before containerd and deliberately left pinned across an agent
+;;;; restart so Pod BPF maps and TCX links (and their counters) survive for the
+;;;; next process to adopt. Extra CRI runtime handlers (e.g. a gVisor runsc
+;;;; addon, podster-mgw) append after the built-in runc in the generated config.
+
 (in-package #:gr8s)
 
 (defstruct (runtime-availability (:constructor make-runtime-availability ()))
@@ -94,6 +115,9 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
   (exit-describer #'describe-containerd-exit))
 
 (defun containerd-platform-for-machine (machine)
+  "Map a uname MACHINE string (x86_64/x86-64/amd64, or aarch64/arm64; case-
+   insensitive) to the containerd platform label \"linux/amd64\" or
+   \"linux/arm64\". Signals an error on any other architecture."
   (let ((normalized (string-downcase machine)))
     (cond
       ((member normalized '("x86_64" "x86-64" "amd64") :test #'string=)
@@ -104,6 +128,8 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
        (error "unsupported containerd machine architecture: ~A" machine)))))
 
 (defun launch-containerd-process (command log-path environment)
+  "Launch COMMAND as a child process with ENVIRONMENT, appending its stdout and
+   stderr to LOG-PATH (created if absent). Returns the UIOP process handle."
   (ensure-directories-exist log-path)
   (with-open-file (stream log-path
                           :direction :output
@@ -118,6 +144,7 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
                        :if-error-output-exists :append))
 
 (defun containerd-process-alive-p (process)
+  "True while PROCESS has not yet exited."
   (uiop:process-alive-p process))
 
 (defun describe-containerd-exit (process)
@@ -126,6 +153,8 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
     (if code (format nil "exit status ~D" code) "exit status unknown")))
 
 (defun containerd-cri-ready-p (socket-path)
+  "True when SOCKET-PATH exists and answers a CRI RuntimeVersion call within one
+   second. Fail-soft: any error is caught and reported as NIL."
   (and (probe-file socket-path)
        (handler-case
            (progn
@@ -140,6 +169,9 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
           (terminator #'uiop:terminate-process)
           (waiter #'uiop:wait-process)
           (sleeper #'sleep))
+  "Stop PROCESS: request a graceful termination, poll up to TIMEOUT seconds for
+   it to exit, then force it if still alive, and reap it. Bar the final reap, a
+   no-op when PROCESS is already dead. The keyword hooks exist for testing."
   (when (funcall process-alive-p process)
     (funcall terminator process :urgent nil)
     (let ((deadline (+ (get-internal-real-time)
@@ -152,6 +184,8 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
   (ignore-errors (funcall waiter process)))
 
 (defun default-shim-socket-directory (state-directory)
+  "A /tmp shim-socket directory path unique to STATE-DIRECTORY (keyed by a hash
+   of its namestring), so two managed containerds on one host do not collide."
   (format nil "/tmp/gr8s-shims-~8,'0X/"
           (logand #xffffffff
                   (sxhash (namestring
@@ -176,6 +210,11 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
           (restart-initial-delay 1)
           (restart-max-delay 30)
           (supervision-interval 0.25))
+  "Construct a MANAGED-CONTAINERD. STATE-DIRECTORY and CNI-BIN-DIRECTORY are
+   normalized to directory namestrings; SHIM-SOCKET-DIRECTORY defaults to one
+   derived from the state directory. The keyword collaborators (launcher,
+   probes, stopper, exit describer, bpf mounters, runtime preparer) default to
+   the real implementations and are overridable for testing."
   (let ((state (uiop:ensure-directory-pathname state-directory)))
     (%make-managed-containerd
      :state-directory state
@@ -203,27 +242,40 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
      :supervision-interval supervision-interval)))
 
 (defun managed-containerd-directory (manager relative-path)
+  "Resolve RELATIVE-PATH against MANAGER's state directory, as a namestring."
   (namestring
    (merge-pathnames relative-path
                     (managed-containerd-state-directory manager))))
 
 (defun managed-containerd-config-path (manager)
+  "Path to MANAGER's generated containerd config.toml."
   (managed-containerd-directory manager "containerd/config.toml"))
 
 (defun managed-containerd-socket-path (manager)
+  "Path to MANAGER's containerd CRI/gRPC control socket."
   (managed-containerd-directory manager "containerd/run/containerd.sock"))
 
 (defun managed-containerd-agent-cni-socket-path (manager)
+  "Path to the Unix socket the agent serves the gr8s CNI plugin on (named by the
+   generated conflist)."
   (managed-containerd-directory manager "containerd/run/gr8s-cni.sock"))
 
 (defun managed-containerd-runtime-directory (manager)
+  "Directory the embedded runtime assets (containerd, runc, CNI plugins) are
+   staged into when MANAGER carries them."
   (managed-containerd-directory manager "containerd/runtime/bin/"))
 
 (defun managed-containerd-bpf-directory (manager)
+  "Mount point for MANAGER's bpffs, where Pod BPF maps and TCX links are pinned."
   (managed-containerd-directory manager "containerd/bpf/"))
 
 (defun mount-managed-bpffs (directory &key (mounted-p #'filesystem-mounted-at-p)
                                            (mounter #'%linux-mount))
+  "Mount a bpffs at DIRECTORY (creating it) and return its namestring, unless one
+   is already mounted there -- a surviving mount is reused rather than
+   overmounted, which would hide the pinned links and discard their counters.
+   Signals an error when the mount fails. MOUNTED-P and MOUNTER are injectable
+   for testing."
   (let ((target (namestring (uiop:ensure-directory-pathname directory))))
     (ensure-directories-exist (merge-pathnames ".mount-point" target))
     ;; Reuse the node's surviving bpffs after an agent process restart. An
@@ -235,6 +287,10 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
     target))
 
 (defun unmount-managed-bpffs (directory &key (unmounter #'%linux-umount))
+  "Unmount the bpffs at DIRECTORY and return its namestring, unless it still
+   holds pinned Pod state (any nested */* entry) -- those maps and TCX links
+   stay pinned for the next agent process to adopt. Signals an error when the
+   unmount itself fails. UNMOUNTER is injectable for testing."
   (let ((target (namestring (uiop:ensure-directory-pathname directory))))
     ;; Running Pods outlive the agent. Keep their maps and TCX links pinned;
     ;; the next process must adopt them before reconnecting to the server.
@@ -245,6 +301,9 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
     target))
 
 (defun managed-containerd-binary-directory (manager)
+  "Directory holding the containerd and runc binaries: the staged runtime
+   directory when MANAGER carries embedded assets, otherwise the directory of
+   its configured executable."
   (if (managed-containerd-runtime-assets manager)
       (managed-containerd-runtime-directory manager)
       (string-right-trim
@@ -254,6 +313,11 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
          (pathname (managed-containerd-executable manager)))))))
 
 (defun managed-containerd-environment (manager)
+  "The child-process environment: the inherited environment with PATH replaced
+   by one that puts MANAGER's binary directory first, then any runtime-addon bin
+   directories, then the inherited PATH -- so containerd can exec runc and addon
+   shims by name. With no addons the result is byte-identical to the prior
+   \"PATH=<prefix>:<inherited>\" form."
   (let* ((prefix (managed-containerd-binary-directory manager))
          ;; Runtime-addon bin dirs join the PATH so containerd can exec their
          ;; shim binaries (e.g. containerd-shim-runsc-v1) by name; runc's own
@@ -273,6 +337,7 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
                      inherited))))
 
 (defun managed-containerd-command (manager)
+  "The argv that launches MANAGER's containerd against its generated config."
   (list (managed-containerd-executable manager)
         "--config"
         (managed-containerd-config-path manager)))
@@ -311,6 +376,10 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
               (format stream "            ~A = ~A~%" (car option) (cdr option)))))))))
 
 (defun managed-containerd-config-text (manager)
+  "Render MANAGER's containerd config.toml as a string (schema version 4):
+   root/state/temp under the state directory, the CRI image and runtime plugins
+   (with the runtime-handler block), the CNI plugin dirs, and the gRPC and ttrpc
+   control socket addresses."
   (let ((root (managed-containerd-directory manager "containerd/root"))
         (state (managed-containerd-directory manager "containerd/run"))
         (temporary (managed-containerd-directory manager "containerd/tmp"))
@@ -339,9 +408,13 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
      snapshotter socket socket)))
 
 (defun managed-containerd-log-path (manager)
+  "Path to the file MANAGER's containerd stdout and stderr are appended to."
   (managed-containerd-directory manager "containerd/containerd.log"))
 
 (defun managed-containerd-cni-config-text (manager)
+  "Render the gr8s CNI conflist (JSON) naming the agent's CNI socket and the
+   bpffs map-pin root, with egress direction. Because the egress guard is
+   JIT-compiled in-process, the conflist carries no ELF program path."
   ;; The egress guard is JIT-compiled in-process by the agent; the conflist
   ;; carries no ELF "program" path.
   (let ((map-pin-root (managed-containerd-bpf-directory manager)))
@@ -353,10 +426,14 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
      (com.inuoe.jzon:stringify (namestring map-pin-root)))))
 
 (defun managed-containerd-cni-config-path (manager)
+  "Path to MANAGER's generated gr8s CNI conflist."
   (managed-containerd-directory
    manager "containerd/cni/net.d/10-gr8s.conflist"))
 
 (defun write-managed-containerd-config (manager)
+  "Create MANAGER's runtime directory tree, write its containerd config.toml and
+   gr8s CNI conflist, and lock the shim-socket directory to mode 0700. Returns
+   the config path."
   (let ((path (managed-containerd-config-path manager)))
     (ensure-directories-exist path)
     (ensure-directories-exist
@@ -383,6 +460,7 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
     path))
 
 (defun managed-containerd-stopping (manager)
+  "True once MANAGER has been asked to stop (read under the supervisor lock)."
   (bt:with-lock-held ((managed-containerd-supervisor-lock manager))
     (managed-containerd-stopping-p manager)))
 
@@ -454,6 +532,9 @@ reconnects to them when it starts again."
                       (managed-containerd-restarts manager)))))))))
 
 (defun start-managed-containerd-supervisor (manager)
+  "Spawn MANAGER's supervisor thread, which restarts containerd on exit and logs
+   to the agent's *error-output*. The thread is stored in MANAGER's SUPERVISOR
+   slot."
   (setf (managed-containerd-supervisor manager)
         (let ((output *error-output*))
           ;; Log where the agent that owns this containerd logs.
@@ -463,6 +544,8 @@ reconnects to them when it starts again."
                           :name "gr8s managed containerd supervisor"))))
 
 (defun stop-managed-containerd-supervisor (manager)
+  "Signal MANAGER's supervisor to stop and join its thread, skipping the join
+   when called from the supervisor thread itself."
   (bt:with-lock-held ((managed-containerd-supervisor-lock manager))
     (setf (managed-containerd-stopping-p manager) t)
     (bt:condition-notify (managed-containerd-supervisor-changed manager)))
@@ -471,6 +554,8 @@ reconnects to them when it starts again."
       (ignore-errors (bt:join-thread thread)))))
 
 (defun stop-managed-containerd (manager)
+  "Stop MANAGER: halt the supervisor, then terminate the running containerd (via
+   the configured stopper) and clear the process slot. Returns NIL."
   (stop-managed-containerd-supervisor manager)
   (let ((process (managed-containerd-process manager)))
     (when process
@@ -480,6 +565,10 @@ reconnects to them when it starts again."
   nil)
 
 (defun start-managed-containerd (manager &key (timeout 30))
+  "Write MANAGER's config, launch containerd, and block until its CRI socket is
+   ready, returning MANAGER. Signals a RUNTIME-ERROR when containerd is already
+   running, exits during startup, or is not ready within TIMEOUT seconds
+   (terminating it on timeout)."
   (let ((existing (managed-containerd-process manager)))
     (when (and existing
                (funcall (managed-containerd-process-alive-p manager) existing))
@@ -513,6 +602,10 @@ reconnects to them when it starts again."
       (sleep 0.05))))
 
 (defun call-with-running-containerd (manager function)
+  "Start MANAGER's containerd (preloading its image archives) and supervisor,
+   call FUNCTION with no arguments, and stop everything on unwind. Installs a
+   liveness predicate on MANAGER's availability for the dynamic extent so a
+   caller can tell a dead runtime from a failed call. Returns FUNCTION's values."
   (bt:with-lock-held ((managed-containerd-supervisor-lock manager))
     (setf (managed-containerd-stopping-p manager) nil))
   (setf (runtime-availability-liveness (managed-containerd-availability manager))
@@ -530,12 +623,18 @@ reconnects to them when it starts again."
     (stop-managed-containerd manager)))
 
 (defun prepared-runtime-path (name paths)
+  "Return the namestring of the prepared runtime payload named NAME from PATHS
+   (an alist). Signals an error when it is absent."
   (let ((entry (assoc name paths :test #'string=)))
     (unless entry
       (error "embedded runtime payload is missing ~A" name))
     (namestring (cdr entry))))
 
 (defun call-with-managed-containerd (manager function)
+  "Run FUNCTION with MANAGER fully provisioned. When MANAGER is NIL, just call
+   FUNCTION. When MANAGER carries embedded runtime assets, stage them and point
+   its executable, OCI runtime and CNI bin directory at the staged paths first.
+   Either way, mount the bpffs and run a supervised containerd around FUNCTION."
   (cond
     ((null manager)
      (funcall function))
@@ -558,6 +657,8 @@ reconnects to them when it starts again."
      (call-with-managed-bpffs manager function))))
 
 (defun call-with-managed-bpffs (manager function)
+  "Mount MANAGER's bpffs, run FUNCTION under a running supervised containerd, and
+   unmount on unwind (the unmounter leaves pinned Pod state in place)."
   (let ((directory (managed-containerd-bpf-directory manager)))
     (funcall (managed-containerd-bpf-mounter manager) directory)
     (unwind-protect

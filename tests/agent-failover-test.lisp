@@ -16,6 +16,30 @@
   (is (equal '(("10.0.0.1" 7443) ("10.0.0.2" 7443))
              (gr8s::parse-agent-servers "10.0.0.1:7443, 10.0.0.2:7443"))))
 
+(test ha-node-endpoints-put-the-local-member-first
+  (let* ((node (gr8s::make-raft-node :id "cp2" :leader-id "cp1"))
+         (member (gr8s::make-raft-member :node node))
+         (hcp (gr8s::make-ha-control-plane :member member)))
+    (setf (gethash "cp1" (gr8s::raft-node-peer-addresses node)) '("10.0.0.1" 7444)
+          (gethash "cp2" (gr8s::raft-node-peer-addresses node)) '("10.0.0.2" 7444)
+          (gethash "cp3" (gr8s::raft-node-peer-addresses node)) '("10.0.0.3" 7444))
+    (is (equal '(("10.0.0.2" 7443)
+                 ("10.0.0.1" 7443)
+                 ("10.0.0.3" 7443))
+               (gr8s::ha-control-plane-node-endpoints hcp 7443)))))
+
+(test ha-node-session-endpoints-put-the-known-leader-first
+  (let* ((node (gr8s::make-raft-node :id "cp2" :leader-id "cp1"))
+         (member (gr8s::make-raft-member :node node))
+         (hcp (gr8s::make-ha-control-plane :member member)))
+    (setf (gethash "cp1" (gr8s::raft-node-peer-addresses node)) '("10.0.0.1" 7444)
+          (gethash "cp2" (gr8s::raft-node-peer-addresses node)) '("10.0.0.2" 7444)
+          (gethash "cp3" (gr8s::raft-node-peer-addresses node)) '("10.0.0.3" 7444))
+    (is (equal '(("10.0.0.1" 7443)
+                 ("10.0.0.2" 7443)
+                 ("10.0.0.3" 7443))
+               (gr8s::ha-control-plane-node-session-endpoints hcp 7443)))))
+
 (test agent-rotates-to-a-live-control-plane-endpoint
   (with-temporary-store (store path)
     (gr8s:register-node

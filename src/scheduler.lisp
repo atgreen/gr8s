@@ -48,7 +48,7 @@
             (gethash (node-record-name node) (pod-store-nodes store)) node)
       (publish-node-change-unlocked store nil node)
       ;; Desired write (the control-plane-assigned podCIDR): replicate (8ia.4).
-      (note-node-desired-change store)
+      (note-node-desired-change store node)
       node)))
 
 (defun get-node-unlocked (store name)
@@ -92,8 +92,13 @@
         ;; A node an older gr8s registered has no creation time until its agent returns.
         (when (and old (null (node-record-creation-timestamp node)))
           (setf (node-record-creation-timestamp node) (current-timestamp))
-          (note-node-desired-change store))
-        (when old (publish-node-change-unlocked store old node)))
+          (note-node-desired-change store node))
+        (when old
+          (publish-node-change-unlocked store old node))
+        ;; Every control-plane member runs the expiry monitor, while the live
+        ;; agent stream belongs to only one member. Replicate the renewed
+        ;; deadline even when the client-visible Ready condition is unchanged.
+        (note-node-state-change store node))
       node)))
 
 (defun note-node-runtime-health (store name runtime-down-message)
@@ -108,7 +113,8 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
         (when (and node (not (equal message (node-record-runtime-down-message node))))
           (let ((old (node-api-object node)))
             (setf (node-record-runtime-down-message node) message)
-            (publish-node-change-unlocked store old node)))
+            (publish-node-change-unlocked store old node)
+            (note-node-state-change store node)))
         node))))
 
 (defun mark-node-not-ready (store name)
@@ -131,7 +137,8 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
     (persist-node store updated)
     (setf (node-record-ready-p node) nil
           (node-record-runtime-down-message node) nil)
-    (publish-node-change-unlocked store old node)))
+    (publish-node-change-unlocked store old node)
+    (note-node-state-change store node)))
 
 (defun expire-node-heartbeats (store oldest-acceptable-heartbeat &key now)
   "Mark stale ready nodes unavailable and return the records that expired."
@@ -216,8 +223,8 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
         (publish-node-change-unlocked store old node))))
   t)
 
-(defun allocate-node-pod-cidr (store cluster-cidr node-prefix)
-  "Return the first free NODE-PREFIX block within CLUSTER-CIDR."
+(defun allocate-node-pod-cidr-unlocked (store cluster-cidr node-prefix)
+  "Return the first free NODE-PREFIX block within CLUSTER-CIDR. Caller holds STORE's lock."
   (multiple-value-bind (address cluster-prefix) (parse-ipv4-cidr cluster-cidr)
     (unless (<= cluster-prefix node-prefix 32)
       (error "Node prefix /~D does not fit cluster CIDR ~A"
@@ -229,19 +236,43 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
            (base (logand address cluster-mask))
            (block-size (ash 1 (- 32 node-prefix)))
            (block-count (ash 1 (- node-prefix cluster-prefix))))
-      (with-store-lock (store)
-        (loop for index below block-count
-              for candidate = (format nil "~A/~D"
-                                      (format-ipv4-integer
-                                       (+ base (* index block-size)))
-                                      node-prefix)
-              unless (loop for node being the hash-values
-                             of (pod-store-nodes store)
-                           thereis (and (plusp (length (node-record-pod-cidr node)))
-                                        (ipv4-prefixes-overlap-p candidate (node-record-pod-cidr node))))
-                return candidate
-              finally (error "No free /~D PodCIDR remains in ~A"
-                             node-prefix cluster-cidr))))))
+      (loop for index below block-count
+            for candidate = (format nil "~A/~D"
+                                    (format-ipv4-integer
+                                     (+ base (* index block-size)))
+                                    node-prefix)
+            unless (loop for node being the hash-values
+                           of (pod-store-nodes store)
+                         thereis (and (plusp (length (node-record-pod-cidr node)))
+                                      (ipv4-prefixes-overlap-p candidate (node-record-pod-cidr node))))
+              return candidate
+            finally (error "No free /~D PodCIDR remains in ~A"
+                           node-prefix cluster-cidr)))))
+
+(defun allocate-node-pod-cidr (store cluster-cidr node-prefix)
+  "Return the first free NODE-PREFIX block within CLUSTER-CIDR."
+  (with-store-lock (store)
+    (allocate-node-pod-cidr-unlocked store cluster-cidr node-prefix)))
+
+(defun install-node-enrollment-command
+    (store node-id node-name cluster-cidr node-prefix creation-timestamp)
+  "Apply one Raft-ordered node enrollment against STORE's committed node index.
+Every replica allocates from the same preceding log state, so concurrent member
+enrollments receive distinct PodCIDRs without replacing the complete node index."
+  (bt:with-lock-held ((pod-store-lock store))
+    (let ((existing (get-node-unlocked store node-name)))
+      (when existing (return-from install-node-enrollment-command existing))
+      (loop for node being the hash-values of (pod-store-nodes store)
+            when (string= node-id (node-record-id node))
+              do (node-conflict "Node identity ~A is already claimed" node-id))
+      (let ((node
+              (make-node-record
+               :id node-id :name node-name
+               :pod-cidr (allocate-node-pod-cidr-unlocked store cluster-cidr node-prefix)
+               :creation-timestamp creation-timestamp)))
+        (setf (gethash node-name (pod-store-nodes store)) node)
+        (publish-node-change-unlocked store nil node)
+        node))))
 
 (defun terminal-pod-phase-p (phase)
   "Return true when PHASE is a terminal Kubernetes Pod phase."
@@ -269,6 +300,9 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
           (gethash "resourceVersion" metadata) next-version)
     (persist-pod store pod)
     (publish-pod-spec-change-unlocked store old pod)
+    ;; Assignment changes desired state just as create/update does. Replicate it
+    ;; before a follower serves reads or a newly elected leader takes over.
+    (note-pod-desired-change store)
     pod))
 
 (defun update-node-kubelet-port (store node-name port)

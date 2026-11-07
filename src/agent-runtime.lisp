@@ -1,3 +1,26 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; The node agent's runtime: gr8s's kubelet-equivalent that runs one Node's assigned
+;;;; Pods and reports their observed status back to the control plane.
+;;;;
+;;;; A NODE-RUNTIME owns the agent's lifecycle on a single node -- its threads, its
+;;;; local desired-state store, the container runtime, IPAM and the VXLAN overlay --
+;;;; and turns control-plane snapshots into reality: it installs assigned Pods, applies
+;;;; the node's network and its Service/NetworkPolicy/Gateway dataplane, and streams
+;;;; back observed status and endpoint telemetry. Two invariants run through the file.
+;;;; First, snapshot application is revision-fenced: RECEIVED-REVISION together with the
+;;;; arrival and apply locks ensure an obsolete snapshot can neither create a Pod nor
+;;;; acknowledge a revision, so a slow apply racing a newer one does no harm. Second,
+;;;; deletion intent is made durable before any CRI call and a withdrawal is only
+;;;; acknowledged once it cannot be lost, so a crash never resurrects a Pod the server
+;;;; has withdrawn. The dataplane convergences (Service LB, node ports, NetworkPolicy,
+;;;; Gateway, host ports) are deliberately fail-soft: a transient error is logged, not
+;;;; allowed to abort the rest of a snapshot. Node operations -- logs, metrics, volume
+;;;; reclaim, port-forward and interactive exec/attach -- are dispatched here, with
+;;;; exec/attach streamed on their own threads through the runtime's streaming server
+;;;; so one session's reader is never held by a running command.
+
 (in-package #:gr8s)
 
 (defstruct (node-runtime (:constructor %make-node-runtime))
@@ -7,6 +30,9 @@
   manager
   network
   network-reconciler
+  ;; Pod CIDR admitted to firewalld during this process lifetime. Cached desired
+  ;; snapshots repeat the same network, so do not spawn firewall-cmd for each one.
+  overlay-firewall-pod-cidr
   ipam
   cni-operations
   (observed-statuses (make-hash-table :test #'equal))
@@ -45,6 +71,12 @@
 (defun make-node-runtime (state-directory runtime manager
                           &key (network-reconciler
                                  (when manager #'reconcile-node-vxlan-network)))
+  "Build and return a NODE-RUNTIME for STATE-DIRECTORY, opening its local desired-state
+store (watch journal disabled, since the control plane serves every watch) and wiring in
+RUNTIME and MANAGER. Replays any persisted node network -- applied or pending -- and
+rebuilds the urgent-cleanup fence from the Pods already on disk, so a restart resumes
+mid-deletion work even with the control plane unavailable. Starts no thread;
+START-NODE-RUNTIME does that."
   (let* ((directory (uiop:ensure-directory-pathname state-directory))
          (store (open-store (merge-pathnames "desired/" directory))))
     ;; The control plane serves every watch; a journal here would only repeat its own.
@@ -76,15 +108,22 @@
       node-runtime)))
 
 (defun node-runtime-network-path (node-runtime)
+  "Pathname of the file holding the node's last fully-applied network assignment."
   (merge-pathnames "network.json" (node-runtime-state-directory node-runtime)))
 
 (defun node-runtime-network-pending-path (node-runtime)
+  "Pathname of the file holding network intent written before the kernel changes, kept
+until they all succeed so a partial apply can be retried."
   (merge-pathnames "network-pending.json" (node-runtime-state-directory node-runtime)))
 
 (defun read-node-network-file (path)
+  "Parse the node-network JSON at PATH, or return NIL when the file does not exist."
   (when (probe-file path) (com.inuoe.jzon:parse path)))
 
 (defun node-network-object (network &optional routes)
+  "Build the persisted node-network object (version 1) from the node-protocol NETWORK
+message and its ROUTES. This is the on-disk and in-memory shape the rest of this file
+validates and reconciles against."
   (json-object
    "version" 1
    "clusterPodCIDR" (slot-value network 'gr8s.node.v1::cluster-pod-cidr)
@@ -101,6 +140,8 @@
                      routes) 'vector)))
 
 (defun validate-network-cidr (cidr)
+  "Return (values ADDRESS PREFIX) for CIDR, a canonical IPv4 CIDR with a 0--30 prefix and
+no host bits set. Signals INVALID-CNI on anything else."
   (handler-case
       (multiple-value-bind (address prefix) (parse-ipv4-cidr cidr)
         (unless (and (<= 0 prefix 30)
@@ -111,6 +152,8 @@
     (error () (invalid-cni "invalid network CIDR ~S" cidr))))
 
 (defun network-cidr-subnet-p (subnet parent)
+  "True when SUBNET lies wholly within PARENT (both validated as CIDRs). Signals
+INVALID-CNI on a malformed CIDR."
   (multiple-value-bind (address prefix) (validate-network-cidr subnet)
     (multiple-value-bind (parent-address parent-prefix) (validate-network-cidr parent)
       (and (<= parent-prefix prefix)
@@ -118,12 +161,18 @@
               (ash parent-address (- parent-prefix 32)))))))
 
 (defun network-cidrs-overlap-p (left right)
+  "True when LEFT and RIGHT overlap -- one contains the other at the shorter prefix.
+Signals INVALID-CNI on a malformed CIDR."
   (multiple-value-bind (a a-prefix) (validate-network-cidr left)
     (multiple-value-bind (b b-prefix) (validate-network-cidr right)
       (let ((shift (- (min a-prefix b-prefix) 32)))
         (= (ash a shift) (ash b shift))))))
 
 (defun validate-node-network-routes (network)
+  "Validate NETWORK's peer routes: each must be well-formed, its Pod CIDR a subnet of the
+cluster Pod CIDR and non-overlapping with this node's and the other peers', and its node
+id and underlay address unique. Peer routes require a local underlay address. Returns
+NETWORK; signals INVALID-CNI on any violation."
   (let ((routes (gethash "routes" network #()))
         (cidrs (list (gethash "nodePodCIDR" network)))
         (addresses (list (gethash "underlayAddress" network "")))
@@ -148,6 +197,10 @@
   network)
 
 (defun validate-node-network-object (network)
+  "Validate a persisted or assigned node network end to end: version 1, node Pod CIDR a
+subnet of the cluster Pod CIDR, a valid (or empty) local underlay address, valid peer
+routes, the DNS address equal to the link-local Pod gateway, and MTU and VNI in range.
+Returns NETWORK; signals INVALID-CNI on any violation."
   (unless (and (hash-table-p network) (eql 1 (gethash "version" network)))
     (invalid-cni "invalid persisted node network format"))
   (unless (network-cidr-subnet-p (required-cni-string network "nodePodCIDR")
@@ -168,6 +221,13 @@
   network)
 
 (defun configure-node-runtime-network (node-runtime network &key (persist t))
+  "Apply NETWORK as this node's overlay configuration and record it on the runtime.
+Validates NETWORK, opens IPAM if needed and -- under the network lock -- refuses to change
+the durable node Pod CIDR, then (when PERSIST) writes pending intent, runs the network
+reconciler to converge the kernel, admits the overlay through an active host firewalld
+(fail-soft, managed nodes only), and promotes pending to applied. Leaves CNI operations
+ready for new Pods. Returns the NODE-RUNTIME; signals INVALID-CNI on an invalid or
+conflicting network."
   (validate-node-network-object network)
   (let ((runtime (node-runtime-runtime node-runtime))
         (address (gethash "underlayAddress" network "")))
@@ -204,9 +264,7 @@
         ;; cross-node traffic is kernel-routed (conntrack-tracked), so firewalld
         ;; would drop the forwarded/encapsulated packets without a scoped ACCEPT.
         ;; No-op without firewalld; fail-soft. Only meaningful for a managed node.
-        (when (and (node-runtime-manager node-runtime)
-                   (plusp (length (gethash "underlayAddress" network ""))))
-          (ignore-errors (ensure-overlay-firewall (gethash "nodePodCIDR" network))))
+        (ignore-errors (ensure-node-runtime-overlay-firewall node-runtime network))
         (when persist
           (write-private-text-atomically
            (node-runtime-network-path node-runtime)
@@ -221,7 +279,23 @@
                   :dns-address (gethash "dnsAddress" network)))))
   node-runtime)
 
+(defun ensure-node-runtime-overlay-firewall
+    (node-runtime network &key (ensure #'ensure-overlay-firewall))
+  "Admit NETWORK's overlay once per NODE-RUNTIME process, using ENSURE to apply it.
+Repeated cached snapshots carry the same desired network; remembering a successful
+apply prevents each snapshot from spawning three firewall-cmd processes. A failed or
+inactive-firewalld attempt is not remembered, so a later snapshot can retry."
+  (when (and (node-runtime-manager node-runtime)
+             (plusp (length (gethash "underlayAddress" network ""))))
+    (let ((cidr (gethash "nodePodCIDR" network)))
+      (unless (equal cidr (node-runtime-overlay-firewall-pod-cidr node-runtime))
+        (when (funcall ensure cidr)
+          (setf (node-runtime-overlay-firewall-pod-cidr node-runtime) cidr)
+          t)))))
+
 (defun apply-node-runtime-network (node-runtime snapshot)
+  "Configure the node network from SNAPSHOT's assigned network. A managed agent given no
+assigned network signals INVALID-CNI; an unmanaged one does nothing."
   (let ((network (slot-value snapshot 'gr8s.node.v1::network)))
     (cond
       (network (configure-node-runtime-network node-runtime (node-network-object network (slot-value snapshot 'gr8s.node.v1::routes))))
@@ -247,6 +321,10 @@
     (ignore-errors (remove-overlay-firewall (node-ipam-cidr (node-runtime-ipam node-runtime))))))
 
 (defun reconcile-cached-node-network (node-runtime)
+  "Re-apply the node's durable network to repair kernel state -- e.g. VXLAN FDB entries a
+link event flushed -- even when the control-plane revision has not changed, re-ensuring
+the node gateway when Pods still hold allocations. Held under the apply lock; a no-op
+without a network reconciler. Returns NIL."
   ;; Kernel link events can flush permanent VXLAN FDB entries even when the
   ;; control-plane revision is unchanged. Repair from durable local topology.
   (when (node-runtime-network-reconciler node-runtime)
@@ -261,6 +339,8 @@
   nil)
 
 (defun handle-node-runtime-cni (node-runtime request)
+  "Service one agent CNI REQUEST against the node's current CNI operations, or return a
+CNI error response when the node's network assignment is not yet ready."
   (let ((operations
           (bt:with-lock-held ((node-runtime-network-lock node-runtime))
             (node-runtime-cni-operations node-runtime))))
@@ -270,10 +350,13 @@
          (make-condition 'cni-error :message "node network assignment is not ready")))))
 
 (defun node-runtime-stopping-p (node-runtime)
+  "True when a stop has been requested of NODE-RUNTIME (read under its lock)."
   (bt:with-lock-held ((node-runtime-lock node-runtime))
     (node-runtime-stop-requested node-runtime)))
 
 (defun wait-for-node-runtime-stop (node-runtime)
+  "Block until a stop is requested of NODE-RUNTIME, waiting on its state condition under
+the runtime lock."
   (bt:with-lock-held ((node-runtime-lock node-runtime))
     (loop until (node-runtime-stop-requested node-runtime)
           do (bt:condition-wait
@@ -281,6 +364,11 @@
               (node-runtime-lock node-runtime)))))
 
 (defun run-node-runtime-body (node-runtime)
+  "Run the agent's main loop: start the reconciliation worker (which each tick repairs the
+cached network and re-converges NetworkPolicy and host-port forwarders, fail-soft), mark
+the runtime running and notify waiters, then block until a stop is requested. On exit,
+unwinds every service it started -- the worker, the host- and node-port forwarders, the
+health-check servers and runtime deletions."
   (unwind-protect
        (progn
          (setf (node-runtime-worker node-runtime)
@@ -316,6 +404,9 @@
 
 (defun call-with-agent-cni-server
     (node-runtime function &key operations)
+  "Run FUNCTION with the agent CNI server listening on the managed-containerd socket,
+dispatching each request to OPERATIONS when supplied or else to the node runtime's current
+operations. Stops the server on exit. Errors when the agent is not managed."
   (let ((manager (node-runtime-manager node-runtime)))
     (unless manager
       (error "the agent CNI service requires managed containerd"))
@@ -365,6 +456,9 @@ the node from starting."
               (node-runtime-service-lb-controller node-runtime) nil)))))
 
 (defun call-with-node-runtime-services (node-runtime)
+  "Run the agent body with the services its runtime needs layered around it: for managed
+containerd, the Service LB, agent CNI server and DNS server; for unmanaged containerd,
+just the DNS server; for any other runtime, nothing."
   (let ((body (lambda () (run-node-runtime-body node-runtime))))
     (if (containerd-runtime-p (node-runtime-runtime node-runtime))
         (if (node-runtime-manager node-runtime)
@@ -380,6 +474,9 @@ the node from starting."
         (funcall body))))
 
 (defun node-runtime-thread-main (node-runtime)
+  "The node-runtime thread's entry point: run the agent under managed containerd and its
+services, cleaning up the node gateway on exit. Records any error and the final :failed or
+:stopped state on the runtime, notifying waiters either way."
   (handler-case
       (unwind-protect
            (call-with-managed-containerd
@@ -397,6 +494,9 @@ the node from starting."
     (bt:condition-notify (node-runtime-state-changed node-runtime))))
 
 (defun start-node-runtime (node-runtime)
+  "Start NODE-RUNTIME's agent thread and block until it is running, returning the runtime.
+Idempotent while already running; re-signals the stored error if a previous start failed.
+Wires the containerd Pod lister to hide Pods already in a terminal phase."
   (let ((runtime (node-runtime-runtime node-runtime)) (store (node-runtime-store node-runtime)))
     (when (typep runtime 'containerd-runtime)
       (setf (containerd-runtime-pod-lister runtime)
@@ -428,6 +528,10 @@ the node from starting."
   node-runtime)
 
 (defun stop-node-runtime (node-runtime)
+  "Request NODE-RUNTIME stop and wait for its thread to exit, returning NIL. Cancels all
+in-flight node operations and stops the volume-reclaim queue (replacing it, since a
+runtime may start again). Safe to call from the runtime's own thread, where it skips the
+join."
   (let ((thread nil))
     (cancel-all-node-operations node-runtime "node runtime stopped")
     ;; A runtime can start again, and a stopped queue can't.
@@ -445,6 +549,8 @@ the node from starting."
   nil)
 
 (defun assignment-pod (assignment)
+  "Parse and return the Pod carried in ASSIGNMENT, erroring when the assignment's
+namespace, name, uid or resource version disagree with the Pod JSON it wraps."
   (let* ((json (trivial-utf-8:utf-8-bytes-to-string
                 (slot-value assignment 'gr8s.node.v1::pod-json)))
          (pod (parse-pod json))
@@ -461,6 +567,10 @@ the node from starting."
     pod))
 
 (defun put-assigned-pod (store pod)
+  "Persist and index the assigned POD in STORE, returning it. Refuses (by erroring) to
+overwrite a different UID still terminating under the same name, and to re-assign a UID
+already marked deleting unless the incoming Pod is itself deleting; a later incoming
+deletion deadline cannot postpone an earlier one. Holds the store lock."
   (with-store-lock (store)
     (let ((existing (gethash (pod-key (pod-namespace pod) (pod-name pod)) (pod-store-pods store))))
       (when (and existing (not (equal (pod-uid existing) (pod-uid pod))))
@@ -562,6 +672,8 @@ the node from starting."
     message))
 
 (defun endpoint-telemetry-message (sandbox interface address counters error)
+  "Build an ENDPOINT-TELEMETRY message for one Pod endpoint from its eBPF COUNTERS (any
+absent field defaults to 0) and an ERROR string (\"\" on success)."
   (make-instance
    'gr8s.node.v1::endpoint-telemetry
    :sandbox-id sandbox :interface-name interface :pod-ip address
@@ -575,6 +687,10 @@ the node from starting."
    :error-message error))
 
 (defun node-runtime-endpoint-telemetry (node-runtime counter-reader)
+  "Collect per-endpoint firewall telemetry for every local Pod allocation, reading each
+one's counters through COUNTER-READER; an endpoint whose counters can't be read yields a
+message carrying that error instead of counts. NIL on an unmanaged agent or before IPAM
+exists."
   (let ((manager (node-runtime-manager node-runtime))
         (ipam (node-runtime-ipam node-runtime)))
     (when (and manager ipam)
@@ -607,6 +723,12 @@ the node from starting."
    :max-expiration-seconds (or (getf claim :max-expiration-seconds) 0)))
 
 (defun node-runtime-status (node-runtime &key (counter-reader #'read-cni-policy-counters))
+  "Build the node's NODE-STATUS heartbeat: observation timestamp, pending podCertificate
+claims, registered CSI drivers (rescanned here, on this thread, so a slow driver can't
+delay the heartbeat), the observed status of each assigned Pod, and endpoint telemetry.
+Prunes cache entries for UIDs no longer assigned, never reports a status for an older
+resource version than the one assigned, and retains a final \"Deleted\" acknowledgement
+while the server still assigns that UID at that version."
   (let ((pods (list-pods (node-runtime-store node-runtime))))
     (make-instance
      'gr8s.node.v1::node-status
@@ -724,6 +846,12 @@ snapshot application."
     (converge-node-network-policies-unlocked node-runtime)))
 
 (defun converge-node-network-policies-unlocked (node-runtime)
+  "Write every local Pod's dataplane into its pinned maps, with the caller holding
+*node-network-policy-lock*: the same-node Pod->Pod delivery table and the Pod->host
+redirect table (each populated first and independently, since the NetworkPolicy
+resolution below can throw on an unsupported policy), then the resolved NetworkPolicy in
+both directions. Reloads IPAM first to pick up allocations the out-of-process CNI plugin
+added. A no-op unless the agent is managed with IPAM and a store."
   (let ((manager (node-runtime-manager node-runtime))
         (ipam (node-runtime-ipam node-runtime))
         (store (node-runtime-store node-runtime)))
@@ -772,6 +900,16 @@ snapshot application."
   "How long a snapshot waits for a restarting container runtime before giving up this attempt.")
 
 (defun reconcile-node-snapshot (node-runtime snapshot)
+  "Apply one control-plane SNAPSHOT to this node and return the assigned Pods' observed
+statuses. Errors unless the runtime is running, and waits briefly for a restarting
+container runtime -- leaving the revision unacknowledged (NODE-SNAPSHOT-INCOMPLETE) rather
+than act against a down runtime. Under the apply lock, and re-checking the snapshot is
+still current at each step, it applies the assigned network, records the assigned
+versions, withdraws Pods the server no longer assigns, installs the assigned resource
+objects, converges the Service LB, node ports, health checks, NetworkPolicy and Gateway
+listeners (all fail-soft), then creates or updates each assigned Pod and caches its
+observation. Signals NODE-SNAPSHOT-INCOMPLETE when any Pod could not be applied or parsed,
+so the revision is retried."
   (unless (eq :running (node-runtime-state node-runtime))
     (error 'runtime-error :message "node runtime is not running"))
   ;; Don't start, stop or fail Pods against a runtime that is restarting. Wait a
@@ -887,6 +1025,7 @@ snapshot application."
         statuses))))
 
 (defun node-operation-response (request status &key (exit-code 0) (message ""))
+  "Build an OPERATION-RESPONSE for REQUEST carrying STATUS, exit code and message."
   (make-instance
    'gr8s.node.v1::operation-response
    :operation-id (slot-value request 'gr8s.node.v1::operation-id)
@@ -895,6 +1034,8 @@ snapshot application."
    :error-message message))
 
 (defun node-operation-stream (request channel data &key (sequence 1) (eof t))
+  "Build an OPERATION-STREAM frame for REQUEST carrying DATA on CHANNEL, with the given
+sequence number and EOF flag."
   (make-instance
    'gr8s.node.v1::operation-stream
    :operation-id (slot-value request 'gr8s.node.v1::operation-id)
@@ -904,6 +1045,8 @@ snapshot application."
    :eof eof))
 
 (defun assigned-operation-pod (node-runtime request)
+  "Return the Pod that REQUEST targets, erroring (\"not assigned to this agent\") when the
+stored Pod's UID does not match the request's."
   (let* ((namespace (slot-value request 'gr8s.node.v1::namespace))
          (name (slot-value request 'gr8s.node.v1::pod))
          (uid (slot-value request 'gr8s.node.v1::pod-uid))
@@ -915,6 +1058,10 @@ snapshot application."
     pod))
 
 (defun handle-node-operation (node-runtime request)
+  "Carry out a synchronous node operation for REQUEST -- container logs, or a one-shot
+exec -- and return the list of (tag . message) replies to emit (a stdout/stderr stream
+plus a completion response). Verifies the Pod is assigned first; any error, including an
+unsupported kind, becomes a single failed response."
   (handler-case
       (progn
         (assigned-operation-pod node-runtime request)
@@ -1001,10 +1148,14 @@ snapshot application."
   (lock (bt:make-lock "gr8s interactive exec operation")))
 
 (defun find-node-exec-operation (node-runtime operation-id)
+  "Return the live node operation registered under OPERATION-ID, or NIL. Holds the
+operations lock."
   (bt:with-lock-held ((node-runtime-operations-lock node-runtime))
     (gethash operation-id (node-runtime-operations node-runtime))))
 
 (defun remember-node-exec-operation (node-runtime operation)
+  "Register OPERATION under its operation id, erroring when one by that id already exists.
+Holds the operations lock."
   (let ((operation-id
           (slot-value (node-exec-operation-request operation)
                       'gr8s.node.v1::operation-id)))
@@ -1015,6 +1166,8 @@ snapshot application."
             operation))))
 
 (defun forget-node-exec-operation (operation)
+  "Remove OPERATION from the operations table, but only while it is still the entry
+registered under its id. Holds the operations lock."
   (let* ((node-runtime (node-exec-operation-node-runtime operation))
          (operation-id
            (slot-value (node-exec-operation-request operation)
@@ -1025,6 +1178,8 @@ snapshot application."
         (remhash operation-id (node-runtime-operations node-runtime))))))
 
 (defun emit-node-exec-response (operation status &key (exit-code 0) message)
+  "Emit a terminal OPERATION-RESPONSE for OPERATION with STATUS, exit code and optional
+message, through the operation's emit function."
   (funcall
    (node-exec-operation-emit operation) :operation-response
    (node-operation-response
@@ -1032,6 +1187,9 @@ snapshot application."
     :exit-code exit-code :message (or message ""))))
 
 (defun finish-node-exec-operation (operation &key error (emit-p t))
+  "Finish OPERATION exactly once: mark it finished, deregister it, shut down and close its
+socket, and -- unless EMIT-P is NIL -- emit a completed response with its exit code, or a
+failed response carrying ERROR. Idempotent; a second call does nothing."
   (let ((finish-p nil)
         (exit-code 0))
     (bt:with-lock-held ((node-exec-operation-lock operation))
@@ -1055,6 +1213,8 @@ snapshot application."
              :exit-code exit-code))))))
 
 (defun node-exec-status-exit-code (data)
+  "Parse the runtime's SPDY error-stream status DATA and return the command's exit code: 0
+on \"Success\", otherwise the ExitCode cause, defaulting to 1 (also 1 on any parse error)."
   (handler-case
       (let* ((status
                (com.inuoe.jzon:parse
@@ -1071,6 +1231,8 @@ snapshot application."
     (error () 1)))
 
 (defun emit-node-exec-stream (operation channel data)
+  "Emit one OPERATION-STREAM frame of DATA on CHANNEL for OPERATION, assigning the next
+sequence number under the operation lock."
   (let ((sequence nil))
     (bt:with-lock-held ((node-exec-operation-lock operation))
       (setf sequence (incf (node-exec-operation-sequence operation))))
@@ -1130,6 +1292,11 @@ snapshot application."
   (finish-node-exec-operation operation))
 
 (defun start-node-exec-operation (node-runtime request emit)
+  "Start a streamed exec or attach for REQUEST: open the connection to the runtime's
+streaming server and its per-channel streams, register the operation, emit an \"accepted\"
+response, and spawn a reader thread that forwards output until the streams end. Returns
+the operation. Verifies the Pod is assigned first, and closes the socket and errors if
+stream setup fails."
   (assigned-operation-pod node-runtime request)
   (let* ((runtime (node-runtime-runtime node-runtime))
          (uid (slot-value request 'gr8s.node.v1::pod-uid))
@@ -1168,6 +1335,9 @@ snapshot application."
            (slot-value input 'gr8s.node.v1::rows))))
 
 (defun write-node-exec-input (operation input)
+  "Forward one interactive INPUT for OPERATION to the runtime -- stdin data/EOF, or a
+terminal resize. Signals on a stale (non-increasing) input sequence or an unsupported
+channel. Holds the operation lock while advancing the last-input sequence."
   ;; The generated binding renames this field's slot because SEQUENCE is a
   ;; Common Lisp symbol, while preserving the protobuf :SEQUENCE initarg.
   (let ((sequence
@@ -1234,6 +1404,11 @@ that reconnects or restarts gets the answer without a second deletion racing the
    :name "gr8s container metrics"))
 
 (defun dispatch-node-operation (node-runtime variant payload emit)
+  "Dispatch one operation-protocol envelope (VARIANT, PAYLOAD) to its handler, emitting
+replies through EMIT. A new request starts the matching operation (metrics, volume
+reclaim, port-forward, streamed exec/attach, or a synchronous op); input and cancel are
+routed to the live operation; a closed session abandons all operations. A request that
+errors becomes a failed response; an error on any other variant is re-signaled."
   (handler-case
       (case variant
         (:operation-request
@@ -1304,6 +1479,8 @@ that reconnects or restarts gets the answer without a second deletion racing the
           (error condition)))))
 
 (defun cancel-all-node-operations (node-runtime reason)
+  "Finish every live node operation as a failure with REASON, emitting each a failed
+response."
   (let ((operations nil))
     (bt:with-lock-held ((node-runtime-operations-lock node-runtime))
       (maphash (lambda (id operation)
@@ -1314,6 +1491,8 @@ that reconnects or restarts gets the answer without a second deletion racing the
       (finish-node-exec-operation operation :error reason))))
 
 (defun abandon-all-node-operations (node-runtime)
+  "Finish every live node operation without emitting any response, for a session that has
+already gone away."
   (let ((operations nil))
     (bt:with-lock-held ((node-runtime-operations-lock node-runtime))
       (maphash (lambda (id operation)

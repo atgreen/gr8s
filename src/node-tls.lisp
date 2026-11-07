@@ -1,6 +1,26 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; Mutually authenticated TLS for node-to-control-plane sessions.
+;;;;
+;;;; Node agents reach the control plane over HTTP/2 gRPC, and both ends must
+;;;; prove who they are before any application data -- including a bootstrap join
+;;;; token -- crosses the wire. The client verifies the server's leaf against the
+;;;; pinned cluster CA (by fingerprint during bootstrap, or by a CA file once
+;;;; enrolled) and requires an "h2" ALPN; the server requests a client
+;;;; certificate only optionally, so credential-less enrollment shares the
+;;;; listener while authenticated calls can still demand a verified, name-bound
+;;;; node cert. A handshake deadline keeps a stalled peer from tying up or killing
+;;;; the listener, and a per-connection session-ticket cache stops a bootstrap
+;;;; ticket from resuming a later authenticated session.
+
 (in-package #:gr8s)
 
 (defun node-server-tls-options (pki)
+  "Return the TLS listener options for the node server when PKI is present, NIL
+   otherwise: the server certificate and key, optional client-certificate
+   verification -- so credential-less enrollment and authenticated calls share
+   one listener -- and a trust store holding the cluster CA."
   (when pki
     (multiple-value-bind (certificate key) (ensure-node-server-credentials pki)
       (list :tls t :tls-certificate (namestring certificate) :tls-key (namestring key)
@@ -11,6 +31,11 @@
             (pure-tls::make-trust-store :certificates (list (cluster-pki-ca-certificate pki)))))))
 
 (defun authenticate-node-server-stream (stream ca-pin ca-certificate-path)
+  "Verify, from the client side, that STREAM's peer presented the pinned cluster
+   CA and a valid server leaf. The CA comes from CA-CERTIFICATE-PATH, or is the
+   peer chain's CA whose fingerprint matches CA-PIN. Signals a PKI failure when
+   no trusted CA is found, the pin mismatches, the leaf fails verification, or the
+   peer did not negotiate HTTP/2."
   (let* ((chain (pure-tls:tls-peer-certificate-chain stream))
          (leaf (first chain))
          (ca (if ca-certificate-path
@@ -87,6 +112,11 @@ ended the whole server (podster-uqb.138 focused run, 117b50c)."
            (error 'tls-handshake-timeout :seconds ,limit))))))
 
 (defun make-node-tls-channel (host port &rest options &key timeout &allow-other-keys)
+  "Open an authenticated gRPC channel to HOST:PORT, bounding the whole TLS and
+   HTTP/2 negotiation by TIMEOUT seconds (default 10) -- a socket-connect timeout
+   alone does not. Uses a fresh per-call session-ticket cache so a bootstrap
+   ticket can never resume a later authenticated node session. OPTIONS pass
+   through to the underlying connector."
   ;; Socket connect timeouts alone do not bound TLS and HTTP/2 negotiation.
   ;; Every connection must present both identities. In particular a bootstrap
   ;; ticket must never resume a subsequent authenticated node session.
@@ -95,6 +125,9 @@ ended the whole server (podster-uqb.138 focused run, 117b50c)."
       (apply #'%make-node-tls-channel host port options))))
 
 (defun authenticate-node-peer (pki context node-name)
+  "Server-side check that a persistent node session presented a client
+   certificate valid for NODE-NAME, verified against PKI. A no-op when PKI is NIL.
+   Signals a PKI failure when the peer offered no certificate."
   (when pki
     (let* ((connection (ag-grpc::context-connection context))
            (stream (ag-http2:connection-stream connection))

@@ -1,3 +1,21 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; The HTTP surface for Kubernetes "core" durable resources: turn a REST
+;;;; request into a store mutation and a wire response.
+;;;;
+;;;; CORE-RESOURCE-ROUTE parses /api/v1/... and /apis/<group>/<version>/... paths
+;;;; into (collection namespace name), consulting *STORED-RESOURCE-TYPES* so only
+;;;; registered kinds (and their group/version) resolve. DISPATCH-CORE-RESOURCE-
+;;;; REQUEST is the verb switch -- list/watch, get, create, replace, patch,
+;;;; delete and delete-collection -- validating names and namespaces and honouring
+;;;; dryRun. Request bodies arrive as JSON or Kubernetes protobuf; label and field
+;;;; selectors compile to predicates (CORE-SELECTOR-PREDICATE); PATCH is served
+;;;; for JSON merge, strategic-merge, JSON Patch (RFC 6902) and server-side apply.
+;;;; The JSON-pointer and JSON-patch helpers implement RFC 6901 and RFC 6902 over
+;;;; the jzon object model (hash-tables and vectors). Admission, storage and the
+;;;; schemas live elsewhere; this file is the protocol edge.
+
 (in-package #:gr8s)
 
 (defvar *crd-route* nil)
@@ -27,12 +45,18 @@
           (list (first type) namespace (second remaining)))))))
 
 (defun core-resource-dry-run-p ()
+  "True when the request carries a ?dryRun parameter. Signals a 400 unless its
+   value is exactly \"All\" (the only mode supported)."
   (let ((value (hunchentoot:parameter "dryRun")))
     (when (and value (not (string= value "All")))
       (core-resource-error 400 "BadRequest" "dryRun must be All"))
     (not (null value))))
 
 (defun core-resource-request-object (expected-kind)
+  "Decode the request body into a resource object for EXPECTED-KIND. Accepts
+   Kubernetes protobuf and JSON (an empty content type is treated as JSON);
+   CRD/CSR bodies and CRD views parse through the CRD reader, other JSON gets
+   typed field validation. Signals a 415 for any other content type."
   (when (and *crd-view-definition* (not (equal expected-kind "DeleteOptions"))) (return-from core-resource-request-object (crd-read-json)))
   (let ((content-type (request-media-type)))
     (cond
@@ -51,6 +75,9 @@
       (t (core-resource-error 415 "UnsupportedMediaType" "Supported resource request formats are JSON and Kubernetes protobuf")))))
 
 (defun core-selector-terms (selector)
+  "Split a label/field SELECTOR into its comma-separated terms, ignoring commas
+   inside parentheses (set-based value lists). Each term is whitespace-trimmed.
+   Signals a 400 on unbalanced parentheses."
   (let ((depth 0) (start 0) (terms nil))
     (loop for character across selector for position from 0
           do (case character
@@ -85,6 +112,12 @@
           ((eq value 'null) "") ((numberp value) (write-to-string value)) (t ""))))
 
 (defun core-selector-predicate (selector &key fields (field-paths '("metadata.name" "metadata.namespace")))
+  "Compile a label SELECTOR (or, with FIELDS true, a field selector over
+   FIELD-PATHS) into a predicate of one object that is true when every term
+   matches. Supports =, ==, !=, set-based in/notin, and presence/absence; a
+   field selector allows only =/!= on the whitelisted FIELD-PATHS. Signals a 400
+   on an empty key or an unsupported term or operator. A NIL or empty selector
+   yields a predicate that is always true."
   (let ((predicates nil))
     (unless (or (null selector) (string= "" selector))
       (dolist (term (core-selector-terms selector))
@@ -148,6 +181,10 @@
           (json-response page code)))))
 
 (defun core-json-pointer (path)
+  "Parse an RFC 6901 JSON Pointer PATH into a list of decoded reference tokens
+   (~1 -> /, ~0 -> ~). The empty pointer yields NIL (the whole document).
+   Signals a 400 when PATH is not a string, lacks a leading \"/\", or has a bad
+   escape."
   (unless (and (stringp path) (or (zerop (length path)) (char= #\/ (char path 0))))
     (core-resource-error 400 "BadRequest" "Invalid JSON patch path"))
   (unless (zerop (length path))
@@ -165,6 +202,10 @@
             (uiop:split-string (subseq path 1) :separator '(#\/)))))
 
 (defun core-json-array-index (part size &key add)
+  "Parse PART as an index into an array of SIZE: a canonical non-negative integer
+   (no leading zeros), or \"-\" meaning the end position when ADD is true. The
+   valid range is 0..SIZE for an add and 0..SIZE-1 otherwise. Signals a 422 when
+   PART is not a valid in-range index."
   (let ((index (if (and add (string= part "-")) size
                    (and (plusp (length part))
                         (or (string= part "0") (not (char= #\0 (char part 0))))
@@ -174,6 +215,9 @@
     index))
 
 (defun core-json-at (object path)
+  "Follow pointer PATH (a token list) into OBJECT and return the value there,
+   descending hash-tables by key and vectors by index. Signals a 422 when any
+   step is missing or lands on a non-container."
   (dolist (part path object)
     (setf object
           (cond ((hash-table-p object)
@@ -184,6 +228,11 @@
                 (t (core-resource-error 422 "Invalid" "JSON patch path does not exist"))))))
 
 (defun core-json-write (object path value operation)
+  "Return OBJECT with VALUE applied at pointer PATH under OPERATION (:add,
+   :replace or :remove). Hash-tables are mutated in place; vectors return a fresh
+   vector (:add inserts, :remove drops, :replace overwrites). An empty PATH
+   targets the whole document, returning VALUE, or 'NULL for :remove. Signals a
+   422 when the parent is missing or a :replace/:remove target does not exist."
   (if (null path)
       (if (eq operation :remove) 'null value)
       (let ((part (first path)))
@@ -205,6 +254,9 @@
           (t (core-resource-error 422 "Invalid" "JSON patch parent does not exist"))))))
 
 (defun core-json-equal-p (left right)
+  "Deep structural equality of two jzon values: hash-tables by matching keys and
+   values, vectors elementwise, strings by EQUAL, numbers by =, else EQL. Used
+   by the JSON Patch \"test\" operation."
   (cond
     ((and (hash-table-p left) (hash-table-p right))
      (and (= (hash-table-count left) (hash-table-count right))
@@ -218,6 +270,11 @@
     (t (eql left right))))
 
 (defun apply-core-json-patch (object patch)
+  "Apply an RFC 6902 JSON Patch (a JSON array) to OBJECT and return the result.
+   Supports test, add, replace, remove, copy and move; \"test\" signals a 409 on
+   mismatch, and a move into its own descendant is a 422. Signals a 400 when the
+   patch is not an array, an operation lacks a required value, or the op is
+   unsupported."
   (unless (and (vectorp patch) (not (stringp patch)))
     (core-resource-error 400 "BadRequest" "JSON patch must be an array"))
   (loop for operation across patch
@@ -247,6 +304,10 @@
         finally (return object)))
 
 (defun core-resource-patch-response (store resource namespace name dry-run)
+  "Serve a PATCH on RESOURCE/NAMESPACE/NAME: dispatch by Content-Type to
+   server-side apply, JSON Patch, strategic-merge or JSON merge, run the result
+   through admitted update (honouring DRY-RUN), and return the stored object as a
+   JSON response. Signals a 415 for any other patch media type."
   (let* ((content-type (request-media-type))
          (patch nil))
     (when (string= content-type "application/apply-patch+yaml")
@@ -283,6 +344,12 @@
       :dry-run dry-run))))
 
 (defun dispatch-core-resource-request (store path method)
+  "Route and serve one core-resource request. Resolves PATH to (resource
+   namespace name), validates the namespace and name for the resource kind,
+   binds the per-request actor, apply manager, view version and dryRun, then
+   dispatches METHOD: list or watch, get, create (201), replace, patch, delete
+   and delete-collection. Signals a 400 for an invalid namespace or name and a
+   405 for an unsupported method on the endpoint."
   (destructuring-bind (resource namespace name) (core-resource-route path)
     (when (and namespace (not (dns-label-p namespace)))
       (core-resource-error 400 "BadRequest" "Invalid request namespace"))
@@ -367,6 +434,10 @@
         (t (core-resource-error 405 "MethodNotAllowed" "Method is not supported for this resource endpoint"))))))
 
 (defun add-core-resource-openapi-paths (paths)
+  "Add the OpenAPI path and operation entries for the core v1 resources served
+   here (configmaps, secrets, podtemplates, replicationcontrollers -- plus their
+   delete-collection and the replicationcontroller status and scale
+   subresources) into PATHS, along with the Event paths. Returns PATHS."
   (dolist (resource '("configmaps" "secrets" "podtemplates" "replicationcontrollers"))
     (let* ((kind (core-resource-kind resource))
            (schema (concatenate 'string "io.k8s.api.core.v1." kind))

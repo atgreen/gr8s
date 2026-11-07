@@ -5,7 +5,8 @@
 ;;;; Node desired-state replication (podster-8ia.4): a node's control-plane-
 ;;;; assigned podCIDR (and labels/taints) must survive leader failover, or a new
 ;;;; leader could hand the node a different CIDR than its agent is already using.
-;;;; Heartbeat/lease state is observed and deliberately NOT replicated.
+;;;; Heartbeat churn stays local, but readiness transitions replicate so every
+;;;; control-plane member serves the same Node API view.
 
 (in-package #:gr8s/tests)
 (def-suite ha-node-cidr :in gr8s)
@@ -14,6 +15,72 @@
 (defun ha-node-cidr (store name)
   (let ((node (ignore-errors (gr8s:get-node store name))))
     (and node (gr8s:node-record-pod-cidr node))))
+
+(defun ha-node-ready-p (store name)
+  (let ((node (ignore-errors (gr8s:get-node store name))))
+    (and node (gr8s::node-record-ready-p node))))
+
+(defun seed-ha-readiness-nodes (store)
+  (gr8s:register-node
+   store (gr8s:make-node-record :id "node-a" :name "worker-a"
+                                :pod-cidr "10.88.0.0/20"))
+  (gr8s:register-node
+   store (gr8s:make-node-record :id "node-b" :name "worker-b"
+                                :pod-cidr "10.88.16.0/20")))
+
+(defun apply-ha-node-command (store command)
+  (case (first command)
+    (:node-state (gr8s::install-node-state-blob store (second command)))
+    (:node-delta (gr8s::install-node-state-delta store (second command)))
+    (t (error "Unsupported HA node command ~S" (first command)))))
+
+(test stale-member-readiness-commands-preserve-unrelated-nodes
+  ;; Two agents report their own readiness through different control-plane
+  ;; members, each of which can still have a stale view of the other Node. Raft
+  ;; order must merge the two key-level transitions instead of letting the later
+  ;; whole-index snapshot turn the first Node NotReady again (podster-aqq).
+  (with-temporary-store (left left-path)
+    (with-temporary-store (right right-path)
+      (with-temporary-store (replica replica-path)
+        (declare (ignore left-path right-path replica-path))
+        (dolist (store (list left right replica)) (seed-ha-readiness-nodes store))
+        (let ((left-command nil) (right-command nil))
+          (setf (gr8s::pod-store-consensus-commit-fn left)
+                (lambda (tag payload) (setf left-command (list tag payload)))
+                (gr8s::pod-store-consensus-commit-fn right)
+                (lambda (tag payload) (setf right-command (list tag payload))))
+          (let ((now (get-universal-time)))
+            (gr8s::mark-node-ready left "worker-a" now)
+            (gr8s::mark-node-ready right "worker-b" now))
+          (apply-ha-node-command replica left-command)
+          (apply-ha-node-command replica right-command)
+          (is (ha-node-ready-p replica "worker-a")
+              "the later stale member command preserves worker-a readiness")
+          (is (ha-node-ready-p replica "worker-b")
+              "the later member's worker-b readiness commits too"))))))
+
+(test heartbeat-renewal-reaches-members-without-the-agent-session
+  ;; Every control-plane member runs a lease-expiry monitor, while an agent's
+  ;; stream belongs to only one member. Renewals must therefore advance the
+  ;; replicated deadline; otherwise a follower expires a healthy Node from its
+  ;; stale first-heartbeat deadline and commits NotReady (podster-aqq).
+  (with-temporary-store (session-owner owner-path)
+    (with-temporary-store (other-member member-path)
+      (declare (ignore owner-path member-path))
+      (seed-ha-readiness-nodes session-owner)
+      (seed-ha-readiness-nodes other-member)
+      (setf (gr8s::pod-store-consensus-commit-fn session-owner)
+            (lambda (tag payload)
+              (apply-ha-node-command other-member (list tag payload))))
+      (let ((now (get-universal-time)))
+        (gr8s::mark-node-ready session-owner "worker-a" now :lease-duration 15)
+        (is (ha-node-ready-p other-member "worker-a"))
+        ;; A beat ten seconds later extends the true deadline to NOW+25. At
+        ;; NOW+16 the original deadline is stale but the renewed one is not.
+        (gr8s::mark-node-ready session-owner "worker-a" (+ now 10) :lease-duration 15)
+        (gr8s::expire-node-heartbeats other-member (+ now 1) :now (+ now 16))
+        (is (ha-node-ready-p other-member "worker-a")
+            "a member without the stream sees the renewed lease deadline")))))
 
 (test node-cidr-replicates-and-survives-failover
   (with-temporary-store (s1 p1)
@@ -41,6 +108,20 @@
                                         (list s1 s2 s3)))
                       :timeout 10)
                      "the assigned podCIDR replicates to every member")
+                 ;; Heartbeats do not flood Raft, but the client-visible readiness
+                 ;; transition must reach followers serving their own local APIs.
+                 (gr8s::mark-node-ready s1 "worker-a" (get-universal-time))
+                 (is (poll-until
+                      (lambda () (every (lambda (s) (ha-node-ready-p s "worker-a"))
+                                        (list s1 s2 s3)))
+                      :timeout 10)
+                     "the Ready transition replicates to every member")
+                 (gr8s::mark-node-not-ready s1 "worker-a")
+                 (is (poll-until
+                      (lambda () (every (lambda (s) (not (ha-node-ready-p s "worker-a")))
+                                        (list s1 s2 s3)))
+                      :timeout 10)
+                     "the NotReady transition replicates to every member")
                  ;; Kill the leader; a survivor keeps the CIDR assignment.
                  (gr8s::stop-ha-control-plane h1)
                  (setf h1 nil)

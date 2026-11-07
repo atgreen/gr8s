@@ -1,3 +1,21 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; Decode Kubernetes client protobuf request bodies into gr8s's hash-table object
+;;;; form, so kubectl and client-go callers sending
+;;;; application/vnd.kubernetes.protobuf are served alongside JSON ones.
+;;;;
+;;;; A hand-written reader walks the protobuf wire format field by field, bounding
+;;;; everything it reads off the wire: the body is capped at 16 MiB, the field count
+;;;; at 65536, every length prefix is checked against the buffer, and any malformed
+;;;; or unsupported shape is an error rather than an over-read. It strips the four-
+;;;; byte "k8s\0" magic envelope, reads the shared TypeMeta/ObjectMeta, and
+;;;; dispatches on kind to the matching per-group decoder; full message decoding of
+;;;; the richer kinds leans on checksum-pinned Kubernetes v1.36 wire schemas.
+;;;; Responses are always serialized back as JSON (kubectl advertises JSON as
+;;;; acceptable), so this is a one-way request path, and a malformed body becomes a
+;;;; 400 BadRequest, never a crash.
+
 (in-package #:gr8s)
 
 ;; Kubernetes request envelopes and scalar/metadata helpers. Full core/RBAC
@@ -6,6 +24,11 @@
 (defvar *core-protobuf-field-count* 0)
 
 (defun core-protobuf-fields (bytes)
+  "Parse BYTES as a protobuf message and return its fields, in order, as a list of
+   (FIELD-NUMBER WIRE-TYPE VALUE). Varints become integers; length-delimited, 64-,
+   and 32-bit fields become byte vectors displaced over BYTES. Signals on a varint
+   overflow, an out-of-range field number, a truncated field, or an unsupported
+   wire type, and a 413 once the dynamic *core-protobuf-field-count* passes 65536."
   (let ((position 0) (end (length bytes)) (fields nil))
     (labels ((varint ()
                (multiple-value-bind (value count) (ag-proto::decode-varint bytes position)
@@ -34,6 +57,8 @@
     (nreverse fields)))
 
 (defun core-protobuf-value (fields number &optional (wire 2) default)
+  "Return the value of the last field numbered NUMBER in FIELDS, or DEFAULT when
+   none is present. Signals when a matching field's wire type is not WIRE (default 2)."
   (let ((value default))
     (dolist (field fields value)
       (when (= number (first field))
@@ -41,10 +66,14 @@
         (setf value (third field))))))
 
 (defun core-protobuf-string (fields number &optional (default ""))
+  "Return field NUMBER of FIELDS decoded as a UTF-8 string, or DEFAULT when absent."
   (let ((bytes (core-protobuf-value fields number)))
     (if bytes (trivial-utf-8:utf-8-bytes-to-string bytes) default)))
 
 (defun core-protobuf-map (fields number &key binary)
+  "Return a string-keyed table built from the repeated protobuf map entries numbered
+   NUMBER in FIELDS, each a { key (1), value (2) } submessage. Values decode as
+   UTF-8 strings, or as base64-encoded strings when BINARY."
   (let ((map (make-hash-table :test #'equal)))
     (dolist (field fields map)
       (when (= number (first field))
@@ -56,6 +85,10 @@
                                      (trivial-utf-8:utf-8-bytes-to-string value))))))))
 
 (defun core-protobuf-metadata (bytes)
+  "Decode a Kubernetes ObjectMeta from its protobuf BYTES into gr8s's metadata
+   object: name, generateName, namespace, uid, and resourceVersion (empty strings
+   dropped), labels and annotations, owner references, and finalizers. Validates the
+   owner references and Pod finalizers before returning the metadata."
   (let ((fields (core-protobuf-fields bytes)) (metadata (make-hash-table :test #'equal)))
     (loop for (number name) in '((1 "name") (2 "generateName") (3 "namespace") (5 "uid") (6 "resourceVersion"))
           for value = (core-protobuf-string fields number)
@@ -137,6 +170,10 @@
     object))
 
 (defun core-protobuf-delete-options (bytes)
+  "Decode a Kubernetes DeleteOptions from protobuf BYTES into an options object:
+   gracePeriodSeconds (as a signed int64), propagationPolicy, orphanDependents, the
+   uid/resourceVersion preconditions, and the dryRun list. Signals on a malformed
+   grace int64 or orphan flag."
   (let* ((fields (core-protobuf-fields bytes))
          (options (make-hash-table :test #'equal))
          (preconditions (core-protobuf-value fields 2))
@@ -168,6 +205,14 @@
     options))
 
 (defun decode-core-resource-protobuf (bytes expected-kind &optional version-override)
+  "Decode a Kubernetes client protobuf request body (BYTES) into gr8s's object form,
+   dispatching on kind. Requires the four-byte \"k8s\\0\" magic prefix and a well-
+   formed envelope whose kind equals EXPECTED-KIND and whose version matches the
+   kind's expected version (or VERSION-OVERRIDE); a body over 16 MiB is a 413. Each
+   kind is routed to its group's decoder (DeleteOptions, CSR, CRD, typed-API,
+   networking, policy, batch, workload, storage, bootstrap, and the rest), with
+   ConfigMap and Secret decoded inline. Any malformed or unsupported input becomes a
+   400 BadRequest; a KUBERNETES-ERROR raised while decoding is re-signalled as is."
   (handler-case
       (let ((*core-protobuf-field-count* 0))
         (when (> (length bytes) (* 16 1024 1024))

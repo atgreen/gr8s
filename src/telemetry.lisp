@@ -1,6 +1,22 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; Prometheus exposition of gr8s dataplane metrics.
+;;;;
+;;;; Renders, in the Prometheus text format, what the node gRPC server has most
+;;;; recently reported from each node's dataplane: whether the node's runtime is
+;;;; ready, when its status was observed, and the per-endpoint eBPF counters
+;;;; (allowed/dropped packets and bytes, rejected spoofs, malformed and
+;;;; unsupported packets). Statuses are read under the server's lock and emitted
+;;;; in node order so a scrape is a consistent snapshot; label values are escaped
+;;;; for the exposition format.
+
 (in-package #:gr8s)
 
 (defun prometheus-label (value)
+  "Return VALUE escaped for use inside a Prometheus label value: backslash,
+   double quote, and newline are backslash-escaped, as the text exposition format
+   requires."
   (with-output-to-string (stream)
     (loop for character across value
           do (case character
