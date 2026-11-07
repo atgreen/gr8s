@@ -171,6 +171,26 @@
    alone only hot-swaps)."
   (list protocol tls-paths))
 
+(defun merge-gateway-listener-plans (&rest plans)
+  "Merge compatible listener PLANS by port, appending their routes.
+
+The first transport definition for a port owns it; later plans with a different
+protocol or TLS reference cannot share that socket and are ignored."
+  (let ((by-port (make-hash-table)) (ports nil))
+    (dolist (plan plans)
+      (dolist (entry plan)
+        (let* ((port (getf entry :port))
+               (existing (gethash port by-port)))
+          (cond
+            ((null existing)
+             (push port ports)
+             (setf (gethash port by-port) (copy-list entry)))
+            ((and (equal (getf existing :protocol) (getf entry :protocol))
+                  (equal (getf existing :tls) (getf entry :tls)))
+             (setf (getf existing :routes)
+                   (append (getf existing :routes) (getf entry :routes))))))))
+    (mapcar (lambda (port) (gethash port by-port)) (nreverse ports))))
+
 (defun converge-gateway-listeners (controller)
   "Reconcile running L7 proxy listeners to match the plan derived from the store:
    start listeners for new ports, hot-swap the compiled router when only routes
@@ -183,9 +203,11 @@
          (start-fn (gateway-controller-start-fn controller))
          (stop-fn (gateway-controller-stop-fn controller))
          (swap-fn (gateway-controller-swap-fn controller))
-         (plan (gateway-listener-plan (list-core-resources store "gateways")
-                                      (list-core-resources store "httproutes")
-                                      (lambda (gateway) (gateway-controlled-p store gateway))))
+         (plan (merge-gateway-listener-plans
+                (gateway-listener-plan (list-core-resources store "gateways")
+                                       (list-core-resources store "httproutes")
+                                       (lambda (gateway) (gateway-controlled-p store gateway)))
+                (ingress-listener-plan store)))
          (running (gateway-controller-listeners controller))
          (desired-ports '()))
     (dolist (entry plan)
