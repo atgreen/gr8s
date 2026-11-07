@@ -107,3 +107,30 @@
       (is (gethash (gr8s::core-resource-key "ingressclasses" nil "gr8s") resources))
       (is (gethash (gr8s::core-resource-key "ingresses" "default" "web") resources))
       (is (gethash (gr8s::core-resource-key "secrets" "default" "web-tls") resources)))))
+
+(test ingress-status-advertises-ready-serving-nodes-only-for-owned-classes
+  (with-temporary-store (store directory)
+    (values directory)
+    (seed-ingress-controller-test store)
+    (dolist (node (list (gr8s:make-node-record :id "node-a" :name "node-a"
+                                               :pod-cidr "10.88.0.0/24"
+                                               :underlay-address "192.0.2.10")
+                        (gr8s:make-node-record :id "node-b" :name "node-b"
+                                               :pod-cidr "10.88.1.0/24"
+                                               :underlay-address "192.0.2.11")))
+      (gr8s:register-node store node))
+    (gr8s:mark-node-ready store "node-b" (get-universal-time))
+    (gr8s::reconcile-ingress-status store)
+    (flet ((addresses (name)
+             (map 'list (lambda (entry) (gethash "ip" entry))
+                  (gr8s::table-get
+                   (gr8s::get-core-resource store "ingresses" "default" name)
+                   "status" "loadBalancer" "ingress"))))
+      (is (equal '("192.0.2.11") (addresses "web")))
+      (is (null (addresses "ignored")))
+      (let ((revision (gr8s::pod-store-resource-revision store)))
+        (gr8s::reconcile-ingress-status store)
+        (is (= revision (gr8s::pod-store-resource-revision store))))
+      (gr8s:mark-node-ready store "node-a" (get-universal-time))
+      (gr8s::reconcile-ingress-status store)
+      (is (equal '("192.0.2.10" "192.0.2.11") (addresses "web"))))))

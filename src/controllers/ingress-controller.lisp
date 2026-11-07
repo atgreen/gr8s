@@ -107,3 +107,39 @@
               (list (list :port 80 :protocol "HTTP" :tls nil :routes routes)))
             (when (and routes tls)
               (list (list :port 443 :protocol "HTTPS" :tls tls :routes routes))))))
+
+(defun ingress-serving-addresses (store)
+  "Return ready node addresses in Ingress load-balancer status form."
+  (coerce
+   (sort
+    (loop for node in (list-nodes store)
+          for address = (node-reported-address node)
+          when (and (node-record-runtime-ready-p node)
+                    (stringp address) (plusp (length address)))
+            collect (core-object "ip" address))
+    #'string< :key (lambda (entry) (gethash "ip" entry)))
+   'vector))
+
+(defun reconcile-ingress-status (store)
+  "Publish ready node addresses on every Ingress this controller owns."
+  (let ((addresses (ingress-serving-addresses store)))
+    (dolist (ingress (list-core-resources store "ingresses"))
+      (when (ingress-controlled-p store ingress)
+        (let* ((metadata (gethash "metadata" ingress))
+               (namespace (gethash "namespace" metadata))
+               (name (gethash "name" metadata))
+               (desired (core-object
+                         "loadBalancer"
+                         (if (plusp (length addresses))
+                             (core-object "ingress" addresses)
+                             (core-object)))))
+          (unless (core-json-equal-p desired (gethash "status" ingress (core-object)))
+            (let ((*networking-status-write* t))
+              (update-core-resource
+               store "ingresses" namespace name
+               (lambda (current)
+                 (when (equal (gethash "uid" metadata)
+                              (gethash "uid" (gethash "metadata" current)))
+                   (setf (gethash "status" current) (copy-core-object desired)))
+                 current))))))))
+  nil)

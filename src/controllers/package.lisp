@@ -18,6 +18,7 @@
    #:reconcile-endpoints
    #:reconcile-endpointslices
    #:reconcile-horizontal-pod-autoscalers
+   #:reconcile-ingress-status
    #:reconcile-jobs
    #:reconcile-pod-certificate-requests
    #:reconcile-service-ip-addresses
@@ -40,6 +41,7 @@
    #:reconcile-endpoints
    #:reconcile-endpointslices
    #:reconcile-horizontal-pod-autoscalers
+   #:reconcile-ingress-status
    #:reconcile-jobs
    #:reconcile-pod-certificate-requests
    #:reconcile-service-ip-addresses
@@ -65,6 +67,7 @@
                     "RECONCILE-ENDPOINTS"
                     "RECONCILE-ENDPOINTSLICES"
                     "RECONCILE-HORIZONTAL-POD-AUTOSCALERS"
+                    "RECONCILE-INGRESS-STATUS"
                     "RECONCILE-JOBS"
                     "RECONCILE-POD-CERTIFICATE-REQUESTS"
                     "RECONCILE-SERVICE-IP-ADDRESSES"
