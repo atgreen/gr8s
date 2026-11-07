@@ -157,6 +157,8 @@ without a name yet and custom objects, which stay in the requested version."
          (attributes (admission-attributes-for store "CREATE" resource namespace (gethash "name" metadata)
                                                :options (admission-request-options "CreateOptions")
                                                :dry-run dry-run)))
+    (when (equal resource "namespaces")
+      (admit-pod-security-namespace "CREATE" input))
     (if (not (admission-active-p store attributes))
         (create-core-resource store resource input namespace :dry-run dry-run)
         (progn
@@ -173,6 +175,8 @@ without a name yet and custom objects, which stay in the requested version."
                                   (error condition)))))
                  (preview-metadata (gethash "metadata" preview))
                  (final (copy-core-object mutated)))
+            (when (equal resource "namespaces")
+              (admit-pod-security-namespace "CREATE" mutated))
             (setf (admission-object attributes) (admission-stamp-object attributes preview)
                   (admission-name attributes) (gethash "name" preview-metadata)
                   (gethash "name" (gethash "metadata" final)) (gethash "name" preview-metadata))
@@ -191,7 +195,16 @@ A client's own stale resourceVersion still fails, in the preview of the next att
                                               :dry-run dry-run)))
     (unless (admission-active-p store attributes)
       (return-from admitted-update-core-resource
-        (update-core-resource store resource namespace name transform :dry-run dry-run)))
+        (update-core-resource
+         store resource namespace name
+         (if (equal resource "namespaces")
+             (lambda (old)
+               (let* ((before (copy-core-object old))
+                      (new (funcall transform old)))
+                 (admit-pod-security-namespace "UPDATE" new before)
+                 new))
+             transform)
+         :dry-run dry-run)))
     (loop repeat +admission-update-attempts+
           do (let* ((existing (get-core-resource store resource namespace name))
                     (old (core-resource-update-view resource existing))
@@ -204,6 +217,8 @@ A client's own stale resourceVersion still fails, in the preview of the next att
                                                      (lambda (current) (declare (ignore current)) (copy-core-object mutated))
                                                      :dry-run t))
                       (final (copy-core-object mutated)))
+                 (when (equal resource "namespaces")
+                   (admit-pod-security-namespace "UPDATE" mutated old))
                  (setf (admission-object attributes) (admission-stamp-object attributes preview)
                        (gethash "resourceVersion" (gethash "metadata" final))
                        (gethash "resourceVersion" (gethash "metadata" existing)))
@@ -324,11 +339,13 @@ Returns the attributes as a second value for the validating step."
 (defun admit-pod-result (store attributes pod)
   "Run the validating webhooks over the final POD, assigning a generated name first."
   (admit-pod-security store attributes (copy-core-object (pod-to-object pod)))
-  (when (admission-active-p store attributes)
-    (with-store-lock (store) (assign-generated-pod-name-unlocked store pod))
-    (setf (admission-name attributes) (pod-name pod)
-          (admission-object attributes) (admission-stamp-object attributes (copy-core-object (pod-to-object pod))))
-    (admission-validate store attributes))
+  (if (admission-active-p store attributes)
+      (progn
+        (with-store-lock (store) (assign-generated-pod-name-unlocked store pod))
+        (setf (admission-name attributes) (pod-name pod)
+              (admission-object attributes) (admission-stamp-object attributes (copy-core-object (pod-to-object pod))))
+        (admission-validate store attributes))
+      (admission-emit-warnings attributes))
   pod)
 
 (defun admit-pod-delete (store namespace name options)

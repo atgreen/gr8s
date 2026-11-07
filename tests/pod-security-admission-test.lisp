@@ -47,6 +47,83 @@
     (is (find "host" (gr8s::pod-security-violations "baseline" "v1.34" pod)
               :test #'search))))
 
+(test pod-security-namespace-labels-validate-create-and-update
+  (let ((valid (gr8s::core-object
+                "metadata" (gr8s::core-object
+                            "labels" (gr8s::core-object
+                                      "pod-security.kubernetes.io/enforce" "restricted"
+                                      "pod-security.kubernetes.io/enforce-version" "v1.34"))))
+        (bad-level (gr8s::core-object
+                    "metadata" (gr8s::core-object
+                                "labels" (gr8s::core-object
+                                          "pod-security.kubernetes.io/enforce" "maximum"))))
+        (bad-version (gr8s::core-object
+                      "metadata" (gr8s::core-object
+                                  "labels" (gr8s::core-object
+                                            "pod-security.kubernetes.io/warn-version" "1.34")))))
+    (is-true (gr8s::admit-pod-security-namespace "CREATE" valid))
+    (signals gr8s::kubernetes-error
+      (gr8s::admit-pod-security-namespace "CREATE" bad-level))
+    (signals gr8s::kubernetes-error
+      (gr8s::admit-pod-security-namespace "CREATE" bad-version))
+    (is-true (gr8s::admit-pod-security-namespace "UPDATE" bad-level bad-level))
+    (signals gr8s::kubernetes-error
+      (gr8s::admit-pod-security-namespace "UPDATE" bad-version bad-level))))
+
+(test namespace-write-path-enforces-pod-security-labels
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let ((gr8s::*admission-controller* "pod-security-test"))
+      (signals gr8s::kubernetes-error
+        (gr8s::admitted-create-core-resource
+         store "namespaces"
+         (gr8s::core-object
+          "metadata" (gr8s::core-object
+                      "name" "invalid"
+                      "labels" (gr8s::core-object
+                                "pod-security.kubernetes.io/enforce" "maximum")))
+         nil))
+      (gr8s::admitted-create-core-resource
+       store "namespaces" (gr8s::core-object "metadata" (gr8s::core-object "name" "team")) nil)
+      (signals gr8s::kubernetes-error
+        (gr8s::admitted-update-core-resource
+         store "namespaces" nil "team"
+         (lambda (namespace)
+           (setf (gethash "labels" (gethash "metadata" namespace))
+                 (gr8s::core-object "pod-security.kubernetes.io/audit-version" "v2"))
+           namespace))))))
+
+(test pod-security-is-enforced-through-the-http-api
+  (with-core-api (store path)
+    (values store path)
+    (check-core-status
+     422 "/api/v1/namespaces" :method :post
+     :object (gr8s::core-object
+              "apiVersion" "v1" "kind" "Namespace"
+              "metadata" (gr8s::core-object
+                          "name" "bad"
+                          "labels" (gr8s::core-object
+                                    "pod-security.kubernetes.io/enforce" "maximum"))))
+    (check-core-status
+     201 "/api/v1/namespaces" :method :post
+     :object (gr8s::core-object
+              "apiVersion" "v1" "kind" "Namespace"
+              "metadata" (gr8s::core-object
+                          "name" "team"
+                          "labels" (gr8s::core-object
+                                    "pod-security.kubernetes.io/enforce" "baseline"
+                                    "pod-security.kubernetes.io/warn" "restricted"))))
+    (check-core-status 403 "/api/v1/namespaces/team/pods" :method :post
+                       :object (psa-pod "privileged" t))
+    (multiple-value-bind (body status headers)
+        (drakma:http-request
+         (core-api-url "/api/v1/namespaces/team/pods")
+         :method :post :content-type "application/json"
+         :content (com.inuoe.jzon:stringify (psa-pod)))
+      (declare (ignore body))
+      (is (= 201 status))
+      (is (assoc :warning headers)))))
+
 (test pod-security-namespace-modes-enforce-warn-and-exempt
   (with-temporary-store (store directory)
     (declare (ignore directory))
