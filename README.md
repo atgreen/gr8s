@@ -25,7 +25,8 @@ attacks out of the box, with classical X25519/P-256 as automatic fallback.
 > slice of the Kubernetes API, but it has **not** passed Kubernetes conformance,
 > and we say so plainly ([details](docs/CONFORMANCE.md)). It is a great place to
 > explore a modern, eBPF-first design — not yet a drop-in replacement for a
-> production k3s cluster.
+> production k3s cluster. The concrete missing and partial capabilities are
+> maintained in the [Kubernetes and k3s gap inventory](docs/k3s-gap-inventory.md).
 
 ---
 

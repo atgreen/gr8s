@@ -46,6 +46,21 @@
 (defvar *api-connection-socket* nil
   "The socket of the API connection this thread serves, for a stream that outlives its request.")
 
+(defun client-connection-closed-p (fd)
+  "Report whether the peer of socket FD has closed it, without consuming anything it sent."
+  (sb-alien:with-alien ((octet (sb-alien:array (sb-alien:unsigned 8) 1)))
+    (let ((got (sb-alien:alien-funcall
+                (sb-alien:extern-alien "recv" (function sb-alien:long sb-alien:int (* t) sb-alien:unsigned-long sb-alien:int))
+                fd (sb-alien:alien-sap octet) 1 (logior 2 #x40)))) ; MSG_PEEK | MSG_DONTWAIT
+      (zerop got))))
+
+(defun api-watch-client-departed-p ()
+  "Report whether the client connection serving the current native API watch has closed."
+  (let ((socket *api-connection-socket*))
+    (and socket
+         (client-connection-closed-p
+          (sb-sys:fd-stream-fd (usocket:socket-stream socket))))))
+
 (defmethod hunchentoot:process-connection :around ((acceptor gr8s-acceptor) socket)
   (let ((*api-connection-socket* socket)) (call-next-method)))
 

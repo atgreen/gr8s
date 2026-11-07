@@ -80,7 +80,7 @@
 
 (test reloading-close-compatibility-preserves-the-true-upstream-function
   (let ((original gr8s::*upstream-http2-connection-close*))
-    (load (asdf:system-relative-pathname :gr8s "src/grpc-close-compat.lisp"))
+    (load (asdf:system-relative-pathname :gr8s "src/protocol/grpc-close-compat.lisp"))
     (is (eq original gr8s::*upstream-http2-connection-close*)))
   (with-http2-close-connection (connection socket peer listener)
     (ag-http2:connection-close connection)

@@ -249,6 +249,79 @@
       (uiop:delete-directory-tree directory
                                   :validate t :if-does-not-exist :ignore))))
 
+(test managed-containerd-reclaims-the-runtime-left-by-a-killed-agent
+  (let* ((directory
+           (merge-pathnames
+            (format nil "gr8s-managed-owner-~36R/" (random (expt 36 8)))
+            (uiop:temporary-directory)))
+         (manager
+           (gr8s::make-managed-containerd
+            :state-directory directory
+            :executable "/opt/gr8s/bin/containerd"
+            :oci-runtime "/opt/gr8s/bin/runc"
+            :cni-bin-directory "/opt/gr8s/bin/cni/"))
+         (signals nil)
+         (alive t))
+    (unwind-protect
+         (progn
+           (gr8s::write-managed-containerd-owner manager 2718 "4242")
+           (gr8s::reclaim-stale-managed-containerd
+            manager
+            :process-start-time (lambda (pid)
+                                  (is (= 2718 pid))
+                                  "4242")
+            :process-command (lambda (pid)
+                               (declare (ignore pid))
+                               (gr8s::managed-containerd-command manager))
+            :process-alive-p (lambda (pid)
+                               (declare (ignore pid))
+                               alive)
+            :signaler (lambda (pid signal)
+                        (push (list pid signal) signals)
+                        (when (= signal sb-posix:sigterm)
+                          (setf alive nil)))
+            :sleeper (lambda (seconds) (declare (ignore seconds))))
+           (is (equal (list (list 2718 sb-posix:sigterm)) (reverse signals)))
+           (is-false (probe-file (gr8s::managed-containerd-owner-path manager))))
+      (uiop:delete-directory-tree directory
+                                  :validate t :if-does-not-exist :ignore))))
+
+(test managed-containerd-never-signals-a-reused-owner-pid
+  (let* ((directory
+           (merge-pathnames
+            (format nil "gr8s-managed-owner-~36R/" (random (expt 36 8)))
+            (uiop:temporary-directory)))
+         (manager
+           (gr8s::make-managed-containerd
+            :state-directory directory
+            :executable "/opt/gr8s/bin/containerd"
+            :oci-runtime "/opt/gr8s/bin/runc"
+            :cni-bin-directory "/opt/gr8s/bin/cni/")))
+    (unwind-protect
+         (progn
+           (gr8s::write-managed-containerd-owner manager 2718 "old-start")
+           (is-false
+            (gr8s::reclaim-stale-managed-containerd
+             manager
+             :process-start-time (lambda (pid) (declare (ignore pid)) "new-start")
+             :process-command (lambda (pid)
+                                (declare (ignore pid))
+                                (gr8s::managed-containerd-command manager))
+             :process-alive-p (lambda (pid) (declare (ignore pid)) t)
+             :signaler (lambda (&rest arguments)
+                         (declare (ignore arguments))
+                         (fail "a recycled pid was signaled"))))
+           (is-false (probe-file (gr8s::managed-containerd-owner-path manager))))
+      (uiop:delete-directory-tree directory
+                                  :validate t :if-does-not-exist :ignore))))
+
+(test managed-containerd-reads-linux-process-identity
+  (let* ((pid (sb-posix:getpid))
+         (command (gr8s::linux-process-command pid)))
+    (is (parse-integer (gr8s::linux-process-start-time pid)))
+    (is (and command (plusp (length (first command)))))
+    (is (gr8s::linux-process-alive-p pid))))
+
 (test managed-containerd-lifecycle-wraps-the-server-body
   (let* ((directory
            (merge-pathnames

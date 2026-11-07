@@ -1,40 +1,13 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
-;;;; Package definitions for gr8s, its subsystems, and generated protobuf namespaces.
+;;;; Public package definition for gr8s.
 ;;;;
 ;;;; GR8S remains the public facade and the compatibility namespace for code not
 ;;;; yet migrated. Subsystem packages such as GR8S.RAFT own their symbols and
-;;;; export the interfaces their callers import. The GR8S.*.V1 packages hold code
-;;;; generated from external protobuf schemas (the CRI, CSI, kubelet plugin-
-;;;; registration, containerd, and the gr8s node protocols). Each shadows the CL
-;;;; symbols a generated message or field would otherwise clash with (LABELS,
-;;;; SOME, TYPE, BLOCK, SIGNAL, PHASE), so this file must load before any code in
-;;;; those packages reads clean. Keep the shadow lists in step with the generated
-;;;; sources.
-
-(defpackage #:gr8s.cri.v1
-  (:use #:cl)
-  (:shadow #:labels #:some))
-
-(defpackage #:gr8s.csi.v1
-  (:use #:cl)
-  (:shadow #:type #:labels #:some #:block))
-
-(defpackage #:gr8s.pluginregistration.v1
-  (:use #:cl)
-  (:shadow #:type #:block))
-
-(defpackage #:gr8s.containerd.tasks.v1
-  (:use #:cl)
-  (:shadow #:signal))
-
-(defpackage #:gr8s.containerd.transfer.v1
-  (:use #:cl))
-
-(defpackage #:gr8s.node.v1
-  (:use #:cl)
-  (:shadow #:labels #:phase))
+;;;; export the interfaces their callers import. Generated protobuf namespaces
+;;;; are defined independently in generated/package.lisp so code generators do
+;;;; not need to load the application package graph.
 
 (defpackage #:gr8s
   (:use #:cl)

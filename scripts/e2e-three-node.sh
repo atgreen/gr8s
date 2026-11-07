@@ -162,6 +162,15 @@ guest_gr8s_teardown() {  # stop gr8s and clear stale dataplane/network/state on 
   ssh_n "$ip" 'set +e
     systemctl kill --kill-who=all --signal=SIGKILL gr8s gr8s-agent 2>/dev/null
     systemctl stop gr8s gr8s-agent 2>/dev/null; systemctl reset-failed gr8s gr8s-agent 2>/dev/null
+    # runc places every CRI task below this namespace cgroup. Kill the subtree
+    # before its shims: SIGKILLing a shim first reparents the container payload
+    # to PID 1, which is how old Sonobuoy and agnhost processes survived down.
+    if [ -w /sys/fs/cgroup/k8s.io/cgroup.kill ]; then
+      echo 1 > /sys/fs/cgroup/k8s.io/cgroup.kill 2>/dev/null
+    elif [ -d /sys/fs/cgroup/k8s.io ]; then
+      find /sys/fs/cgroup/k8s.io -depth -name cgroup.procs -type f -exec cat {} \; 2>/dev/null \
+        | sort -un | xargs -r kill -9 2>/dev/null
+    fi
     pkill -9 -x containerd 2>/dev/null
     pgrep -f "^/.*/containerd-shim-runc-v2( |$)" | xargs -r kill -9 2>/dev/null
     sleep 1

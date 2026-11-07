@@ -52,6 +52,83 @@ load balancer ingress addresses, except ones whose ipMode Proxy says the balance
                         collect (gethash "ip" entry)))))
      :test #'equal :from-end t)))
 
+(defun service-load-balancer-ingress (store)
+  "Return the ready node addresses published by the embedded ServiceLB controller."
+  (coerce
+   (loop for node in (list-nodes store)
+         ;; The in-process local agent deliberately has no configured
+         ;; underlay address. NODE-REPORTED-ADDRESS is also what the Node API
+         ;; publishes as InternalIP, discovering the host's primary address
+         ;; for that local-node case.
+         for address = (node-reported-address node)
+         when (and (node-record-runtime-ready-p node)
+                   (stringp address) (plusp (length address)))
+           collect (core-object "ip" address "ipMode" "Proxy"))
+   'vector))
+
+(defun gr8s-load-balancer-service-p (service)
+  "True when the embedded controller, rather than a named external controller, owns SERVICE."
+  (let ((spec (gethash "spec" service)))
+    (and (equal "LoadBalancer" (gethash "type" spec))
+         (member (gethash "loadBalancerClass" spec) '(nil "") :test #'equal))))
+
+(defun service-load-balancer-identity (service)
+  "Return SERVICE's stable namespace/name identity."
+  (let ((metadata (gethash "metadata" service)))
+    (format nil "~A/~A" (gethash "namespace" metadata "default")
+            (gethash "name" metadata))))
+
+(defun service-load-balancer-listener-keys (service)
+  "Return the protocol/Service-port listeners SERVICE needs on every advertised node."
+  (remove-duplicates
+   (loop for port across (gethash "ports" (gethash "spec" service) #())
+         collect (cons (gethash "protocol" port "TCP") (gethash "port" port)))
+   :test #'equal))
+
+(defun service-load-balancer-port-owners (services)
+  "Return the identities of unclassed LoadBalancer SERVICES that own all their node listeners.
+Ownership is deterministic by namespace/name. A Service with any colliding port
+gets no listener or advertised ingress, matching an unschedulable Klipper
+ServiceLB Pod instead of silently routing the shared port to an arbitrary Service."
+  (let ((claimed (make-hash-table :test #'equal))
+        (owners (make-hash-table :test #'equal)))
+    (dolist (service (stable-sort (remove-if-not #'gr8s-load-balancer-service-p
+                                                  (copy-list services))
+                                  #'string< :key #'service-load-balancer-identity)
+             owners)
+      (let ((keys (service-load-balancer-listener-keys service)))
+        (unless (some (lambda (key) (gethash key claimed)) keys)
+          (setf (gethash (service-load-balancer-identity service) owners) t)
+          (dolist (key keys)
+            (setf (gethash key claimed) t)))))))
+
+(defun reconcile-service-load-balancer-status (store)
+  "Publish ready node addresses for every unclassed LoadBalancer Service.
+Services naming another loadBalancerClass remain entirely under that controller's ownership."
+  (let* ((services (list-core-resources store "services"))
+         (owners (service-load-balancer-port-owners services))
+         (ingress (service-load-balancer-ingress store)))
+    (dolist (service services)
+      (when (gr8s-load-balancer-service-p service)
+        (let* ((metadata (gethash "metadata" service))
+               (namespace (gethash "namespace" metadata))
+               (name (gethash "name" metadata))
+               (desired (core-object "loadBalancer"
+                                     (if (and (gethash (service-load-balancer-identity service) owners)
+                                              (plusp (length ingress)))
+                                         (core-object "ingress" ingress)
+                                         (core-object)))))
+          (unless (core-json-equal-p desired (gethash "status" service (core-object)))
+            (let ((*networking-status-write* t))
+              (update-core-resource
+               store "services" namespace name
+               (lambda (current)
+                 (when (equal (gethash "uid" metadata)
+                              (gethash "uid" (gethash "metadata" current)))
+                   (setf (gethash "status" current) (copy-core-object desired)))
+                 current))))))))
+  nil)
+
 (defun service-affinity-timeout (service)
   "Return the seconds a ClientIP-affinity SERVICE keeps a client on one backend, or NIL."
   (let ((spec (gethash "spec" service)))

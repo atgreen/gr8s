@@ -768,7 +768,30 @@ Return its port, a function to read the records, and a function to stop it."
                  (multiple-value-bind (method target headers body) (aggregator-test-read-request tls)
                    (bt:with-lock-held (lock)
                      (push (list method target headers body (pure-tls:tls-peer-certificate tls)) seen))
-                   (if (search "flunders" target)
+                   (cond
+                     ((equal target "/openapi/v2")
+                      (let ((document
+                              (com.inuoe.jzon:stringify
+                               (gr8s::core-object
+                                "swagger" "2.0" "info" (gr8s::core-object "title" "wardle" "version" "v1alpha1")
+                                "paths" (gr8s::core-object
+                                         "/apis/wardle.example.com/v1alpha1/namespaces/{namespace}/flunders"
+                                         (gr8s::core-object "get" (gr8s::core-object "operationId" "listFlunders")))
+                                "definitions" (gr8s::core-object
+                                               "io.wardle.v1alpha1.Flunder"
+                                               (gr8s::core-object
+                                                "type" "object"
+                                                "x-kubernetes-group-version-kind"
+                                                (vector (gr8s::core-object "group" "wardle.example.com"
+                                                                           "version" "v1alpha1" "kind" "Flunder"))))))))
+                        (write-sequence
+                         (trivial-utf-8:string-to-utf-8-bytes
+                          (format nil "HTTP/1.1 200 OK~C~CContent-Type: application/json~C~CContent-Length: ~D~C~C~C~C~A"
+                                  #\Return #\Linefeed #\Return #\Linefeed (length document)
+                                  #\Return #\Linefeed #\Return #\Linefeed document))
+                         tls)
+                        (force-output tls)))
+                     ((search "flunders" target)
                        ;; Two chunks: a watch's events have to arrive one at a time.
                        (flet ((write-text (text)
                                 (write-sequence (trivial-utf-8:string-to-utf-8-bytes text) tls)
@@ -776,7 +799,8 @@ Return its port, a function to read the records, and a function to stop it."
                          (write-text (format nil "HTTP/1.1 200 OK~C~CContent-Type: application/json~C~CTransfer-Encoding: chunked~C~C~C~C"
                                              #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed))
                          (write-text (format nil "7~C~C{\"a\":1}~C~C" #\Return #\Linefeed #\Return #\Linefeed))
-                         (write-text (format nil "0~C~C~C~C" #\Return #\Linefeed #\Return #\Linefeed)))
+                         (write-text (format nil "0~C~C~C~C" #\Return #\Linefeed #\Return #\Linefeed))))
+                     (t
                        (let ((document (com.inuoe.jzon:stringify
                                         (gr8s::core-object
                                          "apiVersion" "v1" "kind" "APIResourceList"
@@ -790,7 +814,7 @@ Return its port, a function to read the records, and a function to stop it."
                                    #\Return #\Linefeed #\Return #\Linefeed (length document)
                                    #\Return #\Linefeed #\Return #\Linefeed document))
                           tls)
-                         (force-output tls)))))))
+                         (force-output tls))))))))
         (let ((thread (bt:make-thread
                        (lambda ()
                          (handler-case
@@ -968,6 +992,12 @@ Return its port, a function to read the records, and a function to stop it."
                (is (gethash "apis/wardle.example.com/v1alpha1" (gethash "paths" (crd-api-request 200 "/openapi/v3"))))
                (crd-api-request 200 "/openapi/v3/apis/wardle.example.com/v1alpha1?hash=x")
                (is (equal "/openapi/v3/apis/wardle.example.com/v1alpha1" (second (first (funcall records)))))
+               ;; Legacy OpenAPI v2 is one merged document, so its paths and
+               ;; definitions include every available aggregated server.
+               (let ((swagger (crd-api-request 200 "/openapi/v2")))
+                 (is (gethash "io.wardle.v1alpha1.Flunder" (gethash "definitions" swagger)))
+                 (is (gethash "/apis/wardle.example.com/v1alpha1/namespaces/{namespace}/flunders"
+                              (gethash "paths" swagger))))
                ;; The object takes spec and status writes, keeping conditions it doesn't own.
                (is (= 400 (gethash "versionPriority"
                                    (gethash "spec" (crd-api-request 200 item :method :patch
@@ -1060,6 +1090,20 @@ Return its port, a function to read the records, and a function to stop it."
            (usocket:socket-close client)
            (setf client nil)
            (is-true (wait-until (lambda () (gr8s::client-connection-closed-p fd)) :timeout 5)))
+      (when client (usocket:socket-close client))
+      (usocket:socket-close server)
+      (usocket:socket-close listener))))
+
+(test native-watches-notice-a-departed-client
+  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :element-type '(unsigned-byte 8)))
+         (client (usocket:socket-connect "127.0.0.1" (usocket:get-local-port listener) :element-type '(unsigned-byte 8)))
+         (server (usocket:socket-accept listener)))
+    (unwind-protect
+         (let ((gr8s::*api-connection-socket* server))
+           (is-false (gr8s::api-watch-client-departed-p))
+           (usocket:socket-close client)
+           (setf client nil)
+           (is-true (wait-until #'gr8s::api-watch-client-departed-p :timeout 5)))
       (when client (usocket:socket-close client))
       (usocket:socket-close server)
       (usocket:socket-close listener))))

@@ -127,9 +127,14 @@
     (let ((dataplane
             (gr8s::start-service-lb-dataplane
              "/sys/fs/cgroup/gr8s" "/run/gr8s/bpf/service-lb"
-             :compile (lambda () (values :map-specs :program-specs))
+             :compile (lambda ()
+                        (values (list '(:name "gr8s_service_v4")
+                                      '(:name "gr8s_backend_v4"))
+                                :program-specs))
              :create-maps (lambda (specs)
-                            (is (eq :map-specs specs))
+                            (is (equal (list '(:name "gr8s_service_v4")
+                                             '(:name "gr8s_backend_v4"))
+                                       specs))
                             (list (fake-lb-map "gr8s_service_v4" 900001)
                                   (fake-lb-map "gr8s_backend_v4" 900002)))
              :ensure-directory (lambda (path) (declare (ignore path)) t)
@@ -156,12 +161,61 @@
       (is (not (null (gr8s::service-lb-service-table dataplane))))
       (is (not (null (gr8s::service-lb-backend-table dataplane)))))))
 
+(test service-lb-dataplane-start-reuses-compatible-pinned-maps
+  (let ((created nil) (pinned nil) (opened nil) (validated nil)
+        (existing (list (fake-lb-map "gr8s_service_v4" 900011)
+                        (fake-lb-map "gr8s_backend_v4" 900012))))
+    (let ((dataplane
+            (gr8s::start-service-lb-dataplane
+             "/sys/fs/cgroup/gr8s" "/run/gr8s/bpf/service-lb"
+             :compile (lambda ()
+                        (values (list '(:name "gr8s_service_v4")
+                                      '(:name "gr8s_backend_v4"))
+                                :program-specs))
+             :create-maps (lambda (specs)
+                            (setf created specs)
+                            (error "must not create replacement maps"))
+             :ensure-directory (lambda (path) (declare (ignore path)) t)
+             :path-exists-p (lambda (path)
+                              (member (pathname-name path)
+                                      '("gr8s_service_v4" "gr8s_backend_v4")
+                                      :test #'string=))
+             :open-pinned (lambda (path)
+                            (let ((entry (assoc (pathname-name path) existing
+                                                :test #'string=)))
+                              (push (pathname-name path) opened)
+                              (whistler/loader:map-info-fd (cdr entry))))
+             :validate-map (lambda (fd spec)
+                             (push (list fd (getf spec :name)) validated)
+                             (cdr (assoc (getf spec :name) existing :test #'string=)))
+             :pin-map (lambda (map path)
+                        (declare (ignore map path))
+                        (push t pinned))
+             :load-programs (lambda (specs maps)
+                              (is (eq :program-specs specs))
+                              (is (equal existing maps))
+                              (list (cons "gr8s_service_lb" (fake-lb-program 900013))))
+             :attach (lambda (program-fd cgroup attach-type)
+                       (declare (ignore program-fd cgroup attach-type))
+                       :attachment))))
+      (is (null created))
+      (is (null pinned))
+      (is (equal '("gr8s_backend_v4" "gr8s_service_v4") opened))
+      (is (equal '((900012 "gr8s_backend_v4")
+                   (900011 "gr8s_service_v4"))
+                 validated))
+      (is (= 900011 (whistler/loader:map-info-fd
+                     (gr8s::service-lb-service-table dataplane)))))))
+
 (test service-lb-dataplane-start-rolls-back-pins-on-load-failure
   (let ((removed nil))
     (signals error
       (gr8s::start-service-lb-dataplane
        "/sys/fs/cgroup/gr8s" "/run/gr8s/bpf/service-lb"
-       :compile (lambda () (values :map-specs :program-specs))
+       :compile (lambda ()
+                  (values (list '(:name "gr8s_service_v4")
+                                '(:name "gr8s_backend_v4"))
+                          :program-specs))
        :create-maps (lambda (specs) (declare (ignore specs))
                       (list (fake-lb-map "gr8s_service_v4" 900001)
                             (fake-lb-map "gr8s_backend_v4" 900002)))
@@ -245,6 +299,78 @@
     (gr8s::core-object
      "metadata" (gr8s::core-object "name" "svc" "namespace" "default" "uid" cluster-ip)
      "spec" spec)))
+
+(test service-lb-status-advertises-ready-node-addresses
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (dolist (node (list (gr8s:make-node-record :id "node-a" :name "node-a"
+                                               :pod-cidr "10.88.0.0/24" :underlay-address "192.0.2.10")
+                        (gr8s:make-node-record :id "node-b" :name "node-b"
+                                               :pod-cidr "10.88.1.0/24" :underlay-address "192.0.2.11")))
+      (gr8s:register-node store node))
+    (gr8s:mark-node-ready store "node-b" (get-universal-time))
+    (labels ((load-balancer (name &optional class)
+               (let ((service (service-test-object name)))
+                 (setf (gethash "type" (gethash "spec" service)) "LoadBalancer")
+                 (when class (setf (gethash "loadBalancerClass" (gethash "spec" service)) class))
+                 (gr8s::create-core-resource store "services" service "default")))
+             (addresses (name)
+               (let* ((service (gr8s::get-core-resource store "services" "default" name))
+                      (status (gethash "status" service))
+                      (balancer (gethash "loadBalancer" status)))
+                 (map 'list (lambda (entry) (gethash "ip" entry))
+                      (gethash "ingress" balancer #())))))
+      (load-balancer "managed")
+      (load-balancer "custom" "example.test/controller")
+      (gr8s::reconcile-service-load-balancer-status store)
+      (is (equal '("192.0.2.11") (addresses "managed")))
+      (is (null (addresses "custom")))
+      (let ((revision (gr8s::pod-store-resource-revision store)))
+        (gr8s::reconcile-service-load-balancer-status store)
+        (is (= revision (gr8s::pod-store-resource-revision store))))
+      (gr8s:mark-node-ready store "node-a" (get-universal-time))
+      (gr8s::reconcile-service-load-balancer-status store)
+      (is (equal '("192.0.2.10" "192.0.2.11") (addresses "managed"))))))
+
+(test service-lb-status-advertises-the-local-node-discovered-address
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    ;; The in-process local agent intentionally reports no explicit underlay
+    ;; address. Its Kubernetes InternalIP is the host's discovered primary IP.
+    (gr8s:register-node store (gr8s:make-node-record :id "local" :name "local"
+                                                     :pod-cidr "10.88.0.0/24"))
+    (gr8s:mark-node-ready store "local" (get-universal-time))
+    (let* ((gr8s::*local-primary-ipv4* "192.0.2.12")
+           (service (service-test-object "managed")))
+      (setf (gethash "type" (gethash "spec" service)) "LoadBalancer")
+      (gr8s::create-core-resource store "services" service "default")
+      (gr8s::reconcile-service-load-balancer-status store)
+      (let* ((stored (gr8s::get-core-resource store "services" "default" "managed"))
+             (ingress (gethash "ingress" (gethash "loadBalancer" (gethash "status" stored)))))
+        (is (equal '(("192.0.2.12" "Proxy"))
+                   (map 'list (lambda (entry)
+                                (list (gethash "ip" entry) (gethash "ipMode" entry)))
+                        ingress)))))))
+
+(test service-lb-status-withdraws-a-service-whose-node-port-collides
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (gr8s:register-node store (gr8s:make-node-record :id "node-a" :name "node-a"
+                                                     :pod-cidr "10.88.0.0/24"
+                                                     :underlay-address "192.0.2.10"))
+    (gr8s:mark-node-ready store "node-a" (get-universal-time))
+    (dolist (name '("alpha" "beta"))
+      (let ((service (service-test-object name)))
+        (setf (gethash "type" (gethash "spec" service)) "LoadBalancer")
+        (gr8s::create-core-resource store "services" service "default")))
+    (gr8s::reconcile-service-load-balancer-status store)
+    (flet ((ingress (name)
+             (gethash "ingress"
+                      (gethash "loadBalancer"
+                               (gethash "status"
+                                        (gr8s::get-core-resource store "services" "default" name))))))
+      (is (= 1 (length (ingress "alpha"))))
+      (is (null (ingress "beta"))))))
 
 (test service-lb-plan-excludes-ineligible-services
   ;; Headless (None), the API Service, and ExternalName never reach the maps.

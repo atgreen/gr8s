@@ -6,7 +6,8 @@
 ;;;; and answer the Node proxy's kubelet reads from the Pods bound to that Node or
 ;;;; forward them to its kubelet endpoint.
 ;;;; Forward ordinary HTTP methods, request bytes and real upstream status/body,
-;;;; without following backend redirects or inheriting environment HTTP proxies.
+;;;; and relay upgraded streams in both directions, without following backend
+;;;; redirects or inheriting environment HTTP proxies.
 
 (in-package #:gr8s.apiserver)
 
@@ -214,15 +215,106 @@
             (error condition)
             (core-resource-error 503 "ServiceUnavailable" "Proxied HTTP connection failed: ~A" condition))))))
 
+(defun proxy-upgrade-request-headers (host raw-path)
+  "Return the client headers for an upgraded backend request without leaking API credentials."
+  (let ((headers
+          (remove-if
+           (lambda (header)
+             (member (car header)
+                     '("host" "authorization" "proxy-authorization" "content-length"
+                       "x-forwarded-host" "x-forwarded-uri" "x-forwarded-proto")
+                     :test #'string-equal))
+           (mapcar (lambda (header)
+                     (cons (string-downcase (string (car header))) (cdr header)))
+                   (hunchentoot:headers-in*)))))
+    (append (list (cons "Host" host)
+                  (cons "X-Forwarded-Host" host)
+                  (cons "X-Forwarded-Uri" raw-path)
+                  (cons "X-Forwarded-Proto"
+                        (if (hunchentoot:acceptor-ssl-p hunchentoot:*acceptor*) "https" "http")))
+            headers)))
+
+(defun proxy-write-upgrade-request (stream method target host headers body)
+  "Write the current upgrade request to a resolved backend STREAM."
+  (write-sequence
+   (trivial-utf-8:string-to-utf-8-bytes
+    (with-output-to-string (output)
+      (format output "~A ~A HTTP/1.1~C~CHost: ~A~C~C"
+              (string-upcase method) target #\Return #\Linefeed host #\Return #\Linefeed)
+      (dolist (header headers)
+        (unless (string-equal "host" (car header))
+          (format output "~A: ~A~C~C" (car header) (cdr header) #\Return #\Linefeed)))
+      (when (plusp (length body))
+        (format output "Content-Length: ~D~C~C" (length body) #\Return #\Linefeed))
+      (format output "~C~C" #\Return #\Linefeed)))
+   stream)
+  (when (plusp (length body)) (write-sequence body stream))
+  (finish-output stream))
+
+(defun proxy-upgrade-backend (target)
+  "Connect to TARGET and return its socket and HTTP or HTTPS byte stream."
+  (let* ((uri (puri:parse-uri target))
+         (scheme (puri:uri-scheme uri))
+         (host (puri:uri-host uri))
+         (port (or (puri:uri-port uri) (if (eq scheme :https) 443 80)))
+         (socket (usocket:socket-connect host port :element-type '(unsigned-byte 8)
+                                                   :timeout 10 :nodelay t)))
+    (values socket
+            (if (eq scheme :https)
+                (pure-tls:make-tls-client-stream
+                 (usocket:socket-stream socket) :hostname host
+                 :context (pure-tls:make-tls-context :verify-mode pure-tls:+verify-none+
+                                                     :auto-load-system-ca nil)
+                 :verify pure-tls:+verify-none+)
+                (usocket:socket-stream socket))
+            (format nil "~A:~D" (if (find #\: host) (format nil "[~A]" host) host) port))))
+
+(defun proxy-upgrade-exchange (target prefix-pattern method)
+  "Forward an HTTP Upgrade handshake to TARGET and relay its byte stream in both directions."
+  (let* ((raw (hunchentoot:request-uri*))
+         (question (position #\? raw))
+         (raw-path (subseq raw 0 question))
+         (end (nth-value 1 (cl-ppcre:scan prefix-pattern raw-path)))
+         (suffix (subseq raw-path end))
+         (backend-path (concatenate 'string (if (equal suffix "") "/" suffix)
+                                    (if question (subseq raw question) "")))
+         (body (or (hunchentoot:raw-post-data :force-binary t) #()))
+         (socket nil))
+    (handler-case
+        (multiple-value-bind (connected stream authority) (proxy-upgrade-backend target)
+          (setf socket connected)
+          (proxy-write-upgrade-request
+           stream method backend-path authority
+           (proxy-upgrade-request-headers (hunchentoot:header-in* :host) raw-path) body)
+          (multiple-value-bind (status headers)
+              (parse-http-response-head (read-http-response-head stream))
+            (unless (= status 101)
+              (error "backend refused the connection upgrade with HTTP ~D" status))
+            (setf (hunchentoot:return-code*) 101 (hunchentoot:content-type*) nil)
+            (dolist (header headers)
+              (unless (member (car header) '(:content-length :transfer-encoding))
+                (push header (slot-value hunchentoot:*reply* 'hunchentoot::headers-out))))
+            (let ((client (hunchentoot::start-output 101 nil)))
+              (finish-output client)
+              (extend-api-connection-idle-timeout)
+              (relay-runtime-stream client stream socket))))
+      (error (condition)
+        (when socket (ignore-errors (usocket:socket-close socket)))
+        (if hunchentoot::*headers-sent*
+            (error condition)
+            (core-resource-error 503 "ServiceUnavailable"
+                                 "Proxied connection upgrade failed: ~A" condition))))))
+
 (defun pod-http-proxy-response (store namespace id method)
   "Proxy an ordinary HTTP exchange to the real workload rather than synthesizing result data."
   (unless (member method *pod-proxy-methods*)
     (core-resource-error 405 "MethodNotAllowed" "Unsupported Pod proxy method"))
-  (when (hunchentoot:header-in* :upgrade)
-    (core-resource-error 501 "NotImplemented" "Pod proxy connection upgrades are not implemented"))
   (admit-pod-proxy store namespace id)
-  (proxy-http-exchange (pod-proxy-target store namespace id)
-                       "^/api/v1/namespaces/[^/]+/pods/[^/]+/proxy(?=/|$)" method))
+  (let ((target (pod-proxy-target store namespace id))
+        (prefix "^/api/v1/namespaces/[^/]+/pods/[^/]+/proxy(?=/|$)"))
+    (if (upgrade-request-p)
+        (proxy-upgrade-exchange target prefix method)
+        (proxy-http-exchange target prefix method))))
 
 ;;; Service proxy
 
@@ -264,10 +356,11 @@
   "Proxy an ordinary HTTP exchange to one ready backend of a Service port."
   (unless (member method *pod-proxy-methods*)
     (core-resource-error 405 "MethodNotAllowed" "Unsupported Service proxy method"))
-  (when (hunchentoot:header-in* :upgrade)
-    (core-resource-error 501 "NotImplemented" "Service proxy connection upgrades are not implemented"))
-  (proxy-http-exchange (service-proxy-target store namespace id)
-                       "^/api/v1/namespaces/[^/]+/services/[^/]+/proxy(?=/|$)" method))
+  (let ((target (service-proxy-target store namespace id))
+        (prefix "^/api/v1/namespaces/[^/]+/services/[^/]+/proxy(?=/|$)"))
+    (if (upgrade-request-p)
+        (proxy-upgrade-exchange target prefix method)
+        (proxy-http-exchange target prefix method))))
 
 ;;; Node proxy
 

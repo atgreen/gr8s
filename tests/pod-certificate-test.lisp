@@ -3,7 +3,7 @@
 ;;;;
 ;;;; Purpose:
 ;;;; podCertificate projected volumes (KEP-4317): the node generates a pod's
-;;;; keypair locally and reports only the public key as a claim; the control
+;;;; keypair locally and reports a signed PKCS#10 stub as a claim; the control
 ;;;; plane turns the claim into a PodCertificateRequest; a built-in signer issues
 ;;;; a short-lived SPIFFE leaf from the cluster CA; and the node mounts the
 ;;;; credential bundle only once the request is signed, gating the pod until then.
@@ -76,14 +76,16 @@
       ;; not materialized and the pod stays Pending.
       (signals gr8s:runtime-error (gr8s::pod-volume-desired-files runtime pod volume))
       ;; Generating the keypair left exactly one claim to report, with the pod's
-      ;; identity and the base64 PKIX public key -- and no private key.
+      ;; identity and the signed PKCS#10 stub -- and no private key or deprecated
+      ;; v1beta1 public-key field.
       (let ((claims (gr8s::node-pending-pod-certificate-claims store)))
         (is (= 1 (length claims)))
         (let ((claim (first claims)))
           (is (string= "sonobuoy" (getf claim :namespace)))
           (is (string= "podidentity.podcert.ate.dev/identity" (getf claim :signer-name)))
           (is (string= "projected" (getf claim :pod-name)))
-          (is (plusp (length (getf claim :pkix-public-key))))
+          (is (plusp (length (getf claim :stub-pkcs10-request))))
+          (is (zerop (length (getf claim :pkix-public-key ""))))
           ;; The claim carries no private key material of any kind.
           (is (null (getf claim :private-key-pem)))
           ;; A source that names no lifetime still gets the kubelet default, so
@@ -126,6 +128,27 @@
   "Build the node-protocol claim message for the single pending claim in STORE."
   (gr8s::pod-certificate-claim-message (first (gr8s::node-pending-pod-certificate-claims store))))
 
+(test pod-certificate-user-annotations-reach-the-request
+  (with-projection (runtime store directory)
+    (values directory)
+    (let* ((object (gr8s::pod-to-object (projection-pod *pod-certificate-volume*)))
+           (volume (aref (gethash "volumes" (gethash "spec" object)) 0))
+           (source (gethash "podCertificate"
+                            (aref (gethash "sources" (gethash "projected" volume)) 0))))
+      (setf (gethash "userAnnotations" source)
+            (gr8s::core-object "postgres.podcert.ate.dev/username" "owner"))
+      (let* ((pod (create-pod store (parse-pod object)))
+             (stored-volume (aref (gethash "volumes" (gethash "spec" (gr8s::pod-to-object pod))) 0)))
+        (signals gr8s:runtime-error
+          (gr8s::pod-volume-desired-files runtime pod stored-volume))
+        (let* ((claim (pod-certificate-claim-from store))
+               (name (gr8s.node.v1::name claim)))
+          (gr8s::ensure-pod-certificate-request-from-claim store "n1" claim)
+          (let* ((request (gr8s::get-core-resource store "podcertificaterequests" "sonobuoy" name))
+                 (annotations (gethash "unverifiedUserAnnotations" (gethash "spec" request))))
+            (is (string= "owner"
+                         (gethash "postgres.podcert.ate.dev/username" annotations)))))))))
+
 (test pod-certificate-control-plane-creates-and-signs
   ;; Exercise gr8s's optional built-in signer (off by default) by opting this
   ;; signer name in, as a standalone gr8s without Agent Substrate would.
@@ -142,7 +165,12 @@
         (gr8s::ensure-pod-certificate-request-from-claim store "n1" claim)
         (let ((pcr (gr8s::get-core-resource store "podcertificaterequests" "sonobuoy" name)))
           (is (string= "n1" (gethash "nodeName" (gethash "spec" pcr))))
-          (is (string= (gr8s.node.v1::pkix-public-key claim) (gethash "pkixPublicKey" (gethash "spec" pcr))))
+          (let ((spec (gethash "spec" pcr)))
+            (is (string= (gr8s.node.v1::stub-pkcs10-request claim)
+                         (gethash "stubPKCS10Request" spec)))
+            (multiple-value-bind (value present) (gethash "pkixPublicKey" spec)
+              (declare (ignore value))
+              (is (null present))))
           (is (zerop (length (gethash "certificateChain" (gethash "status" pcr (gr8s::core-object)) "")))))
         ;; A second claim for the same key is idempotent (no duplicate/replace).
         (gr8s::ensure-pod-certificate-request-from-claim store "n1" claim)

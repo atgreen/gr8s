@@ -548,24 +548,6 @@ join."
         (setf (node-runtime-state node-runtime) :stopped))))
   nil)
 
-(defun assignment-pod (assignment)
-  "Parse and return the Pod carried in ASSIGNMENT, erroring when the assignment's
-namespace, name, uid or resource version disagree with the Pod JSON it wraps."
-  (let* ((json (trivial-utf-8:utf-8-bytes-to-string
-                (slot-value assignment 'gr8s.node.v1::pod-json)))
-         (pod (parse-pod json))
-         (namespace (slot-value assignment 'gr8s.node.v1::namespace))
-         (name (slot-value assignment 'gr8s.node.v1::name))
-         (uid (slot-value assignment 'gr8s.node.v1::uid))
-         (resource-version
-           (slot-value assignment 'gr8s.node.v1::resource-version)))
-    (unless (and (string= namespace (pod-namespace pod))
-                 (string= name (pod-name pod))
-                 (string= uid (pod-uid pod))
-                 (string= resource-version (pod-resource-version pod)))
-      (error "Pod assignment identity does not match its Pod JSON"))
-    pod))
-
 (defun put-assigned-pod (store pod)
   "Persist and index the assigned POD in STORE, returning it. Refuses (by erroring) to
 overwrite a different UID still terminating under the same name, and to re-assign a UID
@@ -960,7 +942,10 @@ so the revision is retried."
           (progn
             (converge-node-port-forwarders (node-runtime-node-port-forwarders node-runtime)
                                            (node-runtime-store node-runtime)
-                                           :node-name (node-runtime-node-name node-runtime))
+                                           :node-name (node-runtime-node-name node-runtime)
+                                           :node-address
+                                           (ignore-errors (containerd-node-address
+                                                           (node-runtime-runtime node-runtime))))
             (converge-health-check-servers (node-runtime-health-check-servers node-runtime)
                                            (node-runtime-store node-runtime)
                                            :node-name (node-runtime-node-name node-runtime)))
