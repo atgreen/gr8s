@@ -47,6 +47,51 @@
     (is (find "host" (gr8s::pod-security-violations "baseline" "v1.34" pod)
               :test #'search))))
 
+(test pod-security-versioned-policy-fixtures-match-upstream-boundaries
+  (labels ((violates-p (text level version pod)
+             (find text (gr8s::pod-security-violations level version pod) :test #'search))
+           (pod-security (pod)
+             (let ((spec (gethash "spec" pod)))
+               (or (gethash "securityContext" spec)
+                   (setf (gethash "securityContext" spec) (gr8s::core-object))))))
+    (let ((pod (psa-pod)))
+      (setf (gethash "seLinuxOptions" (pod-security pod))
+            (gr8s::core-object "type" "container_engine_t"))
+      (is (violates-p "SELinux type" "baseline" "v1.30" pod))
+      (is-false (violates-p "SELinux type" "baseline" "v1.31" pod))
+      (setf (gethash "user" (gethash "seLinuxOptions" (pod-security pod))) "custom")
+      (is (violates-p "SELinux user" "baseline" "v1.31" pod)))
+    (let ((pod (psa-pod)))
+      (setf (gethash "sysctls" (pod-security pod))
+            (vector (gr8s::core-object "name" "net.ipv4.tcp_rmem")))
+      (is (violates-p "unsafe sysctl" "baseline" "v1.31" pod))
+      (is-false (violates-p "unsafe sysctl" "baseline" "v1.32" pod))
+      (setf (gethash "name" (aref (gethash "sysctls" (pod-security pod)) 0))
+            "net.ipv4.tcp_slow_start_after_idle")
+      (is (violates-p "unsafe sysctl" "baseline" "v1.36" pod))
+      (is-false (violates-p "unsafe sysctl" "baseline" "v1.37" pod)))
+    (let* ((pod (psa-pod))
+           (container (aref (gethash "containers" (gethash "spec" pod)) 0)))
+      (setf (gethash "lifecycle" container)
+            (gr8s::core-object
+             "preStop" (gr8s::core-object
+                        "tcpSocket" (gr8s::core-object "port" 80 "host" "127.0.0.1"))))
+      (is-false (violates-p "host" "baseline" "v1.33" pod))
+      (is (violates-p "host" "baseline" "v1.34" pod)))
+    (let* ((pod (psa-pod "allowPrivilegeEscalation" nil
+                         "capabilities" (gr8s::core-object "drop" #("ALL"))
+                         "seccompProfile" (gr8s::core-object "type" "RuntimeDefault")
+                         "runAsUser" 0))
+           (spec (gethash "spec" pod)))
+      (setf (gethash "hostUsers" spec) nil)
+      (is (violates-p "runAsNonRoot" "restricted" "v1.34" pod))
+      (is (violates-p "runAsUser" "restricted" "v1.34" pod))
+      (is-false (violates-p "runAsNonRoot" "restricted" "v1.35" pod))
+      (is-false (violates-p "runAsUser" "restricted" "v1.35" pod)))
+    (let ((pod (psa-pod "runAsNonRoot" t)))
+      (is-false (violates-p "allowPrivilegeEscalation" "restricted" "v1.7" pod))
+      (is (violates-p "allowPrivilegeEscalation" "restricted" "v1.8" pod)))))
+
 (test pod-security-namespace-labels-validate-create-and-update
   (let ((valid (gr8s::core-object
                 "metadata" (gr8s::core-object
