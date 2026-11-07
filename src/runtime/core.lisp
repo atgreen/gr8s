@@ -226,6 +226,12 @@ name to \"cpu\" (cumulative nanoseconds) and \"memory\" (working set bytes)."))
 (defmethod runtime-container-metrics ((runtime t))
   (declare (ignore runtime))
   (make-hash-table :test #'equal))
+(defgeneric runtime-resource-metrics (runtime)
+  (:documentation "Return current kubelet stats summaries for the nodes behind RUNTIME."))
+(defmethod runtime-resource-metrics ((runtime t))
+  "A runtime without node statistics reports no resource metrics."
+  (declare (ignore runtime))
+  #())
 (defgeneric runtime-send-exec-session-input
     (runtime session channel data &key rows columns eof))
 (defgeneric runtime-next-exec-session-output

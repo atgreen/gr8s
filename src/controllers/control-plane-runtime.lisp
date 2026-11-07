@@ -21,7 +21,11 @@
 (defstruct (control-plane-runtime
              (:constructor make-control-plane-runtime (store node-server)))
   store
-  node-server)
+  node-server
+  (resource-metrics-summaries #())
+  (container-metrics (make-hash-table :test #'equal))
+  (resource-metrics-at 0)
+  (resource-metrics-lock (bt:make-lock "control-plane resource metrics")))
 
 (defun control-plane-pod-by-uid (runtime uid)
   "Return the Pod with UID from RUNTIME's store, or NIL when none matches."
@@ -379,26 +383,54 @@ direction waits for acknowledgements, so a long download neither piles up here n
    (control-plane-runtime-node-server runtime)
    (control-plane-port-forward-operation session)))
 
+(defun refresh-control-plane-resource-metrics (runtime)
+  "Refresh RUNTIME's shared metrics cache from every agent at most once every five seconds.
+An older agent's cumulative-container report still feeds HPA, while a current agent's
+kubelet summary feeds both HPA and metrics.k8s.io."
+  (bt:with-lock-held ((control-plane-runtime-resource-metrics-lock runtime))
+    (let ((now (get-universal-time)))
+      (when (>= (- now (control-plane-runtime-resource-metrics-at runtime)) 5)
+        (let ((summaries nil) (metrics (make-hash-table :test #'equal)))
+          (dolist (node (list-nodes (control-plane-runtime-store runtime)))
+            (unless (node-record-api-only node)
+              (handler-case
+                  (let* ((operation
+                           (request-node-operation
+                            (control-plane-runtime-node-server runtime) (node-record-name node)
+                            (make-instance 'gr8s.node.v1::operation-request
+                                           :operation-id (generate-uid)
+                                           :kind gr8s.node.v1::+operationkind-operation_kind_metrics+)
+                            :timeout 5))
+                         (report (node-operation-channel-data
+                                  operation gr8s.node.v1::+streamchannel-stream_channel_stdout+))
+                         (object (and (plusp (length report))
+                                      (com.inuoe.jzon:parse
+                                       (trivial-utf-8:utf-8-bytes-to-string
+                                        (coerce report '(vector (unsigned-byte 8))))))))
+                    (when object
+                      (if (and (gethash "node" object) (gethash "pods" object))
+                          (progn
+                            (push object summaries)
+                            (maphash (lambda (uid containers) (setf (gethash uid metrics) containers))
+                                     (gr8s.apiserver::container-metrics-from-summary object)))
+                          (maphash (lambda (uid containers) (setf (gethash uid metrics) containers)) object))))
+                (error (condition)
+                  (format *error-output* "gr8s resource metrics from ~A: ~A~%"
+                          (node-record-name node) condition)))))
+          (setf (control-plane-runtime-resource-metrics-summaries runtime)
+                (coerce (nreverse summaries) 'vector)
+                (control-plane-runtime-container-metrics runtime) metrics
+                (control-plane-runtime-resource-metrics-at runtime) now))))
+    runtime))
+
 (defmethod runtime-container-metrics ((runtime control-plane-runtime))
-  "Ask each node for its containers' usage; a node that cannot answer has no measures this time."
-  (let ((metrics (make-hash-table :test #'equal)))
-    (dolist (node (list-nodes (control-plane-runtime-store runtime)) metrics)
-      (unless (node-record-api-only node)
-        (handler-case
-            (let* ((operation
-                     (request-node-operation
-                      (control-plane-runtime-node-server runtime) (node-record-name node)
-                      (make-instance 'gr8s.node.v1::operation-request
-                                     :operation-id (generate-uid)
-                                     :kind gr8s.node.v1::+operationkind-operation_kind_metrics+)
-                      :timeout 5))
-                   (report (node-operation-channel-data
-                            operation gr8s.node.v1::+streamchannel-stream_channel_stdout+)))
-              (when (plusp (length report))
-                (maphash (lambda (uid containers) (setf (gethash uid metrics) containers))
-                         (com.inuoe.jzon:parse (trivial-utf-8:utf-8-bytes-to-string (coerce report '(vector (unsigned-byte 8))))))))
-          (error (condition)
-            (format *error-output* "gr8s HPA metrics from ~A: ~A~%" (node-record-name node) condition)))))))
+  "Return the cached per-container view, refreshing the shared node snapshot when stale."
+  (control-plane-runtime-container-metrics (refresh-control-plane-resource-metrics runtime)))
+
+(defmethod runtime-resource-metrics ((runtime control-plane-runtime))
+  "Return the cached kubelet summary from every reporting node."
+  (control-plane-runtime-resource-metrics-summaries
+   (refresh-control-plane-resource-metrics runtime)))
 
 (defmethod runtime-send-exec-session-input
     ((runtime control-plane-runtime) (session control-plane-exec-session)

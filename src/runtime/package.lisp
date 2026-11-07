@@ -41,6 +41,7 @@
    #:runtime-cancel-exec-session
    #:runtime-cancel-port-forward
    #:runtime-container-metrics
+   #:runtime-resource-metrics
    #:runtime-delete
    #:runtime-delete-pod
    #:runtime-ensure
