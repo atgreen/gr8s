@@ -13,6 +13,41 @@
 (def-suite gateway-proxy :in gr8s)
 (in-suite gateway-proxy)
 
+(test gateway-backend-resolver-maps-the-route-port-to-a-service-port
+  (with-temporary-store (store directory)
+    (values directory)
+    (gr8s::create-core-resource
+     store "services"
+     (gr8s::core-object
+      "metadata" (gr8s::core-object "name" "web")
+      "spec" (gr8s::core-object
+              "clusterIP" "10.96.0.40"
+              "ports" (vector (gr8s::core-object "name" "http" "port" 80
+                                                  "targetPort" 8080))))
+     "default")
+    (gr8s::create-core-resource
+     store "endpointslices"
+     (gr8s::core-object
+      "metadata" (gr8s::core-object
+                  "name" "web-a"
+                  "labels" (gr8s::core-object "kubernetes.io/service-name" "web"))
+      "addressType" "IPv4"
+      "ports" (vector (gr8s::core-object "name" "http" "port" 8080 "protocol" "TCP"))
+      "endpoints" (vector (gr8s::core-object
+                           "addresses" (vector "10.80.0.8")
+                           "conditions" (gr8s::core-object "ready" t))))
+     "default")
+    (multiple-value-bind (address port)
+        (funcall (gr8s::make-service-backend-resolver store)
+                 (gr8s::make-gw-backend :name "web" :namespace "default" :port 80))
+      (is (equal "10.80.0.8" address))
+      (is (= 8080 port)))
+    (multiple-value-bind (address port)
+        (funcall (gr8s::make-service-backend-resolver store)
+                 (gr8s::make-gw-backend :name "web" :namespace "default" :port "http"))
+      (is (equal "10.80.0.8" address))
+      (is (= 8080 port)))))
+
 ;;; A minimal backend "Service" HTTP server that records the exchange.
 (defvar *gw-backend-last* nil "(method path headers-alist body-string) of the last backend request.")
 

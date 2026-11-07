@@ -24,7 +24,7 @@
 (defstruct gw-backend
   (name "" :type string)
   (namespace nil)                       ; nil = the route's own namespace
-  (port 0 :type integer)
+  (port 0 :type (or integer string))
   (weight 1 :type integer))
 
 (defstruct gw-match
