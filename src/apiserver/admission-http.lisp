@@ -323,6 +323,7 @@ Returns the attributes as a second value for the validating step."
 
 (defun admit-pod-result (store attributes pod)
   "Run the validating webhooks over the final POD, assigning a generated name first."
+  (admit-pod-security store attributes (copy-core-object (pod-to-object pod)))
   (when (admission-active-p store attributes)
     (with-store-lock (store) (assign-generated-pod-name-unlocked store pod))
     (setf (admission-name attributes) (pod-name pod)
