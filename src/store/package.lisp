@@ -1,0 +1,141 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; Package boundary for durable control-plane state and revision tracking.
+
+(defpackage #:gr8s.store
+  (:use #:cl #:gr8s.model)
+  (:export
+   #:*apply-update-manager*
+   #:*core-write-active*
+   #:*local-plane-write*
+   #:*pending-consensus-commit*
+   #:*pending-node-commit*
+   #:*pending-pod-commit*
+   #:*pod-watch-journal-bytes*
+   #:*pod-watch-journal-limit*
+   #:*pod-name-generator*
+   #:*pod-revision-reservation*
+   #:*podtemplate-clock*
+   #:*watch-history-seconds*
+   #:+pod-watch-journal-minimum+
+   #:+revision-journal-trim-interval+
+   #:advance-replicated-pod-revision-unlocked
+   #:approximate-heap-bytes
+   #:assign-generated-pod-name-unlocked
+   #:clear-replicated-pod-state-unlocked
+   #:configure-store-policy
+   #:create-pod
+   #:create-pod-unlocked
+   #:copy-pod-status-value
+   #:current-status-pod-p
+   #:current-timestamp
+   #:delete-pod
+   #:generate-pod-name
+   #:generate-uid
+   #:get-pod
+   #:get-pod-unlocked
+   #:index-pod
+   #:install-node-state-blob
+   #:install-node-state-delta
+   #:install-pod-state-blob
+   #:list-pods
+   #:load-pod-status-state
+   #:load-pod-revision
+   #:local-replicated-pod-event-revision-unlocked
+   #:make-pod-store
+   #:mark-pod-deleting
+   #:node-desired-state-json
+   #:node-path
+   #:node-record-to-object
+   #:node-state-delta-json
+   #:nodes-path
+   #:next-pod-revision-unlocked
+   #:note-node-desired-change
+   #:note-node-state-change
+   #:note-pod-desired-change
+   #:note-pod-state-change
+   #:open-store
+   #:parse-node-record
+   #:persist-node
+   #:persist-pod
+   #:persist-pod-status-state
+   #:pod-desired-state-json
+   #:pod-key
+   #:pod-path
+   #:pod-state-json
+   #:pod-published-view
+   #:pod-revision-ceiling-path
+   #:pod-revision-satisfied-p
+   #:pod-status-state-path
+   #:pod-store
+   #:pod-store-consensus-commit-fn
+   #:pod-store-consensus-write-lock
+   #:pod-store-core-checkpoint-bytes
+   #:pod-store-core-checkpoint-needed
+   #:pod-store-core-journal-bytes
+   #:pod-store-credential-lock
+   #:pod-store-event-expirations
+   #:pod-store-in-cluster-config
+   #:pod-store-job-controller-states
+   #:pod-store-lock
+   #:pod-store-node-watch-floor
+   #:pod-store-node-watch-journal
+   #:pod-store-node-watch-journal-bytes
+   #:pod-store-node-watch-journal-length
+   #:pod-store-nodes
+   #:pod-store-nominated-nodes
+   #:pod-store-path
+   #:pod-store-pod-certificates
+   #:pod-store-pod-client-statuses
+   #:pod-store-pod-condition-histories
+   #:pod-store-pod-finalization-states
+   #:pod-store-pod-observed-phases
+   #:pod-store-pod-observed-resource-versions
+   #:pod-store-pod-observed-statuses
+   #:pod-store-pod-published-statuses
+   #:pod-store-pod-revision
+   #:pod-store-pod-revision-ceiling
+   #:pod-store-pod-watch-floor
+   #:pod-store-pod-watch-journal
+   #:pod-store-pod-watch-journal-bytes
+   #:pod-store-pod-watch-journal-length
+   #:pod-store-pod-watch-views
+   #:pod-store-pods
+   #:pod-store-projected-tokens
+   #:pod-store-resource-history-start
+   #:pod-store-resource-revision
+   #:pod-store-resources
+   #:pod-store-scheduling-notes
+   #:pod-store-service-account-signing-key
+   #:pod-store-template-history
+   #:pod-store-template-history-floor
+   #:pod-store-template-history-maintained-at
+   #:pod-store-template-history-recent
+   #:pod-store-template-token-key
+   #:pod-store-verified-tokens
+   #:pod-store-watch-journal-p
+   #:pod-store-workload-deletions
+   #:pod-store-workload-lock
+   #:remove-pod
+   #:record-pod-watch-event-unlocked
+   #:record-revision-journal-event
+   #:replicated-pod-entry-table
+   #:replicated-pod-revision
+   #:secure-random-octets
+   #:publish-pod-removal-unlocked
+   #:publish-pod-spec-change-unlocked
+   #:publish-pod-status-unlocked
+   #:trim-revision-journal
+   #:update-pod
+   #:update-pod-unlocked
+   #:with-core-write
+   #:with-store-lock))
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (do-external-symbols (symbol '#:gr8s.store)
+    (shadowing-import symbol '#:gr8s))
+  (dolist (name '("CREATE-POD" "DELETE-POD" "GET-POD" "LIST-PODS"
+                  "MARK-POD-DELETING" "OPEN-STORE" "REMOVE-POD"
+                  "UPDATE-POD"))
+    (export (find-symbol name '#:gr8s.store) '#:gr8s)))

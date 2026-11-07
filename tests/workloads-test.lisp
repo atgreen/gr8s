@@ -9,6 +9,25 @@
 (def-suite workloads :in gr8s)
 (in-suite workloads)
 
+(test controllers-have-an-explicit-package-boundary
+  (let ((controllers (find-package '#:gr8s.controllers))
+        (composition (find-package '#:gr8s)))
+    (is-true controllers)
+    (dolist (name '("RECONCILE-WORKLOADS"
+                    "RECONCILE-ENDPOINTS"
+                    "RECONCILE-ENDPOINTSLICES"
+                    "RECONCILE-JOBS"
+                    "RECONCILE-CRONJOBS"
+                    "RECONCILE-HORIZONTAL-POD-AUTOSCALERS"
+                    "MAKE-SERVICE-LB-CONTROLLER"
+                    "MAKE-GATEWAY-CONTROLLER"))
+      (multiple-value-bind (implementation status)
+          (find-symbol name controllers)
+        (is (eq :external status))
+        (is (eq implementation (find-symbol name composition)))))
+    (is (not (eq :external
+                 (nth-value 1 (find-symbol "FOR" controllers)))))))
+
 (defun workload-fixture (kind name &optional (replicas 2))
   "Build an executable workload with a selector and distinctive template."
   (gr8s::core-object

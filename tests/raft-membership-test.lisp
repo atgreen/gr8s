@@ -2,7 +2,7 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
-;;;; Exercise Raft membership changes (src/raft.lisp, podster-c2d.6) over the
+;;;; Exercise Raft membership changes (src/raft/core.lisp, podster-c2d.6) over the
 ;;;; deterministic simulator: a witness votes and counts toward quorum but never
 ;;;; leads, a member can be added to a running cluster (and then replicates), and
 ;;;; a member can be removed (the cluster keeps committing under the new quorum).

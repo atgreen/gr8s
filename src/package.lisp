@@ -1,16 +1,17 @@
 ;;;; SPDX-FileCopyrightText: 2026 Anthony Green
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
-;;;; Package definitions for gr8s and its generated protobuf namespaces.
+;;;; Package definitions for gr8s, its subsystems, and generated protobuf namespaces.
 ;;;;
-;;;; GR8S is the one implementation package the whole system lives in; its
-;;;; explicit :export list is the module's public surface. The GR8S.*.V1 packages
-;;;; hold code generated from external protobuf schemas (the CRI, CSI, kubelet
-;;;; plugin-registration, containerd, and the gr8s node protocols). Each shadows
-;;;; the CL symbols a generated message or field would otherwise clash with
-;;;; (LABELS, SOME, TYPE, BLOCK, SIGNAL, PHASE), so this file must load before any
-;;;; code in those packages reads clean. Keep the shadow lists in step with the
-;;;; generated sources.
+;;;; GR8S remains the public facade and the compatibility namespace for code not
+;;;; yet migrated. Subsystem packages such as GR8S.RAFT own their symbols and
+;;;; export the interfaces their callers import. The GR8S.*.V1 packages hold code
+;;;; generated from external protobuf schemas (the CRI, CSI, kubelet plugin-
+;;;; registration, containerd, and the gr8s node protocols). Each shadows the CL
+;;;; symbols a generated message or field would otherwise clash with (LABELS,
+;;;; SOME, TYPE, BLOCK, SIGNAL, PHASE), so this file must load before any code in
+;;;; those packages reads clean. Keep the shadow lists in step with the generated
+;;;; sources.
 
 (defpackage #:gr8s.cri.v1
   (:use #:cl)
@@ -37,6 +38,120 @@
 
 (defpackage #:gr8s
   (:use #:cl)
+  ;; Preserve the historical GR8S:: names while the callers migrate to the
+  ;; explicit consensus package. SHADOWING-IMPORT-FROM also makes reloading this
+  ;; package definition replace symbols interned by an older monolithic image.
+  (:shadowing-import-from
+   #:gr8s.raft
+   #:close-file-raft-storage
+   #:copy-raft-entry
+   #:copy-raft-node
+   #:file-raft-storage
+   #:file-raft-storage-path
+   #:file-raft-storage-stream
+   #:load-raft-log
+   #:make-raft-entry
+   #:make-raft-node
+   #:make-raft-recovered
+   #:open-file-raft-storage
+   #:raft-adopt-config
+   #:raft-advance-commit
+   #:raft-append-message
+   #:raft-apply-committed
+   #:raft-become-candidate
+   #:raft-become-follower
+   #:raft-become-leader
+   #:raft-begin-pre-election
+   #:raft-broadcast
+   #:raft-broadcast-append
+   #:raft-cluster-size
+   #:raft-compact
+   #:raft-config-addresses
+   #:raft-config-api-urls
+   #:raft-configure
+   #:raft-current-config
+   #:raft-entry
+   #:raft-entry-command
+   #:raft-entry-index
+   #:raft-entry-p
+   #:raft-entry-term
+   #:raft-handle-append-entries
+   #:raft-handle-append-entries-reply
+   #:raft-handle-message
+   #:raft-handle-pre-vote
+   #:raft-handle-pre-vote-reply
+   #:raft-handle-request-vote
+   #:raft-handle-request-vote-reply
+   #:raft-last-log-index
+   #:raft-last-log-term
+   #:raft-leader-p
+   #:raft-log-append
+   #:raft-log-entry
+   #:raft-log-length
+   #:raft-log-term
+   #:raft-log-truncate
+   #:raft-majority
+   #:raft-maybe-become-leader
+   #:raft-member-role
+   #:raft-node
+   #:raft-node-api-urls
+   #:raft-node-apply-fn
+   #:raft-node-commit-index
+   #:raft-node-current-term
+   #:raft-node-departing-members
+   #:raft-node-election-elapsed
+   #:raft-node-election-timeout
+   #:raft-node-heartbeat-elapsed
+   #:raft-node-heartbeat-timeout
+   #:raft-node-id
+   #:raft-node-last-applied
+   #:raft-node-leader-contact-elapsed
+   #:raft-node-leader-id
+   #:raft-node-log
+   #:raft-node-match-index
+   #:raft-node-next-index
+   #:raft-node-on-configured
+   #:raft-node-p
+   #:raft-node-peer-addresses
+   #:raft-node-peers
+   #:raft-node-pending
+   #:raft-node-pending-members
+   #:raft-node-pre-vote-term
+   #:raft-node-pre-votes
+   #:raft-node-removed
+   #:raft-node-restore-fn
+   #:raft-node-role
+   #:raft-node-roles
+   #:raft-node-self-role
+   #:raft-node-send-fn
+   #:raft-node-snapshot-fn
+   #:raft-node-snapshot-index
+   #:raft-node-snapshot-term
+   #:raft-node-storage
+   #:raft-node-timeout-fn
+   #:raft-node-voted-for
+   #:raft-node-votes
+   #:raft-persist-hard-state
+   #:raft-propose
+   #:raft-propose-config
+   #:raft-recovered
+   #:raft-recovered-entries
+   #:raft-recovered-snapshot-index
+   #:raft-recovered-snapshot-state
+   #:raft-recovered-snapshot-term
+   #:raft-recovered-term
+   #:raft-recovered-vote
+   #:raft-replicate-ids
+   #:raft-reset-election-timer
+   #:raft-restore-snapshot
+   #:raft-send
+   #:raft-step-down-if-stale
+   #:raft-storage-append-entry
+   #:raft-storage-save-hard-state
+   #:raft-storage-save-snapshot
+   #:raft-storage-truncate
+   #:raft-tick
+   #:recover-raft-node)
   (:export
    #:+gr8s-version+
    #:+node-protocol-version+

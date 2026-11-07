@@ -12,35 +12,6 @@
 (defparameter *pod-ephemeral-update* nil
   "True while the ephemeralcontainers subresource writes, the only way to change that list.")
 
-(defparameter +ephemeral-container-forbidden-fields+
-  '("ports" "startupProbe" "readinessProbe" "livenessProbe" "lifecycle" "resizePolicy" "restartPolicy")
-  "Container fields that promise a lasting service, which an ephemeral container cannot offer.")
-
-(defun parse-ephemeral-container (object)
-  "Validate an ephemeral container declaration and return its CONTAINER-SPEC."
-  (require-object object "ephemeral container")
-  (dolist (field +ephemeral-container-forbidden-fields+)
-    (when (nth-value 1 (gethash field object))
-      (invalid-pod "ephemeral containers cannot define ~A" field)))
-  (when (eq (gethash "targetContainerName" object) 'null) (remhash "targetContainerName" object))
-  (let ((target (gethash "targetContainerName" object)))
-    (remhash "targetContainerName" object)
-    (unwind-protect (parse-container object)
-      (when target (setf (gethash "targetContainerName" object) target)))))
-
-(defun parse-pod-ephemeral-containers (spec)
-  "Return SPEC's ephemeral containers as CONTAINER-SPECs, requiring real target containers."
-  (when (eq (gethash "ephemeralContainers" spec) 'null) (remhash "ephemeralContainers" spec))
-  (let ((declared (optional-vector spec "ephemeralContainers" "spec"))
-        (targets (map 'list (lambda (container) (gethash "name" container))
-                      (concatenate 'vector (optional-vector spec "initContainers" "spec")
-                                   (optional-vector spec "containers" "spec")))))
-    (loop for object across declared
-          do (let ((target (and (hash-table-p object) (gethash "targetContainerName" object))))
-               (when (and target (not (member target targets :test #'equal)))
-                 (invalid-pod "ephemeral container targetContainerName ~S names no container of this Pod" target))))
-    (map 'vector #'parse-ephemeral-container declared)))
-
 (defun preserve-pod-ephemeral-containers (existing replacement)
   "Keep the stored ephemeral containers through any write but the dedicated subresource."
   (unless *pod-ephemeral-update*

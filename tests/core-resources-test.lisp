@@ -2,6 +2,25 @@
 (def-suite core-resources :in gr8s)
 (in-suite core-resources)
 
+(test resource-semantics-have-an-explicit-package-boundary
+  (let ((resources (find-package '#:gr8s.resources))
+        (composition (find-package '#:gr8s)))
+    (is-true resources)
+    (dolist (name '("CORE-OBJECT"
+                    "NORMALIZE-CORE-RESOURCE"
+                    "GET-CORE-RESOURCE"
+                    "LIST-CORE-RESOURCES"
+                    "CREATE-CORE-RESOURCE"
+                    "UPDATE-CORE-RESOURCE"
+                    "DELETE-CORE-RESOURCE"
+                    "WITH-CRD-DEFERRED-CONVERSIONS"))
+      (multiple-value-bind (implementation status)
+          (find-symbol name resources)
+        (is (eq :external status))
+        (is (eq implementation (find-symbol name composition)))))
+    (is (not (eq :external
+                 (nth-value 1 (find-symbol "FOR" resources)))))))
+
 (defun core-fixture (kind name &rest fields)
   (apply #'gr8s::core-object "apiVersion" "v1" "kind" kind
          "metadata" (gr8s::core-object "name" name) fields))

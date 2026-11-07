@@ -2,6 +2,17 @@
 
 (in-suite gr8s)
 
+(test runtime-protocol-has-an-explicit-package-boundary
+  (let ((package (find-package "GR8S.RUNTIME")))
+    (is (not (null package)))
+    (dolist (name '("RUNTIME-ENSURE" "RUNTIME-OBSERVE" "RUNTIME-DELETE"
+                    "RUNTIME-POD" "RUNTIME-ERROR" "MAKE-FAKE-RUNTIME"))
+      (multiple-value-bind (symbol status) (and package (find-symbol name package))
+        (is (not (null symbol)) "~A is present in GR8S.RUNTIME" name)
+        (is (eq :external status) "~A is exported from GR8S.RUNTIME" name)
+        (is (eq symbol (find-symbol name "GR8S"))
+            "GR8S preserves ~A's runtime protocol symbol identity" name)))))
+
 (test reconciliation-is-idempotent-and-replaces-changed-pods
   (with-temporary-store (store path)
     (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))

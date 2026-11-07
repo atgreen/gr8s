@@ -9,18 +9,6 @@
 
 (in-package #:gr8s)
 
-(defun parse-init-container (object)
-  "Validate an init container: only a restartable sidecar may define probes or lifecycle hooks.
-As validateInitContainerRestartPolicy allows with ContainerRestartRules, an ordinary init container
-may override the Pod's policy with OnFailure or Never and restart rules of its own."
-  (require-object object "init container")
-  (when (eq (gethash "restartPolicy" object) 'null) (remhash "restartPolicy" object))
-  (unless (equal "Always" (gethash "restartPolicy" object))
-    (dolist (key '("startupProbe" "readinessProbe" "livenessProbe" "lifecycle"))
-      (when (nth-value 1 (gethash key object))
-        (invalid-pod "ordinary init containers cannot define ~A" key))))
-  (parse-container object))
-
 (defun pod-init-container-p (pod name)
   "Find NAME among POD's ordered init declarations."
   (find name (pod-init-containers pod) :test #'equal :key #'container-spec-name))

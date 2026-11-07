@@ -10,6 +10,15 @@
 (def-suite raft-plane :in gr8s)
 (in-suite raft-plane)
 
+(test ha-adapters-have-an-explicit-package-boundary
+  (let ((package (find-package "GR8S.HA")))
+    (is (not (null package)))
+    (dolist (name '("MAKE-RAFT-RESOURCE-STORE" "RAFT-PLANE-SUBMIT"
+                    "START-HA-CONTROL-PLANE" "STOP-HA-CONTROL-PLANE"))
+      (multiple-value-bind (symbol status) (and package (find-symbol name package))
+        (is (not (null symbol)) "~A is present in GR8S.HA" name)
+        (is (eq :external status) "~A is exported from GR8S.HA" name)))))
+
 (test raft-plane-classifies-consensus-vs-local
   (dolist (r '("configmaps" "secrets" "services" "gateways" "networkpolicies"
                "certificates" "httproutes"))

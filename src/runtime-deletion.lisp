@@ -20,9 +20,6 @@
 
 (defparameter *runtime-deletion-register-cancel* nil)
 
-(defgeneric runtime-terminate-pod (runtime pod deadline)
-  (:documentation "Stop all of POD's containers by DEADLINE, then remove its sandbox."))
-
 (defun register-runtime-deletion-cancel (cancel)
   "Register CANCEL with the current job, rejecting operations from superseded jobs."
   (when *runtime-deletion-register-cancel*

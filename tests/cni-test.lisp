@@ -2,6 +2,26 @@
 
 (in-suite gr8s)
 
+(test network-implementation-has-an-explicit-package-boundary
+  (let ((network (find-package '#:gr8s.network))
+        (composition (find-package '#:gr8s)))
+    (is-true network)
+    (dolist (name '("CNI-MAIN"
+                    "OPEN-NODE-IPAM"
+                    "CALL-RTNETLINK"
+                    "COMPILE-NETWORK-POLICY"
+                    "START-SERVICE-LB-DATAPLANE"
+                    "RECONCILE-NODE-VXLAN-NETWORK"
+                    "START-AGENT-CNI-SERVER"
+                    "MAKE-ROUTED-CNI-OPERATIONS"))
+      (multiple-value-bind (implementation status)
+          (find-symbol name network)
+        (is (eq :external status))
+        (is (eq implementation (find-symbol name composition)))))
+    ;; Reader-interned LOOP syntax is implementation detail, not public API.
+    (is (not (eq :external
+                 (nth-value 1 (find-symbol "FOR" network)))))))
+
 (defparameter *valid-cni-config*
   "{\"cniVersion\":\"1.0.0\",\"name\":\"gr8s\",\"type\":\"gr8s\",\"socket\":\"/run/gr8s/agent-cni.sock\",\"direction\":\"egress\",\"program\":\"/runtime/gr8s-whistler.bpf.o\",\"mapPinRoot\":\"/run/gr8s/bpf\",\"prevResult\":{\"cniVersion\":\"1.0.0\",\"interfaces\":[]}}")
 

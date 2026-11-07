@@ -1,0 +1,325 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+;;;;
+;;;; Purpose:
+;;;; Validate typed PV, PVC, StorageClass and VolumeAttributesClass objects
+;;;; independently of runtime volume capabilities. Controller-owned binding/status is preserved on writes;
+;;;; filesystem access happens only in the assigned node's volume implementation.
+
+(in-package #:gr8s.resources)
+
+(defparameter *storage-schema*
+  (com.inuoe.jzon:parse (asdf:system-relative-pathname :gr8s "schema/storage-v1.json")))
+(defvar *storage-status-write* nil)
+
+(eval-when (:load-toplevel :execute)
+  (dolist (type '(("persistentvolumes" "PersistentVolume" "v1" nil)
+                  ("persistentvolumeclaims" "PersistentVolumeClaim" "v1" t)
+                  ("storageclasses" "StorageClass" "storage.k8s.io/v1" nil)
+                  ("volumeattributesclasses" "VolumeAttributesClass" "storage.k8s.io/v1" nil)))
+    (setf *stored-resource-types* (append (remove (first type) *stored-resource-types* :key #'first :test #'equal) (list type))))
+  (dolist (section '("definitions" "messages"))
+    (maphash (lambda (name value) (setf (gethash name (gethash section *podtemplate-schema*)) value))
+             (gethash section *storage-schema*))))
+
+(defun storage-resource-p (resource)
+  "Return whether RESOURCE belongs to the implemented persistent storage APIs."
+  (or (member resource '("persistentvolumes" "persistentvolumeclaims" "storageclasses" "volumeattributesclasses") :test #'equal)
+      (csi-storage-resource-p resource)))
+
+(defun storage-resource-schema-name (resource)
+  "Return the upstream structural definition for a storage RESOURCE."
+  (concatenate 'string (if (equal "storage.k8s.io/v1" (core-resource-api-version resource)) "io.k8s.api.storage.v1." "io.k8s.api.core.v1.")
+               (core-resource-kind resource)))
+
+(defun storage-quantity (quantity context)
+  "Parse positive Kubernetes decimal/binary storage quantities without float rounding."
+  (let ((text (if (integerp quantity) (write-to-string quantity) quantity)))
+    (unless (and (stringp text) (<= 1 (length text) 80))
+      (core-resource-error 422 "Invalid" "~A requires a positive storage quantity" context))
+    (multiple-value-bind (match groups)
+        (cl-ppcre:scan-to-strings "^([+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+))([eE][+-]?[0-9]+|[A-Za-z]*)$" text)
+      (unless match (core-resource-error 422 "Invalid" "Invalid storage quantity for ~A" context))
+      (let* ((number (aref groups 0)) (suffix (aref groups 1))
+             (negative (char= #\- (char number 0)))
+             (unsigned (if (find (char number 0) "+-") (subseq number 1) number))
+             (dot (position #\. unsigned))
+             (digits (remove #\. unsigned))
+             (value (/ (parse-integer digits) (if dot (expt 10 (- (length unsigned) dot 1)) 1)))
+             (factor (cdr (assoc suffix '(("" . 1) ("n" . 1/1000000000) ("u" . 1/1000000) ("m" . 1/1000)
+                                         ("k" . 1000) ("K" . 1000) ("M" . 1000000) ("G" . 1000000000)
+                                         ("T" . 1000000000000) ("P" . 1000000000000000) ("E" . 1000000000000000000)
+                                         ("Ki" . 1024) ("Mi" . 1048576) ("Gi" . 1073741824) ("Ti" . 1099511627776)
+                                         ("Pi" . 1125899906842624) ("Ei" . 1152921504606846976)) :test #'equal))))
+        (when (and (null factor) (> (length suffix) 1) (find (char suffix 0) "eE"))
+          (let ((exponent (parse-integer suffix :start 1)))
+            (unless (<= -30 exponent 30) (core-resource-error 422 "Invalid" "Storage quantity exponent is out of range"))
+            (setf factor (expt 10 exponent))))
+        (unless (and factor (not negative) (< 0 (* value factor)) (<= (* value factor) #x7fffffffffffffff))
+          (core-resource-error 422 "Invalid" "~A requires a positive storage quantity within int64 capacity" context))
+        (* value factor)))))
+
+(defun storage-string-enum (value values context)
+  "Validate a required supported enum string."
+  (unless (member value values :test #'equal)
+    (core-resource-error 422 "Invalid" "~A must be one of ~{~A~^, ~}" context values))
+  value)
+
+(defun validate-storage-access-modes (modes)
+  "Validate access modes and their mutually exclusive ReadWriteOncePod form."
+  (bootstrap-string-array modes "accessModes" :nonempty t)
+  (loop for mode across modes do (storage-string-enum mode '("ReadWriteOnce" "ReadOnlyMany" "ReadWriteMany" "ReadWriteOncePod") "accessModes"))
+  (unless (= (length modes) (length (remove-duplicates modes :test #'equal)))
+    (core-resource-error 422 "Invalid" "accessModes must be unique"))
+  (when (and (find "ReadWriteOncePod" modes :test #'equal) (/= (length modes) 1))
+    (core-resource-error 422 "Invalid" "ReadWriteOncePod cannot be combined with another access mode")))
+
+(defun validate-storage-parameters (parameters &key allow-empty)
+  "Validate class parameters within the limits Kubernetes sets for provisioners and drivers."
+  (let ((total 0) (count 0))
+    (when parameters
+      (validate-core-string-map parameters "parameters")
+      (maphash (lambda (key value)
+                 (incf count)
+                 (when (zerop (length key)) (core-resource-error 422 "Invalid" "parameters keys can not be empty"))
+                 (incf total (+ (length key) (length value))))
+               parameters))
+    (when (> count 512) (core-resource-error 422 "Invalid" "parameters may have at most 512 entries"))
+    (when (> total (* 256 1024)) (core-resource-error 422 "Invalid" "parameters may not exceed 256 KiB"))
+    (when (and (zerop count) (not allow-empty))
+      (core-resource-error 422 "Invalid" "parameters must contain at least one key/value pair"))))
+
+(defun validate-storage-driver-name (name context)
+  "Validate a provisioner or driver name as a qualified name, as Kubernetes does."
+  (require-nonempty-string name context)
+  (unless (and (<= (length name) 253) (core-qualified-key-p (string-downcase name)))
+    (core-resource-error 422 "Invalid" "~A must be a qualified name" context)))
+
+(defun storage-absolute-path-p (path)
+  "Return whether PATH names an absolute host path without NUL or traversal."
+  (and (stringp path) (plusp (length path)) (char= #\/ (char path 0))
+       (not (find #\Null path)) (not (member ".." (uiop:split-string path :separator '(#\/)) :test #'equal))))
+
+(defun validate-host-storage-source (source &key local)
+  "Validate hostPath/local source paths and explicit hostPath type checks."
+  (require-object source "storage source")
+  (unless (storage-absolute-path-p (gethash "path" source))
+    (core-resource-error 422 "Invalid" "Storage source path must be absolute without traversal"))
+  (unless local
+    (storage-string-enum (gethash "type" source "")
+                         '("" "DirectoryOrCreate" "Directory" "FileOrCreate" "File" "Socket" "CharDevice" "BlockDevice") "hostPath.type")))
+
+(defun validate-storage-node-selector (selector)
+  "Validate node selector requirement cardinality and integer comparisons."
+  (let ((terms (gethash "nodeSelectorTerms" (require-object selector "node selector"))))
+    (unless (and (vectorp terms) (not (stringp terms)) (plusp (length terms)))
+      (core-resource-error 422 "Invalid" "nodeSelectorTerms requires at least one term"))
+    (loop for term across terms
+          do (dolist (field '("matchExpressions" "matchFields"))
+               (loop for requirement across (gethash field term #())
+                     for key = (gethash "key" requirement)
+                     for op = (gethash "operator" requirement)
+                     for values = (gethash "values" requirement #())
+                     do (unless (if (equal field "matchFields") (equal key "metadata.name") (core-qualified-key-p key))
+                          (core-resource-error 422 "Invalid" "Invalid node selector requirement key"))
+                        (storage-string-enum op '("In" "NotIn" "Exists" "DoesNotExist" "Gt" "Lt") "node selector operator")
+                        (unless (and (vectorp values) (not (stringp values)) (every #'stringp values)
+                                     (cond ((member op '("In" "NotIn") :test #'equal) (plusp (length values)))
+                                           ((member op '("Gt" "Lt") :test #'equal)
+                                            (and (= 1 (length values)) (ignore-errors (parse-integer (aref values 0) :junk-allowed nil))))
+                                           (t (zerop (length values)))))
+                          (core-resource-error 422 "Invalid" "Invalid node selector requirement values")))))))
+
+(defun validate-storage-label-selector (selector)
+  "Validate PVC label selection independently of the labels on available volumes."
+  (when selector
+    (let ((labels (gethash "matchLabels" selector)))
+      (when labels
+        (validate-core-string-map labels "selector.matchLabels")
+        (maphash (lambda (key value)
+                   (unless (and (core-qualified-key-p key) (core-label-name-p value :empty t))
+                     (core-resource-error 422 "Invalid" "Invalid PVC label selector"))) labels)))
+    (loop for requirement across (gethash "matchExpressions" selector #())
+          for op = (gethash "operator" requirement)
+          for values = (gethash "values" requirement #())
+          do (unless (core-qualified-key-p (gethash "key" requirement))
+               (core-resource-error 422 "Invalid" "Invalid PVC label selector key"))
+             (storage-string-enum op '("In" "NotIn" "Exists" "DoesNotExist") "selector operator")
+             (unless (and (vectorp values) (not (stringp values))
+                          (every (lambda (value) (core-label-name-p value :empty t)) values)
+                          (if (member op '("In" "NotIn") :test #'equal) (plusp (length values)) (zerop (length values))))
+               (core-resource-error 422 "Invalid" "Invalid PVC label selector values")))))
+
+(defun storage-source-kind (spec)
+  "Return the only persistent volume source in a validated PV spec."
+  (let* ((properties (gethash "k8s.io.api.core.v1.PersistentVolumeSource" (gethash "messages" *storage-schema*)))
+         (sources (loop for definition being the hash-values of properties
+                        for key = (gethash "name" definition)
+                        when (and (gethash key spec) (not (eq 'null (gethash key spec)))) collect key)))
+    (unless (= 1 (length sources)) (core-resource-error 422 "Invalid" "PersistentVolume requires exactly one volume source"))
+    (first sources)))
+
+(defun storage-default-class-unlocked (store)
+  "Return the newest explicitly default StorageClass, or NIL. Caller holds the store lock."
+  (when store
+    (first (sort (loop for key being the hash-keys of (pod-store-resources store) using (hash-value object)
+                       for annotations = (gethash "annotations" (gethash "metadata" object))
+                       when (and (equal "storageclasses" (first key)) annotations
+                                 (or (equal "true" (gethash "storageclass.kubernetes.io/is-default-class" annotations))
+                                     (equal "true" (gethash "storageclass.beta.kubernetes.io/is-default-class" annotations)))) collect object)
+                 (lambda (left right)
+                   (let ((a (gethash "metadata" left)) (b (gethash "metadata" right)))
+                     (if (equal (gethash "creationTimestamp" a) (gethash "creationTimestamp" b))
+                         (string> (gethash "name" a) (gethash "name" b))
+                         (string> (gethash "creationTimestamp" a) (gethash "creationTimestamp" b)))))))))
+
+(defun storage-ensure-protection-finalizer (metadata name)
+  "Add the implemented storage protection finalizer without discarding user finalizers."
+  (let ((values (gethash "finalizers" metadata #())))
+    (unless (find name values :test #'equal)
+      (setf (gethash "finalizers" metadata) (concatenate 'vector values (vector name))))))
+
+(defun normalize-storage-resource (resource input namespace name store)
+  "Admit typed storage resources while keeping server-owned status out of ordinary writes."
+  (let* ((object (copy-core-object (require-object input "storage resource")))
+         (metadata (require-object (gethash "metadata" object) "metadata"))
+         (kind (core-resource-kind resource)) (version (core-resource-api-version resource))
+         (existing (and store (gethash (core-resource-key resource namespace (gethash "name" metadata)) (pod-store-resources store)))))
+    (dolist (field '("finalizers" "deletionTimestamp"))
+      (when (eq 'null (gethash field metadata)) (remhash field metadata)))
+    ;; Go sends a CSINode without drivers as drivers: null, or omits it in protobuf.
+    (when (and (equal resource "csinodes") (hash-table-p (gethash "spec" object))
+               (member (gethash "drivers" (gethash "spec" object)) '(nil null)))
+      (setf (gethash "drivers" (gethash "spec" object)) (vector)))
+    (dolist (target (list object (gethash "spec" object)))
+      (when (hash-table-p target)
+        (dolist (field '("storageClassName" "volumeName" "volumeMode" "nodeAffinity" "claimRef" "mountOptions" "selector" "dataSource" "dataSourceRef" "reclaimPolicy" "volumeBindingMode" "parameters" "allowedTopologies"))
+          (when (eq 'null (gethash field target)) (remhash field target)))))
+    (unless (and (equal kind (gethash "kind" object kind)) (equal version (gethash "apiVersion" object version)))
+      (core-resource-error 400 "BadRequest" "Expected ~A ~A" version kind))
+    (validate-core-metadata metadata namespace name :allow-finalizers t)
+    (setf (gethash "apiVersion" object) version (gethash "kind" object) kind)
+    (if namespace (setf (gethash "namespace" metadata) namespace) (remhash "namespace" metadata))
+    (validate-template-shape object (template-schema (storage-resource-schema-name resource)) kind)
+    (cond
+      ((csi-storage-resource-p resource) (normalize-csi-storage-object resource object existing))
+      ((equal resource "volumeattributesclasses")
+       (validate-storage-driver-name (gethash "driverName" object) "driverName")
+       (validate-storage-parameters (gethash "parameters" object))
+       (storage-ensure-protection-finalizer metadata "kubernetes.io/vac-protection"))
+      ((equal resource "storageclasses")
+       (validate-storage-driver-name (gethash "provisioner" object) "provisioner")
+       (validate-storage-parameters (gethash "parameters" object) :allow-empty t)
+       (unless (gethash "reclaimPolicy" object) (setf (gethash "reclaimPolicy" object) "Delete"))
+       (unless (gethash "volumeBindingMode" object) (setf (gethash "volumeBindingMode" object) "Immediate"))
+       (storage-string-enum (gethash "reclaimPolicy" object) '("Retain" "Delete") "reclaimPolicy")
+       (storage-string-enum (gethash "volumeBindingMode" object) '("Immediate" "WaitForFirstConsumer") "volumeBindingMode")
+       (loop for term across (gethash "allowedTopologies" object #())
+             do (loop for expression across (gethash "matchLabelExpressions" term #())
+                      do (unless (core-qualified-key-p (gethash "key" expression))
+                           (core-resource-error 422 "Invalid" "Invalid allowed topology key"))
+                         (bootstrap-string-array (gethash "values" expression) "topology values" :nonempty t)))
+       (validate-builtin-storage-class object))
+      (t
+       (let ((spec (require-object (gethash "spec" object) "spec")))
+         (unless (gethash "volumeMode" spec) (setf (gethash "volumeMode" spec) "Filesystem"))
+         (storage-string-enum (gethash "volumeMode" spec) '("Filesystem" "Block") "volumeMode")
+         (validate-storage-access-modes (gethash "accessModes" spec))
+         (when (gethash "storageClassName" spec)
+           (unless (or (equal "" (gethash "storageClassName" spec)) (dns-subdomain-p (gethash "storageClassName" spec)))
+             (core-resource-error 422 "Invalid" "Invalid storageClassName")))
+         (if (equal resource "persistentvolumes")
+             (let* ((capacity (require-object (gethash "capacity" spec) "capacity"))
+                    (source (storage-source-kind spec)) (claim (gethash "claimRef" spec)))
+               (reject-unsupported-fields capacity '("storage") "capacity")
+               (storage-quantity (gethash "storage" capacity) "capacity.storage")
+               (unless (gethash "persistentVolumeReclaimPolicy" spec) (setf (gethash "persistentVolumeReclaimPolicy" spec) "Retain"))
+               (storage-string-enum (gethash "persistentVolumeReclaimPolicy" spec) '("Retain" "Delete" "Recycle") "persistentVolumeReclaimPolicy")
+               (when (gethash "required" (gethash "nodeAffinity" spec (core-object)))
+                 (validate-storage-node-selector (gethash "required" (gethash "nodeAffinity" spec (core-object)))))
+               (default-persistent-volume-source source (gethash source spec))
+               (when (equal source "hostPath") (validate-host-storage-source (gethash source spec)))
+               (when (equal source "nfs")
+                 (validate-nfs-source (gethash source spec))
+                 (validate-nfs-mount-options (gethash "mountOptions" spec)))
+               (when (equal source "local")
+                 (validate-host-storage-source (gethash source spec) :local t)
+                 (unless (gethash "required" (gethash "nodeAffinity" spec (core-object)))
+                   (core-resource-error 422 "Invalid" "local PersistentVolumes require nodeAffinity")))
+               (when claim
+                 (require-dns-subdomain (gethash "name" claim) "claimRef.name")
+                 (require-dns-label (gethash "namespace" claim) "claimRef.namespace")
+                 (unless (member (gethash "kind" claim "PersistentVolumeClaim") '("" "PersistentVolumeClaim") :test #'equal)
+                   (core-resource-error 422 "Invalid" "claimRef.kind must be PersistentVolumeClaim")))
+               ;; No class is no class: only a claim's is defaulted, by DefaultStorageClass admission.
+               (storage-ensure-protection-finalizer metadata "kubernetes.io/pv-protection"))
+             (let* ((resources (require-object (gethash "resources" spec) "resources"))
+                    (requests (require-object (gethash "requests" resources) "resources.requests")))
+               (reject-unsupported-fields requests '("storage") "resources.requests")
+               (storage-quantity (gethash "storage" requests) "resources.requests.storage")
+               (when (gethash "limits" resources)
+                 (reject-unsupported-fields (gethash "limits" resources) '("storage") "resources.limits")
+                 (when (< (storage-quantity (gethash "storage" (gethash "limits" resources)) "resources.limits.storage")
+                          (storage-quantity (gethash "storage" requests) "resources.requests.storage"))
+                   (core-resource-error 422 "Invalid" "storage request cannot exceed its limit")))
+               (when (gethash "selector" spec) (validate-storage-label-selector (gethash "selector" spec)))
+               (when (gethash "volumeName" spec) (require-dns-subdomain (gethash "volumeName" spec) "volumeName"))
+               (unless (or existing (nth-value 1 (gethash "storageClassName" spec)))
+                 (let ((class (storage-default-class-unlocked store)))
+                   (when class (setf (gethash "storageClassName" spec) (gethash "name" (gethash "metadata" class))))))
+               (storage-ensure-protection-finalizer metadata "kubernetes.io/pvc-protection")))
+         (unless *storage-status-write*
+           (setf (gethash "status" object) (if existing (copy-core-object (gethash "status" existing)) (core-object "phase" "Pending")))))))
+    object))
+
+(defun storage-claim-expandable-p (store claim)
+  "Return whether CLAIM's StorageClass allows it to grow."
+  (let ((class (gethash (core-resource-key "storageclasses" nil (gethash "storageClassName" (gethash "spec" claim) ""))
+                        (pod-store-resources store))))
+    (and class (eq t (gethash "allowVolumeExpansion" class)))))
+
+(defun validate-storage-update (store resource before after)
+  "Enforce storage allocation identity and immutable source/class fields."
+  (when (csi-storage-resource-p resource)
+    (return-from validate-storage-update (validate-csi-storage-update resource before after)))
+  (unless *storage-status-write*
+    (cond
+      ((equal resource "storageclasses")
+        (dolist (field '("provisioner" "parameters" "reclaimPolicy" "volumeBindingMode"))
+          (unless (core-json-equal-p (gethash field before) (gethash field after))
+            (core-resource-error 422 "Invalid" "StorageClass ~A is immutable" field))))
+      ((equal resource "volumeattributesclasses")
+       (dolist (field '("driverName" "parameters"))
+         (unless (core-json-equal-p (gethash field before) (gethash field after))
+           (core-resource-error 422 "Invalid" "VolumeAttributesClass ~A is immutable" field))))
+      (t
+        (let ((old (gethash "spec" before)) (new (gethash "spec" after)))
+          (if (equal resource "persistentvolumes")
+              (progn
+                ;; A PV stored before its source was defaulted has the same source as one with the defaults.
+                (unless (and (equal (storage-source-kind old) (storage-source-kind new))
+                             (core-json-equal-p
+                              (default-persistent-volume-source (storage-source-kind old)
+                                                                (copy-core-object (gethash (storage-source-kind old) old)))
+                              (default-persistent-volume-source (storage-source-kind new)
+                                                                (copy-core-object (gethash (storage-source-kind new) new)))))
+                  (core-resource-error 422 "Invalid" "PersistentVolume source is immutable"))
+                (unless (equal (gethash "volumeMode" old) (gethash "volumeMode" new))
+                  (core-resource-error 422 "Invalid" "PersistentVolume volumeMode is immutable")))
+              (progn
+                (dolist (field '("accessModes" "selector" "volumeMode" "dataSource" "dataSourceRef"))
+                  (unless (core-json-equal-p (gethash field old) (gethash field new))
+                    (core-resource-error 422 "Invalid" "PersistentVolumeClaim ~A is immutable" field)))
+                (when (and (gethash "storageClassName" old) (not (equal (gethash "storageClassName" old) (gethash "storageClassName" new))))
+                  (core-resource-error 422 "Invalid" "PersistentVolumeClaim storageClassName is immutable"))
+                (when (and (gethash "volumeName" old) (not (equal (gethash "volumeName" old) (gethash "volumeName" new))))
+                  (core-resource-error 422 "Invalid" "PersistentVolumeClaim volumeName is immutable once assigned"))
+                (when (and (gethash "volumeName" old)
+                           (< (storage-quantity (gethash "storage" (gethash "requests" (gethash "resources" new))) "storage request")
+                         (storage-quantity (gethash "storage" (gethash "requests" (gethash "resources" old))) "storage request")))
+                  (core-resource-error 422 "Invalid" "PersistentVolumeClaim storage requests cannot shrink"))
+                (when (and (gethash "volumeName" old)
+                           (> (storage-quantity (gethash "storage" (gethash "requests" (gethash "resources" new))) "storage request")
+                              (storage-quantity (gethash "storage" (gethash "requests" (gethash "resources" old))) "storage request"))
+                           (not (storage-claim-expandable-p store after)))
+                  (core-resource-error 403 "Forbidden" "Only a claim whose StorageClass sets allowVolumeExpansion can be resized")))))))))
