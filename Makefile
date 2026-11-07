@@ -17,12 +17,12 @@ CONTAINERD_SOCKET ?= /run/containerd/containerd.sock
 CONTAINERD_LOG_ROOT ?= /var/log/gr8s/pods/
 KUBECONFIG ?= /tmp/gr8s.kubeconfig
 
-LISP_SOURCES := $(wildcard src/*.lisp) $(wildcard tests/*.lisp) $(wildcard schema/*.json) gr8s.asd
+LISP_SOURCES := $(shell find src tests -type f -name '*.lisp') $(wildcard schema/*.json) gr8s.asd
 NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
-NODE_PROTOCOL_LISP := src/node-v1-generated.lisp
+NODE_PROTOCOL_LISP := src/generated/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 
-.PHONY: all help containerd-bundle generate-protocol test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api check smoke smoke-two-node run kubeconfig notices native clean
+.PHONY: all help containerd-bundle generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api check smoke smoke-two-node run kubeconfig notices native clean
 
 all: native
 
@@ -33,6 +33,7 @@ help:
 	@echo "gr8s targets:"
 	@echo "  containerd-bundle Build and verify pinned containerd, runc, and CNI binaries"
 	@echo "  generate-protocol Generate Common Lisp node-protocol bindings"
+	@echo "  test-protocol-generation Verify standalone protocol generation from a clean output"
 	@echo "  test          Run the unit and HTTP test suite"
 	@echo "  test-core-api Verify ConfigMap/Secret kubectl workflows and restart persistence"
 	@echo "  test-containerd Include the live CRI/containerd integration tests"
@@ -54,8 +55,11 @@ help:
 
 generate-protocol: $(NODE_PROTOCOL_LISP)
 
-$(NODE_PROTOCOL_LISP): $(NODE_PROTOCOL_PROTO) scripts/generate-node-protocol.lisp
+$(NODE_PROTOCOL_LISP): $(NODE_PROTOCOL_PROTO) scripts/generate-node-protocol.lisp src/generated/package.lisp
 	$(SBCL) --noinform --non-interactive --load scripts/generate-node-protocol.lisp
+
+test-protocol-generation:
+	scripts/test-node-protocol-generation.sh
 
 test: generate-protocol
 	$(SBCL) --noinform --non-interactive $(TEST_EVAL)
@@ -109,7 +113,7 @@ test-core-api:
 
 test-whistler-cni: containerd-bundle test
 
-check: containerd-bundle test-whistler-cni test-endpoint-policy
+check: containerd-bundle test-protocol-generation test-whistler-cni test-endpoint-policy
 	sh -n scripts/gr8s scripts/install-containerd.sh scripts/collect-notices.sh \
 	  scripts/verify-static-runtime.sh scripts/smoke.sh scripts/test-core-api.sh
 	scripts/verify-static-runtime.sh build/containerd

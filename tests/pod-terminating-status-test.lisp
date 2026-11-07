@@ -10,10 +10,10 @@
 (def-suite pod-terminating-status :in gr8s)
 (in-suite pod-terminating-status)
 
-(defun terminating-test-pod (json-spec)
-  "Parse a Pod named t with JSON-SPEC as its spec, assigned to worker-a."
-  (parse-pod (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"t\",\"namespace\":\"default\"},\"spec\":~A}"
-                     json-spec)))
+(defun terminating-test-pod (json-spec &optional (name "t"))
+  "Parse a Pod named NAME with JSON-SPEC as its spec, assigned to worker-a."
+  (parse-pod (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":~S,\"namespace\":\"default\"},\"spec\":~A}"
+                     name json-spec)))
 
 (defparameter +fail-pod-spec+
   "{\"restartPolicy\":\"Never\",\"nodeName\":\"worker-a\",\"containers\":[{\"name\":\"fail\",\"image\":\"agnhost\"}]}")
@@ -162,28 +162,32 @@
     (values path)
     (let* ((server (gr8s::%make-node-grpc-server :store store))
            (reconciler (make-reconciler store (gr8s::make-control-plane-runtime store server)))
-           (pod (create-pod store (terminating-test-pod +fail-pod-spec+)))
            (exited (gr8s::core-object "phase" "Failed" "containerStatuses"
                                       (vector (test-container-status "fail" (cons "terminated" (gr8s::core-object "exitCode" 1))))))
            (running (gr8s::core-object "phase" "Running" "containerStatuses"
                                        (vector (test-container-status "fail" (cons "running" (gr8s::core-object)))))))
-      (flet ((publish (status) (gr8s::with-store-lock (store) (gr8s::publish-pod-status-unlocked store pod status)))
-             (final (observation)
-               (gr8s::save-pod-observation store pod observation)
-               (gr8s::deleted-pod-final-status reconciler pod (gr8s::pod-observed-status store pod))))
+      (flet ((scenario (name published observation)
+               ;; Keep the scenarios on distinct Pods. Once a client has seen a
+               ;; terminal phase, the status manager intentionally refuses to
+               ;; publish a later nonterminal report for that same Pod.
+               (let ((pod (create-pod store (terminating-test-pod +fail-pod-spec+ name))))
+                 (gr8s::with-store-lock (store)
+                   (gr8s::publish-pod-status-unlocked store pod published))
+                 (gr8s::save-pod-observation store pod observation)
+                 (gr8s::deleted-pod-final-status
+                  reconciler pod (gr8s::pod-observed-status store pod)))))
         ;; A node that rebuilt its acknowledgement after losing its last report says less than clients saw.
-        (publish exited)
-        (let ((status (final (gr8s::core-object "phase" "Pending" "reason" "Deleted" "containerStatuses"
-                                                (vector (test-container-status "fail" (cons "waiting" (gr8s::core-object "reason" "ContainerCreating"))))))))
+        (let ((status (scenario "rebuilt" exited
+                                (gr8s::core-object "phase" "Pending" "reason" "Deleted" "containerStatuses"
+                                                   (vector (test-container-status "fail" (cons "waiting" (gr8s::core-object "reason" "ContainerCreating"))))))))
           (is (equal "Failed" (gethash "phase" status)))
           (is (equal "terminated" (status-state-name status "fail"))))
         ;; A Pod already terminal on its node is removed at once: its last report is still published.
-        (publish running)
-        (let ((status (final exited)))
+        (let ((status (scenario "terminal" running exited)))
           (is (equal "Failed" (gethash "phase" status)))
           (is (equal "terminated" (status-state-name status "fail"))))
         ;; Without the node's acknowledgement, a running container is not declared gone.
-        (let ((status (final running)))
+        (let ((status (scenario "running" running running)))
           (is (equal "Running" (gethash "phase" status)))
           (is (equal "running" (status-state-name status "fail"))))))))
 

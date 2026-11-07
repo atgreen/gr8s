@@ -302,6 +302,51 @@
                     collect (cons (string-downcase (subseq line 0 colon))
                                   (string-trim '(#\Space #\Tab) (subseq line (1+ colon))))))))
 
+(defun aggregated-api-fetch-json (store apiservice target)
+  "Fetch TARGET from an available APIService over the authenticated aggregator transport."
+  (let ((aggregator (gethash store *aggregators*))
+        (socket nil))
+    (unless aggregator (error "the API aggregator is not running"))
+    (unwind-protect
+         (multiple-value-bind (connected stream) (aggregator-connect store apiservice aggregator)
+           (setf socket connected)
+           (let ((service (apiservice-service apiservice)))
+             (aggregator-write-request
+              stream :get target
+              (format nil "~A.~A.svc:~D" (gethash "name" service) (gethash "namespace" service)
+                      (gethash "port" service))
+              (append (aggregator-identity-headers nil)
+                      '(("Accept" . "application/json")
+                        ("User-Agent" . "kube-aggregator/gr8s")))
+              #()))
+           (multiple-value-bind (code headers) (aggregator-read-response-head stream)
+             (unless (<= 200 code 299)
+               (error "aggregated server returned HTTP ~D for ~A" code target))
+             (let ((body (flexi-streams:with-output-to-sequence (output)
+                           (aggregator-copy-body stream output headers))))
+               (com.inuoe.jzon:parse body))))
+      (when socket (ignore-errors (usocket:socket-close socket))))))
+
+(defun merge-aggregated-openapi-v2 (store document)
+  "Merge available APIService Swagger paths and definitions into local DOCUMENT.
+Local entries win name collisions, matching the aggregator's ownership of its built-in paths."
+  (let ((paths (gethash "paths" document))
+        (definitions (gethash "definitions" document)))
+    (dolist (apiservice (stored-apiservices store))
+      (when (and (apiservice-service apiservice) (apiservice-available-p apiservice))
+        (handler-case
+            (let ((remote (aggregated-api-fetch-json store apiservice "/openapi/v2")))
+              (when (equal "2.0" (gethash "swagger" remote))
+                (dolist (pair (list (cons paths (gethash "paths" remote))
+                                    (cons definitions (gethash "definitions" remote))))
+                  (when (hash-table-p (cdr pair))
+                    (maphash (lambda (name value)
+                               (unless (gethash name (car pair))
+                                 (setf (gethash name (car pair)) value)))
+                             (cdr pair))))))
+          (error () nil))))
+    document))
+
 (defun aggregator-copy-body (upstream client headers)
   "Forward each chunk as it arrives: a watch's events must not wait for a buffer to fill."
   (let ((length-text (cdr (assoc "content-length" headers :test #'string=)))
@@ -391,14 +436,6 @@
                (flexi-streams:flexi-stream (setf stream (flexi-streams:flexi-stream-stream stream)))
                (pure-tls::tls-stream (setf stream (pure-tls::tls-stream-underlying-stream stream)))
                (t (return nil))))))
-
-(defun client-connection-closed-p (fd)
-  "Report whether the peer of socket FD has closed it, without consuming anything it sent."
-  (sb-alien:with-alien ((octet (sb-alien:array (sb-alien:unsigned 8) 1)))
-    (let ((got (sb-alien:alien-funcall
-                (sb-alien:extern-alien "recv" (function sb-alien:long sb-alien:int (* t) sb-alien:unsigned-long sb-alien:int))
-                fd (sb-alien:alien-sap octet) 1 (logior 2 #x40)))) ; MSG_PEEK | MSG_DONTWAIT
-      (zerop got))))
 
 (defun watch-client-departure (fd socket)
   "Shut the proxied SOCKET down once the client on FD goes away, so a watch that has nothing to

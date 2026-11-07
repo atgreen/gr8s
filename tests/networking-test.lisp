@@ -748,6 +748,55 @@ A fixed or random port in the ephemeral range can already be taken on a shared h
         (let ((plan (gethash (list* "SCTP" "" node-port) (gr8s::desired-node-port-targets store))))
           (is (equal '(("192.0.2.5" . 8080)) (first plan))))))))
 
+(test load-balancer-service-ports-are-planned-on-the-node-address
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let* ((service (gr8s::create-core-resource
+                     store "services" (network-service "lb" "type" "LoadBalancer") "alpha"))
+           (port (aref (gethash "ports" (gethash "spec" service)) 0))
+           (node-port (gethash "nodePort" port)))
+      (gr8s::create-core-resource
+       store "endpointslices"
+       (gr8s::core-object "metadata" (gr8s::core-object "name" "lb-manual"
+                                                       "labels" (gr8s::core-object "kubernetes.io/service-name" "lb"))
+                          "addressType" "IPv4"
+                          "ports" (vector (gr8s::core-object "name" "http" "port" 8080 "protocol" "TCP"))
+                          "endpoints" (vector (gr8s::core-object "addresses" (vector "192.0.2.5")
+                                                                 "conditions" (gr8s::core-object "ready" t))))
+       "alpha")
+      (let* ((plans (gr8s::desired-node-port-targets store :node-address "192.0.2.10"))
+             (node-port-plan (gethash (list* "TCP" "" node-port) plans))
+             (load-balancer-plan (gethash (list* "TCP" "192.0.2.10" 80) plans)))
+        (is (equal node-port-plan load-balancer-plan))
+        (is (equal '(("192.0.2.5" . 8080)) (first load-balancer-plan)))))))
+
+(test colliding-load-balancers-route-the-service-port-to-the-deterministic-owner
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    ;; Create in reverse order to prove ownership does not depend on hash or
+    ;; insertion order. Both NodePorts remain independently usable.
+    (dolist (name '("beta" "alpha"))
+      (gr8s::create-core-resource
+       store "services" (network-service name "type" "LoadBalancer") "alpha")
+      (gr8s::create-core-resource
+       store "endpointslices"
+       (gr8s::core-object
+        "metadata" (gr8s::core-object "name" (format nil "~A-manual" name)
+                                      "labels" (gr8s::core-object "kubernetes.io/service-name" name))
+        "addressType" "IPv4"
+        "ports" (vector (gr8s::core-object "name" "http" "port" 8080 "protocol" "TCP"))
+        "endpoints" (vector (gr8s::core-object
+                             "addresses" (vector (if (equal name "alpha") "192.0.2.5" "192.0.2.6"))
+                             "conditions" (gr8s::core-object "ready" t))))
+       "alpha"))
+    (let* ((plans (gr8s::desired-node-port-targets store :node-address "192.0.2.10"))
+           (load-balancer-plan (gethash (list* "TCP" "192.0.2.10" 80) plans)))
+      (is (equal '(("192.0.2.5" . 8080)) (first load-balancer-plan)))
+      (dolist (name '("alpha" "beta"))
+        (let* ((service (gr8s::get-core-resource store "services" "alpha" name))
+               (node-port (gethash "nodePort" (aref (gethash "ports" (gethash "spec" service)) 0))))
+          (is (gethash (list* "TCP" "" node-port) plans)))))))
+
 (test transparent-reply-rules-match-exactly-one-relayed-flow
   ;; fib_rule_hdr for AF_INET /32 to /32 in the reply table, then the client as destination, the
   ;; Pod as source, and the Pod's and relay's ports as one-port ranges.

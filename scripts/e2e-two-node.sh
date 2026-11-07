@@ -155,7 +155,16 @@ guest_prep() {  # deps, forwarding, firewalld on/off. Idempotent.
 guest_gr8s_teardown() {  # stop gr8s and clear stale dataplane/network/state on a guest
   local ip="$1"
   ssh_n "$ip" 'set +e
+    systemctl kill --kill-who=all --signal=SIGKILL gr8s gr8s-agent 2>/dev/null
     systemctl stop gr8s gr8s-agent 2>/dev/null; systemctl reset-failed gr8s gr8s-agent 2>/dev/null
+    # Kill CRI payloads while runc still owns their namespace cgroups. Killing
+    # shims first reparents those processes and leaves workloads behind.
+    if [ -w /sys/fs/cgroup/k8s.io/cgroup.kill ]; then
+      echo 1 > /sys/fs/cgroup/k8s.io/cgroup.kill 2>/dev/null
+    elif [ -d /sys/fs/cgroup/k8s.io ]; then
+      find /sys/fs/cgroup/k8s.io -depth -name cgroup.procs -type f -exec cat {} \; 2>/dev/null \
+        | sort -un | xargs -r kill -9 2>/dev/null
+    fi
     pkill -9 -x containerd 2>/dev/null; pkill -9 -f containerd-shim 2>/dev/null; sleep 1
     for m in $(mount | awk "{print \$3}" | grep "/var/lib/gr8s" | sort -r); do umount -l "$m" 2>/dev/null; done
     for dev in $(ip -br link show | awk "{print \$1}" | sed "s/@.*//" | grep -iE "gr8s|vxlan"); do ip link del "$dev" 2>/dev/null; done

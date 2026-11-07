@@ -27,8 +27,8 @@ ROOT = Path(__file__).resolve().parent.parent
 SPDX_COPYRIGHT = "SPDX-FileCopyrightText: 2026 Anthony Green"
 SPDX_LICENSE = "SPDX-License-Identifier: Apache-2.0"
 GENERATED = {
-    Path("src/cri-v1-generated.lisp"),
-    Path("src/node-v1-generated.lisp"),
+    Path("src/generated/cri-v1-generated.lisp"),
+    Path("src/generated/node-v1-generated.lisp"),
 }
 
 

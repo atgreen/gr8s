@@ -117,6 +117,18 @@
   (is (string= (format nil "KEY~%CHAIN~%")
                (gr8s::pod-certificate-credential-bundle (format nil "KEY~%") (format nil "CHAIN~%")))))
 
+(test podcertificaterequest-v1-stub-excludes-deprecated-public-key
+  (let* ((pcr (gr8s::build-pod-certificate-request
+               :name "demo-cert" :namespace "ate-system"
+               :signer-name "podidentity.podcert.ate.dev/identity"
+               :pkix-public-key "QkFTRTY0REVS" :stub-pkcs10-request "U1RVQg=="
+               :pod-name "demo" :pod-uid "uid-1"))
+         (spec (gethash "spec" pcr)))
+    (is (string= "U1RVQg==" (gethash "stubPKCS10Request" spec)))
+    (multiple-value-bind (value present) (gethash "pkixPublicKey" spec)
+      (declare (ignore value))
+      (is (null present)))))
+
 (test pod-certificate-stub-request-is-a-verifiable-pkcs10-for-the-pod-key
   ;; certificates.k8s.io/v1 signers read the pod's key from stubPKCS10Request
   ;; (x509.ParseCertificateRequest), so it must be a well-formed PKCS#10 signed by

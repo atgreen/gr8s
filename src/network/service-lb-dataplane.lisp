@@ -81,12 +81,37 @@ Returns an alist of (name . prog-info)."
   "Pin MAP-INFO's fd at PATH on bpffs."
   (funcall pin (whistler/loader:map-info-fd map-info) (namestring path)))
 
+(defun service-lb-pinned-map-info (fd spec &key (object-info #'bpf-object-kernel-info))
+  "Return map metadata for pinned FD after validating it against compiled SPEC.
+Reject stale pins whose kernel schema no longer matches the program that will
+use them; BPF map operations trust the kernel's sizes, not the caller's buffers."
+  (let* ((info (funcall object-info fd))
+         (name (getf spec :name))
+         (type (whistler/compiler:resolve-map-type (getf spec :type)))
+         (key-size (getf spec :key-size))
+         (value-size (getf spec :value-size))
+         (max-entries (getf spec :max-entries))
+         (flags (getf spec :flags)))
+    (unless (and (>= (length info) 24)
+                 (= type (netlink-read-integer info 0 4))
+                 (= key-size (netlink-read-integer info 8 4))
+                 (= value-size (netlink-read-integer info 12 4))
+                 (= max-entries (netlink-read-integer info 16 4))
+                 (= flags (netlink-read-integer info 20 4)))
+      (error "Pinned Service LB map ~A has an incompatible schema" name))
+    (whistler/loader::make-map-info
+     :name name :type type :key-size key-size :value-size value-size
+     :max-entries max-entries :flags flags :fd fd)))
+
 (defun start-service-lb-dataplane
     (cgroup-path pin-directory
      &key (compile #'compile-service-lb)
           (create-maps (lambda (specs) (whistler/loader::session-create-maps specs)))
           (load-programs #'load-service-lb-programs)
           (ensure-directory #'ensure-directories-exist)
+          (path-exists-p #'probe-file)
+          (open-pinned #'whistler/loader:open-pinned-object)
+          (validate-map #'service-lb-pinned-map-info)
           (pin-map #'service-lb-pin-map)
           (remove-path #'uiop:delete-file-if-exists)
           (attach (lambda (program-fd cgroup attach-type)
@@ -97,17 +122,33 @@ node's Pod cgroup root).  PIN-DIRECTORY is a bpffs directory for the map pins.
 Returns a SERVICE-LB-DATAPLANE.  Signals through any kernel error; the caller
 decides whether a dataplane failure is fatal to the node."
   (multiple-value-bind (map-specs program-specs) (funcall compile)
-    (let ((maps (funcall create-maps map-specs))
-          (pinned nil))
+    (let ((maps nil) (opened nil) (pinned nil))
       (handler-case
           (progn
-            ;; Pin every map before loading so a failed load still leaves the
-            ;; maps discoverable (and removable) on bpffs.
             (funcall ensure-directory (merge-pathnames ".keep" (uiop:ensure-directory-pathname pin-directory)))
-            (dolist (entry maps)
-              (let ((path (merge-pathnames (car entry) (uiop:ensure-directory-pathname pin-directory))))
-                (funcall pin-map (cdr entry) path)
-                (push (namestring path) pinned)))
+            ;; A crash leaves the maps pinned and their Service state intact.
+            ;; Reopen and validate them before relocating replacement programs;
+            ;; create and pin only maps that do not exist yet (for example, a
+            ;; newly added map after an upgrade).
+            (let ((missing nil))
+              (dolist (spec map-specs)
+                (let* ((name (getf spec :name))
+                       (path (merge-pathnames name (uiop:ensure-directory-pathname pin-directory))))
+                  (if (funcall path-exists-p path)
+                      (let ((fd (funcall open-pinned path)))
+                        (push fd opened)
+                        (push (cons name (funcall validate-map fd spec)) maps))
+                      (push spec missing))))
+              (when missing
+                (dolist (entry (funcall create-maps (nreverse missing)))
+                  (let ((path (merge-pathnames (car entry) (uiop:ensure-directory-pathname pin-directory))))
+                    (funcall pin-map (cdr entry) path)
+                    (push (namestring path) pinned)
+                    (push entry maps))))
+              (setf maps
+                    (mapcar (lambda (spec)
+                              (assoc (getf spec :name) maps :test #'string=))
+                            map-specs)))
             (let* ((programs (funcall load-programs program-specs maps))
                    (attachments nil))
               (handler-bind ((error (lambda (condition)
@@ -130,8 +171,12 @@ decides whether a dataplane failure is fatal to the node."
         (error (condition)
           ;; Roll back pins and map fds so a half-start leaves nothing behind.
           (dolist (path pinned) (ignore-errors (funcall remove-path path)))
-          (dolist (entry maps)
-            (ignore-errors (sb-posix:close (whistler/loader:map-info-fd (cdr entry)))))
+          (dolist (fd (remove-duplicates
+                       (append opened
+                               (mapcar (lambda (entry)
+                                         (whistler/loader:map-info-fd (cdr entry)))
+                                       maps))))
+            (ignore-errors (sb-posix:close fd)))
           (error condition))))))
 
 (defun try-start-service-lb-dataplane (cgroup-path pin-directory &key (log *error-output*))

@@ -21,6 +21,8 @@ load balancer governs, so it is itself a node-local client:
 * a ClusterIP from an extra ServiceCIDR is claimed by an IPAddress and serves;
 * a client outside the node, in its own network namespace, keeps its address through an
   externalTrafficPolicy Local node port (TCP and UDP) and is seen as the node through a Cluster one.
+* a same-node direct Pod-IP connection crosses the destination Pod's ingress
+  NetworkPolicy guard, even though delivery takes the local-Pod redirect fast path.
 
 It accepts and ignores the arguments gr8s-upstream passes, so that tool can run it.
 """
@@ -155,7 +157,8 @@ def http_get(address, port, path, timeout=3):
 def server_pod(name):
     """Return an agnhost netexec Pod serving HTTP on 8080 and UDP on 8081."""
     return {"apiVersion": "v1", "kind": "Pod",
-            "metadata": {"name": name, "namespace": "default", "labels": {"app": "web"}},
+            "metadata": {"name": name, "namespace": "default",
+                         "labels": {"app": "web", "test.gr8s.io/pod": name}},
             "spec": {"terminationGracePeriodSeconds": 1,
                      "containers": [{"name": "netexec", "image": AGNHOST, "imagePullPolicy": "IfNotPresent",
                                      "args": ["netexec", "--http-port=8080", "--udp-port=8081"],
@@ -188,6 +191,14 @@ def udp_hostname(address, port, connected):
             return data.decode().strip(), source
         except OSError as error:
             return None, str(error)
+
+
+def pod_connect(cluster, pod, address, port):
+    """Run agnhost's TCP connector in POD and return its process result."""
+    return subprocess.run(
+        ["kubectl", "--kubeconfig", str(cluster.kubeconfig), "exec", pod, "--",
+         "/agnhost", "connect", "--timeout=3s", f"{address}:{port}"],
+        capture_output=True, text=True, check=False)
 
 
 def main():
@@ -224,12 +235,42 @@ def main():
             for name in ("web-0", "web-1")))
         addresses = {name: cluster.get("pod", name)["status"]["podIP"] for name in ("web-0", "web-1")}
 
+        # Direct same-node Pod delivery uses local_pod_v4, but must still cross
+        # web-0's host-veth egress hook where its ingress guard is attached.
+        baseline = pod_connect(cluster, "web-1", addresses["web-0"], 8080)
+        check("sameNodePodIPWorksBeforeIngressPolicy", baseline.returncode == 0,
+              {"returncode": baseline.returncode, "output": baseline.stdout + baseline.stderr})
+        cluster.apply({
+            "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+            "metadata": {"name": "isolate-web-0", "namespace": "default"},
+            "spec": {"podSelector": {"matchLabels": {"test.gr8s.io/pod": "web-0"}},
+                     "policyTypes": ["Ingress"], "ingress": []}})
+
+        def same_node_denied():
+            result = pod_connect(cluster, "web-1", addresses["web-0"], 8080)
+            return result if result.returncode != 0 else None
+
+        denied = wait_for("same-node ingress policy denial", 60, same_node_denied)
+        check("sameNodeRedirectHonorsIngressPolicy", denied.returncode != 0,
+              {"returncode": denied.returncode, "output": denied.stdout + denied.stderr})
+
         # A ClusterIP and its external IP, both through the socket hook.
         cluster.apply(service("web", [HTTP, UDP], selector={"app": "web"}, externalIPs=[EXTERNAL_IP]))
         cluster_ip = cluster.get("service", "web")["spec"]["clusterIP"]
         wait_for("ClusterIP answers", 120, lambda: http_get(cluster_ip, 80, "/hostname")[0] == 200)
         hosts = {http_get(cluster_ip, 80, "/hostname")[1] for _ in range(30)}
         check("clusterIPReachesEveryPod", hosts == {"web-0", "web-1"}, sorted(hosts))
+
+        # Exercise the same ClusterIP path from a Pod network namespace.  Select
+        # web-1 explicitly so the earlier ingress-deny policy on web-0 cannot
+        # make this dataplane check probabilistic.
+        cluster.apply(service("pod-client", [HTTP], selector={"test.gr8s.io/pod": "web-1"}))
+        pod_client_ip = cluster.get("service", "pod-client")["spec"]["clusterIP"]
+        pod_client = pod_connect(cluster, "web-0", pod_client_ip, 80)
+        check("podReachesClusterIP", pod_client.returncode == 0,
+              {"returncode": pod_client.returncode,
+               "output": pod_client.stdout + pod_client.stderr})
+
         external = wait_for("external IP answers", 60,
                             lambda: (lambda result: result if result[0] == 200 else None)(
                                 http_get(EXTERNAL_IP, 80, "/hostname")))
@@ -307,6 +348,23 @@ def main():
         # A Local LoadBalancer's health check node port, then a Local node port.
         cluster.apply(service("lb", [HTTP], type="LoadBalancer", externalTrafficPolicy="Local",
                               selector={"app": "web"}))
+        def load_balancer_ingress():
+            service_object = cluster.get("service", "lb")
+            entries = service_object.get("status", {}).get("loadBalancer", {}).get("ingress", [])
+            return entries if entries else None
+
+        ingress = wait_for("LoadBalancer status address", 60, load_balancer_ingress)
+        node_address = next(address["address"] for address in cluster.get("node", node)["status"]["addresses"]
+                            if address["type"] == "InternalIP")
+        check("loadBalancerPublishesTheNodeAddress",
+              ingress == [{"ip": node_address, "ipMode": "Proxy"}], ingress)
+        load_balancer_service_port = wait_for(
+            "LoadBalancer Service port on the node address", 60,
+            lambda: (lambda result: result if result[0] == 200 else None)(
+                http_get(node_address, 80, "/hostname")))
+        check("loadBalancerNodeAddressServesTheServicePort",
+              load_balancer_service_port[1] in ("web-0", "web-1", "web-2"),
+              load_balancer_service_port)
         lb = cluster.get("service", "lb")["spec"]
         health = lb.get("healthCheckNodePort")
         check("localLoadBalancerHasHealthCheckNodePort", isinstance(health, int), lb)

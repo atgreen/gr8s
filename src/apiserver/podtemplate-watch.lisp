@@ -122,7 +122,8 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
               (when (and send-initial (true-parameter-p (hunchentoot:parameter "allowWatchBookmarks"))) (bookmark t))
               ;; Flush headers even for an initially empty watch.
               (finish-output out)
-              (loop while (< (get-internal-real-time) deadline)
+              (loop while (and (< (get-internal-real-time) deadline)
+                               (not (api-watch-client-departed-p)))
                     do (when (and *crd-view-definition*
                                   (not (crd-watch-definition-current-p store *crd-view-definition* *crd-request-version*)))
                          (core-resource-error 410 "Expired" "Custom definition identity or served version has changed"))

@@ -49,6 +49,157 @@
          (format nil "http://127.0.0.1:~D/api/v1/namespaces/default/pods/hello/proxy~A" *http-test-port* suffix)
          :proxy nil :redirect nil :force-binary t :preserve-uri t options))
 
+(test pod-proxy-relays-an-upgraded-connection-in-both-directions
+  (with-temporary-store (store path)
+    (let* ((address (pod-proxy-test-address))
+           (object (com.inuoe.jzon:parse *valid-pod-json*))
+           (listener (usocket:socket-listen address 0 :reuse-address t
+                                                    :element-type '(unsigned-byte 8)))
+           (upstream-request nil)
+           (upstream-payload nil)
+           (upstream-thread
+             (bt:make-thread
+              (lambda ()
+                (let* ((socket (usocket:socket-accept listener :element-type '(unsigned-byte 8)))
+                       (stream (usocket:socket-stream socket)))
+                  (unwind-protect
+                       (progn
+                         (setf upstream-request
+                               (gr8s::octets-as-ascii (gr8s::read-http-response-head stream)))
+                         (write-sequence
+                          (gr8s::ascii-octets
+                           (format nil "HTTP/1.1 101 Switching Protocols~C~CConnection: Upgrade~C~CUpgrade: gr8s-test~C~CX-Upstream: kept~C~C~C~C"
+                                   #\Return #\Linefeed #\Return #\Linefeed
+                                   #\Return #\Linefeed #\Return #\Linefeed
+                                   #\Return #\Linefeed))
+                          stream)
+                         (finish-output stream)
+                         (setf upstream-payload (read-exact-octets stream 4))
+                         (write-sequence (gr8s::ascii-octets "pong") stream)
+                         (finish-output stream))
+                    (ignore-errors (usocket:socket-close socket)))))
+              :name "gr8s Pod proxy upgrade upstream"))
+           (frontend nil)
+           (client nil))
+      (setf (gethash "containerPort" (aref (gethash "ports" (aref (gethash "containers" (gethash "spec" object)) 0)) 0))
+            (usocket:get-local-port listener))
+      (unwind-protect
+           (progn
+             (setf frontend (start-http-test-server :store store :runtime (make-fake-runtime)))
+             (let ((pod (create-pod store (parse-pod object))))
+               (gr8s::save-pod-observation store pod (gr8s::core-object "phase" "Running" "podIP" address)))
+             (setf client (usocket:socket-connect "127.0.0.1" *http-test-port*
+                                                  :element-type '(unsigned-byte 8)))
+             (let ((stream (usocket:socket-stream client)))
+               (setf (sb-impl::fd-stream-timeout stream) 10.0)
+               (write-sequence
+                (gr8s::ascii-octets
+                 (format nil "GET /api/v1/namespaces/default/pods/hello/proxy/tunnel?x=1 HTTP/1.1~C~CHost: api.example~C~CAuthorization: Bearer secret~C~CConnection: Upgrade~C~CUpgrade: gr8s-test~C~CContent-Length: 0~C~C~C~C"
+                         #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+                         #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+                         #\Return #\Linefeed))
+                stream)
+               (finish-output stream)
+               (multiple-value-bind (status headers)
+                   (gr8s::parse-http-response-head (gr8s::read-http-response-head stream))
+                 (is (= 101 status))
+                 (when (= 101 status)
+                   (is (equal "gr8s-test" (cdr (assoc :upgrade headers))))
+                   (is (equal "kept" (cdr (assoc :x-upstream headers))))
+                   (write-sequence (gr8s::ascii-octets "ping") stream)
+                   (finish-output stream)
+                   (is (equalp (gr8s::ascii-octets "pong") (read-exact-octets stream 4))))))
+             (when upstream-request
+               (bt:join-thread upstream-thread)
+               (is (search "GET /tunnel?x=1 HTTP/1.1" upstream-request))
+               (is (search "Upgrade: gr8s-test" upstream-request :test #'char-equal))
+               (is (null (search "Authorization:" upstream-request :test #'char-equal)))
+               (is (equalp (gr8s::ascii-octets "ping") upstream-payload))))
+        (when client (ignore-errors (usocket:socket-close client)))
+        (when frontend (stop-server frontend))
+        (ignore-errors (usocket:socket-close listener))
+        (when (bt:thread-alive-p upstream-thread)
+          (ignore-errors (bt:destroy-thread upstream-thread)))))))
+
+(test service-proxy-relays-an-upgraded-connection-to-a-ready-endpoint
+  (with-temporary-store (store path)
+    (let* ((address (pod-proxy-test-address))
+           (listener (usocket:socket-listen address 0 :reuse-address t
+                                                    :element-type '(unsigned-byte 8)))
+           (upstream-request nil)
+           (upstream-thread
+             (bt:make-thread
+              (lambda ()
+                (let* ((socket (usocket:socket-accept listener :element-type '(unsigned-byte 8)))
+                       (stream (usocket:socket-stream socket)))
+                  (unwind-protect
+                       (progn
+                         (setf upstream-request
+                               (gr8s::octets-as-ascii (gr8s::read-http-response-head stream)))
+                         (write-sequence
+                          (gr8s::ascii-octets
+                           (format nil "HTTP/1.1 101 Switching Protocols~C~CConnection: Upgrade~C~CUpgrade: service-test~C~C~C~C"
+                                   #\Return #\Linefeed #\Return #\Linefeed
+                                   #\Return #\Linefeed #\Return #\Linefeed))
+                          stream)
+                         (finish-output stream)
+                         (let ((byte (read-byte stream)))
+                           (write-byte (1+ byte) stream)
+                           (finish-output stream)))
+                    (ignore-errors (usocket:socket-close socket)))))
+              :name "gr8s Service proxy upgrade upstream"))
+           (frontend nil)
+           (client nil))
+      (gr8s::create-core-resource
+       store "services"
+       (gr8s::core-object
+        "metadata" (gr8s::core-object "name" "web")
+        "spec" (gr8s::core-object
+                "ports" (vector (gr8s::core-object "name" "http" "port" 80))))
+       "default")
+      (gr8s::create-core-resource
+       store "endpointslices"
+       (gr8s::core-object
+        "metadata" (gr8s::core-object
+                    "name" "web-ready"
+                    "labels" (gr8s::core-object "kubernetes.io/service-name" "web"))
+        "addressType" "IPv4"
+        "endpoints" (vector (gr8s::core-object
+                             "addresses" (vector address)
+                             "conditions" (gr8s::core-object "ready" t)))
+        "ports" (vector (gr8s::core-object
+                         "name" "http" "port" (usocket:get-local-port listener)
+                         "protocol" "TCP")))
+       "default")
+      (unwind-protect
+           (progn
+             (setf frontend (start-http-test-server :store store :runtime (make-fake-runtime))
+                   client (usocket:socket-connect "127.0.0.1" *http-test-port*
+                                                  :element-type '(unsigned-byte 8)))
+             (let ((stream (usocket:socket-stream client)))
+               (setf (sb-impl::fd-stream-timeout stream) 10.0)
+               (write-sequence
+                (gr8s::ascii-octets
+                 (format nil "GET /api/v1/namespaces/default/services/web:http/proxy/tunnel HTTP/1.1~C~CHost: api.example~C~CConnection: Upgrade~C~CUpgrade: service-test~C~C~C~C"
+                         #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+                         #\Return #\Linefeed #\Return #\Linefeed))
+                stream)
+               (finish-output stream)
+               (multiple-value-bind (status headers)
+                   (gr8s::parse-http-response-head (gr8s::read-http-response-head stream))
+                 (is (= 101 status))
+                 (is (equal "service-test" (cdr (assoc :upgrade headers)))))
+               (write-byte 41 stream)
+               (finish-output stream)
+               (is (= 42 (read-byte stream))))
+             (bt:join-thread upstream-thread)
+             (is (search "GET /tunnel HTTP/1.1" upstream-request)))
+        (when client (ignore-errors (usocket:socket-close client)))
+        (when frontend (stop-server frontend))
+        (ignore-errors (usocket:socket-close listener))
+        (when (bt:thread-alive-p upstream-thread)
+          (ignore-errors (bt:destroy-thread upstream-thread)))))))
+
 (test pod-proxy-target-uses-observed-uid-address-and-kubernetes-port-defaults
   (with-temporary-store (store path)
     (let ((pod (create-pod store (parse-pod *valid-pod-json*))))
@@ -117,9 +268,7 @@
              (multiple-value-bind (body code) (proxy-api-request "/" :method :head)
                (is (= 200 code)) (is (zerop (length body))))
              (multiple-value-bind (body code) (proxy-api-request "/" :method :options)
-               (is (= 200 code)) (is (equalp #(0 255 1 2 127) body)))
-             (multiple-value-bind (body code) (proxy-api-request "/" :additional-headers '(("Upgrade" . "websocket")))
-               (declare (ignore body)) (is (= 501 code))))
+               (is (= 200 code)) (is (equalp #(0 255 1 2 127) body))))
         (when frontend (stop-server frontend))
         (hunchentoot:stop upstream)))))
 

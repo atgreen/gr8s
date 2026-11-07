@@ -250,7 +250,8 @@
 
 (defun openapi-v2-response (store)
   "Answer /openapi/v2 as the protobuf client-go asks for, or as JSON."
-  (let ((document (crd-openapi-document store nil nil nil)))
+  (let ((document (merge-aggregated-openapi-v2
+                   store (crd-openapi-document store nil nil nil))))
     (if (openapi-protobuf-requested-p)
         (progn
           (setf (hunchentoot:content-type*) +openapi-protobuf-media-type+)
