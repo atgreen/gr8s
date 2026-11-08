@@ -77,6 +77,64 @@
                           (gr8s:schedule-pod
                            store (create-pod store (parse-pod third-object))))))))))))
 
+(defun dra-test-pod (name claim-name)
+  "Build a Pod that directly references CLAIM-NAME through DRA."
+  (parse-pod
+   (gr8s::core-object
+    "apiVersion" "v1" "kind" "Pod"
+    "metadata" (gr8s::core-object "name" name "namespace" "default")
+    "spec" (gr8s::core-object
+            "resourceClaims" (vector (gr8s::core-object "name" "device"
+                                                         "resourceClaimName" claim-name))
+            "containers" (vector (gr8s::core-object "name" "c" "image" "busybox"
+                                                      "resources" (gr8s::core-object
+                                                                   "claims" (vector (gr8s::core-object "name" "device")))))))))
+
+(defun create-allocated-dra-claim (store name node-name)
+  "Create a ResourceClaim whose allocation is available only on NODE-NAME."
+  (gr8s::create-core-resource
+   store "resourceclaims"
+   (gr8s::core-object
+    "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
+    "metadata" (gr8s::core-object "name" name)
+    "spec" (gr8s::core-object "devices" (gr8s::core-object "requests" #())))
+   "default")
+  (let ((gr8s::*typed-api-status-write* t))
+    (gr8s::update-core-resource
+     store "resourceclaims" "default" name
+     (lambda (claim)
+       (setf (gethash "status" claim)
+             (gr8s::core-object
+              "allocation"
+              (gr8s::core-object
+               "devices" (gr8s::core-object "results" #())
+               "nodeSelector"
+               (gr8s::core-object
+                "nodeSelectorTerms"
+                (vector (gr8s::core-object
+                         "matchFields"
+                         (vector (gr8s::core-object "key" "metadata.name" "operator" "In"
+                                                    "values" (vector node-name)))))))))
+       claim))))
+
+(test dra-claims-constrain-placement-and-are-reserved-for-the-pod
+  (with-temporary-store (store path)
+    (dolist (node (list (make-test-node "worker-a" "node-a" "10.64.0.0/20")
+                        (make-test-node "worker-b" "node-b" "10.64.16.0/20")))
+      (gr8s:register-node store node)
+      (gr8s:mark-node-ready store (gr8s:node-record-name node) 100))
+    (let ((missing (create-pod store (dra-test-pod "missing" "not-created"))))
+      (is-false (gr8s:schedule-pod store missing))
+      (is-false (gr8s:pod-node-name missing)))
+    (create-allocated-dra-claim store "accelerator" "worker-b")
+    (let* ((pod (create-pod store (dra-test-pod "consumer" "accelerator")))
+           (node (gr8s:schedule-pod store pod))
+           (claim (gr8s::get-core-resource store "resourceclaims" "default" "accelerator"))
+           (reserved (gethash "reservedFor" (gethash "status" claim))))
+      (is (equal "worker-b" (gr8s:node-record-name node)))
+      (is (= 1 (length reserved)))
+      (is (equal (gr8s:pod-uid pod) (gethash "uid" (aref reserved 0)))))))
+
 (test scheduler-respects-an-explicit-existing-node-name
   (with-temporary-store (store path)
     (gr8s:register-node store

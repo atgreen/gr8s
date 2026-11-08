@@ -144,7 +144,8 @@ resource; an extended resource it does not advertise has zero capacity."
        (null (pod-affinity-failure-unlocked store pod node))
        (null (pod-topology-spread-failure-unlocked store pod node))
        (pod-host-ports-free-p store pod node)
-       (pod-node-storage-compatible-p store pod node)))
+       (pod-node-storage-compatible-p store pod node)
+       (pod-dra-node-compatible-p store pod node)))
 
 (defun pod-more-important-p (left right)
   "Order Pods by descending priority, then earliest creation, as the scheduler's reprieve does."

@@ -137,8 +137,8 @@
     (unless resources (return-from normalize-container-resources nil))
     (when (eq resources 'null) (remhash "resources" container) (return-from normalize-container-resources nil))
     (reject-unsupported-fields resources '("limits" "requests" "claims") "container.resources")
-    (when (and (gethash "claims" resources) (plusp (length (gethash "claims" resources))))
-      (invalid-pod "Dynamic resource claims are not implemented"))
+    ;; Pod parsing validates the DRA claim references against spec.resourceClaims.
+    ;; They do not contribute scalar quantities to the CRI resource limits here.
     (dolist (kind '("limits" "requests"))
       (let ((values (gethash kind resources)))
         (when (eq values 'null) (remhash kind resources) (setf values nil))

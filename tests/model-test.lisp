@@ -45,11 +45,20 @@
     (setf (gethash "namespace" (gethash "metadata" object)) "Invalid/namespace")
     (signals kubernetes-error (parse-pod object))))
 
-(test unsupported-pod-spec-fields-are-rejected
-  ;; hostUsers is implemented now; resourceClaims (DRA) still needs a driver gr8s doesn't have.
-  (signals kubernetes-error
-    (parse-pod
-     "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"resourceClaims\":[{\"name\":\"gpu\",\"resourceClaimName\":\"claim\"}],\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}")))
+(test pod-resource-claims-use-the-kubernetes-v1-shape
+  (let* ((pod (parse-pod
+               "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"resourceClaims\":[{\"name\":\"gpu\",\"resourceClaimName\":\"claim\"}],\"containers\":[{\"name\":\"web\",\"image\":\"busybox\",\"resources\":{\"claims\":[{\"name\":\"gpu\",\"request\":\"device\"}]}}]}}"))
+         (spec (gethash "spec" (pod-to-object pod))))
+    (is (equal "claim" (gethash "resourceClaimName" (aref (gethash "resourceClaims" spec) 0))))
+    (is (equal "device" (gethash "request" (aref (gethash "claims" (gethash "resources" (aref (gethash "containers" spec) 0))) 0)))))
+  (dolist (claim '(("missing source" . "{\"name\":\"gpu\"}")
+                   ("two sources" . "{\"name\":\"gpu\",\"resourceClaimName\":\"claim\",\"resourceClaimTemplateName\":\"template\"}")
+                   ("bad name" . "{\"name\":\"Bad_Name\",\"resourceClaimName\":\"claim\"}")))
+    (signals kubernetes-error
+      (parse-pod
+       (format nil "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"hello\"},\"spec\":{\"resourceClaims\":[~A],\"containers\":[{\"name\":\"web\",\"image\":\"busybox\"}]}}"
+               (cdr claim)))
+      (car claim))))
 
 (test kubectl-generated-default-pod-fields-are-accepted
   (let ((pod

@@ -269,6 +269,56 @@
        "metadata.generateName"))
     prefix))
 
+(defun validate-pod-resource-claims (spec)
+  "Validate PodResourceClaim sources and return their unique Pod-local names."
+  (let ((names nil))
+    (loop for claim across (optional-vector spec "resourceClaims" "spec")
+          do (require-object claim "spec.resourceClaims entry")
+             (reject-unsupported-fields
+              claim '("name" "resourceClaimName" "resourceClaimTemplateName")
+              "spec.resourceClaims entry")
+             (let* ((name (require-dns-label (gethash "name" claim)
+                                             "spec.resourceClaims.name"))
+                    (direct (gethash "resourceClaimName" claim))
+                    (template (gethash "resourceClaimTemplateName" claim)))
+               (when (member name names :test #'equal)
+                 (invalid-pod "spec.resourceClaims contains duplicate name ~S" name))
+               (unless (not (eq (null direct) (null template)))
+                 (invalid-pod "spec.resourceClaims ~S must specify exactly one of resourceClaimName or resourceClaimTemplateName"
+                              name))
+               (require-dns-subdomain (or direct template)
+                                      (if direct "spec.resourceClaims.resourceClaimName"
+                                          "spec.resourceClaims.resourceClaimTemplateName"))
+               (push name names)))
+    names))
+
+(defun validate-container-resource-claim-references (spec pod-claim-names)
+  "Validate every container resource claim against POD-CLAIM-NAMES."
+  (dolist (field '("containers" "initContainers" "ephemeralContainers"))
+    (loop for container across (gethash field spec #())
+          for resources = (gethash "resources" container)
+          when resources
+            do (let ((seen nil))
+                 (loop for claim across (gethash "claims" resources #())
+                       do (require-object claim "container.resources.claims entry")
+                          (reject-unsupported-fields claim '("name" "request")
+                                                     "container.resources.claims entry")
+                          (let* ((name (require-dns-label (gethash "name" claim)
+                                                         "container.resources.claims.name"))
+                                 (request (gethash "request" claim ""))
+                                 (key (if (and (stringp request) (plusp (length request)))
+                                          (progn (require-dns-label request "container.resources.claims.request")
+                                                 (format nil "~A/~A" name request))
+                                          name)))
+                            (unless (member name pod-claim-names :test #'equal)
+                              (invalid-pod "container.resources.claims name ~S must name spec.resourceClaims entry" name))
+                            (when (or (member key seen :test #'equal)
+                                      (and (equal key name)
+                                           (find-if (lambda (old) (uiop:string-prefix-p (format nil "~A/" name) old)) seen))
+                                      (and (position #\/ key) (member name seen :test #'equal)))
+                              (invalid-pod "container.resources.claims contains overlapping reference ~S" key))
+                            (push key seen)))))))
+
 (defun parse-pod-with-policy (input policy &key allow-generate-name)
   "Parse JSON text or an object into the supported, validated POD model."
   (let* ((object (require-object
@@ -303,7 +353,7 @@
             "runtimeClassName" "priorityClassName" "priority" "preemptionPolicy" "overhead" "activeDeadlineSeconds"
             "affinity" "os" "hostNetwork" "hostPID" "hostIPC" "hostUsers" "shareProcessNamespace" "hostAliases" "ephemeralContainers"
             "readinessGates" "schedulerName" "hostnameOverride" "setHostnameAsFQDN" "serviceAccount"
-            "topologySpreadConstraints" "schedulingGates" "resources" "schedulingGroup") "spec")
+            "topologySpreadConstraints" "schedulingGates" "resources" "schedulingGroup" "resourceClaims") "spec")
     ;; GenericWorkload is beta and off by default in v1.37, so the API server drops the field.
     (remhash "schedulingGroup" spec)
     (dolist (field '("hostname" "subdomain"))
@@ -319,6 +369,8 @@
       (unless (and (integerp grace) (<= 0 grace #x7fffffffffffffff))
         (invalid-pod "spec.terminationGracePeriodSeconds must be an int64"))
       (setf (gethash "terminationGracePeriodSeconds" spec) grace))
+    (let ((pod-claim-names (validate-pod-resource-claims spec)))
+      (validate-container-resource-claim-references spec pod-claim-names))
     (funcall (pod-parser-policy-spec-validator policy) spec)
     (let* ((prefix (pod-generate-name-prefix metadata))
            (specified (gethash "name" metadata))

@@ -303,8 +303,67 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
                          (gethash (pod-uid pod)
                                   (pod-store-pod-observed-phases store)))))))
 
+(defun pod-dra-claims-unlocked (store pod)
+  "Return POD's direct ResourceClaims and true, or NIL/NIL until every claim exists and is allocated.
+Templated claims are resolved by the ResourceClaim controller before scheduling."
+  (let ((claims nil))
+    (loop for reference across (gethash "resourceClaims" (gethash "spec" (pod-to-object pod)) #())
+          for name = (gethash "resourceClaimName" reference)
+          do (unless name (return-from pod-dra-claims-unlocked (values nil nil)))
+             (let ((claim (gethash (core-resource-key "resourceclaims" (pod-namespace pod) name)
+                                   (pod-store-resources store))))
+               (unless (and claim (gethash "allocation" (gethash "status" claim (core-object))))
+                 (return-from pod-dra-claims-unlocked (values nil nil)))
+               (let ((reserved (gethash "reservedFor" (gethash "status" claim) #())))
+                 (when (and (plusp (length reserved))
+                            (not (find (pod-uid pod) reserved :test #'equal
+                                      :key (lambda (consumer) (gethash "uid" consumer)))))
+                   (return-from pod-dra-claims-unlocked (values nil nil))))
+               (push claim claims)))
+    (values (nreverse claims) t)))
+
+(defun dra-allocation-available-on-node-p (claim node)
+  "Return whether CLAIM's committed allocation is available on NODE."
+  (let* ((allocation (gethash "allocation" (gethash "status" claim)))
+         (selector (gethash "nodeSelector" allocation)))
+    (or (null selector)
+        (some (lambda (term) (node-selector-term-matches-p term node))
+              (gethash "nodeSelectorTerms" selector #())))))
+
+(defun pod-dra-node-compatible-p (store pod node)
+  "Return whether all allocated claims of POD may be reserved and used on NODE.
+Call with STORE's lock held."
+  (multiple-value-bind (claims ready) (pod-dra-claims-unlocked store pod)
+    (and ready (every (lambda (claim) (dra-allocation-available-on-node-p claim node)) claims))))
+
+(defun reserve-pod-dra-claims-unlocked (store pod)
+  "Persist POD in each allocated claim's status.reservedFor. Caller holds STORE's lock."
+  (multiple-value-bind (claims ready) (pod-dra-claims-unlocked store pod)
+    (unless ready (return-from reserve-pod-dra-claims-unlocked nil))
+    (when claims
+      (let* ((resources (copy-core-resource-index store))
+             (revision (1+ (pod-store-resource-revision store))))
+        (dolist (claim claims)
+          (let* ((object (copy-core-object claim))
+                 (metadata (gethash "metadata" object))
+                 (status (gethash "status" object))
+                 (reserved (gethash "reservedFor" status #())))
+            (unless (find (pod-uid pod) reserved :test #'equal
+                          :key (lambda (consumer) (gethash "uid" consumer)))
+              (setf (gethash "reservedFor" status)
+                    (concatenate 'vector reserved
+                                 (vector (core-object "resource" "pods" "name" (pod-name pod)
+                                                      "uid" (pod-uid pod))))))
+            (setf (gethash "resourceVersion" metadata) (write-to-string revision)
+                  (gethash (core-resource-key "resourceclaims" (pod-namespace pod)
+                                              (gethash "name" metadata)) resources) object)))
+        (commit-core-resources store resources revision)))
+    t))
+
 (defun persist-pod-assignment (store pod node-name)
   "Assign POD to NODE-NAME, advance its resource version, and persist it."
+  (unless (reserve-pod-dra-claims-unlocked store pod)
+    (error "ResourceClaims for ~A/~A changed during scheduling" (pod-namespace pod) (pod-name pod)))
   (let* ((object (pod-to-object pod))
          (spec (gethash "spec" object))
          (metadata (gethash "metadata" object))
