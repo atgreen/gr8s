@@ -29,6 +29,29 @@
                      :overlay-backend)))
   (signals error (parse-cli-options '("serve" "--overlay-backend" "bogus"))))
 
+(test wireguard-rotate-key-command-replaces-only-the-persisted-private-identity
+  (with-temporary-store (store directory)
+    (declare (ignore store))
+    (multiple-value-bind (old-private old-public)
+        (gr8s.security::ensure-wireguard-key-pair directory)
+      (let* ((arguments (list "wireguard" "rotate-key" "--state-directory"
+                              (namestring directory)))
+             (options (parse-cli-options arguments))
+             (output
+               (with-output-to-string (*standard-output*)
+                 (is (= 0 (gr8s::main-with-environment
+                           arguments (constantly nil) (constantly 99)))))))
+        (is (eq :wireguard-rotate-key (getf options :command)))
+        (is (equal (namestring directory) (getf options :state-directory)))
+        (multiple-value-bind (new-private new-public)
+            (gr8s.security::ensure-wireguard-key-pair directory)
+          (is-false (equalp old-private new-private))
+          (is-false (equalp old-public new-public))
+          (is (search (ag-grpc:base64-encode new-public) output))
+          (is-false (search (ag-grpc:base64-encode new-private) output))))))
+  (signals error (parse-cli-options '("wireguard" "rotate-key" "--bogus")))
+  (signals error (parse-cli-options '("wireguard" "unknown"))))
+
 (test external-cni-options-are-explicit-and-validated
   (let ((options
           (parse-cli-options
@@ -103,6 +126,7 @@
     ;; #161 lists commands in sections ("  serve  ..."), not as "gr8s serve" lines.
     (dolist (word '("  serve " "  agent " "--node-port"
                     "--overlay-backend"
+                    "wireguard rotate-key"
                     "--disable-agent" "--server" "--token" "--ca-pin"
                     "--node-name" "--state-directory"))
       (is (search word help)))))

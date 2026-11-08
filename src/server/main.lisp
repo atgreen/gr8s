@@ -5,7 +5,7 @@
 ;;;;
 ;;;; Every invocation lands in MAIN, which dispatches on CNI_COMMAND (containerd
 ;;;; runs this same binary as its CNI plugin) and otherwise on the subcommand --
-;;;; serve, agent, witness, join-token, kubeconfig, runtime, doctor and the
+;;;; serve, agent, witness, join-token, kubeconfig, runtime, wireguard, doctor and the
 ;;;; informational ones. Each subcommand parses its own arguments into an options
 ;;;; plist; SERVE and AGENT own the long-running processes. SERVE wires the store,
 ;;;; PKI, node gRPC server, runtime, reconciliation worker and (unless disabled)
@@ -496,6 +496,33 @@ bare positional state directory for backward compatibility.  A missing
                (t (error "unknown doctor option: ~A" option))))
     options))
 
+(defun parse-wireguard-options (arguments)
+  "Parse `gr8s wireguard rotate-key --state-directory DIR'. The key is replaced
+offline and takes effect the next time the node agent starts."
+  (unless (string= (first arguments) "rotate-key")
+    (error "unknown wireguard subcommand: ~A" (or (first arguments) "")))
+  (let ((options (list :command :wireguard-rotate-key
+                       :state-directory (namestring (default-state-directory))))
+        (arguments (rest arguments)))
+    (loop while arguments
+          for option = (first arguments)
+          do (cond
+               ((string= option "--state-directory")
+                (setf (getf options :state-directory) (option-value arguments option)
+                      arguments (cddr arguments)))
+               (t (error "unknown wireguard rotate-key option: ~A" option))))
+    options))
+
+(defun rotate-wireguard-node-key (options &optional (output *standard-output*))
+  "Replace the durable node-local WireGuard identity and print its public key.
+The new identity takes effect when the node agent next starts."
+  (multiple-value-bind (private-key public-key)
+      (gr8s.security::rotate-wireguard-key-pair (getf options :state-directory))
+    (declare (ignore private-key))
+    (format output "WireGuard public key: ~A~%" (ag-grpc:base64-encode public-key))
+    (finish-output output))
+  0)
+
 (defun parse-cli-options (arguments)
   "Dispatch ARGUMENTS to the matching subcommand option parser and return its
    options plist. No arguments, or help/version/notices, yield a bare :command
@@ -520,6 +547,8 @@ bare positional state directory for backward compatibility.  A missing
      (parse-kubeconfig-options (rest arguments)))
     ((string= "runtime" (first arguments))
      (parse-runtime-options (rest arguments)))
+    ((string= "wireguard" (first arguments))
+     (parse-wireguard-options (rest arguments)))
     ((string= "doctor" (first arguments))
      (parse-doctor-options (rest arguments)))
     (t (error "unknown command: ~A" (first arguments)))))
@@ -1192,6 +1221,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (format t "Tools:~%")
   (format t "  kubeconfig   Print or write a cluster kubeconfig~%")
   (format t "  doctor       Diagnose a node's state directory~%")
+  (format t "  wireguard rotate-key   Replace this node's WireGuard identity on its next start~%")
   (format t "  version      Print the gr8s version~%")
   (format t "  notices      Print third-party copyright and license notices~%~%")
   (format t "serve options:~%")
@@ -1277,6 +1307,8 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
               (:runtime-list
                (print-runtime-list (getf options :state-directory))
                0)
+              (:wireguard-rotate-key
+               (rotate-wireguard-node-key options))
               (:doctor
                (if (plusp (apply #'run-doctor
                                  (append
