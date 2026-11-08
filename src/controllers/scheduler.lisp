@@ -443,6 +443,27 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
                         (list (cons "device" binding)))))
       (error () nil))))
 
+(defun dra-device-tolerates-taint-p (toleration taint)
+  "Return whether TOLERATION matches TAINT's scheduling restriction."
+  (and (or (equal "" (gethash "effect" toleration ""))
+           (equal (gethash "effect" toleration) (gethash "effect" taint)))
+       (or (equal "" (gethash "key" toleration ""))
+           (equal (gethash "key" toleration) (gethash "key" taint)))
+       (let ((operator (gethash "operator" toleration "Equal")))
+         (cond ((member operator '("" "Equal") :test #'equal)
+                (equal (gethash "value" toleration "")
+                       (gethash "value" taint "")))
+               ((equal operator "Exists") t)
+               (t nil)))))
+
+(defun dra-device-tolerated-p (device exact)
+  "Return whether EXACT tolerates DEVICE's scheduling taints."
+  (loop for taint across (gethash "taints" device #())
+        always (or (not (member (gethash "effect" taint)
+                                '("NoSchedule" "NoExecute") :test #'equal))
+                   (loop for toleration across (gethash "tolerations" exact #())
+                         thereis (dra-device-tolerates-taint-p toleration taint)))))
+
 (defun dra-map-candidate-combinations (function candidates count)
   "Call FUNCTION for COUNT-sized combinations until it returns true."
   (labels ((visit (remaining remaining-count needed selected)
@@ -483,6 +504,7 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
         (loop for device across (gethash "devices" spec #())
               for name = (gethash "name" device)
               when (and (dra-device-available-on-node-p slice device node)
+                        (dra-device-tolerated-p device exact)
                         (dra-device-matches-selectors-p driver device selectors))
                 do (push (list driver pool name
                                (gethash (dra-device-key driver pool name) used))
