@@ -190,6 +190,59 @@ operation_type, list_podsandbox, or NIL for anything that isn't a CRI call."
                                  "[ALPHA] Cumulative number of runtime operations by operation type." "counter"
                                  (counts (kubelet-instrumentation-operations metrics)))))))
 
+(defun wireguard-peer-node-name (network public-key)
+  "Return the authenticated Node id whose route carries PUBLIC-KEY."
+  (or (loop for route across (gethash "routes" network #())
+            for encoded = (gethash "wireguardPublicKey" route)
+            when (and encoded
+                      (equalp public-key
+                              (ignore-errors (wireguard-decode-key encoded "peer public key"))))
+              return (gethash "nodeID" route))
+      (ag-grpc:base64-encode public-key)))
+
+(defun wireguard-metrics-text
+    (network node-name &key (status-reader #'read-wireguard-peer-statuses)
+                            (key-age-reader (constantly nil)))
+  "Render WireGuard peer traffic/handshake telemetry and local private-key age."
+  (unless (and network
+               (string= "wireguard" (gethash "overlayBackend" network "vxlan")))
+    (return-from wireguard-metrics-text ""))
+  (let ((statuses nil) (available 1))
+    (handler-case (setf statuses (funcall status-reader))
+      (error (condition)
+        (setf available 0)
+        (format *error-output* "gr8s WireGuard telemetry: ~A~%" condition)))
+    (with-output-to-string (out)
+      (flet ((samples (reader)
+               (loop for status in statuses
+                     for labels = (list (cons "node" node-name)
+                                        (cons "peer" (wireguard-peer-node-name
+                                                      network
+                                                      (wireguard-peer-status-public-key status))))
+                     collect (list labels (funcall reader status)))))
+        (write-prometheus-family
+         out "gr8s_wireguard_telemetry_available"
+         "Whether the node could read its WireGuard device telemetry." "gauge"
+         (list (list (list (cons "node" node-name)) available)))
+        (write-prometheus-family
+         out "gr8s_wireguard_peer_latest_handshake_seconds"
+         "Unix time of the peer's latest successful WireGuard handshake." "gauge"
+         (samples #'wireguard-peer-status-latest-handshake-seconds))
+        (write-prometheus-family
+         out "gr8s_wireguard_peer_received_bytes_total"
+         "Bytes received from the WireGuard peer." "counter"
+         (samples #'wireguard-peer-status-received-bytes))
+        (write-prometheus-family
+         out "gr8s_wireguard_peer_transmitted_bytes_total"
+         "Bytes transmitted to the WireGuard peer." "counter"
+         (samples #'wireguard-peer-status-transmitted-bytes))
+        (let ((age (ignore-errors (funcall key-age-reader))))
+          (when age
+            (write-prometheus-family
+             out "gr8s_wireguard_private_key_age_seconds"
+             "Age of this node's persisted WireGuard private key." "gauge"
+             (list (list (list (cons "node" node-name)) age)))))))))
+
 ;;; What the runtime runs
 
 (defun cri-container-state-counts (socket-path &key (timeout 10))

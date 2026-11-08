@@ -143,6 +143,63 @@
    (wireguard-device-attributes interface private-key network))
   nil)
 
+(defstruct wireguard-peer-status
+  "One peer observation returned by Linux's WireGuard Generic Netlink API."
+  public-key
+  (latest-handshake-seconds 0)
+  (latest-handshake-nanoseconds 0)
+  (received-bytes 0)
+  (transmitted-bytes 0))
+
+(defun wireguard-nested-attribute-payloads (bytes)
+  "Return every top-level nested attribute payload in BYTES, preserving order."
+  (let ((offset 0) (payloads nil))
+    (loop while (< offset (length bytes))
+          do (when (< (- (length bytes) offset) 4)
+               (invalid-cni "truncated WireGuard nested attribute"))
+             (let ((size (netlink-read-integer bytes offset 2)))
+               (unless (<= 4 size (- (length bytes) offset))
+                 (invalid-cni "invalid WireGuard nested attribute length"))
+               (push (subseq bytes (+ offset 4) (+ offset size)) payloads)
+               (incf offset (netlink-align size))))
+    (nreverse payloads)))
+
+(defun wireguard-peer-status-from-attributes (attributes)
+  "Decode one peer ATTRIBUTES payload returned by WG_CMD_GET_DEVICE."
+  (let* ((key (gethash 1 attributes))
+         (handshake (gethash 6 attributes))
+         (received (gethash 7 attributes))
+         (transmitted (gethash 8 attributes)))
+    (unless (and key (= 32 (length key)))
+      (invalid-cni "WireGuard peer status has no valid public key"))
+    (unless (or (null handshake) (= 16 (length handshake)))
+      (invalid-cni "WireGuard peer status has an invalid handshake timestamp"))
+    (unless (and received (= 8 (length received)) transmitted (= 8 (length transmitted)))
+      (invalid-cni "WireGuard peer status has invalid byte counters"))
+    (make-wireguard-peer-status
+     :public-key key
+     :latest-handshake-seconds (if handshake (netlink-read-integer handshake 0 8) 0)
+     :latest-handshake-nanoseconds (if handshake (netlink-read-integer handshake 8 8) 0)
+     :received-bytes (netlink-read-integer received 0 8)
+     :transmitted-bytes (netlink-read-integer transmitted 0 8))))
+
+(defun wireguard-peer-statuses-from-messages (messages)
+  "Decode all peer observations from WG_CMD_GET_DEVICE reply MESSAGES."
+  (loop for message in messages
+        for device = (netlink-attributes message 20)
+        for peers = (gethash 8 device)
+        when peers
+          append (loop for payload in (wireguard-nested-attribute-payloads peers)
+                       collect (wireguard-peer-status-from-attributes
+                                (netlink-attributes payload 0)))))
+
+(defun read-wireguard-peer-statuses (&optional (interface +node-wireguard-interface+))
+  "Read INTERFACE's peers, handshake times and byte counters from the kernel."
+  (wireguard-peer-statuses-from-messages
+   (call-generic-netlink
+    (generic-netlink-family-id "wireguard") 0 1
+    (netlink-attribute 2 (netlink-string interface)))))
+
 (defun node-wireguard-owner (network)
   "Return the ownership alias for NETWORK's node-local WireGuard device."
   (format nil "gr8s:wireguard:~A" (gethash "nodePodCIDR" network)))

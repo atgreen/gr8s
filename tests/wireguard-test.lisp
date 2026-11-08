@@ -56,3 +56,45 @@
     (is (eq network (gr8s::validate-node-network-object network)))
     (remhash "wireguardPublicKey" (aref (gethash "routes" network) 0))
     (signals gr8s::cni-error (gr8s::validate-node-network-object network))))
+
+(test wireguard-peer-status-parses-kernel-handshake-and-counters
+  (let* ((key (ironclad:hex-string-to-byte-array
+               "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"))
+         (peer (gr8s::netlink-octets
+                (gr8s::netlink-attribute 1 key)
+                (gr8s::netlink-attribute
+                 6 (gr8s::netlink-octets (gr8s::netlink-integer 1700000000 8)
+                                          (gr8s::netlink-integer 123456789 8)))
+                (gr8s::netlink-attribute 7 (gr8s::netlink-integer 4294967301 8))
+                (gr8s::netlink-attribute 8 (gr8s::netlink-integer 8589934601 8))))
+         (message (gr8s::netlink-octets
+                   (make-array 20 :element-type '(unsigned-byte 8) :initial-element 0)
+                   (gr8s::netlink-attribute #x8008
+                                            (gr8s::netlink-attribute #x8000 peer))))
+         (status (first (gr8s::wireguard-peer-statuses-from-messages (list message)))))
+    (is (equalp key (gr8s::wireguard-peer-status-public-key status)))
+    (is (= 1700000000 (gr8s::wireguard-peer-status-latest-handshake-seconds status)))
+    (is (= 123456789 (gr8s::wireguard-peer-status-latest-handshake-nanoseconds status)))
+    (is (= 4294967301 (gr8s::wireguard-peer-status-received-bytes status)))
+    (is (= 8589934601 (gr8s::wireguard-peer-status-transmitted-bytes status)))))
+
+(test wireguard-prometheus-metrics-identify-authenticated-peer-and-key-age
+  (let* ((route (wireguard-route-fixture))
+         (network (node-network-with-routes-for-test nil))
+         (status (gr8s::make-wireguard-peer-status
+                  :public-key (gr8s::wireguard-decode-key
+                               (gethash "wireguardPublicKey" route) "test key")
+                  :latest-handshake-seconds 1700000000
+                  :latest-handshake-nanoseconds 0
+                  :received-bytes 41 :transmitted-bytes 43)))
+    (setf (gethash "overlayBackend" network) "wireguard"
+          (gethash "wireguardListenPort" network) 51820
+          (gethash "routes" network) (vector route))
+    (let ((text (gr8s::wireguard-metrics-text
+                 network "worker-a" :status-reader (lambda () (list status))
+                 :key-age-reader (constantly 17))))
+      (is (search "gr8s_wireguard_peer_latest_handshake_seconds{node=\"worker-a\",peer=\"peer-a\"} 1.7e+09" text))
+      (is (search "gr8s_wireguard_peer_received_bytes_total{node=\"worker-a\",peer=\"peer-a\"} 41" text))
+      (is (search "gr8s_wireguard_peer_transmitted_bytes_total{node=\"worker-a\",peer=\"peer-a\"} 43" text))
+      (is (search "gr8s_wireguard_private_key_age_seconds{node=\"worker-a\"} 17" text))
+      (is (search "gr8s_wireguard_telemetry_available{node=\"worker-a\"} 1" text)))))
