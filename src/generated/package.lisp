@@ -17,6 +17,10 @@
   (:use #:cl)
   (:shadow #:type #:block))
 
+(defpackage #:gr8s.dra.v1
+  (:use #:cl)
+  (:shadow #:block))
+
 (defpackage #:gr8s.containerd.tasks.v1
   (:use #:cl)
   (:shadow #:signal))

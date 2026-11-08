@@ -45,6 +45,9 @@
    #:runtime-delete
    #:runtime-delete-pod
    #:runtime-ensure
+   #:runtime-prepare-pod-resources
+   #:runtime-container-cdi-device-ids
+   #:runtime-unprepare-pod-resources
    #:runtime-ephemeral-usage
    #:runtime-error
    #:runtime-error-message

@@ -40,6 +40,15 @@
            t)))
     (is (string= "" (gr8s.cri.v1::hostname config)))))
 
+(test cri-container-config-carries-dra-cdi-devices
+  (let* ((config
+           (gr8s::make-cri-container-config
+            :name "app" :image "busybox" :uid "pod-uid"
+            :cdi-device-ids '("vendor.example/gpu=0" "vendor.example/fpga=blue")))
+         (devices (gr8s.cri.v1::cdi-devices config)))
+    (is (equal '("vendor.example/gpu=0" "vendor.example/fpga=blue")
+               (mapcar #'gr8s.cri.v1::name devices)))))
+
 (test cri-sandbox-carries-the-cluster-dns-configuration
   (let* ((config
            (gr8s::make-cri-pod-sandbox-config

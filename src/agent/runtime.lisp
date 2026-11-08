@@ -28,6 +28,7 @@
   (node-name nil)   ; the Node this agent runs, for Service traffic policies
   runtime
   manager
+  dynamic-resource-manager
   dns-forward-rules
   network
   network-reconciler
@@ -169,7 +170,10 @@ rebuilds the urgent-cleanup fence from the Pods already on disk, so a restart re
 mid-deletion work even with the control plane unavailable. Starts no thread;
 START-NODE-RUNTIME does that."
   (let* ((directory (uiop:ensure-directory-pathname state-directory))
-         (store (open-store (merge-pathnames "desired/" directory))))
+         (store (open-store (merge-pathnames "desired/" directory)))
+         (dynamic-resource-manager
+           (when (containerd-runtime-p runtime)
+             (gr8s.kubelet::make-dra-manager store directory))))
     ;; The control plane serves every watch; a journal here would only repeat its own.
     (setf (pod-store-watch-journal-p store) nil)
     (when (containerd-runtime-p runtime)
@@ -177,9 +181,21 @@ START-NODE-RUNTIME does that."
     (let ((node-runtime
             (%make-node-runtime
              :state-directory directory :runtime runtime :manager manager
+             :dynamic-resource-manager dynamic-resource-manager
              :dns-forward-rules dns-forward-rules
              :network-reconciler network-reconciler
              :store store :reconciler (make-reconciler store runtime))))
+      (when dynamic-resource-manager
+        (setf (gr8s.runtime.containerd:containerd-runtime-dynamic-resource-prepare-function runtime)
+              (lambda (pod)
+                (gr8s.kubelet::prepare-pod-dynamic-resources dynamic-resource-manager pod))
+              (gr8s.runtime.containerd:containerd-runtime-dynamic-resource-cdi-device-function runtime)
+              (lambda (pod container)
+                (gr8s.kubelet::container-dra-cdi-device-ids
+                 dynamic-resource-manager pod container))
+              (gr8s.runtime.containerd:containerd-runtime-dynamic-resource-unprepare-function runtime)
+              (lambda (pod)
+                (gr8s.kubelet::unprepare-pod-dynamic-resources dynamic-resource-manager pod))))
       (when (and manager (string= "external" (managed-containerd-cni-mode manager)))
         (load-node-runtime-external-cni-endpoints node-runtime))
       (let ((applied (read-node-network-file (node-runtime-network-path node-runtime)))

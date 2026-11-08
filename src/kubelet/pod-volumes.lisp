@@ -52,7 +52,7 @@
     references))
 
 (defun pod-referenced-resource-objects (store pod)
-  "Copy only POD's referenced volume and environment resources from its namespace."
+  "Copy only POD's referenced configuration, storage and DRA resources."
   (let ((result nil))
     (dolist (reference (pod-resource-reference-declarations pod))
       (destructuring-bind (resource name optional) reference
@@ -66,7 +66,38 @@
                           ;; A missing account delays only this Pod, as its unready volume reports.
                           (kubernetes-error () nil))))
       (when token-object (push token-object result)))
+    (dolist (claim-name (pod-assigned-resource-claim-names pod))
+      (handler-case
+          (push (get-core-resource store "resourceclaims" (pod-namespace pod) claim-name)
+                result)
+        (kubernetes-error (condition)
+          (unless (= 404 (kubernetes-error-status-code condition)) (error condition)))))
     (remove-duplicates (append result (pod-persistent-resource-objects store pod)) :test #'equalp)))
+
+(defun pod-assigned-resource-claim-names (pod)
+  "Return the direct and template-generated ResourceClaim names assigned to POD."
+  (let* ((object (pod-to-object pod))
+         (statuses (gethash "resourceClaimStatuses" (gethash "status" object (core-object)) #())))
+    (loop for reference across (gethash "resourceClaims" (gethash "spec" object) #())
+          for logical-name = (gethash "name" reference)
+          for status = (find logical-name statuses :test #'equal
+                             :key (lambda (entry) (gethash "name" entry)))
+          for claim-name = (or (gethash "resourceClaimName" reference)
+                               (and status (gethash "resourceClaimName" status)))
+          when claim-name collect claim-name)))
+
+(defun resource-claim-assigned-to-pod-p (claim pod)
+  "Return whether CLAIM is a referenced same-namespace claim reserved for POD."
+  (let* ((metadata (gethash "metadata" claim))
+         (status (gethash "status" claim (core-object))))
+    (and (equal (gethash "namespace" metadata) (pod-namespace pod))
+         (member (gethash "name" metadata) (pod-assigned-resource-claim-names pod)
+                 :test #'equal)
+         (some (lambda (reference)
+                 (and (equal "pods" (gethash "resource" reference))
+                      (equal (pod-name pod) (gethash "name" reference))
+                      (equal (pod-uid pod) (gethash "uid" reference))))
+               (gethash "reservedFor" status #())))))
 
 (defun assignment-pod (assignment)
   "Parse ASSIGNMENT's Pod and verify that its envelope identity matches the JSON."
@@ -97,23 +128,28 @@
                  (namespace (gethash "namespace" metadata)) (name (gethash "name" metadata))
                  (resource (cond ((equal "ConfigMap" (gethash "kind" object)) "configmaps")
                                  ((equal "Secret" (gethash "kind" object)) "secrets")
+                                 ((equal "ResourceClaim" (gethash "kind" object)) "resourceclaims")
                                  ((equal "PersistentVolumeClaim" (gethash "kind" object)) "persistentvolumeclaims")
                                  ((equal "PersistentVolume" (gethash "kind" object)) "persistentvolumes")
                                  ((equal "CSIDriver" (gethash "kind" object)) "csidrivers")
                                  ((equal "VolumeAttachment" (gethash "kind" object)) "volumeattachments")
                                  (t (invalid-pod "assignment contains an unsupported resource kind")))))
-            (unless (if (storage-resource-p resource)
-                        (assigned-storage-resource-p object pod projected)
-                        (or (and (equal namespace (pod-namespace pod))
-                                 (or (and (equal resource "secrets") (equal name (projected-token-secret-name pod))
-                                          (pod-projected-token-sources pod))
-                                     (some (lambda (reference) (and (equal resource (first reference)) (equal name (second reference))))
-                                           (pod-resource-reference-declarations pod))))
-                            (and (equal resource "secrets") (csi-volume-secret-reference-p object projected))))
+            (unless (cond ((storage-resource-p resource)
+                           (assigned-storage-resource-p object pod projected))
+                          ((equal resource "resourceclaims")
+                           (resource-claim-assigned-to-pod-p object pod))
+                          (t
+                           (or (and (equal namespace (pod-namespace pod))
+                                    (or (and (equal resource "secrets") (equal name (projected-token-secret-name pod))
+                                             (pod-projected-token-sources pod))
+                                        (some (lambda (reference) (and (equal resource (first reference)) (equal name (second reference))))
+                                              (pod-resource-reference-declarations pod))))
+                               (and (equal resource "secrets") (csi-volume-secret-reference-p object projected)))))
               (invalid-pod "assignment contains an unreferenced, cross-namespace or incorrectly bound resource"))
             ;; This status came from the authenticated control plane, rather than
             ;; an API create request. Preserve its real binding observation.
-            (let ((*storage-status-write* (not (null (storage-resource-p resource)))))
+            (let ((*storage-status-write* (not (null (storage-resource-p resource))))
+                  (*typed-api-status-write* (equal resource "resourceclaims")))
               (cons (core-resource-key resource namespace name)
                     (normalize-core-resource resource object namespace name)))))))
 

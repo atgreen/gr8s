@@ -10,7 +10,8 @@
   (load (merge-pathnames "src/generated/package.lisp" root))
   (loop for (source output package) in '(("proto/csi-v1.proto" "src/generated/csi-v1-generated.lisp" "GR8S.CSI.V1")
                                          ("proto/pluginregistration-v1.proto" "src/generated/pluginregistration-v1-generated.lisp"
-                                          "GR8S.PLUGINREGISTRATION.V1"))
+                                          "GR8S.PLUGINREGISTRATION.V1")
+                                         ("proto/dra-v1.proto" "src/generated/dra-v1-generated.lisp" "GR8S.DRA.V1"))
         do (funcall (find-symbol "COMPILE-PROTO-TO-LISP" "AG-PROTO-CLI")
                     (merge-pathnames source root)
                     :output-file (merge-pathnames output root) :package package)))

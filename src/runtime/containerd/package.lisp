@@ -45,6 +45,7 @@
    #:ensure-cri-deletion-status
    #:ensure-cri-status
    #:make-containerd-kill-request
+   #:make-cri-container-config
    #:make-cri-exec-request
    #:make-cri-exec-sync-request
    #:make-cri-pod-sandbox-config
@@ -136,6 +137,7 @@
    #:ensure-cri-deletion-status
    #:ensure-cri-status
    #:make-containerd-kill-request
+   #:make-cri-container-config
    #:copy-cri-container-info
    #:make-cri-container-info
    #:make-cri-container-summary
@@ -165,6 +167,9 @@
    #:containerd-runtime-credential-providers
    #:containerd-runtime-credential-provider-token-function
    #:containerd-runtime-deletions
+   #:containerd-runtime-dynamic-resource-cdi-device-function
+   #:containerd-runtime-dynamic-resource-prepare-function
+   #:containerd-runtime-dynamic-resource-unprepare-function
    #:containerd-runtime-dns-options
    #:containerd-runtime-dns-searches
    #:containerd-runtime-dns-servers
@@ -260,5 +265,6 @@
                   "CRI-VERSION-INFO-RUNTIME-VERSION"
                   "CRI-VERSION-INFO-VERSION"
                   "CONTAINERD-RUNTIME-CREDENTIAL-PROVIDER-TOKEN-FUNCTION"
+                  "MAKE-CRI-CONTAINER-CONFIG"
                   "MAKE-CONTAINERD-RUNTIME"))
     (export (find-symbol name '#:gr8s.runtime.containerd) '#:gr8s)))

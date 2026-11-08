@@ -341,10 +341,39 @@ AUTH is a (username . password) credential for the registry."
            (gr8s.cri.v1::image-ref response))
       (ag-grpc:channel-close channel))))
 
+(defun make-cri-container-config
+    (&key name image command args env uid mounts security-context resources working-directory
+          stdin stdin-once tty labels cdi-device-ids (attempt 0) log-path)
+  "Build the complete CRI config, including DRA-provided CDI device names."
+  (make-instance
+   'gr8s.cri.v1::container-config
+   :metadata (make-instance 'gr8s.cri.v1::container-metadata
+                            :name name :attempt attempt)
+   :image (make-instance 'gr8s.cri.v1::image-spec :image image)
+   :command command
+   :args args
+   :working-dir (or working-directory "")
+   :stdin (not (null stdin)) :stdin-once (not (null stdin-once)) :tty (not (null tty))
+   :mounts mounts
+   :linux (when (or security-context resources)
+            (make-instance 'gr8s.cri.v1::linux-container-config
+                           :security-context security-context :resources resources))
+   :envs (loop for (key . value) in env
+               collect (make-instance 'gr8s.cri.v1::key-value :key key :value value))
+   :cdi-devices (mapcar (lambda (device-id)
+                          (make-instance 'gr8s.cri.v1::cdi-device :name device-id))
+                        cdi-device-ids)
+   :log-path log-path
+   :labels (append
+            (list (cons +gr8s-managed-label+ "true")
+                  (cons +gr8s-container-label+ name))
+            (when uid (list (cons +gr8s-uid-label+ uid)))
+            labels)))
+
 (defun cri-create-container
     (socket-path sandbox-id sandbox-config
      &key name image command args env uid mounts security-context resources working-directory
-          stdin stdin-once tty labels (attempt 0) log-path (timeout 120))
+          stdin stdin-once tty labels cdi-device-ids (attempt 0) log-path (timeout 120))
   "Create a container in SANDBOX-ID and return its runtime ID."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
@@ -355,32 +384,12 @@ AUTH is a (username . password) credential for the registry."
                'gr8s.cri.v1::create-container-request
                :pod-sandbox-id sandbox-id
                :sandbox-config sandbox-config
-               :config
-               (make-instance
-                'gr8s.cri.v1::container-config
-                :metadata
-                (make-instance 'gr8s.cri.v1::container-metadata
-                               :name name
-                               :attempt attempt)
-                :image (make-instance 'gr8s.cri.v1::image-spec :image image)
-                :command command
-                :args args
-                :working-dir (or working-directory "")
-                :stdin (not (null stdin)) :stdin-once (not (null stdin-once)) :tty (not (null tty))
-                :mounts mounts
-                :linux (when (or security-context resources)
-                         (make-instance 'gr8s.cri.v1::linux-container-config
-                                        :security-context security-context :resources resources))
-                :envs (loop for (key . value) in env
-                            collect (make-instance 'gr8s.cri.v1::key-value
-                                                   :key key :value value))
-                :log-path log-path
-                :labels (append
-                         (list (cons +gr8s-managed-label+ "true")
-                               (cons +gr8s-container-label+ name))
-                         (when uid
-                           (list (cons +gr8s-uid-label+ uid)))
-                         labels)))
+               :config (make-cri-container-config
+                        :name name :image image :command command :args args :env env
+                        :uid uid :mounts mounts :security-context security-context
+                        :resources resources :working-directory working-directory
+                        :stdin stdin :stdin-once stdin-once :tty tty :labels labels
+                        :cdi-device-ids cdi-device-ids :attempt attempt :log-path log-path))
               :timeout timeout)
            (ensure-cri-status "CreateContainer" status)
            (gr8s.cri.v1::container-id response))

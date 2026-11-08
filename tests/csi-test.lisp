@@ -402,7 +402,7 @@
 (test unusable-plugins-are-told-why-and-stay-unregistered
   (with-temporary-store (store directory)
     (declare (ignorable store))
-    (dolist (scenario '(("DRAPlugin" ("1.0.0")) ("CSIPlugin" ("0.3.0"))))
+    (dolist (scenario '(("OtherPlugin" ("1.0.0")) ("CSIPlugin" ("0.3.0"))))
       (destructuring-bind (type versions) scenario
         (with-fake-csi-driver (calls directory :type type :versions versions)
           (multiple-value-bind (path socket)
@@ -415,6 +415,203 @@
                    (is (not (gr8s.pluginregistration.v1::plugin-registered (third (first calls))))))
               (sb-bsd-sockets:socket-close socket)
               (delete-file path))))))))
+
+(test dra-drivers-register-through-the-kubelet-plugin-registry
+  (with-temporary-store (store directory)
+    (declare (ignorable store))
+    (let* ((calls nil)
+           (gr8s::*csi-kubelet-root*
+             (namestring (uiop:ensure-directory-pathname
+                          (merge-pathnames "kubelet/" (truename directory)))))
+           (gr8s::*csi-plugins* (make-hash-table :test #'equal))
+           (gr8s::*dra-plugins* (make-hash-table :test #'equal))
+           (gr8s::*csi-call*
+             (lambda (socket operation request)
+               (push (list operation socket request) calls)
+               (ecase operation
+                 (:get-info
+                  (make-instance 'gr8s.pluginregistration.v1::plugin-info
+                                 :type "DRAPlugin" :name "devices.example.com"
+                                 :endpoint "/run/dra.sock" :supported-versions '("v1")))
+                 (:notify
+                  (make-instance 'gr8s.pluginregistration.v1::registration-status-response))))))
+      (declare (special gr8s::*dra-plugins*))
+      (multiple-value-bind (path socket)
+          (make-registry-socket gr8s::*csi-kubelet-root* "devices.example.com-reg.sock")
+        (unwind-protect
+             (progn
+               (gr8s::scan-csi-plugin-registry)
+               (let ((plugin (gethash "devices.example.com" gr8s::*dra-plugins*)))
+                 (is-true plugin)
+                 (when plugin
+                   (is (equal "/run/dra.sock" (gr8s::dra-plugin-endpoint plugin)))))
+               (is (eq t (gr8s.pluginregistration.v1::plugin-registered
+                          (third (first calls)))))
+               (is (null (gr8s::csi-driver-registrations))))
+          (sb-bsd-sockets:socket-close socket)
+          (delete-file path))))))
+
+(test dra-prepares-allocated-claims-and-exposes-cdi-devices-to-the-container
+  (with-temporary-store (store directory)
+    (let* ((pod
+             (parse-pod
+              "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"consumer\",\"namespace\":\"default\",\"uid\":\"pod-uid\"},\"spec\":{\"nodeName\":\"worker-a\",\"resourceClaims\":[{\"name\":\"device\",\"resourceClaimName\":\"claim\"}],\"containers\":[{\"name\":\"app\",\"image\":\"busybox\",\"resources\":{\"claims\":[{\"name\":\"device\",\"request\":\"gpu\"}]}}]}}"))
+           (second-pod
+             (parse-pod
+              "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"consumer-two\",\"namespace\":\"default\",\"uid\":\"pod-uid-2\"},\"spec\":{\"nodeName\":\"worker-a\",\"resourceClaims\":[{\"name\":\"device\",\"resourceClaimName\":\"claim\"}],\"containers\":[{\"name\":\"app\",\"image\":\"busybox\",\"resources\":{\"claims\":[{\"name\":\"device\",\"request\":\"gpu\"}]}}]}}"))
+           (claim
+             (gr8s::core-object
+              "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
+              "metadata" (gr8s::core-object "name" "claim" "namespace" "default"
+                                               "uid" "claim-uid")
+              "spec" (gr8s::core-object "devices" (gr8s::core-object))))
+           (manager (gr8s::make-dra-manager store directory))
+           (calls nil)
+           (gr8s::*dra-plugins* (make-hash-table :test #'equal))
+           (gr8s::*dra-call*
+             (lambda (plugin operation request)
+               (push (list operation plugin request) calls)
+               (ecase operation
+                 (:prepare
+                  (let ((uid (gr8s.dra.v1::uid
+                              (first (gr8s.dra.v1::claims request)))))
+                    (make-instance
+                     'gr8s.dra.v1::node-prepare-resources-response
+                     :claims
+                     (list
+                      (cons uid
+                            (make-instance
+                             'gr8s.dra.v1::node-prepare-resource-response
+                             :devices
+                             (list (make-instance 'gr8s.dra.v1::device
+                                                  :request-names '("gpu")
+                                                  :pool-name "pool" :device-name "gpu-0"
+                                                  :cdi-device-ids '("vendor.example/gpu=0")))))))))
+                 (:unprepare
+                  (let ((uid (gr8s.dra.v1::uid
+                              (first (gr8s.dra.v1::claims request)))))
+                    (make-instance
+                     'gr8s.dra.v1::node-unprepare-resources-response
+                     :claims
+                     (list (cons uid
+                                 (make-instance
+                                  'gr8s.dra.v1::node-unprepare-resource-response))))))))))
+      (declare (special gr8s::*dra-plugins* gr8s::*dra-call*))
+      (gr8s::create-core-resource store "resourceclaims" claim "default")
+      (let ((gr8s::*typed-api-status-write* t))
+        (gr8s::update-core-resource
+         store "resourceclaims" "default" "claim"
+         (lambda (object)
+           (setf (gethash "status" object)
+                 (gr8s::core-object
+                  "allocation"
+                  (gr8s::core-object
+                   "devices"
+                   (gr8s::core-object
+                    "results"
+                    (vector (gr8s::core-object "request" "gpu"
+                                                "driver" "devices.example.com"
+                                                "pool" "pool" "device" "gpu-0"))))
+                  "reservedFor"
+                  (vector (gr8s::core-object "resource" "pods" "name" "consumer"
+                                              "uid" "pod-uid")
+                          (gr8s::core-object "resource" "pods" "name" "consumer-two"
+                                              "uid" "pod-uid-2"))))
+           object)))
+      (setf (gethash "devices.example.com" gr8s::*dra-plugins*)
+            (gr8s::make-dra-plugin :name "devices.example.com" :endpoint "/run/dra.sock"))
+      (gr8s::prepare-pod-dynamic-resources manager pod)
+      (gr8s::prepare-pod-dynamic-resources manager second-pod)
+      (is (equal '(:prepare) (reverse (mapcar #'first calls))))
+      (setf manager (gr8s::make-dra-manager store directory))
+      (let* ((request (third (first calls)))
+             (requested-claim (first (gr8s.dra.v1::claims request))))
+        (is (equal "default" (gr8s.dra.v1::namespace requested-claim)))
+        (is (equal "claim" (gr8s.dra.v1::name requested-claim)))
+        (is (equal (gethash "uid"
+                            (gethash "metadata"
+                                     (gr8s::get-core-resource store "resourceclaims"
+                                                              "default" "claim")))
+                   (gr8s.dra.v1::uid requested-claim))))
+      (let ((container (aref (gethash "containers" (gethash "spec" (pod-to-object pod))) 0)))
+        (is (equal '("vendor.example/gpu=0")
+                   (gr8s::container-dra-cdi-device-ids manager pod container)))
+        (gr8s::unprepare-pod-dynamic-resources manager pod)
+        (is (equal '(:prepare) (reverse (mapcar #'first calls))))
+        (is (equal '("vendor.example/gpu=0")
+                   (gr8s::container-dra-cdi-device-ids manager second-pod container)))
+        (gr8s::unprepare-pod-dynamic-resources manager second-pod)
+        (is (equal '(:prepare :unprepare) (reverse (mapcar #'first calls))))
+        (signals runtime-error
+          (gr8s::container-dra-cdi-device-ids manager pod container))))))
+
+(test dra-claims-are-projected-only-to-their-reserved-pod
+  (with-temporary-store (store directory)
+    (let* ((claim
+             (gr8s::create-core-resource
+              store "resourceclaims"
+              (gr8s::core-object
+               "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
+               "metadata" (gr8s::core-object "name" "claim" "namespace" "default")
+               "spec" (gr8s::core-object "devices" (gr8s::core-object)))
+              "default"))
+           (pod
+             (create-pod
+              store
+              (parse-pod
+               "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"consumer\",\"namespace\":\"default\"},\"spec\":{\"nodeName\":\"worker-a\",\"resourceClaims\":[{\"name\":\"device\",\"resourceClaimName\":\"claim\"}],\"containers\":[{\"name\":\"app\",\"image\":\"busybox\",\"resources\":{\"claims\":[{\"name\":\"device\",\"request\":\"gpu\"}]}}]}}")))
+           (agent-store (open-store (merge-pathnames "agent/" directory))))
+      (let ((gr8s::*typed-api-status-write* t))
+        (gr8s::update-core-resource
+         store "resourceclaims" "default" "claim"
+         (lambda (object)
+           (setf (gethash "status" object)
+                 (gr8s::core-object
+                  "allocation" (gr8s::core-object "devices" (gr8s::core-object "results" #()))
+                  "reservedFor"
+                  (vector (gr8s::core-object "resource" "pods" "name" (pod-name pod)
+                                              "uid" (pod-uid pod)))))
+           object)))
+      (let* ((assignment (gr8s::pod-assignment pod store))
+             (objects
+               (mapcar (lambda (bytes)
+                         (com.inuoe.jzon:parse
+                          (trivial-utf-8:utf-8-bytes-to-string bytes)))
+                       (slot-value assignment 'gr8s.node.v1::resource-objects-json))))
+        (is (= 1 (count "ResourceClaim" objects :test #'equal
+                        :key (lambda (object) (gethash "kind" object)))))
+        (gr8s::install-assigned-resource-objects agent-store (list assignment))
+        (is (equal (gethash "uid" (gethash "metadata" claim))
+                   (gethash "uid"
+                            (gethash "metadata"
+                                     (gr8s::get-core-resource agent-store "resourceclaims"
+                                                              "default" "claim")))))
+        (let ((projected (find "ResourceClaim" objects :test #'equal
+                               :key (lambda (object) (gethash "kind" object)))))
+          (setf (gethash "uid"
+                         (aref (gethash "reservedFor" (gethash "status" projected)) 0))
+                "another-pod")
+          (setf (slot-value assignment 'gr8s.node.v1::resource-objects-json)
+                (list (trivial-utf-8:string-to-utf-8-bytes
+                       (com.inuoe.jzon:stringify projected))))
+          (signals kubernetes-error
+            (gr8s::assignment-resource-objects assignment)))))))
+
+(test containerd-node-runtime-wires-the-dra-lifecycle
+  (with-temporary-store (unused directory)
+    (declare (ignore unused))
+    (let* ((backend (gr8s::make-containerd-runtime
+                     :socket-path (namestring (merge-pathnames "unused.sock" directory))
+                     :log-root (merge-pathnames "logs/" directory)))
+           (node (gr8s::make-node-runtime (merge-pathnames "agent/" directory) backend nil))
+           (pod (parse-pod
+                 "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"plain\",\"namespace\":\"default\",\"uid\":\"plain-uid\"},\"spec\":{\"containers\":[{\"name\":\"app\",\"image\":\"busybox\"}]}}"))
+           (container (aref (gethash "containers" (gethash "spec" (pod-to-object pod))) 0)))
+      (is (typep (gr8s::node-runtime-dynamic-resource-manager node)
+                 'gr8s::dra-manager))
+      (is-true (gr8s::runtime-prepare-pod-resources backend pod))
+      (is-false (gr8s::runtime-container-cdi-device-ids backend pod container))
+      (is-true (gr8s::runtime-unprepare-pod-resources backend pod)))))
 
 (defun csi-register-fake ()
   (bt:with-lock-held (gr8s::*csi-plugins-lock*)

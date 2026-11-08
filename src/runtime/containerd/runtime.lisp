@@ -40,6 +40,9 @@
   registry-host-config-directory
   image-mirror-port
   resource-store
+  dynamic-resource-prepare-function
+  dynamic-resource-cdi-device-function
+  dynamic-resource-unprepare-function
   probes
   (lifecycle-lock (bt:make-lock "native lifecycle checkpoint writes"))
   (hooks (make-container-hook-manager))
@@ -285,7 +288,25 @@ exiting mid-call still abandon it."
 (defmethod runtime-delete-pod ((runtime containerd-runtime) pod)
   "Poll the native Pod shutdown job without holding reconciliation until exit."
   (begin-terminating-container-probes runtime (pod-uid pod))
-  (poll-runtime-pod-deletion (containerd-runtime-deletions runtime) runtime pod))
+  (let ((deleted (poll-runtime-pod-deletion
+                  (containerd-runtime-deletions runtime) runtime pod)))
+    (when deleted (runtime-unprepare-pod-resources runtime pod))
+    deleted))
+
+(defmethod runtime-prepare-pod-resources ((runtime containerd-runtime) pod)
+  "Prepare DRA claims through the node callback before creating a sandbox."
+  (let ((prepare (containerd-runtime-dynamic-resource-prepare-function runtime)))
+    (if prepare (funcall prepare pod) t)))
+
+(defmethod runtime-container-cdi-device-ids ((runtime containerd-runtime) pod container)
+  "Return DRA CDI names through the node callback for one container."
+  (let ((devices (containerd-runtime-dynamic-resource-cdi-device-function runtime)))
+    (and devices (funcall devices pod container))))
+
+(defmethod runtime-unprepare-pod-resources ((runtime containerd-runtime) pod)
+  "Unprepare DRA claims through the node callback after the sandbox is gone."
+  (let ((unprepare (containerd-runtime-dynamic-resource-unprepare-function runtime)))
+    (if unprepare (funcall unprepare pod) t)))
 
 (defmethod stop-runtime-deletions ((runtime containerd-runtime))
   "Join native deletion jobs before the containerd service exits."
@@ -400,6 +421,9 @@ A container running as any user can write here, and a user mount at the path tak
              :stdin-once (gethash "stdinOnce" (pod-runtime-container-object pod spec))
              :tty (gethash "tty" (pod-runtime-container-object pod spec))
              :uid (pod-uid pod)
+             :cdi-device-ids
+             (runtime-container-cdi-device-ids
+              runtime pod (pod-runtime-container-object pod spec))
              :attempt attempt
              :labels termination-labels
              :log-path (container-attempt-log-path (container-spec-name spec) attempt))))
@@ -415,6 +439,7 @@ A container running as any user can write here, and a user mount at the path tak
   "Converge native containers without destroying an unchanged sandbox or healthy siblings."
   (call-containerd-runtime
    (lambda ()
+     (runtime-prepare-pod-resources runtime pod)
      (reconcile-container-probes runtime pod (counting-user-namespaced-pod-starts runtime pod #'converge-containerd-containers)))))
 
 (defmethod runtime-reconcile-containers ((runtime containerd-runtime) pod observed)

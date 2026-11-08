@@ -50,6 +50,7 @@
                               :components ((:file "cri-v1-generated")
                                            (:file "csi-v1-generated")
                                            (:file "pluginregistration-v1-generated")
+                                           (:file "dra-v1-generated")
                                            (:file "containerd-tasks-v1-generated")
                                            (:file "containerd-transfer-v1-generated")
                                            (:file "cri-wire-compat")
@@ -267,6 +268,7 @@
                              (:file "kubelet/storage-volumes")
                              (:file "kubelet/nfs-volumes")
                              (:file "kubelet/csi-node")
+                             (:file "kubelet/dra-node")
                              (:file "agent/pod-pool")
                              (:file "kubelet/compat")
                              (:module "apiserver"

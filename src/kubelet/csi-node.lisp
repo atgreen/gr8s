@@ -20,6 +20,16 @@
   "Registered drivers on this agent, by name.")
 (defvar *csi-plugins-lock* (bt:make-lock "gr8s CSI plugins"))
 
+(defstruct kubelet-plugin-handler register prune known-p)
+
+(defvar *kubelet-plugin-handlers* (make-hash-table :test #'equal)
+  "Node plugin registration handlers indexed by kubelet plugin type.")
+
+(defun register-kubelet-plugin-handler (type register prune known-p)
+  "Register TYPE's node-plugin callbacks for discovery, pruning and deduplication."
+  (setf (gethash type *kubelet-plugin-handlers*)
+        (make-kubelet-plugin-handler :register register :prune prune :known-p known-p)))
+
 (defun %call-csi-endpoint (socket operation request)
   "Make one CSI or registration RPC on the Unix SOCKET, returning its response."
   (let ((channel (make-unix-grpc-channel socket :timeout *csi-rpc-timeout-seconds*)))
@@ -76,9 +86,10 @@ point: drivers mount these paths by the kubelet's own name, so they must match i
 this node speaks. A plugin offering none is refused at registration."
   (some (lambda (version) (uiop:string-prefix-p "1." version)) versions))
 
-(defun register-csi-plugin (socket inode)
+(defun register-csi-plugin (socket inode &optional info)
   "Register the driver behind one registry SOCKET, telling it whether that worked."
-  (let ((info (funcall *csi-call* socket :get-info (make-instance 'gr8s.pluginregistration.v1::info-request))))
+  (let ((info (or info (funcall *csi-call* socket :get-info
+                                (make-instance 'gr8s.pluginregistration.v1::info-request)))))
     (flet ((notify (registered &optional (message ""))
              (funcall *csi-call* socket :notify
                       (make-instance 'gr8s.pluginregistration.v1::registration-status
@@ -117,6 +128,24 @@ this node speaks. A plugin offering none is refused at registration."
           (notify nil (princ-to-string condition))
           (error condition))))))
 
+(defun prune-csi-plugins (sockets)
+  "Forget CSI registrations whose registrar socket is absent from SOCKETS."
+  (bt:with-lock-held (*csi-plugins-lock*)
+    (loop for plugin being the hash-values of *csi-plugins* using (hash-key name)
+          unless (assoc (csi-plugin-socket plugin) sockets :test #'equal)
+            collect name into gone
+          finally (dolist (entry gone) (remhash entry *csi-plugins*)))))
+
+(defun csi-plugin-socket-known-p (socket inode)
+  "Return whether SOCKET and INODE identify an unchanged CSI registration."
+  (bt:with-lock-held (*csi-plugins-lock*)
+    (loop for plugin being the hash-values of *csi-plugins*
+          thereis (and (equal socket (csi-plugin-socket plugin))
+                       (eql inode (csi-plugin-socket-inode plugin))))))
+
+(register-kubelet-plugin-handler "CSIPlugin" #'register-csi-plugin
+                                 #'prune-csi-plugins #'csi-plugin-socket-known-p)
+
 (defun ensure-csi-kubelet-directories ()
   "Create the kubelet directories CSI driver manifests mount as hostPath type Directory:
 a kubelet makes them at startup, mode 0750, so they must exist before a driver arrives."
@@ -130,19 +159,26 @@ a kubelet makes them at startup, mode 0750, so they must exist before a driver a
   "Register new or restarted drivers and forget those whose registry socket has gone."
   (ensure-csi-kubelet-directories)
   (let ((sockets (csi-registry-sockets)))
-    (bt:with-lock-held (*csi-plugins-lock*)
-      (loop for plugin being the hash-values of *csi-plugins* using (hash-key name)
-            unless (assoc (csi-plugin-socket plugin) sockets :test #'equal)
-              collect name into gone
-            finally (dolist (entry gone) (remhash entry *csi-plugins*))))
+    (loop for handler being the hash-values of *kubelet-plugin-handlers*
+          do (funcall (kubelet-plugin-handler-prune handler) sockets))
     (loop for (socket . inode) in sockets
-          unless (bt:with-lock-held (*csi-plugins-lock*)
-                   (loop for plugin being the hash-values of *csi-plugins*
-                         thereis (and (equal socket (csi-plugin-socket plugin))
-                                      (eql inode (csi-plugin-socket-inode plugin)))))
-            do (handler-case (register-csi-plugin socket inode)
+          unless (loop for handler being the hash-values of *kubelet-plugin-handlers*
+                       thereis (funcall (kubelet-plugin-handler-known-p handler) socket inode))
+            do (handler-case
+                   (let* ((info (funcall *csi-call* socket :get-info
+                                         (make-instance 'gr8s.pluginregistration.v1::info-request)))
+                          (type (gr8s.pluginregistration.v1::proto-plugin-info-type info))
+                          (handler (gethash type *kubelet-plugin-handlers*)))
+                     (unless handler
+                       (funcall *csi-call* socket :notify
+                                (make-instance 'gr8s.pluginregistration.v1::registration-status
+                                               :plugin-registered nil
+                                               :error (format nil "Plugin type ~A is not supported" type)))
+                       (error 'runtime-error :message (format nil "Plugin type ~A is not supported" type)))
+                     (funcall (kubelet-plugin-handler-register handler) socket inode info))
                  (error (condition)
-                   (format *error-output* "gr8s CSI plugin at ~A did not register: ~A~%" socket condition))))))
+                   (format *error-output* "gr8s node plugin at ~A did not register: ~A~%"
+                           socket condition))))))
 
 (defun csi-driver-registrations ()
   "Describe registered drivers for the agent's report to the control plane."
