@@ -187,10 +187,31 @@ creates only the owned `169.254.1.1/32` node-local
 gateway while the embedded DNS listener is running, so the Pod resolver address
 remains reachable without claiming the external plugin's dataplane.
 
-External mode currently configures containerd's single default CNI network.
-Kubernetes NetworkAttachmentDefinition/Multus secondary-interface orchestration
-is tracked separately; selecting Multus as the default plugin does not by itself
-make gr8s reconcile secondary attachments.
+External mode also supports multiple Pod interfaces through a CNI meta-plugin
+such as Multus. Configure Multus as the alphabetically first/default network,
+put its binary in an operator-owned directory supplied with `--cni-bin-dir`, and
+install its `NetworkAttachmentDefinition` CRD. gr8s forwards the complete Pod
+annotation string map through CRI, including
+`k8s.v1.cni.cncf.io/networks`; Multus therefore performs secondary ADD/CHECK/DEL
+and publishes `k8s.v1.cni.cncf.io/network-status` back onto the durable Pod.
+Those annotations survive agent restart without recreating an unchanged
+sandbox.
+
+The primary delegate remains responsible for the Pod IP, default route and DNS
+reachability. Secondary definitions should omit a default route unless the Pod's
+JSON network-selection annotation explicitly chooses one. This keeps route
+selection unambiguous while `/etc/resolv.conf` continues to use gr8s's
+node-local DNS address. For example, a Pod may request a named secondary link
+with:
+
+```yaml
+metadata:
+  annotations:
+    k8s.v1.cni.cncf.io/networks: secondary-net@net1
+```
+
+The resulting `network-status` identifies the primary interface with
+`"default": true` and records each secondary interface, address and MAC.
 
 Each node owns `169.254.1.1/32` on the `gr8s-gateway` dummy interface. Pod veths
 have individual `/32` routes without duplicating that gateway address. Each Pod
