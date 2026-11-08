@@ -98,6 +98,11 @@ class Cluster:
     def stop(self):
         """Stop gr8s, detach owned mounts, and remove disposable state."""
         if self.process and self.process.poll() is None:
+            # Let the kubelet/containerd path issue CNI DEL while the API and
+            # agent are still alive. Otherwise deleting the temporary state
+            # directory can strand the Pods' veth routes in this reusable VM.
+            self.kubectl("delete", "pod", "--all", "--grace-period=0", "--wait=true",
+                         check=False)
             self.process.send_signal(signal.SIGTERM)
             try:
                 self.process.wait(timeout=180)
