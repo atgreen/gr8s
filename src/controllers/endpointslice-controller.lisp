@@ -230,7 +230,7 @@ terminating, as upstream's proxy reads them."
   (let* ((metadata (gethash "metadata" service)) (name (gethash "name" metadata))
          (port-name (gethash "name" port "")) (result nil) (found nil))
     (dolist (slice (list-core-resources store "endpointslices" (gethash "namespace" metadata)))
-      (when (and (equal "IPv4" (gethash "addressType" slice))
+      (when (and (member (gethash "addressType" slice) '("IPv4" "IPv6") :test #'equal)
                  (equal name (gethash "kubernetes.io/service-name" (gethash "labels" (gethash "metadata" slice) (core-object)))))
         (setf found t)
         (let ((target (find-if (lambda (candidate)

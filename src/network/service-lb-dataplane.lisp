@@ -30,11 +30,17 @@
 (defparameter +bpf-cgroup-udp4-recvmsg+ 19
   "BPF_CGROUP_UDP4_RECVMSG, which Whistler's loader does not name.")
 
+(defparameter +bpf-cgroup-udp6-recvmsg+ 20
+  "BPF_CGROUP_UDP6_RECVMSG, which Whistler's loader does not name.")
+
 (defun service-lb-attach-type (section)
   "The cgroup attach type of the socket address hook at SECTION."
   (cond ((equal section "cgroup/connect4") whistler/loader:+bpf-cgroup-inet4-connect+)
         ((equal section "cgroup/sendmsg4") whistler/loader:+bpf-cgroup-udp4-sendmsg+)
         ((equal section "cgroup/recvmsg4") +bpf-cgroup-udp4-recvmsg+)
+        ((equal section "cgroup/connect6") whistler/loader:+bpf-cgroup-inet6-connect+)
+        ((equal section "cgroup/sendmsg6") whistler/loader:+bpf-cgroup-udp6-sendmsg+)
+        ((equal section "cgroup/recvmsg6") +bpf-cgroup-udp6-recvmsg+)
         (t (error "No socket address hook for section ~S" section))))
 
 (defun load-service-lb-programs (specs maps)
@@ -69,13 +75,17 @@ Returns an alist of (name . prog-info)."
   "Return the map-info named NAME (an underscored map name) in DATAPLANE, or NIL."
   (cdr (assoc name (service-lb-dataplane-maps dataplane) :test #'string=)))
 
-(defun service-lb-service-table (dataplane)
-  "The gr8s_service_v4 map-info: VIP:port -> (backend count, base slot)."
-  (service-lb-map dataplane "gr8s_service_v4"))
+(defun service-lb-service-table (dataplane &optional (family :ipv4))
+  "The family-specific Service map: VIP:port -> (backend count, base slot)."
+  (service-lb-map dataplane (ecase family
+                              (:ipv4 "gr8s_service_v4")
+                              (:ipv6 "gr8s_service_v6"))))
 
-(defun service-lb-backend-table (dataplane)
-  "The gr8s_backend_v4 map-info: slot -> (backend addr, port)."
-  (service-lb-map dataplane "gr8s_backend_v4"))
+(defun service-lb-backend-table (dataplane &optional (family :ipv4))
+  "The family-specific backend map: slot -> (backend address, port)."
+  (service-lb-map dataplane (ecase family
+                              (:ipv4 "gr8s_backend_v4")
+                              (:ipv6 "gr8s_backend_v6"))))
 
 (defun service-lb-pin-map (map-info path &key (pin #'whistler/loader:pin-bpf-object))
   "Pin MAP-INFO's fd at PATH on bpffs."
@@ -198,9 +208,10 @@ BASE-SLOT.  The service entry is written last so the program never reads a VIP
 whose backend slots are not yet present."
   (multiple-value-bind (vip-key service-value backend-entries)
       (service-lb-entries address port base-slot backends)
-    (dolist (entry backend-entries)
-      (funcall update (service-lb-backend-table dataplane) (car entry) (cdr entry)))
-    (funcall update (service-lb-service-table dataplane) vip-key service-value)))
+    (let ((family (if (find #\: address) :ipv6 :ipv4)))
+      (dolist (entry backend-entries)
+        (funcall update (service-lb-backend-table dataplane family) (car entry) (cdr entry)))
+      (funcall update (service-lb-service-table dataplane family) vip-key service-value))))
 
 (defun stop-service-lb-dataplane
     (dataplane &key (remove-pins t)

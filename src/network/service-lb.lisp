@@ -57,10 +57,10 @@ loader's map-creation and program-loading steps.  No ELF is produced."
 ;;; Control-plane map byte encoding (byte-order contract in the file header).
 
 (defun service-lb-octets (address)
-  "Return ADDRESS as a list of its four octets (most significant first)."
-  (let ((host (parse-ipv4-integer address)))
-    (list (ldb (byte 8 24) host) (ldb (byte 8 16) host)
-          (ldb (byte 8 8) host) (ldb (byte 8 0) host))))
+  "Return ADDRESS's four or sixteen network-order octets as a list."
+  (multiple-value-bind (family octets) (network-address-wire-values address)
+    (declare (ignore family))
+    (coerce octets 'list)))
 
 (defun service-lb-bytes (value width)
   "Serialize unsigned VALUE little-endian into WIDTH octets."
@@ -74,16 +74,25 @@ loader's map-creation and program-loading steps.  No ELF is produced."
         (t (error "Service protocol ~S is not supported" protocol))))
 
 (defun service-lb-vip-key (address port &optional (protocol "TCP"))
-  "Return the 8-octet gr8s_service_v4 key for ADDRESS:PORT/PROTOCOL.
+  "Return the family-specific Service map key for ADDRESS:PORT/PROTOCOL.
 The program composes (protocol << 48) | (vip << 16) | htons(port) where vip is the
-address octets read little-endian, then serializes that scalar; this reproduces its bytes."
+IPv4 address octets read little-endian. IPv6 keys store the sixteen address octets,
+network-order port, protocol byte, and one zero pad byte."
   (unless (typep port '(integer 1 65535))
     (error "Service port ~S is out of range" port))
-  (destructuring-bind (o0 o1 o2 o3) (service-lb-octets address)
-    (let* ((vip (logior o0 (ash o1 8) (ash o2 16) (ash o3 24)))
-           (vport (logior (ash (ldb (byte 8 0) port) 8) (ldb (byte 8 8) port)))
-           (key (logior (ash (service-lb-protocol-number protocol) 48) (ash vip 16) vport)))
-      (service-lb-bytes key 8))))
+  (let ((octets (service-lb-octets address)))
+    (if (= 4 (length octets))
+        (destructuring-bind (o0 o1 o2 o3) octets
+          (let* ((vip (logior o0 (ash o1 8) (ash o2 16) (ash o3 24)))
+                 (vport (logior (ash (ldb (byte 8 0) port) 8)
+                                (ldb (byte 8 8) port)))
+                 (key (logior (ash (service-lb-protocol-number protocol) 48)
+                              (ash vip 16) vport)))
+            (service-lb-bytes key 8)))
+        (concatenate '(vector (unsigned-byte 8))
+                     (coerce octets '(vector (unsigned-byte 8)))
+                     (vector (ldb (byte 8 8) port) (ldb (byte 8 0) port)
+                             (service-lb-protocol-number protocol) 0)))))
 
 (defun service-lb-service-value (backend-count base-slot &key affinity-timeout refuse)
   "Return the 16-octet gr8s_service_v4 value: count u16 @0, affinity flag u16 @2, base
@@ -104,14 +113,16 @@ program to refuse connections, for a Service with no endpoints at all."
   (service-lb-bytes slot 4))
 
 (defun service-lb-backend-value (address port)
-  "Return the 8-octet gr8s_backend_v4 value: addr u32 @0 and port u16 @4, both in
-network byte order so the program copies them verbatim into the socket address."
+  "Return a family-specific backend value: raw address, network-order port and padding."
   (unless (typep port '(integer 1 65535))
     (error "Backend port ~S is out of range" port))
-  (let ((buffer (make-array 8 :element-type '(unsigned-byte 8) :initial-element 0)))
-    (replace buffer (coerce (service-lb-octets address) '(vector (unsigned-byte 8))) :start1 0)
-    (setf (aref buffer 4) (ldb (byte 8 8) port)
-          (aref buffer 5) (ldb (byte 8 0) port))
+  (let* ((octets (service-lb-octets address))
+         (address-size (length octets))
+         (buffer (make-array (+ address-size 4)
+                             :element-type '(unsigned-byte 8) :initial-element 0)))
+    (replace buffer (coerce octets '(vector (unsigned-byte 8))) :start1 0)
+    (setf (aref buffer address-size) (ldb (byte 8 8) port)
+          (aref buffer (1+ address-size)) (ldb (byte 8 0) port))
     buffer))
 
 (defun service-lb-index-key (vip-key backend-value)

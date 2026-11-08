@@ -59,7 +59,17 @@
     (defmap gr8s-affinity-v4 :type :lru-hash
       :key-size 16 :value-size 16 :max-entries 65536)
     (defmap gr8s-reverse-v4 :type :lru-hash
-      :key-size 16 :value-size 8 :max-entries 65536)))
+      :key-size 16 :value-size 8 :max-entries 65536)
+    (defmap gr8s-service-v6 :type :hash
+      :key-size 20 :value-size 16 :max-entries 4096 :map-flags 1)
+    (defmap gr8s-backend-v6 :type :hash
+      :key-size 4 :value-size 20 :max-entries 65536 :map-flags 1)
+    (defmap gr8s-backend-index-v6 :type :hash
+      :key-size 40 :value-size 4 :max-entries 65536 :map-flags 1)
+    (defmap gr8s-affinity-v6 :type :lru-hash
+      :key-size 32 :value-size 32 :max-entries 65536)
+    (defmap gr8s-reverse-v6 :type :lru-hash
+      :key-size 32 :value-size 20 :max-entries 65536)))
 
 (defun gr8s.network::service-lb-steer-program (name section)
   "Return the (defprog NAME ...) form steering a socket address hook at SECTION.
@@ -119,11 +129,104 @@ replies as coming from the address the client sent to."
                      (setf (ctx user-port) (cast u32 (load u16 backend 4)))))))))))
      1))
 
+(defun gr8s.network::service-lb-v6-steer-program (name section)
+  "Return an IPv6 socket-address hook equivalent to SERVICE-LB-STEER-PROGRAM."
+  `(defprog ,name (:type :cgroup-sock-addr :section ,section :license "GPL")
+     (let ((key (make-gr8s-lb-v6-service-key)))
+       (setf (gr8s-lb-v6-service-key-address key 0) (ctx user-ip6 0)
+             (gr8s-lb-v6-service-key-address key 1) (ctx user-ip6 1)
+             (gr8s-lb-v6-service-key-address key 2) (ctx user-ip6 2)
+             (gr8s-lb-v6-service-key-address key 3) (ctx user-ip6 3)
+             (gr8s-lb-v6-service-key-port key) (cast u16 (ctx user-port))
+             (gr8s-lb-v6-service-key-protocol key) (cast u8 (ctx protocol)))
+       (when-let ((service (map-lookup-ptr gr8s-service-v6 key)))
+         (let ((count u32 (cast u32 (load u16 service 0))))
+           (when (and (= count 0) (> (logand (load u32 service 12) 1) 0))
+             (set-retval #xffffff91)
+             (return 0))
+           (when (> count 0)
+             (let* ((offset u32 (mod (get-prandom-u32) count))
+                    (sticky u64 (load u16 service 2))
+                    (timeout u64 (load u32 service 8))
+                    (now u64 (/ (ktime-get-ns) 1000000000))
+                    (client (make-gr8s-lb-v6-affinity-key)))
+               (when (> sticky 0)
+                 (setf (gr8s-lb-v6-affinity-key-address client 0) (ctx user-ip6 0)
+                       (gr8s-lb-v6-affinity-key-address client 1) (ctx user-ip6 1)
+                       (gr8s-lb-v6-affinity-key-address client 2) (ctx user-ip6 2)
+                       (gr8s-lb-v6-affinity-key-address client 3) (ctx user-ip6 3)
+                       (gr8s-lb-v6-affinity-key-port client) (cast u16 (ctx user-port))
+                       (gr8s-lb-v6-affinity-key-protocol client) (cast u8 (ctx protocol))
+                       (gr8s-lb-v6-affinity-key-cookie client) (get-netns-cookie (ctx-ptr)))
+                 (when-let ((held (map-lookup-ptr gr8s-affinity-v6 client)))
+                   (when (<= (- now (load u64 held 24)) timeout)
+                     (let ((probe (make-gr8s-lb-v6-index-key)))
+                       (setf (gr8s-lb-v6-index-key-vip-address probe 0) (ctx user-ip6 0)
+                             (gr8s-lb-v6-index-key-vip-address probe 1) (ctx user-ip6 1)
+                             (gr8s-lb-v6-index-key-vip-address probe 2) (ctx user-ip6 2)
+                             (gr8s-lb-v6-index-key-vip-address probe 3) (ctx user-ip6 3)
+                             (gr8s-lb-v6-index-key-vip-port probe) (cast u16 (ctx user-port))
+                             (gr8s-lb-v6-index-key-protocol probe) (cast u8 (ctx protocol))
+                             (gr8s-lb-v6-index-key-backend-address probe 0) (load u32 held 0)
+                             (gr8s-lb-v6-index-key-backend-address probe 1) (load u32 held 4)
+                             (gr8s-lb-v6-index-key-backend-address probe 2) (load u32 held 8)
+                             (gr8s-lb-v6-index-key-backend-address probe 3) (load u32 held 12)
+                             (gr8s-lb-v6-index-key-backend-port probe) (load u16 held 16))
+                       (when-let ((index (map-lookup-ptr gr8s-backend-index-v6 probe)))
+                         (let ((found u32 (load u32 index 0)))
+                           (when (< found count) (setf offset found))))))))
+               (let ((slot u32 (+ (load u32 service 4) offset)))
+                 (when-let ((backend u64 (map-lookup gr8s-backend-v6 slot)))
+                   (when (> sticky 0)
+                     (let ((entry (make-gr8s-lb-v6-affinity-value)))
+                       (setf (gr8s-lb-v6-affinity-value-address entry 0) (load u32 backend 0)
+                             (gr8s-lb-v6-affinity-value-address entry 1) (load u32 backend 4)
+                             (gr8s-lb-v6-affinity-value-address entry 2) (load u32 backend 8)
+                             (gr8s-lb-v6-affinity-value-address entry 3) (load u32 backend 12)
+                             (gr8s-lb-v6-affinity-value-port entry) (load u16 backend 16)
+                             (gr8s-lb-v6-affinity-value-seen entry) now)
+                       (map-update-ptr gr8s-affinity-v6 client entry 0)))
+                   (when (= (ctx protocol) 17)
+                     (let ((socket (make-gr8s-lb-v6-reverse-key))
+                           (original (make-gr8s-lb-v6-address)))
+                       (setf (gr8s-lb-v6-reverse-key-cookie socket) (get-socket-cookie (ctx-ptr))
+                             (gr8s-lb-v6-reverse-key-address socket 0) (load u32 backend 0)
+                             (gr8s-lb-v6-reverse-key-address socket 1) (load u32 backend 4)
+                             (gr8s-lb-v6-reverse-key-address socket 2) (load u32 backend 8)
+                             (gr8s-lb-v6-reverse-key-address socket 3) (load u32 backend 12)
+                             (gr8s-lb-v6-reverse-key-port socket) (load u16 backend 16)
+                             (gr8s-lb-v6-address-address original 0) (ctx user-ip6 0)
+                             (gr8s-lb-v6-address-address original 1) (ctx user-ip6 1)
+                             (gr8s-lb-v6-address-address original 2) (ctx user-ip6 2)
+                             (gr8s-lb-v6-address-address original 3) (ctx user-ip6 3)
+                             (gr8s-lb-v6-address-port original) (cast u16 (ctx user-port)))
+                       (map-update-ptr gr8s-reverse-v6 socket original 0)))
+                   (setf (ctx user-ip6 0) (load u32 backend 0)
+                         (ctx user-ip6 1) (load u32 backend 4)
+                         (ctx user-ip6 2) (load u32 backend 8)
+                         (ctx user-ip6 3) (load u32 backend 12)
+                         (ctx user-port) (cast u32 (load u16 backend 16))))))))))
+     1))
+
 ;; The program forms: one 16-octet pair type the maps' keys and values share, the
 ;; connect4 and sendmsg4 steering programs, and the recvmsg4 program that shows a
 ;; UDP reply from a backend as coming from the Service address the client used.
 (defparameter gr8s.network::*service-lb-program-forms*
   (list '(defstruct gr8s-lb-pair (first u64) (second u64))
+        '(defstruct gr8s-lb-v6-service-key
+           (address (array u32 4)) (port u16) (protocol u8) (pad u8))
+        '(defstruct gr8s-lb-v6-address
+           (address (array u32 4)) (port u16) (pad u16))
+        '(defstruct gr8s-lb-v6-affinity-key
+           (address (array u32 4)) (port u16) (protocol u8) (pad0 u8)
+           (pad1 u32) (cookie u64))
+        '(defstruct gr8s-lb-v6-affinity-value
+           (address (array u32 4)) (port u16) (pad0 u16) (pad1 u32) (seen u64))
+        '(defstruct gr8s-lb-v6-index-key
+           (vip-address (array u32 4)) (vip-port u16) (protocol u8) (pad0 u8)
+           (backend-address (array u32 4)) (backend-port u16) (pad1 u16))
+        '(defstruct gr8s-lb-v6-reverse-key
+           (cookie u64) (address (array u32 4)) (port u16) (pad0 u16) (pad1 u32))
         (gr8s.network::service-lb-steer-program 'gr8s-service-lb "cgroup/connect4")
         (gr8s.network::service-lb-steer-program 'gr8s-service-lb-sendmsg "cgroup/sendmsg4")
         '(defprog gr8s-service-lb-recvmsg (:type :cgroup-sock-addr
@@ -138,4 +241,24 @@ replies as coming from the address the client sent to."
               (let ((address u64 (load u64 original 0)))
                 (setf (ctx user-ip4) (cast u32 (logand address #xffffffff)))
                 (setf (ctx user-port) (cast u32 (>> address 32))))))
+          1)
+        (gr8s.network::service-lb-v6-steer-program
+         'gr8s-service-lb-v6 "cgroup/connect6")
+        (gr8s.network::service-lb-v6-steer-program
+         'gr8s-service-lb-sendmsg-v6 "cgroup/sendmsg6")
+        '(defprog gr8s-service-lb-recvmsg-v6
+             (:type :cgroup-sock-addr :section "cgroup/recvmsg6" :license "GPL")
+          (let ((socket (make-gr8s-lb-v6-reverse-key)))
+            (setf (gr8s-lb-v6-reverse-key-cookie socket) (get-socket-cookie (ctx-ptr))
+                  (gr8s-lb-v6-reverse-key-address socket 0) (ctx user-ip6 0)
+                  (gr8s-lb-v6-reverse-key-address socket 1) (ctx user-ip6 1)
+                  (gr8s-lb-v6-reverse-key-address socket 2) (ctx user-ip6 2)
+                  (gr8s-lb-v6-reverse-key-address socket 3) (ctx user-ip6 3)
+                  (gr8s-lb-v6-reverse-key-port socket) (cast u16 (ctx user-port)))
+            (when-let ((original (map-lookup-ptr gr8s-reverse-v6 socket)))
+              (setf (ctx user-ip6 0) (load u32 original 0)
+                    (ctx user-ip6 1) (load u32 original 4)
+                    (ctx user-ip6 2) (load u32 original 8)
+                    (ctx user-ip6 3) (load u32 original 12)
+                    (ctx user-port) (cast u32 (load u16 original 16)))))
           1)))

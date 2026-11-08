@@ -27,6 +27,16 @@
   (is (not (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80)
                    (gr8s::service-lb-vip-key "10.96.0.11" 80)))))
 
+(test service-lb-ipv6-key-and-backend-byte-layout
+  (is (equalp #(#xfd #x00 #x00 #x00 #x00 #x00 #x00 #x00
+                #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x0a
+                #x00 #x50 #x06 #x00)
+              (gr8s::service-lb-vip-key "fd00::a" 80)))
+  (is (equalp #(#xfd #x88 #x00 #x00 #x00 #x00 #x00 #x00
+                #x00 #x00 #x00 #x00 #x00 #x00 #x00 #x05
+                #x1f #x90 #x00 #x00)
+              (gr8s::service-lb-backend-value "fd88::5" 8080))))
+
 (test service-lb-service-value-byte-layout
   ;; count u16 @0, affinity u16 @2, base slot u32 @4, timeout u32 @8, reserved u32 @12,
   ;; all little-endian (logical integers).
@@ -84,28 +94,88 @@
 
 (test service-lb-program-compiles-in-process
   (multiple-value-bind (map-specs prog-specs) (gr8s::compile-service-lb)
-    ;; Exactly the five maps, with the key/value sizes the encoders target.
-    (is (= 5 (length map-specs)))
+    ;; Five maps per family, with the key/value sizes the encoders target.
+    (is (= 10 (length map-specs)))
     (let ((service (find "gr8s_service_v4" map-specs
                          :key (lambda (s) (getf s :name)) :test #'string=))
           (backend (find "gr8s_backend_v4" map-specs
-                         :key (lambda (s) (getf s :name)) :test #'string=)))
+                         :key (lambda (s) (getf s :name)) :test #'string=))
+          (service-v6 (find "gr8s_service_v6" map-specs
+                            :key (lambda (s) (getf s :name)) :test #'string=))
+          (backend-v6 (find "gr8s_backend_v6" map-specs
+                            :key (lambda (s) (getf s :name)) :test #'string=)))
       (is (not (null service)))
       (is (not (null backend)))
       (is (= 8 (getf service :key-size)))
       (is (= 16 (getf service :value-size)))
       (is (= 4 (getf backend :key-size)))
-      (is (= 8 (getf backend :value-size))))
-    ;; A connect4 program first, then sendmsg4 and recvmsg4, with real, 8-byte-aligned
+      (is (= 8 (getf backend :value-size)))
+      (is (= 20 (getf service-v6 :key-size)))
+      (is (= 16 (getf service-v6 :value-size)))
+      (is (= 4 (getf backend-v6 :key-size)))
+      (is (= 20 (getf backend-v6 :value-size))))
+    ;; Three hooks per family, with real, 8-byte-aligned
     ;; instruction bytes and the map-fd relocations the loader patches in (one per map
     ;; lookup, at least).
-    (is (= 3 (length prog-specs)))
+    (is (= 6 (length prog-specs)))
     (let* ((prog (first prog-specs))
            (insns (getf prog :insns)))
       (is (string= "cgroup/connect4" (getf prog :section)))
       (is (plusp (length insns)))
       (is (zerop (mod (length insns) 8)))
       (is (>= (length (getf prog :relocs)) 2)))))
+
+(test service-lb-program-compiles-every-ipv4-and-ipv6-socket-hook
+  (multiple-value-bind (maps programs) (gr8s::compile-service-lb)
+    (is (= 10 (length maps)))
+    (dolist (name '("gr8s_service_v6" "gr8s_backend_v6"
+                    "gr8s_backend_index_v6" "gr8s_affinity_v6"
+                    "gr8s_reverse_v6"))
+      (is (find name maps :key (lambda (spec) (getf spec :name)) :test #'string=)))
+    (is (equal '("cgroup/connect4" "cgroup/sendmsg4" "cgroup/recvmsg4"
+                 "cgroup/connect6" "cgroup/sendmsg6" "cgroup/recvmsg6")
+               (mapcar (lambda (spec) (getf spec :section)) programs)))))
+
+(test service-lb-plan-publishes-each-cluster-ip-to-same-family-backends
+  (let* ((service (fake-lb-service "10.96.0.10"))
+         (spec (gethash "spec" service)))
+    (setf (gethash "clusterIPs" spec) #("10.96.0.10" "fd96::a")
+          (gethash "ipFamilies" spec) #("IPv4" "IPv6"))
+    (multiple-value-bind (services backends)
+        (gr8s::service-lb-plan
+         (list service)
+         (lambda (ignored-service ignored-port)
+           (declare (ignore ignored-service ignored-port))
+           '(("10.88.1.5" 8080) ("fd88::5" 8080))))
+      (is (= 2 (length services)))
+      (is (= 2 (length backends)))
+      (is (find (gr8s::service-lb-vip-key "10.96.0.10" 80)
+                services :key #'car :test #'equalp))
+      (is (find (gr8s::service-lb-vip-key "fd96::a" 80)
+                services :key #'car :test #'equalp))
+      (is (find (gr8s::service-lb-backend-value "10.88.1.5" 8080)
+                backends :key #'cdr :test #'equalp))
+      (is (find (gr8s::service-lb-backend-value "fd88::5" 8080)
+                backends :key #'cdr :test #'equalp)))))
+
+(test service-lb-consumes-ipv4-and-ipv6-endpoint-slices
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let* ((service (fake-lb-service "10.96.0.10"))
+           (port (aref (gethash "ports" (gethash "spec" service)) 0))
+           (v4 (endpointslice-test-object "v4" "10.88.1.5" 8080))
+           (v6 (endpointslice-test-object "v6" "fd88::5" 8080)))
+      (dolist (slice (list v4 v6))
+        (setf (gethash "kubernetes.io/service-name"
+                       (gethash "labels" (gethash "metadata" slice)))
+              "svc"))
+      (setf (gethash "addressType" v6) "IPv6")
+      (gr8s::create-core-resource store "endpointslices" v4 "default")
+      (gr8s::create-core-resource store "endpointslices" v6 "default")
+      (multiple-value-bind (endpoints found)
+          (gr8s::service-slice-endpoints store service port)
+        (is-true found)
+        (is (equal '(("10.88.1.5" 8080) ("fd88::5" 8080)) endpoints))))))
 
 ;;; Dataplane lifecycle.  Every kernel operation (map creation, pinning,
 ;;; program load, cgroup attach, detach) is injected, so the orchestration is
@@ -281,6 +351,24 @@
     (is (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80) (second (third writes))))
     (is (equalp (gr8s::service-lb-service-value 2 3) (third (third writes))))))
 
+(test service-lb-write-service-selects-the-ipv6-map-pair
+  (let ((writes nil)
+        (dataplane (gr8s::%make-service-lb-dataplane
+                    :maps (list (fake-lb-map "gr8s_service_v4" 900001)
+                                (fake-lb-map "gr8s_backend_v4" 900002)
+                                (fake-lb-map "gr8s_service_v6" 900003)
+                                (fake-lb-map "gr8s_backend_v6" 900004)))))
+    (gr8s::service-lb-write-service
+     dataplane "fd96::a" 80 3 '(("fd88::5" . 8080))
+     :update (lambda (map key value)
+               (push (list (whistler/loader:map-info-fd map) key value) writes)))
+    (setf writes (nreverse writes))
+    (is (equal '(900004 900003) (mapcar #'first writes)))
+    (is (equalp (gr8s::service-lb-backend-value "fd88::5" 8080)
+                (third (first writes))))
+    (is (equalp (gr8s::service-lb-vip-key "fd96::a" 80)
+                (second (second writes))))))
+
 (test service-lb-pin-directory-is-under-state
   (is (string= "/var/lib/gr8s/containerd/bpf/service-lb/"
                (gr8s::service-lb-pin-directory "/var/lib/gr8s"))))
@@ -434,6 +522,32 @@
        :delete (lambda (m k) (declare (ignore m k)) (push t touched)))
       (is (null touched)))))
 
+(test service-lb-converge-routes-each-family-to-its-own-maps
+  (let* ((dataplane (gr8s::%make-service-lb-dataplane
+                     :maps (list (fake-lb-map "gr8s_service_v4" 1)
+                                 (fake-lb-map "gr8s_backend_v4" 2)
+                                 (fake-lb-map "gr8s_backend_index_v4" 3)
+                                 (fake-lb-map "gr8s_service_v6" 4)
+                                 (fake-lb-map "gr8s_backend_v6" 5)
+                                 (fake-lb-map "gr8s_backend_index_v6" 6))))
+         (controller (gr8s::make-service-lb-controller nil dataplane))
+         (service (fake-lb-service "10.96.0.10"))
+         (writes nil))
+    (setf (gethash "clusterIPs" (gethash "spec" service))
+          #("10.96.0.10" "fd96::a"))
+    (gr8s::converge-service-lb-controller
+     controller
+     :list-services (lambda () (list service))
+     :endpoints-of (lambda (ignored-service ignored-port)
+                     (declare (ignore ignored-service ignored-port))
+                     '(("10.88.1.5" 8080) ("fd88::5" 8080)))
+     :update (lambda (map key value)
+               (declare (ignore key value))
+               (push (whistler/loader:map-info-fd map) writes))
+     :delete (constantly nil))
+    ;; One backend and one Service entry land in each family's maps.
+    (is (equal '(2 5 1 4) (nreverse writes)))))
+
 (test service-lb-converge-frees-slots-when-a-backend-leaves
   (let ((controller (make-fake-lb-controller)))
     ;; Start with two backends.
@@ -563,13 +677,18 @@
 ;;; Unconnected UDP and affinity that follows its backend
 
 (test service-lb-program-compiles-every-socket-hook
-  ;; connect4 and sendmsg4 steer, recvmsg4 restores the Service address on UDP replies.
+  ;; Both families steer connect/sendmsg and restore the Service address on UDP replies.
   (multiple-value-bind (maps programs) (gr8s::compile-service-lb)
-    (is (equal '("gr8s_service_v4" "gr8s_backend_v4" "gr8s_backend_index_v4" "gr8s_affinity_v4" "gr8s_reverse_v4")
+    (is (equal '("gr8s_service_v4" "gr8s_backend_v4" "gr8s_backend_index_v4" "gr8s_affinity_v4" "gr8s_reverse_v4"
+                 "gr8s_service_v6" "gr8s_backend_v6" "gr8s_backend_index_v6" "gr8s_affinity_v6" "gr8s_reverse_v6")
                (mapcar (lambda (spec) (getf spec :name)) maps)))
-    (is (equal '("cgroup/connect4" "cgroup/sendmsg4" "cgroup/recvmsg4")
+    (is (equal '("cgroup/connect4" "cgroup/sendmsg4" "cgroup/recvmsg4"
+                 "cgroup/connect6" "cgroup/sendmsg6" "cgroup/recvmsg6")
                (mapcar (lambda (spec) (getf spec :section)) programs)))
-    (is (equal (list whistler/loader:+bpf-cgroup-inet4-connect+ whistler/loader:+bpf-cgroup-udp4-sendmsg+ 19)
+    (is (equal (list whistler/loader:+bpf-cgroup-inet4-connect+
+                     whistler/loader:+bpf-cgroup-udp4-sendmsg+ 19
+                     whistler/loader:+bpf-cgroup-inet6-connect+
+                     whistler/loader:+bpf-cgroup-udp6-sendmsg+ 20)
                (mapcar (lambda (spec) (gr8s::service-lb-attach-type (getf spec :section))) programs)))))
 
 (test service-lb-affinity-index-finds-each-backend-by-identity

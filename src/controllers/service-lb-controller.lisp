@@ -35,8 +35,24 @@ labelled for another proxy are excluded."
          (not (equal address "None"))
          (not (equal address "10.96.0.1")))))
 
+(defun service-cluster-addresses (service)
+  "Return every real ClusterIP of SERVICE in API order, including both families."
+  (let* ((spec (gethash "spec" service))
+         (addresses (gethash "clusterIPs" spec)))
+    (if (and (vectorp addresses) (plusp (length addresses)))
+        (coerce addresses 'list)
+        (list (gethash "clusterIP" spec)))))
+
+(defun service-address-family-key (address)
+  "Return :IPV4 or :IPV6 for ADDRESS."
+  (if (find #\: address) :ipv6 :ipv4))
+
+(defun service-address-family-matches-p (left right)
+  "True when LEFT and RIGHT are addresses from the same IP family."
+  (eq (service-address-family-key left) (service-address-family-key right)))
+
 (defun service-external-addresses (service)
-  "The addresses besides the ClusterIP that SERVICE answers on: its externalIPs and the IPv4
+  "The addresses besides the ClusterIP that SERVICE answers on: its externalIPs and the
 load balancer ingress addresses, except ones whose ipMode Proxy says the balancer proxies itself."
   (let* ((spec (gethash "spec" service))
          (status (gethash "status" service))
@@ -44,7 +60,9 @@ load balancer ingress addresses, except ones whose ipMode Proxy says the balance
          (ingress (and (hash-table-p balancer) (gethash "ingress" balancer))))
     (remove-duplicates
      (remove-if-not
-      (lambda (address) (and (stringp address) (not (find #\: address)) (ignore-errors (parse-ipv4-integer address))))
+      (lambda (address)
+        (and (stringp address)
+             (ignore-errors (network-address-wire-values address) t)))
       (append (coerce (gethash "externalIPs" spec #()) 'list)
               (when (vectorp ingress)
                 (loop for entry across ingress
@@ -151,7 +169,7 @@ order; a port's external addresses share its ClusterIP's slots when the backends
   (let ((service-entries nil) (backend-entries nil) (index-entries nil) (slot 0))
     (dolist (service (stable-sort (remove-if-not #'service-lb-eligible-p (copy-list services))
                                   #'string< :key (lambda (s) (gethash "clusterIP" (gethash "spec" s)))))
-      (let ((address (gethash "clusterIP" (gethash "spec" service)))
+      (let ((addresses (service-cluster-addresses service))
             (external-addresses (service-external-addresses service))
             (timeout (service-affinity-timeout service)))
         (loop for port across (gethash "ports" (gethash "spec" service))
@@ -175,9 +193,20 @@ order; a port's external addresses share its ClusterIP's slots when the backends
                                       (push (cons backends slot) placed)
                                       (dolist (entry packed) (push entry backend-entries))
                                       (incf slot (length backends)))))))
-                         (place address (ordered internal))
+                         (dolist (address addresses)
+                           (let ((family-backends
+                                   (remove-if-not
+                                    (lambda (endpoint)
+                                      (service-address-family-matches-p address (first endpoint)))
+                                    internal)))
+                             (place address (ordered family-backends))))
                          (dolist (vip external-addresses)
-                           (place vip (ordered external))))))))))
+                           (place vip
+                                  (ordered
+                                   (remove-if-not
+                                    (lambda (endpoint)
+                                      (service-address-family-matches-p vip (first endpoint)))
+                                    external)))))))))))
     (values (nreverse service-entries) (nreverse backend-entries) slot (nreverse index-entries))))
 
 (defstruct (service-lb-controller (:constructor %make-service-lb-controller
@@ -195,6 +224,26 @@ order; a port's external addresses share its ClusterIP's slots when the backends
 (defun make-service-lb-controller (store dataplane &optional node-name &key endpoint-steerer)
   "Drive DATAPLANE's maps from STORE for the node NODE-NAME."
   (%make-service-lb-controller store dataplane node-name endpoint-steerer))
+
+(defun service-lb-entry-family (entry kind)
+  "Infer ENTRY's address family from the byte width of its KIND-specific key or value."
+  (let ((size (length (ecase kind
+                        (:service (car entry))
+                        (:backend (cdr entry))
+                        (:index (car entry))))))
+    (ecase kind
+      (:service (ecase size (8 :ipv4) (20 :ipv6)))
+      (:backend (ecase size (8 :ipv4) (20 :ipv6)))
+      (:index (ecase size (16 :ipv4) (40 :ipv6))))))
+
+(defun service-lb-family-map (dataplane family kind)
+  "Return DATAPLANE's FAMILY map for KIND."
+  (ecase kind
+    (:service (service-lb-service-table dataplane family))
+    (:backend (service-lb-backend-table dataplane family))
+    (:index (service-lb-map dataplane (ecase family
+                                       (:ipv4 "gr8s_backend_index_v4")
+                                       (:ipv6 "gr8s_backend_index_v6"))))))
 
 (defun converge-service-lb-controller
     (controller
@@ -223,27 +272,38 @@ withdrawn VIPs.  A plan identical to the last applied one writes nothing."
     (let ((signature (list service-entries backend-entries index-entries)))
       (unless (equalp signature (service-lb-controller-applied-signature controller))
         (let* ((dataplane (service-lb-controller-dataplane controller))
-               (service-map (service-lb-service-table dataplane))
-               (backend-map (service-lb-backend-table dataplane))
-               (index-map (service-lb-map dataplane "gr8s_backend_index_v4"))
                (new-keys (mapcar #'car service-entries))
                (new-index-keys (mapcar #'car index-entries)))
           ;; Add/update first: backends and where each now sits, then the services that point at them.
-          (dolist (entry backend-entries) (funcall update backend-map (car entry) (cdr entry)))
-          (when index-map
-            (dolist (entry index-entries) (funcall update index-map (car entry) (cdr entry))))
-          (dolist (entry service-entries) (funcall update service-map (car entry) (cdr entry)))
+          (dolist (entry backend-entries)
+            (funcall update
+                     (service-lb-family-map dataplane (service-lb-entry-family entry :backend) :backend)
+                     (car entry) (cdr entry)))
+          (dolist (entry index-entries)
+            (let ((map (service-lb-family-map dataplane
+                                              (service-lb-entry-family entry :index) :index)))
+              (when map (funcall update map (car entry) (cdr entry)))))
+          (dolist (entry service-entries)
+            (funcall update
+                     (service-lb-family-map dataplane (service-lb-entry-family entry :service) :service)
+                     (car entry) (cdr entry)))
           ;; Remove withdrawn VIPs and freed backend slots.
           (dolist (old (service-lb-controller-applied-service-keys controller))
             (unless (member old new-keys :test #'equalp)
-              (funcall delete service-map old)))
+              (funcall delete
+                       (service-lb-family-map dataplane
+                                              (if (= 8 (length old)) :ipv4 :ipv6) :service)
+                       old)))
           (loop for slot from slot-count below (service-lb-controller-applied-slot-count controller)
-                do (funcall delete backend-map (service-lb-backend-key slot)))
-          (when index-map
-            (dolist (old (service-lb-controller-applied-index-keys controller))
-              (unless (member old new-index-keys :test #'equalp)
-                (funcall delete index-map old))))
-          (setf (service-lb-controller-applied-index-keys controller) (and index-map new-index-keys)
+                do (dolist (family '(:ipv4 :ipv6))
+                     (let ((map (service-lb-family-map dataplane family :backend)))
+                       (when map (funcall delete map (service-lb-backend-key slot))))))
+          (dolist (old (service-lb-controller-applied-index-keys controller))
+            (unless (member old new-index-keys :test #'equalp)
+              (let ((map (service-lb-family-map dataplane
+                                                (if (= 16 (length old)) :ipv4 :ipv6) :index)))
+                (when map (funcall delete map old)))))
+          (setf (service-lb-controller-applied-index-keys controller) new-index-keys
                 (service-lb-controller-applied-service-keys controller) new-keys
                 (service-lb-controller-applied-slot-count controller) slot-count
                 (service-lb-controller-applied-signature controller) signature)))))
