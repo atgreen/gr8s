@@ -17,7 +17,8 @@
                     "addressType" "IPv4" "endpoints" (vector (gr8s::core-object "addresses" (vector address)))
                     "ports" (vector (gr8s::core-object "port" target))))
 
-(defun create-endpointslice-test-pod (store name namespace address &key (target 7777) (ready t) (label "web"))
+(defun create-endpointslice-test-pod (store name namespace address
+                                      &key (addresses (list address)) (target 7777) (ready t) (label "web"))
   "Persist an actual assigned Pod and a real-shaped agent observation for controller tests."
   (let* ((object (com.inuoe.jzon:parse *valid-pod-json*))
          (metadata (gethash "metadata" object))
@@ -29,8 +30,36 @@
       (gr8s::persist-pod-assignment store pod "worker-a")
       (gr8s::update-pod-observed-status store pod
         (gr8s::core-object "phase" "Running" "podIP" address
+                          "podIPs" (map 'vector (lambda (ip) (gr8s::core-object "ip" ip)) addresses)
                           "conditions" (vector (gr8s::core-object "type" "Ready" "status" (if ready "True" "False")))))
       (get-pod store namespace name))))
+
+(test endpointslices-partition-dual-stack-pod-addresses-by-service-family
+  (with-temporary-store (store directory)
+    (values directory)
+    (gr8s:register-node store (gr8s:make-node-record :id "worker-id" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+    (gr8s:mark-node-ready store "worker-a" (get-universal-time))
+    (gr8s::ensure-default-service-cidr store)
+    (gr8s::create-core-resource
+     store "servicecidrs"
+     (gr8s::core-object "metadata" (gr8s::core-object "name" "v6")
+                        "spec" (gr8s::core-object "cidrs" #("fd00:96::/112")))
+     nil)
+    (let ((service (service-test-object "web" "http")))
+      (setf (gethash "ipFamilyPolicy" (gethash "spec" service)) "RequireDualStack"
+            (gethash "ipFamilies" (gethash "spec" service)) #("IPv4" "IPv6"))
+      (gr8s::create-core-resource store "services" service "alpha"))
+    (create-endpointslice-test-pod
+     store "dual" "alpha" "192.0.2.1" :addresses '("192.0.2.1" "2001:db8::1"))
+    (gr8s::reconcile-endpointslices store)
+    (let ((slices (sort (gr8s::list-core-resources store "endpointslices" "alpha")
+                        #'string< :key (lambda (slice) (gethash "addressType" slice)))))
+      (is (= 2 (length slices)))
+      (is (equal '("IPv4" "IPv6") (mapcar (lambda (slice) (gethash "addressType" slice)) slices)))
+      (is (equal '("192.0.2.1" "2001:db8::1")
+                 (mapcar (lambda (slice)
+                           (aref (gethash "addresses" (aref (gethash "endpoints" slice) 0)) 0))
+                         slices))))))
 
 (test endpointslices-partition-real-observations-and-recover-without-journal-churn
   (with-temporary-store (store directory)

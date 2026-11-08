@@ -68,6 +68,44 @@
         (is (= 1 (length answers)))
         (is (equalp (0conf:parse-ipv6 "2001:db8::1") (0conf:aaaa-address (first answers))))))))
 
+(test service-dns-dual-stack-service-and-generated-headless-slices
+  (with-temporary-store (store directory)
+    (values directory)
+    (gr8s:register-node store (gr8s:make-node-record :id "worker-id" :name "worker-a" :pod-cidr "10.88.0.0/24"))
+    (gr8s:mark-node-ready store "worker-a" (get-universal-time))
+    (gr8s::ensure-default-service-cidr store)
+    (gr8s::create-core-resource
+     store "servicecidrs"
+     (gr8s::core-object "metadata" (gr8s::core-object "name" "v6")
+                        "spec" (gr8s::core-object "cidrs" #("fd00:96::/112")))
+     nil)
+    (flet ((dual-service (name &key headless)
+             (let* ((service (service-test-object name "http"))
+                    (spec (gethash "spec" service)))
+               (setf (gethash "ipFamilyPolicy" spec) "RequireDualStack"
+                     (gethash "ipFamilies" spec) #("IPv4" "IPv6"))
+               (when headless (setf (gethash "clusterIP" spec) "None"))
+               service)))
+      (gr8s::create-core-resource store "services" (dual-service "normal") "alpha")
+      (is (equalp #(10 96 0 10)
+                  (0conf:a-address (first (0conf:dns-message-answers
+                                          (service-dns-test-message store "normal.alpha.svc.cluster.local"))))))
+      (is (equalp (0conf:parse-ipv6 "fd00:96::1")
+                  (0conf:aaaa-address (first (0conf:dns-message-answers
+                                             (service-dns-test-message store "normal.alpha.svc.cluster.local"
+                                                                       0conf:+type-aaaa+))))))
+      (gr8s::create-core-resource store "services" (dual-service "web" :headless t) "alpha")
+      (create-endpointslice-test-pod
+       store "dual" "alpha" "192.0.2.1" :addresses '("192.0.2.1" "2001:db8::1"))
+      (gr8s::reconcile-endpointslices store)
+      (is (equalp #(192 0 2 1)
+                  (0conf:a-address (first (0conf:dns-message-answers
+                                          (service-dns-test-message store "web.alpha.svc.cluster.local"))))))
+      (is (equalp (0conf:parse-ipv6 "2001:db8::1")
+                  (0conf:aaaa-address (first (0conf:dns-message-answers
+                                             (service-dns-test-message store "web.alpha.svc.cluster.local"
+                                                                       0conf:+type-aaaa+)))))))))
+
 (test service-dns-rotates-headless-multi-address-answers
   (with-temporary-store (store directory)
     (declare (ignore directory))
