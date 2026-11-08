@@ -16,6 +16,59 @@
 
 (in-package #:gr8s.security)
 
+(defun wireguard-private-key-path (state-directory)
+  "Return the node-local WireGuard private-key path below STATE-DIRECTORY."
+  (merge-pathnames "wireguard.key"
+                   (uiop:ensure-directory-pathname state-directory)))
+
+(defun wireguard-public-key (private-key)
+  "Derive the 32-byte Curve25519 public key WireGuard uses for PRIVATE-KEY."
+  (unless (= 32 (length private-key))
+    (error "WireGuard private keys must contain exactly 32 bytes"))
+  (getf (ironclad:destructure-private-key
+         (ironclad:make-private-key :curve25519 :x private-key))
+        :y))
+
+(defun decode-wireguard-private-key (text path)
+  "Decode one canonical base64 WireGuard private key from TEXT, naming PATH on error."
+  (handler-case
+      (let* ((encoded (string-trim '(#\Space #\Tab #\Newline #\Return) text))
+             (private-key (ag-grpc:base64-decode encoded)))
+        (unless (and (= 32 (length private-key))
+                     (string= encoded (ag-grpc:base64-encode private-key)))
+          (error "not one canonical 32-byte key"))
+        private-key)
+    (error (condition)
+      (error "Invalid WireGuard private key in ~A: ~A" path condition))))
+
+(defun write-wireguard-key-pair (state-directory)
+  "Generate and atomically persist a new node-local WireGuard key pair."
+  (multiple-value-bind (private-object public-object)
+      (ironclad:generate-key-pair :curve25519)
+    (let* ((private-key (getf (ironclad:destructure-private-key private-object) :x))
+           (public-key (getf (ironclad:destructure-public-key public-object) :y))
+           (path (wireguard-private-key-path state-directory)))
+      (write-private-text-atomically
+       path (format nil "~A~%" (ag-grpc:base64-encode private-key)))
+      (values private-key public-key))))
+
+(defun ensure-wireguard-key-pair (state-directory)
+  "Return this node's durable WireGuard private and public keys.
+
+Create the key on first use. Existing malformed key material is rejected rather
+than silently replacing the node's authenticated network identity."
+  (let ((path (wireguard-private-key-path state-directory)))
+    (if (probe-file path)
+        (let ((private-key
+                (decode-wireguard-private-key (uiop:read-file-string path) path)))
+          (sb-posix:chmod (namestring path) #o600)
+          (values private-key (wireguard-public-key private-key)))
+        (write-wireguard-key-pair state-directory))))
+
+(defun rotate-wireguard-key-pair (state-directory)
+  "Explicitly replace this node's durable WireGuard key pair and return it."
+  (write-wireguard-key-pair state-directory))
+
 (defun node-server-tls-options (pki)
   "Return the TLS listener options for the node server when PKI is present, NIL
    otherwise: the server certificate and key, optional client-certificate

@@ -11,6 +11,48 @@
 (def-suite certificate-profiles :in gr8s)
 (in-suite certificate-profiles)
 
+(test wireguard-public-key-matches-rfc-7748
+  (is (equalp
+       (gr8s::hex-to-octets
+        "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a")
+       (gr8s.security::wireguard-public-key
+        (gr8s::hex-to-octets
+         "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a")))))
+
+(test wireguard-node-key-persists-and-rotates-explicitly
+  (with-temporary-store (store directory)
+    (declare (ignore store))
+    (multiple-value-bind (private-1 public-1)
+        (gr8s.security::ensure-wireguard-key-pair directory)
+      (is (= 32 (length private-1)))
+      (is (= 32 (length public-1)))
+      (is (= #o600
+             (logand #o777
+                     (sb-posix:stat-mode
+                      (sb-posix:stat
+                       (namestring
+                        (gr8s.security::wireguard-private-key-path directory)))))))
+      (multiple-value-bind (private-2 public-2)
+          (gr8s.security::ensure-wireguard-key-pair directory)
+        (is (equalp private-1 private-2))
+        (is (equalp public-1 public-2)))
+      (multiple-value-bind (private-3 public-3)
+          (gr8s.security::rotate-wireguard-key-pair directory)
+        (is-false (equalp private-1 private-3))
+        (is-false (equalp public-1 public-3))
+        (multiple-value-bind (private-4 public-4)
+            (gr8s.security::ensure-wireguard-key-pair directory)
+          (is (equalp private-3 private-4))
+          (is (equalp public-3 public-4)))))))
+
+(test malformed-wireguard-node-key-is-never-silently-replaced
+  (with-temporary-store (store directory)
+    (declare (ignore store))
+    (let ((path (gr8s.security::wireguard-private-key-path directory)))
+      (gr8s::write-private-text-atomically path "not-a-wireguard-key\n")
+      (signals error (gr8s.security::ensure-wireguard-key-pair directory))
+      (is (string= "not-a-wireguard-key\n" (uiop:read-file-string path))))))
+
 (defun profile-test-issued-csr (store directory pki subject signer usages sans)
   "Create and explicitly approve a real request before running the genuine signer."
   (let ((request (csr-crypto-fixture directory "ec" :subject subject :sans sans)))
