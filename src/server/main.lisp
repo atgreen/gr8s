@@ -128,6 +128,7 @@
                        :disable-agent nil
                        :cluster-pod-cidr +default-cluster-pod-cidr+
                        :node-pod-prefix +default-node-pod-prefix+
+                       :overlay-backend "vxlan"
                        :runtime "containerd"
                        :containerd-mode "managed"
                        :containerd-executable (default-containerd-executable)
@@ -171,6 +172,10 @@
                         (unless (<= 1 prefix 30) (error "node Pod prefix must be 1..30"))
                         (setf (getf options :node-pod-prefix) prefix
                               (getf options :node-pod-prefix-supplied-p) t)))
+                     ((string= option "--overlay-backend")
+                      (unless (member value '("vxlan" "wireguard") :test #'string=)
+                        (error "overlay backend must be vxlan or wireguard"))
+                      (setf (getf options :overlay-backend) value))
                      ((string= option "--node-listen")
                       (setf (getf options :node-listen)
                             (format-ipv4-integer (parse-ipv4-integer value))))
@@ -1180,6 +1185,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (format t "serve options:~%")
   (format t "  --state-directory DIR   --listen IPV4   --port PORT   --node-port PORT   --node-name NAME~%")
   (format t "  --kubeconfig FILE   --cluster-pod-cidr CIDR   --node-pod-prefix BITS   --disable-agent~%")
+  (format t "  --overlay-backend vxlan|wireguard~%")
   (format t "  --runtime containerd|fake   --containerd-mode managed|external~%")
   (format t "  --containerd-{executable,oci-runtime,socket,log-root} PATH   --containerd-no-sync~%")
   (format t "  --registry-credentials-file DOCKER-CONFIG.json~%")

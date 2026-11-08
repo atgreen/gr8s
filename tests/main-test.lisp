@@ -18,9 +18,16 @@
     (is (string= "native" (getf options :cni-mode)))
     (is-false (getf options :cni-conf-dir))
     (is-false (getf options :cni-bin-dirs))
+    (is (string= "vxlan" (getf options :overlay-backend)))
     (is (= 7443 (getf options :node-port)))
     (is (string= "gr8s-local" (getf options :node-name)))
     (is-false (getf options :disable-agent))))
+
+(test serve-selects-the-cluster-overlay-backend
+  (is (string= "wireguard"
+               (getf (parse-cli-options '("serve" "--overlay-backend" "wireguard"))
+                     :overlay-backend)))
+  (signals error (parse-cli-options '("serve" "--overlay-backend" "bogus"))))
 
 (test external-cni-options-are-explicit-and-validated
   (let ((options
@@ -95,6 +102,7 @@
                 (gr8s::print-help))))
     ;; #161 lists commands in sections ("  serve  ..."), not as "gr8s serve" lines.
     (dolist (word '("  serve " "  agent " "--node-port"
+                    "--overlay-backend"
                     "--disable-agent" "--server" "--token" "--ca-pin"
                     "--node-name" "--state-directory"))
       (is (search word help)))))
