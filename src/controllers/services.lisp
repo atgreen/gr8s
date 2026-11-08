@@ -2,9 +2,9 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 ;;;;
 ;;;; Purpose:
-;;;; Allocate durable single-stack ClusterIP and node port Services and resolve
+;;;; Allocate durable single- and dual-stack ClusterIP and node port Services and resolve
 ;;;; their ports to running, selector-matched Pod endpoints. ClusterIPs come from
-;;;; every IPv4 ServiceCIDR, and each one is claimed by an IPAddress object, as
+;;;; every ServiceCIDR, and each one is claimed by an IPAddress object, as
 ;;;; upstream's allocator does. Virtual addresses
 ;;;; live only on the cluster-owned service interface; the API listener owns the
 ;;;; reserved Kubernetes Service address and credentials remain separate.
@@ -14,8 +14,60 @@
 (defparameter +ip-address-manager+ "ipallocator.k8s.io"
   "The manager label upstream's ClusterIP allocator puts on the IPAddress objects it owns.")
 
+(defun ipv6-integer (address)
+  "Return canonical IPv6 ADDRESS as an unsigned 128-bit integer."
+  (loop with value = 0
+        for byte across (0conf:parse-ipv6 address)
+        do (setf value (logior (ash value 8) byte))
+        finally (return value)))
+
+(defun format-ipv6-integer (value)
+  "Format unsigned 128-bit VALUE in canonical RFC 5952 form."
+  (let* ((groups (loop for shift from 112 downto 0 by 16 collect (ldb (byte 16 shift) value)))
+         (best-start nil) (best-length 0))
+    (loop with start = nil
+          for group in groups
+          for index from 0
+          do (if (zerop group)
+                 (unless start (setf start index))
+                 (when start
+                   (when (> (- index start) best-length)
+                     (setf best-start start best-length (- index start)))
+                   (setf start nil)))
+          finally (when (and start (> (- 8 start) best-length))
+                    (setf best-start start best-length (- 8 start))))
+    (when (< best-length 2) (setf best-start nil best-length 0))
+    (with-output-to-string (stream)
+      (loop for group in groups
+            for index from 0
+            do (cond ((and best-start (= index best-start))
+                      (write-string "::" stream))
+                     ((and best-start (< best-start index (+ best-start best-length))))
+                     (t
+                      (when (and (plusp index)
+                                 (not (and best-start (= index (+ best-start best-length)))))
+                        (write-char #\: stream))
+                      (write-string (string-downcase (format nil "~x" group)) stream)))))))
+
+(defun service-address-family (address)
+  "Return the Kubernetes family name for ADDRESS, or NIL when it is not a valid IP."
+  (when (networking-canonical-ip-p address)
+    (if (find #\: address) "IPv6" "IPv4")))
+
+(defun parse-service-cidr (cidr)
+  "Return CIDR's family, integer network, and prefix length."
+  (let* ((slash (position #\/ cidr)) (address (subseq cidr 0 slash))
+         (family (if (find #\: address) "IPv6" "IPv4")))
+    (values family
+            (if (equal family "IPv6") (ipv6-integer address) (parse-ipv4-integer address))
+            (parse-integer cidr :start (1+ slash)))))
+
+(defun format-service-address (family value)
+  "Format integer VALUE as a canonical address in FAMILY."
+  (if (equal family "IPv6") (format-ipv6-integer value) (format-ipv4-integer value)))
+
 (defun service-cidr-prefixes (store)
-  "Return the IPv4 ranges ClusterIPs come from, as (name network prefix-length) lists: those of
+  "Return the ranges ClusterIPs come from, as (name family network prefix-length) lists: those of
 STORE's ServiceCIDRs not being deleted, the default first, then by name. Without any
 ServiceCIDR, as before the default one is published, the native default range."
   (let ((result nil))
@@ -23,33 +75,33 @@ ServiceCIDR, as before the default one is published, the native default range."
           for metadata = (gethash "metadata" object)
           when (and (equal "ServiceCIDR" (gethash "kind" object)) (not (gethash "deletionTimestamp" metadata)))
             do (loop for cidr across (gethash "cidrs" (gethash "spec" object) #())
-                     for slash = (position #\/ cidr)
-                     unless (or (find #\: cidr) (null slash))
-                       do (push (list (gethash "name" metadata) (parse-ipv4-integer (subseq cidr 0 slash))
-                                      (parse-integer cidr :start (1+ slash)))
-                                result)))
+                     when (position #\/ cidr)
+                       do (multiple-value-bind (family network prefix) (parse-service-cidr cidr)
+                            (push (list (gethash "name" metadata) family network prefix) result))))
     (or (sort result (lambda (left right)
                        (cond ((equal (first left) +default-service-cidr-name+) (not (equal (first right) +default-service-cidr-name+)))
                              ((equal (first right) +default-service-cidr-name+) nil)
                              (t (string< (first left) (first right))))))
-        (let ((slash (position #\/ +default-service-cidr+)))
-          (list (list +default-service-cidr-name+ (parse-ipv4-integer (subseq +default-service-cidr+ 0 slash))
-                      (parse-integer +default-service-cidr+ :start (1+ slash))))))))
+        (multiple-value-bind (family network prefix) (parse-service-cidr +default-service-cidr+)
+          (list (list +default-service-cidr-name+ family network prefix))))))
 
-(defun service-cidr-index (value network prefix)
+(defun service-cidr-index (value network prefix bits)
   "Return VALUE's offset in NETWORK/PREFIX when it may be a ClusterIP: inside the range and,
 as upstream's allocator reserves them, neither its network nor its broadcast address."
-  (let ((size (ash 1 (- 32 prefix))) (offset (- value network)))
+  (let ((size (ash 1 (- bits prefix))) (offset (- value network)))
     (when (and (<= 0 offset) (< offset size)
                (or (<= size 2) (< 0 offset (1- size))))
       offset)))
 
 (defun service-ip-range (store address)
   "Return the name of the ServiceCIDR whose range holds ADDRESS, or NIL."
-  (let ((value (and (networking-canonical-ip-p address) (not (find #\: address)) (parse-ipv4-integer address))))
-    (when value
-      (loop for (name network prefix) in (service-cidr-prefixes store)
-            when (service-cidr-index value network prefix) return name))))
+  (let* ((family (service-address-family address))
+         (value (and family (if (equal family "IPv6") (ipv6-integer address) (parse-ipv4-integer address)))))
+    (when family
+      (loop for (name range-family network prefix) in (service-cidr-prefixes store)
+            when (and (equal family range-family)
+                      (service-cidr-index value network prefix (if (equal family "IPv6") 128 32)))
+              return name))))
 
 (defun service-ip-index (address)
   "Return ADDRESS's usable index within the native 10.96.0.0/16 service pool."
@@ -78,8 +130,9 @@ the repair pass removes and an allocation may take over meanwhile."
     (and (hash-table-p labels) (equal +ip-address-manager+ (gethash "ipaddress.kubernetes.io/managed-by" labels))
          parent
          (let ((service (gethash (core-resource-key "services" (first parent) (second parent)) (pod-store-resources store))))
-           (not (and service (equal (gethash "name" (gethash "metadata" object))
-                                    (gethash "clusterIP" (gethash "spec" service)))))))))
+           (not (and service
+                     (find (gethash "name" (gethash "metadata" object))
+                           (gethash "clusterIPs" (gethash "spec" service) #()) :test #'equal)))))))
 
 (defun service-ip-holder (store address namespace name)
   "Describe what, other than Service NAMESPACE/NAME, holds ADDRESS: another Service, or an
@@ -87,7 +140,7 @@ IPAddress object that isn't a stale one of the allocator's. NIL when it is free.
   (or (loop for object being the hash-values of (pod-store-resources store)
             for metadata = (gethash "metadata" object)
             thereis (and (equal "Service" (gethash "kind" object))
-                         (equal address (gethash "clusterIP" (gethash "spec" object)))
+                         (find address (gethash "clusterIPs" (gethash "spec" object) #()) :test #'equal)
                          (not (and (equal namespace (gethash "namespace" metadata))
                                    (equal name (gethash "name" metadata))))
                          (format nil "Service ~A/~A" (gethash "namespace" metadata) (gethash "name" metadata))))
@@ -96,31 +149,33 @@ IPAddress object that isn't a stale one of the allocator's. NIL when it is free.
                    (not (equal (ip-address-parent-service claim) (list namespace name))))
           (format nil "IPAddress ~A" address)))))
 
-(defun allocate-service-ip-unlocked (store)
+(defun allocate-service-ip-unlocked (store family)
   "Choose a free service IP from STORE's ServiceCIDRs while the caller holds the durable store
 transaction lock: the default range first, from offset 10 as before, then the others in name order.
 An address is taken by a Service or by an IPAddress object that isn't a stale one of the allocator's."
   (let ((used (make-hash-table :test #'equal)))
     (loop for object being the hash-values of (pod-store-resources store)
           do (cond ((equal "Service" (gethash "kind" object))
-                    (setf (gethash (gethash "clusterIP" (gethash "spec" object)) used) t))
+                    (loop for address across (gethash "clusterIPs" (gethash "spec" object) #())
+                          do (setf (gethash address used) t)))
                    ((and (equal "IPAddress" (gethash "kind" object)) (not (ip-address-stale-p store object)))
                     (setf (gethash (gethash "name" (gethash "metadata" object)) used) t))))
-    (loop for (name network prefix) in (service-cidr-prefixes store)
-          for size = (ash 1 (- 32 prefix))
+    (loop for (name range-family network prefix) in (service-cidr-prefixes store)
+          for bits = (if (equal range-family "IPv6") 128 32)
+          for size = (ash 1 (- bits prefix))
+          when (equal family range-family)
           do (loop for offset from (if (equal name +default-service-cidr-name+) (min 10 (max 1 (- size 2))) 1)
                    below (if (<= size 2) size (1- size))
                    for value = (+ network offset)
-                   for address = (format nil "~D.~D.~D.~D" (ldb (byte 8 24) value) (ldb (byte 8 16) value)
-                                         (ldb (byte 8 8) value) (ldb (byte 8 0) value))
+                   for address = (format-service-address family value)
                    unless (gethash address used) do (return-from allocate-service-ip-unlocked address)))
-    (core-resource-error 503 "ServiceUnavailable" "Service address pool is exhausted")))
+    (core-resource-error 503 "ServiceUnavailable" "~A Service address pool is exhausted" family)))
 
 (defun service-ip-address-object (address namespace name)
   "The IPAddress object upstream's allocator writes for Service NAMESPACE/NAME's ADDRESS."
   (core-object "apiVersion" "networking.k8s.io/v1" "kind" "IPAddress"
                "metadata" (core-object "name" address
-                                       "labels" (core-object "ipaddress.kubernetes.io/ip-family" "IPv4"
+                                       "labels" (core-object "ipaddress.kubernetes.io/ip-family" (service-address-family address)
                                                              "ipaddress.kubernetes.io/managed-by" +ip-address-manager+))
                "spec" (core-object "parentRef" (core-object "group" "" "resource" "services"
                                                             "namespace" namespace "name" name))))
@@ -131,19 +186,22 @@ SERVICE's ClusterIP, and drop the one for the address EXISTING held if SERVICE n
 Returns the revision the commit then needs."
   (let* ((metadata (gethash "metadata" service))
          (namespace (gethash "namespace" metadata)) (name (gethash "name" metadata))
-         (address (and (not (service-external-name-p service)) (gethash "clusterIP" (gethash "spec" service))))
-         (old (and existing (not (service-external-name-p existing)) (gethash "clusterIP" (gethash "spec" existing)))))
-    (when (and (stringp old) (not (equal old address)))
-      (let* ((key (core-resource-key "ipaddresses" nil old)) (claim (gethash key resources)))
-        (when (and claim (equal (ip-address-parent-service claim) (list namespace name)))
-          (remhash key resources)
-          (incf revision))))
-    (when (and (stringp address) (not (equal address "None")))
-      (let* ((key (core-resource-key "ipaddresses" nil address)) (claim (gethash key resources)))
-        (unless (and claim (equal (ip-address-parent-service claim) (list namespace name)))
-          (let ((object (service-ip-address-object address namespace name)))
-            (prepare-core-resource-metadata object nil (incf revision))
-            (setf (gethash key resources) object)))))
+         (addresses (if (service-external-name-p service) #() (gethash "clusterIPs" (gethash "spec" service) #())))
+         (old (if (or (null existing) (service-external-name-p existing)) #()
+                  (gethash "clusterIPs" (gethash "spec" existing) #()))))
+    (loop for address across old
+          unless (find address addresses :test #'equal)
+            do (let* ((key (core-resource-key "ipaddresses" nil address)) (claim (gethash key resources)))
+                 (when (and claim (equal (ip-address-parent-service claim) (list namespace name)))
+                   (remhash key resources)
+                   (incf revision))))
+    (loop for address across addresses
+          unless (equal address "None")
+            do (let* ((key (core-resource-key "ipaddresses" nil address)) (claim (gethash key resources)))
+                 (unless (and claim (equal (ip-address-parent-service claim) (list namespace name)))
+                   (let ((object (service-ip-address-object address namespace name)))
+                     (prepare-core-resource-metadata object nil (incf revision))
+                     (setf (gethash key resources) object)))))
     revision))
 
 (defun reconcile-service-ip-addresses (store)
@@ -156,12 +214,12 @@ An address someone else's IPAddress already names is left alone."
                         when (and (equal "IPAddress" (gethash "kind" object)) (ip-address-stale-p store object))
                           collect (gethash "name" (gethash "metadata" object))))
            (unclaimed (loop for object being the hash-values of index
-                            for address = (and (equal "Service" (gethash "kind" object))
-                                               (not (service-external-name-p object))
-                                               (gethash "clusterIP" (gethash "spec" object)))
-                            when (and (stringp address) (not (equal address "None"))
-                                      (or (member address stale :test #'equal)
-                                          (null (gethash (core-resource-key "ipaddresses" nil address) index))))
+                            when (and (equal "Service" (gethash "kind" object))
+                                      (not (service-external-name-p object))
+                                      (loop for address across (gethash "clusterIPs" (gethash "spec" object) #())
+                                            thereis (and (not (equal address "None"))
+                                                         (or (member address stale :test #'equal)
+                                                             (null (gethash (core-resource-key "ipaddresses" nil address) index))))))
                               collect object)))
       (when (or stale unclaimed)
         (let* ((revision (pod-store-resource-revision store))
@@ -454,6 +512,115 @@ Turning affinity off clears the timeout a client read back with the Service."
             (invalid-pod "sessionAffinityConfig.clientIP.timeoutSeconds must be 1..86400"))
           (setf (gethash "timeoutSeconds" client) timeout)))))
 
+(defun service-available-families (store)
+  "Return configured Service address families in allocator preference order."
+  (remove-duplicates (mapcar #'second (service-cidr-prefixes store)) :test #'equal))
+
+(defun service-cidr-description (range)
+  "Render one SERVICE-CIDR-PREFIXES RANGE for an API validation message."
+  (destructuring-bind (name family network prefix) range
+    (declare (ignore name))
+    (format nil "~A/~D" (format-service-address family network) prefix)))
+
+(defun normalize-service-cluster-addresses (spec existing store namespace name type)
+  "Allocate and validate SPEC's ordered clusterIPs/ipFamilies tuple."
+  (let* ((old-spec (and existing (gethash "spec" existing)))
+         (old-external-name-p (and old-spec (equal "ExternalName" (gethash "type" old-spec))))
+         (policy (gethash "ipFamilyPolicy" spec
+                          (if old-spec (gethash "ipFamilyPolicy" old-spec "SingleStack") "SingleStack")))
+         (requested-families (optional-vector spec "ipFamilies" "Service.spec"))
+         (specified-many (optional-vector spec "clusterIPs" "Service.spec"))
+         (legacy (gethash "clusterIP" spec))
+         (old-addresses (and old-spec (gethash "clusterIPs" old-spec #())))
+         (old-families (and old-spec (gethash "ipFamilies" old-spec #())))
+         (available (if store (service-available-families store) '("IPv4")))
+         (addresses (cond ((plusp (length specified-many)) specified-many)
+                          ((and (stringp legacy) (plusp (length legacy))) (vector legacy))
+                          ((and old-addresses (plusp (length old-addresses))) old-addresses)
+                          (t #())))
+         (headless (and (= 1 (length addresses)) (equal "None" (aref addresses 0))))
+         (families
+           (cond ((plusp (length requested-families)) requested-families)
+                 ((plusp (length addresses))
+                  (if headless
+                      (coerce (if (member policy '("PreferDualStack" "RequireDualStack") :test #'equal)
+                                  available (list (first available))) 'vector)
+                      (map 'vector #'service-address-family addresses)))
+                 ((member policy '("PreferDualStack" "RequireDualStack") :test #'equal)
+                  (coerce available 'vector))
+                 (t (vector (first available))))))
+    (when (and (stringp legacy) (plusp (length legacy)) (plusp (length specified-many))
+               (not (equal legacy (aref specified-many 0))))
+      (invalid-pod "clusterIP must match clusterIPs[0]"))
+    (when (equal policy "PreferDualStack")
+      (setf families (remove-if-not (lambda (family) (member family available :test #'equal)) families)))
+    ;; Setting SingleStack on an unchanged dual-stack object is upstream's
+    ;; explicit request to release its secondary family and address.
+    (when (and old-spec (equal policy "SingleStack")
+               (= 2 (length old-addresses)) (equalp addresses old-addresses)
+               (= 2 (length old-families)) (equalp families old-families))
+      (setf addresses (subseq addresses 0 1)
+            families (subseq families 0 1)))
+    (unless (member policy '("SingleStack" "PreferDualStack" "RequireDualStack") :test #'equal)
+      (invalid-pod "ipFamilyPolicy must be SingleStack, PreferDualStack or RequireDualStack"))
+    (unless (and (<= 1 (length families) 2)
+                 (every (lambda (family) (member family '("IPv4" "IPv6") :test #'equal)) families)
+                 (= (length families) (length (remove-duplicates (coerce families 'list) :test #'equal))))
+      (invalid-pod "ipFamilies must contain one or two distinct supported families"))
+    (unless (every (lambda (family) (member family available :test #'equal)) families)
+      (invalid-pod "requested ipFamilies are not configured on this cluster"))
+    (when (and (equal policy "SingleStack") (/= 1 (length families)))
+      (invalid-pod "SingleStack Services require exactly one IP family"))
+    (when (and (equal policy "RequireDualStack") (/= 2 (length families)))
+      (invalid-pod "RequireDualStack Services require two configured IP families"))
+    ;; On a single-to-dual update the client names the new family; the
+    ;; allocator supplies its address while retaining the immutable primary.
+    (when (and store old-spec (= 1 (length old-addresses))
+               (= 1 (length addresses)) (= 2 (length families)))
+      (setf addresses
+            (concatenate 'vector addresses
+                         (vector (allocate-service-ip-unlocked store (aref families 1))))))
+    (when (and (plusp (length addresses)) (not headless) (/= (length addresses) (length families)))
+      (invalid-pod "clusterIPs and ipFamilies must have the same length"))
+    (when (zerop (length addresses))
+      (unless store (invalid-pod "Service allocation requires the control-plane store"))
+      (setf addresses (map 'vector (lambda (family) (allocate-service-ip-unlocked store family)) families)))
+    (unless headless
+      (loop for address across addresses
+            for family across families
+            do (unless (equal family (service-address-family address))
+                 (invalid-pod "clusterIP ~A does not match ipFamily ~A" address family))
+               (unless (or (and old-addresses (find address old-addresses :test #'equal))
+                           (and store (service-ip-range store address))
+                           (and (null store) (service-ip-index address)))
+                 (invalid-pod "spec.clusterIPs: Invalid value: [~S]: the provided IP is not in the valid ranges ~{~A~^, ~}"
+                              address (if store (mapcar #'service-cidr-description (service-cidr-prefixes store))
+                                          (list +default-service-cidr+))))
+               (when (and store (not (and old-addresses (find address old-addresses :test #'equal))))
+                 (let ((holder (service-ip-holder store address namespace name)))
+                   (when holder
+                     (core-resource-error 422 "Invalid" "spec.clusterIPs: Invalid value: [~S]: provided IP is already allocated (by ~A)"
+                                          address holder))))))
+    ;; ExternalName Services own no cluster address. Leaving that type is an
+    ;; allocation. Otherwise the primary is immutable, while an explicit
+    ;; policy transition may add or release exactly one secondary address.
+    (when (and old-addresses (plusp (length old-addresses)) (not old-external-name-p))
+      (unless (and (equal (aref addresses 0) (aref old-addresses 0))
+                   (or (equalp addresses old-addresses)
+                       (and (= 1 (length old-addresses)) (= 2 (length addresses)))
+                       (and (= 2 (length old-addresses)) (= 1 (length addresses))
+                            (equal policy "SingleStack"))))
+        (invalid-pod "clusterIPs may not change once set")))
+    (when (and headless (not (equal type "ClusterIP")))
+      (invalid-pod "clusterIP may not be None for a ~A Service" type))
+    (setf (gethash "clusterIP" spec) (aref addresses 0)
+          (gethash "clusterIPs" spec) addresses
+          (gethash "ipFamilies" spec) families
+          ;; PreferDualStack records the requested behavior even when only one
+          ;; configured family is available to satisfy it.
+          (gethash "ipFamilyPolicy" spec) policy)
+    addresses))
+
 (defun normalize-service-resource (input namespace name store)
   "Validate and default single-stack ClusterIP, NodePort, LoadBalancer and ExternalName Services."
   (let* ((object (copy-core-object (require-object input "Service")))
@@ -482,17 +649,6 @@ Turning affinity off clears the timeout a client read back with the Service."
     ;; DenyServiceExternalIPs is off by default upstream, so external IPs are admitted.
     (validate-service-addresses spec (and store (gethash (core-resource-key "services" namespace (gethash "name" metadata))
                                                          (pod-store-resources store))))
-    ;; gr8s allocates single-stack IPv4 (normalized below). Accept a Service that
-    ;; is satisfiable that way -- SingleStack, or PreferDualStack (best-effort, as
-    ;; on any single-stack cluster; controller-generated Services such as ate's
-    ;; api set it) as long as IPv4 is among its families -- and refuse only a hard
-    ;; dual-stack or IPv6-only request gr8s cannot honor.
-    (unless (or (service-external-name-p object)
-                (let ((policy (gethash "ipFamilyPolicy" spec "SingleStack"))
-                      (families (gethash "ipFamilies" spec #("IPv4"))))
-                  (and (member policy '("SingleStack" "PreferDualStack") :test #'equal)
-                       (or (zerop (length families)) (find "IPv4" families :test #'equal)))))
-      (invalid-pod "Services support only single-stack IPv4 (SingleStack or PreferDualStack including IPv4)"))
     (when (and (nth-value 1 (gethash "publishNotReadyAddresses" spec))
                (not (member (gethash "publishNotReadyAddresses" spec) '(t nil))))
       (invalid-pod "publishNotReadyAddresses must be boolean"))
@@ -549,48 +705,17 @@ Turning affinity off clears the timeout a client read back with the Service."
                 (invalid-pod "loadBalancerClass is immutable while the type is LoadBalancer"))))
           (progn (remhash "allocateLoadBalancerNodePorts" spec) (remhash "loadBalancerClass" spec)))
       (normalize-service-traffic-policies spec (and existing (not (service-external-name-p existing)) existing))
-      (let* ((specified (or (let ((given (gethash "clusterIP" spec))) (and (not (equal given "")) given))
-                            ;; An update that omits the address keeps the allocated one.
-                            (and existing (gethash "clusterIP" (gethash "spec" existing)))))
-             (address (if (or (null specified) (equal specified ""))
-                          (if store (allocate-service-ip-unlocked store)
-                              (invalid-pod "Service allocation requires the control-plane store")) specified)))
-        (unless (or (equal address "None")
-                    (and existing (equal address (gethash "clusterIP" (gethash "spec" existing))))
-                    (and store (service-ip-range store address))
-                    (and (null store) (service-ip-index address)))
-          (invalid-pod "spec.clusterIPs: Invalid value: [~S]: failed to allocate IP ~A: the provided IP (~A) is not in the valid range. The range of valid IPs is ~{~A~^, ~}"
-                       address address address
-                       (if store
-                           (mapcar (lambda (range) (destructuring-bind (name network prefix) range
-                                                     (declare (ignore name))
-                                                     (format nil "~D.~D.~D.~D/~D" (ldb (byte 8 24) network) (ldb (byte 8 16) network)
-                                                             (ldb (byte 8 8) network) (ldb (byte 8 0) network) prefix)))
-                                   (service-cidr-prefixes store))
-                           (list +default-service-cidr+))))
-        (when (and (equal address "None") (not (equal type "ClusterIP")))
-          (invalid-pod "clusterIP may not be None for a ~A Service" type))
-        (when (and (equal address "10.96.0.1")
+      (let ((addresses (normalize-service-cluster-addresses
+                        spec existing store namespace (gethash "name" metadata) type)))
+        (when (and (find "10.96.0.1" addresses :test #'equal)
                    (not (and (equal namespace "default") (equal (gethash "name" metadata) "kubernetes"))))
           (invalid-pod "the API service address is reserved"))
-        (when (and store (not (equal address "None")))
-          (let ((holder (service-ip-holder store address namespace (gethash "name" metadata))))
-            (when holder
-              (core-resource-error 422 "Invalid" "spec.clusterIPs: Invalid value: [~S]: failed to allocate IP ~A: provided IP is already allocated (by ~A)"
-                                   address address holder))))
-        (when (equal address "10.96.0.1")
+        (when (equal "10.96.0.1" (aref addresses 0))
           (let ((ports (gethash "ports" spec)))
             (unless (and (= 1 (length ports)) (= 443 (gethash "port" (aref ports 0)))
                          (eql 443 (gethash "targetPort" (aref ports 0))))
-              (invalid-pod "the API Service must retain its HTTPS port"))))
-        (let ((addresses (gethash "clusterIPs" spec)))
-          (when (and addresses
-                     (not (and (vectorp addresses) (not (stringp addresses))
-                               (or (zerop (length addresses)) (equalp addresses (vector address))))))
-            (invalid-pod "clusterIPs must match the single clusterIP")))
-        (setf (gethash "clusterIP" spec) address (gethash "clusterIPs" spec) (vector address)))
-      (setf (gethash "type" spec) type
-            (gethash "ipFamilies" spec) #("IPv4") (gethash "ipFamilyPolicy" spec) "SingleStack")
+              (invalid-pod "the API Service must retain its HTTPS port")))))
+      (setf (gethash "type" spec) type)
       (assign-service-node-ports spec namespace (gethash "name" metadata)
                                  (and existing (not (service-external-name-p existing)) existing) store)
       (assign-service-health-check-node-port spec namespace (gethash "name" metadata)

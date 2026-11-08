@@ -168,15 +168,13 @@ no class, by field or by the legacy kubernetes.io/ingress.class annotation, the 
   object)
 
 (defun service-cidr-ready-status (cidrs)
-  "Report Ready for a range the allocator assigns addresses from: any IPv4 one, as ClusterIPs
-here are single-stack IPv4."
-  (let ((served (find-if-not (lambda (cidr) (find #\: cidr)) cidrs)))
-    (core-object "conditions"
-                 (vector (core-object "type" "Ready" "status" (if served "True" "False")
-                                      "reason" (if served "" "NotServed")
-                                      "message" (if served "Kubernetes Service CIDR is ready"
-                                                    "ClusterIPs are allocated only from IPv4 ranges")
-                                      "lastTransitionTime" (current-timestamp))))))
+  "Report Ready for every validated range the dual-stack allocator serves."
+  (declare (ignore cidrs))
+  (core-object "conditions"
+               (vector (core-object "type" "Ready" "status" "True"
+                                    "reason" ""
+                                    "message" "Kubernetes Service CIDR is ready"
+                                    "lastTransitionTime" (current-timestamp)))))
 
 (defun normalize-service-cidr (object existing)
   "Validate one or two distinct-family prefixes that never change once set."
