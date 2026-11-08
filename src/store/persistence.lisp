@@ -364,6 +364,11 @@ every HA member, including a member that did not own the reporting agent session
               for old = (gethash key (pod-store-pods store))
               for old-view = (and old (pod-published-view store old))
               for uid = (pod-uid pod)
+              for stale-desired-state-p =
+                (and old
+                     (equal uid (pod-uid old))
+                     (< (replicated-pod-revision (pod-resource-version pod))
+                        (replicated-pod-revision (pod-resource-version old))))
               for observation = (gethash uid observations)
               for publication = (gethash uid published)
               for desired-revision = (replicated-pod-revision (pod-resource-version pod))
@@ -376,38 +381,39 @@ every HA member, including a member that did not own the reporting agent session
                                                   (gethash "resourceVersion"
                                                            (gethash "metadata" old-view))))
               do (setf (gethash key seen) t)
-                 (when publication
-                   ;; Compare API contents while retaining the follower's local
-                   ;; revision.  Incoming revisions are member-local and may be
-                   ;; lower without representing an older object here.
-                   (setf (pod-status-revision pod)
-                         (or previous-local-revision published-revision)))
-                 (persist-pod store pod)
-                 (index-pod store pod)
-                 (clear-replicated-pod-state-unlocked store pod)
-                 (when observation
-                   (let ((status (gethash "status" observation))
-                         (revision (gethash "resourceVersion" observation)))
-                     (when (and (hash-table-p status) (stringp revision))
-                       (let ((copy (copy-pod-status-value status)))
-                         (persist-pod-status-state
-                          store pod :status copy :resource-version revision)
-                         (setf (gethash uid (pod-store-pod-observed-statuses store)) copy
-                               (gethash uid (pod-store-pod-observed-resource-versions store)) revision
-                               (gethash uid (pod-store-pod-observed-phases store))
-                               (gethash "phase" copy "Unknown"))))))
-                 (when publication
-                   (setf (gethash uid (pod-store-pod-published-statuses store))
-                         (copy-pod-status-value (gethash "status" publication))))
-                 (let ((new-view (pod-published-view store pod)))
-                   (unless (and old-view (json-value-equal-p old-view new-view))
-                     (let ((event-revision
-                             (local-replicated-pod-event-revision-unlocked
-                              store incoming-revision)))
-                       (setf (pod-status-revision pod) event-revision
-                             new-view (pod-published-view store pod))
-                       (record-pod-watch-event-unlocked
-                        store event-revision old-view new-view)))))
+                 (unless stale-desired-state-p
+                   (when publication
+                     ;; Compare API contents while retaining the follower's local
+                     ;; revision.  Incoming revisions are member-local and may be
+                     ;; lower without representing an older object here.
+                     (setf (pod-status-revision pod)
+                           (or previous-local-revision published-revision)))
+                   (persist-pod store pod)
+                   (index-pod store pod)
+                   (clear-replicated-pod-state-unlocked store pod)
+                   (when observation
+                     (let ((status (gethash "status" observation))
+                           (revision (gethash "resourceVersion" observation)))
+                       (when (and (hash-table-p status) (stringp revision))
+                         (let ((copy (copy-pod-status-value status)))
+                           (persist-pod-status-state
+                            store pod :status copy :resource-version revision)
+                           (setf (gethash uid (pod-store-pod-observed-statuses store)) copy
+                                 (gethash uid (pod-store-pod-observed-resource-versions store)) revision
+                                 (gethash uid (pod-store-pod-observed-phases store))
+                                 (gethash "phase" copy "Unknown"))))))
+                   (when publication
+                     (setf (gethash uid (pod-store-pod-published-statuses store))
+                           (copy-pod-status-value (gethash "status" publication))))
+                   (let ((new-view (pod-published-view store pod)))
+                     (unless (and old-view (json-value-equal-p old-view new-view))
+                       (let ((event-revision
+                               (local-replicated-pod-event-revision-unlocked
+                                store incoming-revision)))
+                         (setf (pod-status-revision pod) event-revision
+                               new-view (pod-published-view store pod))
+                         (record-pod-watch-event-unlocked
+                          store event-revision old-view new-view))))))
         ;; Drop Pods the committed snapshot no longer has, journalling deletion
         ;; at the snapshot watermark so a resumed watch cannot silently miss it.
         (loop for key being the hash-keys of (pod-store-pods store)

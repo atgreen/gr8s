@@ -90,6 +90,28 @@
                    (and state (gethash "resourceVersion" state)))
             "the command includes the deletion event's revision")))))
 
+(test stale-replicated-pod-state-cannot-undo-a-newer-deletion
+  ;; Agent observations replicate a complete Pod snapshot.  One prepared before
+  ;; a concurrent API deletion may be committed afterward, but it must not
+  ;; resurrect the older desired object by erasing its deletion timestamp.
+  (with-temporary-store (source source-path)
+    (with-temporary-store (follower follower-path)
+      (declare (ignore source-path follower-path))
+      (ha-make-pod source "deleted")
+      (let ((stale (gr8s::pod-state-json source)))
+        (gr8s::mark-pod-deleting source "default" "deleted" :grace-period 30)
+        (gr8s::install-pod-state-blob follower (gr8s::pod-state-json source))
+        (let* ((deleting (gr8s:get-pod follower "default" "deleted"))
+               (revision (gr8s:pod-resource-version deleting)))
+          (is-true (gethash "deletionTimestamp"
+                            (gethash "metadata" (gr8s:pod-to-object deleting))))
+          (gr8s::install-pod-state-blob follower stale)
+          (let ((current (gr8s:get-pod follower "default" "deleted")))
+            (is (equal revision (gr8s:pod-resource-version current))
+                "an older snapshot cannot replace newer desired state")
+            (is-true (gethash "deletionTimestamp"
+                              (gethash "metadata" (gr8s:pod-to-object current))))))))))
+
 (test replicated-pod-events-advance-past-a-followers-newer-local-watermark
   ;; Different members own different agent sessions and may allocate revisions
   ;; concurrently.  A replicated transition must be newer than every revision
