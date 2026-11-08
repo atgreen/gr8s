@@ -99,6 +99,10 @@
     "metadata" (gr8s::core-object "name" name)
     "spec" (gr8s::core-object "devices" (gr8s::core-object "requests" #())))
    "default")
+  (allocate-dra-claim store name node-name))
+
+(defun allocate-dra-claim (store name node-name)
+  "Record NAME's test allocation as available only on NODE-NAME."
   (let ((gr8s::*typed-api-status-write* t))
     (gr8s::update-core-resource
      store "resourceclaims" "default" name
@@ -116,6 +120,137 @@
                          (vector (gr8s::core-object "key" "metadata.name" "operator" "In"
                                                     "values" (vector node-name)))))))))
        claim))))
+
+(test resource-claim-templates-create-one-owned-claim-and-persist-pod-status
+  (with-temporary-store (store path)
+    (let* ((pod-name (make-string 50 :initial-element #\p))
+           (reference-name (make-string 20 :initial-element #\r))
+           (full-length (+ (length pod-name) (length reference-name) 2)))
+      (is (equal (format nil "~A-~A"
+                         (subseq pod-name 0 (floor (* (length pod-name) 57) full-length))
+                         (subseq reference-name 0
+                                 (floor (* (length reference-name) 57) full-length)))
+                 (gr8s.controllers::claim-generate-name pod-name reference-name))
+          "long generated names use upstream's proportional truncation"))
+    (gr8s::create-core-resource
+     store "resourceclaimtemplates"
+     (gr8s::core-object
+      "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaimTemplate"
+      "metadata" (gr8s::core-object "name" "accelerator-template")
+      "spec" (gr8s::core-object
+               "metadata" (gr8s::core-object
+                            "labels" (gr8s::core-object "pool" "fast")
+                            "annotations" (gr8s::core-object "example.com/source" "template"))
+               "spec" (gr8s::core-object "devices" (gr8s::core-object "requests" #()))))
+     "default")
+    (let* ((pod
+             (create-pod
+              store
+              (parse-pod
+               (gr8s::core-object
+                "apiVersion" "v1" "kind" "Pod"
+                "metadata" (gr8s::core-object "name" "consumer" "namespace" "default")
+                "spec" (gr8s::core-object
+                         "resourceClaims"
+                         (vector (gr8s::core-object
+                                  "name" "device"
+                                  "resourceClaimTemplateName" "accelerator-template"))
+                         "containers"
+                         (vector (gr8s::core-object
+                                  "name" "c" "image" "busybox"
+                                  "resources" (gr8s::core-object
+                                               "claims" (vector (gr8s::core-object "name" "device"))))))))))
+           (reconcile (lambda (current)
+                        (gr8s.controllers::reconcile-pod-resource-claims store current))))
+      (funcall reconcile pod)
+      ;; Repeating the pass must rediscover the generated claim rather than
+      ;; creating another one, including after reopening the durable store.
+      (let ((checkpoint (gethash (pod-uid pod) (gr8s::pod-store-pod-client-statuses store))))
+        (funcall reconcile pod)
+        (is (eq checkpoint
+                (gethash (pod-uid pod) (gr8s::pod-store-pod-client-statuses store)))
+            "an unchanged pass does not rewrite the durable Pod status checkpoint"))
+      (let* ((claims (gr8s::list-core-resources store "resourceclaims" "default"))
+             (claim (first claims))
+             (metadata (and claim (gethash "metadata" claim)))
+             (status (gethash (pod-uid pod) (gr8s::pod-store-pod-client-statuses store)))
+             (claim-status (and status (aref (gethash "resourceClaimStatuses" status) 0))))
+        (is (= 1 (length claims)))
+        (is (uiop:string-prefix-p "consumer-device-" (gethash "name" metadata)))
+        (is (equal "fast" (gethash "pool" (gethash "labels" metadata))))
+        (is (equal "template" (gethash "example.com/source" (gethash "annotations" metadata))))
+        (is (equal "device" (gethash "resource.kubernetes.io/pod-claim-name"
+                                      (gethash "annotations" metadata))))
+        (let ((owner (aref (gethash "ownerReferences" metadata) 0)))
+          (is (equal "Pod" (gethash "kind" owner)))
+          (is (equal (pod-uid pod) (gethash "uid" owner)))
+          (is-true (gethash "controller" owner)))
+        (is (equal "device" (gethash "name" claim-status)))
+        (is (equal (gethash "name" metadata) (gethash "resourceClaimName" claim-status)))
+        (let ((published (gr8s::apply-pod-client-status
+                          store pod (gr8s::core-object "conditions" #()))))
+          (is (equal (gethash "name" metadata)
+                     (gethash "resourceClaimName"
+                              (aref (gethash "resourceClaimStatuses" published) 0))))))
+      (let* ((reopened (open-store path))
+             (restored (get-pod reopened "default" "consumer")))
+        (gr8s.controllers::reconcile-pod-resource-claims reopened restored)
+        (is (= 1 (length (gr8s::list-core-resources reopened "resourceclaims" "default"))))
+        (is (= 1
+               (length
+                (gethash "resourceClaimStatuses"
+                         (gethash (pod-uid restored)
+                                  (gr8s::pod-store-pod-client-statuses reopened))))))
+        (let ((reconciler (make-reconciler reopened (make-fake-runtime))))
+          (gr8s::delete-reconciled-pod reconciler "default" "consumer")
+          (gr8s::collect-orphaned-api-objects reconciler)
+          (is (null (gr8s::list-core-resources reopened "resourceclaims" "default"))
+              "the generated claim is collected with its owning Pod"))))))
+
+(test generated-dra-claims-constrain-placement-and-are-reserved
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (dolist (node (list (make-test-node "worker-a" "node-a" "10.64.0.0/20")
+                        (make-test-node "worker-b" "node-b" "10.64.16.0/20")))
+      (gr8s:register-node store node)
+      (gr8s:mark-node-ready store (gr8s:node-record-name node) 100))
+    (gr8s::create-core-resource
+     store "resourceclaimtemplates"
+     (gr8s::core-object
+      "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaimTemplate"
+      "metadata" (gr8s::core-object "name" "template")
+      "spec" (gr8s::core-object
+               "metadata" (gr8s::core-object)
+               "spec" (gr8s::core-object "devices" (gr8s::core-object "requests" #()))))
+     "default")
+    (let* ((pod
+             (create-pod
+              store
+              (parse-pod
+               (gr8s::core-object
+                "apiVersion" "v1" "kind" "Pod"
+                "metadata" (gr8s::core-object "name" "templated" "namespace" "default")
+                "spec" (gr8s::core-object
+                         "resourceClaims"
+                         (vector (gr8s::core-object "name" "device"
+                                                    "resourceClaimTemplateName" "template"))
+                         "containers"
+                         (vector (gr8s::core-object
+                                  "name" "c" "image" "busybox"
+                                  "resources" (gr8s::core-object
+                                               "claims" (vector (gr8s::core-object "name" "device"))))))))))
+           (_ (gr8s.controllers::reconcile-pod-resource-claims store pod))
+           (pod-status (gethash (pod-uid pod) (gr8s::pod-store-pod-client-statuses store)))
+           (claim-name (gethash "resourceClaimName"
+                                (aref (gethash "resourceClaimStatuses" pod-status) 0))))
+      (declare (ignore _))
+      (allocate-dra-claim store claim-name "worker-b")
+      (let* ((node (gr8s:schedule-pod store pod))
+             (claim (gr8s::get-core-resource store "resourceclaims" "default" claim-name))
+             (reserved (gethash "reservedFor" (gethash "status" claim))))
+        (is (equal "worker-b" (gr8s:node-record-name node)))
+        (is (= 1 (length reserved)))
+        (is (equal (pod-uid pod) (gethash "uid" (aref reserved 0))))))))
 
 (test dra-claims-constrain-placement-and-are-reserved-for-the-pod
   (with-temporary-store (store path)

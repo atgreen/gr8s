@@ -124,7 +124,10 @@
                 (slot-value assignment 'gr8s.node.v1::resource-version)))))
 
 (defmethod runtime-ensure ((runtime control-plane-runtime) pod)
-  (let ((node (schedule-pod (control-plane-runtime-store runtime) pod)))
+  (let* ((store (control-plane-runtime-store runtime))
+         (_ (reconcile-pod-resource-claims store pod))
+         (node (schedule-pod store pod)))
+    (declare (ignore _))
     ;; Every read of a Pod the agent has not yet reported lands here. Building a
     ;; snapshot costs every Pod's JSON, so a list of N Pending Pods would cost N^2
     ;; just to find nothing changed. A Pod the node already has needs no snapshot;

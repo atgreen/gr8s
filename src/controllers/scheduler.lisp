@@ -303,12 +303,24 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
                          (gethash (pod-uid pod)
                                   (pod-store-pod-observed-phases store)))))))
 
+(defun pod-dra-claim-name-unlocked (store pod reference)
+  "Resolve REFERENCE to its direct or controller-generated ResourceClaim name."
+  (or (gethash "resourceClaimName" reference)
+      (let* ((reference-name (gethash "name" reference))
+             (client-status (gethash (pod-uid pod)
+                                     (pod-store-pod-client-statuses store)
+                                     (core-object)))
+             (status (find reference-name
+                           (gethash "resourceClaimStatuses" client-status #())
+                           :test #'equal
+                           :key (lambda (entry) (gethash "name" entry)))))
+        (and status (gethash "resourceClaimName" status)))))
+
 (defun pod-dra-claims-unlocked (store pod)
-  "Return POD's direct ResourceClaims and true, or NIL/NIL until every claim exists and is allocated.
-Templated claims are resolved by the ResourceClaim controller before scheduling."
+  "Return POD's resolved ResourceClaims and true, or NIL/NIL until every claim exists and is allocated."
   (let ((claims nil))
     (loop for reference across (gethash "resourceClaims" (gethash "spec" (pod-to-object pod)) #())
-          for name = (gethash "resourceClaimName" reference)
+          for name = (pod-dra-claim-name-unlocked store pod reference)
           do (unless name (return-from pod-dra-claims-unlocked (values nil nil)))
              (let ((claim (gethash (core-resource-key "resourceclaims" (pod-namespace pod) name)
                                    (pod-store-resources store))))

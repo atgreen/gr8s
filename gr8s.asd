@@ -315,6 +315,7 @@
                               :components ((:file "integration")
                                            (:file "scheduler-controller")
                                            (:file "scheduler-metrics")
+                                           (:file "resource-claim-controller")
                                            (:file "control-plane-runtime")
                                            (:file "pod-certificate-signer")
                                            (:file "services")

@@ -71,13 +71,19 @@ A hostNetwork Pod has no address of its own, so it reports its node's as its Pod
     status))
 
 (defun apply-pod-client-status (store pod status)
-  "Overlay POD's persisted client terminal phase, message, reason and custom conditions onto STATUS."
+  "Overlay POD's persisted client and controller-owned status fields onto STATUS."
   (let ((client (gethash (pod-uid pod) (pod-store-pod-client-statuses store))))
     (when client
       (when (gethash "phase" client) (setf (gethash "phase" status) (gethash "phase" client)))
       (dolist (field '("message" "reason"))
         (when (and (gethash field client) (not (gethash field status)))
           (setf (gethash field status) (gethash field client))))
+      ;; The ResourceClaim controller owns this field. It shares the durable
+      ;; status checkpoint, but POD-CLIENT-STATUS-FROM never accepts it from an
+      ;; API client.
+      (when (gethash "resourceClaimStatuses" client)
+        (setf (gethash "resourceClaimStatuses" status)
+              (copy-core-object (gethash "resourceClaimStatuses" client))))
       (let ((conditions (gethash "conditions" status #())))
         (setf (gethash "conditions" status)
               (concatenate 'vector conditions
@@ -136,6 +142,20 @@ A hostNetwork Pod has no address of its own, so it reports its node's as its Pod
     (when (current-status-pod-p store pod)
       (persist-pod-status-state store pod :client client)
       (setf (gethash (pod-uid pod) (pod-store-pod-client-statuses store)) client))))
+
+(defun update-pod-client-status (store pod updater)
+  "Atomically merge controller-owned fields into POD's durable status checkpoint.
+UPDATER receives a copy of the current checkpoint and returns the replacement,
+or NIL when it is already current."
+  (with-store-lock (store)
+    (when (current-status-pod-p store pod)
+      (let* ((current (gethash (pod-uid pod) (pod-store-pod-client-statuses store)
+                               (core-object)))
+             (replacement (funcall updater (copy-core-object current))))
+        (when replacement
+          (persist-pod-status-state store pod :client replacement)
+          (setf (gethash (pod-uid pod) (pod-store-pod-client-statuses store))
+                replacement))))))
 
 (defun update-pod-status-metadata (store pod metadata)
   "Apply label and annotation changes from a status write, leaving the spec alone."
