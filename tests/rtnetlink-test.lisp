@@ -51,6 +51,19 @@
     (signals gr8s::cni-error (gr8s::validate-network-interface-name name)))
   (is (equalp #(192 0 2 17) (gr8s::ipv4-network-octets "192.0.2.17"))))
 
+(test rtnetlink-encodes-both-ip-address-families
+  (multiple-value-bind (family bytes bits)
+      (gr8s::network-address-wire-values "192.0.2.17")
+    (is (= 2 family))
+    (is (= 32 bits))
+    (is (equalp #(192 0 2 17) bytes)))
+  (multiple-value-bind (family bytes bits)
+      (gr8s::network-address-wire-values "fd42::17")
+    (is (= 10 family))
+    (is (= 128 bits))
+    (is (= 16 (length bytes)))
+    (is (equalp (0conf:parse-ipv6 "fd42::17") bytes))))
+
 (test rtnetlink-reads-real-kernel-link-without-privileges
   ;; This exercises the actual ABI, socket, message parser, and ACK handling.
   ;; RTM_GETLINK is read-only and does not require CAP_NET_ADMIN.
@@ -136,3 +149,26 @@
              (is (null (invoke "DEL")))))
       (when (probe-file directory)
         (uiop:delete-directory-tree directory :validate t)))))
+
+(test routed-cni-result-describes-both-pod-address-families
+  (let* ((context (gr8s::make-cni-context
+                   :container-id "sandbox-dual" :interface-name "eth0"
+                   :netns "/fake/netns"))
+         (configuration (gr8s::parse-cni-configuration *valid-cni-config*))
+         (result (gr8s::routed-cni-result
+                  configuration context "gr-test"
+                  '("10.42.0.1" "fd42::1") "169.254.1.1"))
+         (ips (gethash "ips" result))
+         (routes (gethash "routes" result)))
+    (is (= 2 (length ips)))
+    (is (string= "10.42.0.1/32" (gethash "address" (aref ips 0))))
+    (is (string= "169.254.1.1" (gethash "gateway" (aref ips 0))))
+    (is (string= "fd42::1/128" (gethash "address" (aref ips 1))))
+    (is (string= "fe80::1" (gethash "gateway" (aref ips 1))))
+    (is (= 1 (gethash "interface" (aref ips 0))))
+    (is (= 1 (gethash "interface" (aref ips 1))))
+    (is (= 2 (length routes)))
+    (is (string= "0.0.0.0/0" (gethash "dst" (aref routes 0))))
+    (is (string= "169.254.1.1" (gethash "gw" (aref routes 0))))
+    (is (string= "::/0" (gethash "dst" (aref routes 1))))
+    (is (string= "fe80::1" (gethash "gw" (aref routes 1))))))

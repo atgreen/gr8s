@@ -586,6 +586,14 @@
                  :cluster-pod-cidr "10.88.0.0/16" :node-pod-cidr cidr
                  :dns-address "169.254.1.1" :mtu 1450 :vni 42))
 
+(defun dual-node-network-for-test ()
+  (make-instance 'gr8s.node.v1::node-network-config
+                 :cluster-pod-cidr "10.88.0.0/16"
+                 :node-pod-cidr "10.88.8.0/24"
+                 :cluster-pod-cidrs '("10.88.0.0/16" "fd88::/48")
+                 :node-pod-cidrs '("10.88.8.0/24" "fd88:0:0:8::/64")
+                 :dns-address "169.254.1.1" :mtu 1450 :vni 42))
+
 (test assigned-network-and-ipam-restore-before-agent-reconciliation
   (with-temporary-store (store path)
     (assert store)
@@ -608,6 +616,25 @@
       (is (= #o600 (logand #o777 (sb-posix:stat-mode
                                  (sb-posix:stat
                                   (gr8s::node-runtime-network-path runtime)))))))))
+
+(test dual-node-network-opens-and-restores-dual-family-ipam
+  (with-temporary-store (store path)
+    (assert store)
+    (let* ((state (merge-pathnames "dual-network-agent/" path))
+           (runtime (gr8s::make-node-runtime state (make-fake-runtime) nil))
+           (network (gr8s::node-network-object (dual-node-network-for-test))))
+      (is (equal '("10.88.0.0/16" "fd88::/48")
+                 (coerce (gethash "clusterPodCIDRs" network) 'list)))
+      (is (equal '("10.88.8.0/24" "fd88:0:0:8::/64")
+                 (coerce (gethash "nodePodCIDRs" network) 'list)))
+      (gr8s::configure-node-runtime-network runtime network)
+      (is (equal '("10.88.8.1" "fd88:0:0:8::1")
+                 (gr8s::allocate-pod-addresses
+                  (gr8s::node-runtime-ipam runtime) "sandbox-a" "eth0")))
+      (let ((restored (gr8s::make-node-runtime state (make-fake-runtime) nil)))
+        (is (equal '("10.88.8.1" "fd88:0:0:8::1")
+                   (gr8s::check-pod-addresses
+                    (gr8s::node-runtime-ipam restored) "sandbox-a" "eth0")))))))
 
 (test managed-agent-refuses-cni-before-network-assignment
   (with-temporary-store (store path)

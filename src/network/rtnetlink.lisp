@@ -376,55 +376,72 @@
                   (loop for shift from 24 downto 0 by 8
                         collect (ldb (byte 8 shift) integer)))))
 
+(defun network-address-wire-values (address)
+  "Return ADDRESS's rtnetlink family, network-order bytes, and address width."
+  (if (find #\: address)
+      (values 10 (0conf:parse-ipv6 address) 128)
+      (values 2 (ipv4-network-octets address) 32)))
+
 (defun add-network-address (name address prefix)
   "Assign ADDRESS/PREFIX to the link NAME (RTM_NEWADDR). Idempotent: an
    already-present address (EEXIST) is accepted. Signals INVALID-CNI on a prefix
    outside 0..32."
-  (unless (<= 0 prefix 32) (invalid-cni "invalid IPv4 prefix ~A" prefix))
-  (handler-case
-      (call-rtnetlink
-       20 #x600 ; RTM_NEWADDR, CREATE | EXCL
-       (netlink-octets
-        (vector 2 prefix 0 0) ; AF_INET, prefix, flags, scope
-        (netlink-integer (cni-interface-index name) 4)
-        (netlink-attribute 1 (ipv4-network-octets address)) ; IFA_ADDRESS
-        (netlink-attribute 2 (ipv4-network-octets address)))) ; IFA_LOCAL
-    (rtnetlink-error (condition)
-      (unless (= 17 (rtnetlink-error-errno condition)) (error condition)))))
+  (multiple-value-bind (family bytes bits) (network-address-wire-values address)
+    (unless (<= 0 prefix bits) (invalid-cni "invalid address prefix ~A" prefix))
+    (handler-case
+        (call-rtnetlink
+         20 #x600 ; RTM_NEWADDR, CREATE | EXCL
+         (netlink-octets
+          (vector family prefix (if (= family 10) 2 0) 0)
+          (netlink-integer (cni-interface-index name) 4)
+          (netlink-attribute 1 bytes) ; IFA_ADDRESS
+          (netlink-attribute 2 bytes))) ; IFA_LOCAL
+      (rtnetlink-error (condition)
+        (unless (= 17 (rtnetlink-error-errno condition)) (error condition))))))
 
 (defun replace-network-route (destination prefix name &key gateway source)
   "Install or replace the main-table route to DESTINATION/PREFIX out of the link
    NAME (RTM_NEWROUTE, NLM_F_CREATE|NLM_F_REPLACE) as a static unicast route,
    optionally via GATEWAY and with preferred SOURCE. Signals INVALID-CNI on a
    prefix outside 0..32."
-  (unless (<= 0 prefix 32) (invalid-cni "invalid route prefix ~A" prefix))
-  (call-rtnetlink
-   24 #x500 ; RTM_NEWROUTE, CREATE | REPLACE
-   (netlink-octets
-    (vector 2 prefix 0 0 254 4 (if gateway 0 253) 1) ; main, static, unicast
-    (netlink-integer 0 4)
-    (netlink-attribute 1 (ipv4-network-octets destination))
-    (netlink-attribute 4 (netlink-integer (cni-interface-index name) 4))
-    (if gateway (netlink-attribute 5 (ipv4-network-octets gateway)) #())
-    (if source (netlink-attribute 7 (ipv4-network-octets source)) #()))))
+  (multiple-value-bind (family bytes bits) (network-address-wire-values destination)
+    (unless (<= 0 prefix bits) (invalid-cni "invalid route prefix ~A" prefix))
+    (flet ((same-family-bytes (value)
+             (when value
+               (multiple-value-bind (other-family other-bytes)
+                   (network-address-wire-values value)
+                 (unless (= family other-family)
+                   (invalid-cni "route address families do not match"))
+                 other-bytes))))
+      (call-rtnetlink
+       24 #x500 ; RTM_NEWROUTE, CREATE | REPLACE
+       (netlink-octets
+        (vector family prefix 0 0 254 4 (if gateway 0 253) 1)
+        (netlink-integer 0 4)
+        (netlink-attribute 1 bytes)
+        (netlink-attribute 4 (netlink-integer (cni-interface-index name) 4))
+        (if gateway (netlink-attribute 5 (same-family-bytes gateway)) #())
+        (if source (netlink-attribute 7 (same-family-bytes source)) #()))))))
 
 (defun remove-network-route (destination prefix name)
   "Delete the main-table route to DESTINATION/PREFIX through NAME, accepting absence."
-  (unless (<= 0 prefix 32) (invalid-cni "invalid route prefix ~A" prefix))
-  (handler-case
-      (call-rtnetlink
-       25 0 ; RTM_DELROUTE
-       (netlink-octets
-        (vector 2 prefix 0 0 254 4 0 1)
-        (netlink-integer 0 4)
-        (netlink-attribute 1 (ipv4-network-octets destination))
-        (netlink-attribute 4 (netlink-integer (cni-interface-index name) 4))))
-    (rtnetlink-error (condition)
-      (unless (= 3 (rtnetlink-error-errno condition)) ; ESRCH
-        (error condition)))))
+  (multiple-value-bind (family bytes bits) (network-address-wire-values destination)
+    (unless (<= 0 prefix bits) (invalid-cni "invalid route prefix ~A" prefix))
+    (handler-case
+        (call-rtnetlink
+         25 0 ; RTM_DELROUTE
+         (netlink-octets
+          (vector family prefix 0 0 254 4 0 1)
+          (netlink-integer 0 4)
+          (netlink-attribute 1 bytes)
+          (netlink-attribute 4 (netlink-integer (cni-interface-index name) 4))))
+      (rtnetlink-error (condition)
+        (unless (= 3 (rtnetlink-error-errno condition)) ; ESRCH
+          (error condition))))))
 
 (defparameter +node-gateway-interface+ "gr8s-gateway")
 (defparameter +node-gateway-address+ "169.254.1.1")
+(defparameter +node-gateway-ipv6-address+ "fe80::1")
 
 (defun node-gateway-owner (address)
   "Return the stable ownership tag for the node-local gateway ADDRESS."
@@ -443,7 +460,9 @@ An untagged matching link is recoverable after a crash during creation."
 (defun ensure-node-gateway (&optional (address +node-gateway-address+))
   "Ensure one owned, up dummy interface carries the node gateway /32.
 Refuse foreign links; concurrent endpoint ADD requests share this interface."
-  (let ((name +node-gateway-interface+) (owner (node-gateway-owner address)))
+  (let* ((addresses (if (stringp address) (list address) address))
+         (primary (first addresses))
+         (name +node-gateway-interface+) (owner (node-gateway-owner primary)))
     (when (zerop (native-interface-index name))
       (handler-case
           (call-rtnetlink
@@ -456,10 +475,11 @@ Refuse foreign links; concurrent endpoint ADD requests share this interface."
         (rtnetlink-error (condition)
           ;; Another CNI ADD may have created the same node-local link.
           (unless (= 17 (rtnetlink-error-errno condition)) (error condition)))))
-    (unless (node-gateway-owned-or-adoptable-p address)
+    (unless (node-gateway-owned-or-adoptable-p primary)
       (invalid-cni "node gateway interface is owned by another network"))
     (set-network-link-owner name owner)
-    (add-network-address name address 32)
+    (dolist (item addresses)
+      (add-network-address name item (if (find #\: item) 128 32)))
     (set-network-link-up name)
     name))
 
@@ -472,25 +492,30 @@ Refuse foreign links; concurrent endpoint ADD requests share this interface."
   nil)
 
 (defun remove-network-address (name address prefix)
-  "Delete an IPv4 address from NAME, accepting an already absent address."
-  (handler-case
-      (call-rtnetlink
-       21 0
-       (netlink-octets
-        (vector 2 prefix 0 0) (netlink-integer (cni-interface-index name) 4)
-        (netlink-attribute 1 (ipv4-network-octets address))
-        (netlink-attribute 2 (ipv4-network-octets address))))
-    (rtnetlink-error (condition)
-      (unless (= 99 (rtnetlink-error-errno condition)) (error condition)))))
+  "Delete an IP address from NAME, accepting an already absent address."
+  (multiple-value-bind (family bytes bits) (network-address-wire-values address)
+    (unless (<= 0 prefix bits) (invalid-cni "invalid address prefix ~A" prefix))
+    (handler-case
+        (call-rtnetlink
+         21 0
+         (netlink-octets
+          (vector family prefix 0 0) (netlink-integer (cni-interface-index name) 4)
+          (netlink-attribute 1 bytes)
+          (netlink-attribute 2 bytes)))
+      (rtnetlink-error (condition)
+        (unless (= 99 (rtnetlink-error-errno condition)) (error condition))))))
 
 (defun network-address-present-p (name address prefix)
-  "Check an exact IPv4 address/prefix assignment through rtnetlink."
-  (let ((index (cni-interface-index name)) (bytes (ipv4-network-octets address)))
-    (loop for message in (call-rtnetlink 22 #x300 (netlink-octets #(2 0 0 0) (netlink-integer 0 4)))
-          thereis (and (>= (length message) 24) (= 20 (netlink-read-integer message 4 2))
-                       (= 2 (aref message 16)) (= prefix (aref message 17))
-                       (= index (netlink-read-integer message 20 4))
-                       (equalp bytes (gethash 2 (netlink-attributes message 24)))))))
+  "Check an exact IP address/prefix assignment through rtnetlink."
+  (multiple-value-bind (family bytes) (network-address-wire-values address)
+    (let ((index (cni-interface-index name)))
+      (loop for message in (call-rtnetlink 22 #x300
+                                          (netlink-octets (vector family 0 0 0)
+                                                           (netlink-integer 0 4)))
+            thereis (and (>= (length message) 24) (= 20 (netlink-read-integer message 4 2))
+                         (= family (aref message 16)) (= prefix (aref message 17))
+                         (= index (netlink-read-integer message 20 4))
+                         (equalp bytes (gethash 2 (netlink-attributes message 24))))))))
 
 (defun netlink-neighbor-message (family interface state flags)
   "Encode Linux ndmsg fields for a neighbor or VXLAN FDB transaction."
@@ -499,37 +524,52 @@ Refuse foreign links; concurrent endpoint ADD requests share this interface."
                   (netlink-integer state 2) (vector flags 1)))
 
 (defun replace-permanent-network-neighbor (interface address mac)
-  "Install an IPv4 neighbor that survives ARP cache aging on INTERFACE."
-  (call-rtnetlink
-   28 #x500
-   (netlink-octets (netlink-neighbor-message 2 interface 128 0)
-                   (netlink-attribute 1 (ipv4-network-octets address))
-                   (netlink-attribute 2 mac))))
+  "Install a neighbor that survives ARP/NDP cache aging on INTERFACE."
+  (multiple-value-bind (family bytes) (network-address-wire-values address)
+    (call-rtnetlink
+     28 #x500
+     (netlink-octets (netlink-neighbor-message family interface 128 0)
+                     (netlink-attribute 1 bytes)
+                     (netlink-attribute 2 mac)))))
 
 (defun permanent-network-neighbor-p (interface address mac)
-  "Check the MAC and NUD_PERMANENT state of an IPv4 neighbor via rtnetlink."
-  (let ((index (cni-interface-index interface)) (bytes (ipv4-network-octets address)))
-    (loop for message in (call-rtnetlink 30 #x300 (netlink-neighbor-message 2 interface 0 0))
-          thereis (and (>= (length message) 28) (= 28 (netlink-read-integer message 4 2))
-                       (= 2 (aref message 16)) (= index (netlink-read-integer message 20 4))
-                       (logtest 128 (netlink-read-integer message 24 2))
-                       (let ((attributes (netlink-attributes message 28)))
-                         (and (equalp bytes (gethash 1 attributes))
-                              (equalp mac (gethash 2 attributes))))))))
+  "Check the MAC and NUD_PERMANENT state of an IP neighbor via rtnetlink."
+  (multiple-value-bind (family bytes) (network-address-wire-values address)
+    (let ((index (cni-interface-index interface)))
+      (loop for message in (call-rtnetlink 30 #x300
+                                          (netlink-neighbor-message family interface 0 0))
+            thereis (and (>= (length message) 28) (= 28 (netlink-read-integer message 4 2))
+                         (= family (aref message 16)) (= index (netlink-read-integer message 20 4))
+                         (logtest 128 (netlink-read-integer message 24 2))
+                         (let ((attributes (netlink-attributes message 28)))
+                           (and (equalp bytes (gethash 1 attributes))
+                                (equalp mac (gethash 2 attributes)))))))))
 
 (defun network-route-present-p (destination prefix interface &key gateway source)
-  "Check the main-table IPv4 route, output interface, gateway and optional source."
-  (let ((index (cni-interface-index interface)) (bytes (ipv4-network-octets destination)))
-    (loop for message in (call-rtnetlink 26 #x300 (netlink-octets #(2 0 0 0 0 0 0 0) (netlink-integer 0 4)))
-          thereis (and (>= (length message) 28) (= 24 (netlink-read-integer message 4 2))
-                       (= 2 (aref message 16)) (= prefix (aref message 17)) (= 254 (aref message 20))
-                       (let ((attributes (netlink-attributes message 28)))
-                         (and (equalp bytes (gethash 1 attributes #(0 0 0 0)))
-                              (equalp (netlink-integer index 4) (gethash 4 attributes))
-                              (equalp (when gateway (ipv4-network-octets gateway))
-                                      (gethash 5 attributes))
-                              (or (not source)
-                                  (equalp (ipv4-network-octets source) (gethash 7 attributes)))))))))
+  "Check a main-table IP route, output interface, gateway and optional source."
+  (multiple-value-bind (family bytes) (network-address-wire-values destination)
+    (flet ((value-bytes (value)
+             (when value
+               (multiple-value-bind (other-family other-bytes)
+                   (network-address-wire-values value)
+                 (and (= family other-family) other-bytes)))))
+      (let ((index (cni-interface-index interface))
+            (zero (make-array (length bytes) :element-type '(unsigned-byte 8)
+                                             :initial-element 0)))
+        (loop for message in (call-rtnetlink
+                              26 #x300
+                              (netlink-octets (vector family 0 0 0 0 0 0 0)
+                                               (netlink-integer 0 4)))
+              thereis (and (>= (length message) 28) (= 24 (netlink-read-integer message 4 2))
+                           (= family (aref message 16)) (= prefix (aref message 17))
+                           (= 254 (aref message 20))
+                           (let ((attributes (netlink-attributes message 28)))
+                             (and (equalp bytes (gethash 1 attributes zero))
+                                  (equalp (netlink-integer index 4) (gethash 4 attributes))
+                                  (equalp (value-bytes gateway) (gethash 5 attributes))
+                                  (or (not source)
+                                      (equalp (value-bytes source)
+                                              (gethash 7 attributes)))))))))))
 
 (defun enable-node-ipv4-forwarding ()
   "Enable IPv4 forwarding by writing 1 to /proc/sys/net/ipv4/ip_forward, skipping
@@ -541,15 +581,37 @@ Refuse foreign links; concurrent endpoint ADD requests share this interface."
         (write-line "1" stream))))
   nil)
 
+(defun enable-node-ipv6-forwarding ()
+  "Enable IPv6 forwarding, skipping the write when it is already on."
+  (let ((path #P"/proc/sys/net/ipv6/conf/all/forwarding"))
+    (unless (string= "1" (string-trim '(#\Space #\Newline #\Tab)
+                                     (uiop:read-file-string path)))
+      (with-open-file (stream path :direction :output :if-exists :overwrite)
+        (write-line "1" stream))))
+  nil)
+
 (defun configure-routed-veth (context address &key (mtu 1450)
-                                              (gateway "169.254.1.1"))
-  "Create a routed /32 Pod endpoint. The caller owns IPAM and BPF lifecycle."
+                                              (gateway +node-gateway-address+))
+  "Create a routed /32 and/or /128 Pod endpoint. The caller owns IPAM and BPF lifecycle."
   (require-cni-context context :network-namespace t)
-  (enable-node-ipv4-forwarding)
-  (let* ((peer (validate-network-interface-name
+  (let* ((addresses (if (stringp address) (list address) address))
+         (gateways (if (stringp gateway)
+                       (mapcar (lambda (item)
+                                 (if (find #\: item)
+                                     +node-gateway-ipv6-address+
+                                     gateway))
+                               addresses)
+                       gateway))
+         (peer (validate-network-interface-name
                 (cni-context-interface-name context)))
          (host (routed-veth-name (cni-context-container-id context) peer))
          (owner (format nil "gr8s:~A/~A" (cni-context-container-id context) peer)))
+    (when (some (lambda (item) (not (find #\: item))) addresses)
+      (enable-node-ipv4-forwarding))
+    (when (some (lambda (item) (find #\: item)) addresses)
+      (enable-node-ipv6-forwarding))
+    (unless (= (length addresses) (length gateways))
+      (invalid-cni "each Pod address requires a family-specific gateway"))
     ;; An existing host endpoint is retained for idempotent ADD and recovery.
     (when (zerop (native-interface-index host))
       (create-routed-veth host peer (cni-context-netns context)
@@ -565,11 +627,15 @@ Refuse foreign links; concurrent endpoint ADD requests share this interface."
     ;; adoption after a crash between NEWLINK and the separate alias updates.
     (set-network-link-owner host owner)
     (set-network-link-mtu host mtu)
-    (ensure-node-gateway gateway)
+    (ensure-node-gateway gateways)
     ;; Migrate an endpoint created by the earlier per-veth gateway layout.
-    (remove-network-address host gateway 32)
+    (loop for item in gateways
+          do (remove-network-address host item (if (find #\: item) 128 32)))
     (set-network-link-up host)
-    (replace-network-route address 32 host :source gateway)
+    (loop for item in addresses
+          for next-gateway in gateways
+          do (replace-network-route item (if (find #\: item) 128 32) host
+                                    :source (unless (find #\: item) next-gateway)))
     (let ((host-mac (gethash 1 (network-link-attributes host))))
       (call-with-cni-network-namespace
        (cni-context-netns context)
@@ -577,9 +643,12 @@ Refuse foreign links; concurrent endpoint ADD requests share this interface."
          (set-network-link-owner peer owner)
          (set-network-link-mtu peer mtu)
          (set-network-link-up "lo")
-         (add-network-address peer address 32)
+         (loop for item in addresses
+               do (add-network-address peer item (if (find #\: item) 128 32)))
          (set-network-link-up peer)
-         (replace-network-route gateway 32 peer)
-         (replace-permanent-network-neighbor peer gateway host-mac)
-         (replace-network-route "0.0.0.0" 0 peer :gateway gateway))))
-    host))
+         (loop for item in gateways
+               do (replace-network-route item (if (find #\: item) 128 32) peer)
+                  (replace-permanent-network-neighbor peer item host-mac)
+                  (replace-network-route (if (find #\: item) "::" "0.0.0.0")
+                                         0 peer :gateway item))))
+    host)))

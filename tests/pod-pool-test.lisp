@@ -122,6 +122,17 @@
                   :underlay-address underlay :dns-address "169.254.1.1" :mtu 1450 :vni 42)
    routes))
 
+(defun dual-pool-test-network ()
+  "Create a canonical dual-family network object for route-ownership tests."
+  (gr8s::node-network-object
+   (make-instance 'gr8s.node.v1::node-network-config
+                  :cluster-pod-cidr "10.80.0.0/12"
+                  :node-pod-cidr "10.80.0.0/20"
+                  :cluster-pod-cidrs '("10.80.0.0/12" "fd80::/48")
+                  :node-pod-cidrs '("10.80.0.0/20" "fd80::/64")
+                  :underlay-address "" :dns-address "169.254.1.1" :mtu 1450 :vni 42)
+   nil))
+
 (defun pool-test-link-attributes (name owner mac kind &optional network)
   "Model Linux link identity attributes, including nested VXLAN parameters."
   (let ((attributes (make-hash-table)))
@@ -184,6 +195,33 @@
         (setf (gethash 20 attributes) (gr8s::netlink-string owner)
               (gethash 1 attributes) #(2 0 0 0 0 99))
         (signals gr8s::cni-error (validate route))))))
+
+(test dual-stack-pod-route-identities-survive-restart
+  (with-temporary-store (store path)
+    (values store)
+    (let* ((node-root (merge-pathnames "node/" path))
+           (network (dual-pool-test-network))
+           (ipam (gr8s::open-node-ipam
+                  (merge-pathnames "ipam/" node-root)
+                  '("10.80.0.0/20" "fd80::/64")))
+           (addresses (gr8s::allocate-pod-addresses ipam "dual-sandbox" "eth0"))
+           (context (gr8s::make-cni-context
+                     :container-id "dual-sandbox" :interface-name "eth0"))
+           (owner (gr8s::routed-cni-owner context)))
+      (gr8s::write-private-text-atomically
+       (merge-pathnames "network.json" node-root)
+       (com.inuoe.jzon:stringify network))
+      (let ((identities (gr8s::persisted-node-route-identities node-root)))
+        (is (= 2 (length identities)))
+        (is (equal '("10.80.0.1/32" "fd80::1/128")
+                   (mapcar (lambda (identity) (getf identity :cidr))
+                           (reverse identities))))
+        (is (every (lambda (identity)
+                     (and (string= owner (getf identity :owner))
+                          (string= (gr8s::routed-cni-host-name context)
+                                   (getf identity :name))))
+                   identities))
+        (is (equal addresses '("10.80.0.1" "fd80::1")))))))
 
 ;; podster-uqb.121: this ran during CNI DEL or ADD, 12 times in run 13, and ended a node
 ;; session each time. Once that session did not end for 5 minutes.

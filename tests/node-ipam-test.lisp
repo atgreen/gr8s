@@ -29,6 +29,43 @@
       (when (probe-file directory)
         (uiop:delete-directory-tree directory :validate t)))))
 
+(test node-ipam-dual-family-allocations-are-atomic-and-survive-restart
+  (let ((directory
+          (merge-pathnames
+           (format nil "gr8s-node-ipam-dual-~36R/" (random (expt 36 8)))
+           (uiop:temporary-directory)))
+        (cidrs '("10.42.0.0/29" "fd42::/125")))
+    (unwind-protect
+         (let* ((ipam (gr8s::open-node-ipam directory cidrs))
+                (first (gr8s::allocate-pod-addresses ipam "sandbox-a" "eth0"))
+                (second (gr8s::allocate-pod-addresses ipam "sandbox-b" "eth0")))
+           (is (equal '("10.42.0.1" "fd42::1") first))
+           (is (equal '("10.42.0.2" "fd42::2") second))
+           (is (equal first
+                      (gr8s::allocate-pod-addresses
+                       ipam "sandbox-a" "eth0")))
+           (let ((reopened (gr8s::open-node-ipam directory cidrs)))
+             (is (equal first
+                        (gr8s::check-pod-addresses
+                         reopened "sandbox-a" "eth0")))
+             (is (equal second
+                        (gr8s::check-pod-addresses
+                         reopened "sandbox-b" "eth0")))
+             ;; Singular callers retain the primary-family compatibility view.
+             (is (string= "10.42.0.1"
+                          (gr8s::check-pod-address
+                           reopened "sandbox-a" "eth0")))
+             (is (null (gr8s::release-pod-address
+                        reopened "sandbox-a" "eth0"))))
+           (let ((reopened (gr8s::open-node-ipam directory cidrs)))
+             (signals gr8s::cni-error
+               (gr8s::check-pod-addresses reopened "sandbox-a" "eth0"))
+             (is (equal '("10.42.0.1" "fd42::1")
+                        (gr8s::allocate-pod-addresses
+                         reopened "sandbox-c" "eth0")))))
+      (when (probe-file directory)
+        (uiop:delete-directory-tree directory :validate t)))))
+
 (test node-ipam-release-is-persistent-and-unknown-release-succeeds
   (let ((directory
           (merge-pathnames

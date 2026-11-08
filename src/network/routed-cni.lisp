@@ -31,26 +31,48 @@
                     (cni-context-interface-name context)))
 
 (defun check-routed-cni-link (context address)
-  "Verify the assigned Pod /32, host route, node gateway, and static Pod neighbor."
+  "Verify assigned Pod host routes, node gateways, and static Pod neighbors."
   (let* ((host (routed-cni-host-name context))
          (owner (routed-cni-owner context))
-         (gateway +node-gateway-address+))
+         (addresses (if (stringp address) (list address) address))
+         (gateways (mapcar (lambda (item)
+                             (if (find #\: item)
+                                 +node-gateway-ipv6-address+
+                                 +node-gateway-address+))
+                           addresses)))
     (unless (and (network-link-owned-p host owner)
-                 (network-address-present-p +node-gateway-interface+ gateway 32)
-                 (node-gateway-owned-or-adoptable-p gateway)
-                 (not (network-address-present-p host gateway 32))
-                 (network-route-present-p address 32 host :source gateway))
+                 (node-gateway-owned-or-adoptable-p (first gateways))
+                 (loop for item in addresses
+                       for gateway in gateways
+                       always (and
+                               (network-address-present-p
+                                +node-gateway-interface+ gateway
+                                (if (find #\: gateway) 128 32))
+                               (not (network-address-present-p
+                                     host gateway (if (find #\: gateway) 128 32)))
+                               (network-route-present-p
+                                item (if (find #\: item) 128 32) host
+                                :source (unless (find #\: item) gateway)))))
       (invalid-cni "routed host endpoint or node gateway is missing or misconfigured"))
     (let ((mac (gethash 1 (network-link-attributes host))))
       (call-with-cni-network-namespace
        (cni-context-netns context)
        (lambda ()
          (let ((peer (cni-context-interface-name context)))
-           (unless (and (network-link-owned-p peer owner)
-                        (network-address-present-p peer address 32)
-                        (network-route-present-p gateway 32 peer)
-                        (network-route-present-p "0.0.0.0" 0 peer :gateway gateway)
-                        (permanent-network-neighbor-p peer gateway mac))
+           (unless (and
+                    (network-link-owned-p peer owner)
+                    (loop for item in addresses
+                          for gateway in gateways
+                          always (and
+                                  (network-address-present-p
+                                   peer item (if (find #\: item) 128 32))
+                                  (network-route-present-p
+                                   gateway (if (find #\: gateway) 128 32) peer)
+                                  (network-route-present-p
+                                   (if (find #\: item) "::" "0.0.0.0") 0 peer
+                                   :gateway gateway)
+                                  (permanent-network-neighbor-p
+                                   peer gateway mac))))
              (invalid-cni "routed Pod endpoint, routes or permanent gateway neighbor is misconfigured"))))))))
 
 (defun remove-routed-cni-link (context)
@@ -70,21 +92,36 @@
     (rtnetlink-error (condition)
       (unless (= 19 (rtnetlink-error-errno condition)) (error condition)))))
 
-(defun routed-cni-result (configuration context host address dns-address)
+(defun routed-cni-result (configuration context host addresses dns-address)
   "Build the CNI ADD result object: the HOST and Pod interfaces, the Pod's
-   ADDRESS as a /32 with gateway 169.254.1.1, a default route via that gateway,
-   and DNS-ADDRESS as the sole nameserver."
-  (json-object
-   "cniVersion" (cni-configuration-version configuration)
-   "interfaces"
-   (vector (json-object "name" host)
-           (json-object "name" (cni-context-interface-name context)
-                        "sandbox" (cni-context-netns context)))
-   "ips" (vector (json-object "interface" 1
-                              "address" (concatenate 'string address "/32")
-                              "gateway" "169.254.1.1"))
-   "routes" (vector (json-object "dst" "0.0.0.0/0" "gw" "169.254.1.1"))
-   "dns" (json-object "nameservers" (vector dns-address))))
+   addresses as /32 or /128 host routes with family-specific link-local gateways
+   and default routes, and DNS-ADDRESS as the sole nameserver."
+  (let ((addresses (if (stringp addresses) (list addresses) addresses)))
+    (json-object
+     "cniVersion" (cni-configuration-version configuration)
+     "interfaces"
+     (vector (json-object "name" host)
+             (json-object "name" (cni-context-interface-name context)
+                          "sandbox" (cni-context-netns context)))
+     "ips"
+     (coerce
+      (mapcar (lambda (address)
+                (let ((ipv6-p (not (null (find #\: address)))))
+                  (json-object "interface" 1
+                               "address" (format nil "~A/~D" address
+                                                 (if ipv6-p 128 32))
+                               "gateway" (if ipv6-p "fe80::1" "169.254.1.1"))))
+              addresses)
+      'vector)
+     "routes"
+     (coerce
+      (mapcar (lambda (address)
+                (if (find #\: address)
+                    (json-object "dst" "::/0" "gw" "fe80::1")
+                    (json-object "dst" "0.0.0.0/0" "gw" "169.254.1.1")))
+              addresses)
+      'vector)
+     "dns" (json-object "nameservers" (vector dns-address)))))
 
 (defun make-routed-cni-operations
     (ipam &key (mtu 1450) (dns-address +dns-pod-server-address+)
@@ -104,23 +141,23 @@
            (routed-cni-host-name context)))
    :add
    (lambda (configuration context map-path link-path)
-     (let* ((address (allocate-pod-address ipam
-                       (cni-context-container-id context)
-                       (cni-context-interface-name context)))
-            (host (funcall install-link context address)))
+     (let* ((addresses (allocate-pod-addresses ipam
+                         (cni-context-container-id context)
+                         (cni-context-interface-name context)))
+            (host (funcall install-link context addresses)))
        ;; Keep the durable lease on failure. DEL must remove links and policy
        ;; before releasing an address, including after a crash during ADD.
-       (setf (cni-configuration-endpoint-address configuration) address)
+       (setf (cni-configuration-endpoint-address configuration) (first addresses))
        (funcall (cni-operations-add policy)
                 configuration context map-path link-path)
        (setf (cni-configuration-previous-result configuration)
-             (routed-cni-result configuration context host address dns-address))))
+             (routed-cni-result configuration context host addresses dns-address))))
    :check
    (lambda (configuration context map-path link-path)
-     (let ((address (check-pod-address ipam (cni-context-container-id context)
-                                      (cni-context-interface-name context))))
-       (setf (cni-configuration-endpoint-address configuration) address)
-       (funcall check-link context address))
+     (let ((addresses (check-pod-addresses ipam (cni-context-container-id context)
+                                          (cni-context-interface-name context))))
+       (setf (cni-configuration-endpoint-address configuration) (first addresses))
+       (funcall check-link context addresses))
      (funcall (cni-operations-check policy)
               configuration context map-path link-path))
    :delete

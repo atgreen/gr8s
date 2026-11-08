@@ -99,22 +99,46 @@
         (when network
           (validate-node-network-object network)
           (when ipam
-            (unless (and (eql 1 (gethash "version" ipam))
-                         (string= (gethash "cidr" ipam "") (gethash "nodePodCIDR" network)))
-              (invalid-cni "durable IPAM does not match the node network journal"))
-            (loop for allocation across (gethash "allocations" ipam #())
-                  for context = (make-cni-context
-                                 :container-id (required-cni-string allocation "sandboxID")
-                                 :interface-name (required-cni-string allocation "interfaceName"))
-                  for address = (required-cni-string allocation "address")
-                  for owner = (routed-cni-owner context)
-                  do (unless (and (safe-cni-container-id-p (cni-context-container-id context))
-                                  (ipv4-prefixes-overlap-p (format nil "~A/32" address)
-                                                           (gethash "nodePodCIDR" network)))
-                       (invalid-cni "invalid durable Pod allocation in route ownership journal"))
-                     (push (list :cidr (format nil "~A/32" address)
-                                 :name (routed-cni-host-name context) :owner owner :kind "veth"
-                                 :mac (routed-veth-mac owner "host")) result)))
+            (let* ((version (gethash "version" ipam))
+                   (ipam-cidrs
+                     (cond ((eql version 1) (list (gethash "cidr" ipam "")))
+                           ((eql version 2)
+                            (let ((value (gethash "cidrs" ipam)))
+                              (and (vectorp value) (coerce value 'list))))))
+                   (network-cidrs
+                     (persisted-node-network-cidrs
+                      network "nodePodCIDRs" "nodePodCIDR")))
+              (unless (equal ipam-cidrs network-cidrs)
+                (invalid-cni "durable IPAM does not match the node network journal"))
+              (loop for allocation across (gethash "allocations" ipam #())
+                    for context = (make-cni-context
+                                   :container-id (required-cni-string allocation "sandboxID")
+                                   :interface-name (required-cni-string allocation "interfaceName"))
+                    for addresses = (if (eql 1 (gethash "version" ipam))
+                                        (list (required-cni-string allocation "address"))
+                                        (let ((value (gethash "addresses" allocation)))
+                                          (unless (and (vectorp value)
+                                                       (every #'stringp value))
+                                            (invalid-cni "invalid durable Pod allocation"))
+                                          (coerce value 'list)))
+                    for owner = (routed-cni-owner context)
+                    do (unless (and
+                                (safe-cni-container-id-p (cni-context-container-id context))
+                                (= (length addresses) (length network-cidrs))
+                                (every (lambda (address cidr)
+                                         (pod-cidrs-overlap-p
+                                          (format nil "~A/~D" address
+                                                  (if (find #\: address) 128 32))
+                                          cidr))
+                                       addresses network-cidrs))
+                         (invalid-cni "invalid durable Pod allocation in route ownership journal"))
+                       (dolist (address addresses)
+                         (push (list :cidr (format nil "~A/~D" address
+                                                  (if (find #\: address) 128 32))
+                                     :name (routed-cni-host-name context)
+                                     :owner owner :kind "veth"
+                                     :mac (routed-veth-mac owner "host"))
+                               result)))))
           (unless (string= "" (gethash "underlayAddress" network))
             (if (string= "wireguard" (gethash "overlayBackend" network "vxlan"))
                 (dolist (cidr (cons (format nil "~A/32"

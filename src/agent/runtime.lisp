@@ -236,11 +236,19 @@ until they all succeed so a partial apply can be retried."
   "Build the persisted node-network object (version 1) from the node-protocol NETWORK
 message and its ROUTES. This is the on-disk and in-memory shape the rest of this file
 validates and reconciles against."
-  (let ((backend (slot-value network 'gr8s.node.v1::overlay-backend)))
+  (let* ((backend (slot-value network 'gr8s.node.v1::overlay-backend))
+         (cluster-cidrs
+           (or (slot-value network 'gr8s.node.v1::cluster-pod-cidrs)
+               (list (slot-value network 'gr8s.node.v1::cluster-pod-cidr))))
+         (node-cidrs
+           (or (slot-value network 'gr8s.node.v1::node-pod-cidrs)
+               (list (slot-value network 'gr8s.node.v1::node-pod-cidr)))))
     (json-object
      "version" 1
-     "clusterPodCIDR" (slot-value network 'gr8s.node.v1::cluster-pod-cidr)
-     "nodePodCIDR" (slot-value network 'gr8s.node.v1::node-pod-cidr)
+     "clusterPodCIDR" (first cluster-cidrs)
+     "clusterPodCIDRs" (coerce cluster-cidrs 'vector)
+     "nodePodCIDR" (first node-cidrs)
+     "nodePodCIDRs" (coerce node-cidrs 'vector)
      "dnsAddress" (slot-value network 'gr8s.node.v1::dns-address)
      "vni" (slot-value network 'gr8s.node.v1::vni)
      "mtu" (slot-value network 'gr8s.node.v1::mtu)
@@ -268,6 +276,48 @@ validates and reconciles against."
            object))
        routes)
       'vector))))
+
+(defun persisted-node-network-cidrs (network plural singular)
+  "Return NETWORK's ordered CIDRs, falling back to its legacy singular field."
+  (let ((values (gethash plural network)))
+    (if values
+        (progn
+          (unless (and (vectorp values) (plusp (length values))
+                       (every (lambda (value)
+                                (and (stringp value) (plusp (length value))))
+                              values))
+            (invalid-cni "node network ~A must be a non-empty string array" plural))
+          (coerce values 'list))
+        (list (required-cni-string network singular)))))
+
+(defun validate-node-network-cidr-pairs (network)
+  "Validate ordered cluster/node Pod CIDRs and return the node CIDRs."
+  (let ((cluster-cidrs
+          (persisted-node-network-cidrs network "clusterPodCIDRs" "clusterPodCIDR"))
+        (node-cidrs
+          (persisted-node-network-cidrs network "nodePodCIDRs" "nodePodCIDR")))
+    (unless (= (length cluster-cidrs) (length node-cidrs))
+      (invalid-cni "cluster and node Pod CIDR families must have the same length"))
+    (let ((families nil))
+      (loop for cluster-cidr in cluster-cidrs
+            for node-cidr in node-cidrs
+            do (multiple-value-bind (cluster-family cluster-address cluster-prefix cluster-bits)
+                   (parse-pod-cidr cluster-cidr)
+                 (multiple-value-bind (node-family node-address node-prefix node-bits)
+                     (parse-pod-cidr node-cidr)
+                   (unless (and (eq cluster-family node-family)
+                                (= cluster-bits node-bits)
+                                (not (member node-family families))
+                                (<= cluster-prefix node-prefix)
+                                (<= node-prefix (- node-bits 2))
+                                (= (ash cluster-address (- cluster-prefix cluster-bits))
+                                   (ash node-address (- cluster-prefix node-bits)))
+                                (zerop (logand node-address
+                                               (1- (ash 1 (- node-bits node-prefix))))))
+                     (invalid-cni "node Pod CIDR ~A is not a canonical subnet of ~A"
+                                  node-cidr cluster-cidr))
+                   (push node-family families)))))
+    node-cidrs))
 
 (defun validate-network-cidr (cidr)
   "Return (values ADDRESS PREFIX) for CIDR, a canonical IPv4 CIDR with a 0--30 prefix and
@@ -339,9 +389,7 @@ routes, the DNS address equal to the link-local Pod gateway, and MTU and VNI in 
 Returns NETWORK; signals INVALID-CNI on any violation."
   (unless (and (hash-table-p network) (eql 1 (gethash "version" network)))
     (invalid-cni "invalid persisted node network format"))
-  (unless (network-cidr-subnet-p (required-cni-string network "nodePodCIDR")
-                                 (required-cni-string network "clusterPodCIDR"))
-    (invalid-cni "node Pod CIDR must be a subnet of the cluster Pod CIDR"))
+  (validate-node-network-cidr-pairs network)
   (let ((address (gethash "underlayAddress" network "")))
     (unless (equal address "")
       (handler-case (canonical-node-underlay-address address)
@@ -382,14 +430,17 @@ conflicting network."
   (bt:with-lock-held ((node-runtime-network-lock node-runtime))
     (let ((existing (node-runtime-network node-runtime)))
       (when (and existing
-                 (not (string= (gethash "nodePodCIDR" existing)
-                               (gethash "nodePodCIDR" network))))
+                 (not (equal (persisted-node-network-cidrs
+                              existing "nodePodCIDRs" "nodePodCIDR")
+                             (persisted-node-network-cidrs
+                              network "nodePodCIDRs" "nodePodCIDR"))))
         (invalid-cni "refusing to change the agent's durable Pod CIDR")))
     (let ((ipam
             (or (node-runtime-ipam node-runtime)
                 (open-node-ipam
                  (merge-pathnames "ipam/" (node-runtime-state-directory node-runtime))
-                 (gethash "nodePodCIDR" network)))))
+                 (persisted-node-network-cidrs
+                  network "nodePodCIDRs" "nodePodCIDR")))))
       (let ((previous (remove nil (list
                                     (node-runtime-network node-runtime)
                                     (read-node-network-file (node-runtime-network-path node-runtime))
@@ -907,8 +958,8 @@ exists."
       (let ((allocations
               (bt:with-lock-held ((node-ipam-lock ipam))
                 (loop for key being the hash-keys of (node-ipam-allocations ipam)
-                        using (hash-value address)
-                      collect (list (car key) (cdr key) address))))
+                        using (hash-value addresses)
+                      collect (list (car key) (cdr key) (first addresses)))))
             (root (managed-containerd-bpf-directory manager)))
         (loop for (sandbox interface address) in allocations
               collect (handler-case
@@ -1099,8 +1150,8 @@ A no-op unless the agent is managed with a store and known endpoints."
                    (when ipam
                      (bt:with-lock-held ((node-ipam-lock ipam))
                        (loop for key being the hash-keys of (node-ipam-allocations ipam)
-                               using (hash-value address)
-                             collect (list (car key) (cdr key) address))))
+                               using (hash-value addresses)
+                             collect (list (car key) (cdr key) (first addresses)))))
                    (node-runtime-external-cni-endpoint-list node-runtime))))
         ;; Same-node Pod->Pod delivery table (epic podster-pnd): every local Pod
         ;; gets the node-wide {dest IP -> ifindex/MAC} table so the egress guard
