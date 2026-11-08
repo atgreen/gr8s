@@ -120,6 +120,33 @@
                  (gr8s.image-distribution::tracker-lookup
                   tracker digest "node-c")))))))
 
+(test image-tracker-lookup-applies-ranking-and-bounds-the-view
+  (multiple-value-bind (digest torrent) (tracker-test-torrent)
+    (let ((tracker (gr8s.image-distribution::make-image-tracker)))
+      (multiple-value-bind (status token)
+          (gr8s.image-distribution::tracker-acquire-origin tracker digest "node-0")
+        (declare (ignore status))
+        (gr8s.image-distribution::tracker-publish-swarm
+         tracker digest "node-0" token
+         (gr8s.image-distribution::blob-torrent-metainfo torrent)
+         "10.0.0.1" 6881 (bt-octets "-GR8001-000000000000")))
+      (loop for index from 1 to 12
+            do (gr8s.image-distribution::tracker-announce-peer
+                tracker digest (format nil "node-~D" index)
+                (format nil "10.0.0.~D" (1+ index)) 6881
+                (bt-octets (format nil "-GR8001-~12,'0D" index))))
+      (let* ((view (gr8s.image-distribution::tracker-lookup
+                    tracker digest "requester" :maximum-peers 3
+                    :peer-ranker
+                    (lambda (peers)
+                      (sort peers #'string>
+                            :key #'gr8s.image-distribution::tracker-peer-node-name))))
+             (peers (gr8s.image-distribution::tracker-view-peers view)))
+        (is (= 3 (length peers)))
+        (is (string= "node-9"
+                     (gr8s.image-distribution::tracker-peer-node-name
+                      (first peers))))))))
+
 (test image-tracker-rejects-metadata-for-another-oci-digest
   (multiple-value-bind (digest torrent) (tracker-test-torrent)
     (let ((tracker (gr8s.image-distribution::make-image-tracker)))

@@ -90,13 +90,22 @@
           collect (list "firewall-cmd" (format nil "~A-port=~D/tcp" verb port))))
 
 (defun ensure-control-plane-firewall
-    (node-port &key kubelet-port (runner #'host-firewall-run))
+    (node-port &key kubelet-port relay-port-start relay-max-channels
+                      (runner #'host-firewall-run))
   "Open routable control-plane TCP listeners in an active firewalld. NODE-PORT
    admits agent enrollment; KUBELET-PORT admits the authenticated kubelet proxy
    used by metrics, logs, exec, and related node APIs. A NIL or zero port is
    disabled. No-op without firewalld; fail-soft. Returns T when rules were
    attempted."
-  (let ((commands (control-plane-firewall-commands "--add" node-port kubelet-port)))
+  (let ((commands
+          (append
+           (control-plane-firewall-commands "--add" node-port kubelet-port)
+           (when (and relay-port-start relay-max-channels)
+             (list
+              (list "firewall-cmd"
+                    (format nil "--add-port=~D-~D/udp"
+                            relay-port-start
+                            (+ relay-port-start (* 2 relay-max-channels) -1))))))))
     (when (and commands (host-firewalld-active-p :runner runner))
       (apply-overlay-firewall-commands
        commands
@@ -126,10 +135,19 @@
      :runner runner)))
 
 (defun remove-control-plane-firewall
-    (node-port &key kubelet-port (runner #'host-firewall-run))
+    (node-port &key kubelet-port relay-port-start relay-max-channels
+                      (runner #'host-firewall-run))
   "Withdraw the TCP listeners opened by ENSURE-CONTROL-PLANE-FIREWALL. No-op
    without firewalld; fail-soft."
-  (let ((commands (control-plane-firewall-commands "--remove" node-port kubelet-port)))
+  (let ((commands
+          (append
+           (control-plane-firewall-commands "--remove" node-port kubelet-port)
+           (when (and relay-port-start relay-max-channels)
+             (list
+              (list "firewall-cmd"
+                    (format nil "--remove-port=~D-~D/udp"
+                            relay-port-start
+                            (+ relay-port-start (* 2 relay-max-channels) -1))))))))
     (when (and commands (host-firewalld-active-p :runner runner))
       (apply-overlay-firewall-commands
        commands

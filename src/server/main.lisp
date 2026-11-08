@@ -96,6 +96,28 @@
         (progn (setf (cdr existing) (append (cdr existing) (list (cdr parsed)))) rules)
         (append rules (list (list (car parsed) (cdr parsed)))))))
 
+(defun parse-wireguard-endpoint (value)
+  "Parse NAME=IPV4:PORT into the authenticated endpoint tuple advertised by an agent."
+  (let* ((equals (position #\= value))
+         (target (and equals (subseq value (1+ equals))))
+         (colon (and target (position #\: target :from-end t))))
+    (unless (and equals (plusp equals) target colon (plusp colon)
+                 (< colon (1- (length target))))
+      (error "WireGuard endpoint must be NAME=IPV4:PORT: ~A" value))
+    (let ((name (subseq value 0 equals))
+          (address (subseq target 0 colon))
+          (port (subseq target (1+ colon))))
+      (unless (dns-label-p name)
+        (error "WireGuard endpoint name must be a lowercase DNS label: ~A" name))
+      (list name (canonical-node-underlay-address address) (parse-port port)))))
+
+(defun add-wireguard-endpoint (endpoints value)
+  "Append parsed VALUE to ENDPOINTS, rejecting ambiguous duplicate names."
+  (let ((endpoint (parse-wireguard-endpoint value)))
+    (when (assoc (first endpoint) endpoints :test #'equal)
+      (error "duplicate WireGuard endpoint name: ~A" (first endpoint)))
+    (append endpoints (list endpoint))))
+
 (defun validate-cni-options (options)
   "Validate the managed-containerd CNI ownership and plugin search paths."
   (unless (member (getf options :cni-mode) '("native" "external") :test #'string=)
@@ -124,6 +146,11 @@
                        :node-port 7443
                        :node-listen "127.0.0.1"
                        :node-address nil
+                       :wireguard-endpoints nil
+                       :wireguard-relay-address nil
+                       :wireguard-relay-listen "0.0.0.0"
+                       :wireguard-relay-port-start 42000
+                       :wireguard-relay-max-channels 1024
                        :node-name "gr8s-local"
                        :disable-agent nil
                        :cluster-pod-cidr +default-cluster-pod-cidr+
@@ -199,6 +226,24 @@
                      ((string= option "--node-address")
                       (setf (getf options :node-address)
                             (canonical-node-underlay-address value)))
+                     ((string= option "--wireguard-endpoint")
+                      (setf (getf options :wireguard-endpoints)
+                            (add-wireguard-endpoint
+                             (getf options :wireguard-endpoints) value)))
+                     ((string= option "--wireguard-relay-address")
+                      (setf (getf options :wireguard-relay-address)
+                            (format-ipv4-integer (parse-ipv4-integer value))))
+                     ((string= option "--wireguard-relay-listen")
+                      (setf (getf options :wireguard-relay-listen)
+                            (format-ipv4-integer (parse-ipv4-integer value))))
+                     ((string= option "--wireguard-relay-port-start")
+                      (setf (getf options :wireguard-relay-port-start)
+                            (parse-port value)))
+                     ((string= option "--wireguard-relay-max-channels")
+                      (let ((count (parse-integer value :junk-allowed nil)))
+                        (unless (plusp count)
+                          (error "WireGuard relay max channels must be positive"))
+                        (setf (getf options :wireguard-relay-max-channels) count)))
                      ((string= option "--node-port")
                       (setf (getf options :node-port) (parse-port value)))
                      ((string= option "--node-name")
@@ -268,6 +313,15 @@
     (unless (eq (null (getf options :image-credential-provider-config))
                 (null (getf options :image-credential-provider-bin-dir)))
       (error "image credential provider config and bin directory must be specified together"))
+    (when (getf options :wireguard-relay-address)
+      (unless (string= "wireguard" (getf options :overlay-backend))
+        (error "WireGuard relay requires --overlay-backend wireguard"))
+      (when (or (getf options :raft-init) (getf options :raft-join))
+        (error "WireGuard relay currently requires a single control-plane owner"))
+      (when (> (+ (getf options :wireguard-relay-port-start)
+                  (* 2 (getf options :wireguard-relay-max-channels)) -1)
+               65535)
+        (error "WireGuard relay UDP port range exceeds 65535")))
     (validate-cni-options options)))
 
 (defun parse-agent-options (arguments)
@@ -293,6 +347,7 @@
                        :cni-mode "native"
                        :cni-conf-dir nil
                        :cni-bin-dirs nil
+                       :wireguard-endpoints nil
                        :dns-forward-rules nil)))
     (loop while arguments
           for option = (first arguments)
@@ -300,6 +355,10 @@
           do (cond
                ((string= option "--node-address")
                 (setf (getf options :node-address) (canonical-node-underlay-address value)))
+               ((string= option "--wireguard-endpoint")
+                (setf (getf options :wireguard-endpoints)
+                      (add-wireguard-endpoint
+                       (getf options :wireguard-endpoints) value)))
                ((string= option "--server")
                 (setf (getf options :server) value))
                ((string= option "--token")
@@ -534,6 +593,67 @@ offline and takes effect the next time the node agent starts."
                (t (error "unknown wireguard rotate-key option: ~A" option))))
     options))
 
+(defun parse-network-options (arguments)
+  "Parse `gr8s network explain NODE PEER [--server URL]'."
+  (unless (string= (first arguments) "explain")
+    (error "unknown network subcommand: ~A" (or (first arguments) "")))
+  (unless (and (second arguments) (third arguments))
+    (error "network explain requires NODE and PEER"))
+  (let ((options (list :command :network-explain
+                       :node (second arguments) :peer (third arguments)
+                       :server "http://127.0.0.1:8080"))
+        (arguments (cdddr arguments)))
+    (unless (and (dns-label-p (getf options :node))
+                 (dns-label-p (getf options :peer)))
+      (error "network explain NODE and PEER must be DNS labels"))
+    (loop while arguments
+          for option = (first arguments)
+          do (cond
+               ((string= option "--server")
+                (setf (getf options :server) (option-value arguments option)
+                      arguments (cddr arguments)))
+               (t (error "unknown network explain option: ~A" option))))
+    options))
+
+(defun print-network-explanation (options &optional (output *standard-output*))
+  "Fetch and print one agent's durable path decision and candidate evidence."
+  (multiple-value-bind (body status)
+      (drakma:http-request
+       (format nil "~A/gr8s/v1/network/explain?node=~A&peer=~A"
+               (string-right-trim "/" (getf options :server))
+               (getf options :node) (getf options :peer))
+       :method :get :proxy nil)
+    (let ((body-text
+            (etypecase body
+              (string body)
+              ((array (unsigned-byte 8) (*))
+               (trivial-utf-8:utf-8-bytes-to-string body)))))
+    (unless (= status 200)
+      (error "network explain failed with HTTP ~D: ~A" status
+             body-text))
+    (let* ((object (com.inuoe.jzon:parse
+                    body-text))
+           (selected (gethash "selected" object)))
+      (format output "Node ~A → peer ~A~%" (getf options :node) (gethash "peerID" object))
+      (when (gethash "destinationPeerID" object)
+        (format output "Topology: destination ~A via ~A (~A)~%"
+                (gethash "destinationPeerID" object)
+                (gethash "nextHopPeerID" object)
+                (gethash "topologyReason" object)))
+      (format output "Selected: ~A (~A:~D), reason: ~A~%"
+              (gethash "name" selected) (gethash "address" selected)
+              (gethash "port" selected) (gethash "reason" object))
+      (loop for candidate across (gethash "candidates" object #())
+            do (format output "  ~A ~A:~D  ~:[unhealthy~;healthy~]  score=~D  handshake-age=~Ds  successes=~D failures=~D~%"
+                       (gethash "name" candidate) (gethash "address" candidate)
+                       (gethash "port" candidate) (gethash "healthy" candidate)
+                       (gethash "score" candidate)
+                       (gethash "handshakeAgeSeconds" candidate)
+                       (gethash "consecutiveSuccesses" candidate)
+                       (gethash "consecutiveFailures" candidate)))))
+    (finish-output output))
+  0)
+
 (defun rotate-wireguard-node-key (options &optional (output *standard-output*))
   "Replace the durable node-local WireGuard identity and print its public key.
 The new identity takes effect when the node agent next starts."
@@ -570,6 +690,8 @@ The new identity takes effect when the node agent next starts."
      (parse-runtime-options (rest arguments)))
     ((string= "wireguard" (first arguments))
      (parse-wireguard-options (rest arguments)))
+    ((string= "network" (first arguments))
+     (parse-network-options (rest arguments)))
     ((string= "doctor" (first arguments))
      (parse-doctor-options (rest arguments)))
     (t (error "unknown command: ~A" (first arguments)))))
@@ -805,6 +927,7 @@ The new identity takes effect when the node agent next starts."
                   (lambda (function)
                     (setf (containerd-runtime-credential-provider-token-function runtime) function)))
                 :wireguard-public-key wireguard-public-key
+                :wireguard-endpoints (getf options :wireguard-endpoints)
                 :ca-certificate-path ca-certificate
                 :certificate-path certificate :private-key-path private-key
                 :underlay-address (getf options :node-address)
@@ -1076,7 +1199,12 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                   :cluster-pod-cidrs (node-pool-cluster-cidrs pool)
                   :node-prefixes (node-pool-prefixes pool)
                   :overlay-backend (getf options :overlay-backend)
-                  :wireguard-listen-port 51820))
+                  :wireguard-listen-port 51820
+                  :wireguard-relay-address (getf options :wireguard-relay-address)
+                  :wireguard-relay-listen (getf options :wireguard-relay-listen)
+                  :wireguard-relay-port-start (getf options :wireguard-relay-port-start)
+                  :wireguard-relay-max-channels
+                  (getf options :wireguard-relay-max-channels)))
            (when ha
              (configure-raft-node-operation-routing
               (ha-control-plane-member ha) node-server))
@@ -1092,7 +1220,13 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
               (when (and (not (getf options :disable-agent))
                          (equal "containerd" (getf options :runtime))
                          (equal "managed" (getf options :containerd-mode)))
-                (getf options :kubelet-port))))
+                (getf options :kubelet-port))
+              :relay-port-start
+              (when (getf options :wireguard-relay-address)
+                (getf options :wireguard-relay-port-start))
+              :relay-max-channels
+              (when (getf options :wireguard-relay-address)
+                (getf options :wireguard-relay-max-channels))))
            (let* ((runtime (make-control-plane-runtime store node-server))
                   (reconciler (make-reconciler store runtime)))
              (unless (getf options :disable-agent)
@@ -1216,7 +1350,13 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
            (when (and (not (getf options :disable-agent))
                       (equal "containerd" (getf options :runtime))
                       (equal "managed" (getf options :containerd-mode)))
-             (getf options :kubelet-port)))))
+             (getf options :kubelet-port))
+           :relay-port-start
+           (when (getf options :wireguard-relay-address)
+             (getf options :wireguard-relay-port-start))
+           :relay-max-channels
+           (when (getf options :wireguard-relay-address)
+             (getf options :wireguard-relay-max-channels)))))
       (when memory-monitor (stop-memory-monitor memory-monitor))))
   0)
 
@@ -1274,6 +1414,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (format t "  kubeconfig   Print or write a cluster kubeconfig~%")
   (format t "  doctor       Diagnose a node's state directory~%")
   (format t "  wireguard rotate-key   Replace this node's WireGuard identity on its next start~%")
+  (format t "  network explain NODE PEER   Explain an agent's selected WireGuard path~%")
   (format t "  version      Print the gr8s version~%")
   (format t "  notices      Print third-party copyright and license notices~%~%")
   (format t "serve options:~%")
@@ -1286,10 +1427,14 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (format t "  --image-credential-provider-{config FILE,bin-dir DIR}~%")
   (format t "  --cni-mode native|external   --cni-conf-dir DIR   --cni-bin-dir DIR (repeatable)~%")
   (format t "  --dns-forward ZONE=IP[:PORT] (repeat for multiple zones or upstreams)~%")
-  (format t "  --node-listen IPV4   --node-address IPV4   --debug-slynk-port PORT   --local-storage-path DIR~%~%")
+  (format t "  --node-listen IPV4   --node-address IPV4   --wireguard-endpoint NAME=IPV4:PORT (repeatable)~%")
+  (format t "  --wireguard-relay-address IPV4   --wireguard-relay-listen IPV4~%")
+  (format t "  --wireguard-relay-port-start PORT   --wireguard-relay-max-channels N~%")
+  (format t "  --debug-slynk-port PORT   --local-storage-path DIR~%~%")
   (format t "agent options:~%")
   (format t "  --server HOST:PORT   --node-name NAME   --state-directory DIR   --token TOKEN   --ca-pin SHA256~%")
-  (format t "  --node-address IPV4   --runtime containerd|fake   --containerd-mode managed|external~%")
+  (format t "  --node-address IPV4   --wireguard-endpoint NAME=IPV4:PORT (repeatable)~%")
+  (format t "  --runtime containerd|fake   --containerd-mode managed|external~%")
   (format t "  --registry-credentials-file DOCKER-CONFIG.json~%")
   (format t "  --image-credential-provider-{config FILE,bin-dir DIR}~%")
   (format t "  --cni-mode native|external   --cni-conf-dir DIR   --cni-bin-dir DIR (repeatable)~%")
@@ -1361,6 +1506,8 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                0)
               (:wireguard-rotate-key
                (rotate-wireguard-node-key options))
+              (:network-explain
+               (print-network-explanation options))
               (:doctor
                (if (plusp (apply #'run-doctor
                                  (append

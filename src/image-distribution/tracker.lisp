@@ -168,29 +168,40 @@
     (setf (tracker-peer-peer-id copy) (copy-seq (tracker-peer-peer-id peer)))
     copy))
 
-(defun tracker-lookup (tracker digest requesting-node)
+(defun tracker-lookup (tracker digest requesting-node &key peer-ranker (maximum-peers 8))
+  "Return a bounded peer view, optionally ordered by PEER-RANKER.
+PEER-RANKER receives the copied peer list, outside the tracker lock, and must
+return a list.  This keeps network-policy decisions out of swarm mutation."
   (let ((digest (canonical-oci-digest digest)))
-    (bt:with-lock-held ((image-tracker-lock tracker))
-      (let* ((now (funcall (image-tracker-clock tracker)))
-             (swarm (gethash digest (image-tracker-swarms tracker))))
-        (if swarm
-            (progn
-              (expire-swarm-peers tracker swarm now)
-              (make-tracker-view
-               :status :available
-               :metainfo (copy-seq (tracker-swarm-metainfo swarm))
-               :infohash (copy-seq (tracker-swarm-infohash swarm))
-               :peers (loop for node-name being the hash-keys
-                              of (tracker-swarm-peers swarm)
-                            using (hash-value peer)
-                            unless (string= node-name requesting-node)
-                              collect (copy-tracker-peer-for-view peer))))
-            (let ((lease (live-origin-lease tracker digest now)))
-              (make-tracker-view
-               :status (if lease :waiting :missing)
-               :origin-node (and lease (origin-lease-node-name lease))
-               :origin-expires-at (and lease
-                                       (origin-lease-expires-at lease)))))))))
+    (let ((view
+            (bt:with-lock-held ((image-tracker-lock tracker))
+              (let* ((now (funcall (image-tracker-clock tracker)))
+                     (swarm (gethash digest (image-tracker-swarms tracker))))
+                (if swarm
+                    (progn
+                      (expire-swarm-peers tracker swarm now)
+                      (make-tracker-view
+                       :status :available
+                       :metainfo (copy-seq (tracker-swarm-metainfo swarm))
+                       :infohash (copy-seq (tracker-swarm-infohash swarm))
+                       :peers (loop for node-name being the hash-keys
+                                      of (tracker-swarm-peers swarm)
+                                    using (hash-value peer)
+                                    unless (string= node-name requesting-node)
+                                      collect (copy-tracker-peer-for-view peer))))
+                    (let ((lease (live-origin-lease tracker digest now)))
+                      (make-tracker-view
+                       :status (if lease :waiting :missing)
+                       :origin-node (and lease (origin-lease-node-name lease))
+                       :origin-expires-at (and lease
+                                               (origin-lease-expires-at lease)))))))))
+      (when (eq :available (tracker-view-status view))
+        (let* ((peers (tracker-view-peers view))
+               (ranked (if peer-ranker (funcall peer-ranker peers) peers)))
+          (setf (tracker-view-peers view)
+                (subseq ranked 0 (min (length ranked)
+                                      (max 1 (min maximum-peers 32)))))))
+      view)))
 
 (defun tracker-withdraw-peer (tracker digest node-name)
   (let ((digest (canonical-oci-digest digest)))

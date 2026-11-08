@@ -116,10 +116,26 @@
     (when (plusp (length (node-record-wireguard-public-key node)))
       (setf (gethash "wireguardPublicKey" object)
             (ag-grpc:base64-encode (node-record-wireguard-public-key node))))
+    (when (node-record-wireguard-endpoints node)
+      (setf (gethash "wireguardEndpoints" object)
+            (coerce
+             (mapcar (lambda (endpoint)
+                       (let ((object (make-hash-table :test #'equal)))
+                         (setf (gethash "name" object) (first endpoint)
+                               (gethash "address" object) (second endpoint)
+                               (gethash "port" object) (third endpoint))
+                         object))
+                     (node-record-wireguard-endpoints node))
+             'vector)))
+    (when (node-record-wireguard-reflexive-observed-at node)
+      (setf (gethash "wireguardReflexiveObservedAt" object)
+            (node-record-wireguard-reflexive-observed-at node)))
     (when (node-record-last-heartbeat node)
       (setf (gethash "lastHeartbeat" object) (node-record-last-heartbeat node)))
     (when (node-record-lease-deadline node)
       (setf (gethash "leaseDeadline" object) (node-record-lease-deadline node)))
+    (when (node-record-ready-since node)
+      (setf (gethash "readySince" object) (node-record-ready-since node)))
     (when (node-record-labels node) (setf (gethash "labels" object) (node-record-labels node)))
     (when (node-record-annotations node) (setf (gethash "annotations" object) (node-record-annotations node)))
     (setf (gethash "resourceVersion" object) (node-record-resource-version node))
@@ -142,8 +158,13 @@
                     input
                     (com.inuoe.jzon:parse input)))
          (heartbeat (gethash "lastHeartbeat" object))
-         (deadline (gethash "leaseDeadline" object)))
-    (let* ((encoded-key (gethash "wireguardPublicKey" object))
+         (deadline (gethash "leaseDeadline" object))
+         (ready-since (gethash "readySince" object)))
+    (let* ((persisted-ready-p
+             (and (eq t (gethash "ready" object))
+                  (integerp heartbeat) (integerp deadline)
+                  (<= (get-universal-time) deadline)))
+           (encoded-key (gethash "wireguardPublicKey" object))
            (wireguard-public-key
              (if encoded-key
                  (handler-case
@@ -167,9 +188,20 @@
                       :pod-cidrs (copy-seq cidrs)
                       :underlay-address (gethash "underlayAddress" object "")
                       :wireguard-public-key wireguard-public-key
+                      :wireguard-endpoints
+                      (loop for endpoint across (gethash "wireguardEndpoints" object #())
+                            collect (list (gethash "name" endpoint)
+                                          (gethash "address" endpoint)
+                                          (gethash "port" endpoint)))
+                      :wireguard-reflexive-observed-at
+                      (let ((time (gethash "wireguardReflexiveObservedAt" object)))
+                        (when (integerp time) time))
                       :kubelet-port (let ((port (gethash "kubeletPort" object 0))) (if (integerp port) port 0))
                       :last-heartbeat (when (integerp heartbeat) heartbeat)
                       :lease-deadline (when (integerp deadline) deadline)
+                      :ready-since (when (and persisted-ready-p
+                                              (integerp ready-since))
+                                     ready-since)
                       :labels (gethash "labels" object)
                       :annotations (gethash "annotations" object)
                       :resource-version (gethash "resourceVersion" object "1")
@@ -181,9 +213,7 @@
                       :api-status (gethash "apiStatus" object)
                       :creation-timestamp (let ((time (gethash "creationTimestamp" object)))
                                             (and (stringp time) time))
-                      :ready-p (and (eq t (gethash "ready" object))
-                                    (integerp heartbeat) (integerp deadline)
-                                    (<= (get-universal-time) deadline)))))))
+                      :ready-p persisted-ready-p)))))
 
 (defun secure-random-octets (count)
   "Read COUNT cryptographically secure random octets from the operating system."

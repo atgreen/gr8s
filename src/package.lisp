@@ -179,6 +179,7 @@
    #:node-record-pod-cidrs
    #:node-record-all-pod-cidrs
    #:node-record-ready-p
+   #:node-record-ready-since
    #:node-grpc-server-port
    #:node-session-acknowledged-revision
    #:main

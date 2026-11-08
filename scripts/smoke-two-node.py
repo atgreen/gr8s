@@ -48,6 +48,8 @@ class Smoke:
         self.api_port = int(os.environ.get('GR8S_TWO_NODE_PORT', '18084'))
         self.node_port = int(os.environ.get('GR8S_TWO_NODE_AGENT_PORT', '17443'))
         self.overlay = os.environ.get('GR8S_OVERLAY_BACKEND', 'vxlan')
+        self.self_tuning = os.environ.get('GR8S_SELF_TUNING_NETWORK') == '1'
+        self.alternate_addresses = ['198.19.0.1', '198.19.0.2']
         assert self.overlay in ('vxlan', 'wireguard'), self.overlay
         self.overlay_interface = 'gr8s-wg' if self.overlay == 'wireguard' else 'gr8s-vxlan'
         self.encryption_proved = False
@@ -142,6 +144,17 @@ class Smoke:
             # ip netns exec remounts sysfs for the node and hides cgroup mounts.
             if self.in_node(index, 'stat', '-f', '-c', '%T', '/sys/fs/cgroup').stdout.strip() != 'cgroup2fs':
                 self.in_node(index, 'mount', '-t', 'cgroup2', 'none', '/sys/fs/cgroup')
+        if self.self_tuning:
+            assert self.overlay == 'wireguard', 'self-tuning acceptance requires wireguard'
+            run('ip', 'link', 'add', f'{self.prefix}a0', 'type', 'veth', 'peer',
+                'name', f'{self.prefix}a1')
+            for index, namespace in enumerate(self.namespaces):
+                link = f'{self.prefix}a{index}'
+                run('ip', 'link', 'set', link, 'netns', namespace)
+                run('ip', '-n', namespace, 'link', 'set', link, 'name', 'alternate')
+                run('ip', '-n', namespace, 'addr', 'add',
+                    f'{self.alternate_addresses[index]}/30', 'dev', 'alternate')
+                run('ip', '-n', namespace, 'link', 'set', 'alternate', 'up')
         print(f'Launching native control plane and two nodes in {self.root}', flush=True)
         print(f'Test namespace prefix: {self.prefix}', flush=True)
         self.server = self.start([self.binary, 'serve', '--disable-agent', '--runtime', 'fake',
@@ -163,6 +176,11 @@ class Smoke:
             token = json.loads(run(self.binary, 'join-token', '--state-directory', self.root / 'control',
                                    '--node-name', f'worker-{index}').stdout)
             args += ['--token', token['token'], '--ca-pin', token['caPin']]
+        if self.self_tuning:
+            args += ['--wireguard-endpoint',
+                     f'alternate={self.alternate_addresses[index]}:51820',
+                     '--wireguard-endpoint',
+                     f'blackhole=203.0.113.{index + 1}:51820']
         keeper = self.keepers[index]
         self.agents[index] = self.start(['nsenter', f'--mount=/proc/{keeper.pid}/ns/mnt',
                                         f'--net=/run/netns/{self.namespaces[index]}', '--', *args],
@@ -181,6 +199,48 @@ class Smoke:
             assert identities == expected, f'Pod identity/assignment changed: {identities} != {expected}'
         return identities
 
+    def selected_path(self, index, name):
+        peer = f'worker-{1 - index}'
+        result = run(self.binary, 'network', 'explain', f'worker-{index}', peer,
+                     '--server', f'http://127.0.0.1:{self.api_port}', check=False)
+        return result.returncode == 0 and f'Selected: {name} ' in result.stdout
+
+    def alternate_selected(self, index):
+        return self.selected_path(index, 'alternate')
+
+    def blackhole_failed_and_rolled_back(self, index):
+        peer = f'worker-{1 - index}'
+        result = run(self.binary, 'network', 'explain', f'worker-{index}', peer,
+                     '--server', f'http://127.0.0.1:{self.api_port}', check=False)
+        failed = any(line.lstrip().startswith('blackhole ') and 'failures=0' not in line
+                     for line in result.stdout.splitlines())
+        return result.returncode == 0 and 'Selected: alternate ' in result.stdout and failed
+
+    def wait_for_verified_alternate_paths(self):
+        for index in range(2):
+            wait_for(f'worker-{index} selecting verified alternate path',
+                     lambda index=index: self.alternate_selected(index), timeout=240)
+
+    def crash_node_runtime(self, index):
+        """Crash one disposable node and its managed runtime, retaining disk/kernel state."""
+        agent = self.agents[index]
+        if agent and agent.poll() is None:
+            agent.kill()
+            agent.wait(timeout=5)
+        self.agents[index] = None
+        keeper = self.keepers[index]
+        for pid in run('ip', 'netns', 'pids', self.namespaces[index]).stdout.split():
+            pid = int(pid)
+            if pid != keeper.pid:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        wait_for(f'worker-{index} crash cleanup', lambda:
+                 all(int(pid) == keeper.pid for pid in
+                     run('ip', 'netns', 'pids',
+                         self.namespaces[index]).stdout.split()), timeout=10)
+
     def prove_wireguard_encryption(self, identities):
         if self.overlay != 'wireguard' or self.encryption_proved:
             return
@@ -188,12 +248,13 @@ class Smoke:
         # still distinctive enough to prove that known inner payload is absent.
         marker_byte = '47'
         marker = bytes.fromhex(marker_byte) * 64
-        capture_path = self.root / 'wireguard-underlay.pcap'
+        capture_interface = 'alternate' if self.self_tuning else 'underlay'
+        capture_path = self.root / f'wireguard-{capture_interface}.pcap'
         keeper = self.keepers[0]
         capture = subprocess.Popen(
             ['nsenter', f'--mount=/proc/{keeper.pid}/ns/mnt',
              f'--net=/run/netns/{self.namespaces[0]}', '--',
-             'tcpdump', '-U', '-i', 'underlay', '-w', str(capture_path),
+             'tcpdump', '-U', '-i', capture_interface, '-w', str(capture_path),
              'udp', 'port', '51820', 'or', 'icmp'],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         try:
@@ -214,8 +275,8 @@ class Smoke:
                         ')').stdout.splitlines()
         assert not plaintext, f'capture exposed unencapsulated Pod packets: {plaintext}'
         self.encryption_proved = True
-        print('Underlay capture contains WireGuard UDP, no Pod ICMP and no known plaintext',
-              flush=True)
+        print(f'{capture_interface.capitalize()} capture contains WireGuard UDP, '
+              'no Pod ICMP and no known plaintext', flush=True)
 
     def traffic(self, identities):
         for index in range(2):
@@ -257,6 +318,22 @@ class Smoke:
                               identities[1][2], check=False).returncode == 0, timeout=15)
 
     def exercise(self):
+        if self.self_tuning:
+            # Prove selection and restart recovery before image/container activity;
+            # the latter has a separately tracked slow-shutdown failure (podster-ojtd)
+            # that must not obscure this network acceptance gate.
+            self.wait_for_verified_alternate_paths()
+            self.crash_node_runtime(0)
+            self.start_agent(0)
+            wait_for('worker-0 restoring its verified alternate path after restart',
+                     lambda: self.alternate_selected(0), timeout=30)
+            for index in range(2):
+                wait_for(f'worker-{index} rolling back an unreachable candidate',
+                         lambda index=index: self.blackhole_failed_and_rolled_back(index),
+                         timeout=45)
+            print('Self-tuner selected fresh-handshake-verified alternate endpoints '
+                  'and restored the durable choice after restart; unreachable '
+                  'candidate trials rolled back', flush=True)
         for index in range(2):
             pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': f'two-node-{index}'},
                    'spec': {'nodeName': f'worker-{index}', 'terminationGracePeriodSeconds': 1,
@@ -269,8 +346,34 @@ class Smoke:
         if os.environ.get('GR8S_TWO_NODE_FAIL_AFTER_CREATE') == '1':
             raise RuntimeError('forced two-node failure after creating Pods')
         self.traffic(identities)
+        if self.self_tuning:
+            self.wait_for_verified_alternate_paths()
+            self.traffic(identities)
+            for index in range(2):
+                self.in_node(index, 'ip', 'link', 'set', 'alternate', 'down')
+            for index in range(2):
+                wait_for(f'worker-{index} failing over to its previous underlay',
+                         lambda index=index: self.selected_path(index, 'underlay'), timeout=30)
+            self.traffic(identities)
+            for index in range(2):
+                self.in_node(index, 'ip', 'link', 'set', 'alternate', 'up')
+            print('Self-tuning network acceptance passed with live Pod traffic', flush=True)
         print(f'Two-node native {self.overlay} connectivity, DNS, logs, exec and '
               'tunnel-dependency checks passed', flush=True)
+        if self.self_tuning:
+            for index in range(2):
+                self.kubectl('delete', 'pod', f'two-node-{index}',
+                             '--ignore-not-found', '--wait=false')
+            for index in range(2):
+                state = self.root / f'agent-{index}/containerd'
+                wait_for(f'worker-{index} Pod namespace cleanup', lambda index=index, state=state:
+                         not self.in_node(index, 'find',
+                                          state / 'run/io.containerd.grpc.v1.cri/netns',
+                                          '-mindepth', '1', '-maxdepth', '1').stdout.splitlines(),
+                         timeout=30)
+                self.crash_node_runtime(index)
+            self.success = True
+            return
         restart_started = int(time.time())
         self.agents[0].terminate()
         self.agents[0].wait(timeout=20)
