@@ -25,6 +25,15 @@
                '("firewall-cmd" "--add-port=4789/udp"))) ; sanity: add form unchanged
     (is (equal '("firewall-cmd" "--remove-port=4789/udp") (third cmds)))))
 
+(test wireguard-firewall-commands-use-its-interface-and-listen-port
+  (let ((cmds (gr8s::overlay-firewall-commands
+               "10.80.16.0/20" :interface "gr8s-wg" :port 51820)))
+    (is (equal '("firewall-cmd" "--zone" "trusted" "--add-interface" "gr8s-wg")
+               (first cmds)))
+    (is (equal '("firewall-cmd" "--zone" "trusted" "--add-source" "10.80.16.0/20")
+               (second cmds)))
+    (is (equal '("firewall-cmd" "--add-port=51820/udp") (third cmds)))))
+
 (test ensure-overlay-firewall-is-a-noop-without-active-firewalld
   ;; firewall-cmd --state != 0  -> no commands run at all.
   (let ((ran '()))
@@ -90,9 +99,10 @@
     (is (null (gr8s::remove-overlay-firewall "10.80.0.0/20" :runner #'runner)))))
 
 (test ensure-overlay-firewall-is-fail-soft-on-command-error
-  ;; A failing firewall-cmd is logged, not raised: ensure still returns T (active).
+  ;; A failing firewall-cmd is logged, not raised, and returns NIL so a cached
+  ;; network snapshot retries instead of remembering a partial apply.
   (flet ((runner (argv)
            (cond ((equal argv '("firewall-cmd" "--state")) (values "running" 0))
                  ((search "--add-source" (format nil "~{~A~^ ~}" argv)) (values "boom" 1))
                  (t (values "" 0)))))
-    (is (eq t (gr8s::ensure-overlay-firewall "10.80.0.0/20" :runner #'runner)))))
+    (is (null (gr8s::ensure-overlay-firewall "10.80.0.0/20" :runner #'runner)))))

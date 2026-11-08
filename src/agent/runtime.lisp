@@ -31,9 +31,11 @@
   dns-forward-rules
   network
   network-reconciler
-  ;; Pod CIDR admitted to firewalld during this process lifetime. Cached desired
-  ;; snapshots repeat the same network, so do not spawn firewall-cmd for each one.
-  overlay-firewall-pod-cidr
+  ;; (Pod CIDR, interface, UDP port) admitted to firewalld during this process
+  ;; lifetime. Cached snapshots repeat the same network, so do not spawn
+  ;; firewall-cmd for each one; retaining all three fields also makes a backend
+  ;; transition withdraw the rules it supersedes.
+  overlay-firewall-identity
   ipam
   cni-operations
   ;; Durable endpoints created by an operator-owned primary CNI before the
@@ -404,18 +406,38 @@ conflicting network."
                   :dns-address (gethash "dnsAddress" network)))))
   node-runtime)
 
+(defun node-network-overlay-firewall-identity (network)
+  "Return NETWORK's firewalld identity as (Pod-CIDR interface UDP-port)."
+  (if (string= "wireguard" (gethash "overlayBackend" network "vxlan"))
+      (list (gethash "nodePodCIDR" network)
+            +node-wireguard-interface+
+            (gethash "wireguardListenPort" network))
+      (list (gethash "nodePodCIDR" network)
+            +node-vxlan-interface+
+            +node-vxlan-udp-port+)))
+
+(defun call-overlay-firewall-function (function identity)
+  "Call FUNCTION with the Pod CIDR, interface and UDP port in IDENTITY."
+  (destructuring-bind (cidr interface port) identity
+    (funcall function cidr :interface interface :port port)))
+
 (defun ensure-node-runtime-overlay-firewall
-    (node-runtime network &key (ensure #'ensure-overlay-firewall))
+    (node-runtime network &key (ensure #'ensure-overlay-firewall)
+                               (remove #'remove-overlay-firewall))
   "Admit NETWORK's overlay once per NODE-RUNTIME process, using ENSURE to apply it.
 Repeated cached snapshots carry the same desired network; remembering a successful
 apply prevents each snapshot from spawning three firewall-cmd processes. A failed or
 inactive-firewalld attempt is not remembered, so a later snapshot can retry."
   (when (and (node-runtime-manager node-runtime)
              (plusp (length (gethash "underlayAddress" network ""))))
-    (let ((cidr (gethash "nodePodCIDR" network)))
-      (unless (equal cidr (node-runtime-overlay-firewall-pod-cidr node-runtime))
-        (when (funcall ensure cidr)
-          (setf (node-runtime-overlay-firewall-pod-cidr node-runtime) cidr)
+    (let ((desired (node-network-overlay-firewall-identity network))
+          (current (node-runtime-overlay-firewall-identity node-runtime)))
+      (unless (equal desired current)
+        (when current
+          (ignore-errors (call-overlay-firewall-function remove current))
+          (setf (node-runtime-overlay-firewall-identity node-runtime) nil))
+        (when (call-overlay-firewall-function ensure desired)
+          (setf (node-runtime-overlay-firewall-identity node-runtime) desired)
           t)))))
 
 (defun apply-node-runtime-network (node-runtime snapshot)
@@ -450,7 +472,10 @@ link, route, overlay and IPAM ownership to the configured plugins."
     ;; The node is going away with no Pods left; withdraw the overlay firewall
     ;; accepts we programmed (podster-vwy) so the host firewall is left as we
     ;; found it. Fail-soft; a no-op without an active firewalld.
-    (ignore-errors (remove-overlay-firewall (node-ipam-cidr (node-runtime-ipam node-runtime))))))
+    (let ((identity (node-runtime-overlay-firewall-identity node-runtime)))
+      (when identity
+        (ignore-errors
+          (call-overlay-firewall-function #'remove-overlay-firewall identity))))))
 
 (defun reconcile-cached-node-network (node-runtime)
   "Re-apply the node's durable network to repair kernel state -- e.g. VXLAN FDB entries a

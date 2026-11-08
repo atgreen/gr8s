@@ -25,13 +25,38 @@
         (network (gr8s::node-network-object (node-network-for-test)))
         (calls 0))
     (setf (gethash "underlayAddress" network) "192.0.2.1")
-    (flet ((ensure (cidr)
-             (declare (ignore cidr))
+    (flet ((ensure (cidr &key interface port)
+             (declare (ignore cidr interface port))
              (incf calls)
              t))
       (gr8s::ensure-node-runtime-overlay-firewall runtime network :ensure #'ensure)
       (gr8s::ensure-node-runtime-overlay-firewall runtime network :ensure #'ensure))
     (is (= 1 calls))))
+
+(test overlay-backend-transition-replaces-firewalld-ownership
+  (let* ((runtime (gr8s::%make-node-runtime :manager t))
+         (vxlan (gr8s::node-network-object (node-network-for-test)))
+         (wireguard (alexandria:copy-hash-table vxlan))
+         (ensured nil)
+         (removed nil))
+    (setf (gethash "underlayAddress" vxlan) "192.0.2.1"
+          (gethash "underlayAddress" wireguard) "192.0.2.1"
+          (gethash "overlayBackend" wireguard) "wireguard"
+          (gethash "wireguardListenPort" wireguard) 51820)
+    (flet ((ensure (cidr &key interface port)
+             (push (list cidr interface port) ensured)
+             t)
+           (withdraw (cidr &key interface port)
+             (push (list cidr interface port) removed)
+             t))
+      (gr8s::ensure-node-runtime-overlay-firewall
+       runtime vxlan :ensure #'ensure :remove #'withdraw)
+      (gr8s::ensure-node-runtime-overlay-firewall
+       runtime wireguard :ensure #'ensure :remove #'withdraw))
+    (is (equal '(("10.88.8.0/24" "gr8s-wg" 51820)
+                 ("10.88.8.0/24" "gr8s-vxlan" 4789))
+               ensured))
+    (is (equal '(("10.88.8.0/24" "gr8s-vxlan" 4789)) removed))))
 
 (defun pod-assignment-for-test (pod)
   (make-instance

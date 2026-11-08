@@ -13,9 +13,9 @@
 ;;;; programs a small, overlay-scoped set of ACCEPTs -- the same coexistence
 ;;;; approach Cilium takes with its CILIUM_FORWARD rules, but narrower:
 ;;;;
-;;;;   * the VXLAN device in an ACCEPT zone   -> decapsulated inbound Pod traffic
+;;;;   * the selected overlay device in an ACCEPT zone -> decrypted/decapsulated traffic
 ;;;;   * this node's Pod CIDR as a zone source -> local Pod egress/forward (NEW)
-;;;;   * the VXLAN underlay UDP port on the uplink -> the encapsulated tunnel
+;;;;   * the selected overlay's UDP port on the uplink -> tunnel traffic
 ;;;;
 ;;;; This replaces the blunt "trust the whole cluster Pod/Service CIDR" firewalld
 ;;;; workaround with rules scoped to this node's overlay. Conntrack admits the
@@ -47,16 +47,16 @@
     (and code (zerop code))))
 
 (defun overlay-firewall-commands
-    (node-pod-cidr &key (vxlan-interface +node-vxlan-interface+)
-                        (vxlan-port +node-vxlan-udp-port+)
+    (node-pod-cidr &key (interface +node-vxlan-interface+)
+                        (port +node-vxlan-udp-port+)
                         (zone "trusted") (verb "--add"))
   "The firewall-cmd argv lists that admit (VERB \"--add\") or withdraw (VERB
    \"--remove\") gr8s overlay traffic through firewalld, scoped to the overlay.
    Idempotent at firewalld: --add-* / --remove-* is a no-op when already in the
    wanted state."
-  (list (list "firewall-cmd" "--zone" zone (format nil "~A-interface" verb) vxlan-interface)
+  (list (list "firewall-cmd" "--zone" zone (format nil "~A-interface" verb) interface)
         (list "firewall-cmd" "--zone" zone (format nil "~A-source" verb) node-pod-cidr)
-        (list "firewall-cmd" (format nil "~A-port=~D/udp" verb vxlan-port))))
+        (list "firewall-cmd" (format nil "~A-port=~D/udp" verb port))))
 
 (defun apply-overlay-firewall-commands (commands &key (runner #'host-firewall-run))
   "Run each firewall-cmd in COMMANDS, logging (not raising on) any failure.
@@ -71,18 +71,17 @@
 
 (defun ensure-overlay-firewall
     (node-pod-cidr &key (runner #'host-firewall-run)
-                        (vxlan-interface +node-vxlan-interface+)
-                        (vxlan-port +node-vxlan-udp-port+))
+                        (interface +node-vxlan-interface+)
+                        (port +node-vxlan-udp-port+))
   "When an active firewalld is present, admit this node's overlay traffic through
    it (idempotent). A no-op otherwise: a host with no firewalld, or one whose
    forward policy already permits the overlay, needs nothing. Fail-soft. Returns
    T when rules were applied, NIL when no active firewalld."
   (when (and node-pod-cidr (host-firewalld-active-p :runner runner))
     (apply-overlay-firewall-commands
-     (overlay-firewall-commands node-pod-cidr :vxlan-interface vxlan-interface
-                                              :vxlan-port vxlan-port :verb "--add")
-     :runner runner)
-    t))
+     (overlay-firewall-commands node-pod-cidr :interface interface
+                                              :port port :verb "--add")
+     :runner runner)))
 
 (defun ensure-control-plane-firewall (node-port &key (runner #'host-firewall-run))
   "Open the node-server (agent enrollment) port in an active firewalld so agents
@@ -105,18 +104,17 @@
 
 (defun remove-overlay-firewall
     (node-pod-cidr &key (runner #'host-firewall-run)
-                        (vxlan-interface +node-vxlan-interface+)
-                        (vxlan-port +node-vxlan-udp-port+))
+                        (interface +node-vxlan-interface+)
+                        (port +node-vxlan-udp-port+))
   "Withdraw this node's overlay ACCEPTs from an active firewalld, the inverse of
    ensure-overlay-firewall. Called when the node's dataplane is torn down (no
    remaining Pods), so the host firewall returns to its prior state rather than
    keeping orphaned rules. No-op without firewalld; fail-soft."
   (when (and node-pod-cidr (host-firewalld-active-p :runner runner))
     (apply-overlay-firewall-commands
-     (overlay-firewall-commands node-pod-cidr :vxlan-interface vxlan-interface
-                                              :vxlan-port vxlan-port :verb "--remove")
-     :runner runner)
-    t))
+     (overlay-firewall-commands node-pod-cidr :interface interface
+                                              :port port :verb "--remove")
+     :runner runner)))
 
 (defun remove-control-plane-firewall (node-port &key (runner #'host-firewall-run))
   "Withdraw the node-server port opened by ensure-control-plane-firewall. No-op
@@ -137,12 +135,12 @@
 
 (defun overlay-firewall-present-p
     (node-pod-cidr &key (runner #'host-firewall-run)
-                        (vxlan-interface +node-vxlan-interface+)
-                        (vxlan-port +node-vxlan-udp-port+))
+                        (interface +node-vxlan-interface+)
+                        (port +node-vxlan-udp-port+))
   "True when firewalld already carries all three overlay ACCEPTs for this node.
    Used by the doctor check."
   (flet ((q (argv) (multiple-value-bind (out code) (funcall runner argv)
                      (declare (ignore out)) (and code (zerop code)))))
-    (and (q (list "firewall-cmd" "--zone" "trusted" "--query-interface" vxlan-interface))
+    (and (q (list "firewall-cmd" "--zone" "trusted" "--query-interface" interface))
          (q (list "firewall-cmd" "--zone" "trusted" "--query-source" node-pod-cidr))
-         (q (list "firewall-cmd" (format nil "--query-port=~D/udp" vxlan-port))))))
+         (q (list "firewall-cmd" (format nil "--query-port=~D/udp" port))))))
