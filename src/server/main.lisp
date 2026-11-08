@@ -73,6 +73,29 @@
     (error "~A requires a value" option))
   (second arguments))
 
+(defun parse-dns-forward-rule (value)
+  "Parse ZONE=IP[:PORT] into a canonical zone and one IPv4 upstream."
+  (let ((equals (position #\= value)))
+    (unless (and equals (plusp equals) (< equals (1- (length value))))
+      (error "DNS forward rule must be ZONE=IP[:PORT]: ~A" value))
+    (let* ((zone (canonical-dns-name (subseq value 0 equals)))
+           (target (subseq value (1+ equals)))
+           (colon (position #\: target :from-end t))
+           (address (if colon (subseq target 0 colon) target))
+           (port (if colon (parse-port (subseq target (1+ colon))) 53)))
+      (unless (dns-subdomain-p zone)
+        (error "invalid DNS forwarding zone: ~A" zone))
+      (parse-ipv4-integer address)
+      (cons zone (cons address port)))))
+
+(defun add-dns-forward-rule (rules value)
+  "Add VALUE to ordered RULES, grouping repeated zones into one upstream list."
+  (let* ((parsed (parse-dns-forward-rule value))
+         (existing (assoc (car parsed) rules :test #'equal)))
+    (if existing
+        (progn (setf (cdr existing) (append (cdr existing) (list (cdr parsed)))) rules)
+        (append rules (list (list (car parsed) (cdr parsed)))))))
+
 (defun parse-serve-options (arguments)
   "Parse `gr8s serve' ARGUMENTS into an options plist on top of the serve
    defaults. Signals on an unknown option, a missing option value, or an out-of-
@@ -98,6 +121,7 @@
                        :registry-credentials-file nil
                        :image-credential-provider-config nil
                        :image-credential-provider-bin-dir nil
+                       :dns-forward-rules nil
                        :kubeconfig nil
                        :kubelet-port +kubelet-default-port+
                        :local-storage-path +default-local-storage-path+)))
@@ -162,6 +186,9 @@
                       (setf (getf options :image-credential-provider-config) value))
                      ((string= option "--image-credential-provider-bin-dir")
                       (setf (getf options :image-credential-provider-bin-dir) value))
+                     ((string= option "--dns-forward")
+                      (setf (getf options :dns-forward-rules)
+                            (add-dns-forward-rule (getf options :dns-forward-rules) value)))
                      ((string= option "--kubeconfig")
                       (setf (getf options :kubeconfig) value))
                      ((string= option "--kubelet-port")
@@ -214,7 +241,8 @@
                        :containerd-log-root "/var/log/gr8s/pods/"
                        :registry-credentials-file nil
                        :image-credential-provider-config nil
-                       :image-credential-provider-bin-dir nil)))
+                       :image-credential-provider-bin-dir nil
+                       :dns-forward-rules nil)))
     (loop while arguments
           for option = (first arguments)
           for value = (option-value arguments option)
@@ -255,6 +283,9 @@
                 (setf (getf options :image-credential-provider-config) value))
                ((string= option "--image-credential-provider-bin-dir")
                 (setf (getf options :image-credential-provider-bin-dir) value))
+               ((string= option "--dns-forward")
+                (setf (getf options :dns-forward-rules)
+                      (add-dns-forward-rule (getf options :dns-forward-rules) value)))
                (t (error "unknown agent option: ~A" option)))
              (setf arguments (cddr arguments)))
     (dolist (required '(:server :node-name :state-directory))
@@ -633,7 +664,8 @@ bare positional state directory for backward compatibility.  A missing
       (multiple-value-bind (runtime manager) (runtime-from-options options)
         (setf node-runtime
               (make-node-runtime
-               (agent-state-path options "runtime/") runtime manager))
+               (agent-state-path options "runtime/") runtime manager
+               :dns-forward-rules (getf options :dns-forward-rules)))
         (setf (node-runtime-node-name node-runtime) node-name)
         (unwind-protect
              (progn
@@ -1113,12 +1145,14 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (format t "  --containerd-{executable,oci-runtime,socket,log-root} PATH   --containerd-no-sync~%")
   (format t "  --registry-credentials-file DOCKER-CONFIG.json~%")
   (format t "  --image-credential-provider-{config FILE,bin-dir DIR}~%")
+  (format t "  --dns-forward ZONE=IP[:PORT] (repeat for multiple zones or upstreams)~%")
   (format t "  --node-listen IPV4   --node-address IPV4   --debug-slynk-port PORT   --local-storage-path DIR~%~%")
   (format t "agent options:~%")
   (format t "  --server HOST:PORT   --node-name NAME   --state-directory DIR   --token TOKEN   --ca-pin SHA256~%")
   (format t "  --node-address IPV4   --runtime containerd|fake   --containerd-mode managed|external~%")
   (format t "  --registry-credentials-file DOCKER-CONFIG.json~%")
-  (format t "  --image-credential-provider-{config FILE,bin-dir DIR}~%~%")
+  (format t "  --image-credential-provider-{config FILE,bin-dir DIR}~%")
+  (format t "  --dns-forward ZONE=IP[:PORT] (repeat for multiple zones or upstreams)~%~%")
   (format t "runtime install options:~%")
   (format t "  --state-directory DIR   --version V   --hypervisor qemu|clh|fc|dragonball (kata)~%")
   (format t "  --sha256 HEX (kata; trust-on-first-use)   --bundle FILE (use a local bundle)   --release R (gvisor)~%~%")

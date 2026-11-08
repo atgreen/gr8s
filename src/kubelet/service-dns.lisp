@@ -228,8 +228,26 @@
            (make-instance '0conf:aaaa-record :name (0conf:question-name question)
                           :address (0conf:parse-ipv6 address) :ttl 5)))))
 
-(defun resolve-store-service-question (store question)
+(defun resolve-insecure-pod-question (question)
+  "Serve the IP-encoded pod.cluster.local form enabled by Kubernetes's default CoreDNS manifest."
+  (let* ((name (canonical-dns-name (0conf:question-name question)))
+         (labels (uiop:split-string name :separator ".")))
+    (when (and (= 5 (length labels))
+               (equal (last labels 3) '("pod" "cluster" "local")))
+      (let ((address (substitute #\. #\- (first labels))))
+        (handler-case
+            (progn
+              (unless (dns-label-p (second labels)) (error "invalid Pod namespace"))
+              (0conf:parse-ipv4 address)
+              (values (when (= (0conf:question-qtype question) 0conf:+type-a+)
+                        (list (service-dns-address-answer question address)))
+                      t))
+          (error () (values nil nil)))))))
+
+(defun resolve-store-service-question (store question &optional rotate-addresses)
   "Resolve a normal or headless Service and optional headless endpoint hostname."
+  (when (dns-name-in-zone-p (0conf:question-name question) "pod.cluster.local")
+    (return-from resolve-store-service-question (resolve-insecure-pod-question question)))
   (when (equal "dns-version.cluster.local" (canonical-dns-name (0conf:question-name question)))
     (return-from resolve-store-service-question
       (values (when (member (0conf:question-qtype question) (list 0conf:+type-txt+ 0conf:+type-any+))
@@ -264,21 +282,34 @@
                 (unless hostname
                   (setf addresses (coerce (gethash "clusterIPs" spec
                                                    (vector (gethash "clusterIP" spec))) 'list))))
-            (values (remove nil (mapcar (lambda (address) (service-dns-address-answer question address))
-                                        (sort addresses #'string<)))
+            (let ((ordered (sort addresses #'string<)))
+              (when (and rotate-addresses (null hostname)
+                         (equal "None" (gethash "clusterIP" spec))
+                         (> (length ordered) 1))
+                (setf ordered (funcall rotate-addresses name ordered)))
+              (values (remove nil (mapcar (lambda (address) (service-dns-address-answer question address))
+                                          ordered))
                     (if (equal "None" (gethash "clusterIP" spec))
                         (not (null addresses))
-                        (null hostname))))
+                        (null hostname)))))
         (kubernetes-error (condition)
           (if (= 404 (kubernetes-error-status-code condition)) (values nil nil) (error condition)))))))
 
 (defun store-service-dns-resolver (store)
   "Capture the agent's durable store for both DNS worker threads."
-  (lambda (question)
-    (if (and (= (0conf:question-qtype question) 0conf:+type-ptr+)
-             (service-dns-reverse-address (0conf:question-name question)))
-        (resolve-store-service-ptr store question)
-        (resolve-store-service-question store question))))
+  (let ((offsets (make-hash-table :test #'equal))
+        (lock (bt:make-lock "gr8s headless DNS rotation")))
+    (labels ((rotate (name addresses)
+               (bt:with-lock-held (lock)
+                 (let* ((key (list name (length addresses)))
+                        (offset (mod (gethash key offsets 0) (length addresses))))
+                   (setf (gethash key offsets) (1+ offset))
+                   (append (nthcdr offset addresses) (subseq addresses 0 offset))))))
+      (lambda (question)
+        (if (and (= (0conf:question-qtype question) 0conf:+type-ptr+)
+                 (service-dns-reverse-address (0conf:question-name question)))
+            (resolve-store-service-ptr store question)
+            (resolve-store-service-question store question #'rotate))))))
 
 (defun service-dns-endpoint-unready-p (endpoint)
   "Exclude explicitly unready endpoints while retaining unspecified or null readiness."

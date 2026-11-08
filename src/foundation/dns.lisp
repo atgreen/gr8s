@@ -21,6 +21,46 @@
   '("default.svc.cluster.local" "svc.cluster.local" "cluster.local"))
 (defparameter +dns-pod-options+ '("ndots:5"))
 
+(defstruct dns-metrics
+  (queries (make-hash-table :test #'equal))
+  (responses (make-hash-table :test #'equal))
+  (cache (make-hash-table :test #'equal))
+  (forward (make-hash-table :test #'equal))
+  (forward-duration 0d0)
+  (forward-duration-count 0)
+  (lock (bt:make-lock "gr8s DNS metrics")))
+
+(defparameter *dns-metrics* (make-dns-metrics)
+  "Process-local telemetry for the node's embedded DNS service.")
+
+(defun dns-metric-incf (metrics table key)
+  "Increment KEY in one bounded-label counter TABLE."
+  (when metrics
+    (bt:with-lock-held ((dns-metrics-lock metrics))
+      (incf (gethash key table 0)))))
+
+(defun dns-rcode-name (code)
+  "Return the stable Prometheus label for a DNS response code."
+  (case code (0 "NOERROR") (1 "FORMERR") (2 "SERVFAIL") (3 "NXDOMAIN")
+        (4 "NOTIMP") (5 "REFUSED") (otherwise "OTHER")))
+
+(defun dns-metrics-text (&optional (metrics *dns-metrics*))
+  "Render embedded DNS counters and forwarding duration in Prometheus text format."
+  (bt:with-lock-held ((dns-metrics-lock metrics))
+    (with-output-to-string (out)
+      (flet ((family (name help table label)
+               (format out "# HELP ~A ~A~%# TYPE ~A counter~%" name help name)
+               (dolist (key (sort (loop for key being the hash-keys of table collect key) #'string<))
+                 (format out "~A{~A=~S} ~D~%" name label key (gethash key table)))))
+        (family "gr8s_dns_queries_total" "DNS queries received." (dns-metrics-queries metrics) "protocol")
+        (family "gr8s_dns_responses_total" "DNS responses returned." (dns-metrics-responses metrics) "rcode")
+        (family "gr8s_dns_cache_requests_total" "External DNS cache lookups." (dns-metrics-cache metrics) "result")
+        (family "gr8s_dns_forward_requests_total" "External DNS forwarding attempts." (dns-metrics-forward metrics) "result")
+        (format out "# HELP gr8s_dns_forward_duration_seconds Time spent forwarding external DNS queries.~%")
+        (format out "# TYPE gr8s_dns_forward_duration_seconds summary~%")
+        (format out "gr8s_dns_forward_duration_seconds_sum ~,6F~%" (dns-metrics-forward-duration metrics))
+        (format out "gr8s_dns_forward_duration_seconds_count ~D~%" (dns-metrics-forward-duration-count metrics))))))
+
 #+linux
 (sb-alien:define-alien-routine ("setsockopt" %linux-setsockopt) sb-alien:int
   (socket sb-alien:int)
@@ -97,10 +137,13 @@
   address
   port
   upstreams
+  forward-rules
   timeout
   service-resolver
   udp-forwarder
   tcp-forwarder
+  forward-cache
+  (metrics *dns-metrics*)
   udp-socket
   tcp-socket
   udp-thread
@@ -172,23 +215,148 @@
                      2)
       :questions (0conf:dns-message-questions query)))))
 
+(defstruct dns-forward-cache-entry
+  packet
+  stored-at
+  expires-at)
+
+(defstruct (dns-forward-cache (:constructor %make-dns-forward-cache))
+  (entries (make-hash-table :test #'equalp))
+  (maximum-entries 1024)
+  (clock #'get-universal-time)
+  (lock (bt:make-lock "gr8s DNS forward cache")))
+
+(defun make-dns-forward-cache (&key (maximum-entries 1024) (clock #'get-universal-time))
+  "Create a bounded external-response cache using CLOCK seconds for deterministic expiry."
+  (unless (and (integerp maximum-entries) (plusp maximum-entries))
+    (error "DNS cache maximum entries must be positive"))
+  (%make-dns-forward-cache :maximum-entries maximum-entries :clock clock))
+
+(defun dns-forward-cache-key (packet)
+  "Return the wire query without its per-request transaction identifier."
+  (when (< (length packet) 2) (error "truncated DNS query"))
+  (let ((key (copy-seq packet)))
+    (setf (aref key 0) 0 (aref key 1) 0)
+    key))
+
+(defun dns-response-records (message)
+  "Return every record whose TTL must remain valid while a whole response is cached."
+  (append (0conf:dns-message-answers message)
+          (0conf:dns-message-authorities message)
+          (0conf:dns-message-additionals message)))
+
+(defun dns-response-cache-ttl (message)
+  "Return the safe whole-response lifetime, or NIL for a response we must not cache."
+  (let* ((rcode (logand #x000f (0conf:dns-message-flags message)))
+         (records (cond ((and (zerop rcode) (0conf:dns-message-answers message))
+                         (dns-response-records message))
+                        ((member rcode '(0 3))
+                         (0conf:dns-message-authorities message)))))
+    (when records
+      (let ((ttl (reduce #'min records :key #'0conf:rr-ttl)))
+        (and (plusp ttl) ttl)))))
+
+(defun age-dns-response (packet query-id age)
+  "Copy a cached response, install QUERY-ID and subtract AGE seconds from every TTL."
+  (let ((message (0conf:decode-message packet)))
+    (setf (0conf:dns-message-id message) query-id)
+    (dolist (record (dns-response-records message))
+      (setf (0conf:rr-ttl record) (max 0 (- (0conf:rr-ttl record) age))))
+    (0conf:encode-message message)))
+
+(defun evict-one-dns-cache-entry (cache)
+  "Remove the entry that expires first from a full CACHE. Caller holds its lock."
+  (let ((victim nil) (expiry nil))
+    (maphash (lambda (key entry)
+               (when (or (null expiry) (< (dns-forward-cache-entry-expires-at entry) expiry))
+                 (setf victim key expiry (dns-forward-cache-entry-expires-at entry))))
+             (dns-forward-cache-entries cache))
+    (when victim (remhash victim (dns-forward-cache-entries cache)))))
+
+(defun cached-dns-forward (cache packet upstreams timeout forwarder &optional metrics)
+  "Forward PACKET through FORWARDER, caching positive and authoritative negative responses."
+  (let* ((key (dns-forward-cache-key packet))
+         (now (funcall (dns-forward-cache-clock cache)))
+         (query-id (0conf:dns-message-id (0conf:decode-message packet)))
+         (hit nil))
+    (bt:with-lock-held ((dns-forward-cache-lock cache))
+      (let ((entry (gethash key (dns-forward-cache-entries cache))))
+        (when entry
+          (if (< now (dns-forward-cache-entry-expires-at entry))
+              (setf hit (age-dns-response
+                         (dns-forward-cache-entry-packet entry) query-id
+                         (floor (- now (dns-forward-cache-entry-stored-at entry)))))
+              (remhash key (dns-forward-cache-entries cache))))))
+    (if hit
+        (progn (when metrics (dns-metric-incf metrics (dns-metrics-cache metrics) "hit")) hit)
+        (progn
+          (when metrics (dns-metric-incf metrics (dns-metrics-cache metrics) "miss"))
+          (let* ((started (get-internal-real-time))
+                 (response
+                   (handler-case
+                       (prog1 (funcall forwarder packet upstreams timeout)
+                         (when metrics (dns-metric-incf metrics (dns-metrics-forward metrics) "success")))
+                     (error (condition)
+                       (when metrics (dns-metric-incf metrics (dns-metrics-forward metrics) "error"))
+                       (error condition))))
+               (message (0conf:decode-message response))
+               (ttl (dns-response-cache-ttl message)))
+          (when metrics
+            (bt:with-lock-held ((dns-metrics-lock metrics))
+              (incf (dns-metrics-forward-duration metrics)
+                    (/ (- (get-internal-real-time) started)
+                       (coerce internal-time-units-per-second 'double-float)))
+              (incf (dns-metrics-forward-duration-count metrics))))
+          (when ttl
+            (bt:with-lock-held ((dns-forward-cache-lock cache))
+              (when (and (null (gethash key (dns-forward-cache-entries cache)))
+                         (>= (hash-table-count (dns-forward-cache-entries cache))
+                             (dns-forward-cache-maximum-entries cache)))
+                (evict-one-dns-cache-entry cache))
+              (setf (gethash key (dns-forward-cache-entries cache))
+                    (make-dns-forward-cache-entry
+                     :packet (copy-seq response) :stored-at now :expires-at (+ now ttl)))))
+          response)))))
+
+(defun dns-upstreams-for-packet (packet defaults rules)
+  "Choose the longest matching conditional forwarding zone, or DEFAULTS."
+  (let* ((message (0conf:decode-message packet))
+         (question (first (0conf:dns-message-questions message)))
+         (name (and question (canonical-dns-name (0conf:question-name question))))
+         (best nil))
+    (dolist (rule rules)
+      (when (and name (dns-name-in-zone-p name (car rule))
+                 (or (null best) (> (length (car rule)) (length (car best)))))
+        (setf best rule)))
+    (if best (cdr best) defaults)))
+
 (defun call-dns-handler (server packet protocol)
   "Resolve one query and convert ordinary forwarding failures into SERVFAIL."
-  (handler-case
-      (answer-dns-query
+  (dns-metric-incf (dns-server-metrics server) (dns-metrics-queries (dns-server-metrics server))
+                   (string-downcase (symbol-name protocol)))
+  (let ((response
+          (handler-case
+              (answer-dns-query
        packet
        (lambda (query)
-         (funcall (ecase protocol
-                    (:udp (dns-server-udp-forwarder server))
-                    (:tcp (dns-server-tcp-forwarder server)))
-                  query
-                  (dns-server-upstreams server)
-                  (dns-server-timeout server)))
+         (cached-dns-forward
+          (dns-server-forward-cache server) query
+          (dns-upstreams-for-packet query (dns-server-upstreams server)
+                                    (dns-server-forward-rules server))
+          (dns-server-timeout server)
+          (ecase protocol
+            (:udp (dns-server-udp-forwarder server))
+            (:tcp (dns-server-tcp-forwarder server)))
+          (dns-server-metrics server)))
        (dns-server-service-resolver server))
-    (error (condition)
-      (format *error-output* "gr8s DNS query failed: ~A~%" condition)
-      (handler-case (dns-servfail-response packet)
-        (error () nil)))))
+            (error (condition)
+              (format *error-output* "gr8s DNS query failed: ~A~%" condition)
+              (handler-case (dns-servfail-response packet)
+                (error () nil))))))
+    (when response
+      (dns-metric-incf (dns-server-metrics server) (dns-metrics-responses (dns-server-metrics server))
+                       (dns-rcode-name (dns-response-code response))))
+    response))
 
 (defun dns-udp-loop (server)
   "Receive and answer UDP queries until the DNS server stops."
@@ -368,7 +536,9 @@
 
 (defun start-dns-server
     (&key (address +dns-pod-server-address+) (port 53) upstreams
-          (timeout 2.0) service-resolver
+          (timeout 2.0) service-resolver forward-rules
+          (forward-cache (make-dns-forward-cache))
+          (metrics *dns-metrics*)
           (udp-forwarder #'forward-dns-udp)
           (tcp-forwarder #'forward-dns-tcp))
   "Bind owned UDP and TCP listeners and start the DNS worker threads."
@@ -378,9 +548,9 @@
           (progn
             (setf server
                   (%make-dns-server
-                   :address address :port selected-port :upstreams upstreams
+                   :address address :port selected-port :upstreams upstreams :forward-rules forward-rules
                    :timeout timeout :service-resolver service-resolver :udp-forwarder udp-forwarder
-                   :tcp-forwarder tcp-forwarder :udp-socket udp-socket
+                   :tcp-forwarder tcp-forwarder :forward-cache forward-cache :metrics metrics :udp-socket udp-socket
                    :tcp-socket tcp-socket))
             (setf (dns-server-udp-thread server)
                   (bt:make-thread (lambda () (dns-udp-loop server)) :name "gr8s DNS UDP")
@@ -414,11 +584,12 @@
                 (stopper #'stop-dns-server)
                 (address +dns-pod-server-address+)
                 (port 53)
-                (upstreams (host-dns-upstreams)) service-resolver)
+                (upstreams (host-dns-upstreams)) service-resolver forward-rules)
   "Run a body with an owned DNS service and always stop it afterward."
   (let ((server (apply starter :address address :port port
                        :upstreams upstreams
-                       (when service-resolver (list :service-resolver service-resolver)))))
+                       (append (when service-resolver (list :service-resolver service-resolver))
+                               (when forward-rules (list :forward-rules forward-rules))))))
     (unwind-protect
          (funcall function)
       (funcall stopper server))))

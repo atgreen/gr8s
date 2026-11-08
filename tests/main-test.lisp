@@ -119,6 +119,8 @@
              "--registry-credentials-file" "/etc/gr8s/registry.json"
              "--image-credential-provider-config" "/etc/gr8s/providers.yaml"
              "--image-credential-provider-bin-dir" "/usr/libexec/gr8s/credentials/"
+             "--dns-forward" "corp.example=192.0.2.53"
+             "--dns-forward" "dev.corp.example=192.0.2.54:5353"
              "--kubeconfig" "/tmp/gr8s.conf"))))
     (is (eq :serve (getf options :command)))
     (is (string= "/tmp/gr8s-state" (getf options :state-directory)))
@@ -135,6 +137,9 @@
                  (getf options :image-credential-provider-config)))
     (is (string= "/usr/libexec/gr8s/credentials/"
                  (getf options :image-credential-provider-bin-dir)))
+    (is (equal '(("corp.example" ("192.0.2.53" . 53))
+                 ("dev.corp.example" ("192.0.2.54" . 5353)))
+               (getf options :dns-forward-rules)))
     (is (string= "/tmp/gr8s.conf" (getf options :kubeconfig)))))
 
 (test managed-containerd-options-build-an-owned-runtime
@@ -266,6 +271,18 @@
     (is (string= "192.0.2.11" (getf options :node-address))))
   (dolist (address '("127.0.0.1" "0.0.0.0" "224.0.0.1" "255.255.255.255" "192.0.2.1/24"))
     (signals error (gr8s::parse-serve-options (list "--node-address" address)))))
+
+(test dns-forward-options-apply-to-serve-and-standalone-agents
+  (let ((agent (gr8s::parse-agent-options
+                '("--server" "192.0.2.1:7443" "--token" "test" "--ca-pin" "test"
+                  "--node-name" "worker-a" "--state-directory" "/tmp/worker-a"
+                  "--dns-forward" "corp.example=192.0.2.53"
+                  "--dns-forward" "corp.example=192.0.2.54:5353"))))
+    (is (equal '(("corp.example" ("192.0.2.53" . 53) ("192.0.2.54" . 5353)))
+               (getf agent :dns-forward-rules))))
+  (dolist (invalid '("corp.example" "=192.0.2.53" "corp.example=not-an-ip"
+                     "corp.example=192.0.2.53:0"))
+    (signals error (gr8s::parse-serve-options (list "--dns-forward" invalid)))))
 
 (test join-token-command-uses-the-running-clusters-persisted-pki
   (with-temporary-store (store path)

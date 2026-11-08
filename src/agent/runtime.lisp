@@ -28,6 +28,7 @@
   (node-name nil)   ; the Node this agent runs, for Service traffic policies
   runtime
   manager
+  dns-forward-rules
   network
   network-reconciler
   ;; Pod CIDR admitted to firewalld during this process lifetime. Cached desired
@@ -73,7 +74,8 @@
 
 (defun make-node-runtime (state-directory runtime manager
                           &key (network-reconciler
-                                 (when manager #'reconcile-node-vxlan-network)))
+                                 (when manager #'reconcile-node-vxlan-network))
+                               dns-forward-rules)
   "Build and return a NODE-RUNTIME for STATE-DIRECTORY, opening its local desired-state
 store (watch journal disabled, since the control plane serves every watch) and wiring in
 RUNTIME and MANAGER. Replays any persisted node network -- applied or pending -- and
@@ -89,6 +91,7 @@ START-NODE-RUNTIME does that."
     (let ((node-runtime
             (%make-node-runtime
              :state-directory directory :runtime runtime :manager manager
+             :dns-forward-rules dns-forward-rules
              :network-reconciler network-reconciler
              :store store :reconciler (make-reconciler store runtime))))
       (let ((applied (read-node-network-file (node-runtime-network-path node-runtime)))
@@ -477,9 +480,11 @@ just the DNS server; for any other runtime, nothing."
              (lambda ()
                (call-with-agent-cni-server
                 node-runtime
-                (lambda () (call-with-dns-server body :service-resolver
+                (lambda () (call-with-dns-server body :forward-rules (node-runtime-dns-forward-rules node-runtime)
+                                                 :service-resolver
                                            (store-service-dns-resolver (node-runtime-store node-runtime)))))))
-            (call-with-dns-server body :service-resolver
+            (call-with-dns-server body :forward-rules (node-runtime-dns-forward-rules node-runtime)
+                                       :service-resolver
                                         (store-service-dns-resolver (node-runtime-store node-runtime))))
         (funcall body))))
 

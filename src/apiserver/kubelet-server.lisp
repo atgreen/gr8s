@@ -351,6 +351,7 @@ instrumented runtime operations and Pod latencies, its identity, the statistics 
 the (namespace claim host-path) of each mounted claim, and the process collector."
   (with-output-to-string (out)
     (write-string (kubelet-instrumentation-text) out)
+    (write-string (dns-metrics-text) out)
     (write-prometheus-family out "kubelet_node_name" "[ALPHA] The node's name. The count is always 1." "gauge"
                              (list (list (list (cons "node" node-name)) 1)))
     (when states

@@ -187,8 +187,23 @@ Native DNS publishes normal Service A/AAAA records from cluster IPs and headless
 Service / explicit endpoint-hostname records from ready EndpointSlice addresses.
 Public Service discovery data travels once per node in authenticated snapshots and
 installs atomically with Pod references, separately from namespace-scoped Secret
-delivery. SRV, PTR, DNS-schema TXT, generated endpoint-hostname records, and
-ExternalName are tracked separately.
+delivery. It also serves named-port SRV, reverse PTR, DNS-schema TXT, generated
+endpoint-hostname, ExternalName CNAME, and CoreDNS-compatible insecure
+`IP.NAMESPACE.pod.cluster.local` records. Multi-address headless replies rotate
+their first address between queries.
+
+Forwarded positive answers remain cached for the lowest record TTL. NXDOMAIN and
+NODATA answers with an authority record use its TTL for negative caching. Cache
+hits preserve the caller's DNS transaction ID and report the remaining TTL. The
+cache is bounded and shared by the UDP and TCP listeners. Repeat
+`--dns-forward ZONE=IP[:PORT]` on `gr8s serve` or `gr8s agent` to configure stub
+domains; the longest matching zone wins, and repeated zones provide multiple
+upstreams. Other names continue to use the host's IPv4 resolvers.
+
+The kubelet `/metrics` endpoint includes query and response counters, cache hits
+and misses, upstream success and error counts, and forwarding duration. DNS is
+embedded in every native agent rather than deployed as Pods, so its lifecycle and
+availability follow the node agent.
 
 `scripts/test-pod-dns-config.py` verifies actual resolver files and custom
 UDP/TCP queries against a separate resolver in an owned guest.

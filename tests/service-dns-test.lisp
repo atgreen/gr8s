@@ -68,6 +68,47 @@
         (is (= 1 (length answers)))
         (is (equalp (0conf:parse-ipv6 "2001:db8::1") (0conf:aaaa-address (first answers))))))))
 
+(test service-dns-rotates-headless-multi-address-answers
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let ((service (service-test-object "web" "http"))
+          (slice (endpointslice-test-object "manual" "192.0.2.11")))
+      (setf (gethash "clusterIP" (gethash "spec" service)) "None"
+            (gethash "endpoints" slice)
+            (vector (gr8s::core-object "addresses" #("192.0.2.11"))
+                    (gr8s::core-object "addresses" #("192.0.2.12"))
+                    (gr8s::core-object "addresses" #("192.0.2.13"))))
+      (gr8s::create-core-resource store "services" service "alpha")
+      (gr8s::create-core-resource store "endpointslices" slice "alpha")
+      (let ((resolver (gr8s::store-service-dns-resolver store)))
+        (labels ((addresses ()
+                   (mapcar #'0conf:format-ipv4
+                           (mapcar #'0conf:a-address
+                                   (0conf:dns-message-answers
+                                    (0conf:decode-message
+                                     (gr8s::answer-dns-query
+                                      (dns-a-query "web.alpha.svc.cluster.local")
+                                      (lambda (packet) (declare (ignore packet)) (error "forwarded"))
+                                      resolver)))))))
+          (let ((first (addresses)) (second (addresses)) (third (addresses)))
+            (is (equal (sort (copy-list first) #'string<)
+                       (sort (copy-list second) #'string<)))
+            (is (equal (rest first) (butlast second)))
+            (is (equal (rest second) (butlast third)))))))))
+
+(test service-dns-serves-default-coredns-insecure-pod-records
+  (with-temporary-store (store directory)
+    (declare (ignore directory))
+    (let* ((name "10-42-7-19.alpha.pod.cluster.local")
+           (a (service-dns-test-message store name))
+           (aaaa (service-dns-test-message store name 0conf:+type-aaaa+))
+           (invalid (service-dns-test-message store "10-42-999-19.alpha.pod.cluster.local")))
+      (is (equalp #(10 42 7 19)
+                  (0conf:a-address (first (0conf:dns-message-answers a)))))
+      (is (= 0 (logand 15 (0conf:dns-message-flags aaaa))))
+      (is (null (0conf:dns-message-answers aaaa)))
+      (is (= 3 (logand 15 (0conf:dns-message-flags invalid)))))))
+
 (test service-dns-projection-excludes-private-metadata-and-rejects-secrets
   (let* ((object (service-test-object "web" "http"))
          (metadata (gethash "metadata" object)))
