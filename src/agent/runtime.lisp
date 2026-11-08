@@ -96,12 +96,14 @@ START-NODE-RUNTIME does that."
              :store store :reconciler (make-reconciler store runtime))))
       (let ((applied (read-node-network-file (node-runtime-network-path node-runtime)))
             (pending (read-node-network-file (node-runtime-network-pending-path node-runtime))))
-        (when applied
-          (validate-node-network-object applied)
-          (setf (node-runtime-network node-runtime) applied))
-        (when (or pending applied)
-          (configure-node-runtime-network node-runtime (or pending applied)
-                                          :persist (not (null pending)))))
+        (when (or (null manager)
+                  (string= "native" (managed-containerd-cni-mode manager)))
+          (when applied
+            (validate-node-network-object applied)
+            (setf (node-runtime-network node-runtime) applied))
+          (when (or pending applied)
+            (configure-node-runtime-network node-runtime (or pending applied)
+                                            :persist (not (null pending))))))
       (dolist (pod (list-pods store))
         (setf (gethash (pod-uid pod) (node-runtime-assigned-versions node-runtime))
               (pod-resource-version pod))
@@ -301,7 +303,12 @@ inactive-firewalld attempt is not remembered, so a later snapshot can retry."
 
 (defun apply-node-runtime-network (node-runtime snapshot)
   "Configure the node network from SNAPSHOT's assigned network. A managed agent given no
-assigned network signals INVALID-CNI; an unmanaged one does nothing."
+assigned network signals INVALID-CNI in native mode; external CNI mode leaves all
+link, route, overlay and IPAM ownership to the configured plugins."
+  (when (and (node-runtime-manager node-runtime)
+             (string= "external"
+                      (managed-containerd-cni-mode (node-runtime-manager node-runtime))))
+    (return-from apply-node-runtime-network nil))
   (let ((network (slot-value snapshot 'gr8s.node.v1::network)))
     (cond
       (network (configure-node-runtime-network node-runtime (node-network-object network (slot-value snapshot 'gr8s.node.v1::routes))))
@@ -318,7 +325,9 @@ assigned network signals INVALID-CNI; an unmanaged one does nothing."
 (defun cleanup-node-runtime-gateway (node-runtime)
   "Remove the owned gateway after node services stop and all leases are gone."
   ;; Keep the gateway while Pods or partially installed leases outlive us.
-  (when (and (node-runtime-manager node-runtime) (node-runtime-ipam node-runtime)
+  (when (and (node-runtime-manager node-runtime)
+             (string= "native" (managed-containerd-cni-mode (node-runtime-manager node-runtime)))
+             (node-runtime-ipam node-runtime)
              (not (node-runtime-has-allocations-p node-runtime)))
     (remove-node-gateway)
     ;; The node is going away with no Pods left; withdraw the overlay firewall
@@ -333,7 +342,10 @@ the node gateway when Pods still hold allocations. Held under the apply lock; a 
 without a network reconciler. Returns NIL."
   ;; Kernel link events can flush permanent VXLAN FDB entries even when the
   ;; control-plane revision is unchanged. Repair from durable local topology.
-  (when (node-runtime-network-reconciler node-runtime)
+  (when (and (node-runtime-network-reconciler node-runtime)
+             (or (null (node-runtime-manager node-runtime))
+                 (string= "native"
+                          (managed-containerd-cni-mode (node-runtime-manager node-runtime)))))
     (bt:with-lock-held ((node-runtime-apply-lock node-runtime))
       (let* ((pending (read-node-network-file (node-runtime-network-pending-path node-runtime)))
              (network (or pending (node-runtime-network node-runtime))))
@@ -344,16 +356,22 @@ without a network reconciler. Returns NIL."
             (ensure-node-gateway))))))
   nil)
 
-(defun handle-node-runtime-cni (node-runtime request)
-  "Service one agent CNI REQUEST against the node's current CNI operations, or return a
-CNI error response when the node's network assignment is not yet ready."
-  (let ((operations
-          (bt:with-lock-held ((node-runtime-network-lock node-runtime))
-            (node-runtime-cni-operations node-runtime))))
-    (if operations
-        (handle-agent-cni-request request :operations operations :chained nil)
-        (agent-cni-error-response
-         (make-condition 'cni-error :message "node network assignment is not ready")))))
+(defun handle-node-runtime-cni
+    (node-runtime request &key (chained-operations (make-chained-cni-operations)))
+  "Service one agent CNI REQUEST in the manager's configured ownership mode.
+External mode treats gr8s as an optional chained policy plugin and never requires
+the native node IPAM. Native mode dispatches to the assigned routed CNI operations."
+  (if (and (node-runtime-manager node-runtime)
+           (string= "external"
+                    (managed-containerd-cni-mode (node-runtime-manager node-runtime))))
+      (handle-agent-cni-request request :operations chained-operations :chained t)
+      (let ((operations
+              (bt:with-lock-held ((node-runtime-network-lock node-runtime))
+                (node-runtime-cni-operations node-runtime))))
+        (if operations
+            (handle-agent-cni-request request :operations operations :chained nil)
+            (agent-cni-error-response
+             (make-condition 'cni-error :message "node network assignment is not ready"))))))
 
 (defun node-runtime-stopping-p (node-runtime)
   "True when a stop has been requested of NODE-RUNTIME (read under its lock)."
@@ -488,6 +506,20 @@ just the DNS server; for any other runtime, nothing."
                                         (store-service-dns-resolver (node-runtime-store node-runtime))))
         (funcall body))))
 
+(defun call-with-external-cni-dns-gateway
+    (node-runtime function &key (ensure #'ensure-node-gateway) (remove #'remove-node-gateway))
+  "Keep only gr8s's node-local DNS address while external plugins own Pod networking.
+The gateway exists before the DNS listener starts and is removed after that listener
+stops, including when the agent body exits with an error. Native mode continues to
+create and retain the same gateway according to its durable IPAM leases."
+  (if (and (node-runtime-manager node-runtime)
+           (string= "external"
+                    (managed-containerd-cni-mode (node-runtime-manager node-runtime))))
+      (unwind-protect
+           (progn (funcall ensure) (funcall function))
+        (funcall remove))
+      (funcall function)))
+
 (defun node-runtime-thread-main (node-runtime)
   "The node-runtime thread's entry point: run the agent under managed containerd and its
 services, cleaning up the node gateway on exit. Records any error and the final :failed or
@@ -496,7 +528,9 @@ services, cleaning up the node gateway on exit. Records any error and the final 
       (unwind-protect
            (call-with-managed-containerd
             (node-runtime-manager node-runtime)
-            (lambda () (call-with-node-runtime-services node-runtime)))
+            (lambda ()
+              (call-with-external-cni-dns-gateway
+               node-runtime (lambda () (call-with-node-runtime-services node-runtime)))))
         (cleanup-node-runtime-gateway node-runtime))
     (error (condition)
       (bt:with-lock-held ((node-runtime-lock node-runtime))

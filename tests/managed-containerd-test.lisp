@@ -111,6 +111,49 @@
     (is (search "conf_dir = '/var/lib/gr8s/containerd/cni/net.d'" config))
     (is (search "platform = 'linux/arm64'" config))))
 
+(test managed-containerd-can-delegate-cni-configuration-to-operator-owned-plugins
+  (let* ((root (merge-pathnames
+                (format nil "gr8s-external-cni-~36R/" (random (expt 36 8)))
+                (uiop:temporary-directory)))
+         (config-directory (merge-pathnames "net.d/" root))
+         (sentinel (merge-pathnames "10-calico.conflist" config-directory))
+         (manager
+           (gr8s::make-managed-containerd
+            :state-directory (merge-pathnames "state/" root)
+            :executable "/opt/gr8s/bin/containerd"
+            :oci-runtime "/opt/gr8s/bin/runc"
+            :cni-bin-directory "/opt/gr8s/bin/cni/"
+            :cni-bin-directories '("/opt/cni/bin/" "/var/lib/cilium/bin/")
+            :cni-mode "external"
+            :cni-config-directory config-directory
+            :platform "linux/amd64")))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist sentinel)
+           (with-open-file (stream sentinel :direction :output :if-does-not-exist :create)
+             (write-string "operator-owned" stream))
+           (gr8s::write-managed-containerd-config manager)
+           (let ((config (gr8s::managed-containerd-config-text manager)))
+             (is (search "bin_dirs = [\"/opt/gr8s/bin/cni/\", \"/opt/cni/bin/\", \"/var/lib/cilium/bin/\"]"
+                         config))
+             (is (search (format nil "conf_dir = '~A'" (namestring config-directory)) config)))
+           (is (string= "operator-owned" (uiop:read-file-string sentinel)))
+           (is-false (probe-file (gr8s::managed-containerd-cni-config-path manager))))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+
+(test managed-containerd-escapes-operator-cni-bin-paths-as-toml
+  (let* ((manager
+           (gr8s::make-managed-containerd
+            :state-directory "/var/lib/gr8s/"
+            :executable "/opt/gr8s/bin/containerd"
+            :oci-runtime "/opt/gr8s/bin/runc"
+            :cni-bin-directory "/opt/gr8s/bin/cni/"
+            :cni-bin-directories '("/opt/operator's cni/")))
+         (config (gr8s::managed-containerd-config-text manager)))
+    (is (search "bin_dirs = [\"/opt/gr8s/bin/cni/\", \"/opt/operator's cni/\"]"
+                config))
+    (is (string= "\"a\\\\b\\\"c\"" (gr8s::toml-basic-string "a\\b\"c")))))
+
 (test containerd-launcher-creates-a-new-log-file
   (let* ((directory
            (merge-pathnames

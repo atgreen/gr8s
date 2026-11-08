@@ -96,6 +96,22 @@
         (progn (setf (cdr existing) (append (cdr existing) (list (cdr parsed)))) rules)
         (append rules (list (list (car parsed) (cdr parsed)))))))
 
+(defun validate-cni-options (options)
+  "Validate the managed-containerd CNI ownership and plugin search paths."
+  (unless (member (getf options :cni-mode) '("native" "external") :test #'string=)
+    (error "CNI mode must be native or external"))
+  (dolist (path (append (when (getf options :cni-conf-dir)
+                          (list (getf options :cni-conf-dir)))
+                        (getf options :cni-bin-dirs)))
+    (unless (uiop:absolute-pathname-p (pathname path))
+      (error "CNI paths must be absolute: ~A" path)))
+  (if (string= "external" (getf options :cni-mode))
+      (unless (getf options :cni-conf-dir)
+        (error "external CNI mode requires --cni-conf-dir"))
+      (when (getf options :cni-conf-dir)
+        (error "--cni-conf-dir requires external CNI mode")))
+  options)
+
 (defun parse-serve-options (arguments)
   "Parse `gr8s serve' ARGUMENTS into an options plist on top of the serve
    defaults. Signals on an unknown option, a missing option value, or an out-of-
@@ -121,6 +137,9 @@
                        :registry-credentials-file nil
                        :image-credential-provider-config nil
                        :image-credential-provider-bin-dir nil
+                       :cni-mode "native"
+                       :cni-conf-dir nil
+                       :cni-bin-dirs nil
                        :dns-forward-rules nil
                        :kubeconfig nil
                        :kubelet-port +kubelet-default-port+
@@ -186,6 +205,13 @@
                       (setf (getf options :image-credential-provider-config) value))
                      ((string= option "--image-credential-provider-bin-dir")
                       (setf (getf options :image-credential-provider-bin-dir) value))
+                     ((string= option "--cni-mode")
+                      (setf (getf options :cni-mode) value))
+                     ((string= option "--cni-conf-dir")
+                      (setf (getf options :cni-conf-dir) value))
+                     ((string= option "--cni-bin-dir")
+                      (setf (getf options :cni-bin-dirs)
+                            (append (getf options :cni-bin-dirs) (list value))))
                      ((string= option "--dns-forward")
                       (setf (getf options :dns-forward-rules)
                             (add-dns-forward-rule (getf options :dns-forward-rules) value)))
@@ -220,7 +246,7 @@
     (unless (eq (null (getf options :image-credential-provider-config))
                 (null (getf options :image-credential-provider-bin-dir)))
       (error "image credential provider config and bin directory must be specified together"))
-    options))
+    (validate-cni-options options)))
 
 (defun parse-agent-options (arguments)
   "Parse `gr8s agent' ARGUMENTS into an options plist. Signals on an unknown
@@ -242,6 +268,9 @@
                        :registry-credentials-file nil
                        :image-credential-provider-config nil
                        :image-credential-provider-bin-dir nil
+                       :cni-mode "native"
+                       :cni-conf-dir nil
+                       :cni-bin-dirs nil
                        :dns-forward-rules nil)))
     (loop while arguments
           for option = (first arguments)
@@ -283,6 +312,13 @@
                 (setf (getf options :image-credential-provider-config) value))
                ((string= option "--image-credential-provider-bin-dir")
                 (setf (getf options :image-credential-provider-bin-dir) value))
+               ((string= option "--cni-mode")
+                (setf (getf options :cni-mode) value))
+               ((string= option "--cni-conf-dir")
+                (setf (getf options :cni-conf-dir) value))
+               ((string= option "--cni-bin-dir")
+                (setf (getf options :cni-bin-dirs)
+                      (append (getf options :cni-bin-dirs) (list value))))
                ((string= option "--dns-forward")
                 (setf (getf options :dns-forward-rules)
                       (add-dns-forward-rule (getf options :dns-forward-rules) value)))
@@ -300,7 +336,7 @@
     (unless (eq (null (getf options :image-credential-provider-config))
                 (null (getf options :image-credential-provider-bin-dir)))
       (error "image credential provider config and bin directory must be specified together"))
-    options))
+    (validate-cni-options options)))
 
 (defun parse-join-token-options (arguments)
   "Parse `gr8s join-token' ARGUMENTS into an options plist (role defaults to
@@ -556,6 +592,9 @@ bare positional state directory for backward compatibility.  A missing
                    :oci-runtime (getf options :containerd-oci-runtime)
                    :metadata-no-sync (getf options :containerd-no-sync)
                    :runtime-assets *embedded-runtime-assets*
+                   :cni-mode (getf options :cni-mode)
+                   :cni-config-directory (getf options :cni-conf-dir)
+                   :cni-bin-directories (getf options :cni-bin-dirs)
                    :extra-runtime-handlers
                    ;; Runtime addons are a node-level resource at the node's
                    ;; state root. serve runs its local agent (and thus
@@ -1145,6 +1184,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (format t "  --containerd-{executable,oci-runtime,socket,log-root} PATH   --containerd-no-sync~%")
   (format t "  --registry-credentials-file DOCKER-CONFIG.json~%")
   (format t "  --image-credential-provider-{config FILE,bin-dir DIR}~%")
+  (format t "  --cni-mode native|external   --cni-conf-dir DIR   --cni-bin-dir DIR (repeatable)~%")
   (format t "  --dns-forward ZONE=IP[:PORT] (repeat for multiple zones or upstreams)~%")
   (format t "  --node-listen IPV4   --node-address IPV4   --debug-slynk-port PORT   --local-storage-path DIR~%~%")
   (format t "agent options:~%")
@@ -1152,6 +1192,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (format t "  --node-address IPV4   --runtime containerd|fake   --containerd-mode managed|external~%")
   (format t "  --registry-credentials-file DOCKER-CONFIG.json~%")
   (format t "  --image-credential-provider-{config FILE,bin-dir DIR}~%")
+  (format t "  --cni-mode native|external   --cni-conf-dir DIR   --cni-bin-dir DIR (repeatable)~%")
   (format t "  --dns-forward ZONE=IP[:PORT] (repeat for multiple zones or upstreams)~%~%")
   (format t "runtime install options:~%")
   (format t "  --state-directory DIR   --version V   --hypervisor qemu|clh|fc|dragonball (kata)~%")

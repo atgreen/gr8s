@@ -271,6 +271,47 @@
       (is (search "sandbox-1/rejected_spoofs" (third call)))
       (is (search "sandbox-1/tcx-egress" (fourth call))))))
 
+(test chained-cni-policy-uses-the-primary-plugins-ip-and-preserves-its-result
+  (let* ((seen nil)
+         (previous
+           (gr8s::json-object
+            "cniVersion" "1.0.0"
+            "interfaces" (vector (gr8s::json-object "name" "eth0" "sandbox" "/proc/99/ns/net"))
+            "ips" (vector (gr8s::json-object "interface" 0 "address" "10.244.7.19/24"))))
+         (configuration
+           (com.inuoe.jzon:stringify
+            (gr8s::json-object
+             "cniVersion" "1.0.0" "name" "external" "type" "gr8s"
+             "socket" "/run/gr8s/cni.sock" "mapPinRoot" "/run/gr8s/bpf"
+             "prevResult" previous)))
+         (policy
+           (gr8s::make-cni-operations
+            :add (lambda (config context map-path link-path)
+                   (declare (ignore context map-path link-path))
+                   (setf seen (gr8s::cni-configuration-endpoint-address config)))))
+         (result
+           (gr8s::dispatch-cni-command
+            "ADD" configuration
+            (gr8s::make-cni-context :container-id "sandbox-external"
+                                    :netns "/proc/99/ns/net" :interface-name "eth0")
+            (gr8s::make-chained-cni-operations :policy policy))))
+    (is (string= "10.244.7.19" seen))
+    (is (string= (com.inuoe.jzon:stringify previous)
+                 (com.inuoe.jzon:stringify result)))))
+
+(test chained-cni-policy-rejects-a-result-without-an-ipv4-address
+  (let ((configuration
+          (com.inuoe.jzon:stringify
+           (gr8s::json-object
+            "cniVersion" "1.0.0" "mapPinRoot" "/run/gr8s/bpf"
+            "prevResult" (gr8s::json-object "cniVersion" "1.0.0" "ips" #())))))
+    (signals gr8s::cni-error
+      (gr8s::dispatch-cni-command
+       "ADD" configuration
+       (gr8s::make-cni-context :container-id "sandbox-no-ip"
+                               :netns "/proc/99/ns/net" :interface-name "eth0")
+       (gr8s::make-chained-cni-operations)))))
+
 (test cni-delete-does-not-require-a-network-namespace
   (let* ((removed nil)
         (operations

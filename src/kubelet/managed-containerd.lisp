@@ -83,6 +83,9 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
   executable
   oci-runtime
   cni-bin-directory
+  cni-bin-directories
+  (cni-mode "native")
+  cni-config-directory
   shim-socket-directory
   platform
   (snapshotter "overlayfs")
@@ -196,6 +199,7 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
 
 (defun make-managed-containerd
     (&key state-directory executable oci-runtime cni-bin-directory
+          cni-bin-directories (cni-mode "native") cni-config-directory
           shim-socket-directory
           extra-runtime-handlers
           runtime-assets
@@ -213,11 +217,17 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
           (restart-initial-delay 1)
           (restart-max-delay 30)
           (supervision-interval 0.25))
-  "Construct a MANAGED-CONTAINERD. STATE-DIRECTORY and CNI-BIN-DIRECTORY are
-   normalized to directory namestrings; SHIM-SOCKET-DIRECTORY defaults to one
+  "Construct a MANAGED-CONTAINERD. CNI-MODE is native or external. Native writes
+   gr8s's conflist; external leaves CNI-CONFIG-DIRECTORY operator-owned.
+   CNI-BIN-DIRECTORY and additional CNI-BIN-DIRECTORIES are normalized to
+   directory namestrings; SHIM-SOCKET-DIRECTORY defaults to one
    derived from the state directory. The keyword collaborators (launcher,
    probes, stopper, exit describer, bpf mounters, runtime preparer) default to
    the real implementations and are overridable for testing."
+  (unless (member cni-mode '("native" "external") :test #'string=)
+    (error "unsupported CNI mode: ~A" cni-mode))
+  (when (and (string= cni-mode "external") (null cni-config-directory))
+    (error "external CNI mode requires a configuration directory"))
   (let ((state (uiop:ensure-directory-pathname state-directory)))
     (%make-managed-containerd
      :state-directory state
@@ -225,6 +235,14 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
      :oci-runtime oci-runtime
      :cni-bin-directory
      (namestring (uiop:ensure-directory-pathname cni-bin-directory))
+     :cni-bin-directories
+     (mapcar (lambda (directory)
+               (namestring (uiop:ensure-directory-pathname directory)))
+             cni-bin-directories)
+     :cni-mode cni-mode
+     :cni-config-directory
+     (when cni-config-directory
+       (namestring (uiop:ensure-directory-pathname cni-config-directory)))
      :shim-socket-directory
      (or shim-socket-directory (default-shim-socket-directory state))
      :extra-runtime-handlers extra-runtime-handlers
@@ -243,6 +261,42 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
      :restart-initial-delay restart-initial-delay
      :restart-max-delay restart-max-delay
      :supervision-interval supervision-interval)))
+
+(defun managed-containerd-cni-config-directory-path (manager)
+  "Return the containerd CNI configuration directory selected for MANAGER."
+  (or (managed-containerd-cni-config-directory manager)
+      (managed-containerd-directory manager "containerd/cni/net.d")))
+
+(defun managed-containerd-cni-bin-directory-list (manager)
+  "Return embedded and operator CNI binary directories in lookup order."
+  (remove-duplicates
+   (cons (managed-containerd-cni-bin-directory manager)
+         (managed-containerd-cni-bin-directories manager))
+   :test #'string=))
+
+(defun toml-basic-string (string)
+  "Render STRING as one escaped TOML basic string."
+  (with-output-to-string (stream)
+    (write-char #\" stream)
+    (loop for character across string
+          for code = (char-code character)
+          do (case character
+               (#\" (write-string "\\\"" stream))
+               (#\\ (write-string "\\\\" stream))
+               (#\Backspace (write-string "\\b" stream))
+               (#\Tab (write-string "\\t" stream))
+               (#\Newline (write-string "\\n" stream))
+               (#\Page (write-string "\\f" stream))
+               (#\Return (write-string "\\r" stream))
+               (otherwise
+                (if (< code 32)
+                    (format stream "\\u~4,'0X" code)
+                    (write-char character stream)))))
+    (write-char #\" stream)))
+
+(defun toml-string-list (strings)
+  "Render STRINGS as a TOML array of escaped basic strings."
+  (format nil "[~{~A~^, ~}]" (mapcar #'toml-basic-string strings)))
 
 (defun managed-containerd-directory (manager relative-path)
   "Resolve RELATIVE-PATH against MANAGER's state directory, as a namestring."
@@ -388,7 +442,7 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
         (temporary (managed-containerd-directory manager "containerd/tmp"))
         (runtimes (managed-containerd-runtimes-toml manager))
         (socket (managed-containerd-socket-path manager))
-        (cni-config (managed-containerd-directory manager "containerd/cni/net.d"))
+        (cni-config (managed-containerd-cni-config-directory-path manager))
         (snapshotter (managed-containerd-snapshotter manager)))
     (format
      nil
@@ -396,7 +450,7 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
 [plugins]~%~:[~;  [plugins.'io.containerd.metadata.v1.bolt']~%    no_sync = true~%~]  [plugins.'io.containerd.cri.v1.images']~%    snapshotter = '~A'~%~
   [plugins.'io.containerd.cri.v1.runtime']~%    disable_apparmor = true~%    restrict_oom_score_adj = true~%    netns_mounts_under_state_dir = true~%~
     [plugins.'io.containerd.cri.v1.runtime'.containerd]~%      default_runtime_name = 'runc'~%~A~
-    [plugins.'io.containerd.cri.v1.runtime'.cni]~%      bin_dirs = ['~A']~%      conf_dir = '~A'~%      use_internal_loopback = true~%~
+    [plugins.'io.containerd.cri.v1.runtime'.cni]~%      bin_dirs = ~A~%      conf_dir = '~A'~%      use_internal_loopback = true~%~
   [plugins.'io.containerd.nri.v1.nri']~%    disable = true~%~
   [plugins.'io.containerd.shim.v1.manager']~%    socket_dir = '~A'~%~
   [plugins.'io.containerd.transfer.v1.local']~%~
@@ -405,7 +459,7 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
   [plugins.'io.containerd.server.v1.ttrpc']~%    address = '~A.ttrpc'~%"
      root state temporary (managed-containerd-metadata-no-sync manager) snapshotter
      runtimes
-     (managed-containerd-cni-bin-directory manager)
+     (toml-string-list (managed-containerd-cni-bin-directory-list manager))
      cni-config (managed-containerd-shim-socket-directory manager)
      (managed-containerd-platform manager)
      snapshotter socket socket)))
@@ -564,7 +618,9 @@ PID reuse. Return true when an owned live process was reclaimed."
   (let ((path (managed-containerd-config-path manager)))
     (ensure-directories-exist path)
     (ensure-directories-exist
-     (managed-containerd-directory manager "containerd/cni/net.d/"))
+     (merge-pathnames ".directory"
+                      (uiop:ensure-directory-pathname
+                       (managed-containerd-cni-config-directory-path manager))))
     (ensure-directories-exist
      (merge-pathnames
       ".state-directory"
@@ -579,11 +635,12 @@ PID reuse. Return true when an owned live process was reclaimed."
                             :if-exists :supersede
                             :if-does-not-exist :create)
       (write-string (managed-containerd-config-text manager) stream))
-    (with-open-file (stream (managed-containerd-cni-config-path manager)
-                            :direction :output
-                            :if-exists :supersede
-                            :if-does-not-exist :create)
-      (write-string (managed-containerd-cni-config-text manager) stream))
+    (when (string= "native" (managed-containerd-cni-mode manager))
+      (with-open-file (stream (managed-containerd-cni-config-path manager)
+                              :direction :output
+                              :if-exists :supersede
+                              :if-does-not-exist :create)
+        (write-string (managed-containerd-cni-config-text manager) stream)))
     path))
 
 (defun managed-containerd-stopping (manager)

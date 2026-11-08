@@ -164,6 +164,31 @@ reconciliation. containerd invokes only the `gr8s` CNI plugin, which sends typed
 requests to the agent's private Unix socket. CNI ADD retains its durable lease
 through partial failures; DEL releases it only after removing policy and links.
 
+Use `--cni-mode external --cni-conf-dir /etc/cni/net.d` to give ownership of
+Pod links, addresses, routes, IPAM, and cross-node transport to operator-supplied
+CNI configuration. Repeat `--cni-bin-dir DIR` to add plugin search directories;
+the bundled gr8s plugin directory remains available. In external mode gr8s
+points its managed containerd at the supplied directory but neither creates nor
+overwrites a conflist, and it does not apply the native Pod CIDR, VXLAN, routes,
+or IPAM. This is the ownership boundary needed by primary plugins such as
+Calico, Cilium, Canal, or a Multus-selected default network.
+
+The gr8s policy plugin may optionally supplement an external primary plugin by
+appearing after it in the same conflist. Its entry needs `type: "gr8s"`, the
+agent socket at `<state>/containerd/run/gr8s-cni.sock`, and `mapPinRoot` at
+`<state>/containerd/bpf`. ADD and CHECK require the primary plugin's
+`prevResult`; gr8s extracts the assigned IPv4 address, attaches its policy guards
+to `CNI_IFNAME` inside the Pod namespace, and returns the previous result
+unchanged. Omitting the gr8s entry leaves policy entirely with the external
+plugin. External mode still creates only the owned `169.254.1.1/32` node-local
+gateway while the embedded DNS listener is running, so the Pod resolver address
+remains reachable without claiming the external plugin's dataplane.
+
+External mode currently configures containerd's single default CNI network.
+Kubernetes NetworkAttachmentDefinition/Multus secondary-interface orchestration
+is tracked separately; selecting Multus as the default plugin does not by itself
+make gr8s reconcile secondary attachments.
+
 Each node owns `169.254.1.1/32` on the `gr8s-gateway` dummy interface. Pod veths
 have individual `/32` routes without duplicating that gateway address. Each Pod
 has a permanent neighbor mapping the gateway to its host-veth MAC, plus a link

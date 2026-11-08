@@ -594,6 +594,79 @@
       (is (search "assignment is not ready"
                   (slot-value response 'gr8s.node.v1::error-message))))))
 
+(test external-cni-chaining-does-not-wait-for-native-network-assignment
+  (with-temporary-store (store path)
+    (assert store)
+    (let* ((manager
+             (gr8s::make-managed-containerd
+              :state-directory path :executable "/opt/containerd" :oci-runtime "/opt/runc"
+              :cni-bin-directory "/opt/cni/bin" :cni-mode "external"
+              :cni-config-directory "/etc/cni/net.d"))
+           (runtime (gr8s::make-node-runtime path (make-fake-runtime) manager))
+           (seen nil)
+           (operations
+             (gr8s::make-cni-operations
+              :add (lambda (configuration context map-path link-path)
+                     (declare (ignore context map-path link-path))
+                     (setf seen (gr8s::cni-configuration-endpoint-address configuration)))))
+           (config
+             (com.inuoe.jzon:stringify
+              (gr8s::json-object
+               "cniVersion" "1.0.0" "mapPinRoot" "/run/gr8s/bpf"
+               "prevResult"
+               (gr8s::json-object "cniVersion" "1.0.0"
+                                  "ips" (vector (gr8s::json-object "address" "10.244.1.9/24"))))))
+           (response
+             (gr8s::handle-node-runtime-cni
+              runtime (agent-cni-request-for-test "ADD" config)
+              :chained-operations (gr8s::make-chained-cni-operations :policy operations))))
+      (is-true (slot-value response 'gr8s.node.v1::success))
+      (is (string= "10.244.1.9" seen)))))
+
+(test external-cni-mode-does-not-apply-the-native-overlay-or-ipam
+  (with-temporary-store (store path)
+    (assert store)
+    (let* ((manager
+             (gr8s::make-managed-containerd
+              :state-directory path :executable "/opt/containerd" :oci-runtime "/opt/runc"
+              :cni-bin-directory "/opt/cni/bin" :cni-mode "external"
+              :cni-config-directory "/etc/cni/net.d"))
+           (native-reconciliations 0)
+           (runtime
+             (gr8s::make-node-runtime
+              path (make-fake-runtime) manager
+              :network-reconciler
+              (lambda (network previous)
+                (declare (ignore network previous))
+                (incf native-reconciliations))))
+           (snapshot
+             (make-instance 'gr8s.node.v1::desired-state-snapshot
+                            :revision 1 :network (node-network-for-test))))
+      (gr8s::apply-node-runtime-network runtime snapshot)
+      (is (= 0 native-reconciliations))
+      (is-false (gr8s::node-runtime-ipam runtime))
+      (is-false (gr8s::node-runtime-cni-operations runtime)))))
+
+(test external-cni-mode-owns-only-the-node-local-dns-gateway
+  (with-temporary-store (store path)
+    (assert store)
+    (let* ((manager
+             (gr8s::make-managed-containerd
+              :state-directory path :executable "/opt/containerd" :oci-runtime "/opt/runc"
+              :cni-bin-directory "/opt/cni/bin" :cni-mode "external"
+              :cni-config-directory "/etc/cni/net.d"))
+           (runtime (gr8s::make-node-runtime path (make-fake-runtime) manager))
+           (events nil))
+      (signals error
+        (gr8s::call-with-external-cni-dns-gateway
+         runtime
+         (lambda ()
+           (push :body events)
+           (error "injected agent failure"))
+         :ensure (lambda () (push :ensure events))
+         :remove (lambda () (push :remove events))))
+      (is (equal '(:ensure :body :remove) (nreverse events))))))
+
 (test node-network-rejects-invalid-subnets-before-persistence
   (with-temporary-store (store path)
     (assert store)

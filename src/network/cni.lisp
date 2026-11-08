@@ -220,6 +220,35 @@
             nil)
            (t (invalid-cni "unsupported CNI command ~A" command))))))))
 
+(defun chained-cni-ipv4-address (previous-result)
+  "Return the first valid IPv4 address in a CNI PREVIOUS-RESULT, without its prefix."
+  (let ((addresses (gethash "ips" previous-result #())))
+    (loop for entry across addresses
+          for cidr = (and (hash-table-p entry) (gethash "address" entry))
+          for slash = (and (stringp cidr) (position #\/ cidr))
+          for address = (and slash (subseq cidr 0 slash))
+          when (and address
+                    (handler-case (progn (parse-ipv4-integer address) t)
+                      (error () nil)))
+            return address
+          finally (invalid-cni "the primary CNI result has no IPv4 Pod address"))))
+
+(defun make-chained-cni-operations (&key (policy (make-cni-operations)))
+  "Wrap POLICY for use after an external primary CNI plugin.
+The primary plugin owns links and IPAM; gr8s derives the endpoint identity from
+prevResult and only installs, checks, or removes its policy datapath."
+  (make-cni-operations
+   :prepare
+   (lambda (configuration context)
+     (setf (cni-configuration-endpoint-address configuration)
+           (chained-cni-ipv4-address
+            (cni-configuration-previous-result configuration)))
+     (funcall (cni-operations-prepare policy) configuration context))
+   :add (cni-operations-add policy)
+   :check (cni-operations-check policy)
+   :delete (cni-operations-delete policy)
+   :status (cni-operations-status policy)))
+
 (defun ensure-cni-pin-directory (directory)
   "Ensure DIRECTORY exists, creating parents, and return it."
   (ensure-directories-exist (merge-pathnames ".pin" (pathname directory)))
