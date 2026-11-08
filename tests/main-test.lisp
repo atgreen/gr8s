@@ -13,6 +13,8 @@
     (is (string= "/var/log/gr8s/pods/"
                  (getf options :containerd-log-root)))
     (is-false (getf options :registry-credentials-file))
+    (is-false (getf options :image-credential-provider-config))
+    (is-false (getf options :image-credential-provider-bin-dir))
     (is (= 7443 (getf options :node-port)))
     (is (string= "gr8s-local" (getf options :node-name)))
     (is-false (getf options :disable-agent))))
@@ -115,6 +117,8 @@
              "--containerd-socket" "/tmp/containerd.sock"
              "--containerd-log-root" "/tmp/gr8s-logs/"
              "--registry-credentials-file" "/etc/gr8s/registry.json"
+             "--image-credential-provider-config" "/etc/gr8s/providers.yaml"
+             "--image-credential-provider-bin-dir" "/usr/libexec/gr8s/credentials/"
              "--kubeconfig" "/tmp/gr8s.conf"))))
     (is (eq :serve (getf options :command)))
     (is (string= "/tmp/gr8s-state" (getf options :state-directory)))
@@ -127,6 +131,10 @@
                  (getf options :containerd-log-root)))
     (is (string= "/etc/gr8s/registry.json"
                  (getf options :registry-credentials-file)))
+    (is (string= "/etc/gr8s/providers.yaml"
+                 (getf options :image-credential-provider-config)))
+    (is (string= "/usr/libexec/gr8s/credentials/"
+                 (getf options :image-credential-provider-bin-dir)))
     (is (string= "/tmp/gr8s.conf" (getf options :kubeconfig)))))
 
 (test managed-containerd-options-build-an-owned-runtime

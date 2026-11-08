@@ -11,6 +11,162 @@
 (defparameter +default-registry-key+ "index.docker.io"
   "The key Docker configs use for the default registry, once their /v1/ path is removed.")
 
+(defparameter *credential-provider-clock* #'get-universal-time
+  "Wall clock used to expire executable credential-provider responses.")
+
+(defparameter *credential-provider-timeout-seconds* 60
+  "Maximum execution time of one kubelet credential-provider plugin.")
+
+(defstruct image-credential-provider
+  "One validated kubelet exec credential provider and its private response cache."
+  name executable match-images default-cache-seconds api-version args environment
+  (cache (make-hash-table :test #'equal))
+  (lock (bt:make-lock "image credential provider cache")))
+
+(defun credential-provider-duration-seconds (value context)
+  "Parse VALUE as a nonnegative Go duration, signaling a configuration error otherwise."
+  (let ((nanoseconds (and (stringp value) (gr8s.resources::cel-parse-duration value))))
+    (unless (and nanoseconds (not (minusp nanoseconds)))
+      (error "~A must be a nonnegative duration" context))
+    (/ nanoseconds 1000000000)))
+
+(defun credential-provider-string-vector (value context)
+  "Return VALUE as a list of strings, requiring its kubelet configuration shape."
+  (unless (vectorp value) (error "~A must be an array" context))
+  (loop for item across value
+        do (unless (stringp item) (error "~A entries must be strings" context))
+        collect item))
+
+(defun load-image-credential-providers (config-path bin-directory)
+  "Load and validate a kubelet v1 CredentialProviderConfig from CONFIG-PATH.
+Provider names resolve only within BIN-DIRECTORY and are returned in configuration order."
+  (multiple-value-bind (document duplicates)
+      (gr8s.resources::yaml-parse (uiop:read-file-string config-path))
+    (when duplicates (error "Credential provider config has duplicate fields: ~{~A~^; ~}" duplicates))
+    (let* ((config (require-object document "credential provider config"))
+           (providers (gethash "providers" config))
+           (seen (make-hash-table :test #'equal)))
+      (unless (and (equal "kubelet.config.k8s.io/v1" (gethash "apiVersion" config))
+                   (equal "CredentialProviderConfig" (gethash "kind" config)))
+        (error "Credential provider config must be kubelet.config.k8s.io/v1 CredentialProviderConfig"))
+      (unless (and (vectorp providers) (plusp (length providers)))
+        (error "Credential provider config must contain providers"))
+      (loop for raw across providers
+            for index from 0
+            for provider = (require-object raw "credential provider")
+            for name = (gethash "name" provider)
+            for api-version = (gethash "apiVersion" provider)
+            for executable = (and (stringp name) (merge-pathnames name bin-directory))
+            do (unless (and (stringp name) (plusp (length name))
+                            (null (find #\/ name)) (not (member name '("." "..") :test #'equal)))
+                 (error "Credential provider ~D has an invalid name" index))
+               (when (gethash name seen) (error "Credential provider name ~A is duplicated" name))
+               (setf (gethash name seen) t)
+               (unless (equal api-version "credentialprovider.kubelet.k8s.io/v1")
+                 (error "Credential provider ~A uses unsupported apiVersion ~A" name api-version))
+               (when (gethash "tokenAttributes" provider)
+                 (error "Credential provider ~A requests unsupported tokenAttributes" name))
+               (unless (probe-file executable)
+                 (error "Credential provider executable ~A does not exist" executable))
+            collect
+            (make-image-credential-provider
+             :name name :executable (namestring executable) :api-version api-version
+             :match-images
+             (credential-provider-string-vector (gethash "matchImages" provider) "matchImages")
+             :default-cache-seconds
+             (credential-provider-duration-seconds
+              (gethash "defaultCacheDuration" provider) "defaultCacheDuration")
+             :args (credential-provider-string-vector (gethash "args" provider #()) "args")
+             :environment
+             (let ((environment (gethash "env" provider #())))
+               (unless (vectorp environment) (error "env must be an array"))
+               (loop for binding across environment
+                     for object = (require-object binding "credential provider environment")
+                     for variable = (gethash "name" object)
+                     for value = (gethash "value" object)
+                     do (unless (and (stringp variable) (plusp (length variable))
+                                     (stringp value) (null (find #\= variable)))
+                          (error "Credential provider ~A has an invalid environment entry" name))
+                     collect (format nil "~A=~A" variable value))))))))
+
+(defun credential-provider-response-entries (provider image)
+  "Invoke PROVIDER for IMAGE and return its validated registry entries and cache metadata."
+  (let* ((request (core-object "kind" "CredentialProviderRequest"
+                               "apiVersion" (image-credential-provider-api-version provider)
+                               "image" image))
+         (command (append (list "/usr/bin/env")
+                          (image-credential-provider-environment provider)
+                          (list (image-credential-provider-executable provider))
+                          (image-credential-provider-args provider)))
+         (output
+           (sb-ext:with-timeout *credential-provider-timeout-seconds*
+             (uiop:run-program
+              command :input (make-string-input-stream (com.inuoe.jzon:stringify request))
+              :output '(:string :stripped t) :error-output :string)))
+         (response (handler-case (com.inuoe.jzon:parse output)
+                     (error () (error "Credential provider ~A returned malformed JSON"
+                                      (image-credential-provider-name provider)))))
+         (object (require-object response "credential provider response"))
+         (cache-key-type (gethash "cacheKeyType" object))
+         (duration (if (eq 'missing (gethash "cacheDuration" object 'missing))
+                       (image-credential-provider-default-cache-seconds provider)
+                       (credential-provider-duration-seconds
+                        (gethash "cacheDuration" object) "cacheDuration")))
+         (auth (gethash "auth" object (core-object))))
+    (unless (and (equal "CredentialProviderResponse" (gethash "kind" object))
+                 (equal (image-credential-provider-api-version provider)
+                        (gethash "apiVersion" object))
+                 (member cache-key-type '("Image" "Registry" "Global") :test #'equal))
+      (error "Credential provider ~A returned an invalid response identity or cacheKeyType"
+             (image-credential-provider-name provider)))
+    (values
+     (loop for key being the hash-keys of (require-object auth "credential provider auth")
+             using (hash-value credential)
+           for entry = (require-object credential "credential provider credential")
+           for username = (gethash "username" entry)
+           for password = (gethash "password" entry)
+           do (unless (and (stringp username) (stringp password))
+                (error "Credential provider ~A returned a non-string credential"
+                       (image-credential-provider-name provider)))
+           collect (list* key username password))
+     cache-key-type duration)))
+
+(defun credential-provider-cache-key (type repository)
+  "Return the kubelet cache key for TYPE and normalized REPOSITORY."
+  (cond ((equal type "Image") repository)
+        ((equal type "Registry") (subseq repository 0 (position #\/ repository)))
+        ((equal type "Global") "")))
+
+(defun image-credential-provider-entries (providers image)
+  "Return matching executable-provider registry entries for IMAGE in provider order."
+  (let ((repository (image-repository image)) (now (funcall *credential-provider-clock*)))
+    (loop for provider in providers
+          when (some (lambda (pattern) (registry-key-matches-p pattern repository))
+                     (image-credential-provider-match-images provider))
+            append
+            (handler-case
+                (bt:with-lock-held ((image-credential-provider-lock provider))
+                  (let ((cache (image-credential-provider-cache provider)))
+                    (multiple-value-bind (cached hit)
+                        (loop for type in '("Image" "Registry" "Global")
+                              for key = (cons type (credential-provider-cache-key type repository))
+                              for value = (gethash key cache)
+                              when (and value (> (car value) now))
+                                do (return (values (cdr value) t))
+                              finally (return (values nil nil)))
+                      (if hit
+                          cached
+                          (multiple-value-bind (entries type duration)
+                              (credential-provider-response-entries provider image)
+                            (when (plusp duration)
+                              (setf (gethash
+                                     (cons type (credential-provider-cache-key type repository)) cache)
+                                    (cons (+ now duration) entries)))
+                            entries)))))
+              ;; Plugin errors do not prevent credentials from earlier keyrings
+              ;; from being attempted, and their output may contain credentials.
+              (error () nil)))))
+
 (defun image-repository (image)
   "Return IMAGE's normalized repository without its tag or digest: docker.io/library/a for a."
   (let* ((name (subseq image 0 (position #\@ image)))
@@ -150,7 +306,11 @@ Every matching credential is returned, because the kubelet tries them all to all
                              (error ()
                                (error 'container-image-pull-error
                                       :message (format nil "Image pull secret ~A is malformed" name))))))))
-    (setf entries (append entries (containerd-runtime-registry-credentials runtime)))
+    (setf entries
+          (append entries
+                  (containerd-runtime-registry-credentials runtime)
+                  (image-credential-provider-entries
+                   (containerd-runtime-credential-providers runtime) image)))
     (matching-registry-credentials entries (image-repository image))))
 
 (defun image-pull-job-key (image credentials)

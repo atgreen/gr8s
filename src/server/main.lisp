@@ -96,6 +96,8 @@
                        :containerd-socket "/run/containerd/containerd.sock"
                        :containerd-log-root "/var/log/gr8s/pods/"
                        :registry-credentials-file nil
+                       :image-credential-provider-config nil
+                       :image-credential-provider-bin-dir nil
                        :kubeconfig nil
                        :kubelet-port +kubelet-default-port+
                        :local-storage-path +default-local-storage-path+)))
@@ -156,6 +158,10 @@
                       (setf (getf options :containerd-log-root) value))
                      ((string= option "--registry-credentials-file")
                       (setf (getf options :registry-credentials-file) value))
+                     ((string= option "--image-credential-provider-config")
+                      (setf (getf options :image-credential-provider-config) value))
+                     ((string= option "--image-credential-provider-bin-dir")
+                      (setf (getf options :image-credential-provider-bin-dir) value))
                      ((string= option "--kubeconfig")
                       (setf (getf options :kubeconfig) value))
                      ((string= option "--kubelet-port")
@@ -184,6 +190,9 @@
                    (setf arguments (cddr arguments)))))
     (unless (string= "127.0.0.1" (getf options :listen))
       (error "gr8s v1 only listens on 127.0.0.1"))
+    (unless (eq (null (getf options :image-credential-provider-config))
+                (null (getf options :image-credential-provider-bin-dir)))
+      (error "image credential provider config and bin directory must be specified together"))
     options))
 
 (defun parse-agent-options (arguments)
@@ -203,7 +212,9 @@
                        :containerd-oci-runtime (default-containerd-oci-runtime)
                        :containerd-socket "/run/containerd/containerd.sock"
                        :containerd-log-root "/var/log/gr8s/pods/"
-                       :registry-credentials-file nil)))
+                       :registry-credentials-file nil
+                       :image-credential-provider-config nil
+                       :image-credential-provider-bin-dir nil)))
     (loop while arguments
           for option = (first arguments)
           for value = (option-value arguments option)
@@ -240,6 +251,10 @@
                 (setf (getf options :containerd-log-root) value))
                ((string= option "--registry-credentials-file")
                 (setf (getf options :registry-credentials-file) value))
+               ((string= option "--image-credential-provider-config")
+                (setf (getf options :image-credential-provider-config) value))
+               ((string= option "--image-credential-provider-bin-dir")
+                (setf (getf options :image-credential-provider-bin-dir) value))
                (t (error "unknown agent option: ~A" option)))
              (setf arguments (cddr arguments)))
     (dolist (required '(:server :node-name :state-directory))
@@ -251,6 +266,9 @@
         (dolist (required '(:token :ca-pin))
           (unless (getf options required)
             (error "unenrolled agent requires --~(~A~)" required)))))
+    (unless (eq (null (getf options :image-credential-provider-config))
+                (null (getf options :image-credential-provider-bin-dir)))
+      (error "image credential provider config and bin directory must be specified together"))
     options))
 
 (defun parse-join-token-options (arguments)
@@ -532,6 +550,12 @@ bare positional state directory for backward compatibility.  A missing
              :registry-credentials
              (when (getf options :registry-credentials-file)
                (load-node-registry-credentials (getf options :registry-credentials-file)))
+             :credential-providers
+             (when (getf options :image-credential-provider-config)
+               (load-image-credential-providers
+                (getf options :image-credential-provider-config)
+                (uiop:ensure-directory-pathname
+                 (getf options :image-credential-provider-bin-dir))))
              :availability (managed-containerd-availability manager))
             manager))
          (values
@@ -544,7 +568,13 @@ bare positional state directory for backward compatibility.  A missing
            :dns-options +dns-pod-options+
            :registry-credentials
            (when (getf options :registry-credentials-file)
-             (load-node-registry-credentials (getf options :registry-credentials-file))))
+             (load-node-registry-credentials (getf options :registry-credentials-file)))
+           :credential-providers
+           (when (getf options :image-credential-provider-config)
+             (load-image-credential-providers
+              (getf options :image-credential-provider-config)
+              (uiop:ensure-directory-pathname
+               (getf options :image-credential-provider-bin-dir)))))
           nil)))
     (t
      (values (make-fake-runtime) nil))))
@@ -1078,11 +1108,13 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (format t "  --runtime containerd|fake   --containerd-mode managed|external~%")
   (format t "  --containerd-{executable,oci-runtime,socket,log-root} PATH   --containerd-no-sync~%")
   (format t "  --registry-credentials-file DOCKER-CONFIG.json~%")
+  (format t "  --image-credential-provider-{config FILE,bin-dir DIR}~%")
   (format t "  --node-listen IPV4   --node-address IPV4   --debug-slynk-port PORT   --local-storage-path DIR~%~%")
   (format t "agent options:~%")
   (format t "  --server HOST:PORT   --node-name NAME   --state-directory DIR   --token TOKEN   --ca-pin SHA256~%")
   (format t "  --node-address IPV4   --runtime containerd|fake   --containerd-mode managed|external~%")
-  (format t "  --registry-credentials-file DOCKER-CONFIG.json~%~%")
+  (format t "  --registry-credentials-file DOCKER-CONFIG.json~%")
+  (format t "  --image-credential-provider-{config FILE,bin-dir DIR}~%~%")
   (format t "runtime install options:~%")
   (format t "  --state-directory DIR   --version V   --hypervisor qemu|clh|fc|dragonball (kata)~%")
   (format t "  --sha256 HEX (kata; trust-on-first-use)   --bundle FILE (use a local bundle)   --release R (gvisor)~%~%")

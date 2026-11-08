@@ -65,6 +65,7 @@
    #:containerd-replace-uid
    #:containerd-runtime
    #:containerd-runtime-p
+   #:containerd-runtime-credential-providers
    #:containerd-termination-file
    #:cri-status-timestamp
    #:directory-disk-bytes
@@ -160,6 +161,7 @@
    #:containerd-runtime
    #:containerd-runtime-p
    #:containerd-runtime-availability
+   #:containerd-runtime-credential-providers
    #:containerd-runtime-deletions
    #:containerd-runtime-dns-options
    #:containerd-runtime-dns-searches

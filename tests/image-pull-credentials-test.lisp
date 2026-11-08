@@ -116,6 +116,109 @@
                    (gr8s::pod-image-pull-credentials
                     runtime (pull-secret-test-pod) "c" "registry.example.test/other/a:1")))))))
 
+(test executable-credential-providers-match-invoke-cache-and-follow-static-credentials
+  (let* ((directory
+           (uiop:ensure-directory-pathname
+            (sb-posix:mkdtemp
+             (namestring (merge-pathnames "gr8s-credential-provider-XXXXXX"
+                                           (uiop:temporary-directory))))))
+         (plugin (merge-pathnames "test-provider" directory))
+         (calls (merge-pathnames "calls" directory))
+         (config (merge-pathnames "config.yaml" directory)))
+    (unwind-protect
+         (progn
+           (with-open-file (out plugin :direction :output :if-exists :supersede)
+             (format out "#!/bin/sh~%")
+             (format out "request=$(cat)~%")
+             (format out "case \"$request\" in *'\"image\":\"registry.example.test/team/a:1\"'*) ;; *) exit 2;; esac~%")
+             (format out "[ \"$1\" = expected ] && [ \"$PLUGIN_ENV\" = yes ] || exit 3~%")
+             (format out "printf x >> ~S~%" (namestring calls))
+             (format out "printf '%s\\n' '{\"kind\":\"CredentialProviderResponse\",\"apiVersion\":\"credentialprovider.kubelet.k8s.io/v1\",\"cacheKeyType\":\"Registry\",\"cacheDuration\":\"1m\",\"auth\":{\"registry.example.test/team\":{\"username\":\"plugin\",\"password\":\"secret\"}}}'~%"))
+           (sb-posix:chmod (namestring plugin) #o700)
+           (with-open-file (out config :direction :output :if-exists :supersede)
+             (format out
+                     "apiVersion: kubelet.config.k8s.io/v1~%kind: CredentialProviderConfig~%providers:~%- name: test-provider~%  matchImages:~%  - registry.example.test/team~%  defaultCacheDuration: 30s~%  apiVersion: credentialprovider.kubelet.k8s.io/v1~%  args: [expected]~%  env:~%  - name: PLUGIN_ENV~%    value: \"yes\"~%"))
+           (let ((providers (gr8s::load-image-credential-providers config directory)))
+             (is (null (gr8s::image-credential-provider-entries
+                        providers "other.example.test/team/a:1")))
+             (is (equal '(("registry.example.test/team" "plugin" . "secret"))
+                        (gr8s::image-credential-provider-entries
+                         providers "registry.example.test/team/a:1")))
+             (is (equal '(("registry.example.test/team" "plugin" . "secret"))
+                        (gr8s::image-credential-provider-entries
+                         providers "registry.example.test/team/a:1")))
+             (is (= 1 (length (uiop:read-file-string calls))))
+             (let ((runtime
+                     (gr8s::make-containerd-runtime
+                      :log-root directory
+                      :registry-credentials
+                      '(("registry.example.test/team" "static" . "password"))
+                      :credential-providers providers)))
+               (is (equal '(("static" . "password") ("plugin" . "secret"))
+                          (gr8s::pod-image-pull-credentials
+                           runtime (pull-secret-test-pod) "c"
+                           "registry.example.test/team/a:1"))))))
+      (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
+
+(test credential-provider-registry-cache-is-isolated-by-registry
+  (let ((provider
+          (gr8s::make-image-credential-provider
+           :name "provider" :match-images '("*.example.test")
+           :cache (make-hash-table :test #'equal)))
+        (calls nil))
+    (with-replaced-functions
+        ((gr8s::credential-provider-response-entries
+           (lambda (provider image)
+             (declare (ignore provider))
+             (push image calls)
+             (values (list (list* (gr8s::image-repository image) image "password"))
+                     "Registry" 60))))
+      (gr8s::image-credential-provider-entries (list provider) "one.example.test/a:1")
+      (gr8s::image-credential-provider-entries (list provider) "one.example.test/b:1")
+      (gr8s::image-credential-provider-entries (list provider) "two.example.test/a:1"))
+    (is (equal '("two.example.test/a:1" "one.example.test/a:1") calls))))
+
+(test failing-credential-provider-does-not-hide-earlier-credentials
+  (let* ((provider
+           (gr8s::make-image-credential-provider
+            :name "broken" :match-images '("registry.example.test")))
+         (runtime
+           (gr8s::make-containerd-runtime
+            :log-root "/nonexistent/"
+            :registry-credentials
+            '(("registry.example.test" "static" . "password"))
+            :credential-providers (list provider))))
+    (with-replaced-functions
+        ((gr8s::credential-provider-response-entries
+           (lambda (&rest arguments)
+             (declare (ignore arguments))
+             (error "plugin is unavailable"))))
+      (is (equal '(("static" . "password"))
+                 (gr8s::pod-image-pull-credentials
+                  runtime (pull-secret-test-pod) "c" "registry.example.test/a:1"))))))
+
+(test credential-provider-caches-an-empty-response
+  (let ((provider
+          (gr8s::make-image-credential-provider
+           :name "empty" :match-images '("registry.example.test")))
+        (calls 0))
+    (with-replaced-functions
+        ((gr8s::credential-provider-response-entries
+           (lambda (&rest arguments)
+             (declare (ignore arguments))
+             (incf calls)
+             (values nil "Global" 60))))
+      (gr8s::image-credential-provider-entries (list provider) "registry.example.test/a:1")
+      (gr8s::image-credential-provider-entries (list provider) "registry.example.test/b:1"))
+    (is (= 1 calls))))
+
+(test service-account-token-credential-provider-config-is-rejected-until-supported
+  (uiop:with-temporary-file (:pathname config :stream out :keep nil)
+    (format out
+            "apiVersion: kubelet.config.k8s.io/v1~%kind: CredentialProviderConfig~%providers:~%- name: env~%  matchImages: [registry.example.test]~%  defaultCacheDuration: 30s~%  apiVersion: credentialprovider.kubelet.k8s.io/v1~%  tokenAttributes: {}~%")
+    (finish-output out)
+    (signals error (gr8s::load-image-credential-providers config #p"/usr/bin/"))))
+
 (test malformed-node-registry-credential-files-fail-runtime-construction
   (uiop:with-temporary-file (:pathname file :stream stream :keep nil)
     (write-string "{\"auths\":7}" stream)

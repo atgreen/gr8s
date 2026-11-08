@@ -88,7 +88,12 @@ Private registries work through the `imagePullSecrets` of a Pod or its
 ServiceAccount, matched as the kubelet matches them apart from `[...]` host
 patterns. `gr8s serve` and `gr8s agent` also accept a Docker `config.json` via
 `--registry-credentials-file`; Pod credentials are tried before these node-wide
-credentials. Executable kubelet credential-provider plugins are not implemented.
+credentials. Kubelet v1 executable credential-provider plugins are configured
+with `--image-credential-provider-config` and
+`--image-credential-provider-bin-dir`. Matching, arguments and environment,
+response cache scopes and durations, validation, and fallback ordering follow
+the kubelet protocol. ServiceAccount-token credential-provider requests are not
+yet supported.
 
 ## RBAC, CSRs & certificates
 
