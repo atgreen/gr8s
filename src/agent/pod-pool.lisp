@@ -82,21 +82,35 @@
                                  :name (routed-cni-host-name context) :owner owner :kind "veth"
                                  :mac (routed-veth-mac owner "host")) result)))
           (unless (string= "" (gethash "underlayAddress" network))
-            (dolist (cidr (cons (format nil "~A/32" (vxlan-router-address (gethash "nodePodCIDR" network)))
-                               (loop for route across (gethash "routes" network #())
-                                     append (list (gethash "podCIDR" route)
-                                                  (format nil "~A/32" (vxlan-router-address (gethash "podCIDR" route)))))))
-              (push (list :cidr cidr :name +node-vxlan-interface+
-                          :owner (node-vxlan-owner network) :kind "vxlan"
-                          :mac (vxlan-router-mac (gethash "nodePodCIDR" network))
-                          :network network) result))))))
+            (if (string= "wireguard" (gethash "overlayBackend" network "vxlan"))
+                (dolist (cidr (cons (format nil "~A/32"
+                                                  (vxlan-router-address
+                                                   (gethash "nodePodCIDR" network)))
+                                    (loop for route across (gethash "routes" network #())
+                                          collect (gethash "podCIDR" route))))
+                  (push (list :cidr cidr :name +node-wireguard-interface+
+                              :owner (node-wireguard-owner network)
+                              :kind "wireguard") result))
+                (dolist (cidr (cons (format nil "~A/32"
+                                                  (vxlan-router-address
+                                                   (gethash "nodePodCIDR" network)))
+                                    (loop for route across (gethash "routes" network #())
+                                          append (list (gethash "podCIDR" route)
+                                                       (format nil "~A/32"
+                                                               (vxlan-router-address
+                                                                (gethash "podCIDR" route)))))))
+                  (push (list :cidr cidr :name +node-vxlan-interface+
+                              :owner (node-vxlan-owner network) :kind "vxlan"
+                              :mac (vxlan-router-mac (gethash "nodePodCIDR" network))
+                              :network network) result)))))))
     result))
 
 (defun route-link-matches-identity-p (attributes identity)
   "Match an allowed route against the actual kernel link's ownership and type."
   (and (equalp (gethash 3 attributes) (netlink-string (getf identity :name)))
        (network-link-kind-p attributes (getf identity :kind))
-       (equalp (gethash 1 attributes) (getf identity :mac))
+       (or (null (getf identity :mac))
+           (equalp (gethash 1 attributes) (getf identity :mac)))
        (or (equalp (gethash 20 attributes) (netlink-string (getf identity :owner)))
            (network-link-untagged-p attributes))
        (let ((network (getf identity :network)))

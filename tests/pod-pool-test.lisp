@@ -223,3 +223,22 @@
           (setf attributes (pool-test-link-attributes
                             "gr8s-vxlan" "" (gr8s::vxlan-router-mac "10.80.0.0/20") "vxlan" unowned))
           (signals gr8s::cni-error (validate)))))))
+
+(test owned-wireguard-router-address-survives-host-route-validation
+  (with-temporary-store (store path)
+    (values store)
+    (let* ((network (pool-test-network nil))
+           (route '(:cidr "10.80.0.0/32" :index 11 :table 255)))
+      (setf (gethash "overlayBackend" network) "wireguard"
+            (gethash "wireguardListenPort" network) 51820)
+      (gr8s::write-private-text-atomically
+       (merge-pathnames "network.json" path) (com.inuoe.jzon:stringify network))
+      (is-true
+       (gr8s::validate-pod-pool-host-routes
+        "10.80.0.0/12" path
+        :route-reader (lambda () (list route))
+        :link-reader
+        (lambda (index)
+          (is (= 11 index))
+          (pool-test-link-attributes
+           "gr8s-wg" (gr8s::node-wireguard-owner network) nil "wireguard")))))))
