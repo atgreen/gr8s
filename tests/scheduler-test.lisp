@@ -473,6 +473,15 @@
 (test scheduler-shares-dra-devices-through-admin-access
   (with-temporary-store (store path)
     (declare (ignore path))
+    (gr8s::create-core-resource
+     store "namespaces"
+     (gr8s::core-object
+      "metadata"
+      (gr8s::core-object
+       "name" "default"
+       "labels" (gr8s::core-object
+                  "resource.kubernetes.io/admin-access" "true")))
+     nil)
     (let ((node (make-test-node "worker-a" "node-a" "10.64.0.0/20")))
       (gr8s:register-node store node)
       (gr8s:mark-node-ready store "worker-a" 100))

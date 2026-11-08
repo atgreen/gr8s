@@ -128,6 +128,66 @@
         (typed-check 200 item :method :put :object held))
       (typed-check 404 item))))
 
+(test dra-admin-access-requires-the-namespace-opt-in-label
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (labels ((namespace (name &optional labels)
+               (gr8s::create-core-resource
+                store "namespaces"
+                (gr8s::core-object
+                 "metadata" (gr8s::core-object "name" name "labels" labels))
+                nil))
+             (claim (name admin-access)
+               (let ((exactly (gr8s::core-object "deviceClassName" "example")))
+                 (when admin-access
+                   (setf (gethash "adminAccess" exactly) t))
+                 (gr8s::core-object
+                  "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
+                  "metadata" (gr8s::core-object "name" name)
+                  "spec" (gr8s::core-object
+                           "devices" (gr8s::core-object
+                                      "requests"
+                                      (vector (gr8s::core-object
+                                               "name" "device" "exactly" exactly)))))))
+             (template (name)
+               (let ((claim (claim name t)))
+                 (gr8s::core-object
+                  "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaimTemplate"
+                  "metadata" (gr8s::core-object "name" name)
+                  "spec" (gr8s::core-object
+                           "metadata" (gr8s::core-object)
+                           "spec" (gethash "spec" claim))))))
+      (namespace "ordinary")
+      (namespace "admin"
+                 (gr8s::core-object "resource.kubernetes.io/admin-access" "true"))
+      (signals gr8s::kubernetes-error
+        (gr8s::create-core-resource store "resourceclaims" (claim "refused" t)
+                                    "ordinary"))
+      (signals gr8s::kubernetes-error
+        (gr8s::create-core-resource store "resourceclaimtemplates"
+                                    (template "template-refused") "ordinary"))
+      (finishes
+        (gr8s::create-core-resource store "resourceclaims" (claim "allowed" t)
+                                    "admin"))
+      (gr8s::create-core-resource store "resourceclaims" (claim "status-refused" nil)
+                                  "ordinary")
+      (let ((gr8s::*typed-api-status-write* t))
+        (signals gr8s::kubernetes-error
+          (gr8s::update-core-resource
+           store "resourceclaims" "ordinary" "status-refused"
+           (lambda (object)
+             (setf (gethash "status" object)
+                   (gr8s::core-object
+                    "allocation"
+                    (gr8s::core-object
+                     "devices"
+                     (gr8s::core-object
+                      "results"
+                      (vector (gr8s::core-object
+                               "request" "device" "driver" "example.com"
+                               "pool" "pool" "device" "one" "adminAccess" t))))))
+             object)))))))
+
 (test server-side-apply-tracks-ownership
   (with-typed-http (store)
     (values store)

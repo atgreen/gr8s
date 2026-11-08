@@ -300,6 +300,43 @@
        (validate-admission-policy-binding (require-object spec "spec") nil)))
     object))
 
+(defun dra-admin-access-requested-p (resource object)
+  "Return whether OBJECT requests or records DRA administrator access."
+  (let* ((spec (gethash "spec" object))
+         (claim-spec (if (equal resource "resourceclaimtemplates")
+                         (gethash "spec" spec (core-object))
+                         spec))
+         (requests (gethash "requests" (gethash "devices" claim-spec (core-object)) #()))
+         (results (gethash "results"
+                           (gethash "devices"
+                                    (gethash "allocation"
+                                             (gethash "status" object (core-object))
+                                             (core-object))
+                                    (core-object))
+                           #())))
+    (or (loop for request across requests
+              thereis (gethash "adminAccess"
+                               (gethash "exactly" request (core-object))))
+        (loop for result across results thereis (gethash "adminAccess" result)))))
+
+(defun validate-dra-admin-access (store resource namespace object)
+  "Require NAMESPACE to opt into administrator access requested by OBJECT."
+  (when (and store namespace
+             (member resource '("resourceclaims" "resourceclaimtemplates")
+                     :test #'equal)
+             (dra-admin-access-requested-p resource object))
+    (let* ((namespace-object
+             (gethash (core-resource-key "namespaces" nil namespace)
+                      (pod-store-resources store)))
+           (labels (and namespace-object
+                        (gethash "labels" (gethash "metadata" namespace-object)))))
+      (unless (and labels
+                   (equal "true"
+                          (gethash "resource.kubernetes.io/admin-access" labels)))
+        (core-resource-error
+         422 "Invalid"
+         "DRA admin access is not enabled in namespace ~A" namespace)))))
+
 (defun typed-api-immutable-paths (resource)
   "Return the top-level fields of RESOURCE that an update may not change."
   (when (member resource '("resourceclaims" "resourceclaimtemplates" "storageversionmigrations") :test #'equal) '("spec")))
@@ -333,6 +370,7 @@
     (fill-required-arrays object (template-schema (typed-api-schema-name resource)))
     (validate-template-shape object (template-schema (typed-api-schema-name resource)) kind)
     (normalize-typed-api-spec resource object)
+    (validate-dra-admin-access store resource namespace object)
     (when (and (equal resource "devicetaintrules") (not *typed-api-status-write*))
       (stamp-device-taint-time object existing))
     (when (and (equal resource "apiservices") (not existing))
