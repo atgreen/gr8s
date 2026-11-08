@@ -57,6 +57,18 @@
                (gr8s.cri.v1::searches dns)))
     (is (equal '("ndots:5") (gr8s.cri.v1::options dns)))))
 
+(test cri-sandbox-carries-pod-network-annotations
+  (let* ((networks "macvlan-blue@net1, sriov-red@net2")
+         (config
+           (gr8s::make-cri-pod-sandbox-config
+            "multinet" "multinet-uid" "default" 0 "/tmp/gr8s-multinet" nil
+            :annotations
+            (list (cons "k8s.v1.cni.cncf.io/networks" networks)))))
+    (is (string= networks
+                 (cdr (assoc "k8s.v1.cni.cncf.io/networks"
+                             (gr8s.cri.v1::annotations config)
+                             :test #'string=))))))
+
 (test cri-exec-request-preserves-command-and-stream-selection
   (let ((request
           (gr8s::make-cri-exec-request

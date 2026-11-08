@@ -327,6 +327,15 @@
   "Return whether POD's sandbox joins the node's network, by its own spec or the runtime's mode."
   (or (containerd-runtime-host-network runtime) (pod-host-network-p pod)))
 
+(defun pod-cri-annotations (pod)
+  "Return POD's metadata annotations as the string map supplied to CRI. CNI
+   meta-plugins such as Multus consume their network requests from this map."
+  (let ((annotations (gethash "annotations" (gethash "metadata" (pod-to-object pod)))))
+    (when annotations
+      (sort (loop for key being the hash-keys of annotations using (hash-value value)
+                  collect (cons key value))
+            #'string< :key #'car))))
+
 (defun containerd-sandbox-config (runtime pod)
   "Build the sandbox configuration used for initial and subsequent container attempts."
   (multiple-value-bind (servers searches options) (containerd-pod-dns-configuration runtime pod)
@@ -338,6 +347,7 @@
      :privileged (pod-requests-privileged-container-p pod)
      :hostname (pod-sandbox-hostname pod)
      :security (containerd-pod-sandbox-security pod)
+     :annotations (pod-cri-annotations pod)
      :sysctls (pod-sysctls pod) :pid-mode (pod-pid-namespace-mode pod) :host-ipc (pod-spec-flag-p pod "hostIPC")
      :userns (containerd-pod-user-namespace runtime pod)
      :dns-servers servers :dns-searches searches :dns-options options)))
@@ -357,6 +367,7 @@
             :hostname (pod-sandbox-hostname pod)
             :security (containerd-pod-sandbox-security pod)
             :runtime-handler (pod-runtime-handler pod)
+            :annotations (pod-cri-annotations pod)
             :sysctls (pod-sysctls pod) :pid-mode (pod-pid-namespace-mode pod) :host-ipc (pod-spec-flag-p pod "hostIPC")
             :userns (containerd-pod-user-namespace runtime pod)
             :dns-servers servers :dns-searches searches :dns-options options)))))

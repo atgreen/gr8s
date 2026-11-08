@@ -195,8 +195,9 @@
 (defun make-cri-pod-sandbox-config
     (name uid namespace attempt log-directory host-network
      &key resource-version spec-fingerprint dns-servers dns-searches dns-options privileged hostname security
-          sysctls (pid-mode gr8s.cri.v1::+namespacemode-container+) host-ipc userns)
-  "Build sandbox identity, ownership labels, hostname and native network/security configuration."
+          annotations sysctls (pid-mode gr8s.cri.v1::+namespacemode-container+) host-ipc userns)
+  "Build sandbox identity, ownership labels and annotations, hostname, and
+   native network/security configuration."
   (let ((metadata
           (make-instance 'gr8s.cri.v1::pod-sandbox-metadata
                          :name name
@@ -211,6 +212,7 @@
                      (if (> (length selected) 63)
                          (string-right-trim "-." (subseq selected 0 63)) selected)))
      :log-directory log-directory
+     :annotations annotations
      :dns-config
      (when dns-servers
        (make-instance 'gr8s.cri.v1::dns-config
@@ -249,7 +251,8 @@
     (socket-path &key name uid (namespace "default") (attempt 0)
                    log-directory host-network resource-version spec-fingerprint
                    dns-servers dns-searches dns-options privileged hostname security runtime-handler
-                   sysctls (pid-mode gr8s.cri.v1::+namespacemode-container+) host-ipc userns (timeout 120))
+                   annotations sysctls (pid-mode gr8s.cri.v1::+namespacemode-container+)
+                   host-ipc userns (timeout 120))
   "Create and start a CRI pod sandbox under RUNTIME-HANDLER, returning its runtime ID."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
@@ -261,7 +264,8 @@
                    :dns-servers dns-servers
                    :dns-searches dns-searches
                    :dns-options dns-options :privileged privileged :hostname hostname
-                   :security security :sysctls sysctls :pid-mode pid-mode :host-ipc host-ipc :userns userns)))
+                   :security security :annotations annotations :sysctls sysctls
+                   :pid-mode pid-mode :host-ipc host-ipc :userns userns)))
            (multiple-value-bind (response status)
                (gr8s.cri.v1::runtime-service-run-pod-sandbox
                 stub
