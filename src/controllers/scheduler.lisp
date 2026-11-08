@@ -366,9 +366,20 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
           ((gethash "nodeSelector" spec)
            (some (lambda (term) (node-selector-term-matches-p term node))
                  (gethash "nodeSelectorTerms" (gethash "nodeSelector" spec) #())))
-          ;; Per-device node selection needs the device's own nodeName or
-          ;; nodeSelector and is implemented with the broader selector slice.
+          ((gethash "perDeviceNodeSelection" spec) t)
           (t nil))))
+
+(defun dra-device-available-on-node-p (slice device node)
+  "Return whether DEVICE from SLICE is accessible on NODE."
+  (if (not (gethash "perDeviceNodeSelection" (gethash "spec" slice)))
+      t
+      (cond ((gethash "allNodes" device) t)
+            ((gethash "nodeName" device)
+             (equal (gethash "nodeName" device) (node-record-name node)))
+            ((gethash "nodeSelector" device)
+             (some (lambda (term) (node-selector-term-matches-p term node))
+                   (gethash "nodeSelectorTerms" (gethash "nodeSelector" device) #())))
+            (t nil))))
 
 (defun dra-current-complete-slices-unlocked (store node)
   "Return current-generation ResourceSlices whose pools are complete on NODE."
@@ -455,7 +466,8 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
           (loop for device across (gethash "devices" spec #())
                 for name = (gethash "name" device)
                 for key = (dra-device-key driver pool name)
-                when (dra-device-matches-selectors-p driver device selectors)
+                when (and (dra-device-available-on-node-p slice device node)
+                          (dra-device-matches-selectors-p driver device selectors))
                   do (push (list driver pool name (gethash key used))
                            (gethash (list driver pool) pools))
                      (unless (gethash key used)
