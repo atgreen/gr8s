@@ -432,7 +432,8 @@
                  (:get-info
                   (make-instance 'gr8s.pluginregistration.v1::plugin-info
                                  :type "DRAPlugin" :name "devices.example.com"
-                                 :endpoint "/run/dra.sock" :supported-versions '("v1")))
+                                 :endpoint "/run/dra.sock"
+                                 :supported-versions '("v1.DRAPlugin")))
                  (:notify
                   (make-instance 'gr8s.pluginregistration.v1::registration-status-response))))))
       (declare (special gr8s::*dra-plugins*))
@@ -544,6 +545,134 @@
         (is (equal '(:prepare :unprepare) (reverse (mapcar #'first calls))))
         (signals runtime-error
           (gr8s::container-dra-cdi-device-ids manager pod container))))))
+
+(test upstream-dra-driver-registers-publishes-prepares-and-unprepares
+  (let ((driver (uiop:getenv "GR8S_TEST_DRA_DRIVER")))
+    (if (or (null driver) (not (probe-file driver)))
+        (skip "Set GR8S_TEST_DRA_DRIVER to Kubernetes' dra-test-driver binary")
+        (with-temporary-store (store directory)
+          (let* ((root (uiop:ensure-directory-pathname directory))
+                 (gr8s::*csi-kubelet-root*
+                   (namestring (uiop:ensure-directory-pathname
+                                (merge-pathnames "kubelet/" root))))
+                 (gr8s::*dra-plugins* (make-hash-table :test #'equal))
+                 (kubeconfig (merge-pathnames "kubeconfig" root))
+                 (log (merge-pathnames "dra-driver.log" root))
+                 (server (start-server :address "127.0.0.1" :port 0 :store store
+                                       :runtime (make-fake-runtime)))
+                 (process nil)
+                 (ready nil))
+            (declare (special gr8s::*dra-plugins*))
+            (unwind-protect
+                 (progn
+                   (let ((node (make-test-node "worker-a" "node-a" "10.64.0.0/20")))
+                     (gr8s:register-node store node)
+                     (gr8s:mark-node-ready store "worker-a" 100))
+                   (with-open-file (out kubeconfig :direction :output
+                                                   :if-exists :supersede
+                                                   :if-does-not-exist :create)
+                     (format out
+                             "apiVersion: v1~%kind: Config~%clusters:~%- name: gr8s~%  cluster: {server: ~S}~%contexts:~%- name: gr8s~%  context: {cluster: gr8s, user: gr8s}~%current-context: gr8s~%users:~%- name: gr8s~%  user: {}~%"
+                             (format nil "http://127.0.0.1:~D"
+                                     (hunchentoot:acceptor-port server))))
+                   (gr8s::ensure-csi-kubelet-directories)
+                   (ensure-directories-exist
+                    (uiop:ensure-directory-pathname
+                     (gr8s::csi-kubelet-path
+                      "plugins/test-driver.cdi.k8s.io")))
+                   (setf process
+                         (uiop:launch-program
+                          (list driver "--kubeconfig" (namestring kubeconfig)
+                                "--drivername" "test-driver.cdi.k8s.io"
+                                "kubelet-plugin" "--node-name" "worker-a"
+                                "--num-devices" "1"
+                                "--plugin-registration-path"
+                                (gr8s::csi-kubelet-path "plugins_registry")
+                                "--datadir" (gr8s::csi-kubelet-path "plugins")
+                                "--cdi-dir" (namestring (merge-pathnames "cdi/" root)))
+                          :output (namestring log) :error-output :output))
+                   (setf ready
+                         (wait-until
+                          (lambda ()
+                            (gr8s::scan-csi-plugin-registry)
+                            (and (gethash "test-driver.cdi.k8s.io" gr8s::*dra-plugins*)
+                                 (plusp (length
+                                         (gr8s::list-core-resources
+                                          store "resourceslices" nil)))))
+                          :timeout 30))
+                   (is-true ready "External DRA driver did not become ready:~%~A"
+                            (if (probe-file log)
+                                (uiop:read-file-string log)
+                                "driver produced no log"))
+                   (when ready
+                     (gr8s::create-core-resource
+                    store "deviceclasses"
+                    (gr8s::core-object
+                     "apiVersion" "resource.k8s.io/v1" "kind" "DeviceClass"
+                     "metadata" (gr8s::core-object "name" "external")
+                     "spec" (gr8s::core-object "selectors" #()))
+                    nil)
+                   (gr8s::create-core-resource
+                    store "resourceclaims"
+                    (gr8s::core-object
+                     "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
+                     "metadata" (gr8s::core-object "name" "external")
+                     "spec" (gr8s::core-object
+                             "devices"
+                             (gr8s::core-object
+                              "requests"
+                              (vector
+                               (gr8s::core-object
+                                "name" "device"
+                                "exactly"
+                                (gr8s::core-object
+                                 "deviceClassName" "external"
+                                 "allocationMode" "ExactCount" "count" 1))))))
+                    "default")
+                   (let* ((pod
+                            (create-pod
+                             store
+                             (parse-pod
+                              (gr8s::core-object
+                               "apiVersion" "v1" "kind" "Pod"
+                               "metadata" (gr8s::core-object
+                                           "name" "external" "namespace" "default")
+                               "spec" (gr8s::core-object
+                                       "resourceClaims"
+                                       (vector (gr8s::core-object
+                                                "name" "device"
+                                                "resourceClaimName" "external"))
+                                       "containers"
+                                       (vector (gr8s::core-object
+                                                "name" "app" "image" "busybox"
+                                                "resources"
+                                                (gr8s::core-object
+                                                 "claims"
+                                                 (vector (gr8s::core-object
+                                                          "name" "device"))))))))))
+                          (node (gr8s:schedule-pod store pod))
+                          (manager (gr8s::make-dra-manager
+                                    store (merge-pathnames "dra-state/" root)))
+                          (claim-object
+                            (gr8s::get-core-resource
+                             store "resourceclaims" "default" "external"))
+                          (expected-cdi
+                            (format nil
+                                    "test-driver.cdi.k8s.io/test=claim-~A-device"
+                                    (gethash "uid" (gethash "metadata" claim-object))))
+                          (container (aref (gethash "containers"
+                                                    (gethash "spec" (pod-to-object pod)))
+                                           0)))
+                     (is (equal "worker-a" (and node (gr8s:node-record-name node))))
+                     (gr8s::prepare-pod-dynamic-resources manager pod)
+                     (is (equal (list expected-cdi)
+                                (gr8s::container-dra-cdi-device-ids
+                                 manager pod container)))
+                     (is-true (gr8s::unprepare-pod-dynamic-resources manager pod)))))
+              (when process
+                (ignore-errors (uiop:terminate-process process))
+                (ignore-errors (uiop:wait-process process)))
+              (ignore-errors (gr8s:stop-server server))))))))
 
 (test dra-claims-are-projected-only-to-their-reserved-pod
   (with-temporary-store (store directory)

@@ -50,7 +50,7 @@
 
 (defun dra-plugin-version-supported-p (versions)
   "Return whether VERSIONS advertises the kubelet DRA v1 protocol."
-  (find "v1" versions :test #'equal))
+  (find "v1.DRAPlugin" versions :test #'equal))
 
 (defun register-dra-plugin (socket inode info)
   "Register the DRA driver described by INFO and notify its registrar."
@@ -362,7 +362,9 @@
 
 (defun dra-request-matches-p (configured prepared)
   "Return whether PREPARED request name satisfies CONFIGURED's scope."
-  (or (equal configured prepared)
+  (or (null configured)
+      (equal configured "")
+      (equal configured prepared)
       (uiop:string-prefix-p (format nil "~A/" configured) prepared)))
 
 (defun container-dra-cdi-device-ids (manager pod container)

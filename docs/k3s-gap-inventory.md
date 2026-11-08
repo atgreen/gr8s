@@ -30,13 +30,21 @@ The comparisons have different meanings:
 |---|---|---|
 | Conformance | No current build has passed the certified-conformance suite. The checked-in ledger's newest full result is round 4 at 64/446 tests; it predates substantial current functionality, so it is evidence of neither current failure counts nor current parity. A fresh run is required before making a conformance claim. | [Conformance ledger](CONFORMANCE.md); documentation refresh `podster-9do` |
 | IP families | Allocated Pod and Service networking is IPv4-only. `PreferDualStack` is accepted but produces a single IPv4 family; `RequireDualStack` and IPv6-only Services are refused. IPv6 DNS enforcement is deferred with IPv6 Pod networking. | [Services](networking.md#services--load-balancing); `tests/services-test.lisp`; `podster-n2iv`; `podster-yge` |
-| Dynamic Resource Allocation | The APIs exist, Pod/container claim references are validated, and direct or template-generated claims constrain scheduling and are reserved for the selected Pod. The scheduler allocates ExactCount, All, and prioritized FirstAvailable requests from complete current-generation ResourceSlice pools, including CEL selectors, per-device placement, device taints and tolerations, namespace-authorized admin access, configuration, cross-request constraints, consumable capacity, multiple allocations, and request policies. Nodes discover DRAPlugin v1 plugins, prepare and durably checkpoint claims with shared-claim reference counting, project only authorized claims, pass driver-returned CDI devices to CRI containers, and unprepare after the final Pod is deleted. The remaining gap is acceptance of that complete path against a real external plugin. | `src/resources/typed-apis.lisp`; `src/controllers/resource-claim-controller.lisp`; `src/controllers/scheduler.lisp`; `src/kubelet/dra-node.lisp`; `podster-08qi` |
 
 Registry credentials and resource metrics are no longer gaps. Pod and
 ServiceAccount `imagePullSecrets`, node-wide Docker credential files, and
 kubelet v1 executable credential providers are implemented. gr8s also serves
 `metrics.k8s.io/v1beta1` natively for NodeMetrics, PodMetrics, `kubectl top`, and
 dashboard CPU/MEM without a metrics-server deployment.
+
+Dynamic Resource Allocation is also no longer a tracked parity gap. The API,
+controller, scheduler, and node paths cover structured allocation, selectors,
+constraints and configuration, per-device placement, taints and tolerations,
+namespace-authorized admin access, consumable capacity, multiple allocations,
+durable prepare/unprepare, and CDI injection. Process-boundary acceptance with
+Kubernetes's upstream `dra-test-driver` proves registration, ResourceSlice
+publication, scheduling, NodePrepareResources, CDI projection, and
+NodeUnprepareResources against a real external plugin.
 
 ## Most material product gaps
 
@@ -47,13 +55,12 @@ of code?":
 
 | Priority | Gap | Why it is material | Tracking |
 |---|---|---|---|
-| P0 | Control-plane memory safety | Serializing the complete core-state blob has exhausted the SBCL heap and terminated `serve` under memory pressure. This is a demonstrated availability defect in the persistence/replication path, not merely a scaling optimization. The disconnected-follower AppendEntries OOM has a focused queue-coalescing fix, but still needs live HA revalidation before that incident is considered closed. | `podster-061`; `podster-8r7`; per-key replication `podster-bwu.2` |
-| P1 | HA availability and failover correctness | A disconnected follower can still drive an unbounded AppendEntries queue and founder OOM until its focused fix is revalidated live; idle Raft peer links also poll every 2 ms and waste node CPU. Image tracker state is not yet consistent across members, a follower can lose its node-heartbeat monitor after a rejected consensus write, and Pod replication retains a narrower leader-crash-before-commit window. These are active availability/correctness risks in the k3s-comparable HA path. | `podster-8r7`; `podster-uvi`; `podster-i5vx`; `podster-7ni6.3.5`; `podster-bwu.1` |
+| P0 | Control-plane memory safety | Serializing the complete core-state blob has exhausted the SBCL heap and terminated `serve` under memory pressure. This is a demonstrated availability defect in the persistence/replication path, not merely a scaling optimization. | `podster-061`; per-key replication `podster-bwu.2` |
+| P1 | HA availability and failover correctness | The disconnected-follower AppendEntries OOM has a focused queue-coalescing fix but still needs live HA revalidation before the incident can close. Idle Raft peer links also poll every 2 ms and waste node CPU. Image tracker state is not yet consistent across members, a follower can lose its node-heartbeat monitor after a rejected consensus write, and Pod replication retains a narrower leader-crash-before-commit window. These are active availability/correctness risks in the k3s-comparable HA path. | `podster-8r7`; `podster-uvi`; `podster-i5vx`; `podster-7ni6.3.5`; `podster-bwu.1` |
 | P1 | Backup and restore | Internal Raft snapshots are not an operator recovery workflow. There is no supported, tested way to capture and restore the datastore together with the cluster identity, encryption material, and signing keys, nor scheduled retention and remote-copy support. Until this exists, a cluster cannot be treated as recoverable. | `podster-oime` |
 | P1 | Secrets at rest | Kubernetes Secret values are persisted without encryption. A stolen state directory or backup therefore exposes workload credentials, and there is no staged key-rotation or re-encryption workflow. | `podster-dcge`; [Secret API](configmap-secret-api.md) |
 | P1 | Installation, upgrade, and certificate lifecycle | There is no k3s-like installer, persistent service configuration, controlled upgrade/uninstall path, or cluster-wide certificate expiry/rotation workflow. This is the largest day-zero/day-two usability gap once data recovery is separated out. | `podster-7g65`; `podster-6l63` |
 | P1 | IPv6 and dual-stack networking | IPv4-only networking excludes IPv6-only sites and does not honor portable `RequireDualStack` workloads. k3s supports both dual-stack and IPv6-only clusters, so this is a concrete portability and deployment gap. | `podster-n2iv` |
-| P2 | DRA external-plugin interoperability | The controller, scheduler, and kubelet DRAPlugin v1 lifecycle now cover the previously identified allocation semantics, durable node recovery, and CDI injection. The remaining uncertainty is end-to-end acceptance against an independently implemented external DRA plugin. This is an interoperability-evidence gap, not a missing DRA lifecycle. | `podster-08qi` |
 | P2 | Control-plane operational telemetry | gr8s already exports Kubernetes-compatible API-server, scheduler, kubelet/resource, DNS, Gateway, process, and eBPF endpoint metrics. It does not yet expose the Raft health, SBCL heap/GC pressure, datastore growth, disk/inode pressure, and reconciliation convergence signals needed to diagnose its distinctive failure modes. k3s exposes embedded Kubernetes-component, runtime, supervisor, and datastore metrics through its supervisor endpoint. | `podster-gmx`; especially `podster-gmx.1` through `.5` |
 | P2 | Managed AddOns and Helm lifecycle | gr8s has intentional in-process replacements for the ordinary default components, but no general declarative manifests directory, AddOn status model, or HelmChart lifecycle for operator-supplied components. | `podster-pve3` |
 | P2 | Kubernetes audit policy and durable audit log | Admission audit annotations reach process logs, but there is no policy-selected, structured, retained Kubernetes audit trail suitable for security review. | `podster-9fi4` |

@@ -114,6 +114,32 @@
       (check-core-status 400 collection :parameters '(("watch" . "true") ("resourceVersion" . "invalid")))
       (check-core-status 400 collection :parameters '(("fieldSelector" . "data.key=x"))))))
 
+(test resourceslices-support-the-upstream-driver-and-node-field-selectors
+  (with-core-api (store path)
+    (values path)
+    (flet ((slice (name driver node)
+             (gr8s::core-object
+              "apiVersion" "resource.k8s.io/v1" "kind" "ResourceSlice"
+              "metadata" (gr8s::core-object "name" name)
+              "spec" (gr8s::core-object
+                      "driver" driver "nodeName" node
+                      "pool" (gr8s::core-object
+                              "name" "pool" "generation" 1
+                              "resourceSliceCount" 1)))))
+      (gr8s::create-core-resource store "resourceslices"
+                                  (slice "worker-a" "devices.example.com" "worker-a") nil)
+      (gr8s::create-core-resource store "resourceslices"
+                                  (slice "worker-b" "other.example.com" "worker-b") nil))
+    (let* ((response
+             (check-core-status
+              200 "/apis/resource.k8s.io/v1/resourceslices"
+              :parameters '(("fieldSelector" .
+                             "spec.driver=devices.example.com,spec.nodeName=worker-a"))))
+           (items (gethash "items" response)))
+      (is (= 1 (length items)))
+      (is (equal "worker-a"
+                 (gethash "name" (gethash "metadata" (aref items 0))))))))
+
 (test core-resource-json-patch-tests-values-case-sensitively-and-atomically
   (with-core-api (store path)
     (values path)
