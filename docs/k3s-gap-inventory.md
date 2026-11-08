@@ -54,6 +54,7 @@ of code?":
 | P1 | Installation, upgrade, and certificate lifecycle | There is no k3s-like installer, persistent service configuration, controlled upgrade/uninstall path, or cluster-wide certificate expiry/rotation workflow. This is the largest day-zero/day-two usability gap once data recovery is separated out. | `podster-7g65`; `podster-6l63` |
 | P1 | IPv6 and dual-stack networking | IPv4-only networking excludes IPv6-only sites and does not honor portable `RequireDualStack` workloads. k3s supports both dual-stack and IPv6-only clusters, so this is a concrete portability and deployment gap. | `podster-n2iv` |
 | P2 | Complete DRA workload lifecycle | Direct and template-generated claims participate in placement and reservation, including CEL-selected structured allocation, per-device placement, class/claim configuration, cross-request attribute constraints, and constraint-aware FirstAvailable fallback. Remaining structured-allocation semantics and kubelet plugin preparation/unpreparation still block real device-driver workloads, but affect fewer ordinary clusters than the P1 items above. | `podster-08qi` |
+| P2 | Control-plane operational telemetry | gr8s already exports Kubernetes-compatible API-server, scheduler, kubelet/resource, DNS, Gateway, process, and eBPF endpoint metrics. It does not yet expose the Raft health, SBCL heap/GC pressure, datastore growth, disk/inode pressure, and reconciliation convergence signals needed to diagnose its distinctive failure modes. k3s exposes embedded Kubernetes-component, runtime, supervisor, and datastore metrics through its supervisor endpoint. | `podster-gmx`; especially `podster-gmx.1` through `.5` |
 | P2 | Managed AddOns and Helm lifecycle | gr8s has intentional in-process replacements for the ordinary default components, but no general declarative manifests directory, AddOn status model, or HelmChart lifecycle for operator-supplied components. | `podster-pve3` |
 | P2 | Kubernetes audit policy and durable audit log | Admission audit annotations reach process logs, but there is no policy-selected, structured, retained Kubernetes audit trail suitable for security review. | `podster-9fi4` |
 
@@ -96,6 +97,7 @@ and [networking-services documentation](https://docs.k3s.io/networking/networkin
 | Traefik Ingress | gr8s embeds its own Gateway/Ingress proxy instead of installing Traefik. `networking.k8s.io/v1` Ingress routes, TLS Secrets, status addresses, and listener lifecycle are reconciled directly by each agent. | Equivalent outcome; intentional replacement |
 | local-path-provisioner | gr8s has an in-process default `local-path` provisioner rather than a provisioner Pod. | Equivalent outcome; intentional replacement |
 | metrics-server | gr8s replaces the addon with an in-process `metrics.k8s.io/v1beta1` API backed by the same node summaries used for autoscaling. No metrics-server Pod, Service, or APIService is required for `kubectl top` or dashboard CPU/MEM. | Equivalent outcome; intentional replacement |
+| Supervisor/component metrics | gr8s exposes many Kubernetes-compatible component and workload metrics, but not yet complete Raft, Lisp-runtime, datastore-capacity, or controller-convergence telemetry. | Partial operational parity (`podster-gmx`) |
 | ServiceLB | gr8s implements node relays and eBPF Service forwarding rather than Klipper ServiceLB Pods. It publishes ready node InternalIPs in `status.loadBalancer.ingress` with `ipMode: Proxy` and serves each LoadBalancer Service port on those addresses; `scripts/test-service-traffic.py` covers the native path. | Equivalent outcome; intentional replacement |
 | Helm controller | No HelmChart/HelmChartConfig controller or equivalent packaged chart lifecycle is documented. | Distribution gap (`podster-pve3`) |
 | Install/service lifecycle | k3s provides an installer, persistent config files/drop-ins, system service management, uninstall/killall tooling, and upgrade workflows. gr8s currently documents a manual build and direct process invocation. | Distribution gap (`podster-7g65`) |
@@ -108,7 +110,8 @@ The operational comparison is based on k3s's current primary documentation for
 [installation](https://docs.k3s.io/installation),
 [backup and restore](https://docs.k3s.io/datastore/backup-restore),
 [certificate management](https://docs.k3s.io/cli/certificate), and
-[secrets encryption](https://docs.k3s.io/security/secrets-encryption).
+[secrets encryption](https://docs.k3s.io/security/secrets-encryption), plus its
+[supervisor and component metrics](https://docs.k3s.io/reference/metrics).
 
 ## Optional k3s features without a gr8s equivalent
 
