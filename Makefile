@@ -84,7 +84,7 @@ test-node-topology:
 
 # The egress guard is JIT-compiled in-process; the fixture is its raw bytecode +
 # map descriptors as JSON, not an ELF object.
-build/gr8s-endpoint-test.json: src/egress-guard-program.lisp src/egress-guard.lisp scripts/compile-endpoint-policy-fixture.lisp
+build/gr8s-endpoint-test.json: src/network/egress-guard-program.lisp src/network/egress-guard.lisp scripts/compile-endpoint-policy-fixture.lisp
 	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@
 
 test-endpoint-policy: build/gr8s-endpoint-test.json

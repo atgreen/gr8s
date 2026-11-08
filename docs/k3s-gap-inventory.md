@@ -29,9 +29,8 @@ The comparisons have different meanings:
 | Area | Current difference | Evidence / tracking |
 |---|---|---|
 | Conformance | No current build has passed the certified-conformance suite. The checked-in ledger's newest full result is round 4 at 64/446 tests; it predates substantial current functionality, so it is evidence of neither current failure counts nor current parity. A fresh run is required before making a conformance claim. | [Conformance ledger](CONFORMANCE.md); documentation refresh `podster-9do` |
-| IP families | Allocated Pod and Service networking is IPv4-only. `PreferDualStack` is accepted but produces a single IPv4 family; `RequireDualStack` and IPv6-only Services are refused. IPv6 DNS enforcement is deferred with IPv6 Pod networking. | [Services](networking.md#services--load-balancing); `tests/services-test.lisp`; `podster-yge` |
-| Dynamic Resource Allocation | ResourceClaim and ResourceClaimTemplate storage APIs exist, but there is no allocator/controller that turns claims into device allocations. | `src/resources/typed-apis.lisp`; no ResourceClaim controller |
-| NetworkPolicy statefulness | Ingress and egress policy enforcement exist, but policy evaluation is stateless. Kubernetes permits reply traffic for an allowed connection without requiring a matching policy in the reverse direction; gr8s still needs connection tracking to preserve that semantic. | `podster-10p.6`; `podster-26r` |
+| IP families | Allocated Pod and Service networking is IPv4-only. `PreferDualStack` is accepted but produces a single IPv4 family; `RequireDualStack` and IPv6-only Services are refused. IPv6 DNS enforcement is deferred with IPv6 Pod networking. | [Services](networking.md#services--load-balancing); `tests/services-test.lisp`; `podster-n2iv`; `podster-yge` |
+| Dynamic Resource Allocation | ResourceClaim, ResourceClaimTemplate, ResourceSlice, and DeviceClass storage APIs exist, but there is no allocator/controller or node preparation path that turns claims into devices assigned to Pods. | `src/resources/typed-apis.lisp`; `podster-08qi` |
 
 Registry credentials and resource metrics are no longer gaps. Pod and
 ServiceAccount `imagePullSecrets`, node-wide Docker credential files, and
@@ -47,10 +46,12 @@ real k3s replacement than several missing optional APIs:
 | Priority | Gap | Why it is material | Tracking |
 |---|---|---|---|
 | P0 | Fresh certified-conformance evidence | The only result preserved from the 192.168.1.10 attempt is a focused 8-test run (8 passed, 3,205 skipped), not a certified run. Without a current full result, portable behavior remains unmeasured and prioritization is partly speculative. | `podster-9do` |
-| P0 | Control-plane memory safety | Serializing the complete core-state blob can exhaust the SBCL heap and terminate the server under memory pressure. k3s parity is not useful if ordinary control-plane state can crash the process. | `podster-061`; per-key replication `podster-bwu.2` |
+| P0 | Control-plane memory safety | Serializing the complete core-state blob can exhaust the SBCL heap. Independently, retrying a disconnected Raft follower has caused an unbounded AppendEntries queue and founder OOM; the queue fix has focused coverage but still needs live HA revalidation. Either path can terminate the control plane. | `podster-061`; `podster-8r7`; per-key replication `podster-bwu.2` |
 | P1 | Host firewall independence | Pod-to-Pod, Service, and API traffic is not yet independent of firewalld policy. The trusted-zone workaround is transitional; the selected fix is an eBPF host-routing path that bypasses netfilter for cluster traffic. | `podster-pnd`; `podster-bgn.3`; cleanup `podster-ntp` |
-| P1 | HA state consistency | Image tracker leases/swarms are not yet consistent across control-plane members, Pod replication retains a leader-crash window, and node heartbeat monitoring must remain alive on followers. These can surface as stale availability or incorrect failover behavior. | `podster-i5vx`; `podster-bwu.1`; `podster-7ni6.3.5` |
-| P1 | Installation and recovery lifecycle | There is still no k3s-like installer/service lifecycle, operator backup/restore command, or cluster certificate inventory/rotation workflow. These are the largest day-two operational omissions. | Distribution and operational rows below |
+| P1 | HA state and failover consistency | Image tracker leases/swarms are not yet consistent across control-plane members, Pod replication retains a leader-crash window, and a follower can lose its node-heartbeat monitor after a rejected consensus write. These can surface as stale availability or incorrect failover behavior. | `podster-i5vx`; `podster-bwu.1`; `podster-7ni6.3.5` |
+| P1 | Secrets at rest | Kubernetes Secret values are persisted without encryption. A stolen state directory or backup therefore exposes workload credentials, and there is no staged key-rotation or re-encryption workflow. | `podster-dcge`; [Secret API](configmap-secret-api.md) |
+| P1 | Installation and recovery lifecycle | There is no k3s-like installer/service/upgrade lifecycle, supported operator backup/restore workflow, or cluster certificate inventory and rotation command set. These are the largest day-zero and day-two operational omissions. | `podster-7g65`; `podster-oime`; `podster-6l63` |
+| P1 | IPv6 and dual-stack networking | IPv4-only networking excludes IPv6-only sites and does not honor portable `RequireDualStack` workloads. This is more material than optional addon parity, but less urgent than current crash and HA defects for an IPv4 deployment. | `podster-n2iv` |
 
 The open empirical compatibility map under `podster-bgn` contains narrower API
 and wire-format defects found by running a real controller stack. Those issues
@@ -73,18 +74,18 @@ and [networking-services documentation](https://docs.k3s.io/networking/networkin
 
 | k3s default capability | gr8s difference | Classification |
 |---|---|---|
-| Managed AddOn/manifests controller | There is no general manifests directory, AddOn resource/controller, or disable/uninstall lifecycle for packaged components. Runtime payload add-ons are a narrower mechanism. | Distribution gap |
+| Managed AddOn/manifests controller | There is no general manifests directory, AddOn resource/controller, or disable/uninstall lifecycle for packaged components. Runtime payload add-ons are a narrower mechanism. | Distribution gap (`podster-pve3`) |
 | CoreDNS | gr8s embeds its own DNS server instead of deploying CoreDNS. Current source implements ordinary, headless, ExternalName, SRV, and reverse records; equivalence beyond covered behavior depends on a fresh conformance run. | Intentional replacement |
 | Traefik Ingress | gr8s embeds its own Gateway/Ingress proxy instead of installing Traefik. `networking.k8s.io/v1` Ingress routes, TLS Secrets, status addresses, and listener lifecycle are reconciled directly by each agent. | Equivalent outcome; intentional replacement |
 | local-path-provisioner | gr8s has an in-process default `local-path` provisioner rather than a provisioner Pod. | Equivalent outcome; intentional replacement |
 | metrics-server | gr8s replaces the addon with an in-process `metrics.k8s.io/v1beta1` API backed by the same node summaries used for autoscaling. No metrics-server Pod, Service, or APIService is required for `kubectl top` or dashboard CPU/MEM. | Equivalent outcome; intentional replacement |
 | ServiceLB | gr8s implements node relays and eBPF Service forwarding rather than Klipper ServiceLB Pods. It publishes ready node InternalIPs in `status.loadBalancer.ingress` with `ipMode: Proxy` and serves each LoadBalancer Service port on those addresses; `scripts/test-service-traffic.py` covers the native path. | Equivalent outcome; intentional replacement |
-| Helm controller | No HelmChart/HelmChartConfig controller or equivalent packaged chart lifecycle is documented. | Distribution gap |
-| Install/service lifecycle | k3s provides an installer, persistent config files/drop-ins, system service management, uninstall/killall tooling, and upgrade workflows. gr8s currently documents a manual build and direct process invocation. | Distribution gap |
-| Datastore backup/restore | k3s documents SQLite copies and embedded-etcd snapshots, including S3 workflows. gr8s Raft has internal snapshots/compaction but no documented operator backup, restore, scheduled snapshot, or remote snapshot workflow. | Operational gap |
-| Certificate operations | k3s exposes certificate status and leaf/CA rotation commands and restart-time renewal. gr8s documents automatic Raft-member renewal but no cluster-wide certificate inventory and rotation workflow. | Operational gap |
-| Secrets at rest | k3s supports configurable secrets encryption and key rotation. No equivalent encryption-at-rest or key-rotation facility is documented or found in gr8s. | Security/operations gap |
-| Audit policy/logging | k3s can pass through Kubernetes audit policy and log configuration. No Kubernetes audit-event pipeline or operator audit policy is documented for gr8s. | Security/operations gap |
+| Helm controller | No HelmChart/HelmChartConfig controller or equivalent packaged chart lifecycle is documented. | Distribution gap (`podster-pve3`) |
+| Install/service lifecycle | k3s provides an installer, persistent config files/drop-ins, system service management, uninstall/killall tooling, and upgrade workflows. gr8s currently documents a manual build and direct process invocation. | Distribution gap (`podster-7g65`) |
+| Datastore backup/restore | k3s documents SQLite copies and embedded-etcd snapshots, including S3 workflows. gr8s Raft has internal snapshots/compaction but no documented operator backup, restore, scheduled snapshot, or remote snapshot workflow. | Operational gap (`podster-oime`) |
+| Certificate operations | k3s exposes certificate status and leaf/CA rotation commands and restart-time renewal. gr8s documents automatic Raft-member renewal but no cluster-wide certificate inventory and rotation workflow. | Operational gap (`podster-6l63`) |
+| Secrets at rest | k3s supports configurable secrets encryption and key rotation. gr8s persists Secret values without an equivalent encryption-at-rest or key-rotation facility. | Security/operations gap (`podster-dcge`) |
+| Audit policy/logging | k3s can pass through Kubernetes audit policy and log configuration. gr8s has no durable Kubernetes audit-event pipeline or operator audit policy; admission audit annotations currently go only to the process log. | Security/operations gap (`podster-9fi4`) |
 
 The operational comparison is based on k3s's current primary documentation for
 [installation](https://docs.k3s.io/installation),

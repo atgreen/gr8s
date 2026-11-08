@@ -27,7 +27,9 @@ EXPECTED_MAPS = {'rejected_spoofs': (ARRAY, 4, 8, 1, 0),
                  'netpol_egress_ports': (LPM_TRIE, 12, 1, 4096, 1),
                  'netpol_ingress_cidr': (LPM_TRIE, 8, 4, 16384, 1),
                  'netpol_ingress_ports': (LPM_TRIE, 12, 1, 4096, 1),
-                 'netpol_flows': (LRU_HASH, 12, 8, 4096, 0)}
+                 'netpol_flows': (LRU_HASH, 12, 8, 4096, 0),
+                 'local_pod_v4': (LPM_TRIE, 8, 16, 4096, 1),
+                 'host_redirect_v4': (HASH, 4, 1, 64, 1)}
 TC_ACT_OK, TC_ACT_SHOT = 0, 2
 
 
