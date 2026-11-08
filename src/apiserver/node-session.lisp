@@ -744,6 +744,41 @@ operation. No-op when no operation matches MESSAGE's id."
                            (node-grpc-server-acknowledged-revisions server))
                   revision)))))))
 
+(defun credential-token-response (store node-name request)
+  "Mint the credential-provider token REQUEST after binding it to NODE-NAME's exact Pod."
+  (let* ((namespace (slot-value request 'gr8s.node.v1::namespace))
+         (pod-name (slot-value request 'gr8s.node.v1::pod-name))
+         (pod (get-pod store namespace pod-name))
+         (pod-object (pod-to-object pod))
+         (service-account-name (slot-value request 'gr8s.node.v1::service-account-name)))
+    (unless (and (equal node-name (pod-node-name pod))
+                 (equal (pod-uid pod) (slot-value request 'gr8s.node.v1::pod-uid)))
+      (error "Credential token request does not name this node's exact Pod"))
+    (unless (equal service-account-name
+                   (gethash "serviceAccountName" (gethash "spec" pod-object) "default"))
+      (error "Credential token request names another ServiceAccount"))
+    (let* ((account (get-core-resource store "serviceaccounts" namespace service-account-name))
+           (metadata (gethash "metadata" account))
+           (source (gethash "annotations" metadata (core-object)))
+           (annotations (core-object)))
+      (dolist (key (slot-value request 'gr8s.node.v1::required-annotation-keys))
+        (multiple-value-bind (value present) (gethash key source)
+          (unless present (error "Required ServiceAccount annotation ~A is absent" key))
+          (setf (gethash key annotations) value)))
+      (dolist (key (slot-value request 'gr8s.node.v1::optional-annotation-keys))
+        (multiple-value-bind (value present) (gethash key source)
+          (when present (setf (gethash key annotations) value))))
+      (multiple-value-bind (token expiry)
+          (mint-service-account-token
+           store account :audiences (list (slot-value request 'gr8s.node.v1::audience))
+           :binding (list "pod" (pod-name pod) (pod-uid pod)))
+        (declare (ignore expiry))
+        (make-instance
+         'gr8s.node.v1::credential-token-response
+         :request-id (slot-value request 'gr8s.node.v1::request-id)
+         :token token :service-account-annotations annotations
+         :service-account-uid (gethash "uid" metadata))))))
+
 (defun handle-node-agent-envelope (server node-name envelope)
   "Dispatch one inbound envelope from NODE-NAME's agent after checking its protocol
    version. A heartbeat renews the node's readiness and lease and records runtime
@@ -828,6 +863,21 @@ operation. No-op when no operation matches MESSAGE's id."
     (:operation-stream
      (note-node-operation-stream
       server (slot-value envelope 'gr8s.node.v1::operation-stream)))
+    (:credential-token-request
+     (let* ((request (slot-value envelope 'gr8s.node.v1::credential-token-request))
+            (response
+              (handler-case
+                  (credential-token-response (node-grpc-server-store server) node-name request)
+                (error (condition)
+                  (make-instance
+                   'gr8s.node.v1::credential-token-response
+                   :request-id (slot-value request 'gr8s.node.v1::request-id)
+                   :error-message (princ-to-string condition))))))
+       (bt:with-lock-held ((node-grpc-server-lock server))
+         (let ((session (gethash node-name (node-grpc-server-sessions server))))
+           (when session
+             (send-node-agent-envelope
+              session (make-server-envelope :credential-token-response response :sequence 0)))))))
     (otherwise
      (error "Unexpected node-session payload ~S"
             (slot-value envelope 'gr8s.node.v1::payload-case)))))

@@ -121,8 +121,51 @@
   (outbox nil)
   (outbox-lock (bt:make-lock "gr8s agent node session outbox"))
   (outbox-changed (bt:make-condition-variable :name "gr8s agent node session outbox"))
+  (credential-token-requests (make-hash-table :test #'equal))
+  (credential-token-lock (bt:make-lock "gr8s credential token requests"))
   ;; The last complete snapshot received, which the server's next delta changes.
   received)
+
+(defstruct pending-credential-token
+  response
+  (changed (bt:make-condition-variable :name "gr8s credential token response")))
+
+(defun request-agent-credential-token (session pod audience required optional)
+  "Request a Pod-bound credential-provider token through SESSION and wait for its response."
+  (let* ((id (generate-uid))
+         (pending (make-pending-credential-token))
+         (spec (gethash "spec" (pod-to-object pod)))
+         (service-account (gethash "serviceAccountName" spec "")))
+    (bt:with-lock-held ((agent-node-session-credential-token-lock session))
+      (setf (gethash id (agent-node-session-credential-token-requests session)) pending))
+    (unwind-protect
+         (progn
+           (send-agent-session-envelope
+            session :credential-token-request
+            (make-instance
+             'gr8s.node.v1::credential-token-request
+             :request-id id :namespace (pod-namespace pod) :pod-name (pod-name pod)
+             :pod-uid (pod-uid pod) :service-account-name service-account
+             :audience audience :required-annotation-keys required
+             :optional-annotation-keys optional))
+           (let ((response
+                   (bt:with-lock-held ((agent-node-session-credential-token-lock session))
+                     (loop until (pending-credential-token-response pending)
+                           do (unless (bt:condition-wait
+                                       (pending-credential-token-changed pending)
+                                       (agent-node-session-credential-token-lock session) :timeout 60)
+                                (error "Credential token request timed out")))
+                     (pending-credential-token-response pending))))
+             (when (plusp (length (slot-value response 'gr8s.node.v1::error-message)))
+               (error "Credential token request failed: ~A"
+                      (slot-value response 'gr8s.node.v1::error-message)))
+             (values
+              (slot-value response 'gr8s.node.v1::token)
+              (slot-value response 'gr8s.node.v1::service-account-annotations)
+              (list :namespace (pod-namespace pod) :name service-account
+                    :uid (slot-value response 'gr8s.node.v1::service-account-uid)))))
+      (bt:with-lock-held ((agent-node-session-credential-token-lock session))
+        (remhash id (agent-node-session-credential-token-requests session))))))
 
 (defun pod-assignment-sort-key (pod)
   "POD's \"namespace/name\", the stable key agent and server sort assignments by."
@@ -303,6 +346,14 @@ applicable method for NIL rather than finding a closed connection."
             (slot-value
              (slot-value envelope 'gr8s.node.v1::protocol-error)
              'gr8s.node.v1::message)))
+    (:credential-token-response
+     (let* ((response (slot-value envelope 'gr8s.node.v1::credential-token-response))
+            (id (slot-value response 'gr8s.node.v1::request-id)))
+       (bt:with-lock-held ((agent-node-session-credential-token-lock session))
+         (let ((pending (gethash id (agent-node-session-credential-token-requests session))))
+           (when pending
+             (setf (pending-credential-token-response pending) response)
+             (bt:condition-notify (pending-credential-token-changed pending)))))))
     (otherwise
      (error "Unexpected server payload ~S"
             (slot-value envelope 'gr8s.node.v1::payload-case)))))
@@ -585,7 +636,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
     (host port node-name identity-path apply-snapshot operation-handler
      one-shot-p control stop-predicate underlay-address status-provider
      ca-certificate-path certificate-path private-key-path &optional snapshot-observer (kubelet-port 0)
-                                                                     runtime-health)
+                                                                     runtime-health credential-token-function-setter)
   "Run one agent session to the control plane at HOST:PORT from connect to close:
    dial (TLS when a CA path is given), send the hello and first heartbeat, perform
    the ServerHello handshake, then apply the initial and subsequent snapshots in
@@ -650,6 +701,10 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                             (gr8s.node.v1::node-service-connect
                              stub :timeout session-timeout)))
                   (session (make-agent-node-session stream)))
+             (when credential-token-function-setter
+               (funcall credential-token-function-setter
+                        (lambda (pod audience required optional)
+                          (request-agent-credential-token session pod audience required optional))))
              (send-agent-session-envelope
               session :hello
                (make-instance 'gr8s.node.v1::node-hello
@@ -741,6 +796,8 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                                  session envelope identity identity-path
                                  apply-snapshot operation-handler snapshot-worker))))))))
       (finish-session)
+      (when credential-token-function-setter
+        (funcall credential-token-function-setter nil))
       (stop-agent-snapshot-worker snapshot-worker)
       (when (and operation-session-p operation-handler)
         ;; Operation emitters close over this gRPC session.  Give the agent a
@@ -763,6 +820,7 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                            operation-handler underlay-address status-provider snapshot-observer
                            ca-certificate-path certificate-path private-key-path
                            control (kubelet-port 0) runtime-health
+                           credential-token-function-setter
                            (stop-predicate (constantly nil)))
   "Maintain the agent's session to the control plane, reconnecting on loss. With
    ENDPOINTS (a list of (host port)) the agent rotates through the control-plane
@@ -784,7 +842,8 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                                                  (not (null max-sessions)) control stop-predicate
                                                  underlay-address status-provider
                                                  ca-certificate-path certificate-path private-key-path
-                                                 snapshot-observer kubelet-port runtime-health))
+                                                 snapshot-observer kubelet-port runtime-health
+                                                 credential-token-function-setter))
                        (unless (or (node-session-cancelled-p control) (funcall stop-predicate))
                          (format *error-output* "gr8s node session to ~A:~A ended; reconnecting~%"
                                  try-host try-port))

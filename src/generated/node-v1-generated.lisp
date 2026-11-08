@@ -195,6 +195,9 @@
             GR8S.NODE.V1::OPERATION-RESPONSE :INITFORM NIL :TYPE T)
            (OPERATION-STREAM :INITARG :OPERATION-STREAM :ACCESSOR
             GR8S.NODE.V1::OPERATION-STREAM :INITFORM NIL :TYPE T)
+           (CREDENTIAL-TOKEN-REQUEST :INITARG :CREDENTIAL-TOKEN-REQUEST
+            :ACCESSOR GR8S.NODE.V1::CREDENTIAL-TOKEN-REQUEST :INITFORM NIL
+            :TYPE T)
            (GR8S.NODE.V1::PAYLOAD-CASE :INITFORM NIL :ACCESSOR
             GR8S.NODE.V1::PAYLOAD-CASE :DOCUMENTATION
             "Which payload variant is set (field name keyword or nil)"))
@@ -250,6 +253,14 @@
           (AG-PROTO::WRITE-FIELD-TAG 15 2 AG-PROTO::BUFFER)
           (AG-PROTO::WRITE-LENGTH-DELIMITED
            (AG-PROTO:SERIALIZE-TO-BYTES AG-PROTO::VALUE) AG-PROTO::BUFFER))))
+    (WHEN
+        (EQ (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE) :CREDENTIAL-TOKEN-REQUEST)
+      (LET ((AG-PROTO::VALUE
+             (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-REQUEST)))
+        (WHEN AG-PROTO::VALUE
+          (AG-PROTO::WRITE-FIELD-TAG 16 2 AG-PROTO::BUFFER)
+          (AG-PROTO::WRITE-LENGTH-DELIMITED
+           (AG-PROTO:SERIALIZE-TO-BYTES AG-PROTO::VALUE) AG-PROTO::BUFFER))))
     AG-PROTO::BUFFER))
 
 
@@ -275,6 +286,8 @@
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'STATUS) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-RESPONSE) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-STREAM) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-REQUEST)
+                           NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'HELLO)
                            (LET ((AG-PROTO::DATA
                                   (AG-PROTO::READ-LENGTH-DELIMITED
@@ -299,6 +312,8 @@
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'STATUS) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-RESPONSE) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-STREAM) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-REQUEST)
+                           NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'HEARTBEAT)
                            (LET ((AG-PROTO::DATA
                                   (AG-PROTO::READ-LENGTH-DELIMITED
@@ -323,6 +338,8 @@
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'STATUS) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-RESPONSE) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-STREAM) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-REQUEST)
+                           NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'SNAPSHOT-ACK)
                            (LET ((AG-PROTO::DATA
                                   (AG-PROTO::READ-LENGTH-DELIMITED
@@ -348,6 +365,8 @@
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'SNAPSHOT-ACK) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-RESPONSE) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-STREAM) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-REQUEST)
+                           NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'STATUS)
                            (LET ((AG-PROTO::DATA
                                   (AG-PROTO::READ-LENGTH-DELIMITED
@@ -372,6 +391,8 @@
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'SNAPSHOT-ACK) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'STATUS) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-STREAM) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-REQUEST)
+                           NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-RESPONSE)
                            (LET ((AG-PROTO::DATA
                                   (AG-PROTO::READ-LENGTH-DELIMITED
@@ -397,6 +418,8 @@
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'SNAPSHOT-ACK) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'STATUS) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-RESPONSE) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-REQUEST)
+                           NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-STREAM)
                            (LET ((AG-PROTO::DATA
                                   (AG-PROTO::READ-LENGTH-DELIMITED
@@ -415,6 +438,32 @@
                                 'OPERATION-STREAM AG-PROTO::DATA))))
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE)
                            :OPERATION-STREAM)))
+                 (16
+                  (PROGN
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'HELLO) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'HEARTBEAT) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'SNAPSHOT-ACK) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'STATUS) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-RESPONSE) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-STREAM) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-REQUEST)
+                           (LET ((AG-PROTO::DATA
+                                  (AG-PROTO::READ-LENGTH-DELIMITED
+                                   AG-PROTO::BUFFER)))
+                             (WHEN
+                                 (AND AG-PROTO:*MAX-RECURSION-DEPTH*
+                                      (>= AG-PROTO:*CURRENT-RECURSION-DEPTH*
+                                          AG-PROTO:*MAX-RECURSION-DEPTH*))
+                               (ERROR 'AG-PROTO:WIRE-FORMAT-ERROR :MESSAGE
+                                      (FORMAT NIL
+                                              "Maximum recursion depth ~D exceeded"
+                                              AG-PROTO:*MAX-RECURSION-DEPTH*)))
+                             (LET ((AG-PROTO:*CURRENT-RECURSION-DEPTH*
+                                    (1+ AG-PROTO:*CURRENT-RECURSION-DEPTH*)))
+                               (AG-PROTO:DESERIALIZE-FROM-BYTES
+                                'CREDENTIAL-TOKEN-REQUEST AG-PROTO::DATA))))
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE)
+                           :CREDENTIAL-TOKEN-REQUEST)))
                  (OTHERWISE
                   (AG-PROTO::SKIP-FIELD AG-PROTO::BUFFER
                                         AG-PROTO::WIRE-TYPE)))))
@@ -440,6 +489,9 @@
             GR8S.NODE.V1::OPERATION-CANCEL :INITFORM NIL :TYPE T)
            (PROTOCOL-ERROR :INITARG :PROTOCOL-ERROR :ACCESSOR
             GR8S.NODE.V1::PROTOCOL-ERROR :INITFORM NIL :TYPE T)
+           (CREDENTIAL-TOKEN-RESPONSE :INITARG :CREDENTIAL-TOKEN-RESPONSE
+            :ACCESSOR GR8S.NODE.V1::CREDENTIAL-TOKEN-RESPONSE :INITFORM NIL
+            :TYPE T)
            (GR8S.NODE.V1::PAYLOAD-CASE :INITFORM NIL :ACCESSOR
             GR8S.NODE.V1::PAYLOAD-CASE :DOCUMENTATION
             "Which payload variant is set (field name keyword or nil)"))
@@ -495,6 +547,15 @@
           (AG-PROTO::WRITE-FIELD-TAG 15 2 AG-PROTO::BUFFER)
           (AG-PROTO::WRITE-LENGTH-DELIMITED
            (AG-PROTO:SERIALIZE-TO-BYTES AG-PROTO::VALUE) AG-PROTO::BUFFER))))
+    (WHEN
+        (EQ (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE)
+            :CREDENTIAL-TOKEN-RESPONSE)
+      (LET ((AG-PROTO::VALUE
+             (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-RESPONSE)))
+        (WHEN AG-PROTO::VALUE
+          (AG-PROTO::WRITE-FIELD-TAG 16 2 AG-PROTO::BUFFER)
+          (AG-PROTO::WRITE-LENGTH-DELIMITED
+           (AG-PROTO:SERIALIZE-TO-BYTES AG-PROTO::VALUE) AG-PROTO::BUFFER))))
     AG-PROTO::BUFFER))
 
 
@@ -520,6 +581,8 @@
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-INPUT) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-CANCEL) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'PROTOCOL-ERROR) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-RESPONSE)
+                           NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'HELLO)
                            (LET ((AG-PROTO::DATA
                                   (AG-PROTO::READ-LENGTH-DELIMITED
@@ -544,6 +607,8 @@
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-INPUT) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-CANCEL) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'PROTOCOL-ERROR) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-RESPONSE)
+                           NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'DESIRED-STATE)
                            (LET ((AG-PROTO::DATA
                                   (AG-PROTO::READ-LENGTH-DELIMITED
@@ -569,6 +634,8 @@
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-INPUT) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-CANCEL) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'PROTOCOL-ERROR) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-RESPONSE)
+                           NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-REQUEST)
                            (LET ((AG-PROTO::DATA
                                   (AG-PROTO::READ-LENGTH-DELIMITED
@@ -594,6 +661,8 @@
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-REQUEST) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-CANCEL) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'PROTOCOL-ERROR) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-RESPONSE)
+                           NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-INPUT)
                            (LET ((AG-PROTO::DATA
                                   (AG-PROTO::READ-LENGTH-DELIMITED
@@ -619,6 +688,8 @@
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-REQUEST) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-INPUT) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'PROTOCOL-ERROR) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-RESPONSE)
+                           NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-CANCEL)
                            (LET ((AG-PROTO::DATA
                                   (AG-PROTO::READ-LENGTH-DELIMITED
@@ -644,6 +715,8 @@
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-REQUEST) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-INPUT) NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-CANCEL) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-RESPONSE)
+                           NIL)
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'PROTOCOL-ERROR)
                            (LET ((AG-PROTO::DATA
                                   (AG-PROTO::READ-LENGTH-DELIMITED
@@ -662,9 +735,301 @@
                                                                 AG-PROTO::DATA))))
                    (SETF (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE)
                            :PROTOCOL-ERROR)))
+                 (16
+                  (PROGN
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'HELLO) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'DESIRED-STATE) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-REQUEST) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-INPUT) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPERATION-CANCEL) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'PROTOCOL-ERROR) NIL)
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'CREDENTIAL-TOKEN-RESPONSE)
+                           (LET ((AG-PROTO::DATA
+                                  (AG-PROTO::READ-LENGTH-DELIMITED
+                                   AG-PROTO::BUFFER)))
+                             (WHEN
+                                 (AND AG-PROTO:*MAX-RECURSION-DEPTH*
+                                      (>= AG-PROTO:*CURRENT-RECURSION-DEPTH*
+                                          AG-PROTO:*MAX-RECURSION-DEPTH*))
+                               (ERROR 'AG-PROTO:WIRE-FORMAT-ERROR :MESSAGE
+                                      (FORMAT NIL
+                                              "Maximum recursion depth ~D exceeded"
+                                              AG-PROTO:*MAX-RECURSION-DEPTH*)))
+                             (LET ((AG-PROTO:*CURRENT-RECURSION-DEPTH*
+                                    (1+ AG-PROTO:*CURRENT-RECURSION-DEPTH*)))
+                               (AG-PROTO:DESERIALIZE-FROM-BYTES
+                                'CREDENTIAL-TOKEN-RESPONSE AG-PROTO::DATA))))
+                   (SETF (SLOT-VALUE AG-PROTO::OBJ 'PAYLOAD-CASE)
+                           :CREDENTIAL-TOKEN-RESPONSE)))
                  (OTHERWISE
                   (AG-PROTO::SKIP-FIELD AG-PROTO::BUFFER
                                         AG-PROTO::WIRE-TYPE)))))
+    AG-PROTO::OBJ))
+
+
+(DEFCLASS GR8S.NODE.V1::CREDENTIAL-TOKEN-REQUEST (AG-PROTO:PROTO-MESSAGE)
+          ((REQUEST-ID :INITARG :REQUEST-ID :ACCESSOR GR8S.NODE.V1::REQUEST-ID
+            :INITFORM "" :TYPE STRING)
+           (NAMESPACE :INITARG :NAMESPACE :ACCESSOR GR8S.NODE.V1::NAMESPACE
+            :INITFORM "" :TYPE STRING)
+           (POD-NAME :INITARG :POD-NAME :ACCESSOR GR8S.NODE.V1::POD-NAME
+            :INITFORM "" :TYPE STRING)
+           (POD-UID :INITARG :POD-UID :ACCESSOR GR8S.NODE.V1::POD-UID :INITFORM
+            "" :TYPE STRING)
+           (SERVICE-ACCOUNT-NAME :INITARG :SERVICE-ACCOUNT-NAME :ACCESSOR
+            GR8S.NODE.V1::SERVICE-ACCOUNT-NAME :INITFORM "" :TYPE STRING)
+           (AUDIENCE :INITARG :AUDIENCE :ACCESSOR GR8S.NODE.V1::AUDIENCE
+            :INITFORM "" :TYPE STRING)
+           (REQUIRED-ANNOTATION-KEYS :INITARG :REQUIRED-ANNOTATION-KEYS
+            :ACCESSOR GR8S.NODE.V1::REQUIRED-ANNOTATION-KEYS :INITFORM NIL
+            :TYPE LIST)
+           (OPTIONAL-ANNOTATION-KEYS :INITARG :OPTIONAL-ANNOTATION-KEYS
+            :ACCESSOR GR8S.NODE.V1::OPTIONAL-ANNOTATION-KEYS :INITFORM NIL
+            :TYPE LIST))
+          (:DOCUMENTATION "Proto message: CredentialTokenRequest"))
+
+
+(DEFMETHOD AG-PROTO:SERIALIZE-TO-BYTES
+           ((AG-PROTO::OBJ GR8S.NODE.V1::CREDENTIAL-TOKEN-REQUEST))
+  (LET ((AG-PROTO::BUFFER
+         (MAKE-ARRAY 64 :ELEMENT-TYPE '(UNSIGNED-BYTE 8) :FILL-POINTER 0
+                     :ADJUSTABLE T)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'REQUEST-ID)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 1 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'NAMESPACE)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 2 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'POD-NAME)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 3 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'POD-UID)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 4 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'SERVICE-ACCOUNT-NAME)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 5 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'AUDIENCE)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 6 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    (DOLIST
+        (AG-PROTO::ELEM (SLOT-VALUE AG-PROTO::OBJ 'REQUIRED-ANNOTATION-KEYS))
+      (AG-PROTO::WRITE-FIELD-TAG 7 2 AG-PROTO::BUFFER)
+      (AG-PROTO::WRITE-LENGTH-DELIMITED
+       (AG-PROTO::STRING-TO-UTF8 AG-PROTO::ELEM) AG-PROTO::BUFFER))
+    (DOLIST
+        (AG-PROTO::ELEM (SLOT-VALUE AG-PROTO::OBJ 'OPTIONAL-ANNOTATION-KEYS))
+      (AG-PROTO::WRITE-FIELD-TAG 8 2 AG-PROTO::BUFFER)
+      (AG-PROTO::WRITE-LENGTH-DELIMITED
+       (AG-PROTO::STRING-TO-UTF8 AG-PROTO::ELEM) AG-PROTO::BUFFER))
+    AG-PROTO::BUFFER))
+
+
+(DEFMETHOD AG-PROTO:DESERIALIZE-FROM-BYTES
+           ((TYPE (EQL 'GR8S.NODE.V1::CREDENTIAL-TOKEN-REQUEST))
+            AG-PROTO::DATA)
+  (LET ((AG-PROTO::OBJ (MAKE-INSTANCE 'GR8S.NODE.V1::CREDENTIAL-TOKEN-REQUEST))
+        (AG-PROTO::BUFFER (CONS AG-PROTO::DATA 0)))
+    (LOOP AG-PROTO::WHILE (< (REST AG-PROTO::BUFFER) (LENGTH AG-PROTO::DATA))
+          DO (LET* ((AG-PROTO::TAG (AG-PROTO::READ-VARINT AG-PROTO::BUFFER))
+                    (AG-PROTO::FIELD-NUMBER (ASH AG-PROTO::TAG -3))
+                    (AG-PROTO::WIRE-TYPE (LOGAND AG-PROTO::TAG 7)))
+               (CASE AG-PROTO::FIELD-NUMBER
+                 (1
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'REQUEST-ID)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (2
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'NAMESPACE)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (3
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'POD-NAME)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (4
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'POD-UID)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (5
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'SERVICE-ACCOUNT-NAME)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (6
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'AUDIENCE)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (7
+                  (PUSH
+                   (AG-PROTO::UTF8-TO-STRING
+                    (AG-PROTO::READ-LENGTH-DELIMITED AG-PROTO::BUFFER))
+                   (SLOT-VALUE AG-PROTO::OBJ 'REQUIRED-ANNOTATION-KEYS)))
+                 (8
+                  (PUSH
+                   (AG-PROTO::UTF8-TO-STRING
+                    (AG-PROTO::READ-LENGTH-DELIMITED AG-PROTO::BUFFER))
+                   (SLOT-VALUE AG-PROTO::OBJ 'OPTIONAL-ANNOTATION-KEYS)))
+                 (OTHERWISE
+                  (AG-PROTO::SKIP-FIELD AG-PROTO::BUFFER
+                                        AG-PROTO::WIRE-TYPE)))))
+    (SETF (SLOT-VALUE AG-PROTO::OBJ 'REQUIRED-ANNOTATION-KEYS)
+            (NREVERSE (SLOT-VALUE AG-PROTO::OBJ 'REQUIRED-ANNOTATION-KEYS)))
+    (SETF (SLOT-VALUE AG-PROTO::OBJ 'OPTIONAL-ANNOTATION-KEYS)
+            (NREVERSE (SLOT-VALUE AG-PROTO::OBJ 'OPTIONAL-ANNOTATION-KEYS)))
+    AG-PROTO::OBJ))
+
+
+(DEFCLASS GR8S.NODE.V1::CREDENTIAL-TOKEN-RESPONSE (AG-PROTO:PROTO-MESSAGE)
+          ((REQUEST-ID :INITARG :REQUEST-ID :ACCESSOR GR8S.NODE.V1::REQUEST-ID
+            :INITFORM "" :TYPE STRING)
+           (TOKEN :INITARG :TOKEN :ACCESSOR GR8S.NODE.V1::TOKEN :INITFORM ""
+            :TYPE STRING)
+           (SERVICE-ACCOUNT-ANNOTATIONS :INITARG :SERVICE-ACCOUNT-ANNOTATIONS
+            :ACCESSOR GR8S.NODE.V1::SERVICE-ACCOUNT-ANNOTATIONS :INITFORM NIL
+            :TYPE LIST)
+           (SERVICE-ACCOUNT-UID :INITARG :SERVICE-ACCOUNT-UID :ACCESSOR
+            GR8S.NODE.V1::SERVICE-ACCOUNT-UID :INITFORM "" :TYPE STRING)
+           (ERROR-MESSAGE :INITARG :ERROR-MESSAGE :ACCESSOR
+            GR8S.NODE.V1::ERROR-MESSAGE :INITFORM "" :TYPE STRING))
+          (:DOCUMENTATION "Proto message: CredentialTokenResponse"))
+
+
+(DEFMETHOD AG-PROTO:SERIALIZE-TO-BYTES
+           ((AG-PROTO::OBJ GR8S.NODE.V1::CREDENTIAL-TOKEN-RESPONSE))
+  (LET ((AG-PROTO::BUFFER
+         (MAKE-ARRAY 64 :ELEMENT-TYPE '(UNSIGNED-BYTE 8) :FILL-POINTER 0
+                     :ADJUSTABLE T)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'REQUEST-ID)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 1 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'TOKEN)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 2 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    (DOLIST
+        (AG-PROTO::ENTRY
+         (SLOT-VALUE AG-PROTO::OBJ 'SERVICE-ACCOUNT-ANNOTATIONS))
+      (AG-PROTO::WRITE-FIELD-TAG 3 2 AG-PROTO::BUFFER)
+      (LET ((AG-PROTO::ENTRY-BUFFER
+             (MAKE-ARRAY 16 :ELEMENT-TYPE '(UNSIGNED-BYTE 8) :FILL-POINTER 0
+                         :ADJUSTABLE T)))
+        (AG-PROTO::WRITE-FIELD-TAG 1 2 AG-PROTO::ENTRY-BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 (CAR AG-PROTO::ENTRY))
+         AG-PROTO::ENTRY-BUFFER)
+        (AG-PROTO::WRITE-FIELD-TAG 2 2 AG-PROTO::ENTRY-BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 (CDR AG-PROTO::ENTRY))
+         AG-PROTO::ENTRY-BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED AG-PROTO::ENTRY-BUFFER
+                                          AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'SERVICE-ACCOUNT-UID)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 4 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    (LET ((AG-PROTO::VALUE (SLOT-VALUE AG-PROTO::OBJ 'ERROR-MESSAGE)))
+      (WHEN (AND AG-PROTO::VALUE (PLUSP (LENGTH AG-PROTO::VALUE)))
+        (AG-PROTO::WRITE-FIELD-TAG 5 2 AG-PROTO::BUFFER)
+        (AG-PROTO::WRITE-LENGTH-DELIMITED
+         (AG-PROTO::STRING-TO-UTF8 AG-PROTO::VALUE) AG-PROTO::BUFFER)))
+    AG-PROTO::BUFFER))
+
+
+(DEFMETHOD AG-PROTO:DESERIALIZE-FROM-BYTES
+           ((TYPE (EQL 'GR8S.NODE.V1::CREDENTIAL-TOKEN-RESPONSE))
+            AG-PROTO::DATA)
+  (LET ((AG-PROTO::OBJ
+         (MAKE-INSTANCE 'GR8S.NODE.V1::CREDENTIAL-TOKEN-RESPONSE))
+        (AG-PROTO::BUFFER (CONS AG-PROTO::DATA 0)))
+    (LOOP AG-PROTO::WHILE (< (REST AG-PROTO::BUFFER) (LENGTH AG-PROTO::DATA))
+          DO (LET* ((AG-PROTO::TAG (AG-PROTO::READ-VARINT AG-PROTO::BUFFER))
+                    (AG-PROTO::FIELD-NUMBER (ASH AG-PROTO::TAG -3))
+                    (AG-PROTO::WIRE-TYPE (LOGAND AG-PROTO::TAG 7)))
+               (CASE AG-PROTO::FIELD-NUMBER
+                 (1
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'REQUEST-ID)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (2
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'TOKEN)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (3
+                  (PUSH
+                   (LET* ((AG-PROTO::ENTRY-DATA
+                           (AG-PROTO::READ-LENGTH-DELIMITED AG-PROTO::BUFFER))
+                          (AG-PROTO::ENTRY-BUF (CONS AG-PROTO::ENTRY-DATA 0))
+                          (AG-PROTO::KEY "")
+                          (AG-PROTO::VALUE ""))
+                     (LOOP AG-PROTO::WHILE (< (REST AG-PROTO::ENTRY-BUF)
+                                              (LENGTH AG-PROTO::ENTRY-DATA))
+                           DO (LET* ((AG-PROTO::ENTRY-TAG
+                                      (AG-PROTO::READ-VARINT
+                                       AG-PROTO::ENTRY-BUF))
+                                     (AG-PROTO::ENTRY-FIELD-NUMBER
+                                      (ASH AG-PROTO::ENTRY-TAG -3))
+                                     (AG-PROTO::ENTRY-WIRE-TYPE
+                                      (LOGAND AG-PROTO::ENTRY-TAG 7)))
+                                (DECLARE
+                                 (IGNORABLE AG-PROTO::ENTRY-FIELD-NUMBER
+                                  AG-PROTO::ENTRY-WIRE-TYPE))
+                                (CASE AG-PROTO::ENTRY-FIELD-NUMBER
+                                  (1
+                                   (SETF AG-PROTO::KEY
+                                           (AG-PROTO::UTF8-TO-STRING
+                                            (AG-PROTO::READ-LENGTH-DELIMITED
+                                             AG-PROTO::ENTRY-BUF))))
+                                  (2
+                                   (SETF AG-PROTO::VALUE
+                                           (AG-PROTO::UTF8-TO-STRING
+                                            (AG-PROTO::READ-LENGTH-DELIMITED
+                                             AG-PROTO::ENTRY-BUF))))
+                                  (OTHERWISE
+                                   (AG-PROTO::SKIP-FIELD AG-PROTO::ENTRY-BUF
+                                                         (LOGAND
+                                                          AG-PROTO::ENTRY-TAG
+                                                          7))))))
+                     (CONS AG-PROTO::KEY AG-PROTO::VALUE))
+                   (SLOT-VALUE AG-PROTO::OBJ 'SERVICE-ACCOUNT-ANNOTATIONS)))
+                 (4
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'SERVICE-ACCOUNT-UID)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (5
+                  (SETF (SLOT-VALUE AG-PROTO::OBJ 'ERROR-MESSAGE)
+                          (AG-PROTO::UTF8-TO-STRING
+                           (AG-PROTO::READ-LENGTH-DELIMITED
+                            AG-PROTO::BUFFER))))
+                 (OTHERWISE
+                  (AG-PROTO::SKIP-FIELD AG-PROTO::BUFFER
+                                        AG-PROTO::WIRE-TYPE)))))
+    (SETF (SLOT-VALUE AG-PROTO::OBJ 'SERVICE-ACCOUNT-ANNOTATIONS)
+            (NREVERSE (SLOT-VALUE AG-PROTO::OBJ 'SERVICE-ACCOUNT-ANNOTATIONS)))
     AG-PROTO::OBJ))
 
 

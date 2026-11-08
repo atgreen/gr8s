@@ -37,6 +37,7 @@ message AgentEnvelope {
     NodeStatus status = 13;
     OperationResponse operation_response = 14;
     OperationStream operation_stream = 15;
+    CredentialTokenRequest credential_token_request = 16;
   }
 }
 
@@ -50,7 +51,29 @@ message ServerEnvelope {
     OperationInput operation_input = 13;
     OperationCancel operation_cancel = 14;
     ProtocolError protocol_error = 15;
+    CredentialTokenResponse credential_token_response = 16;
   }
+}
+
+// A node asks the control plane for a short-lived token bound to a Pod whose
+// image it is about to pull. The authenticated session supplies the node name.
+message CredentialTokenRequest {
+  string request_id = 1;
+  string namespace = 2;
+  string pod_name = 3;
+  string pod_uid = 4;
+  string service_account_name = 5;
+  string audience = 6;
+  repeated string required_annotation_keys = 7;
+  repeated string optional_annotation_keys = 8;
+}
+
+message CredentialTokenResponse {
+  string request_id = 1;
+  string token = 2;
+  map<string, string> service_account_annotations = 3;
+  string service_account_uid = 4;
+  string error_message = 5;
 }
 
 message NodeHello {

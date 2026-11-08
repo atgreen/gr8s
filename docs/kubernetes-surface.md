@@ -92,8 +92,11 @@ credentials. Kubelet v1 executable credential-provider plugins are configured
 with `--image-credential-provider-config` and
 `--image-credential-provider-bin-dir`. Matching, arguments and environment,
 response cache scopes and durations, validation, and fallback ordering follow
-the kubelet protocol. ServiceAccount-token credential-provider requests are not
-yet supported.
+the kubelet protocol. A provider's `tokenAttributes` are validated and honored:
+the control plane mints an audience-specific token bound to the exact Pod after
+authenticating its node, and returns only the requested ServiceAccount annotations.
+`requireServiceAccount`, `ServiceAccount` and `Token` cache identities follow the
+kubelet semantics; the cluster signing key never leaves the control plane.
 
 ## RBAC, CSRs & certificates
 

@@ -15,7 +15,7 @@
 
 (in-package #:gr8s.protocol)
 
-(defconstant +node-protocol-version+ 1)
+(defconstant +node-protocol-version+ 2)
 
 (define-condition unsupported-node-protocol-version (error)
   ((received
@@ -45,7 +45,8 @@
     (:snapshot-ack . gr8s.node.v1::snapshot-ack)
     (:status . gr8s.node.v1::node-status)
     (:operation-response . gr8s.node.v1::operation-response)
-    (:operation-stream . gr8s.node.v1::operation-stream)))
+    (:operation-stream . gr8s.node.v1::operation-stream)
+    (:credential-token-request . gr8s.node.v1::credential-token-request)))
 
 (defparameter +server-envelope-variants+
   '((:hello . gr8s.node.v1::server-hello)
@@ -53,7 +54,8 @@
     (:operation-request . gr8s.node.v1::operation-request)
     (:operation-input . gr8s.node.v1::operation-input)
     (:operation-cancel . gr8s.node.v1::operation-cancel)
-    (:protocol-error . gr8s.node.v1::protocol-error)))
+    (:protocol-error . gr8s.node.v1::protocol-error)
+    (:credential-token-response . gr8s.node.v1::credential-token-response)))
 
 (defun make-node-envelope (class variants variant payload sequence protocol-version)
   "Build an envelope of CLASS carrying VARIANT's PAYLOAD at PROTOCOL-VERSION and

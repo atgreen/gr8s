@@ -194,9 +194,11 @@ Provider names resolve only within BIN-DIRECTORY and are returned in configurati
                      (getf attributes :optional-annotations))
           (let ((cache-identity
                   (list identity
-                        (loop for key being the hash-keys of (or annotations (core-object))
-                                using (hash-value value)
-                              collect (cons key value)))))
+                        (sort
+                         (loop for key being the hash-keys of (or annotations (core-object))
+                                 using (hash-value value)
+                               collect (cons key value))
+                         #'string< :key #'car))))
             (when (equal "Token" (getf attributes :cache-type))
               (setf cache-identity
                     (list cache-identity

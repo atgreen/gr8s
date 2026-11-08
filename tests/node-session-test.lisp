@@ -37,6 +37,52 @@
 (defun empty-desired-snapshot ()
   (make-instance 'gr8s.node.v1::desired-state-snapshot))
 
+(test credential-token-requests-are-bound-to-the-authenticated-nodes-pod
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (gr8s:register-node
+     store (gr8s:make-node-record :id "token-node" :name "worker-a" :pod-cidr "10.88.7.0/24"))
+    (gr8s::create-core-resource
+     store "serviceaccounts"
+     (gr8s::core-object
+      "metadata" (gr8s::core-object "name" "builder" "uid" "builder-uid"
+                                     "annotations" (gr8s::core-object "tenant.example/id" "acme"
+                                                                      "tenant.example/region" "ca")))
+     "default")
+    (let* ((pod (create-pod
+                 store
+                 (parse-pod
+                  "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"puller\",\"namespace\":\"default\"},\"spec\":{\"serviceAccountName\":\"builder\",\"containers\":[{\"name\":\"c\",\"image\":\"private.example/a\"}]}}")))
+           (version (pod-resource-version pod)))
+      (setf (gr8s::pod-node-name pod) "worker-a")
+      (setf pod (gr8s:update-pod store pod version))
+      (let* ((request
+               (make-instance
+                'gr8s.node.v1::credential-token-request
+                :request-id "request-1" :namespace "default" :pod-name "puller"
+                :pod-uid (pod-uid pod) :service-account-name "builder"
+                :audience "private.example"
+                :required-annotation-keys '("tenant.example/id")
+                :optional-annotation-keys '("tenant.example/region" "tenant.example/missing")))
+             (response (gr8s::credential-token-response store "worker-a" request)))
+        (is (equal "request-1" (slot-value response 'gr8s.node.v1::request-id)))
+        (is (plusp (length (slot-value response 'gr8s.node.v1::token))))
+        (is (equal (gethash "uid" (gethash "metadata"
+                                            (gr8s::get-core-resource store "serviceaccounts"
+                                                                      "default" "builder")))
+                   (slot-value response 'gr8s.node.v1::service-account-uid)))
+        (is (equal "acme" (gethash "tenant.example/id"
+                                    (slot-value response 'gr8s.node.v1::service-account-annotations))))
+        (is (equal "ca" (gethash "tenant.example/region"
+                                  (slot-value response 'gr8s.node.v1::service-account-annotations))))
+        (is (null (gr8s::verify-service-account-jwt store
+                                                     (slot-value response 'gr8s.node.v1::token)
+                                                     '("another-audience"))))
+        (is (not (null (gr8s::verify-service-account-jwt
+                        store (slot-value response 'gr8s.node.v1::token) '("private.example")))))
+        (setf (slot-value request 'gr8s.node.v1::pod-uid) "another-pod")
+        (signals error (gr8s::credential-token-response store "worker-a" request))))))
+
 (defun send-stale-node-ack (port node-name revision)
   (let ((channel (ag-grpc:make-channel "127.0.0.1" port :timeout 3)))
     (unwind-protect

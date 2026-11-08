@@ -650,6 +650,10 @@ bare positional state directory for backward compatibility.  A missing
                   (dispatch-node-operation node-runtime variant payload emit))
                 :status-provider (lambda () (node-runtime-status node-runtime))
                 :runtime-health (lambda () (runtime-unavailable-message runtime))
+                :credential-token-function-setter
+                (when (containerd-runtime-p runtime)
+                  (lambda (function)
+                    (setf (containerd-runtime-credential-provider-token-function runtime) function)))
                 :ca-certificate-path ca-certificate
                 :certificate-path certificate :private-key-path private-key
                 :underlay-address (getf options :node-address)

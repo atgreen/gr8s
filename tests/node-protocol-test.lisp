@@ -7,33 +7,33 @@
    type (ag-proto:serialize-to-bytes message)))
 
 (test node-protocol-version-is-explicit-and-rejected-when-unsupported
-  (is (= 1 gr8s::+node-protocol-version+))
-  (is (= 1 (gr8s::ensure-node-protocol-version 1)))
+  (is (= 2 gr8s::+node-protocol-version+))
+  (is (= 2 (gr8s::ensure-node-protocol-version 2)))
   (handler-case
       (progn
-        (gr8s::ensure-node-protocol-version 2)
-        (fail "version 2 must be rejected"))
+        (gr8s::ensure-node-protocol-version 1)
+        (fail "version 1 must be rejected"))
     (gr8s::unsupported-node-protocol-version (condition)
-      (is (= 2 (gr8s::unsupported-node-protocol-version-received condition)))
-      (is (= 1 (gr8s::unsupported-node-protocol-version-supported condition))))))
+      (is (= 1 (gr8s::unsupported-node-protocol-version-received condition)))
+      (is (= 2 (gr8s::unsupported-node-protocol-version-supported condition))))))
 
 (test enrollment-messages-roundtrip-node-identity-material
   (let* ((request
            (make-instance 'gr8s.node.v1::enroll-request
-                          :protocol-version 1
+                          :protocol-version 2
                           :node-name "worker-a"
                           :join-token "secret"
                           :certificate-request #(1 2 3)))
          (restored
            (roundtrip-node-message request 'gr8s.node.v1::enroll-request)))
-    (is (= 1 (slot-value restored 'gr8s.node.v1::protocol-version)))
+    (is (= 2 (slot-value restored 'gr8s.node.v1::protocol-version)))
     (is (string= "worker-a" (slot-value restored 'gr8s.node.v1::node-name)))
     (is (string= "secret" (slot-value restored 'gr8s.node.v1::join-token)))
     (is (equalp #(1 2 3)
                 (slot-value restored 'gr8s.node.v1::certificate-request))))
   (let* ((response
            (make-instance 'gr8s.node.v1::enroll-response
-                          :protocol-version 1
+                          :protocol-version 2
                           :node-id "node-1"
                           :node-certificate #(4 5)
                           :ca-certificate #(6 7)))
@@ -51,7 +51,8 @@
                   (:snapshot-ack gr8s.node.v1::snapshot-ack)
                   (:status gr8s.node.v1::node-status)
                   (:operation-response gr8s.node.v1::operation-response)
-                  (:operation-stream gr8s.node.v1::operation-stream)))
+                  (:operation-stream gr8s.node.v1::operation-stream)
+                  (:credential-token-request gr8s.node.v1::credential-token-request)))
     (destructuring-bind (variant payload-type) spec
       (let* ((payload (make-instance payload-type))
              (envelope
@@ -59,7 +60,7 @@
              (restored
                (roundtrip-node-message
                 envelope 'gr8s.node.v1::agent-envelope)))
-        (is (= 1 (slot-value restored 'gr8s.node.v1::protocol-version)))
+        (is (= 2 (slot-value restored 'gr8s.node.v1::protocol-version)))
         (is (= 42 (slot-value restored 'gr8s.node.v1::proto-sequence)))
         (is (eq variant (slot-value restored 'gr8s.node.v1::payload-case)))
         (is (typep (slot-value restored
@@ -73,7 +74,8 @@
                   (:operation-request gr8s.node.v1::operation-request)
                   (:operation-input gr8s.node.v1::operation-input)
                   (:operation-cancel gr8s.node.v1::operation-cancel)
-                  (:protocol-error gr8s.node.v1::protocol-error)))
+                  (:protocol-error gr8s.node.v1::protocol-error)
+                  (:credential-token-response gr8s.node.v1::credential-token-response)))
     (destructuring-bind (variant payload-type) spec
       (let* ((payload (make-instance payload-type))
              (envelope
@@ -81,7 +83,7 @@
              (restored
                (roundtrip-node-message
                 envelope 'gr8s.node.v1::server-envelope)))
-        (is (= 1 (slot-value restored 'gr8s.node.v1::protocol-version)))
+        (is (= 2 (slot-value restored 'gr8s.node.v1::protocol-version)))
         (is (= 77 (slot-value restored 'gr8s.node.v1::proto-sequence)))
         (is (eq variant (slot-value restored 'gr8s.node.v1::payload-case)))
         (is (typep (slot-value restored
