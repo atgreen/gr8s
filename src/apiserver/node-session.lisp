@@ -498,7 +498,9 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
 
 (defun send-node-operation-envelope (server operation variant payload operation-id)
   "Send (VARIANT . PAYLOAD) to OPERATION's live session (verified by OPERATION-ID).
-   On a send failure, finishes the operation with the error and re-signals it.
+   A remote send gets one retry so a relay connection dropped between operation
+   frames can be replaced. On a send failure, finishes the operation with the error
+   and re-signals it.
    Returns OPERATION."
   (let ((remote (pending-node-operation-remote-member operation)))
     (if remote
@@ -511,8 +513,13 @@ nothing yet, signal a RUNTIME-ERROR as WAIT-FOR-NEXT-NODE-OPERATION-MESSAGE does
             (error 'runtime-error :message "Node operation is no longer active"))
           (let ((router (node-grpc-server-operation-router server)))
             (unless (and router
-                         (funcall router variant remote
-                                  (pending-node-operation-node-name operation) payload))
+                         (loop repeat 2
+                               thereis
+                               (and (eq operation (find-node-operation server operation-id))
+                                    (not (pending-node-operation-done-p operation))
+                                    (funcall router variant remote
+                                             (pending-node-operation-node-name operation)
+                                             payload))))
               (finish-node-operation operation :error "Remote node operation owner is unavailable")
               (error 'runtime-error :message "Remote node operation owner is unavailable"))))
         (let ((session (live-node-operation-session server operation operation-id)))

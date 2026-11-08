@@ -448,6 +448,27 @@
             (gr8s::node-exec-operation-finished-p windowed) t)
       (is (null (gr8s::wait-for-node-exec-output-window windowed 100))))))
 
+(test replayed-node-exec-input-is-idempotent
+  ;; A peer RPC can deliver an input frame and lose only its reply. Retrying the
+  ;; same sequence must not apply its data or output acknowledgement twice.
+  (let* ((operation
+           (gr8s::make-node-exec-operation
+            nil (make-instance 'gr8s.node.v1::operation-request
+                               :operation-id "replayed-input"
+                               :acknowledges-output t)
+            nil nil nil))
+         (input
+           (make-instance 'gr8s.node.v1::operation-input
+                          :operation-id "replayed-input" :sequence 1
+                          :channel gr8s.node.v1::+streamchannel-stream_channel_stdin+
+                          :data (make-array 0 :element-type '(unsigned-byte 8))
+                          :acknowledged-bytes 1024)))
+    (setf (gr8s::node-exec-operation-unacknowledged-output operation) 2048)
+    (gr8s::write-node-exec-input operation input)
+    (gr8s::write-node-exec-input operation input)
+    (is (= 1 (gr8s::node-exec-operation-last-input-sequence operation)))
+    (is (= 1024 (gr8s::node-exec-operation-unacknowledged-output operation)))))
+
 (test node-exec-status-reads-the-exit-code-of-a-status-frame
   (flet ((frame (text) (trivial-utf-8:string-to-utf-8-bytes text)))
     (is (= 0 (gr8s::node-exec-status-exit-code (gr8s::exec-exit-status-bytes 0))))

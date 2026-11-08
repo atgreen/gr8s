@@ -1363,8 +1363,9 @@ stream setup fails."
 
 (defun write-node-exec-input (operation input)
   "Forward one interactive INPUT for OPERATION to the runtime -- stdin data/EOF, or a
-terminal resize. Signals on a stale (non-increasing) input sequence or an unsupported
-channel. Holds the operation lock while advancing the last-input sequence."
+terminal resize. Ignores a replay of the last input, and signals on an older input
+sequence or an unsupported channel. Holds the operation lock while advancing the
+last-input sequence."
   ;; The generated binding renames this field's slot because SEQUENCE is a
   ;; Common Lisp symbol, while preserving the protobuf :SEQUENCE initarg.
   (let ((sequence
@@ -1372,8 +1373,13 @@ channel. Holds the operation lock while advancing the last-input sequence."
         (session (node-exec-operation-session operation))
         (streams (node-exec-operation-streams operation)))
     (bt:with-lock-held ((node-exec-operation-lock operation))
-      (unless (> sequence (node-exec-operation-last-input-sequence operation))
-        (error 'runtime-error :message "Interactive input sequence is stale"))
+      (let ((last-sequence (node-exec-operation-last-input-sequence operation)))
+        (when (< sequence last-sequence)
+          (error 'runtime-error :message "Interactive input sequence is stale"))
+        ;; The control plane retries once when a relay reply is lost. The first send
+        ;; may already have applied both the data and its output acknowledgement.
+        (when (= sequence last-sequence)
+          (return-from write-node-exec-input operation)))
       (setf (node-exec-operation-last-input-sequence operation) sequence)
       (let ((acknowledged (slot-value input 'gr8s.node.v1::acknowledged-bytes)))
         (when (plusp acknowledged)

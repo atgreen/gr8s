@@ -871,6 +871,37 @@
           (gr8s::finish-node-operation operation :error "test cleanup")
           (gr8s::release-node-operation server operation))))))
 
+(test a-transient-directed-peer-miss-does-not-fail-an-active-node-operation
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let* ((server (gr8s::%make-node-grpc-server :store store))
+           (request
+             (make-instance 'gr8s.node.v1::operation-request
+                            :operation-id "directed-retry"
+                            :kind gr8s.node.v1::+operationkind-operation_kind_exec+))
+           (operation (gr8s::make-pending-node-operation "worker" request))
+           (attempts 0))
+      (setf (gr8s::pending-node-operation-remote-member operation) "owner"
+            (gethash "directed-retry" (gr8s::node-grpc-server-operations server)) operation
+            (gr8s::node-grpc-server-operation-router server)
+            (lambda (variant target-member node-name payload)
+              (declare (ignore payload))
+              (is (eq :operation-input variant))
+              (is (string= "owner" target-member))
+              (is (string= "worker" node-name))
+              (when (> (incf attempts) 1) "owner")))
+      (unwind-protect
+           (progn
+             (gr8s::send-node-operation-input
+              server operation
+              (make-instance 'gr8s.node.v1::operation-input
+                             :operation-id "directed-retry" :sequence 1
+                             :channel gr8s.node.v1::+streamchannel-stream_channel_stdin+
+                             :data (gr8s::ascii-octets "input")))
+             (is (= 2 attempts))
+             (is-false (gr8s::pending-node-operation-done-p operation)))
+        (gr8s::release-node-operation server operation)))))
+
 (test operation-input-and-cancel-follow-the-correlated-node-session
   (with-temporary-store (store path)
     (gr8s:register-node
