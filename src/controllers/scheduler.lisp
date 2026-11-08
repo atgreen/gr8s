@@ -443,96 +443,253 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
                         (list (cons "device" binding)))))
       (error () nil))))
 
-(defun dra-exact-request-results-unlocked (store exact result-name node used)
-  "Allocate one ExactCount or All request on NODE under RESULT-NAME."
-  (let* ((class-name (and exact (gethash "deviceClassName" exact)))
-         (class (and class-name
-                     (gethash (core-resource-key "deviceclasses" nil class-name)
-                              (pod-store-resources store))))
-         (mode (and exact (gethash "allocationMode" exact "ExactCount")))
-         (count (and exact (gethash "count" exact 1)))
+(defun dra-map-candidate-combinations (function candidates count)
+  "Call FUNCTION for COUNT-sized combinations until it returns true."
+  (labels ((visit (remaining remaining-count needed selected)
+             (cond ((zerop needed) (funcall function (nreverse selected)))
+                   ((< remaining-count needed) nil)
+                   (t (or (visit (rest remaining) (1- remaining-count) (1- needed)
+                                 (cons (first remaining) selected))
+                          (visit (rest remaining) (1- remaining-count) needed selected))))))
+    (visit candidates (length candidates) count nil)))
+
+(defun dra-candidates-to-results (candidates result-name)
+  "Convert allocation CANDIDATES into status results for RESULT-NAME."
+  (map 'vector
+       (lambda (candidate)
+         (core-object "request" result-name
+                      "driver" (first candidate) "pool" (second candidate)
+                      "device" (third candidate)))
+       candidates))
+
+(defun dra-map-exact-request-options-unlocked (function store exact result-name node used)
+  "Call FUNCTION for exact-request allocations until it returns true."
+  (let* ((class-name (gethash "deviceClassName" exact))
+         (class (gethash (core-resource-key "deviceclasses" nil class-name)
+                         (pod-store-resources store)))
+         (mode (gethash "allocationMode" exact "ExactCount"))
+         (count (gethash "count" exact 1))
          (selectors (and class
                          (concatenate 'vector
                                       (gethash "selectors" (gethash "spec" class) #())
-                                      (gethash "selectors" exact #())))))
-    (unless (and exact class (member mode '("ExactCount" "All") :test #'equal)
-                 selectors)
-      (return-from dra-exact-request-results-unlocked (values nil nil)))
-    (let ((candidates nil) (pools (make-hash-table :test #'equal)))
-      (dolist (slice (dra-current-complete-slices-unlocked store node))
-        (let* ((spec (gethash "spec" slice))
-               (driver (gethash "driver" spec))
-               (pool (gethash "name" (gethash "pool" spec))))
-          (loop for device across (gethash "devices" spec #())
-                for name = (gethash "name" device)
-                for key = (dra-device-key driver pool name)
-                when (and (dra-device-available-on-node-p slice device node)
-                          (dra-device-matches-selectors-p driver device selectors))
-                  do (push (list driver pool name (gethash key used))
-                           (gethash (list driver pool) pools))
-                     (unless (gethash key used)
-                       (push (list driver pool name) candidates)))))
-      (when (equal mode "All")
-        (let ((pool-candidates
-                (sort (loop for devices being the hash-values of pools
-                            unless (or (null devices) (find t devices :key #'fourth))
-                              collect devices)
-                      #'string< :key (lambda (devices)
-                                       (format nil "~A/~A" (first (first devices))
-                                               (second (first devices)))))))
-          (unless pool-candidates
-            (return-from dra-exact-request-results-unlocked (values nil nil)))
-          (setf candidates
-                (mapcar (lambda (candidate) (subseq candidate 0 3))
-                        (first pool-candidates))
-                count (length candidates))))
-      (setf candidates (sort candidates #'string<
-                             :key (lambda (candidate) (format nil "~{~A~^/~}" candidate))))
-      (unless (<= count (length candidates))
-        (return-from dra-exact-request-results-unlocked (values nil nil)))
-      (values
-       (map 'vector
-            (lambda (candidate)
-              (destructuring-bind (driver pool device) candidate
-                (setf (gethash (dra-device-key driver pool device) used) t)
-                (core-object "request" result-name
-                             "driver" driver "pool" pool "device" device)))
-            (subseq candidates 0 count))
-       t))))
+                                      (gethash "selectors" exact #()))))
+         (matching nil))
+    (unless (and class selectors (member mode '("ExactCount" "All") :test #'equal))
+      (return-from dra-map-exact-request-options-unlocked nil))
+    (dolist (slice (dra-current-complete-slices-unlocked store node))
+      (let* ((spec (gethash "spec" slice))
+             (driver (gethash "driver" spec))
+             (pool (gethash "name" (gethash "pool" spec))))
+        (loop for device across (gethash "devices" spec #())
+              for name = (gethash "name" device)
+              when (and (dra-device-available-on-node-p slice device node)
+                        (dra-device-matches-selectors-p driver device selectors))
+                do (push (list driver pool name
+                               (gethash (dra-device-key driver pool name) used))
+                         matching))))
+    (setf matching (sort matching #'string<
+                         :key (lambda (candidate)
+                                (format nil "~A/~A/~A" (first candidate)
+                                        (second candidate) (third candidate)))))
+    (if (equal mode "All")
+        (let ((pools (make-hash-table :test #'equal)) (options nil))
+          (dolist (candidate matching)
+            (push candidate (gethash (subseq candidate 0 2) pools)))
+          (maphash
+           (lambda (key candidates)
+             (declare (ignore key))
+             (unless (find t candidates :key #'fourth)
+               (push (dra-candidates-to-results
+                      (mapcar (lambda (candidate) (subseq candidate 0 3))
+                              (nreverse candidates))
+                      result-name)
+                     options)))
+           pools)
+          (dolist (option (sort options #'string<
+                                :key (lambda (option)
+                                       (let ((first (aref option 0)))
+                                         (format nil "~A/~A" (gethash "driver" first)
+                                                 (gethash "pool" first))))))
+            (when (funcall function option)
+              (return-from dra-map-exact-request-options-unlocked t))))
+        (dra-map-candidate-combinations
+         (lambda (combination)
+           (funcall function (dra-candidates-to-results combination result-name)))
+         (loop for candidate in matching unless (fourth candidate)
+               collect (subseq candidate 0 3))
+         count))))
 
-(defun dra-request-results-unlocked (store request node used)
-  "Allocate REQUEST on NODE, honoring an ordered FirstAvailable list."
+(defun dra-map-request-options-unlocked (function store request node used)
+  "Call FUNCTION for REQUEST's allocations in Kubernetes preference order."
   (let ((name (gethash "name" request)) (exact (gethash "exactly" request)))
-    (when exact
-      (return-from dra-request-results-unlocked
-        (dra-exact-request-results-unlocked store exact name node used)))
-    (loop for subrequest across (gethash "firstAvailable" request #())
-          do (multiple-value-bind (results ready)
-                 (dra-exact-request-results-unlocked
-                  store subrequest
-                  (format nil "~A/~A" name (gethash "name" subrequest)) node used)
-               (when ready (return-from dra-request-results-unlocked (values results t)))))
-    (values nil nil)))
+    (if exact
+        (dra-map-exact-request-options-unlocked function store exact name node used)
+        (loop for subrequest across (gethash "firstAvailable" request #())
+              when (dra-map-exact-request-options-unlocked
+                    function store subrequest
+                    (format nil "~A/~A" name (gethash "name" subrequest))
+                    node used)
+                return t))))
+
+(defun dra-result-device-unlocked (store node result)
+  "Return RESULT's ResourceSlice device object on NODE."
+  (dolist (slice (dra-current-complete-slices-unlocked store node))
+    (let ((spec (gethash "spec" slice)))
+      (when (and (equal (gethash "driver" result) (gethash "driver" spec))
+                 (equal (gethash "pool" result) (gethash "name" (gethash "pool" spec))))
+        (let ((device (find (gethash "device" result) (gethash "devices" spec #())
+                            :test #'equal :key (lambda (candidate) (gethash "name" candidate)))))
+          (when device (return device)))))))
+
+(defun dra-device-qualified-attribute (device driver qualified-name)
+  "Return DEVICE's scalar QUALIFIED-NAME attribute and whether it exists."
+  (let* ((slash (position #\/ qualified-name :from-end t))
+         (domain (and slash (subseq qualified-name 0 slash)))
+         (name (if slash (subseq qualified-name (1+ slash)) qualified-name))
+         (attributes (gethash "attributes" device (core-object))))
+    (multiple-value-bind (attribute present)
+        (gethash (if (and domain (not (equal domain driver))) qualified-name name) attributes)
+      (values (and present (dra-device-attribute-value attribute)) present))))
+
+(defun dra-constraint-includes-request-p (constraint result-name)
+  "Return whether CONSTRAINT applies to RESULT-NAME."
+  (let ((requests (gethash "requests" constraint #())))
+    (or (zerop (length requests))
+        (some (lambda (configured)
+                (or (equal configured result-name)
+                    (uiop:string-prefix-p (format nil "~A/" configured) result-name)))
+              requests))))
+
+(defun dra-constraints-satisfied-p (store claim node results)
+  "Return whether RESULTS satisfy CLAIM's cross-device attribute constraints."
+  (loop for constraint across (gethash "constraints"
+                                       (gethash "devices" (gethash "spec" claim) (core-object))
+                                       #())
+        always
+        (let* ((match-attribute (gethash "matchAttribute" constraint))
+               (distinct-attribute (gethash "distinctAttribute" constraint))
+               (attribute (or match-attribute distinct-attribute))
+              (values nil) (complete t))
+          (unless attribute (return-from dra-constraints-satisfied-p nil))
+          (loop for result across results
+                when (dra-constraint-includes-request-p constraint (gethash "request" result))
+                  do (let ((device (dra-result-device-unlocked store node result)))
+                       (multiple-value-bind (value present)
+                           (and device
+                                (dra-device-qualified-attribute
+                                 device (gethash "driver" result) attribute))
+                         (unless present (setf complete nil))
+                         (when present (push value values)))))
+          (and complete
+               (if match-attribute
+                   (or (null values)
+                       (every (lambda (value) (equalp value (first values)))
+                              (rest values)))
+                   (= (length values)
+                      (length (remove-duplicates values :test #'equalp))))))))
+
+(defun dra-claim-results-unlocked (store claim node used)
+  "Search REQUEST alternatives for the first constraint-satisfying allocation."
+  (let ((requests (gethash "requests" (gethash "devices" (gethash "spec" claim) (core-object)) #()))
+        (solution nil))
+    (labels ((search-request (index results)
+               (if (= index (length requests))
+                   (let ((vector (coerce results 'vector)))
+                     (when (dra-constraints-satisfied-p store claim node vector)
+                       (setf solution vector)
+                       t))
+                   (dra-map-request-options-unlocked
+                    (lambda (option)
+                      (let ((keys (map 'list
+                                       (lambda (result)
+                                         (dra-device-key (gethash "driver" result)
+                                                         (gethash "pool" result)
+                                                         (gethash "device" result)))
+                                       option)))
+                        (unless (some (lambda (key) (gethash key used)) keys)
+                          (dolist (key keys) (setf (gethash key used) t))
+                          (unwind-protect
+                               (search-request (1+ index)
+                                               (append results (coerce option 'list)))
+                            (dolist (key keys) (remhash key used))))))
+                    store (aref requests index) node used))))
+      (if (search-request 0 nil)
+          (values solution t)
+          (values nil nil)))))
+
+(defun dra-selected-request-class (request result-name)
+  "Return REQUEST's selected DeviceClass name for allocation RESULT-NAME."
+  (let ((exact (gethash "exactly" request)))
+    (if exact
+        (and (equal result-name (gethash "name" request))
+             (gethash "deviceClassName" exact))
+        (let* ((prefix (format nil "~A/" (gethash "name" request)))
+               (subrequest-name (and (uiop:string-prefix-p prefix result-name)
+                                     (subseq result-name (length prefix))))
+               (subrequest (and subrequest-name
+                                (find subrequest-name (gethash "firstAvailable" request #())
+                                      :test #'equal :key (lambda (candidate)
+                                                           (gethash "name" candidate))))))
+          (and subrequest (gethash "deviceClassName" subrequest))))))
+
+(defun dra-allocation-config-unlocked (store claim results)
+  "Return class and claim configuration captured for RESULTS."
+  (let* ((devices (gethash "devices" (gethash "spec" claim) (core-object)))
+         (requests (gethash "requests" devices #()))
+         (classes (make-hash-table :test #'equal))
+         (class-order nil)
+         (selected-request-names
+           (remove-duplicates (map 'list (lambda (result) (gethash "request" result)) results)
+                              :test #'equal))
+         (config nil))
+    (dolist (result-name selected-request-names)
+      (loop for request across requests
+            for class-name = (dra-selected-request-class request result-name)
+            when class-name
+              do (unless (gethash class-name classes)
+                   (push class-name class-order))
+                 (pushnew result-name (gethash class-name classes) :test #'equal)
+                 (loop-finish)))
+    (dolist (class-name (nreverse class-order))
+      (let ((class (gethash (core-resource-key "deviceclasses" nil class-name)
+                            (pod-store-resources store)))
+            (class-requests (coerce (nreverse (gethash class-name classes)) 'vector)))
+        (loop for entry across (gethash "config" (gethash "spec" class) #())
+              do (let ((copy (copy-core-object entry)))
+                   (setf (gethash "source" copy) "FromClass"
+                         (gethash "requests" copy) (copy-seq class-requests))
+                   (push copy config)))))
+    (loop for entry across (gethash "config" devices #())
+          for requested = (gethash "requests" entry #())
+          when (or (zerop (length requested))
+                   (some (lambda (name)
+                           (find name selected-request-names :test
+                                 (lambda (configured selected)
+                                   (or (equal configured selected)
+                                       (uiop:string-prefix-p
+                                        (format nil "~A/" configured) selected)))))
+                         requested))
+            do (let ((copy (copy-core-object entry)))
+                 (setf (gethash "source" copy) "FromClaim")
+                 (push copy config)))
+    (coerce (nreverse config) 'vector)))
 
 (defun dra-allocation-for-claim-unlocked (store claim node used)
   "Build CLAIM's structured allocation on NODE, returning it and success."
-  (let ((results nil)
-        (requests (gethash "requests" (gethash "devices" (gethash "spec" claim) (core-object)) #())))
-    (loop for request across requests
-          do (multiple-value-bind (request-results ready)
-                 (dra-request-results-unlocked store request node used)
-               (unless ready (return-from dra-allocation-for-claim-unlocked (values nil nil)))
-               (loop for result across request-results do (push result results))))
+  (multiple-value-bind (results ready) (dra-claim-results-unlocked store claim node used)
+    (unless ready (return-from dra-allocation-for-claim-unlocked (values nil nil)))
     (values
-     (core-object
-      "devices" (core-object "results" (coerce (nreverse results) 'vector))
-      "nodeSelector"
-      (core-object
-       "nodeSelectorTerms"
-       (vector (core-object
-                "matchFields"
-                (vector (core-object "key" "metadata.name" "operator" "In"
-                                     "values" (vector (node-record-name node))))))))
+     (let ((results results))
+       (core-object
+        "devices" (core-object "results" results
+                               "config" (dra-allocation-config-unlocked store claim results))
+        "nodeSelector"
+        (core-object
+         "nodeSelectorTerms"
+         (vector (core-object
+                  "matchFields"
+                  (vector (core-object "key" "metadata.name" "operator" "In"
+                                       "values" (vector (node-record-name node)))))))))
      t)))
 
 (defun pod-dra-allocation-plan-unlocked (store pod node)

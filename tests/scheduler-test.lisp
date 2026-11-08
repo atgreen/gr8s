@@ -552,6 +552,336 @@
       (when (= 1 (length results))
         (is (equal "gpu-a" (gethash "device" (aref results 0))))))))
 
+(test dra-candidate-combination-search-stops-at-the-first-solution
+  (let ((visits 0) (selected nil))
+    (is (gr8s::dra-map-candidate-combinations
+         (lambda (combination)
+           (incf visits)
+           (setf selected combination)
+           t)
+         (loop for index below 40 collect index)
+         20))
+    (is (= 1 visits))
+    (is (equal (loop for index below 20 collect index) selected))))
+
+(test scheduler-copies-dra-class-and-claim-configuration-into-the-allocation
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((node (make-test-node "worker-a" "node-a" "10.64.0.0/20")))
+      (gr8s:register-node store node)
+      (gr8s:mark-node-ready store "worker-a" 100))
+    (gr8s::create-core-resource
+     store "deviceclasses"
+     (gr8s::core-object
+      "apiVersion" "resource.k8s.io/v1" "kind" "DeviceClass"
+      "metadata" (gr8s::core-object "name" "accelerator")
+      "spec" (gr8s::core-object
+              "selectors" #()
+              "config" (vector
+                        (gr8s::core-object
+                         "opaque" (gr8s::core-object
+                                   "driver" "devices.example.com"
+                                   "parameters" (gr8s::core-object "source" "class"))))))
+     nil)
+    (gr8s::create-core-resource
+     store "resourceslices"
+     (gr8s::core-object
+      "apiVersion" "resource.k8s.io/v1" "kind" "ResourceSlice"
+      "metadata" (gr8s::core-object "name" "devices")
+      "spec" (gr8s::core-object
+              "driver" "devices.example.com"
+              "pool" (gr8s::core-object "name" "pool" "generation" 1
+                                         "resourceSliceCount" 1)
+              "nodeName" "worker-a"
+              "devices" (vector (gr8s::core-object "name" "gpu-0"))))
+     nil)
+    (gr8s::create-core-resource
+     store "resourceclaims"
+     (gr8s::core-object
+      "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
+      "metadata" (gr8s::core-object "name" "device")
+      "spec" (gr8s::core-object
+              "devices" (gr8s::core-object
+                         "requests"
+                         (vector (gr8s::core-object
+                                  "name" "gpu"
+                                  "exactly" (gr8s::core-object
+                                             "deviceClassName" "accelerator"
+                                             "allocationMode" "ExactCount"
+                                             "count" 1)))
+                         "config"
+                         (vector (gr8s::core-object
+                                  "requests" (vector "gpu")
+                                  "opaque" (gr8s::core-object
+                                            "driver" "devices.example.com"
+                                            "parameters" (gr8s::core-object
+                                                          "source" "claim")))))))
+     "default")
+    (let* ((pod (create-pod store (dra-test-pod "consumer" "device")))
+           (node (gr8s:schedule-pod store pod))
+           (claim (gr8s::get-core-resource store "resourceclaims" "default" "device"))
+           (config (gethash "config"
+                            (gethash "devices"
+                                     (gethash "allocation"
+                                              (gethash "status" claim (gr8s::core-object))
+                                              (gr8s::core-object))
+                                     (gr8s::core-object))
+                            #())))
+      (is (equal "worker-a" (and node (gr8s:node-record-name node))))
+      (is (= 2 (length config)))
+      (when (= 2 (length config))
+        (is (equal "FromClass" (gethash "source" (aref config 0))))
+        (is (equalp #("gpu") (gethash "requests" (aref config 0))))
+        (is (equal "class" (gethash "source"
+                                     (gethash "parameters"
+                                              (gethash "opaque" (aref config 0))))))
+        (is (equal "FromClaim" (gethash "source" (aref config 1))))
+        (is (equalp #("gpu") (gethash "requests" (aref config 1))))
+        (is (equal "claim" (gethash "source"
+                                     (gethash "parameters"
+                                              (gethash "opaque" (aref config 1))))))))))
+
+(test scheduler-backtracks-to-satisfy-dra-match-attribute-constraints
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((node (make-test-node "worker-a" "node-a" "10.64.0.0/20")))
+      (gr8s:register-node store node)
+      (gr8s:mark-node-ready store "worker-a" 100))
+    (dolist (class '("gpu" "nic"))
+      (gr8s::create-core-resource
+       store "deviceclasses"
+       (gr8s::core-object
+        "apiVersion" "resource.k8s.io/v1" "kind" "DeviceClass"
+        "metadata" (gr8s::core-object "name" class)
+        "spec" (gr8s::core-object
+                "selectors"
+                (vector (gr8s::core-object
+                         "cel" (gr8s::core-object
+                                "expression"
+                                (format nil
+                                        "device.attributes[\"devices.example.com\"].kind == \"~A\""
+                                        class))))))
+       nil))
+    (flet ((device (name kind numa)
+             (gr8s::core-object
+              "name" name
+              "attributes" (gr8s::core-object
+                            "kind" (gr8s::core-object "string" kind)
+                            "numa" (gr8s::core-object "int" numa)))))
+      (gr8s::create-core-resource
+       store "resourceslices"
+       (gr8s::core-object
+        "apiVersion" "resource.k8s.io/v1" "kind" "ResourceSlice"
+        "metadata" (gr8s::core-object "name" "devices")
+        "spec" (gr8s::core-object
+                "driver" "devices.example.com"
+                "pool" (gr8s::core-object "name" "pool" "generation" 1
+                                           "resourceSliceCount" 1)
+                "nodeName" "worker-a"
+                "devices" (vector (device "gpu-a" "gpu" 0)
+                                  (device "gpu-b" "gpu" 1)
+                                  (device "nic-a" "nic" 1))))
+       nil))
+    (gr8s::create-core-resource
+     store "resourceclaims"
+     (gr8s::core-object
+      "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
+      "metadata" (gr8s::core-object "name" "devices")
+      "spec" (gr8s::core-object
+              "devices" (gr8s::core-object
+                         "requests"
+                         (vector
+                          (gr8s::core-object
+                           "name" "gpu"
+                           "exactly" (gr8s::core-object "deviceClassName" "gpu"
+                                                        "allocationMode" "ExactCount"
+                                                        "count" 1))
+                          (gr8s::core-object
+                           "name" "nic"
+                           "exactly" (gr8s::core-object "deviceClassName" "nic"
+                                                        "allocationMode" "ExactCount"
+                                                        "count" 1)))
+                         "constraints"
+                         (vector (gr8s::core-object
+                                  "requests" (vector "gpu" "nic")
+                                  "matchAttribute" "devices.example.com/numa")))))
+     "default")
+    (let* ((pod (create-pod store (dra-test-pod "consumer" "devices")))
+           (node (gr8s:schedule-pod store pod))
+           (claim (gr8s::get-core-resource store "resourceclaims" "default" "devices"))
+           (results (gethash "results"
+                             (gethash "devices"
+                                      (gethash "allocation"
+                                               (gethash "status" claim (gr8s::core-object))
+                                               (gr8s::core-object))
+                                      (gr8s::core-object))
+                             #())))
+      (is (equal "worker-a" (and node (gr8s:node-record-name node))))
+      (is (= 2 (length results)))
+      (when (= 2 (length results))
+        (is (equal '("gpu-b" "nic-a")
+                   (map 'list (lambda (result) (gethash "device" result)) results)))))))
+
+(test scheduler-backtracks-to-satisfy-dra-distinct-attribute-constraints
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((node (make-test-node "worker-a" "node-a" "10.64.0.0/20")))
+      (gr8s:register-node store node)
+      (gr8s:mark-node-ready store "worker-a" 100))
+    (gr8s::create-core-resource
+     store "deviceclasses"
+     (gr8s::core-object
+      "apiVersion" "resource.k8s.io/v1" "kind" "DeviceClass"
+      "metadata" (gr8s::core-object "name" "nic")
+      "spec" (gr8s::core-object "selectors" #()))
+     nil)
+    (flet ((device (name uplink)
+             (gr8s::core-object
+              "name" name
+              "attributes" (gr8s::core-object
+                            "uplink" (gr8s::core-object "string" uplink)))))
+      (gr8s::create-core-resource
+       store "resourceslices"
+       (gr8s::core-object
+        "apiVersion" "resource.k8s.io/v1" "kind" "ResourceSlice"
+        "metadata" (gr8s::core-object "name" "devices")
+        "spec" (gr8s::core-object
+                "driver" "devices.example.com"
+                "pool" (gr8s::core-object "name" "pool" "generation" 1
+                                           "resourceSliceCount" 1)
+                "nodeName" "worker-a"
+                "devices" (vector (device "nic-a" "physical-a")
+                                  (device "nic-b" "physical-a")
+                                  (device "nic-c" "physical-b"))))
+       nil))
+    (gr8s::create-core-resource
+     store "resourceclaims"
+     (gr8s::core-object
+      "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
+      "metadata" (gr8s::core-object "name" "devices")
+      "spec" (gr8s::core-object
+              "devices" (gr8s::core-object
+                         "requests"
+                         (vector
+                          (gr8s::core-object
+                           "name" "first"
+                           "exactly" (gr8s::core-object "deviceClassName" "nic"
+                                                        "allocationMode" "ExactCount"
+                                                        "count" 1))
+                          (gr8s::core-object
+                           "name" "second"
+                           "exactly" (gr8s::core-object "deviceClassName" "nic"
+                                                        "allocationMode" "ExactCount"
+                                                        "count" 1)))
+                         "constraints"
+                         (vector (gr8s::core-object
+                                  "requests" (vector "first" "second")
+                                  "distinctAttribute" "devices.example.com/uplink")))))
+     "default")
+    (let* ((pod (create-pod store (dra-test-pod "consumer" "devices")))
+           (node (gr8s:schedule-pod store pod))
+           (claim (gr8s::get-core-resource store "resourceclaims" "default" "devices"))
+           (results (gethash "results"
+                             (gethash "devices"
+                                      (gethash "allocation"
+                                               (gethash "status" claim (gr8s::core-object))
+                                               (gr8s::core-object))
+                                      (gr8s::core-object))
+                             #())))
+      (is (equal "worker-a" (and node (gr8s:node-record-name node))))
+      (is (= 2 (length results)))
+      (when (= 2 (length results))
+        (is (equal '("nic-a" "nic-c")
+                   (map 'list (lambda (result) (gethash "device" result)) results)))))))
+
+(test scheduler-advances-first-available-after-constraint-rejection
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((node (make-test-node "worker-a" "node-a" "10.64.0.0/20")))
+      (gr8s:register-node store node)
+      (gr8s:mark-node-ready store "worker-a" 100))
+    (dolist (class '(("wrong-gpu" . "wrong") ("right-gpu" . "right") ("nic" . "nic")))
+      (gr8s::create-core-resource
+       store "deviceclasses"
+       (gr8s::core-object
+        "apiVersion" "resource.k8s.io/v1" "kind" "DeviceClass"
+        "metadata" (gr8s::core-object "name" (car class))
+        "spec" (gr8s::core-object
+                "selectors"
+                (vector (gr8s::core-object
+                         "cel" (gr8s::core-object
+                                "expression"
+                                (format nil
+                                        "device.attributes[\"devices.example.com\"].kind == \"~A\""
+                                        (cdr class)))))))
+       nil))
+    (flet ((device (name kind numa)
+             (gr8s::core-object
+              "name" name
+              "attributes" (gr8s::core-object
+                            "kind" (gr8s::core-object "string" kind)
+                            "numa" (gr8s::core-object "int" numa)))))
+      (gr8s::create-core-resource
+       store "resourceslices"
+       (gr8s::core-object
+        "apiVersion" "resource.k8s.io/v1" "kind" "ResourceSlice"
+        "metadata" (gr8s::core-object "name" "devices")
+        "spec" (gr8s::core-object
+                "driver" "devices.example.com"
+                "pool" (gr8s::core-object "name" "pool" "generation" 1
+                                           "resourceSliceCount" 1)
+                "nodeName" "worker-a"
+                "devices" (vector (device "gpu-wrong" "wrong" 0)
+                                  (device "gpu-right" "right" 1)
+                                  (device "nic-a" "nic" 1))))
+       nil))
+    (gr8s::create-core-resource
+     store "resourceclaims"
+     (gr8s::core-object
+      "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
+      "metadata" (gr8s::core-object "name" "devices")
+      "spec" (gr8s::core-object
+              "devices" (gr8s::core-object
+                         "requests"
+                         (vector
+                          (gr8s::core-object
+                           "name" "gpu"
+                           "firstAvailable"
+                           (vector
+                            (gr8s::core-object "name" "wrong"
+                                               "deviceClassName" "wrong-gpu"
+                                               "allocationMode" "ExactCount"
+                                               "count" 1)
+                            (gr8s::core-object "name" "right"
+                                               "deviceClassName" "right-gpu"
+                                               "allocationMode" "ExactCount"
+                                               "count" 1)))
+                          (gr8s::core-object
+                           "name" "nic"
+                           "exactly" (gr8s::core-object "deviceClassName" "nic"
+                                                        "allocationMode" "ExactCount"
+                                                        "count" 1)))
+                         "constraints"
+                         (vector (gr8s::core-object
+                                  "requests" (vector "gpu" "nic")
+                                  "matchAttribute" "devices.example.com/numa")))))
+     "default")
+    (let* ((pod (create-pod store (dra-test-pod "consumer" "devices")))
+           (node (gr8s:schedule-pod store pod))
+           (claim (gr8s::get-core-resource store "resourceclaims" "default" "devices"))
+           (results (gethash "results"
+                             (gethash "devices"
+                                      (gethash "allocation"
+                                               (gethash "status" claim (gr8s::core-object))
+                                               (gr8s::core-object))
+                                      (gr8s::core-object))
+                             #())))
+      (is (equal "worker-a" (and node (gr8s:node-record-name node))))
+      (is (= 2 (length results)))
+      (when (= 2 (length results))
+        (is (equal '("gpu-right" "nic-a")
+                   (map 'list (lambda (result) (gethash "device" result)) results)))))))
+
 (test dra-claims-constrain-placement-and-are-reserved-for-the-pod
   (with-temporary-store (store path)
     (dolist (node (list (make-test-node "worker-a" "node-a" "10.64.0.0/20")
