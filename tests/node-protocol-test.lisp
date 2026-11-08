@@ -115,23 +115,45 @@
       (is-true (ag-grpc::handler-server-streaming-p connect)))))
 
 (test node-underlay-and-peer-route-fields-survive-protobuf-roundtrips
-  (let* ((hello (make-instance 'gr8s.node.v1::node-hello
-                                :node-name "worker-a" :underlay-address "192.0.2.10"))
+  (let* ((public-key (make-array 32 :element-type '(unsigned-byte 8)
+                                    :initial-element 17))
+         (hello (make-instance 'gr8s.node.v1::node-hello
+                               :node-name "worker-a" :underlay-address "192.0.2.10"
+                               :wireguard-public-key public-key))
          (restored (roundtrip-node-message hello 'gr8s.node.v1::node-hello)))
-    (is (string= "192.0.2.10" (slot-value restored 'gr8s.node.v1::underlay-address))))
-  (let* ((snapshot
+    (is (string= "192.0.2.10" (slot-value restored 'gr8s.node.v1::underlay-address)))
+    (is (equalp public-key
+                (slot-value restored 'gr8s.node.v1::wireguard-public-key))))
+  (let* ((peer-key (make-array 32 :element-type '(unsigned-byte 8)
+                                  :initial-element 29))
+         (snapshot
            (make-instance
             'gr8s.node.v1::desired-state-snapshot
             :network (make-instance 'gr8s.node.v1::node-network-config
                                      :node-pod-cidr "10.88.1.0/24"
-                                     :underlay-address "192.0.2.10")
+                                     :underlay-address "192.0.2.10"
+                                     :overlay-backend "wireguard"
+                                     :wireguard-listen-port 51820)
             :routes (list (make-instance 'gr8s.node.v1::node-route
                                          :node-id "node-b" :pod-cidr "10.88.2.0/24"
-                                         :underlay-address "192.0.2.11"))))
+                                         :underlay-address "192.0.2.11"
+                                         :wireguard-public-key peer-key
+                                         :wireguard-listen-port 51820))))
          (restored (roundtrip-node-message snapshot 'gr8s.node.v1::desired-state-snapshot)))
     (is (string= "192.0.2.10"
                  (slot-value (slot-value restored 'gr8s.node.v1::network)
                              'gr8s.node.v1::underlay-address)))
     (is (string= "10.88.2.0/24"
                  (slot-value (first (slot-value restored 'gr8s.node.v1::routes))
-                             'gr8s.node.v1::pod-cidr)))))
+                             'gr8s.node.v1::pod-cidr)))
+    (is (string= "wireguard"
+                 (slot-value (slot-value restored 'gr8s.node.v1::network)
+                             'gr8s.node.v1::overlay-backend)))
+    (is (= 51820
+           (slot-value (slot-value restored 'gr8s.node.v1::network)
+                       'gr8s.node.v1::wireguard-listen-port)))
+    (let ((route (first (slot-value restored 'gr8s.node.v1::routes))))
+      (is (equalp peer-key
+                  (slot-value route 'gr8s.node.v1::wireguard-public-key)))
+      (is (= 51820
+             (slot-value route 'gr8s.node.v1::wireguard-listen-port))))))

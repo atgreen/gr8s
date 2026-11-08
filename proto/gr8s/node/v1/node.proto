@@ -87,6 +87,9 @@ message NodeHello {
   map<string, string> capacity = 8;
   // The port of the agent's authenticated kubelet endpoints, or 0 when it serves none.
   uint32 kubelet_port = 9;
+  // Public half of the node-local WireGuard identity. The mTLS-authenticated
+  // session binds it to node_name; private key material never leaves the node.
+  bytes wireguard_public_key = 10;
 }
 
 message Heartbeat {
@@ -240,12 +243,16 @@ message NodeNetworkConfig {
   uint32 vni = 4;
   uint32 mtu = 5;
   string underlay_address = 6;
+  string overlay_backend = 7; // vxlan | wireguard
+  uint32 wireguard_listen_port = 8;
 }
 
 message NodeRoute {
   string node_id = 1;
   string pod_cidr = 2;
   string underlay_address = 3;
+  bytes wireguard_public_key = 4;
+  uint32 wireguard_listen_port = 5;
 }
 
 enum OperationKind {
