@@ -48,6 +48,9 @@
 (defstruct netpol-port-key (prefixlen u32) (group u32) (proto u8) (pad u8) (port u16))
 (defstruct netpol-flow-key (peer u32) (pod-port u16) (peer-port u16) (proto u8) (pad0 u8) (pad1 u16))
 (defstruct netpol-flow-stamp (ns u64))
+(defstruct netpol-lpm-key-v6 (prefixlen u32) (addr (array u32 4)))
+(defstruct netpol-flow-key-v6
+  (peer (array u32 4)) (pod-port u16) (peer-port u16) (proto u8) (pad0 u8) (pad1 u16))
 ;; Key for the same-node Pod delivery table: an LPM /32, same {prefixlen, addr}
 ;; shape as netpol-lpm-key (which the program resolves identically and works).
 (defstruct local-pod-key (prefixlen u32) (addr u32))
@@ -66,6 +69,27 @@
          (lkey (make-netpol-lpm-key)))
      (setf (netpol-lpm-key-prefixlen lkey) 32
            (netpol-lpm-key-addr lkey) ,addr)
+     (let ((hit (map-lookup-ptr ,cidr-map lkey)))
+       (when (/= hit 0)
+         (let ((pkey (make-netpol-port-key)))
+           (setf (netpol-port-key-prefixlen pkey) (if (= ,has-port 1) 64 40)
+                 (netpol-port-key-group pkey) (load u32 hit 0)
+                 (netpol-port-key-proto pkey) ,proto
+                 (netpol-port-key-pad pkey) 0
+                 (netpol-port-key-port pkey) (if (= ,has-port 1) ,port 0))
+           (when (/= (map-lookup-ptr ,port-map pkey) 0)
+             (setf verdict 1)))))
+     verdict))
+
+(defmacro netpol-allowed-v6 (cidr-map port-map addr0 addr1 addr2 addr3 proto port has-port)
+  "IPv6 counterpart of NETPOL-ALLOWED over one 128-bit peer address."
+  `(let ((verdict u32 0)
+         (lkey (make-netpol-lpm-key-v6)))
+     (setf (netpol-lpm-key-v6-prefixlen lkey) 128
+           (netpol-lpm-key-v6-addr lkey 0) ,addr0
+           (netpol-lpm-key-v6-addr lkey 1) ,addr1
+           (netpol-lpm-key-v6-addr lkey 2) ,addr2
+           (netpol-lpm-key-v6-addr lkey 3) ,addr3)
      (let ((hit (map-lookup-ptr ,cidr-map lkey)))
        (when (/= hit 0)
          (let ((pkey (make-netpol-port-key)))
@@ -108,10 +132,20 @@
       :key-size 8 :value-size 4 :max-entries 16384 :map-flags 1)
     (defmap netpol-ingress-ports :type :lpm-trie
       :key-size 12 :value-size 1 :max-entries 4096 :map-flags 1)
+    (defmap netpol-egress-cidr-v6 :type :lpm-trie
+      :key-size 20 :value-size 4 :max-entries 16384 :map-flags 1)
+    (defmap netpol-egress-ports-v6 :type :lpm-trie
+      :key-size 12 :value-size 1 :max-entries 4096 :map-flags 1)
+    (defmap netpol-ingress-cidr-v6 :type :lpm-trie
+      :key-size 20 :value-size 4 :max-entries 16384 :map-flags 1)
+    (defmap netpol-ingress-ports-v6 :type :lpm-trie
+      :key-size 12 :value-size 1 :max-entries 4096 :map-flags 1)
     ;; Connections allowed in either direction -> when their last packet passed, so
     ;; that their replies pass the other direction's isolation.
     (defmap netpol-flows :type :lru-hash
       :key-size 12 :value-size 8 :max-entries 4096)
+    (defmap netpol-flows-v6 :type :lru-hash
+      :key-size 24 :value-size 8 :max-entries 4096)
     ;; Same-node Pod delivery table (agent-populated): destination Pod IPv4
     ;; (network order) -> 16-byte value {dest host-veth ifindex (u32, host order),
     ;; dest Pod MAC (6 bytes, wire order), dest host-veth MAC (6 bytes, wire order)}.
@@ -280,14 +314,47 @@
                              (/= (load u32 ip 16) (load u32 identity 24))
                              (/= (load u32 ip 20) (load u32 identity 28)))
                      (drop-pod-packet :spoof))
-                   ;; IPv6 NetworkPolicy maps arrive with the remaining
-                   ;; dual-stack policy work. Until then, isolation fails
-                   ;; closed instead of letting IPv6 bypass an active policy.
-                   (let ((egress-on (map-lookup netpol-mode 0))
-                         (ingress-on (map-lookup netpol-mode 1)))
-                     (when (or (and (/= egress-on 0) (/= (load u32 egress-on 0) 0))
-                               (and (/= ingress-on 0) (/= (load u32 ingress-on 0) 0)))
-                       (drop-pod-packet :policy)))))
+                   ;; IPv6 has a fixed 40-byte base header. Extension headers do
+                   ;; not expose a transport port here, so they can match only
+                   ;; rules that allow every port for their next-header value.
+                   (let ((egress-on u32 (if (/= egress-mode 0) (load u32 egress-mode 0) 0))
+                         (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0)))
+                     (when (or (/= egress-on 0) (/= ingress-on 0))
+                       (let ((fkey (make-netpol-flow-key-v6))
+                             (has-port u8 0))
+                         (setf (netpol-flow-key-v6-peer fkey 0) (load u32 ip 24)
+                               (netpol-flow-key-v6-peer fkey 1) (load u32 ip 28)
+                               (netpol-flow-key-v6-peer fkey 2) (load u32 ip 32)
+                               (netpol-flow-key-v6-peer fkey 3) (load u32 ip 36)
+                               (netpol-flow-key-v6-proto fkey) (load u8 ip 6)
+                               (netpol-flow-key-v6-pad0 fkey) 0
+                               (netpol-flow-key-v6-pad1 fkey) 0)
+                         (when (and (or (= (load u8 ip 6) 6)
+                                        (= (load u8 ip 6) 17)
+                                        (= (load u8 ip 6) 132))
+                                    (<= (+ data 58) data-end))
+                           (setf (netpol-flow-key-v6-pod-port fkey) (load u16 ip 40)
+                                 (netpol-flow-key-v6-peer-port fkey) (load u16 ip 42)
+                                 has-port 1))
+                         (let ((now u64 (ktime-get-ns)))
+                           (when (/= egress-on 0)
+                             (when (= (netpol-allowed-v6
+                                       netpol-egress-cidr-v6 netpol-egress-ports-v6
+                                       (netpol-flow-key-v6-peer fkey 0)
+                                       (netpol-flow-key-v6-peer fkey 1)
+                                       (netpol-flow-key-v6-peer fkey 2)
+                                       (netpol-flow-key-v6-peer fkey 3)
+                                       (netpol-flow-key-v6-proto fkey)
+                                       (netpol-flow-key-v6-peer-port fkey) has-port)
+                                      0)
+                               (let ((flow (map-lookup-ptr netpol-flows-v6 fkey)))
+                                 (when (= flow 0) (drop-pod-packet :policy))
+                                 (when (> (- now (load u64 flow 0))
+                                          (netpol-flow-lifetime (netpol-flow-key-v6-proto fkey)))
+                                   (drop-pod-packet :policy)))))
+                           (let ((stamp (make-netpol-flow-stamp)))
+                             (setf (netpol-flow-stamp-ns stamp) now)
+                             (map-update-ptr netpol-flows-v6 fkey stamp 0))))))))
                 ((= protocol #x0806)
                  (when (> (+ data 42) data-end) (drop-pod-packet :malformed))
                  (let ((arp u64 (+ data 14)))
@@ -307,16 +374,21 @@
         (add-pod-counter allowed-bytes (ctx u32 0))
         TC_ACT_OK))
     ;; Pod ingress (host veth egress, or the Pod interface's ingress when chained):
-    ;; the same rules for the packet's source and the Pod's destination port. Only
-    ;; IPv4 is governed; the node gateway address, from which the node's probes,
-    ;; DNS answers and proxies reach the Pod, always passes.
+    ;; the same rules for the packet's source and the Pod's destination port.
+    ;; Family-specific node gateway addresses, from which probes, DNS answers
+    ;; and proxies reach the Pod, always pass.
     (defprog gr8s-ingress-guard (:type :tc :section "classifier" :license "GPL")
       ;; Read the packet's fields into locals before any helper call or stack struct:
       ;; the calls clobber the registers holding the context and packet pointers.
       (let ((data u64 (tc-data))
             (data-end u64 (tc-data-end))
             (ipv4 u8 0)
+            (ipv6 u8 0)
             (peer u32 0)
+            (peer6-0 u32 0)
+            (peer6-1 u32 0)
+            (peer6-2 u32 0)
+            (peer6-3 u32 0)
             (proto u8 0)
             (sport u16 0)
             (dport u16 0)
@@ -331,10 +403,28 @@
             (setf sport (load u16 data 34)
                   dport (load u16 data 36)
                   has-port 1)))
-        (when (and (= ipv4 1) (/= (ntohl peer) #xa9fe0101))
-          (let ((policy-drops (map-lookup traffic-stats 6))
-                (egress-mode (map-lookup netpol-mode 0))
-                (ingress-mode (map-lookup netpol-mode 1)))
+        (when (and (<= (+ data 54) data-end)
+                   (= (eth-type data) #x86dd)
+                   (= (logand (load u8 data 14) #xf0) #x60))
+          (setf ipv6 1
+                peer6-0 (load u32 data 22)
+                peer6-1 (load u32 data 26)
+                peer6-2 (load u32 data 30)
+                peer6-3 (load u32 data 34)
+                proto (load u8 data 20))
+          (when (and (or (= proto 6) (= proto 17) (= proto 132))
+                     (<= (+ data 58) data-end))
+            (setf sport (load u16 data 54)
+                  dport (load u16 data 56)
+                  has-port 1)))
+        ;; Resolve the shared mode/counter pointers once. Keeping duplicate
+        ;; literal-key lookups in separate family branches lets the compiler
+        ;; coalesce their stack keys across control-flow paths, leaving the
+        ;; IPv6-only path without a dominating key initialization.
+        (let ((policy-drops (map-lookup traffic-stats 6))
+              (egress-mode (map-lookup netpol-mode 0))
+              (ingress-mode (map-lookup netpol-mode 1)))
+          (when (and (= ipv4 1) (/= (ntohl peer) #xa9fe0101))
             (let ((egress-on u32 (if (/= egress-mode 0) (load u32 egress-mode 0) 0))
                   (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0)))
               (when (or (/= egress-on 0) (/= ingress-on 0))
@@ -359,5 +449,39 @@
                             (return TC_ACT_SHOT)))))
                     (let ((stamp (make-netpol-flow-stamp)))
                       (setf (netpol-flow-stamp-ns stamp) now)
-                      (map-update-ptr netpol-flows fkey stamp 0))))))))
+                      (map-update-ptr netpol-flows fkey stamp 0)))))))
+          ;; fe80::1 is the node gateway on every routed Pod interface. As with
+          ;; 169.254.1.1 above, node-originated traffic is outside Pod isolation.
+          (when (and (= ipv6 1)
+                     (not (and (= peer6-0 #x000080fe) (= peer6-1 0)
+                               (= peer6-2 0) (= peer6-3 #x01000000))))
+            (let ((egress-on u32 (if (/= egress-mode 0) (load u32 egress-mode 0) 0))
+                  (ingress-on u32 (if (/= ingress-mode 0) (load u32 ingress-mode 0) 0)))
+              (when (or (/= egress-on 0) (/= ingress-on 0))
+                (let ((now u64 (ktime-get-ns))
+                      (fkey (make-netpol-flow-key-v6)))
+                  (setf (netpol-flow-key-v6-peer fkey 0) peer6-0
+                        (netpol-flow-key-v6-peer fkey 1) peer6-1
+                        (netpol-flow-key-v6-peer fkey 2) peer6-2
+                        (netpol-flow-key-v6-peer fkey 3) peer6-3
+                        (netpol-flow-key-v6-pod-port fkey) dport
+                        (netpol-flow-key-v6-peer-port fkey) sport
+                        (netpol-flow-key-v6-proto fkey) proto
+                        (netpol-flow-key-v6-pad0 fkey) 0
+                        (netpol-flow-key-v6-pad1 fkey) 0)
+                  (when (/= ingress-on 0)
+                    (when (= (netpol-allowed-v6 netpol-ingress-cidr-v6 netpol-ingress-ports-v6
+                                                peer6-0 peer6-1 peer6-2 peer6-3
+                                                proto dport has-port)
+                             0)
+                      (let ((flow (map-lookup-ptr netpol-flows-v6 fkey)))
+                        (when (= flow 0)
+                          (add-pod-counter policy-drops 1)
+                          (return TC_ACT_SHOT))
+                        (when (> (- now (load u64 flow 0)) (netpol-flow-lifetime proto))
+                          (add-pod-counter policy-drops 1)
+                          (return TC_ACT_SHOT)))))
+                  (let ((stamp (make-netpol-flow-stamp)))
+                    (setf (netpol-flow-stamp-ns stamp) now)
+                    (map-update-ptr netpol-flows-v6 fkey stamp 0)))))))
         TC_ACT_OK))))

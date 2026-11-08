@@ -55,6 +55,11 @@
     ("netpol_ingress_cidr" 11 8  4  16384 1)
     ("netpol_ingress_ports" 11 12 1 4096  1)
     ("netpol_flows"         9 12 8  4096  0)
+    ("netpol_egress_cidr_v6" 11 20 4 16384 1)
+    ("netpol_egress_ports_v6" 11 12 1 4096 1)
+    ("netpol_ingress_cidr_v6" 11 20 4 16384 1)
+    ("netpol_ingress_ports_v6" 11 12 1 4096 1)
+    ("netpol_flows_v6"       9 24 8 4096 0)
     ;; Same-node Pod delivery table: dest Pod IPv4 (network order) -> 16-byte
     ;; {ifindex, Pod MAC, veth MAC}. Agent-populated on reconcile. LPM /32 keys,
     ;; NO_PREALLOC -- same shape as netpol_egress_cidr.

@@ -40,10 +40,14 @@ of PORTS (every port when NIL)."
 POLICY-TYPES (\"Ingress\"/\"Egress\")."
   namespace name pod-selector (policy-types '()) (ingress '()) (egress '()))
 
-(defstruct (np-pod (:constructor make-np-pod (&key name namespace labels ip ports)))
-  "A Pod as policy sees it: its labels, IPv4 address, and its containers' named ports as
-(name protocol-keyword number) lists."
-  name namespace labels ip (ports '()))
+(defstruct (np-pod (:constructor make-np-pod (&key name namespace labels ip ips ports)))
+  "A Pod as policy sees it: its labels, primary IP, every IP, and its containers'
+named ports as (name protocol-keyword number) lists."
+  name namespace labels ip (ips '()) (ports '()))
+
+(defun np-pod-addresses (pod)
+  "Every address of POD, preserving API order and the legacy primary IP fallback."
+  (or (np-pod-ips pod) (and (np-pod-ip pod) (list (np-pod-ip pod)))))
 
 (defun np-labels (&rest pairs)
   "Make a label table from alternating keys and values."
@@ -138,12 +142,30 @@ peers allows every peer."
   (third (find-if (lambda (entry) (and (equal name (first entry)) (eq protocol (second entry))))
                   (np-pod-ports pod))))
 
-(defun ipv4-cidr-contains-p (cidr address)
-  "True when IPv4 ADDRESS lies in IPv4 CIDR; NIL for anything else."
+(defun network-address-in-cidr-p (cidr address)
+  "True when ADDRESS lies in same-family CIDR; NIL for invalid or mixed families."
   (ignore-errors
-   (multiple-value-bind (network prefix) (parse-ipv4-cidr cidr)
-     (let ((shift (- 32 prefix)))
-       (= (ash network (- shift)) (ash (parse-ipv4-integer address) (- shift)))))))
+   (let* ((slash (position #\/ cidr))
+          (network-text (subseq cidr 0 slash))
+          (prefix (parse-integer cidr :start (1+ slash))))
+     (multiple-value-bind (network-family network-bytes bits)
+         (network-address-wire-values network-text)
+       (multiple-value-bind (address-family address-bytes)
+           (network-address-wire-values address)
+         (and (= network-family address-family)
+              (<= prefix bits)
+              (let ((whole (floor prefix 8))
+                    (partial (mod prefix 8)))
+                (and (loop for index below whole
+                           always (= (aref network-bytes index) (aref address-bytes index)))
+                     (or (zerop partial)
+                         (= (ldb (byte partial (- 8 partial)) (aref network-bytes whole))
+                            (ldb (byte partial (- 8 partial)) (aref address-bytes whole))))))))))))
+
+(defun ipv4-cidr-contains-p (cidr address)
+  "Compatibility wrapper for callers that require an IPv4 CIDR and address."
+  (and (not (find #\: cidr)) (not (find #\: address))
+       (network-address-in-cidr-p cidr address)))
 
 (defun np-peer-pods (peer policy-namespace pods namespace-labels)
   "The PODS a selector PEER selects. NAMESPACE-LABELS maps each namespace to its labels."
@@ -160,9 +182,12 @@ peers allows every peer."
 (defun np-block-pods (peer pods)
   "The PODS whose address an ipBlock PEER covers, excepted ranges excluded."
   (remove-if-not (lambda (pod)
-                   (and (ipv4-cidr-contains-p (np-peer-cidr peer) (np-pod-ip pod))
-                        (notany (lambda (except) (ipv4-cidr-contains-p except (np-pod-ip pod)))
-                                (np-peer-except peer))))
+                   (some (lambda (address)
+                           (and (network-address-in-cidr-p (np-peer-cidr peer) address)
+                                (notany (lambda (except)
+                                          (network-address-in-cidr-p except address))
+                                        (np-peer-except peer))))
+                         (np-pod-addresses pod)))
                  pods))
 
 (defun np-ip-block (cidr &optional except)
@@ -181,8 +206,10 @@ peers allows every peer."
 
 (defun np-pod-peers (pods)
   "ipBlock peers for PODS' addresses, in a stable order and without repeats."
-  (mapcar (lambda (ip) (np-ip-block (format nil "~A/32" ip)))
-          (sort (remove-duplicates (mapcar #'np-pod-ip pods) :test #'equal) #'string<)))
+  (mapcar (lambda (ip) (np-ip-block (format nil "~A/~D" ip (if (find #\: ip) 128 32))))
+          (sort (remove-duplicates (loop for pod in pods append (np-pod-addresses pod))
+                                   :test #'equal)
+                #'string<)))
 
 (defun resolve-network-policy-rule (rule direction policy-namespace pods namespace-labels)
   "Resolve RULE into rule objects whose peers are only ipBlocks. A rule whose selector peers
@@ -254,16 +281,24 @@ Pods or Namespaces: defaulted policyTypes, and rules whose peers are only ipBloc
                                      (gethash "containerPort" port)))))
 
 (defun network-policy-cluster-pods (store)
-  "Every Pod with an IPv4 address that a policy can select, as np-pods."
+  "Every nonterminal Pod with at least one address that policy can select."
   (loop for pod in (list-pods store)
         for status = (pod-observed-status store pod)
-        for ip = (and (hash-table-p status) (gethash "podIP" status))
+        for addresses = (and (hash-table-p status)
+                             (let ((plural (gethash "podIPs" status)))
+                               (or (and (vectorp plural)
+                                        (loop for entry across plural
+                                              for address = (and (hash-table-p entry) (gethash "ip" entry))
+                                              when (stringp address) collect address))
+                                   (let ((single (gethash "podIP" status)))
+                                     (and (stringp single) (list single))))))
         for object = (pod-to-object pod)
-        when (and (stringp ip) (find #\. ip)
+        when (and addresses
                   (not (member (gethash "phase" status) '("Succeeded" "Failed") :test #'equal)))
           collect (make-np-pod :name (pod-name pod) :namespace (pod-namespace pod)
                                :labels (gethash "labels" (gethash "metadata" object) (core-object))
-                               :ip ip :ports (np-container-ports object))))
+                               :ip (first addresses) :ips addresses
+                               :ports (np-container-ports object))))
 
 (defun network-policy-namespace-labels (store)
   "Map each Namespace to its labels, including the kubernetes.io/metadata.name label
@@ -314,12 +349,14 @@ POD. Each entry is (cidr excepts ports), PORTS :all or a list of (protocol first
                          :all)))
           (when ports
             (if (eq (np-rule-peers rule) :all)
-                (push (list "0.0.0.0/0" '() ports) entries)
+                (progn
+                  (push (list "0.0.0.0/0" '() ports) entries)
+                  (push (list "::/0" '() ports) entries))
                 (dolist (peer (np-rule-peers rule))
-                  ;; Projected peers are ipBlocks; an IPv6 block cannot match an IPv4 packet.
-                  (when (and (np-peer-cidr peer) (ignore-errors (parse-ipv4-cidr (np-peer-cidr peer))))
+                  ;; Projected peers are ipBlocks; preserve either address family.
+                  (when (and (np-peer-cidr peer) (network-policy-cidr (np-peer-cidr peer)))
                     (push (list (np-peer-cidr peer)
-                                (remove-if-not (lambda (except) (ignore-errors (parse-ipv4-cidr except)))
+                                (remove-if-not (lambda (except) (network-policy-cidr except))
                                                (np-peer-except peer))
                                 ports)
                           entries))))))))
@@ -361,19 +398,27 @@ POD. Each entry is (cidr excepts ports), PORTS :all or a list of (protocol first
                (incf first size)))
     (nreverse prefixes)))
 
-(defun network-policy-tables (entries)
+(defun %network-policy-tables (entries prefix-function address-bits)
   "Compile ENTRIES into the Pod's tries. Returns (values cidrs ports): CIDRS a list of
 ((network . length) . group), PORTS a list of (group protocol port bits), protocol NIL for
 every protocol and port NIL for every port. Group 0 allows nothing."
   (let* ((prefixes (remove-duplicates
                     (loop for (cidr excepts) in entries
-                          collect (np-prefix cidr) append (mapcar #'np-prefix excepts))
+                          collect (funcall prefix-function cidr)
+                          append (mapcar prefix-function excepts))
                     :test #'equal))
          (groups '()) (cidrs '()))
     (dolist (prefix (sort prefixes (lambda (a b) (if (= (cdr a) (cdr b)) (< (car a) (car b)) (< (cdr a) (cdr b))))))
-      (let* ((sets (loop for (cidr excepts ports) in entries
-                         when (and (np-prefix-within-p prefix (np-prefix cidr))
-                                   (notany (lambda (except) (np-prefix-within-p prefix (np-prefix except))) excepts))
+      (let* ((within-p (lambda (inner outer)
+                         (and (>= (cdr inner) (cdr outer))
+                              (= (ash (car inner) (- (cdr outer) address-bits))
+                                 (ash (car outer) (- (cdr outer) address-bits))))))
+             (sets (loop for (cidr excepts ports) in entries
+                         when (and (funcall within-p prefix (funcall prefix-function cidr))
+                                   (notany (lambda (except)
+                                             (funcall within-p prefix
+                                                      (funcall prefix-function except)))
+                                           excepts))
                            collect ports))
              (set (and sets (np-port-set-union sets)))
              (group (cond ((null set) 0)
@@ -390,6 +435,22 @@ every protocol and port NIL for every port. Group 0 allows nothing."
                                               (loop for (port . bits) in (np-port-prefixes first last)
                                                     collect (list group protocol port bits)))))))))
 
+(defun network-policy-tables (entries)
+  "Compile IPv4 ENTRIES into the Pod's CIDR and port tries."
+  (%network-policy-tables entries #'np-prefix 32))
+
+(defun np-prefix-v6 (cidr)
+  "IPv6 CIDR as (128-bit-network-integer . prefix-length), with host bits masked."
+  (let* ((slash (position #\/ cidr))
+         (address (subseq cidr 0 slash))
+         (length (parse-integer cidr :start (1+ slash)))
+         (value (network-octets-integer (0conf:parse-ipv6 address))))
+    (cons (logand value (if (zerop length) 0 (ash -1 (- 128 length)))) length)))
+
+(defun network-policy-tables-v6 (entries)
+  "Compile IPv6 ENTRIES into the Pod's CIDR and port tries."
+  (%network-policy-tables entries #'np-prefix-v6 128))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Map encodings, matching the structs in src/egress-guard-program.lisp.
 
@@ -399,9 +460,12 @@ every protocol and port NIL for every port. Group 0 allows nothing."
     (dotimes (i 4 bytes) (setf (aref bytes i) (ldb (byte 8 (* 8 i)) value)))))
 
 (defun netpol-cidr-lpm-key (cidr)
-  "LPM key for CIDR: u32 prefix length (host order), then the masked network in network order."
-  (destructuring-bind (network . length) (np-prefix cidr)
-    (netpol-prefix-lpm-key network length)))
+  "LPM key for CIDR: u32 prefix length, then its masked network in wire order."
+  (if (find #\: cidr)
+      (destructuring-bind (network . length) (np-prefix-v6 cidr)
+        (netpol-prefix-lpm-key-v6 network length))
+      (destructuring-bind (network . length) (np-prefix cidr)
+        (netpol-prefix-lpm-key network length))))
 
 (defun netpol-prefix-lpm-key (network length)
   "The eBPF LPM-trie key for the prefix NETWORK/LENGTH: the prefix LENGTH as a
@@ -409,6 +473,14 @@ every protocol and port NIL for every port. Group 0 allows nothing."
   (concatenate '(vector (unsigned-byte 8)) (%netpol-u32-le length)
                (vector (ldb (byte 8 24) network) (ldb (byte 8 16) network)
                        (ldb (byte 8 8) network) (ldb (byte 8 0) network))))
+
+(defun netpol-prefix-lpm-key-v6 (network length)
+  "The eBPF IPv6 LPM key: little-endian prefix length plus 16 wire-order bytes."
+  (concatenate '(vector (unsigned-byte 8)) (%netpol-u32-le length)
+               (loop with bytes = (make-array 16 :element-type '(unsigned-byte 8))
+                     for index below 16
+                     do (setf (aref bytes index) (ldb (byte 8 (* 8 (- 15 index))) network))
+                     finally (return bytes))))
 
 (defun netpol-port-lpm-key (group protocol port bits)
   "LPM key for a port entry: {prefixlen, group (host order), protocol, pad, port (network
@@ -419,17 +491,32 @@ PORT is NIL, and otherwise BITS bits of the port too."
                (%netpol-u32-le group)
                (vector (or protocol 0) 0 (ldb (byte 8 8) (or port 0)) (ldb (byte 8 0) (or port 0)))))
 
-(defun network-policy-map-contents (entries)
-  "The exact (key . value) contents of a Pod's cidr and ports tries for ENTRIES."
-  (multiple-value-bind (cidrs ports) (network-policy-tables entries)
+(defun network-policy-family-map-contents (entries family)
+  "The exact CIDR and port trie contents for one address FAMILY's ENTRIES."
+  (multiple-value-bind (cidrs ports)
+      (ecase family
+        (:ipv4 (network-policy-tables entries))
+        (:ipv6 (network-policy-tables-v6 entries)))
     (values (mapcar (lambda (entry)
-                      (cons (netpol-prefix-lpm-key (car (car entry)) (cdr (car entry)))
+                      (cons (ecase family
+                              (:ipv4 (netpol-prefix-lpm-key (car (car entry)) (cdr (car entry))))
+                              (:ipv6 (netpol-prefix-lpm-key-v6 (car (car entry)) (cdr (car entry)))))
                             (%netpol-u32-le (cdr entry))))
                     cidrs)
             (mapcar (lambda (entry)
                       (cons (apply #'netpol-port-lpm-key entry)
                             (make-array 1 :element-type '(unsigned-byte 8) :initial-element 1)))
                     ports))))
+
+(defun network-policy-map-contents (entries)
+  "Return IPv4 CIDRs/ports then IPv6 CIDRs/ports for a Pod's mixed-family ENTRIES."
+  (let ((ipv4 (remove-if (lambda (entry) (find #\: (first entry))) entries))
+        (ipv6 (remove-if-not (lambda (entry) (find #\: (first entry))) entries)))
+    (multiple-value-bind (cidr-v4 ports-v4)
+        (network-policy-family-map-contents ipv4 :ipv4)
+      (multiple-value-bind (cidr-v6 ports-v6)
+          (network-policy-family-map-contents ipv6 :ipv6)
+        (values cidr-v4 ports-v4 cidr-v6 ports-v6)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Writing a Pod's policy into its pinned maps, as data: no recompile, no re-attach.
@@ -466,12 +553,18 @@ untouched. OPEN/MAP-INFO/UPDATE/DELETE/KEYS/EXISTS/CLOSE are injectable for test
                     (dolist (key (funcall keys trie))
                       (unless (find key contents :key #'car :test #'equalp)
                         (funcall delete trie key)))))
-             (loop for (direction cidr-name ports-name) in '((:egress "netpol_egress_cidr" "netpol_egress_ports")
-                                                             (:ingress "netpol_ingress_cidr" "netpol_ingress_ports"))
+             (loop for (direction cidr-name ports-name cidr-v6-name ports-v6-name)
+                     in '((:egress "netpol_egress_cidr" "netpol_egress_ports"
+                                  "netpol_egress_cidr_v6" "netpol_egress_ports_v6")
+                          (:ingress "netpol_ingress_cidr" "netpol_ingress_ports"
+                                   "netpol_ingress_cidr_v6" "netpol_ingress_ports_v6"))
                    for (isolated . entries) = (if (eq direction :egress) egress ingress)
-                   do (multiple-value-bind (cidrs ports) (network-policy-map-contents (and isolated entries))
+                   do (multiple-value-bind (cidrs ports cidrs-v6 ports-v6)
+                          (network-policy-map-contents (and isolated entries))
                         (replace-contents (open-map ports-name) ports)
-                        (replace-contents (open-map cidr-name) cidrs)))
+                        (replace-contents (open-map cidr-name) cidrs)
+                        (replace-contents (open-map ports-v6-name) ports-v6)
+                        (replace-contents (open-map cidr-v6-name) cidrs-v6)))
              (let ((mode (open-map "netpol_mode")))
                (funcall update mode (%netpol-u32-le 0) (%netpol-u32-le (if (car egress) 1 0)))
                (funcall update mode (%netpol-u32-le 1) (%netpol-u32-le (if (car ingress) 1 0))))
@@ -581,8 +674,7 @@ after a numeric port it is not below."
              (core-resource-error 422 "Invalid" "~A.endPort: Invalid value: ~A: must be greater than or equal to `port`" path end))))))
 
 (defun network-policy-cidr (text)
-  "Parse TEXT as address/prefix, returning (values family-length address-integer-or-nil prefix), or NIL.
-IPv4 addresses are returned as integers; an IPv6 one is only checked for form."
+  "Parse TEXT as address/prefix, returning family bits, address integer, and prefix."
   (let ((slash (and (stringp text) (position #\/ text))))
     (when slash
       (let* ((address (subseq text 0 slash)) (digits (subseq text (1+ slash)))
@@ -590,7 +682,9 @@ IPv4 addresses are returned as integers; an IPv6 one is only checked for form."
         (cond ((null prefix) nil)
               ((find #\: address)
                (and (<= prefix 128) (not (find #\% address))
-                    (handler-case (progn (0conf:parse-ipv6 address) (values 128 nil prefix)) (error () nil))))
+                    (handler-case
+                        (values 128 (network-octets-integer (0conf:parse-ipv6 address)) prefix)
+                      (error () nil))))
               ((and (<= prefix 32) (networking-canonical-ip-p address))
                (values 32 (parse-ipv4-integer address) prefix)))))))
 
@@ -607,8 +701,8 @@ IPv4 addresses are returned as integers; an IPv6 one is only checked for form."
           (loop for except across (gethash "except" block #())
                 do (multiple-value-bind (inner-family inner-network inner-prefix) (network-policy-cidr except)
                      (unless (and inner-family (= family inner-family) (> inner-prefix prefix)
-                                  (or (null network)
-                                      (= (ash inner-network (- prefix 32)) (ash network (- prefix 32)))))
+                                  (= (ash inner-network (- prefix family))
+                                     (ash network (- prefix family))))
                        (core-resource-error 422 "Invalid" "~A.ipBlock.except: Invalid value: ~S: must be a strict subset of `cidr`"
                                             path except)))))))))
 

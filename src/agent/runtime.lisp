@@ -1413,14 +1413,23 @@ while the server still assigns that UID at that version."
   (let ((map (make-hash-table :test #'equal)))
     (dolist (pod (list-pods store) map)
       (let* ((status (gethash (pod-uid pod) (pod-store-pod-observed-statuses store)))
-             (ip (and status (gethash "podIP" status)))
+             (plural (and status (gethash "podIPs" status)))
+             (addresses (or (and (vectorp plural)
+                                 (loop for entry across plural
+                                       for address = (and (hash-table-p entry) (gethash "ip" entry))
+                                       when (stringp address) collect address))
+                            (let ((single (and status (gethash "podIP" status))))
+                              (and (stringp single) (list single)))))
              (object (pod-object pod))
              (metadata (gethash "metadata" object (make-hash-table :test #'equal))))
-        (when (and (stringp ip) (plusp (length ip)))
-          (setf (gethash ip map)
-                (make-np-pod :name (pod-name pod) :namespace (pod-namespace pod)
-                             :labels (gethash "labels" metadata (make-hash-table :test #'equal))
-                             :ip ip :ports (np-container-ports object))))))))
+        (when addresses
+          (let ((policy-pod
+                  (make-np-pod :name (pod-name pod) :namespace (pod-namespace pod)
+                               :labels (gethash "labels" metadata (make-hash-table :test #'equal))
+                               :ip (first addresses) :ips addresses
+                               :ports (np-container-ports object))))
+            (dolist (address addresses)
+              (setf (gethash address map) policy-pod))))))))
 
 (defvar *node-network-policy-lock* (bt:make-lock "gr8s node network policy")
   "Serializes writes of Pods' policies from snapshots and from new Pod addresses.")

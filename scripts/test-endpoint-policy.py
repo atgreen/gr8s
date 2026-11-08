@@ -11,6 +11,7 @@ bytecode in Linux. The default interpreter also checks short buffers, non-linear
 lengths and uninitialized stack reads.
 """
 import ctypes
+import ipaddress
 import json
 import os
 import platform
@@ -20,14 +21,19 @@ import sys
 MASK = (1 << 64) - 1
 ARRAY, HASH, LRU_HASH, LPM_TRIE = 2, 1, 9, 11
 EXPECTED_MAPS = {'rejected_spoofs': (ARRAY, 4, 8, 1, 0),
-                 'endpoint_identity': (ARRAY, 4, 16, 1, 128),
+                 'endpoint_identity': (ARRAY, 4, 32, 1, 128),
                  'traffic_stats': (ARRAY, 4, 8, 7, 0),
                  'netpol_mode': (ARRAY, 4, 4, 2, 0),
                  'netpol_egress_cidr': (LPM_TRIE, 8, 4, 16384, 1),
                  'netpol_egress_ports': (LPM_TRIE, 12, 1, 4096, 1),
                  'netpol_ingress_cidr': (LPM_TRIE, 8, 4, 16384, 1),
                  'netpol_ingress_ports': (LPM_TRIE, 12, 1, 4096, 1),
+                 'netpol_egress_cidr_v6': (LPM_TRIE, 20, 4, 16384, 1),
+                 'netpol_egress_ports_v6': (LPM_TRIE, 12, 1, 4096, 1),
+                 'netpol_ingress_cidr_v6': (LPM_TRIE, 20, 4, 16384, 1),
+                 'netpol_ingress_ports_v6': (LPM_TRIE, 12, 1, 4096, 1),
                  'netpol_flows': (LRU_HASH, 12, 8, 4096, 0),
+                 'netpol_flows_v6': (LRU_HASH, 24, 8, 4096, 0),
                  'local_pod_v4': (LPM_TRIE, 8, 16, 4096, 1),
                  'host_redirect_v4': (HASH, 4, 1, 64, 1)}
 TC_ACT_OK, TC_ACT_SHOT = 0, 2
@@ -158,7 +164,10 @@ class Machine:
         if helper in (1, 2):
             name = self.maps.names[r[1]]
             _, key_size, value_size, _, _ = self.maps.descriptors[name]
-            key = self.read_bytes(r[2], key_size)
+            try:
+                key = self.read_bytes(r[2], key_size)
+            except AssertionError as error:
+                raise AssertionError(f'{name}: {error}') from error
             if helper == 1:
                 r[0] = self.maps.lookup(name, key)
             else:
@@ -341,23 +350,27 @@ class Kernel:
 
     def advance(self, seconds):
         # The kernel's clock cannot be moved; age the connection table instead.
-        flows = self.map_fds['netpol_flows']
-        key = ctypes.create_string_buffer(12)
-        next_key = ctypes.create_string_buffer(12)
-        keys = []
-        first = True
-        while True:
-            try:
-                self.bpf(4, struct.pack('<IIQQ', flows, 0, 0 if first else ctypes.addressof(key),
-                                        ctypes.addressof(next_key)))
-            except OSError:
-                break
-            keys.append(next_key.raw)
-            ctypes.memmove(key, next_key, 12)
-            first = False
-        for entry in keys:
-            stamp = struct.unpack('<Q', self.lookup('netpol_flows', entry))[0]
-            self.update('netpol_flows', entry, struct.pack('<Q', max(0, stamp - int(seconds * 1e9))))
+        for name in ('netpol_flows', 'netpol_flows_v6'):
+            flows = self.map_fds[name]
+            size = self.descriptors[name][1]
+            key = ctypes.create_string_buffer(size)
+            next_key = ctypes.create_string_buffer(size)
+            keys = []
+            first = True
+            while True:
+                try:
+                    self.bpf(4, struct.pack('<IIQQ', flows, 0,
+                                            0 if first else ctypes.addressof(key),
+                                            ctypes.addressof(next_key)))
+                except OSError:
+                    break
+                keys.append(next_key.raw)
+                ctypes.memmove(key, next_key, size)
+                first = False
+            for entry in keys:
+                stamp = struct.unpack('<Q', self.lookup(name, entry))[0]
+                self.update(name, entry,
+                            struct.pack('<Q', max(0, stamp - int(seconds * 1e9))))
 
     def close(self):
         for fd in reversed(self.fds):
@@ -368,6 +381,8 @@ class Kernel:
 MAC = bytes.fromhex('021122334455')
 IP = bytes([10, 88, 1, 2])
 GATEWAY = bytes([169, 254, 1, 1])
+IP6 = ipaddress.IPv6Address('fd42::2').packed
+GATEWAY6 = ipaddress.IPv6Address('fe80::1').packed
 TCP, UDP, ICMP = 6, 17, 1
 
 
@@ -391,6 +406,18 @@ def datagram(source, destination, protocol, sport=0, dport=0, mac=MAC):
     return ethernet(0x0800, header + bytes(source) + bytes(destination) + l4, mac)
 
 
+def datagram6(source, destination, protocol, sport=0, dport=0, mac=MAC):
+    """An IPv6 packet carrying a minimal TCP, UDP, or ICMPv6 header."""
+    if protocol == TCP:
+        l4 = struct.pack('>HHIIBBHHH', sport, dport, 1, 0, 0x50, 0x02, 1024, 0, 0)
+    elif protocol == UDP:
+        l4 = struct.pack('>HHHH', sport, dport, 8, 0)
+    else:
+        l4 = struct.pack('>BBHI', 128, 0, 0, 1)
+    header = bytes([0x60, 0, 0, 0]) + struct.pack('>HBB', len(l4), protocol, 64)
+    return ethernet(0x86dd, header + bytes(source) + bytes(destination) + l4, mac)
+
+
 def arp(source=IP, sender_mac=MAC, opcode=1):
     return ethernet(0x0806, struct.pack('>HHBBH', 1, 0x0800, 6, 4, opcode) + sender_mac + source + bytes(6) + bytes([169, 254, 1, 1]))
 
@@ -398,6 +425,11 @@ def arp(source=IP, sender_mac=MAC, opcode=1):
 def cidr_key(cidr):
     address, length = cidr.split('/')
     return struct.pack('<I', int(length)) + bytes(int(octet) for octet in address.split('.'))
+
+
+def cidr_key6(cidr):
+    network = ipaddress.IPv6Network(cidr, strict=False)
+    return struct.pack('<I', network.prefixlen) + network.network_address.packed
 
 
 def port_key(group, protocol=None, port=None, bits=16):
@@ -420,7 +452,8 @@ def main(path, kernel=False):
 
     def configure(configured=True):
         backend.update('endpoint_identity', struct.pack('<I', 0),
-                       struct.pack('<IIII', 0x0a580102, 0x02112233, 0x4455, 1) if configured else bytes(16))
+                       (struct.pack('<IIII', 0x0a580102, 0x02112233, 0x4455, 1) + IP6)
+                       if configured else bytes(32))
 
     def mode(egress, ingress):
         backend.update('netpol_mode', struct.pack('<I', 0), struct.pack('<I', egress))
@@ -469,7 +502,11 @@ def main(path, kernel=False):
     check(arp(source=bytes([10, 88, 1, 3])), False, 'spoof')
     check(arp(sender_mac=bytes.fromhex('021122334456')), False, 'spoof')
     check(ipv4(), False, 'spoof', configured=False)
-    for protocol in (0x86dd, 0x8100, 0x88cc):
+    check(datagram6(IP6, ipaddress.IPv6Address('fd42::3').packed, UDP, 40000, 53), True)
+    check(datagram6(ipaddress.IPv6Address('fd42::4').packed,
+                    ipaddress.IPv6Address('fd42::3').packed, UDP, 40000, 53),
+          False, 'spoof')
+    for protocol in (0x8100, 0x88cc):
         check(ethernet(protocol, bytes(64)), False, 'unsupported')
     for packet in (ipv4(), arp()):
         for size in range(len(packet)):
@@ -508,6 +545,41 @@ def main(path, kernel=False):
     check(datagram(IP, outside, TCP, 40000, 9999), False, 'policy')
     check(datagram(IP, bytes([172, 16, 0, 1]), UDP, 40000, 53), False, 'policy')
     check(arp(), True)
+
+    peer6 = ipaddress.IPv6Address('fd43::2').packed
+    other6 = ipaddress.IPv6Address('fd44::3').packed
+    outside6 = ipaddress.IPv6Address('2001:db8::7').packed
+    # IPv6 egress isolation: UDP 53 to fd43::/64, plus every TCP port to
+    # 2001:db8::/32. The same LPM and port semantics apply to 128-bit peers.
+    mode(1, 0)
+    backend.update('netpol_egress_cidr_v6', cidr_key6('fd43::/64'), struct.pack('<I', 1))
+    backend.update('netpol_egress_cidr_v6', cidr_key6('2001:db8::/32'), struct.pack('<I', 2))
+    backend.update('netpol_egress_ports_v6', port_key(1, UDP, 53), b'\x01')
+    backend.update('netpol_egress_ports_v6', port_key(2, TCP), b'\x01')
+    check(datagram6(IP6, peer6, UDP, 40000, 53), True)
+    check(datagram6(IP6, peer6, UDP, 40000, 54), False, 'policy')
+    check(datagram6(IP6, outside6, TCP, 40000, 443), True)
+    check(datagram6(IP6, other6, TCP, 40000, 443), False, 'policy')
+
+    # IPv6 ingress isolation and the fixed link-local node gateway exemption.
+    mode(0, 1)
+    backend.update('netpol_ingress_cidr_v6', cidr_key6('fd43::/64'), struct.pack('<I', 1))
+    backend.update('netpol_ingress_ports_v6', port_key(1, TCP, 80), b'\x01')
+    inbound(datagram6(peer6, IP6, TCP, 5555, 80), True)
+    inbound(datagram6(peer6, IP6, TCP, 5555, 81), False)
+    inbound(datagram6(other6, IP6, TCP, 5555, 80), False)
+    inbound(datagram6(GATEWAY6, IP6, TCP, 5555, 8080), True)
+    # Replies to an IPv6 connection opened by the Pod pass ingress isolation.
+    check(datagram6(IP6, outside6, TCP, 41000, 443), True)
+    inbound(datagram6(outside6, IP6, TCP, 443, 41000), True)
+    inbound(datagram6(outside6, IP6, TCP, 444, 41000), False)
+
+    # Conversely, replies to IPv6 traffic accepted by an ingress policy pass
+    # egress isolation even when no egress CIDR is allowed.
+    mode(1, 0)
+    inbound(datagram6(other6, IP6, UDP, 6000, 7000), True)
+    check(datagram6(IP6, other6, UDP, 7000, 6000), True)
+    check(datagram6(IP6, other6, UDP, 7001, 6000), False, 'policy')
 
     # Ingress isolation: only TCP 80 from 10.88.2.0/24; the node gateway always reaches the Pod.
     mode(0, 1)

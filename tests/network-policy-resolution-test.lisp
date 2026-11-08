@@ -190,6 +190,35 @@
   (is (equalp #(64 0 0 0 1 0 0 0 6 0 31 144) (gr8s::netpol-port-lpm-key 1 6 8080 16)))
   (is (equalp #(58 0 0 0 1 0 0 0 6 0 31 64) (gr8s::netpol-port-lpm-key 1 6 8000 10))))
 
+(test npr-ipv6-rules-survive-node-resolution-and-use-128-bit-lpm-keys
+  (let* ((pod (npr-pod "web" "prod" "10.0.0.1" "app" "web"))
+         (specs (gr8s::network-policy-specs-from-objects
+                 (list (npr-policy
+                        "prod"
+                        "{\"podSelector\":{},\"policyTypes\":[\"Egress\"],\"egress\":[{\"to\":[{\"ipBlock\":{\"cidr\":\"fd12:3456:789a::/64\",\"except\":[\"fd12:3456:789a:1::/80\"]}}],\"ports\":[{\"protocol\":\"TCP\",\"port\":443}]}]}")))))
+    (multiple-value-bind (isolated entries)
+        (gr8s::pod-network-policy-entries pod specs :egress)
+      (is-true isolated)
+      (is (equal '(("fd12:3456:789a::/64" ("fd12:3456:789a:1::/80") ((6 443 443))))
+                 entries))))
+  ;; LPM prefix length is host-order u32; the following 16 bytes are the
+  ;; masked IPv6 network in wire order.
+  (is (equalp #(64 0 0 0 253 18 52 86 120 154 0 0 0 0 0 0 0 0 0 0)
+              (gr8s::netpol-cidr-lpm-key "fd12:3456:789a::/64"))))
+
+(test npr-ipv6-ipblock-except-must-be-a-strict-subset
+  (flet ((validate (cidr except)
+           (gr8s::validate-network-policy-peer
+            (npr-json (format nil
+                              "{\"ipBlock\":{\"cidr\":\"~A\",\"except\":[\"~A\"]}}"
+                              cidr except))
+            "spec.egress[0].to[0]")))
+    (finishes (validate "fd12:3456::/48" "fd12:3456:0:1::/64"))
+    (signals gr8s:kubernetes-error
+      (validate "fd12:3456::/48" "fd12:9999::/64"))
+    (signals gr8s:kubernetes-error
+      (validate "fd12:3456::/48" "fd12:3456::/48"))))
+
 (defun npr-capture-writes (egress ingress &key existing (exists t))
   "Run write-pod-network-policy against in-memory maps holding EXISTING (name . keys).
 Return (values result final-contents events)."

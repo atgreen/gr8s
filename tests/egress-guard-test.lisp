@@ -36,6 +36,18 @@
         (is (zerop (mod (length insns) 8)))
         (is (>= (length (getf spec :relocs)) 3))))))
 
+(test egress-guard-publishes-ipv6-policy-and-flow-maps
+  (multiple-value-bind (map-specs prog-specs) (gr8s::compile-egress-guard)
+    (declare (ignore prog-specs))
+    (dolist (expected '("netpol_egress_cidr_v6" "netpol_ingress_cidr_v6"
+                        "netpol_egress_ports_v6" "netpol_ingress_ports_v6"
+                        "netpol_flows_v6"))
+      (is (egress-map-spec map-specs expected) "missing ~A" expected))
+    (let ((egress (egress-map-spec map-specs "netpol_egress_cidr_v6"))
+          (flows (egress-map-spec map-specs "netpol_flows_v6")))
+      (is (= 20 (getf egress :key-size)))
+      (is (= 24 (getf flows :key-size))))))
+
 ;;; In-process policy object for the CNI installer.  create-map and the program
 ;;; loader are injected, so the create/reuse/load orchestration runs rootless.
 
