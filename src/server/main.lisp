@@ -712,6 +712,7 @@ bare positional state directory for backward compatibility.  A missing
           (setf node-runtime
               (make-node-runtime
                (agent-state-path options "runtime/") runtime manager
+               :wireguard-private-key wireguard-private-key
                :dns-forward-rules (getf options :dns-forward-rules)))
         (setf (node-runtime-node-name node-runtime) node-name)
         (unwind-protect

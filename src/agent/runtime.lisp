@@ -152,8 +152,13 @@
   nil)
 
 (defun make-node-runtime (state-directory runtime manager
-                          &key (network-reconciler
-                                 (when manager #'reconcile-node-vxlan-network))
+                          &key wireguard-private-key
+                               (network-reconciler
+                                 (when manager
+                                   (lambda (network previous-networks)
+                                     (reconcile-node-overlay-network
+                                      network previous-networks
+                                      wireguard-private-key))))
                                dns-forward-rules)
   "Build and return a NODE-RUNTIME for STATE-DIRECTORY, opening its local desired-state
 store (watch journal disabled, since the control plane serves every watch) and wiring in
@@ -213,20 +218,38 @@ until they all succeed so a partial apply can be retried."
   "Build the persisted node-network object (version 1) from the node-protocol NETWORK
 message and its ROUTES. This is the on-disk and in-memory shape the rest of this file
 validates and reconciles against."
-  (json-object
-   "version" 1
-   "clusterPodCIDR" (slot-value network 'gr8s.node.v1::cluster-pod-cidr)
-   "nodePodCIDR" (slot-value network 'gr8s.node.v1::node-pod-cidr)
-   "dnsAddress" (slot-value network 'gr8s.node.v1::dns-address)
-   "vni" (slot-value network 'gr8s.node.v1::vni)
-   "mtu" (slot-value network 'gr8s.node.v1::mtu)
-   "underlayAddress" (slot-value network 'gr8s.node.v1::underlay-address)
-   "routes" (coerce
-             (mapcar (lambda (route)
-                       (json-object "nodeID" (slot-value route 'gr8s.node.v1::node-id)
-                                    "podCIDR" (slot-value route 'gr8s.node.v1::pod-cidr)
-                                    "underlayAddress" (slot-value route 'gr8s.node.v1::underlay-address)))
-                     routes) 'vector)))
+  (let ((backend (slot-value network 'gr8s.node.v1::overlay-backend)))
+    (json-object
+     "version" 1
+     "clusterPodCIDR" (slot-value network 'gr8s.node.v1::cluster-pod-cidr)
+     "nodePodCIDR" (slot-value network 'gr8s.node.v1::node-pod-cidr)
+     "dnsAddress" (slot-value network 'gr8s.node.v1::dns-address)
+     "vni" (slot-value network 'gr8s.node.v1::vni)
+     "mtu" (slot-value network 'gr8s.node.v1::mtu)
+     "underlayAddress" (slot-value network 'gr8s.node.v1::underlay-address)
+     "overlayBackend" (if (zerop (length backend)) "vxlan" backend)
+     "wireguardListenPort"
+     (slot-value network 'gr8s.node.v1::wireguard-listen-port)
+     "routes"
+     (coerce
+      (mapcar
+       (lambda (route)
+         (let ((object
+                 (json-object
+                  "nodeID" (slot-value route 'gr8s.node.v1::node-id)
+                  "podCIDR" (slot-value route 'gr8s.node.v1::pod-cidr)
+                  "underlayAddress"
+                  (slot-value route 'gr8s.node.v1::underlay-address)))
+               (key (slot-value route 'gr8s.node.v1::wireguard-public-key))
+               (port (slot-value route 'gr8s.node.v1::wireguard-listen-port)))
+           (when (plusp (length key))
+             (setf (gethash "wireguardPublicKey" object)
+                   (ag-grpc:base64-encode key)))
+           (when (plusp port)
+             (setf (gethash "wireguardListenPort" object) port))
+           object))
+       routes)
+      'vector))))
 
 (defun validate-network-cidr (cidr)
   "Return (values ADDRESS PREFIX) for CIDR, a canonical IPv4 CIDR with a 0--30 prefix and
@@ -282,6 +305,12 @@ NETWORK; signals INVALID-CNI on any violation."
                             (not (member id node-ids :test #'string=))
                             (not (member address addresses :test #'string=)))
                  (invalid-cni "conflicting or out-of-range peer route ~A" cidr))
+               (when (string= "wireguard" (gethash "overlayBackend" network "vxlan"))
+                 (wireguard-decode-key
+                  (required-cni-string route "wireguardPublicKey") "peer public key")
+                 (unless (typep (gethash "wireguardListenPort" route)
+                                '(integer 1 65535))
+                   (invalid-cni "invalid WireGuard peer listen port")))
                (push cidr cidrs) (push address addresses) (push id node-ids))))
   network)
 
@@ -307,6 +336,13 @@ Returns NETWORK; signals INVALID-CNI on any violation."
     (invalid-cni "invalid node network MTU"))
   (unless (typep (gethash "vni" network) '(integer 1 16777215))
     (invalid-cni "invalid VXLAN network identifier"))
+  (let ((backend (gethash "overlayBackend" network "vxlan")))
+    (unless (member backend '("vxlan" "wireguard") :test #'string=)
+      (invalid-cni "invalid overlay backend ~A" backend))
+    (when (and (string= backend "wireguard")
+               (not (typep (gethash "wireguardListenPort" network)
+                           '(integer 1 65535))))
+      (invalid-cni "invalid WireGuard listen port")))
   network)
 
 (defun configure-node-runtime-network (node-runtime network &key (persist t))

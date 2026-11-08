@@ -648,7 +648,10 @@ operation. No-op when no operation matches MESSAGE's id."
                    (if (string= "wireguard" (node-grpc-server-overlay-backend server))
                        (node-grpc-server-wireguard-listen-port server)
                        0)
-                   :vni 42 :mtu 1450)))
+                   :vni 42
+                   :mtu (if (string= "wireguard"
+                                    (node-grpc-server-overlay-backend server))
+                            1420 1450))))
 
 (defun assigned-node-routes (server node-name)
   "The overlay routes from NODE-NAME to every OTHER node that has both an underlay

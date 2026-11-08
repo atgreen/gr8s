@@ -408,6 +408,21 @@
     (if gateway (netlink-attribute 5 (ipv4-network-octets gateway)) #())
     (if source (netlink-attribute 7 (ipv4-network-octets source)) #()))))
 
+(defun remove-network-route (destination prefix name)
+  "Delete the main-table route to DESTINATION/PREFIX through NAME, accepting absence."
+  (unless (<= 0 prefix 32) (invalid-cni "invalid route prefix ~A" prefix))
+  (handler-case
+      (call-rtnetlink
+       25 0 ; RTM_DELROUTE
+       (netlink-octets
+        (vector 2 prefix 0 0 254 4 0 1)
+        (netlink-integer 0 4)
+        (netlink-attribute 1 (ipv4-network-octets destination))
+        (netlink-attribute 4 (netlink-integer (cni-interface-index name) 4))))
+    (rtnetlink-error (condition)
+      (unless (= 3 (rtnetlink-error-errno condition)) ; ESRCH
+        (error condition)))))
+
 (defparameter +node-gateway-interface+ "gr8s-gateway")
 (defparameter +node-gateway-address+ "169.254.1.1")
 
