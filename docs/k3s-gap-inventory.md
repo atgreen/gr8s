@@ -38,21 +38,37 @@ kubelet v1 executable credential providers are implemented. gr8s also serves
 `metrics.k8s.io/v1beta1` natively for NodeMetrics, PodMetrics, `kubectl top`, and
 dashboard CPU/MEM without a metrics-server deployment.
 
-## Material correctness and operability gaps
+## Most material product gaps
 
 These are not all Kubernetes API-surface gaps, but they are more material to a
-real k3s replacement than several missing optional APIs:
+real k3s replacement than several missing optional APIs. The ordering answers
+"what most limits safe production use today?", not "what is the largest amount
+of code?":
 
 | Priority | Gap | Why it is material | Tracking |
 |---|---|---|---|
-| P0 | Control-plane memory safety | Serializing the complete core-state blob can exhaust the SBCL heap. Independently, retrying a disconnected Raft follower caused an unbounded AppendEntries queue and founder OOM. The queue is now coalesced in focused tests but still lacks live HA revalidation; the whole-state serializer remains open. Either path can terminate the control plane. | `podster-061`; `podster-8r7`; per-key replication `podster-bwu.2` |
-| P0 evidence blocker | Fresh certified-conformance evidence | The only result preserved from the 192.168.1.10 attempt is a focused 8-test run (8 passed, 3,205 skipped), not a certified run. This is not itself a missing feature, but it prevents a defensible compatibility claim and leaves the ranking partly inferential. | `podster-7lq`; `podster-9do` |
-| P1 | HA state and failover consistency | Image tracker leases/swarms are not yet consistent across control-plane members, Pod replication retains a leader-crash window, and a follower can lose its node-heartbeat monitor after a rejected consensus write. These can surface as stale availability or incorrect failover behavior. | `podster-i5vx`; `podster-bwu.1`; `podster-7ni6.3.5` |
+| P0 | Control-plane memory safety | Serializing the complete core-state blob has exhausted the SBCL heap and terminated `serve` under memory pressure. This is a demonstrated availability defect in the persistence/replication path, not merely a scaling optimization. The disconnected-follower AppendEntries OOM has a focused queue-coalescing fix, but still needs live HA revalidation before that incident is considered closed. | `podster-061`; `podster-8r7`; per-key replication `podster-bwu.2` |
+| P1 | Backup and restore | Internal Raft snapshots are not an operator recovery workflow. There is no supported, tested way to capture and restore the datastore together with the cluster identity, encryption material, and signing keys, nor scheduled retention and remote-copy support. Until this exists, a cluster cannot be treated as recoverable. | `podster-oime` |
 | P1 | Secrets at rest | Kubernetes Secret values are persisted without encryption. A stolen state directory or backup therefore exposes workload credentials, and there is no staged key-rotation or re-encryption workflow. | `podster-dcge`; [Secret API](configmap-secret-api.md) |
-| P1 | Installation and recovery lifecycle | There is no k3s-like installer/service/upgrade lifecycle, supported operator backup/restore workflow, or cluster certificate inventory and rotation command set. These are the largest day-zero and day-two operational omissions. | `podster-7g65`; `podster-oime`; `podster-6l63` |
-| P1 | IPv6 and dual-stack networking | IPv4-only networking excludes IPv6-only sites and does not honor portable `RequireDualStack` workloads. This is more material than optional addon parity, but less urgent than current crash and HA defects for an IPv4 deployment. | `podster-n2iv` |
-| P2 | Host firewall independence | Real two-node firewalld acceptance passes through gr8s-managed coexistence rules, so this is no longer a basic connectivity blocker. The remaining gap is a zero-firewall-mutation eBPF path and retirement of the trusted-zone integration. | `podster-pnd`; cleanup `podster-ntp` |
-| P2 | Complete DRA workload lifecycle | Direct preallocated claims now participate in placement and reservation, but template expansion, device allocation, and kubelet plugin preparation remain. This blocks portable DRA workloads but affects fewer ordinary clusters than the P1 items above. | `podster-08qi` |
+| P1 | HA state and failover consistency | Image tracker leases/swarms are not yet consistent across control-plane members, and a follower can lose its node-heartbeat monitor after a rejected consensus write. Pod replication also retains a narrower leader-crash-before-commit window. These can surface as stale availability or incorrect failover behavior. | `podster-i5vx`; `podster-7ni6.3.5`; `podster-bwu.1` |
+| P1 | Installation, upgrade, and certificate lifecycle | There is no k3s-like installer, persistent service configuration, controlled upgrade/uninstall path, or cluster-wide certificate expiry/rotation workflow. This is the largest day-zero/day-two usability gap once data recovery is separated out. | `podster-7g65`; `podster-6l63` |
+| P1 | IPv6 and dual-stack networking | IPv4-only networking excludes IPv6-only sites and does not honor portable `RequireDualStack` workloads. k3s supports both dual-stack and IPv6-only clusters, so this is a concrete portability and deployment gap. | `podster-n2iv` |
+| P2 | Complete DRA workload lifecycle | Direct preallocated claims participate in placement and reservation. Template expansion is under active implementation, while structured device allocation and kubelet plugin preparation/unpreparation remain. This blocks portable DRA workloads but affects fewer ordinary clusters than the P1 items above. | `podster-08qi` |
+| P2 | Managed AddOns and Helm lifecycle | gr8s has intentional in-process replacements for the ordinary default components, but no general declarative manifests directory, AddOn status model, or HelmChart lifecycle for operator-supplied components. | `podster-pve3` |
+| P2 | Kubernetes audit policy and durable audit log | Admission audit annotations reach process logs, but there is no policy-selected, structured, retained Kubernetes audit trail suitable for security review. | `podster-9fi4` |
+
+Fresh certified-conformance evidence remains the largest **confidence blocker**,
+but it is not itself a product feature gap. The only preserved result from the
+192.168.1.10 attempt is a focused 8-test run (8 passed, 3,205 skipped), not a
+certified run. Until `podster-7lq` produces a complete archive and `podster-9do`
+updates the ledger, the parity inventory remains partly source- and focused-test-
+based.
+
+Zero-firewall-mutation networking is also no longer ranked as a k3s gap. Real
+two-node firewalld acceptance passes through gr8s-managed coexistence rules, and
+k3s itself documents host firewall requirements. The all-eBPF bypass and removal
+of the trusted-zone integration remain worthwhile gr8s engineering work under
+`podster-pnd` and `podster-ntp`, but they are not missing k3s behavior.
 
 The open empirical compatibility map under `podster-bgn` contains narrower API
 and wire-format defects found by running a real controller stack. Those issues
