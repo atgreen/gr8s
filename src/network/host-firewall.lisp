@@ -83,16 +83,25 @@
                                               :port port :verb "--add")
      :runner runner)))
 
-(defun ensure-control-plane-firewall (node-port &key (runner #'host-firewall-run))
-  "Open the node-server (agent enrollment) port in an active firewalld so agents
-   can join over the underlay. Only meaningful when the node server listens on a
-   routable address; a 127.0.0.1 listener needs nothing. No-op without firewalld;
-   fail-soft. Returns T when a rule was applied."
-  (when (and node-port (plusp node-port) (host-firewalld-active-p :runner runner))
-    (apply-overlay-firewall-commands
-     (list (list "firewall-cmd" (format nil "--add-port=~D/tcp" node-port)))
-     :runner runner)
-    t))
+(defun control-plane-firewall-commands (verb &rest ports)
+  "Return firewall-cmd ARGV lists applying VERB to each positive TCP PORT."
+  (loop for port in ports
+        when (and port (plusp port))
+          collect (list "firewall-cmd" (format nil "~A-port=~D/tcp" verb port))))
+
+(defun ensure-control-plane-firewall
+    (node-port &key kubelet-port (runner #'host-firewall-run))
+  "Open routable control-plane TCP listeners in an active firewalld. NODE-PORT
+   admits agent enrollment; KUBELET-PORT admits the authenticated kubelet proxy
+   used by metrics, logs, exec, and related node APIs. A NIL or zero port is
+   disabled. No-op without firewalld; fail-soft. Returns T when rules were
+   attempted."
+  (let ((commands (control-plane-firewall-commands "--add" node-port kubelet-port)))
+    (when (and commands (host-firewalld-active-p :runner runner))
+      (apply-overlay-firewall-commands
+       commands
+       :runner runner)
+      t)))
 
 (defun ensure-gateway-listener-firewall (port &key (runner #'host-firewall-run))
   "Admit TCP traffic to a live Gateway or Ingress listener through firewalld."
@@ -116,14 +125,16 @@
                                               :port port :verb "--remove")
      :runner runner)))
 
-(defun remove-control-plane-firewall (node-port &key (runner #'host-firewall-run))
-  "Withdraw the node-server port opened by ensure-control-plane-firewall. No-op
+(defun remove-control-plane-firewall
+    (node-port &key kubelet-port (runner #'host-firewall-run))
+  "Withdraw the TCP listeners opened by ENSURE-CONTROL-PLANE-FIREWALL. No-op
    without firewalld; fail-soft."
-  (when (and node-port (plusp node-port) (host-firewalld-active-p :runner runner))
-    (apply-overlay-firewall-commands
-     (list (list "firewall-cmd" (format nil "--remove-port=~D/tcp" node-port)))
-     :runner runner)
-    t))
+  (let ((commands (control-plane-firewall-commands "--remove" node-port kubelet-port)))
+    (when (and commands (host-firewalld-active-p :runner runner))
+      (apply-overlay-firewall-commands
+       commands
+       :runner runner)
+      t)))
 
 (defun remove-gateway-listener-firewall (port &key (runner #'host-firewall-run))
   "Withdraw the TCP port opened by ENSURE-GATEWAY-LISTENER-FIREWALL."

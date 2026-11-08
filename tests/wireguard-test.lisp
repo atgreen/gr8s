@@ -86,6 +86,40 @@
     (is (= 4294967301 (gr8s::wireguard-peer-status-received-bytes status)))
     (is (= 8589934601 (gr8s::wireguard-peer-status-transmitted-bytes status)))))
 
+(test wireguard-unchanged-live-peers-do-not-require-destructive-replacement
+  (let* ((route (wireguard-route-fixture))
+         (network (node-network-with-routes-for-test nil))
+         (status (gr8s::make-wireguard-peer-status
+                  :public-key (gr8s::wireguard-decode-key
+                               (gethash "wireguardPublicKey" route) "test key"))))
+    (setf (gethash "overlayBackend" network) "wireguard"
+          (gethash "wireguardListenPort" network) 51820
+          (gethash "routes" network) (vector route))
+    (is-true (gr8s::wireguard-live-peer-keys-match-p
+              network :status-reader (lambda () (list status))))
+    (setf (gethash "wireguardPublicKey" route)
+          (ag-grpc:base64-encode
+           (make-array 32 :element-type '(unsigned-byte 8) :initial-element 8)))
+    (is-false (gr8s::wireguard-live-peer-keys-match-p
+               network :status-reader (lambda () (list status))))))
+
+(test wireguard-topology-identity-detects-config-changes-with-the-same-peer-key
+  (let* ((before (node-network-with-routes-for-test nil))
+         (after (node-network-with-routes-for-test nil))
+         (route-before (wireguard-route-fixture))
+         (route-after (wireguard-route-fixture)))
+    (setf (gethash "overlayBackend" before) "wireguard"
+          (gethash "overlayBackend" after) "wireguard"
+          (gethash "wireguardListenPort" before) 51820
+          (gethash "wireguardListenPort" after) 51820
+          (gethash "routes" before) (vector route-before)
+          (gethash "routes" after) (vector route-after))
+    (is (equal (gr8s::wireguard-topology-identity before)
+               (gr8s::wireguard-topology-identity after)))
+    (setf (gethash "underlayAddress" route-after) "192.0.2.10")
+    (is-false (equal (gr8s::wireguard-topology-identity before)
+                     (gr8s::wireguard-topology-identity after)))))
+
 (test wireguard-prometheus-metrics-identify-authenticated-peer-and-key-age
   (let* ((route (wireguard-route-fixture))
          (network (node-network-with-routes-for-test nil))

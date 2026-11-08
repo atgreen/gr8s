@@ -64,6 +64,27 @@
       (is (eq t (gr8s::ensure-control-plane-firewall 7443 :runner #'runner)))
       (is (member '("firewall-cmd" "--add-port=7443/tcp") (reverse ran) :test #'equal)))))
 
+(test control-plane-firewall-follows-the-kubelet-listener-lifecycle
+  (let ((ran '()))
+    (flet ((runner (argv) (push argv ran) (values "" 0)))
+      (is (eq t (gr8s::ensure-control-plane-firewall
+                 7443 :kubelet-port 10250 :runner #'runner)))
+      (is (eq t (gr8s::remove-control-plane-firewall
+                 7443 :kubelet-port 10250 :runner #'runner)))
+      (let ((applied (reverse ran)))
+        (is (member '("firewall-cmd" "--add-port=7443/tcp") applied :test #'equal))
+        (is (member '("firewall-cmd" "--add-port=10250/tcp") applied :test #'equal))
+        (is (member '("firewall-cmd" "--remove-port=7443/tcp") applied :test #'equal))
+        (is (member '("firewall-cmd" "--remove-port=10250/tcp") applied :test #'equal))))))
+
+(test control-plane-firewall-ignores-a-disabled-kubelet-listener
+  (let ((ran '()))
+    (flet ((runner (argv) (push argv ran) (values "" 0)))
+      (is (eq t (gr8s::ensure-control-plane-firewall
+                 7443 :kubelet-port 0 :runner #'runner)))
+      (is (null (member '("firewall-cmd" "--add-port=0/tcp") ran :test #'equal)))
+      (is (null (member '("firewall-cmd" "--add-port=10250/tcp") ran :test #'equal))))))
+
 (test ensure-control-plane-firewall-is-a-noop-without-firewalld
   (flet ((runner (argv)
            (if (equal argv '("firewall-cmd" "--state")) (values "" 1) (values "" 0))))

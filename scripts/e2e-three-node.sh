@@ -57,6 +57,7 @@ MODE="${GR8S_E2E_MODE:-certified}"
 FOCUS="${GR8S_E2E_FOCUS:-}"; SKIP="${GR8S_E2E_SKIP:-}"
 EXTRA_ARGS="${GR8S_E2E_EXTRA_ARGS:-}"
 FIREWALLD="${GR8S_E2E_FIREWALLD:-on}"
+OVERLAY_BACKEND="${GR8S_E2E_OVERLAY_BACKEND:-vxlan}"
 DEBUG_SLYNK_PORT="${GR8S_E2E_DEBUG_SLYNK_PORT:-}"
 KC=(kubectl --kubeconfig "$KUBECONFIG_FILE" --request-timeout=20s)
 SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile="$KNOWN" -o ConnectTimeout=8 -o ServerAliveInterval=15)
@@ -78,6 +79,7 @@ preflight() {
   "${VIRSH[@]}" net-info "$NET" >/dev/null 2>&1 || die "libvirt network '$NET' not found"
   "${VIRSH[@]}" net-info "$NET" 2>/dev/null | grep -qi 'active:.*yes' || "${VIRSH[@]}" net-start "$NET" 2>/dev/null || true
   mkdir -p "$RUNDIR"
+  case "$OVERLAY_BACKEND" in vxlan|wireguard) ;; *) die "unknown overlay backend: $OVERLAY_BACKEND" ;; esac
   if [ -n "$DEBUG_SLYNK_PORT" ]; then
     [[ "$DEBUG_SLYNK_PORT" =~ ^[0-9]+$ ]] \
       || die "GR8S_E2E_DEBUG_SLYNK_PORT must be an integer from 1 through 65535"
@@ -125,12 +127,13 @@ ensure_vm() {  # create if absent, start if defined-but-off, else leave running
   log "creating VM $name"
   local overlay="$IMAGES_DIR/$name.qcow2" base="$IMAGES_DIR/gr8s-e2e-base.qcow2" seediso="$IMAGES_DIR/$name-seed.iso"
   sudo test -f "$base" || sudo cp "$BASE_IMG" "$base"
+  sudo chcon -t virt_content_t "$base" 2>/dev/null || true
   sudo qemu-img create -f qcow2 -b "$base" -F qcow2 "$overlay" "$DISK" >/dev/null
   sudo cp "$seed" "$seediso"
   sudo restorecon -F "$base" "$overlay" "$seediso" 2>/dev/null || true
   sudo virt-install --connect qemu:///system --name "$name" \
     --memory "$MEM" --vcpus "$VCPUS" --cpu host-passthrough \
-    --disk path="$overlay",format=qcow2,bus=virtio \
+    --disk path="$overlay",driver.type=qcow2,bus=virtio \
     --disk path="$seediso",device=cdrom \
     --osinfo fedora-unknown --network network="$NET",model=virtio \
     --graphics none --import --noautoconsole >/dev/null
@@ -212,6 +215,7 @@ founder_up() {  # ip name -- start the --raft-init founder and wait for its API 
       --raft-init --raft-id $name --raft-node-name $name --raft-listen $ip --raft-port $RAFT_PORT \
       --listen 127.0.0.1 --port $CP_API_PORT \
       --node-listen $ip --node-port $CP_NODE_PORT --node-address $ip \
+      --overlay-backend $OVERLAY_BACKEND \
       --node-name $name --state-directory /var/lib/gr8s --kubeconfig /root/kubeconfig \
       ${DEBUG_SLYNK_PORT:+--debug-slynk-port $DEBUG_SLYNK_PORT} >/dev/null 2>&1"
   wait_api "$ip" || die "founder $name did not become ready (podster-40i? check journalctl -u gr8s on $ip)"
@@ -232,6 +236,7 @@ member_up() {  # ip name founder_ip -- join an existing quorum as a control-plan
       --raft-listen $ip --raft-port $RAFT_PORT --raft-token $tok --raft-ca-pin $capin \
       --listen 127.0.0.1 --port $CP_API_PORT \
       --node-listen $ip --node-port $CP_NODE_PORT --node-address $ip \
+      --overlay-backend $OVERLAY_BACKEND \
       --node-name $name --state-directory /var/lib/gr8s --kubeconfig /root/kubeconfig \
       ${DEBUG_SLYNK_PORT:+--debug-slynk-port $DEBUG_SLYNK_PORT} >/dev/null 2>&1"
   wait_api "$ip" || die "member $name did not become ready; check journalctl -u gr8s on $ip"

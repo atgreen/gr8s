@@ -198,13 +198,67 @@
                        collect (wireguard-peer-status-from-attributes
                                 (netlink-attributes payload 0)))))
 
+(defun wireguard-device-public-key-from-messages (messages)
+  "Return the local device public key from WG_CMD_GET_DEVICE MESSAGES, or NIL."
+  (loop for message in messages
+        for device = (netlink-attributes message 20)
+        for key = (gethash 4 device)
+        when (and key (= 32 (length key))) return key))
+
+(defun wireguard-device-messages (&optional (interface +node-wireguard-interface+))
+  "Return the kernel's complete Generic Netlink description of INTERFACE."
+  (call-generic-netlink
+   (generic-netlink-family-id "wireguard") 0 1
+   (netlink-attribute 2 (netlink-string interface))
+   :flags #x300)) ; NLM_F_ROOT | NLM_F_MATCH (NLM_F_DUMP)
+
 (defun read-wireguard-peer-statuses (&optional (interface +node-wireguard-interface+))
   "Read INTERFACE's peers, handshake times and byte counters from the kernel."
   (wireguard-peer-statuses-from-messages
-   (call-generic-netlink
-    (generic-netlink-family-id "wireguard") 0 1
-    (netlink-attribute 2 (netlink-string interface))
-    :flags #x300))) ; NLM_F_ROOT | NLM_F_MATCH (NLM_F_DUMP)
+   (wireguard-device-messages interface)))
+
+(defun wireguard-peer-key-set (keys)
+  "Return canonical, order-independent base64 identities for WireGuard KEYS."
+  (sort (mapcar #'ag-grpc:base64-encode keys) #'string<))
+
+(defun wireguard-desired-peer-keys (network)
+  "Return NETWORK's decoded desired peer public keys."
+  (loop for route across (gethash "routes" network #())
+        collect (wireguard-decode-key
+                 (required-cni-string route "wireguardPublicKey")
+                 "peer public key")))
+
+(defun wireguard-live-peer-keys-match-p
+    (network &key (status-reader #'read-wireguard-peer-statuses))
+  "True when the live peer key set exactly matches NETWORK's desired peers."
+  (equal (wireguard-peer-key-set (wireguard-desired-peer-keys network))
+         (wireguard-peer-key-set
+          (mapcar #'wireguard-peer-status-public-key (funcall status-reader)))))
+
+(defun wireguard-topology-identity (network)
+  "Return the WireGuard configuration fields whose change requires replacement."
+  (list (gethash "nodePodCIDR" network)
+        (gethash "underlayAddress" network)
+        (gethash "mtu" network)
+        (gethash "wireguardListenPort" network)
+        (loop for route across (gethash "routes" network #())
+              collect (list (gethash "nodeID" route)
+                            (gethash "podCIDR" route)
+                            (gethash "underlayAddress" route)
+                            (gethash "wireguardPublicKey" route)
+                            (gethash "wireguardListenPort" route)))))
+
+(defun wireguard-live-configuration-matches-p (network private-key)
+  "True when the kernel already has PRIVATE-KEY's identity and NETWORK's peers."
+  (handler-case
+      (let* ((messages (wireguard-device-messages))
+             (local-key (wireguard-device-public-key-from-messages messages))
+             (statuses (wireguard-peer-statuses-from-messages messages)))
+        (and local-key
+             (equalp local-key (gr8s.security::wireguard-public-key private-key))
+             (wireguard-live-peer-keys-match-p
+              network :status-reader (lambda () statuses))))
+    (error () nil)))
 
 (defun node-wireguard-owner (network)
   "Return the ownership alias for NETWORK's node-local WireGuard device."
@@ -265,6 +319,7 @@
   "Converge the owned WireGuard link, complete peer set, and Pod-CIDR routes."
   (let* ((local (gethash "underlayAddress" network ""))
          (wanted (wireguard-route-cidrs network))
+         (previous (first previous-networks))
          (previous-routes
            (remove-duplicates
             (mapcan #'wireguard-route-cidrs previous-networks) :test #'equal)))
@@ -278,7 +333,14 @@
         (delete-network-link +node-wireguard-interface+)
         (setf previous-routes nil)))
     (ensure-node-wireguard network)
-    (configure-wireguard-device +node-wireguard-interface+ private-key network)
+    ;; WGDEVICE_F_REPLACE_PEERS deletes and recreates every peer, which resets
+    ;; handshake and byte-counter telemetry. Replace only for actual topology or
+    ;; key drift; unchanged cached-network repair still verifies the live keys.
+    (when (or (null previous)
+              (not (equal (wireguard-topology-identity network)
+                          (wireguard-topology-identity previous)))
+              (not (wireguard-live-configuration-matches-p network private-key)))
+      (configure-wireguard-device +node-wireguard-interface+ private-key network))
     (dolist (cidr previous-routes)
       (unless (member cidr wanted :test #'equal)
         (multiple-value-bind (address prefix) (parse-ipv4-cidr cidr)

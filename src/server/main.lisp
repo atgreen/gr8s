@@ -1040,12 +1040,19 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
            (when ha
              (configure-raft-node-operation-routing
               (ha-control-plane-member ha) node-server))
-           ;; When the node server is exposed for remote agents, open its port in
-           ;; an active host firewalld so agents can enroll (podster-vwy). A
-           ;; 127.0.0.1 listener (single-node) needs nothing. No-op without
-           ;; firewalld; fail-soft.
-           (unless (string= "127.0.0.1" (getf options :node-listen "127.0.0.1"))
-             (ignore-errors (ensure-control-plane-firewall (getf options :node-port))))
+           ;; Admit the routable, authenticated node endpoints through an active
+           ;; host firewalld. The enrollment port is omitted for a loopback-only
+           ;; node server; the kubelet port is omitted unless serve will start a
+           ;; managed local containerd agent. No-op without firewalld; fail-soft.
+           (ignore-errors
+             (ensure-control-plane-firewall
+              (unless (string= "127.0.0.1" (getf options :node-listen "127.0.0.1"))
+                (getf options :node-port))
+              :kubelet-port
+              (when (and (not (getf options :disable-agent))
+                         (equal "containerd" (getf options :runtime))
+                         (equal "managed" (getf options :containerd-mode)))
+                (getf options :kubelet-port))))
            (let* ((runtime (make-control-plane-runtime store node-server))
                   (reconciler (make-reconciler store runtime)))
              (unless (getf options :disable-agent)
@@ -1160,11 +1167,16 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
       (when ha (stop-ha-control-plane ha))
       (when node-server
         (stop-node-grpc-server node-server)
-        ;; Withdraw the node-server port we opened for remote agents (podster-vwy),
-        ;; mirroring the open in startup. Fail-soft; a no-op without firewalld or
-        ;; for a 127.0.0.1 listener (which was never opened).
-        (unless (string= "127.0.0.1" (getf options :node-listen "127.0.0.1"))
-          (ignore-errors (remove-control-plane-firewall (getf options :node-port)))))
+        ;; Mirror the enrollment and authenticated kubelet firewall lifecycle.
+        (ignore-errors
+          (remove-control-plane-firewall
+           (unless (string= "127.0.0.1" (getf options :node-listen "127.0.0.1"))
+             (getf options :node-port))
+           :kubelet-port
+           (when (and (not (getf options :disable-agent))
+                      (equal "containerd" (getf options :runtime))
+                      (equal "managed" (getf options :containerd-mode)))
+             (getf options :kubelet-port)))))
       (when memory-monitor (stop-memory-monitor memory-monitor))))
   0)
 
