@@ -350,11 +350,12 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
                                                                     (core-object))
                                                            (core-object))
                                                   #())
-                     do (setf (gethash (dra-device-key (gethash "driver" result)
-                                                       (gethash "pool" result)
-                                                       (gethash "device" result))
-                                       used)
-                              t)))
+                     unless (gethash "adminAccess" result)
+                       do (setf (gethash (dra-device-key (gethash "driver" result)
+                                                         (gethash "pool" result)
+                                                         (gethash "device" result))
+                                         used)
+                                t)))
     used))
 
 (defun dra-slice-available-on-node-p (slice node)
@@ -474,13 +475,16 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
                           (visit (rest remaining) (1- remaining-count) needed selected))))))
     (visit candidates (length candidates) count nil)))
 
-(defun dra-candidates-to-results (candidates result-name)
+(defun dra-candidates-to-results (candidates result-name &optional admin-access)
   "Convert allocation CANDIDATES into status results for RESULT-NAME."
   (map 'vector
        (lambda (candidate)
-         (core-object "request" result-name
-                      "driver" (first candidate) "pool" (second candidate)
-                      "device" (third candidate)))
+         (let ((result (core-object "request" result-name
+                                    "driver" (first candidate) "pool" (second candidate)
+                                    "device" (third candidate))))
+           (when admin-access
+             (setf (gethash "adminAccess" result) t))
+           result))
        candidates))
 
 (defun dra-map-exact-request-options-unlocked (function store exact result-name node used)
@@ -490,6 +494,7 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
                          (pod-store-resources store)))
          (mode (gethash "allocationMode" exact "ExactCount"))
          (count (gethash "count" exact 1))
+         (admin-access (gethash "adminAccess" exact))
          (selectors (and class
                          (concatenate 'vector
                                       (gethash "selectors" (gethash "spec" class) #())
@@ -520,11 +525,11 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
           (maphash
            (lambda (key candidates)
              (declare (ignore key))
-             (unless (find t candidates :key #'fourth)
+             (unless (and (not admin-access) (find t candidates :key #'fourth))
                (push (dra-candidates-to-results
                       (mapcar (lambda (candidate) (subseq candidate 0 3))
                               (nreverse candidates))
-                      result-name)
+                      result-name admin-access)
                      options)))
            pools)
           (dolist (option (sort options #'string<
@@ -536,8 +541,10 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
               (return-from dra-map-exact-request-options-unlocked t))))
         (dra-map-candidate-combinations
          (lambda (combination)
-           (funcall function (dra-candidates-to-results combination result-name)))
-         (loop for candidate in matching unless (fourth candidate)
+           (funcall function (dra-candidates-to-results
+                              combination result-name admin-access)))
+         (loop for candidate in matching
+               unless (and (not admin-access) (fourth candidate))
                collect (subseq candidate 0 3))
          count))))
 
@@ -613,27 +620,40 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
 (defun dra-claim-results-unlocked (store claim node used)
   "Search REQUEST alternatives for the first constraint-satisfying allocation."
   (let ((requests (gethash "requests" (gethash "devices" (gethash "spec" claim) (core-object)) #()))
-        (solution nil))
-    (labels ((search-request (index results)
+        (solution nil)
+        (claim-used (make-hash-table :test #'equal)))
+    (labels ((try-option (option index results)
+               (let* ((keys (map 'list
+                                 (lambda (result)
+                                   (dra-device-key (gethash "driver" result)
+                                                   (gethash "pool" result)
+                                                   (gethash "device" result)))
+                                 option))
+                      (admin-access
+                        (and (plusp (length option))
+                             (every (lambda (result) (gethash "adminAccess" result))
+                                    option))))
+                 (unless (or (some (lambda (key) (gethash key claim-used)) keys)
+                             (and (not admin-access)
+                                  (some (lambda (key) (gethash key used)) keys)))
+                   (let ((new-global-keys
+                           (remove-if (lambda (key) (gethash key used)) keys)))
+                     (dolist (key keys)
+                       (setf (gethash key claim-used) t
+                             (gethash key used) t))
+                     (unwind-protect
+                          (search-request (1+ index)
+                                          (append results (coerce option 'list)))
+                       (dolist (key keys) (remhash key claim-used))
+                       (dolist (key new-global-keys) (remhash key used)))))))
+             (search-request (index results)
                (if (= index (length requests))
                    (let ((vector (coerce results 'vector)))
                      (when (dra-constraints-satisfied-p store claim node vector)
                        (setf solution vector)
                        t))
                    (dra-map-request-options-unlocked
-                    (lambda (option)
-                      (let ((keys (map 'list
-                                       (lambda (result)
-                                         (dra-device-key (gethash "driver" result)
-                                                         (gethash "pool" result)
-                                                         (gethash "device" result)))
-                                       option)))
-                        (unless (some (lambda (key) (gethash key used)) keys)
-                          (dolist (key keys) (setf (gethash key used) t))
-                          (unwind-protect
-                               (search-request (1+ index)
-                                               (append results (coerce option 'list)))
-                            (dolist (key keys) (remhash key used))))))
+                    (lambda (option) (try-option option index results))
                     store (aref requests index) node used))))
       (if (search-request 0 nil)
           (values solution t)

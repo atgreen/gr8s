@@ -470,6 +470,73 @@
                       (gr8s::core-object "effect" "FutureEffect")))
     (gr8s::core-object))))
 
+(test scheduler-shares-dra-devices-through-admin-access
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((node (make-test-node "worker-a" "node-a" "10.64.0.0/20")))
+      (gr8s:register-node store node)
+      (gr8s:mark-node-ready store "worker-a" 100))
+    (gr8s::create-core-resource
+     store "deviceclasses"
+     (gr8s::core-object
+      "apiVersion" "resource.k8s.io/v1" "kind" "DeviceClass"
+      "metadata" (gr8s::core-object "name" "accelerator")
+      "spec" (gr8s::core-object "selectors" #()))
+     nil)
+    (gr8s::create-core-resource
+     store "resourceslices"
+     (gr8s::core-object
+      "apiVersion" "resource.k8s.io/v1" "kind" "ResourceSlice"
+      "metadata" (gr8s::core-object "name" "devices")
+      "spec" (gr8s::core-object
+              "driver" "devices.example.com"
+              "pool" (gr8s::core-object "name" "pool" "generation" 1
+                                         "resourceSliceCount" 1)
+              "nodeName" "worker-a"
+              "devices" (vector (gr8s::core-object "name" "gpu-0")
+                                (gr8s::core-object "name" "gpu-1"))))
+     nil)
+    (labels ((create-claim (name admin-access)
+               (gr8s::create-core-resource
+                store "resourceclaims"
+                (gr8s::core-object
+                 "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
+                 "metadata" (gr8s::core-object "name" name)
+                 "spec" (gr8s::core-object
+                         "devices" (gr8s::core-object
+                                    "requests"
+                                    (vector
+                                     (gr8s::core-object
+                                      "name" "gpu"
+                                      "exactly"
+                                      (gr8s::core-object
+                                       "deviceClassName" "accelerator"
+                                       "allocationMode" "ExactCount" "count" 1
+                                       "adminAccess" admin-access))))))
+                "default"))
+             (allocate (claim-name pod-name)
+               (let* ((pod (create-pod store (dra-test-pod pod-name claim-name)))
+                      (node (gr8s:schedule-pod store pod))
+                      (claim (gr8s::get-core-resource
+                              store "resourceclaims" "default" claim-name))
+                      (result (aref (gethash
+                                     "results"
+                                     (gethash "devices"
+                                              (gethash "allocation"
+                                                       (gethash "status" claim)))
+                                     #())
+                                    0)))
+                 (is (equal "worker-a" (and node (gr8s:node-record-name node))))
+                 result)))
+      (create-claim "admin" t)
+      (create-claim "ordinary" nil)
+      (let ((admin-result (allocate "admin" "admin-pod"))
+            (ordinary-result (allocate "ordinary" "ordinary-pod")))
+        (is (equal "gpu-0" (gethash "device" admin-result)))
+        (is (eq t (gethash "adminAccess" admin-result)))
+        (is (equal "gpu-0" (gethash "device" ordinary-result)))
+        (is-false (gethash "adminAccess" ordinary-result))))))
+
 (test scheduler-allocates-all-matching-dra-devices-from-one-pool
   (with-temporary-store (store path)
     (declare (ignore path))
