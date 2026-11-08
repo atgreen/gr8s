@@ -574,6 +574,53 @@
                           (gr8s:node-record-id (gr8s:get-node store "worker-retry")))))
         (gr8s:stop-node-grpc-server server)))))
 
+(test image-tracker-rpc-binds-node-name-to-the-mtls-certificate
+  (with-temporary-store (store path)
+    (let* ((pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" path)))
+           (server (gr8s:start-node-grpc-server
+                    store :host "127.0.0.1" :port 0 :pki pki))
+           (directory (merge-pathnames "tracker-node/" path))
+           (private-key (merge-pathnames "node.key" directory))
+           (certificate (merge-pathnames "node.crt" directory))
+           (ca-certificate (merge-pathnames "ca.crt" directory))
+           (channel nil))
+      (unwind-protect
+           (progn
+             (gr8s:enroll-node-over-grpc
+              "127.0.0.1" (gr8s:node-grpc-server-port server)
+              "tracker-node" (gr8s:create-join-token pki "tracker-node")
+              (gr8s:cluster-pki-ca-fingerprint pki)
+              private-key certificate ca-certificate)
+             (setf channel
+                   (gr8s::make-node-tls-channel
+                    "127.0.0.1" (gr8s:node-grpc-server-port server)
+                    :timeout 5 :ca-certificate-path ca-certificate
+                    :certificate-path certificate :private-key-path private-key))
+             (let ((stub (gr8s.node.v1::make-node-service-stub channel)))
+               (multiple-value-bind (response status)
+                   (gr8s.node.v1::node-service-track-image
+                    stub
+                    (make-instance
+                     'gr8s.node.v1::image-tracker-request
+                     :node-name "tracker-node" :action "acquire"
+                     :digest
+                     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                    :timeout 5)
+                 (declare (ignore status))
+                 (is (string= "granted"
+                              (slot-value response 'gr8s.node.v1::status))))
+               (signals ag-grpc:grpc-status-error
+                   (gr8s.node.v1::node-service-track-image
+                  stub
+                  (make-instance
+                   'gr8s.node.v1::image-tracker-request
+                   :node-name "different-node" :action "lookup"
+                   :digest
+                   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                  :timeout 5))))
+        (when channel (ignore-errors (ag-grpc:channel-close channel)))
+        (gr8s:stop-node-grpc-server server)))))
+
 (test ha-enrollment-replicates-an-ordered-node-operation
   (with-temporary-store (store path)
     (gr8s:register-node

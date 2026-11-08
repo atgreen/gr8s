@@ -13,6 +13,13 @@ It is not a fork or a repackaging of upstream Kubernetes. Almost everything
 above the container runtime is written from scratch in Common Lisp. The result
 is a cluster you can read, reason about, and run from one file.
 
+**Images spread node-to-node.** On a cold multi-node rollout, gr8s grants one
+node the exclusive right to fetch each missing OCI blob, verifies it, and then
+distributes it to the other nodes with the actual BitTorrent v2 peer protocol.
+Every node that completes the blob becomes a seeder. The private swarm is
+authenticated with node certificates and mTLS, and strict mode gives containerd
+no direct-registry escape hatch that could turn a DaemonSet into a pull storm.
+
 **Post-quantum secure by default.** gr8s carries its own pure-Lisp TLS 1.3 stack
 — no OpenSSL, no C — and every internal channel (the Kubernetes API, the node
 agent protocol, and Raft) prefers **post-quantum hybrid key exchange

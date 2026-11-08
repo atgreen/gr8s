@@ -727,7 +727,8 @@ The new identity takes effect when the node agent next starts."
           (ca-certificate (agent-state-path options "ca.crt"))
           (identity (agent-state-path options "identity.json"))
           (node-runtime nil)
-          (kubelet nil))
+          (kubelet nil)
+          (image-distribution nil))
       (unless (and (probe-file private-key)
                    (probe-file certificate)
                    (probe-file ca-certificate))
@@ -736,8 +737,22 @@ The new identity takes effect when the node agent next starts."
          private-key certificate ca-certificate))
       (multiple-value-bind (wireguard-private-key wireguard-public-key)
           (ensure-wireguard-key-pair (getf options :state-directory))
-        (declare (ignore wireguard-private-key))
         (multiple-value-bind (runtime manager) (runtime-from-options options)
+          (when (and manager (containerd-runtime-p runtime))
+            (multiple-value-bind (tracker-call tracker-close)
+                (gr8s.agent::make-image-tracker-rpc-client
+                 host port node-name ca-certificate certificate private-key)
+              (setf image-distribution
+                    (gr8s.security::start-node-image-distribution
+                     (agent-state-path options "images/")
+                     tracker-call tracker-close ca-certificate certificate private-key
+                     (or (getf options :node-address)
+                         (discover-local-primary-ipv4)
+                         "127.0.0.1"))
+                    (gr8s.runtime.containerd::containerd-runtime-registry-host-config-directory runtime)
+                    (managed-containerd-directory manager "containerd/certs.d")
+                    (gr8s.runtime.containerd::containerd-runtime-image-mirror-port runtime)
+                    (gr8s.security::node-image-distribution-mirror-port image-distribution))))
           (setf node-runtime
               (make-node-runtime
                (agent-state-path options "runtime/") runtime manager
@@ -776,7 +791,9 @@ The new identity takes effect when the node agent next starts."
                 :kubelet-port (if kubelet (getf options :kubelet-port) 0)
                 :stop-predicate stop-predicate))
           (when kubelet (stop-kubelet-server kubelet))
-          (stop-node-runtime node-runtime))))))
+          (stop-node-runtime node-runtime)
+          (when image-distribution
+            (gr8s.security::stop-node-image-distribution image-distribution)))))))
   0)
 
 (defstruct local-node-agent

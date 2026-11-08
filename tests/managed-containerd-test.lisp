@@ -107,9 +107,20 @@
     (is (search "BinaryName = '/opt/gr8s/bin/runc'" config))
     (is (search "Root = '/var/lib/gr8s/containerd/run/runc'" config))
     (is (search "restrict_oom_score_adj = true" config))
-    (is (search "bin_dirs = ['/opt/gr8s/bin/cni/']" config))
+    (is (search "bin_dirs = [\"/opt/gr8s/bin/cni/\"]" config))
     (is (search "conf_dir = '/var/lib/gr8s/containerd/cni/net.d'" config))
     (is (search "platform = 'linux/arm64'" config))))
+
+(test managed-containerd-routes-registry-pulls-through-its-private-host-config
+  (let* ((manager
+           (gr8s::make-managed-containerd
+            :state-directory "/var/lib/gr8s/"
+            :executable "/opt/gr8s/bin/containerd"
+            :oci-runtime "/opt/gr8s/bin/runc"
+            :cni-bin-directory "/opt/gr8s/bin/cni/"))
+         (config (gr8s::managed-containerd-config-text manager)))
+    (is (search "[plugins.'io.containerd.cri.v1.images'.registry]" config))
+    (is (search "config_path = '/var/lib/gr8s/containerd/certs.d'" config))))
 
 (test managed-containerd-can-delegate-cni-configuration-to-operator-owned-plugins
   (let* ((root (merge-pathnames

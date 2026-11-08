@@ -36,7 +36,7 @@
              (:constructor %make-node-grpc-server
                  (&key store grpc-server thread port heartbeat-timeout-seconds
                        pki cluster-pod-cidr node-prefix overlay-backend
-                       wireguard-listen-port)))
+                       wireguard-listen-port image-tracker)))
   store
   grpc-server
   thread
@@ -47,6 +47,7 @@
   node-prefix
   (overlay-backend "vxlan")
   (wireguard-listen-port 51820)
+  (image-tracker (gr8s.image-distribution::make-image-tracker))
   (revisions (make-hash-table :test #'equal))
   (snapshots (make-hash-table :test #'equal))
   (statuses (make-hash-table :test #'equal))
@@ -1119,6 +1120,81 @@ operation. No-op when no operation matches MESSAGE's id."
        (pki-ascii-octets
         (uiop:read-file-string (cluster-pki-ca-certificate-path pki)))))))
 
+(defun image-tracker-peer-message (peer)
+  (make-instance
+   'gr8s.node.v1::image-tracker-peer
+   :node-name (gr8s.image-distribution::tracker-peer-node-name peer)
+   :address (gr8s.image-distribution::tracker-peer-address peer)
+   :port (gr8s.image-distribution::tracker-peer-port peer)
+   :peer-id (gr8s.image-distribution::tracker-peer-peer-id peer)
+   :complete (gr8s.image-distribution::tracker-peer-complete-p peer)))
+
+(defun image-tracker-view-response (view)
+  (make-instance
+   'gr8s.node.v1::image-tracker-response
+   :status (string-downcase
+            (symbol-name (gr8s.image-distribution::tracker-view-status view)))
+   :expires-at (or (gr8s.image-distribution::tracker-view-origin-expires-at view) 0)
+   :metainfo (or (gr8s.image-distribution::tracker-view-metainfo view) #())
+   :infohash (or (gr8s.image-distribution::tracker-view-infohash view) #())
+   :peers (mapcar #'image-tracker-peer-message
+                  (gr8s.image-distribution::tracker-view-peers view))))
+
+(defun handle-image-tracker-request (server request context)
+  "Execute one tracker operation for the node identity authenticated by mTLS."
+  (let* ((node-name (slot-value request 'gr8s.node.v1::node-name))
+         (tracker (node-grpc-server-image-tracker server))
+         (digest (slot-value request 'gr8s.node.v1::digest)))
+    ;; This is deliberately before dispatch: no tracker state is observable or
+    ;; mutable until the claimed node name matches the client certificate.
+    (authenticate-node-peer (node-grpc-server-pki server) context node-name)
+    (flet ((response (status &key token expires-at infohash)
+             (make-instance 'gr8s.node.v1::image-tracker-response
+                            :status status :lease-token (or token #())
+                            :expires-at (or expires-at 0)
+                            :infohash (or infohash #()))))
+      (let ((action (slot-value request 'gr8s.node.v1::action)))
+        (cond
+          ((string= action "lookup")
+           (image-tracker-view-response
+            (gr8s.image-distribution::tracker-lookup tracker digest node-name)))
+          ((string= action "acquire")
+           (multiple-value-bind (status token expires-at owner)
+               (gr8s.image-distribution::tracker-acquire-origin
+                tracker digest node-name)
+             (declare (ignore owner))
+             (response (string-downcase (symbol-name status))
+                       :token token :expires-at expires-at)))
+          ((string= action "renew")
+           (response
+            "ok" :expires-at
+            (gr8s.image-distribution::tracker-renew-origin
+             tracker digest node-name
+             (slot-value request 'gr8s.node.v1::lease-token))))
+          ((string= action "publish")
+           (response
+            "ok" :infohash
+            (gr8s.image-distribution::tracker-publish-swarm
+             tracker digest node-name
+             (slot-value request 'gr8s.node.v1::lease-token)
+             (slot-value request 'gr8s.node.v1::metainfo)
+             (slot-value request 'gr8s.node.v1::peer-address)
+             (slot-value request 'gr8s.node.v1::peer-port)
+             (slot-value request 'gr8s.node.v1::peer-id))))
+          ((string= action "announce")
+           (gr8s.image-distribution::tracker-announce-peer
+            tracker digest node-name
+            (slot-value request 'gr8s.node.v1::peer-address)
+            (slot-value request 'gr8s.node.v1::peer-port)
+            (slot-value request 'gr8s.node.v1::peer-id)
+            :complete-p (slot-value request 'gr8s.node.v1::complete))
+           (response "ok"))
+          ((string= action "withdraw")
+           (gr8s.image-distribution::tracker-withdraw-peer
+            tracker digest node-name)
+           (response "ok"))
+          (t (error "Unknown image tracker action ~S" action)))))))
+
 (defun start-node-grpc-server (store &key (host "127.0.0.1") (port 0)
                                             (heartbeat-timeout-seconds 15)
                                             pki
@@ -1152,7 +1228,9 @@ operation. No-op when no operation matches MESSAGE's id."
     (gr8s.node.v1::register-node-service-service
      grpc-server
      :connect-handler (lambda (context stream)
-                        (handle-node-connect server context stream)))
+                        (handle-node-connect server context stream))
+     :track-image-handler (lambda (request context)
+                            (handle-image-tracker-request server request context)))
     (when pki
       (gr8s.node.v1::register-enrollment-service-service
        grpc-server

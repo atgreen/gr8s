@@ -866,3 +866,54 @@ and kills the thread. A throw also passes runtime wrappers that handle errors."
                            (funcall stop-predicate))
                  (sleep reconnect-delay))))
     completed))
+
+(defun image-tracker-response-plist (response)
+  "Convert the protobuf tracker response into the image coordinator's small
+plist interface without leaking generated protocol classes into that layer."
+  (list :status (slot-value response 'gr8s.node.v1::status)
+        :token (slot-value response 'gr8s.node.v1::lease-token)
+        :expires-at (slot-value response 'gr8s.node.v1::expires-at)
+        :metainfo (slot-value response 'gr8s.node.v1::metainfo)
+        :infohash (slot-value response 'gr8s.node.v1::infohash)
+        :peers
+        (mapcar (lambda (peer)
+                  (list :node-name (slot-value peer 'gr8s.node.v1::node-name)
+                        :address (slot-value peer 'gr8s.node.v1::address)
+                        :port (slot-value peer 'gr8s.node.v1::port)
+                        :peer-id (slot-value peer 'gr8s.node.v1::peer-id)
+                        :complete (slot-value peer 'gr8s.node.v1::complete)))
+                (slot-value response 'gr8s.node.v1::peers))))
+
+(defun make-image-tracker-rpc-client
+    (host port node-name ca-certificate-path certificate-path private-key-path
+     &key (timeout 10))
+  "Return (values CALL CLOSE). CALL implements the callback contract consumed
+by ENSURE-STRICT-P2P-BLOB; the channel uses the enrolled node's mTLS identity."
+  (let* ((channel (make-node-tls-channel
+                   host port :timeout timeout
+                   :ca-certificate-path ca-certificate-path
+                   :certificate-path certificate-path
+                   :private-key-path private-key-path))
+         (stub (gr8s.node.v1::make-node-service-stub channel)))
+    (values
+     (lambda (action digest &rest arguments)
+       (flet ((argument (name default)
+                (getf arguments name default)))
+         (multiple-value-bind (response status)
+             (gr8s.node.v1::node-service-track-image
+              stub
+              (make-instance
+               'gr8s.node.v1::image-tracker-request
+               :node-name node-name
+               :action (string-downcase (symbol-name action))
+               :digest digest
+               :lease-token (argument :token #())
+               :metainfo (argument :metainfo #())
+               :peer-address (argument :address "")
+               :peer-port (argument :port 0)
+               :peer-id (argument :peer-id #())
+               :complete (argument :complete nil))
+              :timeout timeout)
+           (declare (ignore status))
+           (image-tracker-response-plist response))))
+     (lambda () (ag-grpc:channel-close channel)))))
