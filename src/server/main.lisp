@@ -358,8 +358,8 @@
                ((string= option "--state-directory")
                 (setf (getf options :state-directory) value))
                ((string= option "--role")
-                (unless (member value '("node" "control-plane") :test #'string=)
-                  (error "join-token --role must be node or control-plane"))
+                (unless (member value '("node" "control-plane" "witness") :test #'string=)
+                  (error "join-token --role must be node, control-plane, or witness"))
                 (setf (getf options :role) value))
                (t (error "unknown join-token option: ~A" option)))
              (setf arguments (cddr arguments)))
@@ -436,7 +436,7 @@
          (root (merge-pathnames "pki/" state))
          ;; Control-plane tokens have their own store and CA, so a token for a
          ;; worker node can't admit a Raft member.
-         (root (if (equal "control-plane" (getf options :role))
+         (root (if (member (getf options :role) '("control-plane" "witness") :test #'equal)
                    (merge-pathnames "raft/" root)
                    root)))
     ;; The token command must use an existing control plane's CA, never create
@@ -446,9 +446,13 @@
       (error "cluster PKI does not exist in the selected control-plane state directory"))
     (let* ((pki (ensure-cluster-pki root))
            (name (getf options :node-name))
-           (token (create-join-token pki name)))
+           (role (getf options :role))
+           (token (create-join-token
+                   pki name :role (cond ((equal role "control-plane") :voter)
+                                        ((equal role "witness") :witness)
+                                        (t :node)))))
       (com.inuoe.jzon:stringify
-       (json-object "nodeName" name "token" token
+       (json-object "nodeName" name "role" role "token" token
                     "caPin" (cluster-pki-ca-fingerprint pki)) :stream output)
       (terpri output)
       (finish-output output)))

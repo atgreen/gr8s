@@ -35,7 +35,7 @@
                        (list :member-id "w1" :node-name "w1"
                              :join (format nil "127.0.0.1:~D" (gr8s::raft-member-port a))
                              :listen "127.0.0.1" :port 0
-                             :token (gr8s:create-join-token raft-pki "w1")
+                             :token (gr8s:create-join-token raft-pki "w1" :role :witness)
                              :ca-pin (gr8s::cluster-pki-ca-fingerprint raft-pki)
                              :state-directory state)
                        :stop-predicate (lambda () stop)))

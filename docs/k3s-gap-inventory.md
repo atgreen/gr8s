@@ -4,7 +4,7 @@ SPDX-License-Identifier: Apache-2.0
 -->
 # Functional gaps relative to Kubernetes and k3s
 
-This is a difference-only inventory as of 2026-11-07. It is not a feature
+This is a difference-only inventory as of 2026-11-08. It is not a feature
 overview and does not score code quality, performance, maturity, or implementation
 language. A capability appears here only when current gr8s documentation or an
 open issue identifies a missing, partial, or incompatible behavior, or when a
@@ -30,9 +30,27 @@ The comparisons have different meanings:
 |---|---|---|
 | Conformance | No current build has passed the certified-conformance suite. The checked-in ledger's newest full result is round 4 at 64/446 tests; it predates substantial current functionality, so it is evidence of neither current failure counts nor current parity. A fresh run is required before making a conformance claim. | [Conformance ledger](CONFORMANCE.md); documentation refresh `podster-9do` |
 | IP families | Allocated Pod and Service networking is IPv4-only. `PreferDualStack` is accepted but produces a single IPv4 family; `RequireDualStack` and IPv6-only Services are refused. IPv6 DNS enforcement is deferred with IPv6 Pod networking. | [Services](networking.md#services--load-balancing); `tests/services-test.lisp`; `podster-yge` |
-| Registry credentials | Pod and ServiceAccount `imagePullSecrets`, node-wide Docker credential files, and kubelet v1 executable credential-provider plugins work, including Pod-bound ServiceAccount tokens and selected annotations. | [Config, identity and secrets](kubernetes-surface.md#config-identity--secrets) |
 | Dynamic Resource Allocation | ResourceClaim and ResourceClaimTemplate storage APIs exist, but there is no allocator/controller that turns claims into device allocations. | `src/resources/typed-apis.lisp`; no ResourceClaim controller |
-| Metrics APIs | gr8s serves `metrics.k8s.io/v1beta1` natively from per-node CRI/cgroup statistics, so NodeMetrics, PodMetrics, `kubectl top`, and dashboard CPU/MEM do not require metrics-server. A standalone `gr8s agent` does not yet serve kubelet metrics endpoints, and HPA has no custom or external metrics source. | [Metrics and autoscaling](kubernetes-surface.md#metrics--autoscaling) |
+| NetworkPolicy statefulness | Ingress and egress policy enforcement exist, but policy evaluation is stateless. Kubernetes permits reply traffic for an allowed connection without requiring a matching policy in the reverse direction; gr8s still needs connection tracking to preserve that semantic. | `podster-10p.6`; `podster-26r` |
+
+Registry credentials and resource metrics are no longer gaps. Pod and
+ServiceAccount `imagePullSecrets`, node-wide Docker credential files, and
+kubelet v1 executable credential providers are implemented. gr8s also serves
+`metrics.k8s.io/v1beta1` natively for NodeMetrics, PodMetrics, `kubectl top`, and
+dashboard CPU/MEM without a metrics-server deployment.
+
+## Material correctness and operability gaps
+
+These are not all Kubernetes API-surface gaps, but they are more material to a
+real k3s replacement than several missing optional APIs:
+
+| Priority | Gap | Why it is material | Tracking |
+|---|---|---|---|
+| P0 | Fresh certified-conformance evidence | The only result preserved from the 192.168.1.10 attempt is a focused 8-test run (8 passed, 3,205 skipped), not a certified run. Without a current full result, portable behavior remains unmeasured and prioritization is partly speculative. | `podster-9do` |
+| P0 | Control-plane memory safety | Serializing the complete core-state blob can exhaust the SBCL heap and terminate the server under memory pressure. k3s parity is not useful if ordinary control-plane state can crash the process. | `podster-061`; per-key replication `podster-bwu.2` |
+| P1 | Host firewall independence | Pod-to-Pod, Service, and API traffic is not yet independent of firewalld policy. The trusted-zone workaround is transitional; the selected fix is an eBPF host-routing path that bypasses netfilter for cluster traffic. | `podster-pnd`; `podster-bgn.3`; cleanup `podster-ntp` |
+| P1 | HA state consistency | Image tracker leases/swarms are not yet consistent across control-plane members, Pod replication retains a leader-crash window, and node heartbeat monitoring must remain alive on followers. These can surface as stale availability or incorrect failover behavior. | `podster-i5vx`; `podster-bwu.1`; `podster-7ni6.3.5` |
+| P1 | Installation and recovery lifecycle | There is still no k3s-like installer/service lifecycle, operator backup/restore command, or cluster certificate inventory/rotation workflow. These are the largest day-two operational omissions. | Distribution and operational rows below |
 
 The open empirical compatibility map under `podster-bgn` contains narrower API
 and wire-format defects found by running a real controller stack. Those issues

@@ -271,30 +271,39 @@ TEXT is a string, or a function that writes the text to the stream it is given."
    :sha256
    (concatenate '(vector (unsigned-byte 8)) salt (pki-ascii-octets secret))))
 
-(defun token-record-json (node-name salt digest state)
-  "Serialize node binding, salted digest and one-time enrollment state."
+(defun join-token-role-name (role)
+  "Return ROLE's persisted lower-case name, or reject an unknown trust role."
+  (let ((name (string-downcase (string role))))
+    (unless (member name '("node" "voter" "witness") :test #'string=)
+      (pki-fail "invalid-token-role" "Unknown join-token role ~A" role))
+    name))
+
+(defun token-record-json (node-name salt digest state role)
+  "Serialize node and role binding, salted digest and one-time enrollment state."
   (let ((record (make-hash-table :test #'equal)))
     (setf (gethash "nodeName" record) node-name
+          (gethash "role" record) (join-token-role-name role)
           (gethash "salt" record) (octets-to-hex salt)
           (gethash "digest" record) (octets-to-hex digest)
           (gethash "state" record) state)
     (with-output-to-string (stream)
       (com.inuoe.jzon:stringify record :stream stream))))
 
-(defun create-join-token (pki node-name)
-  "Persist a new unused node-bound token digest and return its one-time secret."
+(defun create-join-token (pki node-name &key (role :node))
+  "Persist a new unused node-and-role-bound token digest and return its one-time secret."
   (ensure-valid-node-name node-name)
-  (bt:with-lock-held ((cluster-pki-lock pki))
-    (loop
-      for identifier = (octets-to-hex (ironclad:random-data 12))
-      for secret = (octets-to-hex (ironclad:random-data 32))
-      for path = (token-path pki identifier)
-      unless (probe-file path)
-        do (let* ((salt (ironclad:random-data 16))
-                  (digest (token-digest salt secret)))
-             (write-private-text-exclusively
-              path (token-record-json node-name salt digest "unused"))
-             (return (format nil "~A.~A" identifier secret))))))
+  (let ((role (join-token-role-name role)))
+    (bt:with-lock-held ((cluster-pki-lock pki))
+      (loop
+        for identifier = (octets-to-hex (ironclad:random-data 12))
+        for secret = (octets-to-hex (ironclad:random-data 32))
+        for path = (token-path pki identifier)
+        unless (probe-file path)
+          do (let* ((salt (ironclad:random-data 16))
+                    (digest (token-digest salt secret)))
+               (write-private-text-exclusively
+                path (token-record-json node-name salt digest "unused" role))
+               (return (format nil "~A.~A" identifier secret)))))))
 
 (defun split-join-token (token)
   "Validate token shape and hexadecimal identifier material before pathname use."
@@ -320,8 +329,8 @@ TEXT is a string, or a function that writes the text to the stream it is given."
       (error ()
         (pki-fail "invalid-token" "Unreadable join-token record")))))
 
-(defun validate-token (pki token node-name)
-  "Check secret digest, exact node binding and unused state before enrollment."
+(defun validate-token (pki token node-name &key expected-role)
+  "Check secret digest, exact node and optional role binding, and unused state."
   (multiple-value-bind (identifier secret) (split-join-token token)
     (multiple-value-bind (record path) (load-token-record pki identifier)
       (let* ((salt (hex-to-octets (gethash "salt" record)))
@@ -331,6 +340,14 @@ TEXT is a string, or a function that writes the text to the stream it is given."
           (pki-fail "invalid-token" "Join token secret does not match"))
         (unless (string= node-name (gethash "nodeName" record))
           (pki-fail "node-name-mismatch" "Join token belongs to a different node"))
+        (let ((role (gethash "role" record)))
+          (unless role
+            (pki-fail "invalid-token-role" "Legacy unscoped join tokens are not accepted"))
+          (join-token-role-name role)
+          (when (and expected-role
+                     (not (string= role (join-token-role-name expected-role))))
+            (pki-fail "token-role-mismatch"
+                      "Join token is bound to role ~A, not ~A" role expected-role)))
         (unless (string= "unused" (gethash "state" record))
           (pki-fail "token-already-used" "Join token has already been used"))
         (values record path salt stored-digest)))))
@@ -433,14 +450,14 @@ TEXT is a string, or a function that writes the text to the stream it is given."
     (pki-fail "ca-pin-mismatch" "Presented cluster CA fingerprint does not match"))
   (bt:with-lock-held ((cluster-pki-lock pki))
     (multiple-value-bind (record path salt digest)
-        (validate-token pki token node-name)
+        (validate-token pki token node-name :expected-role :node)
       (multiple-value-bind (requested-subject subject-public-key)
           (parse-and-verify-node-csr csr node-name)
         (declare (ignore requested-subject))
         (setf (gethash "state" record) "used")
         (write-private-text-atomically
          path
-         (token-record-json node-name salt digest "used"))
+         (token-record-json node-name salt digest "used" (gethash "role" record)))
         (pure-tls/acme::wrap-pem
          "CERTIFICATE"
          (node-certificate-der pki (pure-tls/acme::encode-subject node-name) subject-public-key))))))

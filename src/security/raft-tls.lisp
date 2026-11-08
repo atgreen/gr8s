@@ -91,19 +91,12 @@ NODE-PKI is the control plane's own, whose CA is shared with voters it enrolls."
         pki member-id (generate-node-key-and-csr member-id (raft-member-key-path root)))))
     (load-raft-credentials root)))
 
-(defun consume-raft-join-token (pki token node-name)
-  "Check TOKEN against the Raft token store and use it up. Caller holds the PKI lock."
-  (multiple-value-bind (record path salt digest) (validate-token pki token node-name)
-    (declare (ignore record))
-    (write-private-text-atomically path (token-record-json node-name salt digest "used"))))
-
 (defun raft-member-handle-enroll (member request)
   "Issue a certificate to a new member presenting a Raft join token and return its credentials."
   (let* ((credentials (raft-member-credentials member))
          (pki (and credentials (raft-credentials-pki credentials)))
          (node-pki (and credentials (raft-credentials-node-pki credentials)))
-         (id (gr8s.node.v1::member-id request))
-         (voter (not (string-equal "witness" (gr8s.node.v1::role request)))))
+         (id (gr8s.node.v1::member-id request)))
     (unless pki (pki-fail "enrollment-disabled" "This Raft member can't enroll others"))
     (ensure-valid-node-name id)
     ;; A fresh token must not let its holder take over an existing member's identity.
@@ -112,28 +105,39 @@ NODE-PKI is the control plane's own, whose CA is shared with voters it enrolls."
                  :test #'equal)
       (pki-fail "member-exists" "Raft member ~A already exists" id))
     (bt:with-lock-held ((cluster-pki-lock pki))
-      (let ((certificate (issue-raft-member-certificate pki id (gr8s.node.v1::certificate-request request))))
-        (consume-raft-join-token pki (gr8s.node.v1::join-token request) (gr8s.node.v1::node-name request))
-        (make-instance 'gr8s.node.v1::enroll-member-response
-                       :certificate certificate
-                       :ca-certificate (uiop:read-file-string (cluster-pki-ca-certificate-path pki))
-                       :ca-private-key (if voter
-                                           (uiop:read-file-string (cluster-pki-ca-private-key-path pki))
-                                           "")
-                       :node-ca-certificate
-                       (if (and voter node-pki)
-                           (uiop:read-file-string (cluster-pki-ca-certificate-path node-pki))
-                           "")
-                       :node-ca-private-key
-                       (if (and voter node-pki)
-                           (uiop:read-file-string (cluster-pki-ca-private-key-path node-pki))
-                           "")
-                       :service-account-signing-key
-                       (if (and voter node-pki)
-                           (uiop:read-file-string
-                            (service-account-signing-key-path-under-pki-root
-                             (cluster-pki-root node-pki)))
-                           ""))))))
+      (multiple-value-bind (record path salt digest)
+          (validate-token pki (gr8s.node.v1::join-token request)
+                          (gr8s.node.v1::node-name request)
+                          :expected-role (gr8s.node.v1::role request))
+        (let* ((role (gethash "role" record))
+               (voter (string= "voter" role))
+               (certificate
+                 (issue-raft-member-certificate
+                  pki id (gr8s.node.v1::certificate-request request))))
+          ;; Spend the token only after its CSR has produced a certificate. The
+          ;; persisted issuer-bound role, never the request, controls key release.
+          (write-private-text-atomically
+           path (token-record-json (gr8s.node.v1::node-name request) salt digest "used" role))
+          (make-instance 'gr8s.node.v1::enroll-member-response
+                         :certificate certificate
+                         :ca-certificate (uiop:read-file-string (cluster-pki-ca-certificate-path pki))
+                         :ca-private-key (if voter
+                                             (uiop:read-file-string (cluster-pki-ca-private-key-path pki))
+                                             "")
+                         :node-ca-certificate
+                         (if (and voter node-pki)
+                             (uiop:read-file-string (cluster-pki-ca-certificate-path node-pki))
+                             "")
+                         :node-ca-private-key
+                         (if (and voter node-pki)
+                             (uiop:read-file-string (cluster-pki-ca-private-key-path node-pki))
+                             "")
+                         :service-account-signing-key
+                         (if (and voter node-pki)
+                             (uiop:read-file-string
+                              (service-account-signing-key-path-under-pki-root
+                               (cluster-pki-root node-pki)))
+                             "")))))))
 
 (defun install-shared-node-ca (node-root certificate-pem key-pem)
   "Store the cluster's node CA under NODE-ROOT, refusing to replace a different complete one,

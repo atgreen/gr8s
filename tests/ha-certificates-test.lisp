@@ -47,7 +47,7 @@
                                         (merge-pathnames "raft/" (uiop:ensure-directory-pathname ,state))
                                         "w1" "127.0.0.1" (control-plane-port ,founder)
                                         :role :witness :node-name "w1"
-                                        :token (gr8s:create-join-token raft-pki "w1")
+                                        :token (gr8s:create-join-token raft-pki "w1" :role :witness)
                                         :ca-pin (gr8s::cluster-pki-ca-fingerprint raft-pki)))))
      (unwind-protect
           (progn
@@ -108,7 +108,7 @@
              (reason (handler-case
                          (gr8s::ensure-joining-control-plane-pki
                           root "cp2" "127.0.0.1" (control-plane-port founder)
-                          :node-name "cp2" :token (gr8s:create-join-token raft-pki "cp2")
+                          :node-name "cp2" :token (gr8s:create-join-token raft-pki "cp2" :role :voter)
                           :ca-pin (gr8s::cluster-pki-ca-fingerprint raft-pki))
                        (gr8s:pki-error (condition) (gr8s:pki-error-reason condition)))))
         (is (equal "node-ca-conflict" reason))
@@ -134,7 +134,7 @@
              (node-root (merge-pathnames "pki/" state)))
         (gr8s::enroll-raft-member (merge-pathnames "raft/" state) "w1" "127.0.0.1" (control-plane-port founder)
                                   :role :witness :node-name "w1" :node-root node-root
-                                  :token (gr8s:create-join-token raft-pki "w1")
+                                  :token (gr8s:create-join-token raft-pki "w1" :role :witness)
                                   :ca-pin (gr8s::cluster-pki-ca-fingerprint raft-pki))
         (is (probe-file (gr8s::raft-member-certificate-path (merge-pathnames "raft/" state))))
         (is (null (probe-file (gr8s::raft-ca-certificate-path node-root))))
@@ -193,7 +193,8 @@
              (credentials (gr8s::ensure-raft-joiner-credentials
                            (merge-pathnames "raft/" (uiop:ensure-directory-pathname path))
                            "w1" "127.0.0.1" (control-plane-port founder)
-                           :role :witness :node-name "w1" :token (gr8s:create-join-token raft-pki "w1")
+                           :role :witness :node-name "w1"
+                           :token (gr8s:create-join-token raft-pki "w1" :role :witness)
                            :ca-pin (gr8s::cluster-pki-ca-fingerprint raft-pki)))
              ;; This member never joined, so it has no peer to ask.
              (lonely (gr8s::start-raft-member "w1" :apply-fn (lambda (c) (declare (ignore c)) nil)

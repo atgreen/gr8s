@@ -35,7 +35,8 @@
            (gr8s::stop-ha-control-plane ,founder))))))
 
 (defun join-control-plane (founder store path id &key (node-name id)
-                                                   (token (gr8s:create-join-token (member-raft-pki founder) node-name))
+                                                   (token (gr8s:create-join-token
+                                                           (member-raft-pki founder) node-name :role :voter))
                                                    (ca-pin (gr8s::cluster-pki-ca-fingerprint (member-raft-pki founder))))
   (let ((pki (gr8s::ensure-joining-control-plane-pki
               (merge-pathnames "pki/" (uiop:ensure-directory-pathname path)) id
@@ -245,13 +246,26 @@
                    "a certificate for one member can't join another"))
           (gr8s::stop-ha-control-plane joiner))))))
 
-(defun enrollment-refused-p (founder path &key (id "cp2") (node-name id) token ca-pin)
+(defun enrollment-refused-p (founder path &key (id "cp2") (node-name id) token ca-pin (role :voter))
   "Attempt enrollment with these details and return whether it was refused and left no certificate."
   (let ((root (gr8s::raft-tls-root (raft-tls-test-pki path))))
     (and (rejected-p (lambda ()
                        (gr8s::enroll-raft-member root id "127.0.0.1" (control-plane-port founder)
-                                                 :node-name node-name :token token :ca-pin ca-pin)))
+                                                 :node-name node-name :token token :ca-pin ca-pin
+                                                 :role role)))
          (null (probe-file (gr8s::raft-member-certificate-path root))))))
+
+(test a-witness-token-can-not-escalate-to-voter
+  (with-founded-cluster (founder)
+    (with-temporary-store (store path)
+      (declare (ignorable store))
+      (let* ((raft-pki (member-raft-pki founder))
+             (pin (gr8s::cluster-pki-ca-fingerprint raft-pki))
+             (token (gr8s:create-join-token raft-pki "w1" :role :witness)))
+        (is (enrollment-refused-p founder path :id "w1" :token token :ca-pin pin :role :voter)
+            "a witness-scoped token must not release the cluster CA")
+        (is (not (enrollment-refused-p founder path :id "w1" :token token :ca-pin pin :role :witness))
+            "a role mismatch does not consume the token needed for the intended witness")))))
 
 (test enrollment-needs-the-right-pin-and-an-unused-raft-token
   (with-founded-cluster (founder node-pki)
@@ -264,16 +278,16 @@
         (is (enrollment-refused-p founder path :token "0123456789abcdef01234567.0000" :ca-pin pin)
             "a malformed token")
         (is (enrollment-refused-p founder path :id "cp1" :node-name "cp1"
-                                               :token (gr8s:create-join-token raft-pki "cp1") :ca-pin pin)
+                                               :token (gr8s:create-join-token raft-pki "cp1" :role :voter) :ca-pin pin)
             "an existing member's identity")
         (is (enrollment-refused-p founder path :token nil :ca-pin pin))
-        (let ((token (gr8s:create-join-token raft-pki "cp2")))
+        (let ((token (gr8s:create-join-token raft-pki "cp2" :role :voter)))
           (is (enrollment-refused-p founder path :token token :ca-pin (gr8s::cluster-pki-ca-fingerprint node-pki))
               "the wrong CA pin")
           (finishes (gr8s::validate-token raft-pki token "cp2"))
           (is (not (enrollment-refused-p founder path :token token :ca-pin pin))))
         ;; The first enrollment succeeded and spent its token.
-        (let ((token (gr8s:create-join-token raft-pki "cp3")))
+        (let ((token (gr8s:create-join-token raft-pki "cp3" :role :voter)))
           (with-temporary-store (other other-path)
             (declare (ignorable other))
             (is (not (enrollment-refused-p founder other-path :id "cp3" :token token :ca-pin pin))))
