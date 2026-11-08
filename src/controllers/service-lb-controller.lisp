@@ -180,19 +180,21 @@ order; a port's external addresses share its ClusterIP's slots when the backends
                            (place vip (ordered external))))))))))
     (values (nreverse service-entries) (nreverse backend-entries) slot (nreverse index-entries))))
 
-(defstruct (service-lb-controller (:constructor %make-service-lb-controller (store dataplane node-name)))
+(defstruct (service-lb-controller (:constructor %make-service-lb-controller
+                                      (store dataplane node-name endpoint-steerer)))
   "Drives the socket LB maps from the durable store's Service/endpoint state."
   store
   dataplane
   node-name                    ; this node, for traffic policies and topology hints
+  endpoint-steerer             ; bounded network-quality/locality selector
   (applied-service-keys nil)   ; VIP key byte-vectors currently in the service map
   (applied-slot-count 0)       ; highest backend slot currently populated
   (applied-index-keys nil)     ; affinity index keys currently in the index map
   (applied-signature nil))     ; last applied plan, for no-op skipping
 
-(defun make-service-lb-controller (store dataplane &optional node-name)
+(defun make-service-lb-controller (store dataplane &optional node-name &key endpoint-steerer)
   "Drive DATAPLANE's maps from STORE for the node NODE-NAME."
-  (%make-service-lb-controller store dataplane node-name))
+  (%make-service-lb-controller store dataplane node-name endpoint-steerer))
 
 (defun converge-service-lb-controller
     (controller
@@ -208,7 +210,10 @@ order; a port's external addresses share its ClusterIP's slots when the backends
                (multiple-value-bind (internal external local-origin ready-local any)
                    (service-port-backends store service port :node-name node-name :zone zone)
                  (declare (ignore external ready-local))
-                 (values internal local-origin (not any)))))))
+                 (let ((steer (service-lb-controller-endpoint-steerer controller)))
+                   (values (if steer (funcall steer internal) internal)
+                           (if steer (funcall steer local-origin) local-origin)
+                           (not any))))))))
   "Recompute the desired LB table and apply the difference to the maps.
 Writes every backend before the service that references it (so the program never
 reads a VIP whose slots are missing), then removes freed backend slots and

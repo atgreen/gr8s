@@ -62,6 +62,7 @@
                                            (:file "node-protocol")))
                              (:file "foundation/dns")
                              (:file "foundation/json")
+                             (:file "foundation/network-steering")
                              (:module "image-distribution"
                               :serial t
                               :components ((:file "package")
@@ -211,6 +212,9 @@
                                            (:file "network-policy-program")
                                            (:file "network-policy")
                                            (:file "vxlan")
+                                           (:file "wireguard-telemetry-program")
+                                           (:file "wireguard-telemetry")
+                                           (:file "wireguard-relay")
                                            (:file "wireguard")
                                            (:file "host-firewall")
                                            (:file "agent-cni")

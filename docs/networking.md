@@ -8,7 +8,8 @@ are compiled and loaded on the fly, and per-Pod state lives in BPF maps the agen
 updates.
 
 This document covers the whole dataplane: the egress guard, NetworkPolicy,
-Services and load balancing, the Gateway API, CNI/IPAM, DNS, and cross-node VXLAN.
+Services and load balancing, the Gateway API, CNI/IPAM, DNS, and the VXLAN and
+self-tuning WireGuard cross-node overlays.
 
 ## The per-Pod egress guard
 
@@ -256,6 +257,120 @@ availability follow the node agent.
 
 `scripts/test-pod-dns-config.py` verifies actual resolver files and custom
 UDP/TCP queries against a separate resolver in an owned guest.
+
+## Self-tuning WireGuard overlay
+
+Start the control plane with `--overlay-backend wireguard`; each agent keeps its
+private key locally and advertises only its public key and authenticated endpoint
+candidates. Repeat `--wireguard-endpoint NAME=IPV4:PORT` for LAN, public, or other
+operator-known paths. The control plane rejects malformed, duplicate, and
+identity-conflicting claims. A kernel-observed NAT endpoint is accepted only from
+fresh authenticated WireGuard traffic, rate-limited, and owned by the server—not
+by an arbitrary node report.
+
+The agent continuously combines fresh WireGuard handshakes and returned bytes
+with active probes and passive Whistler/eBPF measurements: RTT, retransmits,
+congestion window, active flows, and throughput. A broken selected endpoint fails
+over immediately. A healthy optimization needs repeated proof and a material cost
+improvement. Endpoint changes are trialled without deleting the last-known-good
+path, require returned authenticated bytes and a fresh handshake, and roll back on
+failure. Selections, observations, MTU evidence, and bounded decision history are
+persisted across restart. `gr8s network explain NODE DESTINATION` resolves a
+sparse destination to its effective peer and prints both the topology decision
+(`direct-peer` or `sparse-next-hop`) and ranked endpoint evidence.
+
+NATed nodes first establish authenticated sessions with the rendezvous point;
+the control plane exchanges the observed reflexive endpoints so both sides can
+hole-punch. If direct traversal remains unavailable, an optional UDP relay keeps
+the original WireGuard encryption end to end. Configure it with
+`--wireguard-relay-address IPV4`; the relay has bounded channels, expiring
+authorization, idle reaping, and per-node source-change limits. Relay ownership is
+currently single-control-plane. The path tuner prefers any healthy direct path to
+the relay.
+
+The MTU tuner sends bounded DF probes through the selected encrypted path. A
+packet-size black hole lowers the device MTU immediately; increases require three
+successful proofs. Cached-network repair never raises a previously proven-safe
+MTU.
+
+### Sparse topology and gateways
+
+Clusters of eight nodes or fewer use a direct full mesh. Above eight, the planner
+uses the standard `topology.kubernetes.io/region` and
+`topology.kubernetes.io/zone` labels (stable `unknown-*` domains when absent):
+
+- nodes form deterministic rings inside a zone;
+- two indexed zone gateways connect zones inside each region;
+- two indexed regional gateways connect regions;
+- weighted shortest paths prefer zone-local, then region-local, then cross-region
+  edges, with normal planned degree bounded to six;
+- domains with fewer than two gateway candidates are explicitly degraded.
+
+Recovering leaves choose the currently lowest-degree eligible gateways, so spare
+capacity is used evenly and the six-peer bound is retained whenever the remaining
+stable topology has enough attachment capacity. Availability wins when that is
+mathematically impossible (for example, many recovering leaves and only one stable
+gateway): the plan reports `:peer-degree NODE COUNT` in its degraded-domain evidence
+instead of silently claiming the normal bound. The intentional direct full mesh at
+eight nodes or fewer is not a sparse-degree degradation.
+
+Every destination remains an ordinary `NodeRoute`; an authenticated `nextHop`
+only says which peer carries it. Agents group all destination CIDRs for that peer
+into one WireGuard `AllowedIPs` set while retaining one kernel route per
+destination. Before any destination CIDR migrates to a new peer, gr8s adds only
+that gateway's reserved router `/32`, proves returned authenticated traffic, and
+then commits the complete peer replacement. Failure restores the exact previous
+configuration.
+
+Lease expiry removes a failed gateway and republishes surviving routes on the
+next monitor tick. A recovered node is reachable as a destination immediately but
+cannot carry third-party traffic until 30 seconds of uninterrupted readiness.
+That hysteresis makes failure fast and optimization slow; unchanged monitor ticks
+do not create snapshot revisions. If no stable gateway exists during recovery,
+temporary direct links preserve connectivity rather than appointing an unproven
+transit node.
+
+Useful kubelet metrics include:
+
+- `gr8s_wireguard_path_selected`, `gr8s_wireguard_path_healthy`, and
+  `gr8s_wireguard_path_score`;
+- `gr8s_wireguard_path_consecutive_failures` and
+  `gr8s_wireguard_peer_latest_handshake_seconds`;
+- `gr8s_wireguard_path_passive_rtt_microseconds`,
+  `gr8s_wireguard_path_passive_retransmits`,
+  `gr8s_wireguard_path_passive_congestion_window`,
+  `gr8s_wireguard_path_passive_active_flows`, and
+  `gr8s_wireguard_path_passive_bytes_per_second`;
+- `gr8s_wireguard_path_safe_mtu_bytes` and
+  `gr8s_wireguard_telemetry_available`.
+
+The overlay is IPv4-only today. Sparse mode's threshold and 30-second gateway
+stability interval are conservative fixed defaults rather than public tuning
+knobs. `scripts/test-wireguard-sparse-routing.sh` builds two independent gateways
+in disposable namespaces, invokes the production next-hop trial, removes the
+selected gateway, proves bidirectional recovery, checks peer bounds, and verifies
+with an underlay packet capture that an application marker never appears in
+plaintext.
+
+### Network-aware consumers
+
+Service and image distribution decisions share one deterministic, bounded score.
+It combines same-node/zone/region locality, kernel-authenticated WireGuard path
+health and cost, bounded active-flow load, advertised CPU capacity, and the
+planner's link cost. Every numeric input is clamped at the trust boundary. An
+unhealthy path loses immediately; optimization among healthy paths remains slow
+and deterministic, and the second choice is promoted from another region/zone
+failure domain when one exists.
+
+The agent applies the score to ready Service endpoints before programming the
+`cgroup/connect4` backend map. It programs at most four preferred endpoints per
+port, reconverges when path observations change, keeps local endpoints cheapest,
+and retains unhealthy candidates only as a last-resort availability fallback.
+The control plane applies the same ordering to mTLS-authenticated BitTorrent
+announcements using the requester's authenticated node status; tracker responses
+contain at most eight peers. Missing path evidence is conservative neutral cost,
+not a fabricated failure, so a new node can still bootstrap. Peer ordering is a
+copy-only operation outside the tracker lock and cannot mutate swarm membership.
 
 ## Cross-node VXLAN
 

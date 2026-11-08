@@ -46,11 +46,14 @@
    #:node-record-pod-cidrs
    #:node-record-all-pod-cidrs
    #:node-record-ready-p
+   #:node-record-ready-since
    #:node-record-resource-version
    #:node-record-runtime-down-message
    #:node-record-runtime-ready-p
    #:node-record-taints
    #:node-record-underlay-address
+   #:node-record-wireguard-endpoints
+   #:node-record-wireguard-reflexive-observed-at
    #:node-record-wireguard-public-key
    #:node-record-unschedulable
    #:object-value

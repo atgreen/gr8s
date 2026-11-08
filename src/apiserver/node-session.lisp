@@ -32,11 +32,301 @@
 
 (in-package #:gr8s.apiserver)
 
+(defstruct wireguard-topology-plan
+  mode
+  adjacency
+  nodes
+  transit-nodes
+  object)
+
+(defun node-network-domain (node)
+  "Return NODE's standard region and zone, with stable explicit fallbacks."
+  (let ((labels (node-record-labels node)))
+    (values (or (and labels (gethash "topology.kubernetes.io/region" labels))
+                "unknown-region")
+            (or (and labels (gethash "topology.kubernetes.io/zone" labels))
+                "unknown-zone"))))
+
+(defun node-network-link-cost (left right)
+  "Return the planner's bounded locality cost between LEFT and RIGHT."
+  (multiple-value-bind (left-region left-zone) (node-network-domain left)
+    (multiple-value-bind (right-region right-zone) (node-network-domain right)
+      (cond ((and (string= left-region right-region)
+                  (string= left-zone right-zone)) 1)
+            ((string= left-region right-region) 10)
+            (t 100)))))
+
+(defun topology-group-push (table key value)
+  (push value (gethash key table))
+  table)
+
+(defun wireguard-topology-add-edge (adjacency left right cost kind)
+  (unless (string= left right)
+    (flet ((add-one (source destination)
+             (let* ((neighbors (or (gethash source adjacency)
+                                   (setf (gethash source adjacency)
+                                         (make-hash-table :test #'equal))))
+                    (existing (gethash destination neighbors)))
+               (when (or (null existing) (< cost (first existing)))
+                 (setf (gethash destination neighbors) (list cost kind))))))
+      (add-one left right)
+      (add-one right left)))
+  adjacency)
+
+(defun wireguard-topology-add-ring (adjacency names cost kind)
+  (let ((names (sort (remove-duplicates (copy-list names) :test #'string=) #'string<)))
+    (cond
+      ((= 2 (length names))
+       (wireguard-topology-add-edge adjacency (first names) (second names) cost kind))
+      ((> (length names) 2)
+       (loop for tail on names
+             for left = (first tail)
+             for right = (or (second tail) (first names))
+             do (wireguard-topology-add-edge adjacency left right cost kind)))))
+  adjacency)
+
+(defun wireguard-topology-neighbors (plan node-name)
+  "Return NODE-NAME's directly authenticated peers in deterministic order."
+  (let ((neighbors (gethash node-name (wireguard-topology-plan-adjacency plan))))
+    (when neighbors
+      (sort (loop for name being the hash-keys of neighbors collect name) #'string<))))
+
+(defun wireguard-topology-next-hop (plan source destination)
+  "Return the deterministic weighted-shortest first hop from SOURCE to DESTINATION."
+  (when (string= source destination)
+    (return-from wireguard-topology-next-hop source))
+  (let ((distance (make-hash-table :test #'equal))
+        (first-hop (make-hash-table :test #'equal))
+        (visited (make-hash-table :test #'equal))
+        (names (sort (loop for name being the hash-keys of
+                           (wireguard-topology-plan-nodes plan) collect name)
+                     #'string<)))
+    (setf (gethash source distance) 0)
+    (loop
+      (let ((current
+              (first
+               (sort (remove-if (lambda (name)
+                                  (or (gethash name visited)
+                                      (null (gethash name distance))))
+                                (copy-list names))
+                     (lambda (left right)
+                       (let ((left-distance (gethash left distance))
+                             (right-distance (gethash right distance)))
+                         (or (< left-distance right-distance)
+                             (and (= left-distance right-distance)
+                                  (string< left right)))))))))
+        (unless current (return nil))
+        (when (string= current destination)
+          (return (gethash current first-hop)))
+        (setf (gethash current visited) t)
+        (let ((neighbors
+                (and (or (string= current source)
+                         (gethash current
+                                  (wireguard-topology-plan-transit-nodes plan)))
+                     (gethash current (wireguard-topology-plan-adjacency plan)))))
+          (when neighbors
+            (maphash
+             (lambda (neighbor edge)
+               (let* ((candidate-distance (+ (gethash current distance) (first edge)))
+                      (candidate-hop (if (string= current source)
+                                         neighbor (gethash current first-hop)))
+                      (known-distance (gethash neighbor distance))
+                      (known-hop (gethash neighbor first-hop)))
+                 (when (or (null known-distance)
+                           (< candidate-distance known-distance)
+                           (and (= candidate-distance known-distance)
+                                (or (null known-hop)
+                                    (string< candidate-hop known-hop))))
+                   (setf (gethash neighbor distance) candidate-distance
+                         (gethash neighbor first-hop) candidate-hop))))
+             neighbors)))))))
+
+(defun wireguard-topology-object (mode adjacency nodes zone-gateways region-gateways)
+  (let ((edges nil)
+        (domains nil)
+        (degraded nil))
+    (maphash
+     (lambda (left neighbors)
+       (maphash (lambda (right edge)
+                  (when (string< left right)
+                    (push (list left right (first edge) (second edge)) edges)))
+                neighbors))
+     adjacency)
+    (maphash
+     (lambda (name node)
+       (multiple-value-bind (region zone) (node-network-domain node)
+         (push (list name region zone) domains)))
+     nodes)
+    (maphash (lambda (domain gateways)
+               (when (< (length gateways) 2)
+                 (push (list :zone (first domain) (second domain)) degraded)))
+             zone-gateways)
+    (maphash (lambda (region gateways)
+               (when (< (length gateways) 2)
+                 (push (list :region region) degraded)))
+             region-gateways)
+    (unless (eq mode :full-mesh)
+      (maphash (lambda (name neighbors)
+                 (when (> (hash-table-count neighbors) 6)
+                   (push (list :peer-degree name (hash-table-count neighbors))
+                         degraded)))
+               adjacency))
+    (list :mode mode
+          :domains (sort domains #'string< :key #'first)
+          :zone-gateways
+          (sort (loop for key being the hash-keys of zone-gateways
+                      collect (list key (sort (copy-list (gethash key zone-gateways)) #'string<)))
+                #'string< :key (lambda (entry) (format nil "~{~A/~}" (first entry))))
+          :region-gateways
+          (sort (loop for key being the hash-keys of region-gateways
+                      collect (list key (sort (copy-list (gethash key region-gateways)) #'string<)))
+                #'string< :key #'first)
+          :degraded-domains
+          (sort degraded #'string< :key (lambda (entry) (format nil "~{~A/~}" entry)))
+          :edges (sort edges #'string< :key (lambda (edge)
+                                               (format nil "~A/~A" (first edge) (second edge)))))))
+
+(defun plan-wireguard-topology
+    (node-records &key (full-mesh-limit 8)
+                        (transit-node-names nil transit-node-names-p))
+  "Plan direct peers and deterministic next hops for NODE-RECORDS.
+When TRANSIT-NODE-NAMES is supplied, other nodes remain reachable leaves but
+cannot forward traffic between healthy nodes."
+  (let ((nodes (make-hash-table :test #'equal))
+        (adjacency (make-hash-table :test #'equal))
+        (zones (make-hash-table :test #'equal))
+        (regions (make-hash-table :test #'equal))
+        (zone-gateways (make-hash-table :test #'equal))
+        (region-gateways (make-hash-table :test #'equal))
+        (transit-index (make-hash-table :test #'equal))
+        (transit-nodes nil)
+        (leaf-nodes nil))
+    (dolist (node node-records)
+      (setf (gethash (node-record-name node) nodes) node
+            (gethash (node-record-name node) adjacency) (make-hash-table :test #'equal))
+      (if (or (not transit-node-names-p)
+              (member (node-record-name node) transit-node-names :test #'string=))
+          (push node transit-nodes)
+          (push node leaf-nodes)))
+    ;; Only stable nodes form rings and may become a third party's next hop.
+    (dolist (node transit-nodes)
+      (setf (gethash (node-record-name node) transit-index) t)
+      (multiple-value-bind (region zone) (node-network-domain node)
+        (topology-group-push zones (list region zone) (node-record-name node))
+        (topology-group-push regions region (node-record-name node))))
+    (let ((mode (if (<= (length node-records) full-mesh-limit) :full-mesh :sparse)))
+      (if (eq mode :full-mesh)
+          (let ((names (sort (mapcar #'node-record-name (copy-list node-records)) #'string<)))
+            (loop for tail on names
+                  do (dolist (right (rest tail))
+                       (wireguard-topology-add-edge adjacency (first tail) right 1 :direct))))
+          (progn
+            (maphash
+             (lambda (domain names)
+               (let ((ordered (sort (copy-list names) #'string<)))
+                 (wireguard-topology-add-ring adjacency ordered 1 :zone)
+                 (setf (gethash domain zone-gateways) (subseq ordered 0 (min 2 (length ordered))))))
+             zones)
+            (maphash
+             (lambda (region names)
+               (declare (ignore names))
+               (let ((domains
+                       (sort (loop for domain being the hash-keys of zone-gateways
+                                   when (string= region (first domain)) collect domain)
+                             #'string< :key #'second)))
+                 (dotimes (index 2)
+                   (wireguard-topology-add-ring
+                    adjacency
+                    (loop for domain in domains
+                          for gateways = (gethash domain zone-gateways)
+                          when (< index (length gateways)) collect (nth index gateways))
+                    10 :zone-gateway))
+                 (let ((candidates
+                         (sort (remove-duplicates
+                                (loop for domain in domains append
+                                      (copy-list (gethash domain zone-gateways)))
+                                :test #'string=)
+                               #'string<)))
+                   (setf (gethash region region-gateways)
+                         (subseq candidates 0 (min 2 (length candidates)))))))
+             regions)
+            (dotimes (index 2)
+              (wireguard-topology-add-ring
+               adjacency
+               (sort (loop for region being the hash-keys of region-gateways
+                           for gateways = (gethash region region-gateways)
+                           when (< index (length gateways)) collect (nth index gateways))
+                     #'string<)
+               100 :region-gateway))
+            ;; Recovering nodes attach to up to two stable nodes in the closest
+            ;; failure domain. They are destinations, never transit shortcuts.
+            (let ((ordered-leaves
+                    (sort (copy-list leaf-nodes) #'string< :key #'node-record-name)))
+              (dolist (leaf ordered-leaves)
+              (multiple-value-bind (leaf-region leaf-zone) (node-network-domain leaf)
+                (let* ((same-zone
+                         (remove-if-not
+                          (lambda (candidate)
+                            (multiple-value-bind (region zone)
+                                (node-network-domain candidate)
+                              (and (string= region leaf-region)
+                                   (string= zone leaf-zone))))
+                          transit-nodes))
+                       (same-region
+                         (remove-if-not
+                          (lambda (candidate)
+                            (multiple-value-bind (region zone)
+                                (node-network-domain candidate)
+                              (declare (ignore zone))
+                              (string= region leaf-region)))
+                          transit-nodes))
+                       (candidates
+                         (sort (copy-list (or same-zone same-region transit-nodes))
+                               #'string< :key #'node-record-name))
+                       (selected
+                         (subseq
+                          (sort (copy-list candidates)
+                                (lambda (left right)
+                                  (let ((left-degree
+                                          (hash-table-count
+                                           (gethash (node-record-name left) adjacency)))
+                                        (right-degree
+                                          (hash-table-count
+                                           (gethash (node-record-name right) adjacency))))
+                                    (or (< left-degree right-degree)
+                                        (and (= left-degree right-degree)
+                                             (string< (node-record-name left)
+                                                      (node-record-name right)))))))
+                          0 (min 2 (length candidates)))))
+                  (dolist (gateway selected)
+                    (wireguard-topology-add-edge
+                     adjacency (node-record-name leaf) (node-record-name gateway)
+                     1 :recovering-leaf))))))
+            ;; Immediately after a control-plane restart every ready node may
+            ;; still be inside its conservative stability window. Direct edges
+            ;; preserve reachability without appointing any of them as transit.
+            (when (null transit-nodes)
+              (setf mode :recovery-full-mesh)
+              (let ((names (sort (mapcar #'node-record-name
+                                         (copy-list node-records))
+                                 #'string<)))
+                (loop for tail on names
+                      do (dolist (right (rest tail))
+                           (wireguard-topology-add-edge
+                            adjacency (first tail) right 1 :recovery-direct)))))))
+      (make-wireguard-topology-plan
+       :mode mode :adjacency adjacency :nodes nodes :transit-nodes transit-index
+       :object (wireguard-topology-object
+                mode adjacency nodes zone-gateways region-gateways)))))
+
 (defstruct (node-grpc-server
              (:constructor %make-node-grpc-server
                  (&key store grpc-server thread port heartbeat-timeout-seconds
-                       pki cluster-pod-cidr node-prefix cluster-pod-cidrs node-prefixes overlay-backend
-                       wireguard-listen-port image-tracker)))
+                       pki cluster-pod-cidr node-prefix cluster-pod-cidrs node-prefixes
+                       overlay-backend
+                       wireguard-listen-port wireguard-relay-server
+                       wireguard-relay-address image-tracker clock
+                       gateway-stability-seconds)))
   store
   grpc-server
   thread
@@ -49,6 +339,12 @@
   node-prefixes
   (overlay-backend "vxlan")
   (wireguard-listen-port 51820)
+  wireguard-relay-server
+  wireguard-relay-address
+  (clock #'get-universal-time)
+  ;; NIL is used only by direct unit fixtures constructed with the private
+  ;; constructor. START-NODE-GRPC-SERVER always installs a validated interval.
+  gateway-stability-seconds
   (image-tracker (gr8s.image-distribution::make-image-tracker))
   (revisions (make-hash-table :test #'equal))
   (snapshots (make-hash-table :test #'equal))
@@ -57,6 +353,13 @@
   (operations (make-hash-table :test #'equal))
   (operation-queues (make-hash-table :test #'equal))
   (sessions (make-hash-table :test #'equal))
+  ;; Last accepted reflexive-endpoint change per target node. This bounds an
+  ;; authenticated but faulty reporter's ability to churn peer trials.
+  (nat-observation-times (make-hash-table :test #'equal))
+  ;; Nodes currently admitted as sparse transit gateways, plus a bounded
+  ;; human-readable history of admission and removal decisions.
+  (transit-eligible (make-hash-table :test #'equal))
+  (topology-decisions nil)
   ;; (VARIANT TARGET-MEMBER NODE-NAME PAYLOAD) -> accepting member id or NIL.
   ;; HA installs this peer relay; single-node servers leave it NIL.
   operation-router
@@ -658,33 +961,114 @@ operation. No-op when no operation matches MESSAGE's id."
                                     (node-grpc-server-overlay-backend server))
                             1420 1450))))
 
+(defun wireguard-projected-endpoints (server source-name peer)
+  "Return PEER's authenticated candidates plus SOURCE-NAME's pair-specific relay."
+  (append
+   (mapcar (lambda (endpoint)
+             (make-instance 'gr8s.node.v1::wireguard-endpoint
+                            :name (first endpoint) :address (second endpoint)
+                            :port (third endpoint)))
+           (node-record-wireguard-endpoints peer))
+   (let ((relay (node-grpc-server-wireguard-relay-server server))
+         (address (node-grpc-server-wireguard-relay-address server)))
+     (when (and relay address)
+       (handler-case
+           (let* ((now (get-universal-time))
+                  (now-unix (- now 2208988800))
+                  (source (get-node (node-grpc-server-store server) source-name))
+                  (reflexive (find "nat-reflexive"
+                                   (node-record-wireguard-endpoints source)
+                                   :key #'first :test #'string=))
+                  (observed-at (node-record-wireguard-reflexive-observed-at source)))
+             (when (and reflexive observed-at (<= 0 (- now-unix observed-at) 180))
+               (let ((channel
+                       (gr8s.network::ensure-wireguard-relay-server-channel
+                        relay source-name (node-record-name peer) now)))
+                 (when (gr8s.network::authorize-wireguard-relay-node
+                        (gr8s.network::wireguard-relay-server-coordinator relay)
+                        channel source-name (second reflexive) now)
+                   (list (make-instance
+                          'gr8s.node.v1::wireguard-endpoint
+                          :name "relay" :address address
+                          :port (gr8s.network::wireguard-relay-channel-port-for
+                                 channel source-name)))))))
+         (error (condition)
+           (format *error-output* "gr8s relay allocation failed for ~A/~A: ~A~%"
+                   source-name (node-record-name peer) condition)
+           nil))))))
+
+(defun wireguard-next-hop-message (server source-name node)
+  (make-instance 'gr8s.node.v1::wireguard-next-hop
+                 :node-id (node-record-id node)
+                 :node-name (node-record-name node)
+                 :underlay-address (node-record-underlay-address node)
+                 :wireguard-public-key (node-record-wireguard-public-key node)
+                 :wireguard-listen-port (node-grpc-server-wireguard-listen-port server)
+                 :wireguard-endpoints
+                 (wireguard-projected-endpoints server source-name node)))
+
 (defun assigned-node-routes (server node-name)
-  "The overlay routes from NODE-NAME to every OTHER node that has both an underlay
-   address and a Pod CIDR, ordered by node name. NIL until this node itself has an
-   underlay address."
-  (when (string= "" (node-record-underlay-address
-                     (get-node (node-grpc-server-store server) node-name)))
-    (return-from assigned-node-routes nil))
-  (loop for node in (sort (copy-list (list-nodes (node-grpc-server-store server)))
-                         #'string< :key #'node-record-name)
-        unless (or (string= node-name (node-record-name node))
-                   (string= "" (node-record-underlay-address node))
-                   (string= "" (node-record-pod-cidr node))
-                   (and (string= "wireguard" (node-grpc-server-overlay-backend server))
-                        (/= 32 (length (node-record-wireguard-public-key node)))))
-          collect (make-instance 'gr8s.node.v1::node-route
-                                 :node-id (node-record-id node)
-                                 :pod-cidr (node-record-pod-cidr node)
-                                 :pod-cidrs (coerce (node-record-all-pod-cidrs node) 'list)
-                                 :underlay-address (node-record-underlay-address node)
-                                 :wireguard-public-key
-                                 (if (string= "wireguard" (node-grpc-server-overlay-backend server))
-                                     (node-record-wireguard-public-key node)
-                                     #())
-                                 :wireguard-listen-port
-                                 (if (string= "wireguard" (node-grpc-server-overlay-backend server))
-                                     (node-grpc-server-wireguard-listen-port server)
-                                     0))))
+  "Project every destination Pod CIDR and its authenticated direct or sparse next hop."
+  (let* ((store (node-grpc-server-store server))
+         (wireguard-p (string= "wireguard" (node-grpc-server-overlay-backend server)))
+         (source (get-node store node-name))
+         (now (funcall (node-grpc-server-clock server))))
+    (when (string= "" (node-record-underlay-address source))
+      (return-from assigned-node-routes nil))
+    (let* ((eligible
+             (remove-if
+              (lambda (node)
+                (or (and (node-grpc-server-gateway-stability-seconds server)
+                         (not (node-record-ready-p node)))
+                    (string= "" (node-record-underlay-address node))
+                    (string= "" (node-record-pod-cidr node))
+                    (and wireguard-p
+                         (/= 32 (length (node-record-wireguard-public-key node))))))
+              (copy-list (list-nodes store))))
+           (stable-transit
+             (if (null (node-grpc-server-gateway-stability-seconds server))
+                 (mapcar #'node-record-name eligible)
+                 (loop for node in eligible
+                       for ready-since = (node-record-ready-since node)
+                       when (and ready-since
+                                 (>= (- now ready-since)
+                                     (node-grpc-server-gateway-stability-seconds server)))
+                         collect (node-record-name node))))
+           (plan (and wireguard-p
+                      (plan-wireguard-topology
+                       eligible :transit-node-names stable-transit)))
+           (ordered (sort eligible #'string< :key #'node-record-name)))
+      (loop for node in ordered
+            unless (string= node-name (node-record-name node))
+              collect
+              (let* ((destination-name (node-record-name node))
+                     (hop-name (and plan
+                                    (wireguard-topology-next-hop
+                                     plan node-name destination-name)))
+                     (hop-node (and hop-name (get-node store hop-name))))
+                (multiple-value-bind (region zone) (node-network-domain node)
+                  (make-instance
+                   'gr8s.node.v1::node-route
+                   :node-id (node-record-id node)
+                   :node-name destination-name
+                   :pod-cidr (node-record-pod-cidr node)
+                   :pod-cidrs (coerce (node-record-all-pod-cidrs node) 'list)
+                   :underlay-address (node-record-underlay-address node)
+                   :region region :zone zone
+                   :capacity-score
+                   (node-steering-capacity-score (node-record-capacity node))
+                   :link-cost (node-network-link-cost source node)
+                   :wireguard-public-key
+                   (if wireguard-p (node-record-wireguard-public-key node) #())
+                   :wireguard-endpoints
+                   (when wireguard-p
+                     (wireguard-projected-endpoints server node-name node))
+                   :wireguard-listen-port
+                   (if wireguard-p (node-grpc-server-wireguard-listen-port server) 0)
+                   :next-hop
+                   (and hop-node
+                        (not (string= hop-name destination-name))
+                        (wireguard-next-hop-message server node-name hop-node)))))))))
 
 (defun attach-node-topology (server node-name snapshot)
   "Fill SNAPSHOT's network and routes slots for NODE-NAME from the store, in place,
@@ -720,6 +1104,76 @@ operation. No-op when no operation matches MESSAGE's id."
           (unless (same-node-snapshot-topology-p
                    (current-node-snapshot server name) snapshot)
             (publish-node-desired-state server name snapshot)))))))
+
+(defun merge-wireguard-reflexive-endpoint (endpoints address port)
+  "Replace the kernel-observed NAT candidate without disturbing manual candidates."
+  (append (remove "nat-reflexive" endpoints :key #'first :test #'string=)
+          (list (list "nat-reflexive" address port))))
+
+(defun merge-wireguard-advertised-endpoints (advertised durable)
+  "Keep NAT evidence server-owned while replacing a node's manual candidates."
+  (when (find-if (lambda (endpoint)
+                   (member (first endpoint) '("nat-reflexive" "relay")
+                           :test #'string=))
+                 advertised)
+    (error "WireGuard endpoint names nat-reflexive and relay are reserved"))
+  (append advertised
+          (remove-if-not (lambda (endpoint)
+                           (string= "nat-reflexive" (first endpoint)))
+                         durable)))
+
+(defun accept-wireguard-nat-observation-p (server target now &optional (minimum-seconds 30))
+  (bt:with-lock-held ((node-grpc-server-lock server))
+    (let ((previous (gethash target (node-grpc-server-nat-observation-times server))))
+      (when (or (null previous) (>= (- now previous) minimum-seconds))
+        (setf (gethash target (node-grpc-server-nat-observation-times server)) now)
+        t))))
+
+(defun record-authenticated-wireguard-observations
+    (server reporter observations
+     &key (now (- (get-universal-time) 2208988800)) (fresh-seconds 180))
+  "Publish fresh WireGuard endpoints observed by authenticated REPORTER.
+The reported peer key must already belong to a registered node. These remain
+candidates; agents still require their transactional handshake/probe gates."
+  (dolist (observation observations)
+    (handler-case
+        (let* ((key (slot-value observation 'gr8s.node.v1::peer-public-key))
+               (handshake
+                 (slot-value observation 'gr8s.node.v1::latest-handshake-unix-seconds))
+               (received (slot-value observation 'gr8s.node.v1::received-bytes))
+               (target
+                 (and (= 32 (length key))
+                      (find key (list-nodes (node-grpc-server-store server))
+                            :key #'node-record-wireguard-public-key :test #'equalp))))
+          (when (and target
+                     (not (string= reporter (node-record-name target)))
+                     (plusp received)
+                     (<= 0 (- now handshake) fresh-seconds))
+            (let* ((target-name (node-record-name target))
+                   (address (canonical-node-underlay-address
+                             (slot-value observation 'gr8s.node.v1::address)))
+                   (port (slot-value observation 'gr8s.node.v1::port))
+                   (candidate (list "nat-reflexive" address port))
+                   (current (find "nat-reflexive"
+                                  (node-record-wireguard-endpoints target)
+                                  :key #'first :test #'string=)))
+              (when (accept-wireguard-nat-observation-p server target-name now)
+                (let ((changed (not (equal current candidate))))
+                  (update-node-wireguard-endpoints
+                   (node-grpc-server-store server) target-name
+                   (merge-wireguard-reflexive-endpoint
+                    (node-record-wireguard-endpoints target)
+                    address port)
+                   :reflexive-observed-at now)
+                  (when (node-grpc-server-wireguard-relay-server server)
+                    (gr8s.network::refresh-wireguard-relay-source-evidence
+                     (node-grpc-server-wireguard-relay-server server)
+                     target-name address (+ now 2208988800)))
+                  (when changed
+                    (refresh-node-peer-topology server target-name)))))))
+      (error (condition)
+        (format *error-output* "gr8s ignored WireGuard NAT observation from ~A: ~A~%"
+                reporter condition)))))
 
 (defun prepare-node-connect-snapshot (server node-name last-applied)
   "The desired-state snapshot a (re)connecting agent whose last applied revision is
@@ -818,7 +1272,13 @@ operation. No-op when no operation matches MESSAGE's id."
    (slot-value envelope 'gr8s.node.v1::protocol-version))
   (case (slot-value envelope 'gr8s.node.v1::payload-case)
     (:heartbeat
-     (let ((now (get-universal-time)))
+     (let* ((now (funcall (node-grpc-server-clock server)))
+            (previously-ready-p
+              (node-record-ready-p
+               (get-node (node-grpc-server-store server) node-name))))
+       (when (node-grpc-server-wireguard-relay-server server)
+         (gr8s.network::refresh-wireguard-relay-node
+          (node-grpc-server-wireguard-relay-server server) node-name now))
        (mark-node-ready (node-grpc-server-store server)
                         node-name now
                         :lease-duration (node-grpc-server-heartbeat-timeout-seconds server))
@@ -826,13 +1286,22 @@ operation. No-op when no operation matches MESSAGE's id."
         (node-grpc-server-store server) node-name
         (slot-value (slot-value envelope 'gr8s.node.v1::heartbeat)
                     'gr8s.node.v1::runtime-down-message))
-       (note-node-heartbeat-lease (node-grpc-server-store server) node-name now)))
+       (note-node-heartbeat-lease (node-grpc-server-store server) node-name now)
+       (unless previously-ready-p
+         (note-topology-decision
+          server now node-name :recovered-as-destination
+          "heartbeat restored; reachable as a destination while transit cooldown runs")
+         (refresh-node-peer-topology server node-name))))
     (:snapshot-ack
      (note-node-snapshot-ack
       server node-name
       (slot-value envelope 'gr8s.node.v1::snapshot-ack)))
     (:status
      (let ((status (slot-value envelope 'gr8s.node.v1::status)))
+       (setf (slot-value status 'gr8s.node.v1::wireguard-peer-observations)
+             (canonical-node-wireguard-observations
+              server node-name
+              (slot-value status 'gr8s.node.v1::wireguard-peer-observations)))
        (bt:with-lock-held ((node-grpc-server-lock server))
          (setf (gethash node-name (node-grpc-server-statuses server)) status))
        (handler-case
@@ -840,6 +1309,9 @@ operation. No-op when no operation matches MESSAGE's id."
                                           (slot-value status 'gr8s.node.v1::csi-drivers))
          (kubernetes-error (condition)
            (format *error-output* "gr8s CSINode ~A update failed: ~A~%" node-name condition)))
+       (record-authenticated-wireguard-observations
+        server node-name
+        (slot-value status 'gr8s.node.v1::wireguard-peer-observations))
        (loop for pod-status in (slot-value status 'gr8s.node.v1::pods)
              for pod = (handler-case
                            (get-pod (node-grpc-server-store server)
@@ -943,7 +1415,15 @@ operation. No-op when no operation matches MESSAGE's id."
            (authenticated (authenticate-node-peer (node-grpc-server-pki server) context node-name))
            (wireguard-public-key
              (slot-value hello 'gr8s.node.v1::wireguard-public-key))
+           (wireguard-endpoints
+             (mapcar
+              (lambda (endpoint)
+                (list (slot-value endpoint 'gr8s.node.v1::name)
+                      (slot-value endpoint 'gr8s.node.v1::address)
+                      (slot-value endpoint 'gr8s.node.v1::port)))
+              (slot-value hello 'gr8s.node.v1::wireguard-endpoints)))
            (node (get-node (node-grpc-server-store server) node-name))
+           (previously-ready-p (node-record-ready-p node))
            (topology-changed
              (progn
                ;; Validate before either durable write so a malformed hello
@@ -961,8 +1441,19 @@ operation. No-op when no operation matches MESSAGE's id."
                      (key-changed
                        (update-node-wireguard-public-key
                         (node-grpc-server-store server) node-name
-                        wireguard-public-key)))
-                 (or address-changed key-changed))))
+                        wireguard-public-key))
+                     (endpoints-changed
+                       (update-node-wireguard-endpoints
+                        (node-grpc-server-store server) node-name
+                        (merge-wireguard-advertised-endpoints
+                         wireguard-endpoints
+                         (node-record-wireguard-endpoints node)))))
+                 (or address-changed key-changed endpoints-changed))))
+           (ready-node
+             (mark-node-ready
+              (node-grpc-server-store server) node-name
+              (funcall (node-grpc-server-clock server))
+              :lease-duration (node-grpc-server-heartbeat-timeout-seconds server)))
            (snapshot (prepare-node-connect-snapshot
                       server node-name
                       (slot-value hello 'gr8s.node.v1::last-applied-revision)))
@@ -979,7 +1470,7 @@ operation. No-op when no operation matches MESSAGE's id."
                         session)))
            (heartbeat-interval
              (max 1 (floor (node-grpc-server-heartbeat-timeout-seconds server) 2))))
-      (declare (ignore authenticated))
+      (declare (ignore authenticated ready-node))
       (unwind-protect
            (progn
              ;; Register and drain queued work atomically; hold the send lock
@@ -1011,7 +1502,13 @@ operation. No-op when no operation matches MESSAGE's id."
                            stream (make-server-envelope
                                    :operation-request (pending-node-operation-request operation)
                                    :sequence sequence)))))
-             (when topology-changed (refresh-node-peer-topology server node-name))
+             (when (or topology-changed (not previously-ready-p))
+               (unless previously-ready-p
+                 (note-topology-decision
+                  server (funcall (node-grpc-server-clock server)) node-name
+                  :recovered-as-destination
+                  "authenticated session restored; reachable as a destination while transit cooldown runs"))
+               (refresh-node-peer-topology server node-name))
              (loop for envelope = (ag-grpc:stream-recv stream)
                    while envelope
                    do (setf (node-agent-session-last-envelope-time session) (get-universal-time))
@@ -1053,14 +1550,67 @@ operation. No-op when no operation matches MESSAGE's id."
                  (ignore-errors
                   (ag-http2:connection-close (ag-grpc::server-stream-connection stream))))))))
 
+(defun stable-transit-node-names (server now)
+  "Return ready nodes whose uninterrupted lease has passed the gateway cooldown."
+  (sort
+   (loop for node in (list-nodes (node-grpc-server-store server))
+         for ready-since = (node-record-ready-since node)
+         when (and (node-record-ready-p node) ready-since
+                   (>= (- now ready-since)
+                       (node-grpc-server-gateway-stability-seconds server)))
+           collect (node-record-name node))
+   #'string<))
+
+(defun note-topology-decision (server now node reason message)
+  "Prepend one bounded operator-readable sparse-topology decision."
+  (bt:with-lock-held ((node-grpc-server-lock server))
+    (push (list :at now :node node :reason reason :message message)
+          (node-grpc-server-topology-decisions server))
+    (when (> (length (node-grpc-server-topology-decisions server)) 128)
+      (setf (node-grpc-server-topology-decisions server)
+            (subseq (node-grpc-server-topology-decisions server) 0 128)))))
+
+(defun reconcile-node-heartbeats (server now)
+  "Expire failed leases, update stable transit admission, and republish topology."
+  (let* ((expired
+           (expire-node-heartbeats
+            (node-grpc-server-store server)
+            (- now (node-grpc-server-heartbeat-timeout-seconds server)) :now now))
+         (stable (stable-transit-node-names server now))
+         (added nil)
+         (removed nil))
+    (bt:with-lock-held ((node-grpc-server-lock server))
+      (let ((previous (node-grpc-server-transit-eligible server)))
+        (setf added (remove-if (lambda (name) (gethash name previous)) stable)
+              removed (loop for name being the hash-keys of previous
+                            unless (member name stable :test #'string=)
+                              collect name))
+        (clrhash previous)
+        (dolist (name stable) (setf (gethash name previous) t))))
+    (dolist (node expired)
+      (note-topology-decision
+       server now (node-record-name node) :lease-expired
+       "lease expired; removed from destinations and transit immediately"))
+    (dolist (name added)
+      (note-topology-decision
+       server now name :stability-window-satisfied
+       "uninterrupted ready interval satisfied; admitted as a sparse transit gateway"))
+    (dolist (name removed)
+      (unless (find name expired :key #'node-record-name :test #'string=)
+        (note-topology-decision
+         server now name :transit-ineligible
+         "node is no longer eligible to carry third-party sparse traffic")))
+    (when (and (string= "wireguard" (node-grpc-server-overlay-backend server))
+               (or expired added removed))
+      (refresh-node-peer-topology server ""))
+    expired))
+
 (defun monitor-node-heartbeats (server)
   "Until SERVER is stopping, every 50ms expire node leases past the heartbeat
    timeout and evict sessions that have gone silent."
   (loop until (node-grpc-server-stopping-p server)
-        do (let ((now (get-universal-time)))
-             (expire-node-heartbeats
-              (node-grpc-server-store server)
-              (- now (node-grpc-server-heartbeat-timeout-seconds server)) :now now)
+        do (let ((now (funcall (node-grpc-server-clock server))))
+             (reconcile-node-heartbeats server now)
              (evict-silent-node-sessions server now))
            (sleep 0.05)))
 
@@ -1148,6 +1698,115 @@ operation. No-op when no operation matches MESSAGE's id."
    :peers (mapcar #'image-tracker-peer-message
                   (gr8s.image-distribution::tracker-view-peers view))))
 
+(defun node-status-wireguard-observation (status public-key &key now)
+  (and status
+       (find public-key
+             (subseq (slot-value status 'gr8s.node.v1::wireguard-peer-observations)
+                     0 (min 64 (length (slot-value status
+                                                   'gr8s.node.v1::wireguard-peer-observations))))
+             :test #'equalp
+             :key (lambda (observation)
+                    (and (or (null now)
+                             (<= 0 (- now (slot-value observation
+                                                      'gr8s.node.v1::latest-handshake-unix-seconds))
+                                 180))
+                         (slot-value observation 'gr8s.node.v1::peer-public-key))))))
+
+(defun unix-seconds-for-server (server)
+  (let ((value (funcall (node-grpc-server-clock server))))
+    (if (> value 2208988800) (- value 2208988800) value)))
+
+(defun effective-route-peer-key (route)
+  (let ((hop (slot-value route 'gr8s.node.v1::next-hop)))
+    (slot-value (or hop route) 'gr8s.node.v1::wireguard-public-key)))
+
+(defun canonical-node-wireguard-observations (server node-name observations)
+  "Bound, deduplicate, validate and clamp authenticated node path evidence."
+  (let ((allowed (handler-case
+                     (mapcar #'effective-route-peer-key
+                             (assigned-node-routes server node-name))
+                   (kubernetes-error () nil)))
+        (seen nil)
+        (now (unix-seconds-for-server server)))
+    (loop for observation in observations
+          for index from 0 below 256
+          for key = (slot-value observation 'gr8s.node.v1::peer-public-key)
+          for handshake = (slot-value observation
+                                      'gr8s.node.v1::latest-handshake-unix-seconds)
+          when (and (< (length seen) 64)
+                    (= 32 (length key))
+                    (stringp (slot-value observation 'gr8s.node.v1::address))
+                    (plusp (length (slot-value observation 'gr8s.node.v1::address)))
+                    (<= 1 (slot-value observation 'gr8s.node.v1::port) 65535)
+                    (find key allowed :test #'equalp)
+                    (not (find key seen :test #'equalp))
+                    (<= 0 (- now handshake) 180))
+            collect
+            (progn
+              (push key seen)
+              (make-instance
+               'gr8s.node.v1::wireguard-peer-observation
+               :peer-public-key key
+               :address (slot-value observation 'gr8s.node.v1::address)
+               :port (slot-value observation 'gr8s.node.v1::port)
+               :latest-handshake-unix-seconds handshake
+               :received-bytes (slot-value observation 'gr8s.node.v1::received-bytes)
+               :path-score (steering-bounded-integer
+                            (slot-value observation 'gr8s.node.v1::path-score) 10000 10000)
+               :healthy (slot-value observation 'gr8s.node.v1::healthy)
+               :active-flows (steering-bounded-integer
+                              (slot-value observation 'gr8s.node.v1::active-flows) 1000))))))
+
+(defun rank-image-tracker-peers (server requesting-node peers)
+  "Rank authenticated swarm peers using locality and the requester's kernel evidence."
+  (let* ((store (node-grpc-server-store server))
+         (source (get-node store requesting-node))
+         (routes (assigned-node-routes server requesting-node))
+         (now (unix-seconds-for-server server))
+         (status (bt:with-lock-held ((node-grpc-server-lock server))
+                   (gethash requesting-node (node-grpc-server-statuses server)))))
+    (multiple-value-bind (source-region source-zone) (node-network-domain source)
+      (mapcar
+       (lambda (candidate) (getf candidate :value))
+       (rank-network-steering-candidates
+        (loop for peer in peers
+              for node = (handler-case
+                             (get-node store
+                                       (gr8s.image-distribution::tracker-peer-node-name peer))
+                           (kubernetes-error () nil))
+              when node
+                collect
+                (multiple-value-bind (region zone) (node-network-domain node)
+                  (let* ((route (find (node-record-name node) routes :test #'string=
+                                      :key (lambda (candidate)
+                                             (slot-value candidate
+                                                         'gr8s.node.v1::node-name))))
+                         (observation
+                          (node-status-wireguard-observation
+                           status
+                           (if route (effective-route-peer-key route)
+                               (node-record-wireguard-public-key node))
+                           :now now)))
+                    (list
+                     :value peer
+                     :node-name (node-record-name node)
+                     :same-node (string= requesting-node (node-record-name node))
+                     :same-zone (and (string= source-region region)
+                                     (string= source-zone zone))
+                     :same-region (string= source-region region)
+                     :failure-domain (list region zone)
+                     :capacity (node-steering-capacity-score (node-record-capacity node))
+                     :link-cost (node-network-link-cost source node)
+                     :healthy (if observation
+                                  (slot-value observation 'gr8s.node.v1::healthy)
+                                  t)
+                     :path-score (if observation
+                                     (slot-value observation 'gr8s.node.v1::path-score)
+                                     10000)
+                     :active-flows (if observation
+                                       (slot-value observation 'gr8s.node.v1::active-flows)
+                                       0))))))))))
+
 (defun handle-image-tracker-request (server request context)
   "Execute one tracker operation for the node identity authenticated by mTLS."
   (let* ((node-name (slot-value request 'gr8s.node.v1::node-name))
@@ -1165,7 +1824,10 @@ operation. No-op when no operation matches MESSAGE's id."
         (cond
           ((string= action "lookup")
            (image-tracker-view-response
-            (gr8s.image-distribution::tracker-lookup tracker digest node-name)))
+            (gr8s.image-distribution::tracker-lookup
+             tracker digest node-name
+             :peer-ranker (lambda (peers)
+                            (rank-image-tracker-peers server node-name peers)))))
           ((string= action "acquire")
            (multiple-value-bind (status token expires-at owner)
                (gr8s.image-distribution::tracker-acquire-origin
@@ -1211,7 +1873,13 @@ operation. No-op when no operation matches MESSAGE's id."
                                             cluster-pod-cidrs
                                             node-prefixes
                                             (overlay-backend "vxlan")
-                                            (wireguard-listen-port 51820))
+                                            (wireguard-listen-port 51820)
+                                            wireguard-relay-address
+                                            (wireguard-relay-listen "0.0.0.0")
+                                            (wireguard-relay-port-start 42000)
+                                            (wireguard-relay-max-channels 1024)
+                                            (clock #'get-universal-time)
+                                            (gateway-stability-seconds 30))
   "Create and start the node control-plane gRPC server on HOST:PORT: register the
    Connect service (and the Enrollment service when PKI is given), spawn its accept
    thread and the heartbeat monitor, and block until it is listening. Errors on a
@@ -1219,6 +1887,9 @@ operation. No-op when no operation matches MESSAGE's id."
    NODE-GRPC-SERVER (with its actual bound port)."
   (unless (plusp heartbeat-timeout-seconds)
     (error "Heartbeat timeout must be positive"))
+  (unless (and (integerp gateway-stability-seconds)
+               (not (minusp gateway-stability-seconds)))
+    (error "Gateway stability interval must be a non-negative integer"))
   (unless (member overlay-backend '("vxlan" "wireguard") :test #'string=)
     (error "Overlay backend must be vxlan or wireguard"))
   (unless (<= 1 wireguard-listen-port 65535)
@@ -1226,8 +1897,16 @@ operation. No-op when no operation matches MESSAGE's id."
   (multiple-value-bind (cluster-pod-cidrs node-prefixes)
       (normalize-pod-pool-geometry (or cluster-pod-cidrs cluster-pod-cidr)
                                    (or node-prefixes node-prefix))
-   (let* ((grpc-server (apply #'ag-grpc:make-grpc-server port :host host
+    (when (and wireguard-relay-address (not (string= overlay-backend "wireguard")))
+      (error "WireGuard relay requires the wireguard overlay backend"))
+    (let* ((grpc-server (apply #'ag-grpc:make-grpc-server port :host host
                              (node-server-tls-options pki)))
+         (relay-server
+           (when wireguard-relay-address
+             (gr8s.network::start-wireguard-relay-server
+              :address wireguard-relay-listen
+              :port-start wireguard-relay-port-start
+              :max-channels wireguard-relay-max-channels)))
          (server (%make-node-grpc-server
                   :store store
                   :grpc-server grpc-server
@@ -1239,40 +1918,55 @@ operation. No-op when no operation matches MESSAGE's id."
                   :cluster-pod-cidrs cluster-pod-cidrs
                   :node-prefixes node-prefixes
                   :overlay-backend overlay-backend
-                  :wireguard-listen-port wireguard-listen-port)))
-    (gr8s.node.v1::register-node-service-service
+                  :wireguard-listen-port wireguard-listen-port
+                  :wireguard-relay-server relay-server
+                  :wireguard-relay-address wireguard-relay-address
+                  :clock clock
+                  :gateway-stability-seconds gateway-stability-seconds))
+         (started-p nil))
+    (unwind-protect
+      (progn
+        (gr8s.node.v1::register-node-service-service
      grpc-server
      :connect-handler (lambda (context stream)
                         (handle-node-connect server context stream))
      :track-image-handler (lambda (request context)
                             (handle-image-tracker-request server request context)))
-    (when pki
-      (gr8s.node.v1::register-enrollment-service-service
+        (when pki
+          (gr8s.node.v1::register-enrollment-service-service
        grpc-server
        :enroll-handler (lambda (request context)
                          (handle-node-enrollment server request context))))
-    (setf (node-grpc-server-thread server)
+        (setf (node-grpc-server-thread server)
           (bt:make-thread
            (lambda () (ag-grpc:server-start grpc-server))
            :name "gr8s node gRPC server"))
-    (loop repeat 500
+        (loop repeat 500
           until (and (eql :running (ag-grpc:server-state grpc-server))
                      (ag-grpc::server-socket grpc-server))
           do (sleep 0.01))
-    (unless (ag-grpc::server-socket grpc-server)
-      (error "Node gRPC server failed to start listening"))
-    (setf (node-grpc-server-port server)
+        (unless (ag-grpc::server-socket grpc-server)
+          (error "Node gRPC server failed to start listening"))
+        (setf (node-grpc-server-port server)
           (usocket:get-local-port (ag-grpc::server-socket grpc-server))
           (node-grpc-server-monitor-thread server)
           (bt:make-thread (lambda () (monitor-node-heartbeats server))
                           :name "gr8s node heartbeat monitor"))
-    server)))
+        (setf started-p t)
+        server)
+      (unless started-p
+        (ignore-errors (ag-grpc:server-stop grpc-server))
+        (when relay-server
+          (gr8s.network::stop-wireguard-relay-server relay-server)))))))
 
 (defun stop-node-grpc-server (server)
   "Stop SERVER: signal its loops to stop, stop the gRPC server, and join its monitor
    and accept threads with a bounded wait, destroying a thread still wedged in
    accept(2) as the last resort. Returns SERVER."
   (setf (node-grpc-server-stopping-p server) t)
+  (when (node-grpc-server-wireguard-relay-server server)
+    (gr8s.network::stop-wireguard-relay-server
+     (node-grpc-server-wireguard-relay-server server)))
   (ignore-errors (ag-grpc:server-stop (node-grpc-server-grpc-server server)))
   (dolist (thread (list (node-grpc-server-monitor-thread server)
                         (node-grpc-server-thread server)))

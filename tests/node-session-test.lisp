@@ -2,6 +2,329 @@
 
 (in-suite gr8s)
 
+(defun topology-node (name region zone)
+  (gr8s:make-node-record
+   :id name :name name :pod-cidr "10.88.0.0/24" :underlay-address "192.0.2.1"
+   :labels (gr8s::core-object "topology.kubernetes.io/region" region
+                              "topology.kubernetes.io/zone" zone)))
+
+(defun topology-fixture ()
+  (loop for region in '("east" "west" "north")
+        append (loop for zone in '("a" "b")
+                     append (loop for index below 3
+                                  collect (topology-node
+                                           (format nil "~A-~A-~D" region zone index)
+                                           region zone)))))
+
+(test node-ready-stability-window-survives-restart-and-resets-after-expiry
+  (with-temporary-store (store path)
+    (let* ((now (get-universal-time))
+           (node (gr8s:make-node-record :id "stable-id" :name "stable-node"
+                                        :pod-cidr "10.88.1.0/24")))
+      (gr8s:register-node store node)
+      (gr8s:mark-node-ready store "stable-node" now :lease-duration 10)
+      (is (= now (gr8s::node-record-ready-since
+                  (gr8s:get-node store "stable-node"))))
+      ;; Renewing a healthy lease does not restart the stability interval.
+      (gr8s:mark-node-ready store "stable-node" (1+ now) :lease-duration 10)
+      (is (= now (gr8s::node-record-ready-since
+                  (gr8s:get-node store "stable-node"))))
+      (let ((reopened (gr8s:open-store path)))
+        (is (= now (gr8s::node-record-ready-since
+                    (gr8s:get-node reopened "stable-node"))))
+        (gr8s:expire-node-heartbeats reopened now :now (+ now 12))
+        (is-false (gr8s::node-record-ready-since
+                   (gr8s:get-node reopened "stable-node")))
+        (gr8s:mark-node-ready reopened "stable-node" (+ now 13)
+                              :lease-duration 10)
+        (is (= (+ now 13)
+               (gr8s::node-record-ready-since
+                (gr8s:get-node reopened "stable-node"))))
+        ;; A control plane that was down past the lease deadline must not reuse
+        ;; the old stability epoch when the node returns.
+        (gr8s:mark-node-ready reopened "stable-node" (- now 100)
+                              :lease-duration 1)
+        (let ((expired-reopen (gr8s:open-store path)))
+          (is-false (gr8s:node-record-ready-p
+                     (gr8s:get-node expired-reopen "stable-node")))
+          (is-false (gr8s::node-record-ready-since
+                     (gr8s:get-node expired-reopen "stable-node")))
+          (gr8s:mark-node-ready expired-reopen "stable-node" now
+                                :lease-duration 10)
+          (is (= now (gr8s::node-record-ready-since
+                      (gr8s:get-node expired-reopen "stable-node")))))))))
+
+(test wireguard-topology-planner-keeps-small-clusters-direct
+  (let* ((nodes (loop for index below 4
+                      collect (topology-node (format nil "node-~D" index) "r" "z")))
+         (plan (gr8s::plan-wireguard-topology nodes :full-mesh-limit 8)))
+    (is (eq :full-mesh (gr8s::wireguard-topology-plan-mode plan)))
+    (is-false (getf (gr8s::wireguard-topology-plan-object plan)
+                    :degraded-domains))
+    (dolist (node nodes)
+      (is (= 3 (length (gr8s::wireguard-topology-neighbors
+                        plan (gr8s:node-record-name node))))))))
+
+(test recovering-node-is-reachable-but-never-used-as-sparse-transit
+  (let* ((nodes (loop for index below 9
+                      collect (topology-node (format nil "node-~D" index) "r" "z")))
+         (stable (loop for index from 1 below 9 collect (format nil "node-~D" index)))
+         (plan (gr8s::plan-wireguard-topology
+                nodes :full-mesh-limit 8 :transit-node-names stable)))
+    (is (eq :sparse (gr8s::wireguard-topology-plan-mode plan)))
+    (is (<= (length (gr8s::wireguard-topology-neighbors plan "node-0")) 2))
+    (dolist (source stable)
+      (dolist (destination stable)
+        (unless (string= source destination)
+          (let ((current source))
+            (loop repeat (length nodes)
+                  until (string= current destination)
+                  do (setf current
+                           (gr8s::wireguard-topology-next-hop
+                            plan current destination))
+                     (is (and current (not (string= current "node-0"))))
+                  finally (is (string= current destination)))))))
+    ;; The recovering node is still a destination and has a direct stable hop.
+    (is (member (gr8s::wireguard-topology-next-hop plan "node-4" "node-0")
+                stable :test #'string=))))
+
+(test recovering-leaf-cannot-shortcut-between-stable-failure-domains
+  (let* ((stable
+           (append (loop for index below 5
+                         collect (topology-node (format nil "a-~D" index) "r" "a"))
+                   (loop for index below 5
+                         collect (topology-node (format nil "b-~D" index) "r" "b"))))
+         (leaf (topology-node "recovering" "r" "new-zone"))
+         (plan (gr8s::plan-wireguard-topology
+                (cons leaf stable) :full-mesh-limit 8
+                :transit-node-names (mapcar #'gr8s:node-record-name stable)))
+         (current "a-4")
+         (visited nil))
+    (loop repeat 20
+          until (string= current "b-4")
+          do (setf current (gr8s::wireguard-topology-next-hop plan current "b-4"))
+             (push current visited))
+    (is (string= current "b-4"))
+    (is-false (member "recovering" visited :test #'string=))))
+
+(test recovering-leaf-attachments-balance-across-stable-gateways
+  (let* ((stable
+           (loop for index below 18
+                 collect (topology-node
+                          (format nil "stable-~2,'0D" index) "r"
+                          (format nil "z~D" (mod index 3)))))
+         (leaves
+           (loop for index below 9
+                 collect (topology-node
+                          (format nil "recovering-~2,'0D" index) "r" "new-zone")))
+         (plan (gr8s::plan-wireguard-topology
+                (append stable leaves) :full-mesh-limit 8
+                :transit-node-names (mapcar #'gr8s:node-record-name stable)))
+         (used nil))
+    (dolist (leaf leaves)
+      (dolist (neighbor (gr8s::wireguard-topology-neighbors
+                         plan (gr8s:node-record-name leaf)))
+        (pushnew neighbor used :test #'string=)))
+    (is (>= (length used) 12))
+    (is (<= (loop for node in stable
+                  maximize (length (gr8s::wireguard-topology-neighbors
+                                    plan (gr8s:node-record-name node))))
+            6))))
+
+(test gateway-expiry-fails-over-fast-and-recovery-enters-transit-slowly
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((now 4000000000))
+      (dotimes (index 9)
+        (let ((node (topology-node (format nil "node-~D" index) "r" "z")))
+          (setf (gr8s::node-record-pod-cidr node) (format nil "10.88.~D.0/24" index)
+                (gr8s::node-record-underlay-address node) (format nil "192.0.2.~D" (+ 10 index))
+                (gr8s::node-record-wireguard-public-key node)
+                (make-array 32 :element-type '(unsigned-byte 8)
+                               :initial-element (1+ index)))
+          (gr8s:register-node store node)
+          (gr8s:mark-node-ready store (gr8s:node-record-name node) (- now 100)
+                                :lease-duration (if (zerop index) 50 1000))))
+      (let ((server (gr8s::%make-node-grpc-server
+                     :store store :heartbeat-timeout-seconds 15
+                     :overlay-backend "wireguard" :clock (lambda () now)
+                     :gateway-stability-seconds 30)))
+        (labels ((effective-hop (route)
+                   (let ((hop (slot-value route 'gr8s.node.v1::next-hop)))
+                     (if hop (slot-value hop 'gr8s.node.v1::node-name)
+                         (slot-value route 'gr8s.node.v1::node-name))))
+                 (uses-node-0-as-transit-p ()
+                   (loop for source-index from 1 below 9
+                         thereis
+                         (loop for route in (gr8s::assigned-node-routes
+                                             server (format nil "node-~D" source-index))
+                               thereis (and (string= "node-0" (effective-hop route))
+                                            (not (string= "node-0"
+                                                          (slot-value route
+                                                                      'gr8s.node.v1::node-name))))))))
+          (is-true (uses-node-0-as-transit-p))
+          (gr8s::reconcile-node-heartbeats server now)
+          (let* ((snapshot (gr8s::current-node-snapshot server "node-4"))
+                 (revision (slot-value snapshot 'gr8s.node.v1::revision)))
+            (is (= 7 (length (slot-value snapshot 'gr8s.node.v1::routes))))
+            (gr8s::reconcile-node-heartbeats server now)
+            (is (= revision
+                   (slot-value (gr8s::current-node-snapshot server "node-4")
+                               'gr8s.node.v1::revision))))
+          (is-false (find "node-0" (gr8s::assigned-node-routes server "node-4")
+                          :key (lambda (route)
+                                 (slot-value route 'gr8s.node.v1::node-name))
+                          :test #'string=))
+          (gr8s:mark-node-ready store "node-0" (incf now) :lease-duration 1000)
+          (is (find "node-0" (gr8s::assigned-node-routes server "node-4")
+                    :key (lambda (route)
+                           (slot-value route 'gr8s.node.v1::node-name))
+                    :test #'string=))
+          (is-false (uses-node-0-as-transit-p))
+          (incf now 30)
+          (gr8s::reconcile-node-heartbeats server now)
+          (is-true (uses-node-0-as-transit-p))
+          (is (= 8 (length
+                    (slot-value (gr8s::current-node-snapshot server "node-4")
+                                'gr8s.node.v1::routes))))
+          (let ((reasons (mapcar (lambda (decision) (getf decision :reason))
+                                 (gr8s::node-grpc-server-topology-decisions server))))
+            (is (member :lease-expired reasons))
+            (is (member :stability-window-satisfied reasons))))))))
+
+(test sparse-steering-evidence-is-next-hop-bound-fresh-deduplicated-and-clamped
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((now 1700000200))
+      (dotimes (index 9)
+        (let ((node (topology-node (format nil "node-~D" index) "r" "z")))
+          (setf (gr8s::node-record-pod-cidr node) (format nil "10.88.~D.0/24" index)
+                (gr8s::node-record-underlay-address node) (format nil "192.0.2.~D" (+ 10 index))
+                (gr8s::node-record-wireguard-public-key node)
+                (make-array 32 :element-type '(unsigned-byte 8)
+                               :initial-element (1+ index)))
+          (gr8s:register-node store node)
+          (gr8s:mark-node-ready store (gr8s::node-record-name node)
+                                (+ now 2208988800) :lease-duration 1000)))
+      (let* ((server (gr8s::%make-node-grpc-server
+                      :store store :overlay-backend "wireguard"
+                      :clock (lambda () now)))
+             (route (find-if (lambda (candidate)
+                               (slot-value candidate 'gr8s.node.v1::next-hop))
+                             (gr8s::assigned-node-routes server "node-0")))
+             (hop-key (gr8s::effective-route-peer-key route))
+             (other-route
+               (find-if (lambda (candidate)
+                          (not (equalp hop-key
+                                       (gr8s::effective-route-peer-key candidate))))
+                        (gr8s::assigned-node-routes server "node-0")))
+             (destination-key (slot-value route 'gr8s.node.v1::wireguard-public-key))
+             (fresh (lambda (key score flows &optional (handshake (- now 3)))
+                      (make-instance 'gr8s.node.v1::wireguard-peer-observation
+                                     :peer-public-key key :address "192.0.2.20"
+                                     :port 51820 :latest-handshake-unix-seconds handshake
+                                     :received-bytes 1 :healthy t
+                                     :path-score score :active-flows flows)))
+             (canonical
+               (gr8s::canonical-node-wireguard-observations
+                server "node-0"
+                (list (funcall fresh hop-key 999999 999999)
+                      (funcall fresh hop-key 1 1)
+                      (funcall fresh destination-key 1 1)
+                      (funcall fresh hop-key 1 1 (- now 500))))))
+        (is-true route)
+        (is (= 1 (length canonical)))
+        (is (equalp hop-key
+                    (slot-value (first canonical) 'gr8s.node.v1::peer-public-key)))
+        (is (= 10000 (slot-value (first canonical) 'gr8s.node.v1::path-score)))
+        (is (= 1000 (slot-value (first canonical) 'gr8s.node.v1::active-flows)))
+        (let* ((status (make-instance
+                        'gr8s.node.v1::node-status
+                        :wireguard-peer-observations
+                        (list (make-instance
+                               'gr8s.node.v1::wireguard-peer-observation
+                               :peer-public-key hop-key :healthy nil :path-score 1
+                               :latest-handshake-unix-seconds (- now 2))
+                              (make-instance
+                               'gr8s.node.v1::wireguard-peer-observation
+                               :peer-public-key (gr8s::effective-route-peer-key other-route)
+                               :healthy t :path-score 9999
+                               :latest-handshake-unix-seconds (- now 2)))))
+               (bad-name (slot-value route 'gr8s.node.v1::node-name))
+               (good-name (slot-value other-route 'gr8s.node.v1::node-name))
+               (bad (gr8s.image-distribution::make-tracker-peer :node-name bad-name))
+               (good (gr8s.image-distribution::make-tracker-peer :node-name good-name)))
+          (setf (gethash "node-0" (gr8s::node-grpc-server-statuses server)) status)
+          (is (string= good-name
+                       (gr8s.image-distribution::tracker-peer-node-name
+                        (first (gr8s::rank-image-tracker-peers
+                                server "node-0" (list bad good)))))))))))
+
+(test wireguard-topology-planner-is-local-bounded-deterministic-and-resilient
+  (let* ((nodes (topology-fixture))
+         (plan (gr8s::plan-wireguard-topology nodes :full-mesh-limit 8))
+         (again (gr8s::plan-wireguard-topology (reverse nodes) :full-mesh-limit 8)))
+    (is (eq :sparse (gr8s::wireguard-topology-plan-mode plan)))
+    (is (equal (gr8s::wireguard-topology-plan-object plan)
+               (gr8s::wireguard-topology-plan-object again)))
+    (is (equal '("east-a-0" "east-a-1")
+               (second (find '("east" "a")
+                             (getf (gr8s::wireguard-topology-plan-object plan)
+                                   :zone-gateways)
+                             :key #'first :test #'equal))))
+    (is-false (getf (gr8s::wireguard-topology-plan-object plan)
+                    :degraded-domains))
+    (dolist (source nodes)
+      (let* ((source-name (gr8s:node-record-name source))
+             (neighbors (gr8s::wireguard-topology-neighbors plan source-name)))
+        (is (<= (length neighbors) 6))
+        (dolist (destination nodes)
+          (unless (eq source destination)
+            (let ((hop (gr8s::wireguard-topology-next-hop
+                        plan source-name (gr8s:node-record-name destination))))
+              (is-true hop)
+              (is (member hop neighbors :test #'string=)))))
+        ;; A route within one zone must not leave its failure domain first.
+        (let* ((same-zone (find-if
+                           (lambda (candidate)
+                             (and (not (eq candidate source))
+                                  (string= (nth-value 0 (gr8s::node-network-domain source))
+                                           (nth-value 0 (gr8s::node-network-domain candidate)))
+                                  (string= (nth-value 1 (gr8s::node-network-domain source))
+                                           (nth-value 1 (gr8s::node-network-domain candidate)))))
+                           nodes))
+               (hop (and same-zone
+                         (gr8s::wireguard-topology-next-hop
+                          plan source-name (gr8s:node-record-name same-zone))))
+               (hop-node (find hop nodes :key #'gr8s:node-record-name :test #'string=)))
+          (is (string= (nth-value 1 (gr8s::node-network-domain source))
+                       (nth-value 1 (gr8s::node-network-domain hop-node)))))))
+    ;; Replanning without any one node retains all-pairs reachability. Domains
+    ;; in this fixture have enough redundancy to make that guarantee possible.
+    (dolist (removed nodes)
+      (let* ((survivors (remove removed nodes))
+             (survivor-plan
+               (gr8s::plan-wireguard-topology survivors :full-mesh-limit 8)))
+        (dolist (source survivors)
+          (dolist (destination survivors)
+            (unless (eq source destination)
+              (is (gr8s::wireguard-topology-next-hop
+                   survivor-plan (gr8s:node-record-name source)
+                   (gr8s:node-record-name destination))))))))))
+
+(test wireguard-topology-planner-explains-unavoidable-single-gateway-domains
+  (let* ((nodes (loop for index below 9
+                      collect (topology-node
+                               (format nil "node-~D" index)
+                               (format nil "region-~D" index)
+                               "only-zone")))
+         (plan (gr8s::plan-wireguard-topology nodes :full-mesh-limit 8))
+         (degraded (getf (gr8s::wireguard-topology-plan-object plan)
+                         :degraded-domains)))
+    (is (= 18 (length degraded)))
+    (is (member '(:zone "region-0" "only-zone") degraded :test #'equal))
+    (is (member '(:region "region-0") degraded :test #'equal))))
+
 (test node-session-packages-own-their-public-entry-points
   (dolist (name '("START-NODE-GRPC-SERVER"
                   "STOP-NODE-GRPC-SERVER"
@@ -1318,7 +1641,11 @@
        store (gr8s:make-node-record :id "node-b" :name "worker-b"
                                     :pod-cidr "10.88.2.0/24"
                                     :underlay-address "192.0.2.11"
-                                    :wireguard-public-key key-b))
+                                    :wireguard-public-key key-b
+                                    :wireguard-reflexive-observed-at 1234
+                                    :wireguard-endpoints
+                                    '(("private" "10.0.0.11" 51820)
+                                      ("public" "192.0.2.11" 51820))))
       (let* ((reopened (gr8s:open-store path))
              (server (gr8s::%make-node-grpc-server
                       :store reopened :port 0 :heartbeat-timeout-seconds 5
@@ -1329,17 +1656,203 @@
         (is (equalp key-a
                     (gr8s::node-record-wireguard-public-key
                      (gr8s:get-node reopened "worker-a"))))
+        (is (= 1234
+               (gr8s::node-record-wireguard-reflexive-observed-at
+                (gr8s:get-node reopened "worker-b"))))
         (is (string= "wireguard"
                      (slot-value network 'gr8s.node.v1::overlay-backend)))
         (is (= 51820
                (slot-value network 'gr8s.node.v1::wireguard-listen-port)))
         (is (= 1 (length routes)))
+        (is (string= "worker-b"
+                     (slot-value (first routes) 'gr8s.node.v1::node-name)))
         (is (equalp key-b
                     (slot-value (first routes)
                                 'gr8s.node.v1::wireguard-public-key)))
         (is (= 51820
                (slot-value (first routes)
-                           'gr8s.node.v1::wireguard-listen-port)))))))
+                           'gr8s.node.v1::wireguard-listen-port)))
+        (is (equal '("private" "public")
+                   (mapcar (lambda (endpoint)
+                             (slot-value endpoint 'gr8s.node.v1::name))
+                           (slot-value (first routes)
+                                       'gr8s.node.v1::wireguard-endpoints))))))))
+
+(test sparse-wireguard-routes-separate-destination-from-authenticated-next-hop
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (dotimes (index 9)
+      (let ((node (topology-node (format nil "node-~D" index) "region" "zone")))
+        (setf (gr8s::node-record-id node) (format nil "id-~D" index)
+              (gr8s::node-record-pod-cidr node) (format nil "10.88.~D.0/24" index)
+              (gr8s::node-record-underlay-address node) (format nil "192.0.2.~D" (+ 10 index))
+              (gr8s::node-record-wireguard-public-key node)
+              (make-array 32 :element-type '(unsigned-byte 8)
+                             :initial-element (1+ index)))
+        (gr8s:register-node store node)))
+    (let* ((server (gr8s::%make-node-grpc-server
+                    :store store :port 0 :heartbeat-timeout-seconds 5
+                    :cluster-pod-cidr "10.88.0.0/16" :node-prefix 24
+                    :overlay-backend "wireguard" :wireguard-listen-port 51820))
+           (routes (gr8s::assigned-node-routes server "node-0"))
+           (effective-peers nil))
+      (is (= 8 (length routes)))
+      (dolist (route routes)
+        (let ((hop (slot-value route 'gr8s.node.v1::next-hop)))
+          (pushnew (if hop
+                       (slot-value hop 'gr8s.node.v1::node-name)
+                       (slot-value route 'gr8s.node.v1::node-name))
+                   effective-peers :test #'string=)))
+      (is (<= (length effective-peers) 2))
+      (let* ((route (find "node-4" routes
+                          :key (lambda (candidate)
+                                 (slot-value candidate 'gr8s.node.v1::node-name))
+                          :test #'string=))
+             (hop (slot-value route 'gr8s.node.v1::next-hop))
+             (hop-node (gr8s:get-node store
+                                      (slot-value hop 'gr8s.node.v1::node-name))))
+        (is-true hop)
+        (is (not (string= "node-4"
+                          (slot-value hop 'gr8s.node.v1::node-name))))
+        (is (equalp (gr8s::node-record-wireguard-public-key hop-node)
+                    (slot-value hop 'gr8s.node.v1::wireguard-public-key)))))))
+
+(test nat-rendezvous-replaces-only-the-reflexive-candidate
+  (is (equal '(("lan" "10.0.0.9" 51820)
+               ("nat-reflexive" "198.51.100.9" 41002))
+             (gr8s::merge-wireguard-reflexive-endpoint
+              '(("lan" "10.0.0.9" 51820)
+                ("nat-reflexive" "198.51.100.9" 41001))
+              "198.51.100.9" 41002)))
+
+  (is (equal '(("public" "192.0.2.9" 51820)
+               ("nat-reflexive" "198.51.100.9" 41002))
+             (gr8s::merge-wireguard-advertised-endpoints
+              '(("public" "192.0.2.9" 51820))
+              '(("lan" "10.0.0.9" 51820)
+                ("nat-reflexive" "198.51.100.9" 41002)))))
+  (signals error
+    (gr8s::merge-wireguard-advertised-endpoints
+     '(("nat-reflexive" "203.0.113.8" 9)) nil))
+  (signals error
+    (gr8s::merge-wireguard-advertised-endpoints
+     '(("relay" "203.0.113.8" 9)) nil)))
+
+(test authenticated-topology-appends-pair-specific-relay-candidates
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let* ((key-a (make-array 32 :element-type '(unsigned-byte 8) :initial-element 21))
+           (key-b (make-array 32 :element-type '(unsigned-byte 8) :initial-element 22))
+           (relay (gr8s::start-wireguard-relay-server
+                   :address "127.0.0.1" :port-start 46000 :max-channels 1)))
+      (unwind-protect
+           (progn
+             (gr8s:register-node
+              store (gr8s:make-node-record
+                     :id "node-a" :name "worker-a" :pod-cidr "10.88.1.0/24"
+                     :underlay-address "192.0.2.10" :wireguard-public-key key-a
+                     :wireguard-reflexive-observed-at
+                     (- (get-universal-time) 2208988800)
+                     :wireguard-endpoints
+                     '(("nat-reflexive" "198.51.100.10" 41000))))
+             (gr8s:register-node
+              store (gr8s:make-node-record
+                     :id "node-b" :name "worker-b" :pod-cidr "10.88.2.0/24"
+                     :underlay-address "192.0.2.11" :wireguard-public-key key-b
+                     :wireguard-reflexive-observed-at
+                     (- (get-universal-time) 2208988800)
+                     :wireguard-endpoints
+                     '(("public" "198.51.100.11" 51820)
+                       ("nat-reflexive" "198.51.100.11" 41001))))
+             (let* ((server
+                      (gr8s::%make-node-grpc-server
+                       :store store :port 0 :heartbeat-timeout-seconds 5
+                       :cluster-pod-cidr "10.88.0.0/16" :node-prefix 24
+                       :overlay-backend "wireguard" :wireguard-listen-port 51820
+                       :wireguard-relay-server relay
+                       :wireguard-relay-address "203.0.113.9"))
+                    (route-a (first (gr8s::assigned-node-routes server "worker-a")))
+                    (route-b (first (gr8s::assigned-node-routes server "worker-b")))
+                    (endpoints-a (slot-value route-a 'gr8s.node.v1::wireguard-endpoints))
+                    (endpoints-b (slot-value route-b 'gr8s.node.v1::wireguard-endpoints)))
+               (is (equal '("public" "nat-reflexive" "relay")
+                          (mapcar (lambda (endpoint)
+                                    (slot-value endpoint 'gr8s.node.v1::name))
+                                  endpoints-a)))
+               (is (equal '("nat-reflexive" "relay")
+                          (mapcar (lambda (endpoint)
+                                    (slot-value endpoint 'gr8s.node.v1::name))
+                                  endpoints-b)))
+               (is (= 46000 (slot-value (third endpoints-a)
+                                        'gr8s.node.v1::port)))
+               (is (= 46001 (slot-value (second endpoints-b)
+                                        'gr8s.node.v1::port)))))
+        (gr8s::stop-wireguard-relay-server relay)))))
+
+(test nat-rendezvous-binds-peer-keys-to-registered-nodes-and-rejects-stale-evidence
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let* ((reporter-key (make-array 32 :element-type '(unsigned-byte 8)
+                                        :initial-element 7))
+           (target-key (make-array 32 :element-type '(unsigned-byte 8)
+                                      :initial-element 8))
+           (server (gr8s::%make-node-grpc-server
+                    :store store :overlay-backend "wireguard"
+                    :cluster-pod-cidr "10.88.0.0/16")))
+      (gr8s:register-node
+       store (gr8s:make-node-record :id "reporter" :name "reporter"
+                                    :pod-cidr "10.88.1.0/24"
+                                    :underlay-address "192.0.2.1"
+                                    :wireguard-public-key reporter-key))
+      (gr8s:register-node
+       store (gr8s:make-node-record :id "target" :name "target"
+                                    :pod-cidr "10.88.2.0/24"
+                                    :underlay-address "192.0.2.2"
+                                    :wireguard-public-key target-key
+                                    :wireguard-endpoints
+                                    '(("lan" "10.0.0.2" 51820))))
+      (flet ((observation (key handshake &optional (address "198.51.100.2"))
+               (make-instance
+                'gr8s.node.v1::wireguard-peer-observation
+                :peer-public-key key :address address :port 41000
+                :latest-handshake-unix-seconds handshake :received-bytes 20)))
+        (gr8s::record-authenticated-wireguard-observations
+         server "reporter" (list (observation target-key 970))
+         :now 1000 :fresh-seconds 60)
+        (is (equal '(("lan" "10.0.0.2" 51820)
+                     ("nat-reflexive" "198.51.100.2" 41000))
+                   (gr8s::node-record-wireguard-endpoints
+                    (gr8s:get-node store "target"))))
+        (is (= 1000
+               (gr8s::node-record-wireguard-reflexive-observed-at
+                (gr8s:get-node store "target"))))
+        (gr8s::record-authenticated-wireguard-observations
+         server "reporter" (list (observation target-key 100))
+         :now 1000 :fresh-seconds 60)
+        (is (= 41000
+               (third (find "nat-reflexive"
+                            (gr8s::node-record-wireguard-endpoints
+                             (gr8s:get-node store "target"))
+                            :key #'first :test #'string=))))
+        (gr8s::record-authenticated-wireguard-observations
+         server "reporter" (list (observation target-key 1005 "198.51.100.3"))
+         :now 1010 :fresh-seconds 60)
+        (is (string= "198.51.100.2"
+                     (second (find "nat-reflexive"
+                                   (gr8s::node-record-wireguard-endpoints
+                                    (gr8s:get-node store "target"))
+                                   :key #'first :test #'string=))))
+        (gr8s::record-authenticated-wireguard-observations
+         server "reporter" (list (observation target-key 1025 "198.51.100.3"))
+         :now 1031 :fresh-seconds 60)
+        (is (string= "198.51.100.3"
+                     (second (find "nat-reflexive"
+                                   (gr8s::node-record-wireguard-endpoints
+                                    (gr8s:get-node store "target"))
+                                   :key #'first :test #'string=))))
+        (is (= 1031
+               (gr8s::node-record-wireguard-reflexive-observed-at
+                (gr8s:get-node store "target"))))))))
 
 (test live-node-sessions-publish-peer-address-and-key-changes-and-withdrawals
   (with-temporary-store (store path)
@@ -1367,7 +1880,19 @@
                    (let* ((snapshot (first snapshots))
                           (peer (and snapshot (first (slot-value snapshot 'gr8s.node.v1::routes)))))
                      (and peer (slot-value peer 'gr8s.node.v1::wireguard-public-key)))))
-               (connect-peer (address key)
+               (latest-peer-endpoint-names ()
+                 (bt:with-lock-held (lock)
+                   (let* ((snapshot (first snapshots))
+                          (peer (and snapshot
+                                     (first (slot-value snapshot
+                                                        'gr8s.node.v1::routes)))))
+                     (and peer
+                          (mapcar
+                           (lambda (endpoint)
+                             (slot-value endpoint 'gr8s.node.v1::name))
+                           (slot-value peer
+                                       'gr8s.node.v1::wireguard-endpoints))))))
+               (connect-peer (address key &optional endpoints)
                  (gr8s:run-node-session
                   "127.0.0.1" (gr8s:node-grpc-server-port server) "worker-b"
                   (merge-pathnames "peer-b/identity.json" path)
@@ -1375,6 +1900,7 @@
                     (is (string= address (slot-value (slot-value snapshot 'gr8s.node.v1::network)
                                                      'gr8s.node.v1::underlay-address))))
                   :underlay-address address :wireguard-public-key key
+                  :wireguard-endpoints endpoints
                   :max-sessions 1)))
         (unwind-protect
              (progn
@@ -1390,9 +1916,16 @@
                          :wireguard-public-key key-a :control control
                          :reconnect-delay 0.01))))
                (is-true (wait-until (lambda () (bt:with-lock-held (lock) snapshots)) :timeout 5))
-               (connect-peer "192.0.2.11" key-b)
+               (connect-peer "192.0.2.11" key-b
+                             '(("private" "10.0.0.11" 51820)
+                               ("public" "192.0.2.11" 51820)))
                (is-true (wait-until (lambda () (equal "192.0.2.11" (latest-peer-address))) :timeout 5))
                (is-true (equalp key-b (latest-peer-key)))
+               (is-true (wait-until
+                         (lambda ()
+                           (equal '("private" "public")
+                                  (latest-peer-endpoint-names)))
+                         :timeout 5))
                (connect-peer "192.0.2.12" key-b)
                (is-true (wait-until (lambda () (equal "192.0.2.12" (latest-peer-address))) :timeout 5))
                (connect-peer "192.0.2.12" key-c)

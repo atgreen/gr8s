@@ -197,7 +197,7 @@ operation_type, list_podsandbox, or NIL for anything that isn't a CRI call."
             when (and encoded
                       (equalp public-key
                               (ignore-errors (wireguard-decode-key encoded "peer public key"))))
-              return (gethash "nodeID" route))
+              return (gethash "nodeName" route (gethash "nodeID" route)))
       (ag-grpc:base64-encode public-key)))
 
 (defun wireguard-metrics-text
@@ -242,6 +242,60 @@ operation_type, list_podsandbox, or NIL for anything that isn't a CRI call."
              out "gr8s_wireguard_private_key_age_seconds"
              "Age of this node's persisted WireGuard private key." "gauge"
              (list (list (list (cons "node" node-name)) age)))))))))
+
+(defun wireguard-path-metrics-text (state node-name)
+  "Render selected-path, health and score evidence from the durable tuner state."
+  (with-output-to-string (out)
+    (let ((selected nil) (healthy nil) (scores nil) (failures nil)
+          (passive-rtt nil) (passive-retransmits nil) (passive-cwnd nil)
+          (passive-flows nil) (passive-throughput nil) (safe-mtus nil))
+      (maphash
+       (lambda (peer-id peer)
+         (dolist (observation (wireguard-peer-path-state-observations peer))
+           (let ((labels
+                   (list (cons "node" node-name) (cons "peer" peer-id)
+                         (cons "endpoint" (wireguard-path-observation-name observation)))))
+             (push (list labels
+                         (if (equal (wireguard-observation-endpoint observation)
+                                    (wireguard-peer-path-state-selected peer)) 1 0))
+                   selected)
+             (push (list labels (if (wireguard-path-healthy-p observation) 1 0)) healthy)
+             (push (list labels (wireguard-path-score observation)) scores)
+             (push (list labels (wireguard-path-observation-consecutive-failures observation))
+                   failures)
+             (push (list labels (or (wireguard-path-observation-passive-rtt-microseconds observation) 0))
+                   passive-rtt)
+             (push (list labels (wireguard-path-observation-passive-retransmits observation))
+                   passive-retransmits)
+             (push (list labels (or (wireguard-path-observation-passive-congestion-window observation) 0))
+                   passive-cwnd)
+             (push (list labels (wireguard-path-observation-passive-active-flows observation))
+                   passive-flows)
+             (push (list labels (wireguard-path-observation-passive-bytes-per-second observation))
+                   passive-throughput)
+             (push (list labels (wireguard-path-observation-safe-mtu observation))
+                   safe-mtus))))
+       (wireguard-path-state-peers state))
+      (write-prometheus-family out "gr8s_wireguard_path_selected"
+                               "Whether this endpoint is the selected peer path." "gauge" selected)
+      (write-prometheus-family out "gr8s_wireguard_path_healthy"
+                               "Whether this endpoint currently passes path health gates." "gauge" healthy)
+      (write-prometheus-family out "gr8s_wireguard_path_score"
+                               "Lower-is-better self-tuning endpoint path score." "gauge" scores)
+      (write-prometheus-family out "gr8s_wireguard_path_consecutive_failures"
+                               "Consecutive verified path failures." "gauge" failures)
+      (write-prometheus-family out "gr8s_wireguard_path_passive_rtt_microseconds"
+                               "Passive TCP smoothed RTT." "gauge" passive-rtt)
+      (write-prometheus-family out "gr8s_wireguard_path_passive_retransmits"
+                               "Passive TCP retransmits in the last interval." "gauge" passive-retransmits)
+      (write-prometheus-family out "gr8s_wireguard_path_passive_congestion_window"
+                               "Smallest observed passive TCP congestion window." "gauge" passive-cwnd)
+      (write-prometheus-family out "gr8s_wireguard_path_passive_active_flows"
+                               "Recently active passive TCP flows." "gauge" passive-flows)
+      (write-prometheus-family out "gr8s_wireguard_path_passive_bytes_per_second"
+                               "Passive TCP throughput in bytes per second." "gauge" passive-throughput)
+      (write-prometheus-family out "gr8s_wireguard_path_safe_mtu_bytes"
+                               "Largest verified inner packet size for this path." "gauge" safe-mtus))))
 
 ;;; What the runtime runs
 
