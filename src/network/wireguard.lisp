@@ -31,15 +31,17 @@
    (make-array 8 :element-type '(unsigned-byte 8) :initial-element 0)))
 
 (defun wireguard-allowed-ip-attributes (cidr)
-  "Encode one WireGuard IPv4 allowed-ip entry for CIDR."
-  (multiple-value-bind (address prefix) (parse-ipv4-cidr cidr)
-    (unless (and (<= 0 prefix 32)
-                 (zerop (logand address (1- (ash 1 (- 32 prefix))))))
+  "Encode one WireGuard IPv4 or IPv6 allowed-ip entry for CIDR."
+  (multiple-value-bind (family address prefix bits) (parse-pod-cidr cidr)
+    (unless (and (zerop (logand address (1- (ash 1 (- bits prefix)))))
+                 (string= cidr
+                          (format nil "~A/~D" (format-pod-address family address) prefix)))
       (invalid-cni "invalid WireGuard allowed IP ~A" cidr))
     (netlink-octets
-     (netlink-attribute 1 (netlink-integer 2 2)) ; WGALLOWEDIP_A_FAMILY
-     (netlink-attribute 2
-                        (ipv4-network-octets (format-ipv4-integer address)))
+     (netlink-attribute 1 (netlink-integer (if (eq family :ipv6) 10 2) 2))
+     (netlink-attribute 2 (nth-value 1
+                                    (network-address-wire-values
+                                     (format-pod-address family address))))
      (netlink-attribute 3 (vector prefix)))))
 
 (defun wireguard-peer-attributes (route)
@@ -57,9 +59,12 @@
       4 (wireguard-endpoint (required-cni-string route "underlayAddress") port))
      (netlink-attribute
       #x8009
-      (netlink-attribute #x8000
-                         (wireguard-allowed-ip-attributes
-                          (required-cni-string route "podCIDR")))))))
+      (apply #'netlink-octets
+             (loop for cidr in (route-pod-cidrs route)
+                   for index from 0
+                   collect (netlink-attribute
+                            (logior #x8000 index)
+                            (wireguard-allowed-ip-attributes cidr))))))))
 
 (defun wireguard-device-attributes (interface private-key network)
   "Encode a complete replace-peers WireGuard device configuration."
@@ -243,7 +248,7 @@
         (gethash "wireguardListenPort" network)
         (loop for route across (gethash "routes" network #())
               collect (list (gethash "nodeID" route)
-                            (gethash "podCIDR" route)
+                            (route-pod-cidrs route)
                             (gethash "underlayAddress" route)
                             (gethash "wireguardPublicKey" route)
                             (gethash "wireguardListenPort" route)))))
@@ -297,15 +302,29 @@
     (unless (node-wireguard-owned-p network)
       (invalid-cni "WireGuard interface is owned by another network"))
     (set-network-link-mtu name (gethash "mtu" network))
-    (add-network-address name
-                         (vxlan-router-address (gethash "nodePodCIDR" network)) 32)
+    (dolist (cidr (network-pod-cidrs network "nodePodCIDRs" "nodePodCIDR"))
+      (multiple-value-bind (family address prefix bits) (parse-pod-cidr cidr)
+        (declare (ignore address prefix))
+        (add-network-address name (vxlan-router-address cidr) bits)
+        (when (eq family :ipv6) (enable-node-ipv6-forwarding))))
     (set-network-link-up name)
     name))
 
 (defun wireguard-route-cidrs (network)
   "Return NETWORK's peer Pod CIDRs."
   (loop for route across (gethash "routes" network #())
-        collect (gethash "podCIDR" route)))
+        append (route-pod-cidrs route)))
+
+(defun wireguard-source-address (network cidr)
+  "Return this node's overlay router address in CIDR's family."
+  (multiple-value-bind (family address prefix bits) (parse-pod-cidr cidr)
+    (declare (ignore address prefix bits))
+    (let ((local
+            (find family (network-pod-cidrs network "nodePodCIDRs" "nodePodCIDR")
+                  :key (lambda (candidate) (nth-value 0 (parse-pod-cidr candidate))))))
+      (unless local
+        (invalid-cni "no local Pod CIDR for peer family ~A" cidr))
+      (vxlan-router-address local))))
 
 (defun remove-owned-wireguard (networks)
   "Remove gr8s-wg when one of NETWORKS proves that gr8s owns it."
@@ -343,14 +362,16 @@
       (configure-wireguard-device +node-wireguard-interface+ private-key network))
     (dolist (cidr previous-routes)
       (unless (member cidr wanted :test #'equal)
-        (multiple-value-bind (address prefix) (parse-ipv4-cidr cidr)
-          (remove-network-route (format-ipv4-integer address) prefix
+        (multiple-value-bind (family address prefix bits) (parse-pod-cidr cidr)
+          (declare (ignore bits))
+          (remove-network-route (format-pod-address family address) prefix
                                 +node-wireguard-interface+))))
     (dolist (cidr wanted)
-      (multiple-value-bind (address prefix) (parse-ipv4-cidr cidr)
+      (multiple-value-bind (family address prefix bits) (parse-pod-cidr cidr)
+        (declare (ignore bits))
         (replace-network-route
-         (format-ipv4-integer address) prefix +node-wireguard-interface+
-         :source (vxlan-router-address (gethash "nodePodCIDR" network))))))
+         (format-pod-address family address) prefix +node-wireguard-interface+
+         :source (wireguard-source-address network cidr)))))
   nil)
 
 (defun reconcile-node-overlay-network (network previous-networks private-key)

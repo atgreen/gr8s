@@ -33,6 +33,8 @@
    #:cri-pod-sandbox-info
    #:cri-pod-sandbox-ip
    #:cri-pod-sandbox-ip-from-response
+   #:cri-pod-sandbox-ips
+   #:cri-pod-sandbox-ips-from-response
    #:cri-port-forward-url
    #:cri-protobuf-state
    #:cri-pull-image
@@ -121,6 +123,8 @@
    #:cri-pod-sandbox-info-state
    #:cri-pod-sandbox-ip
    #:cri-pod-sandbox-ip-from-response
+   #:cri-pod-sandbox-ips
+   #:cri-pod-sandbox-ips-from-response
    #:cri-port-forward-url
    #:cri-protobuf-state
    #:cri-pull-image

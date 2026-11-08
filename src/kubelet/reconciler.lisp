@@ -201,8 +201,12 @@ finishes stops the node starting Pods, and nothing else reports it (podster-uqb.
                     (pod-status (runtime-pod-phase runtime-pod)))))
     (setf (gethash "phase" status) (runtime-pod-phase runtime-pod))
     (unless (string= "" (runtime-pod-pod-ip runtime-pod))
-      (setf (gethash "podIP" status) (runtime-pod-pod-ip runtime-pod)
-            (gethash "podIPs" status) (vector (json-object "ip" (runtime-pod-pod-ip runtime-pod)))))
+      (let ((addresses (runtime-pod-pod-ips runtime-pod)))
+        (setf (gethash "podIP" status) (runtime-pod-pod-ip runtime-pod)
+              (gethash "podIPs" status)
+              (map 'vector #'(lambda (address) (json-object "ip" address))
+                   (if (plusp (length addresses)) addresses
+                       (vector (runtime-pod-pod-ip runtime-pod)))))))
     status))
 
 (defun pod-active-deadline-exceeded-p (pod)

@@ -278,12 +278,31 @@
 
 (defun cri-pod-sandbox-ip-from-response (response)
   "Read the real CRI network address, leaving absent assignments empty."
+  (let ((addresses (cri-pod-sandbox-ips-from-response response)))
+    (if (plusp (length addresses)) (aref addresses 0) "")))
+
+(defun cri-pod-sandbox-ips-from-response (response)
+  "Read every ordered CRI network address, with the primary address first."
   (let* ((sandbox (gr8s.cri.v1::status response))
          (network (and sandbox (gr8s.cri.v1::network sandbox))))
-    (if network (gr8s.cri.v1::ip network) "")))
+    (if network
+        (coerce (remove-duplicates
+                 (remove ""
+                         (cons (gr8s.cri.v1::ip network)
+                               (mapcar #'gr8s.cri.v1::ip
+                                       (gr8s.cri.v1::additional-ips network)))
+                         :test #'string=)
+                 :test #'string=)
+                'vector)
+        #())))
 
 (defun cri-pod-sandbox-ip (socket-path sandbox-id &key (timeout 5))
   "Fetch one native sandbox address within the requested observation budget."
+  (let ((addresses (cri-pod-sandbox-ips socket-path sandbox-id :timeout timeout)))
+    (if (plusp (length addresses)) (aref addresses 0) "")))
+
+(defun cri-pod-sandbox-ips (socket-path sandbox-id &key (timeout 5))
+  "Fetch every native sandbox address within the requested observation budget."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
          (multiple-value-bind (response status)
@@ -292,7 +311,7 @@
               (make-instance 'gr8s.cri.v1::pod-sandbox-status-request
                              :pod-sandbox-id sandbox-id) :timeout timeout)
            (ensure-cri-status "PodSandboxStatus" status)
-           (cri-pod-sandbox-ip-from-response response))
+           (cri-pod-sandbox-ips-from-response response))
       (ag-grpc:channel-close channel))))
 
 (defun cri-delete-pod-sandbox (socket-path sandbox-id &key (timeout 30))

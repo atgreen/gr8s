@@ -91,14 +91,20 @@
 
 (defun control-plane-observation (runtime pod)
   "Build the RUNTIME-POD observation for POD from RUNTIME's store: its observed
-   resource version, scheduling phase, status, and podIP (\"\" when none)."
-  (make-runtime-pod
-   :uid (pod-uid pod)
-   :resource-version (pod-observed-resource-version (control-plane-runtime-store runtime) pod)
-   :phase (pod-scheduling-phase (control-plane-runtime-store runtime) pod)
-   :status (pod-observed-status (control-plane-runtime-store runtime) pod)
-   :pod-ip (let ((status (pod-observed-status (control-plane-runtime-store runtime) pod)))
-             (if status (gethash "podIP" status "") ""))))
+   resource version, scheduling phase, status, and all Pod IPs."
+  (let* ((store (control-plane-runtime-store runtime))
+         (status (pod-observed-status store pod))
+         (primary (if status (gethash "podIP" status "") ""))
+         (reported (and status (gethash "podIPs" status)))
+         (addresses
+           (if (and (vectorp reported) (plusp (length reported)))
+               (map 'vector (lambda (item) (gethash "ip" item)) reported)
+               (if (string= primary "") #() (vector primary)))))
+    (make-runtime-pod
+     :uid (pod-uid pod)
+     :resource-version (pod-observed-resource-version store pod)
+     :phase (pod-scheduling-phase store pod)
+     :status status :pod-ip primary :pod-ips addresses)))
 
 (defmethod runtime-runs-containers-p ((runtime control-plane-runtime))
   "The assigned node's agent enforces container lifetimes; the control plane only observes them."

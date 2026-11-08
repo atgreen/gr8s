@@ -806,6 +806,23 @@ operation. No-op when no operation matches MESSAGE's id."
          :token token :service-account-annotations annotations
          :service-account-uid (gethash "uid" metadata))))))
 
+(defun merge-node-pod-address-status (object pod-status)
+  "Merge authenticated wire status into OBJECT without discarding additional IPs."
+  (setf (gethash "phase" object) (slot-value pod-status 'gr8s.node.v1::phase))
+  (let ((primary (slot-value pod-status 'gr8s.node.v1::pod-ip)))
+    (unless (string= "" primary)
+      (setf (gethash "podIP" object) primary)
+      (let ((addresses (gethash "podIPs" object)))
+        (unless (and (vectorp addresses) (plusp (length addresses))
+                     (every (lambda (item)
+                              (and (hash-table-p item)
+                                   (stringp (gethash "ip" item))))
+                            addresses)
+                     (string= primary (gethash "ip" (aref addresses 0))))
+          (setf (gethash "podIPs" object)
+                (vector (json-object "ip" primary)))))))
+  object)
+
 (defun handle-node-agent-envelope (server node-name envelope)
   "Dispatch one inbound envelope from NODE-NAME's agent after checking its protocol
    version. A heartbeat renews the node's readiness and lease and records runtime
@@ -858,11 +875,7 @@ operation. No-op when no operation matches MESSAGE's id."
                                             (trivial-utf-8:utf-8-bytes-to-string bytes)))
                                        (error () nil))))
                         (unless (hash-table-p object) (setf object (make-hash-table :test #'equal)))
-                        (setf (gethash "phase" object) (slot-value pod-status 'gr8s.node.v1::phase))
-                        (unless (string= "" (slot-value pod-status 'gr8s.node.v1::pod-ip))
-                          (setf (gethash "podIP" object) (slot-value pod-status 'gr8s.node.v1::pod-ip)
-                                (gethash "podIPs" object)
-                                (vector (json-object "ip" (slot-value pod-status 'gr8s.node.v1::pod-ip)))))
+                        (merge-node-pod-address-status object pod-status)
                         (let ((events (gethash "gr8sRuntimeEvents" object)))
                           (remhash "gr8sRuntimeEvents" object)
                           (update-pod-observed-status (node-grpc-server-store server) pod object)

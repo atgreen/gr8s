@@ -4,14 +4,18 @@
 (in-package #:gr8s/tests)
 (in-suite gr8s)
 
-(defun wireguard-route-fixture (&key (key-byte 7) (port 51820))
-  (gr8s::json-object
-   "nodeID" "peer-a" "podCIDR" "10.88.9.0/24"
-   "underlayAddress" "192.0.2.9"
-   "wireguardPublicKey"
-   (ag-grpc:base64-encode
-    (make-array 32 :element-type '(unsigned-byte 8) :initial-element key-byte))
-   "wireguardListenPort" port))
+(defun wireguard-route-fixture (&key (key-byte 7) (port 51820) pod-cidrs)
+  (let ((route
+          (gr8s::json-object
+           "nodeID" "peer-a" "podCIDR" "10.88.9.0/24"
+           "underlayAddress" "192.0.2.9"
+           "wireguardPublicKey"
+           (ag-grpc:base64-encode
+            (make-array 32 :element-type '(unsigned-byte 8) :initial-element key-byte))
+           "wireguardListenPort" port)))
+    (when pod-cidrs
+      (setf (gethash "podCIDRs" route) (coerce pod-cidrs 'vector)))
+    route))
 
 (test wireguard-peer-uapi-carries-identity-endpoint-and-allowed-prefix
   (let* ((attributes
@@ -30,6 +34,23 @@
     (is (= 2 (gr8s::netlink-read-integer (gethash 1 allowed) 0 2)))
     (is (equalp #(10 88 9 0) (gethash 2 allowed)))
     (is (= 24 (aref (gethash 3 allowed) 0)))))
+
+(test wireguard-peer-uapi-carries-every-pod-address-family
+  (let* ((route (wireguard-route-fixture
+                 :pod-cidrs '("10.88.9.0/24" "fd88:0:0:9::/64")))
+         (attributes
+           (gr8s::netlink-attributes
+            (gr8s::wireguard-peer-attributes route) 0))
+         (entries (gr8s::netlink-attributes (gethash 9 attributes) 0))
+         (ipv4 (gr8s::netlink-attributes (gethash 0 entries) 0))
+         (ipv6 (gr8s::netlink-attributes (gethash 1 entries) 0)))
+    (is (= 2 (hash-table-count entries)))
+    (is (= 2 (gr8s::netlink-read-integer (gethash 1 ipv4) 0 2)))
+    (is (equalp #(10 88 9 0) (gethash 2 ipv4)))
+    (is (= 24 (aref (gethash 3 ipv4) 0)))
+    (is (= 10 (gr8s::netlink-read-integer (gethash 1 ipv6) 0 2)))
+    (is (equalp (0conf:parse-ipv6 "fd88:0:0:9::") (gethash 2 ipv6)))
+    (is (= 64 (aref (gethash 3 ipv6) 0)))))
 
 (test wireguard-device-uapi-never-confuses-private-and-peer-keys
   (let* ((private-key

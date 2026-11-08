@@ -59,6 +59,16 @@
       (is (equalp pool (ensure-test-controller-node-pool
                         (open-store path) path (parse-cli-options '("serve"))))))))
 
+(test explicit-dual-stack-pool-derives-default-prefix-for-every-family
+  (with-temporary-store (store path)
+    (let ((pool (ensure-test-controller-node-pool
+                 store path
+                 (parse-cli-options
+                  '("serve" "--cluster-pod-cidr" "10.112.0.0/12,fd70::/48")))))
+      (is (equalp #("10.112.0.0/12" "fd70::/48")
+                  (gr8s::node-pool-cluster-cidrs pool)))
+      (is (equalp #(20 64) (gr8s::node-pool-prefixes pool))))))
+
 (test previous-default-pool-and-node-identities-survive-upgrade
   (with-temporary-store (store path)
     (gr8s:register-node store (make-test-node "old-worker" "old-node" "10.88.3.0/24"))
@@ -223,6 +233,27 @@
                    identities))
         (is (equal addresses '("10.80.0.1" "fd80::1")))))))
 
+(test dual-stack-overlay-route-identities-survive-restart
+  (with-temporary-store (store path)
+    (values store)
+    (let* ((node-root (merge-pathnames "node-overlay/" path))
+           (network (dual-pool-test-network))
+           (route (gr8s::json-object
+                   "nodeID" "peer" "podCIDR" "10.80.16.0/20"
+                   "podCIDRs" (vector "10.80.16.0/20" "fd80:0:0:1::/64")
+                   "underlayAddress" "192.0.2.2")))
+      (setf (gethash "underlayAddress" network) "192.0.2.1"
+            (gethash "routes" network) (vector route))
+      (gr8s::write-private-text-atomically
+       (merge-pathnames "network.json" node-root)
+       (com.inuoe.jzon:stringify network))
+      (let ((cidrs (mapcar (lambda (identity) (getf identity :cidr))
+                           (gr8s::persisted-node-route-identities node-root))))
+        (dolist (cidr '("10.80.0.0/32" "fd80::/128"
+                        "10.80.16.0/20" "10.80.16.0/32"
+                        "fd80:0:0:1::/64" "fd80:0:0:1::/128"))
+          (is (member cidr cidrs :test #'string=) "missing route identity ~A" cidr))))))
+
 ;; podster-uqb.121: this ran during CNI DEL or ADD, 12 times in run 13, and ended a node
 ;; session each time. Once that session did not end for 5 minutes.
 (test host-route-validation-tolerates-pods-coming-and-going-while-it-reads
@@ -265,6 +296,15 @@
           (signals gr8s::cni-error
             (validate (lambda () (list held))
                       (lambda (index) (declare (ignore index)) (gr8s::fail-rtnetlink "link lookup" 1)))))))))
+
+(test host-route-validation-rejects-foreign-ipv6-pod-routes
+  (with-temporary-store (store path)
+    (values store)
+    (signals gr8s::cni-error
+      (gr8s::validate-pod-pool-host-routes
+       '("10.80.0.0/12" "fd80::/48") path
+       :route-reader (lambda () '((:cidr "fd80::1234/128" :index 7 :table 254)))
+       :link-reader (lambda (index) (declare (ignore index)) nil)))))
 
 (test pending-and-applied-vxlan-identities-both-survive-host-route-validation
   (with-temporary-store (store path)

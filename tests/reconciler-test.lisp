@@ -13,6 +13,29 @@
         (is (eq symbol (find-symbol name "GR8S"))
             "GR8S preserves ~A's runtime protocol symbol identity" name)))))
 
+(test observed-runtime-status-publishes-every-pod-address
+  (let* ((status (gr8s::observed-status
+                  (gr8s::make-runtime-pod
+                   :pod-ip "10.88.1.2" :pod-ips #("10.88.1.2" "fd88::2"))))
+         (addresses (gethash "podIPs" status)))
+    (is (string= "10.88.1.2" (gethash "podIP" status)))
+    (is (equalp #("10.88.1.2" "fd88::2")
+                (map 'vector (lambda (item) (gethash "ip" item)) addresses)))))
+
+(test control-plane-runtime-retains-every-agent-observed-pod-address
+  (with-temporary-store (store path)
+    (values path)
+    (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))
+           (status (gr8s::core-object
+                    "phase" "Running" "podIP" "10.88.1.2"
+                    "podIPs" (vector (gr8s::core-object "ip" "10.88.1.2")
+                                     (gr8s::core-object "ip" "fd88::2")))))
+      (gr8s::save-pod-observation store pod status)
+      (let ((observed (gr8s::control-plane-observation
+                       (gr8s::make-control-plane-runtime store nil) pod)))
+        (is (equalp #("10.88.1.2" "fd88::2")
+                    (gr8s::runtime-pod-pod-ips observed)))))))
+
 (test reconciliation-is-idempotent-and-replaces-changed-pods
   (with-temporary-store (store path)
     (let* ((pod (create-pod store (parse-pod *valid-pod-json*)))

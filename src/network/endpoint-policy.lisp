@@ -68,27 +68,31 @@
       +cni-policy-chained-attachment+))
 
 (defun encode-cni-endpoint-identity
-    (address mac &optional (attachment-mode +cni-policy-native-attachment+))
-  "Encode the datapath endpoint-identity value from the Pod's ADDRESS (dotted
-   IPv4) and 6-byte MAC: the IPv4 integer, the MAC split across two words, and a
-   trailing ATTACHMENT-MODE. Signals INVALID-CNI when MAC is missing or not 6
-   bytes long."
+    (addresses mac &optional (attachment-mode +cni-policy-native-attachment+))
+  "Encode Pod IPv4/IPv6 addresses, MAC, and attachment mode for the datapath."
   (unless (and mac (= 6 (length mac)))
     (invalid-cni "the Pod interface has no Ethernet identity"))
-  (netlink-octets
-   (netlink-integer (parse-ipv4-integer address) 4)
-   (netlink-integer (loop for index below 4 sum (ash (aref mac index) (- 24 (* index 8)))) 4)
-   (netlink-integer (+ (ash (aref mac 4) 8) (aref mac 5)) 4)
-   (netlink-integer attachment-mode 4)))
+  (let* ((items (if (stringp addresses) (list addresses) addresses))
+         (ipv4 (find-if-not (lambda (address) (find #\: address)) items))
+         (ipv6 (find-if (lambda (address) (find #\: address)) items)))
+    (netlink-octets
+     (netlink-integer (if ipv4 (parse-ipv4-integer ipv4) 0) 4)
+     (netlink-integer (loop for index below 4 sum (ash (aref mac index) (- 24 (* index 8)))) 4)
+     (netlink-integer (+ (ash (aref mac 4) 8) (aref mac 5)) 4)
+     (netlink-integer attachment-mode 4)
+     (if ipv6 (0conf:parse-ipv6 ipv6)
+         (make-array 16 :element-type '(unsigned-byte 8) :initial-element 0)))))
 
 (defun cni-endpoint-identity (configuration context)
   "Build the endpoint-identity value for the Pod described by CONFIGURATION and
    CONTEXT, reading the Pod interface's MAC from inside its network namespace.
    Signals INVALID-CNI when the agent has assigned no endpoint address."
-  (let ((address (cni-configuration-endpoint-address configuration)))
-    (unless address (invalid-cni "the agent has not assigned an endpoint address"))
+  (let ((addresses (or (cni-configuration-endpoint-addresses configuration)
+                       (let ((address (cni-configuration-endpoint-address configuration)))
+                         (and address (list address))))))
+    (unless addresses (invalid-cni "the agent has not assigned an endpoint address"))
     (encode-cni-endpoint-identity
-     address
+     addresses
      (call-with-cni-network-namespace
       (cni-context-netns context)
       (lambda () (gethash 1 (network-link-attributes (cni-context-interface-name context)))))

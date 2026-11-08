@@ -783,6 +783,26 @@
                                                    "underlayAddress" address)) 'vector))
     network))
 
+(test dual-stack-peer-routes-survive-the-agent-network-boundary
+  (let* ((route (make-instance 'gr8s.node.v1::node-route
+                               :node-id "peer"
+                               :pod-cidr "10.88.9.0/24"
+                               :pod-cidrs '("10.88.9.0/24" "fd88:0:0:9::/64")
+                               :underlay-address "192.0.2.2"))
+         (network (gr8s::node-network-object (dual-node-network-for-test)
+                                             (list route)))
+         (persisted-route (aref (gethash "routes" network) 0)))
+    (setf (gethash "underlayAddress" network) "192.0.2.1")
+    (is (equal '("10.88.9.0/24" "fd88:0:0:9::/64")
+               (coerce (gethash "podCIDRs" persisted-route) 'list)))
+    (is (equal '(("10.88.9.0/24" . "192.0.2.2")
+                 ("fd88:0:0:9::/64" . "192.0.2.2"))
+               (gr8s::node-vxlan-route-pairs network)))
+    (is (eq network (gr8s::validate-node-network-object network)))
+    (setf (gethash "podCIDRs" persisted-route)
+          (vector "10.88.9.0/24" "fd88::/32"))
+    (signals gr8s::cni-error (gr8s::validate-node-network-object network))))
+
 (test partial-node-network-update-is-replayed-from-the-durable-journal
   (with-temporary-store (store path)
     (assert store)

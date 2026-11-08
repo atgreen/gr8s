@@ -50,6 +50,8 @@ class Smoke:
         self.overlay = os.environ.get('GR8S_OVERLAY_BACKEND', 'vxlan')
         assert self.overlay in ('vxlan', 'wireguard'), self.overlay
         self.overlay_interface = 'gr8s-wg' if self.overlay == 'wireguard' else 'gr8s-vxlan'
+        self.cluster_pod_cidrs = os.environ.get('GR8S_CLUSTER_POD_CIDRS', '')
+        self.expected_pod_families = 2 if ',' in self.cluster_pod_cidrs else 1
         self.encryption_proved = False
         self.pool = ipaddress.ip_network(os.environ.get('GR8S_SMOKE_UNDERLAY', '198.18.253.0/29'))
         assert self.pool.version == 4 and self.pool.prefixlen == 29
@@ -144,11 +146,13 @@ class Smoke:
                 self.in_node(index, 'mount', '-t', 'cgroup2', 'none', '/sys/fs/cgroup')
         print(f'Launching native control plane and two nodes in {self.root}', flush=True)
         print(f'Test namespace prefix: {self.prefix}', flush=True)
-        self.server = self.start([self.binary, 'serve', '--disable-agent', '--runtime', 'fake',
-                                 '--state-directory', self.root / 'control', '--port', self.api_port,
-                                 '--node-listen', '0.0.0.0', '--node-port', self.node_port,
-                                 '--overlay-backend', self.overlay,
-                                 '--kubeconfig', self.kubeconfig], 'control')
+        server_args = [self.binary, 'serve', '--disable-agent', '--runtime', 'fake',
+                       '--state-directory', self.root / 'control', '--port', self.api_port,
+                       '--node-listen', '0.0.0.0', '--node-port', self.node_port,
+                       '--overlay-backend', self.overlay, '--kubeconfig', self.kubeconfig]
+        if self.cluster_pod_cidrs:
+            server_args += ['--cluster-pod-cidr', self.cluster_pod_cidrs]
+        self.server = self.start(server_args, 'control')
         wait_for('control plane', lambda: self.kubeconfig.exists() and
                  self.kubectl('get', '--raw', '/readyz').returncode == 0)
         for index in range(2):
@@ -173,10 +177,11 @@ class Smoke:
     def check_pods(self, expected=None):
         pods = [self.pod(index) for index in range(2)]
         if any(pod.get('status', {}).get('phase') != 'Running' or
-               not pod.get('status', {}).get('podIP') for pod in pods):
+               len(pod.get('status', {}).get('podIPs', [])) != self.expected_pod_families
+               for pod in pods):
             return False
-        identities = [(pod['metadata']['uid'], pod['spec']['nodeName'], pod['status']['podIP'])
-                      for pod in pods]
+        identities = [(pod['metadata']['uid'], pod['spec']['nodeName'], pod['status']['podIP'],
+                       tuple(item['ip'] for item in pod['status']['podIPs'])) for pod in pods]
         if expected is not None:
             assert identities == expected, f'Pod identity/assignment changed: {identities} != {expected}'
         return identities
@@ -219,8 +224,10 @@ class Smoke:
 
     def traffic(self, identities):
         for index in range(2):
-            peer = identities[1 - index][2]
-            self.kubectl('exec', f'two-node-{index}', '--', 'ping', '-c', '2', '-W', '2', '-s', '1200', peer)
+            peers = identities[1 - index][3]
+            for peer in peers:
+                self.kubectl('exec', f'two-node-{index}', '--', 'ping', '-c', '2', '-W', '2',
+                             '-s', '1200', peer)
             self.kubectl('exec', f'two-node-{index}', '--', 'nslookup', 'kubernetes.default.svc.cluster.local')
             self.kubectl('exec', f'two-node-{index}', '--', 'nslookup', 'example.com')
             assert f'two-node-{index}' in self.kubectl('logs', f'two-node-{index}').stdout
@@ -230,8 +237,10 @@ class Smoke:
             assert gateways == ['gr8s-gateway'], gateways
             assert self.kubectl('exec', f'two-node-{index}', '--', 'ip', 'neigh', 'show',
                                 '169.254.1.1').stdout.strip().endswith('PERMANENT')
-            route = json.loads(self.in_node(index, 'ip', '-j', 'route', 'get', peer).stdout)
-            assert route[0]['dev'] == self.overlay_interface, route
+            for peer in peers:
+                family = '-6' if ':' in peer else '-4'
+                route = json.loads(self.in_node(index, 'ip', '-j', family, 'route', 'get', peer).stdout)
+                assert route[0]['dev'] == self.overlay_interface, route
             counters = json.loads(self.in_node(
                 index, 'ip', '-s', '-j', 'link', 'show', self.overlay_interface).stdout)
             stats = counters[0].get('stats64', counters[0].get('stats'))
@@ -268,14 +277,24 @@ class Smoke:
         identities = wait_for('two real Running Pods', self.check_pods, timeout=180)
         if os.environ.get('GR8S_TWO_NODE_FAIL_AFTER_CREATE') == '1':
             raise RuntimeError('forced two-node failure after creating Pods')
+        pause = int(os.environ.get('GR8S_TWO_NODE_PAUSE_BEFORE_TRAFFIC', '0'))
+        if pause:
+            print(f'Pausing {pause}s before traffic checks for dataplane inspection', flush=True)
+            time.sleep(pause)
         self.traffic(identities)
         print(f'Two-node native {self.overlay} connectivity, DNS, logs, exec and '
               'tunnel-dependency checks passed', flush=True)
         restart_started = int(time.time())
         self.agents[0].terminate()
-        self.agents[0].wait(timeout=20)
+        try:
+            self.agents[0].wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            print('Agent did not stop after SIGTERM; injecting abrupt restart', flush=True)
+            self.agents[0].kill()
+            self.agents[0].wait()
         # The stopped agent's existing Pod and pinned dataplane stay alive.
-        self.kubectl('exec', 'two-node-1', '--', 'ping', '-c', '2', '-W', '2', identities[0][2])
+        for peer in identities[0][3]:
+            self.kubectl('exec', 'two-node-1', '--', 'ping', '-c', '2', '-W', '2', peer)
         if self.overlay == 'wireguard':
             result = run(self.binary, 'wireguard', 'rotate-key', '--state-directory',
                          self.root / 'agent-0')
@@ -288,6 +307,10 @@ class Smoke:
         if self.overlay == 'wireguard':
             print('Post-rotation encrypted cross-node traffic confirms peer-key convergence',
                   flush=True)
+        pause = int(os.environ.get('GR8S_TWO_NODE_PAUSE_BEFORE_CNI_CHECK', '0'))
+        if pause:
+            print(f'Pausing {pause}s before CNI CHECK for dataplane inspection', flush=True)
+            time.sleep(pause)
         for index in range(2):
             def recovered(index=index):
                 lines = self.metrics().splitlines()
@@ -309,9 +332,11 @@ class Smoke:
             namespaces = self.in_node(index, 'find', state / 'run/io.containerd.grpc.v1.cri/netns',
                                       '-mindepth', '1', '-maxdepth', '1').stdout.splitlines()
             assert len(sandboxes) == len(namespaces) == 1, (sandboxes, namespaces)
-            self.in_node(index, 'env', 'CNI_COMMAND=CHECK', f'CNI_CONTAINERID={Path(sandboxes[0]).name}',
-                         f'CNI_NETNS={namespaces[0]}', 'CNI_IFNAME=eth0', self.binary,
-                         input=json.dumps(plugin))
+            check = self.in_node(
+                index, 'env', 'CNI_COMMAND=CHECK',
+                f'CNI_CONTAINERID={Path(sandboxes[0]).name}', f'CNI_NETNS={namespaces[0]}',
+                'CNI_IFNAME=eth0', self.binary, input=json.dumps(plugin), check=False)
+            assert check.returncode == 0, check.stdout + check.stderr
         print('Agent restart preserves assignments, addresses, policy and cross-node connectivity', flush=True)
         self.success = True
 

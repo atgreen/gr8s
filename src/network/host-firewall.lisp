@@ -54,9 +54,14 @@
    \"--remove\") gr8s overlay traffic through firewalld, scoped to the overlay.
    Idempotent at firewalld: --add-* / --remove-* is a no-op when already in the
    wanted state."
-  (list (list "firewall-cmd" "--zone" zone (format nil "~A-interface" verb) interface)
-        (list "firewall-cmd" "--zone" zone (format nil "~A-source" verb) node-pod-cidr)
-        (list "firewall-cmd" (format nil "~A-port=~D/udp" verb port))))
+  (let ((cidrs (if (stringp node-pod-cidr) (list node-pod-cidr) node-pod-cidr)))
+    (append
+     (list (list "firewall-cmd" "--zone" zone
+                 (format nil "~A-interface" verb) interface))
+     (loop for cidr in cidrs
+           collect (list "firewall-cmd" "--zone" zone
+                         (format nil "~A-source" verb) cidr))
+     (list (list "firewall-cmd" (format nil "~A-port=~D/udp" verb port))))))
 
 (defun apply-overlay-firewall-commands (commands &key (runner #'host-firewall-run))
   "Run each firewall-cmd in COMMANDS, logging (not raising on) any failure.
@@ -153,5 +158,7 @@
   (flet ((q (argv) (multiple-value-bind (out code) (funcall runner argv)
                      (declare (ignore out)) (and code (zerop code)))))
     (and (q (list "firewall-cmd" "--zone" "trusted" "--query-interface" interface))
-         (q (list "firewall-cmd" "--zone" "trusted" "--query-source" node-pod-cidr))
+         (every (lambda (cidr)
+                  (q (list "firewall-cmd" "--zone" "trusted" "--query-source" cidr)))
+                (if (stringp node-pod-cidr) (list node-pod-cidr) node-pod-cidr))
          (q (list "firewall-cmd" (format nil "--query-port=~D/udp" port))))))

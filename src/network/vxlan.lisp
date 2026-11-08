@@ -21,14 +21,32 @@
 
 (defparameter +node-vxlan-interface+ "gr8s-vxlan")
 
+(defun route-pod-cidrs (route)
+  "Return ROUTE's ordered Pod CIDRs, accepting the legacy singular field."
+  (let ((cidrs (gethash "podCIDRs" route)))
+    (if cidrs
+        (progn
+          (unless (and (vectorp cidrs) (plusp (length cidrs))
+                       (every (lambda (cidr) (and (stringp cidr) (plusp (length cidr))))
+                              cidrs))
+            (invalid-cni "peer Pod CIDRs must be a non-empty string array"))
+          (coerce cidrs 'list))
+        (list (required-cni-string route "podCIDR")))))
+
+(defun network-pod-cidrs (network plural singular)
+  "Return NETWORK's ordered Pod CIDRs, accepting the legacy singular field."
+  (let ((cidrs (gethash plural network)))
+    (if (and (vectorp cidrs) (plusp (length cidrs)))
+        (coerce cidrs 'list)
+        (list (required-cni-string network singular)))))
+
 (defun vxlan-router-address (pod-cidr)
-  "Return POD-CIDR's network address as a dotted-quad string: this node's overlay router
-address. IPAM reserves that /32, so using it as the gateway costs no Pod allocation."
-  ;; IPAM excludes the network address. Use that reserved /32 as the node's
+  "Return POD-CIDR's network address: this node's family-specific overlay router."
+  ;; IPAM excludes the network address. Use that reserved host address as the node's
   ;; overlay router address, without consuming any Pod allocation.
-  (multiple-value-bind (address prefix) (parse-ipv4-cidr pod-cidr)
-    (declare (ignore prefix))
-    (format-ipv4-integer address)))
+  (multiple-value-bind (family address prefix bits) (parse-pod-cidr pod-cidr)
+    (declare (ignore prefix bits))
+    (format-pod-address family address)))
 
 (defun vxlan-router-mac (pod-cidr)
   "Return the router MAC for POD-CIDR as a 6-octet sequence: a locally-administered
@@ -85,13 +103,15 @@ tag is written) as a side effect. NIL when the device belongs to another node ne
        (set-network-link-owner name owner)
        t))))
 
-(defun ensure-node-vxlan (local-address pod-cidr vni mtu)
+(defun ensure-node-vxlan (local-address pod-cidrs vni mtu)
   "Idempotently bring up this node's VXLAN device for the given overlay parameters and
 return its interface name. Creates and owner-tags the device when absent (rolling the
 creation back if tagging fails), verifies ownership -- signaling INVALID-CNI when the
 device belongs to another node network -- then sets the MTU, adds the router /32 address,
 brings the link up and enables IPv4 forwarding. Safe to call repeatedly."
-  (let ((owner (format nil "gr8s:vxlan:~A:~D:~A" pod-cidr vni local-address)))
+  (let* ((cidrs (if (stringp pod-cidrs) (list pod-cidrs) pod-cidrs))
+         (pod-cidr (first cidrs))
+         (owner (format nil "gr8s:vxlan:~A:~D:~A" pod-cidr vni local-address)))
     (when (zerop (native-interface-index +node-vxlan-interface+))
       (create-node-vxlan local-address pod-cidr vni mtu)
       (handler-case
@@ -103,19 +123,23 @@ brings the link up and enables IPv4 forwarding. Safe to call repeatedly."
              (json-object "nodePodCIDR" pod-cidr "vni" vni "underlayAddress" local-address))
       (invalid-cni "VXLAN interface belongs to another node network"))
     (set-network-link-mtu +node-vxlan-interface+ mtu)
-    (add-network-address +node-vxlan-interface+ (vxlan-router-address pod-cidr) 32)
+    (dolist (cidr cidrs)
+      (multiple-value-bind (family address prefix bits) (parse-pod-cidr cidr)
+        (declare (ignore address prefix))
+        (add-network-address +node-vxlan-interface+ (vxlan-router-address cidr) bits)
+        (when (eq family :ipv6) (enable-node-ipv6-forwarding))))
     (set-network-link-up +node-vxlan-interface+)
     (enable-node-ipv4-forwarding))
   +node-vxlan-interface+)
 
-(defun replace-vxlan-peer (pod-cidr underlay-address)
+(defun replace-vxlan-peer (pod-cidr underlay-address &optional (mac-cidr pod-cidr))
   "Install or replace the tunnel to one peer: a permanent FDB entry mapping the peer's
 router MAC to UNDERLAY-ADDRESS, a static ARP entry pinning that MAC, a /32 route to the
 router address, and a route for the peer's POD-CIDR through it. Idempotent (each is a
 replace). Side-effects the kernel over rtnetlink; returns NIL."
   (let ((interface +node-vxlan-interface+)
         (router (vxlan-router-address pod-cidr))
-        (mac (vxlan-router-mac pod-cidr)))
+        (mac (vxlan-router-mac mac-cidr)))
     ;; AF_BRIDGE FDB: remote router MAC -> underlay IPv4 destination.
     (call-rtnetlink
      28 #x500
@@ -123,16 +147,11 @@ replace). Side-effects the kernel over rtnetlink; returns NIL."
       (netlink-neighbor-message 7 interface 128 2) ; PERMANENT, SELF
       (netlink-attribute 2 mac)
       (netlink-attribute 1 (ipv4-network-octets underlay-address))))
-    ;; Static ARP avoids floods and prevents a peer from changing its router MAC.
-    (call-rtnetlink
-     28 #x500
-     (netlink-octets
-      (netlink-neighbor-message 2 interface 128 0)
-      (netlink-attribute 1 (ipv4-network-octets router))
-      (netlink-attribute 2 mac)))
-    (replace-network-route router 32 interface)
-    (multiple-value-bind (address prefix) (parse-ipv4-cidr pod-cidr)
-      (replace-network-route (format-ipv4-integer address) prefix interface
+    (multiple-value-bind (family address prefix bits) (parse-pod-cidr pod-cidr)
+      ;; Static ARP/NDP avoids floods and pins the peer's actual VXLAN MAC.
+      (replace-permanent-network-neighbor interface router mac)
+      (replace-network-route router bits interface)
+      (replace-network-route (format-pod-address family address) prefix interface
                              :gateway router)))
   nil)
 
@@ -148,31 +167,32 @@ RTNETLINK-ERROR is re-signaled. Makes a deletion idempotent."
 (defun delete-network-route (destination prefix interface)
   "Delete the route to DESTINATION/PREFIX on INTERFACE over rtnetlink, tolerating its
 absence. The scope is left as NOWHERE so a route of any existing scope matches."
-  (call-rtnetlink-delete
-   25 (netlink-octets
-       (vector 2 prefix 0 0 254 4 255 1) ; scope NOWHERE accepts any old scope
-       (netlink-integer 0 4)
-       (netlink-attribute 1 (ipv4-network-octets destination))
-       (netlink-attribute 4 (netlink-integer (cni-interface-index interface) 4)))))
+  (multiple-value-bind (family bytes) (network-address-wire-values destination)
+    (call-rtnetlink-delete
+     25 (netlink-octets
+         (vector family prefix 0 0 254 4 255 1) ; scope NOWHERE accepts any old scope
+         (netlink-integer 0 4)
+         (netlink-attribute 1 bytes)
+         (netlink-attribute 4 (netlink-integer (cni-interface-index interface) 4))))))
 
-(defun remove-vxlan-peer (pod-cidr underlay-address)
+(defun remove-vxlan-peer (pod-cidr underlay-address &optional (mac-cidr pod-cidr))
   "Withdraw one peer's tunnel -- the POD-CIDR route, the router /32 route, the static ARP
 entry and the FDB entry -- the inverse of REPLACE-VXLAN-PEER. A no-op when the VXLAN
 device is absent. Each deletion tolerates the entry already being gone; returns NIL."
   (unless (zerop (native-interface-index +node-vxlan-interface+))
     (let ((interface +node-vxlan-interface+)
           (router (vxlan-router-address pod-cidr)))
-      (multiple-value-bind (address prefix) (parse-ipv4-cidr pod-cidr)
-        (delete-network-route (format-ipv4-integer address) prefix interface))
-      (delete-network-route router 32 interface)
+      (multiple-value-bind (family address prefix bits) (parse-pod-cidr pod-cidr)
+        (delete-network-route (format-pod-address family address) prefix interface)
+        (delete-network-route router bits interface))
       (call-rtnetlink-delete
        29 (netlink-octets
-           (netlink-neighbor-message 2 interface 128 0)
-           (netlink-attribute 1 (ipv4-network-octets router))))
+           (netlink-neighbor-message (if (find #\: router) 10 2) interface 128 0)
+           (netlink-attribute 1 (nth-value 1 (network-address-wire-values router)))))
       (call-rtnetlink-delete
        29 (netlink-octets
            (netlink-neighbor-message 7 interface 128 2)
-           (netlink-attribute 2 (vxlan-router-mac pod-cidr))
+           (netlink-attribute 2 (vxlan-router-mac mac-cidr))
            (netlink-attribute 1 (ipv4-network-octets underlay-address))))))
   nil)
 
@@ -186,7 +206,16 @@ device is absent. Each deletion tolerates the entry already being gone; returns 
   "Return a list of (POD-CIDR . UNDERLAY-ADDRESS) conses, one per entry in NETWORK's
 \"routes\" array: the set of peers this node should tunnel to."
   (loop for route across (gethash "routes" network #())
-        collect (cons (gethash "podCIDR" route) (gethash "underlayAddress" route))))
+        append (loop for cidr in (route-pod-cidrs route)
+                     collect (cons cidr (gethash "underlayAddress" route)))))
+
+(defun node-vxlan-route-specs (network)
+  "Return (CIDR UNDERLAY PRIMARY-CIDR) entries for VXLAN reconciliation."
+  (loop for route across (gethash "routes" network #())
+        for cidrs = (route-pod-cidrs route)
+        append (loop for cidr in cidrs
+                     collect (list cidr (gethash "underlayAddress" route)
+                                   (first cidrs)))))
 
 (defun reconcile-node-vxlan-network (network previous-networks)
   "Converge this node's VXLAN dataplane onto NETWORK, using PREVIOUS-NETWORKS (earlier
@@ -198,9 +227,9 @@ than seize a foreign interface. An underlay/VNI change replaces the tunnel, and 
 durable journal keeps both identities so a crash mid-change can be retried. Returns NIL,
 and is a no-op when the node has never had an overlay."
   (let* ((local (gethash "underlayAddress" network ""))
-         (wanted (node-vxlan-route-pairs network))
+         (wanted (node-vxlan-route-specs network))
          (previous
-           (remove-duplicates (mapcan #'node-vxlan-route-pairs previous-networks)
+           (remove-duplicates (mapcan #'node-vxlan-route-specs previous-networks)
                               :test #'equal)))
     (when (and (string= local "")
                (notany (lambda (old)
@@ -222,10 +251,11 @@ and is a no-op when the node has never had an overlay."
       ((string= local "")
        (delete-network-link +node-vxlan-interface+))
       (t
-       (ensure-node-vxlan local (gethash "nodePodCIDR" network)
+       (ensure-node-vxlan local (network-pod-cidrs
+                                 network "nodePodCIDRs" "nodePodCIDR")
                           (gethash "vni" network) (gethash "mtu" network))
        ;; Remove changed FDB entries before reusing their router MAC/address.
        (dolist (route previous)
          (unless (member route wanted :test #'equal)
-           (remove-vxlan-peer (car route) (cdr route))))
-       (dolist (route wanted) (replace-vxlan-peer (car route) (cdr route)))))))
+           (apply #'remove-vxlan-peer route)))
+       (dolist (route wanted) (apply #'replace-vxlan-peer route))))))

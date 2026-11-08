@@ -264,6 +264,10 @@ validates and reconciles against."
                  (json-object
                   "nodeID" (slot-value route 'gr8s.node.v1::node-id)
                   "podCIDR" (slot-value route 'gr8s.node.v1::pod-cidr)
+                  "podCIDRs"
+                  (coerce (or (slot-value route 'gr8s.node.v1::pod-cidrs)
+                              (list (slot-value route 'gr8s.node.v1::pod-cidr)))
+                          'vector)
                   "underlayAddress"
                   (slot-value route 'gr8s.node.v1::underlay-address)))
                (key (slot-value route 'gr8s.node.v1::wireguard-public-key))
@@ -348,13 +352,26 @@ Signals INVALID-CNI on a malformed CIDR."
       (let ((shift (- (min a-prefix b-prefix) 32)))
         (= (ash a shift) (ash b shift))))))
 
+(defun pod-cidr-subnet-p (subnet parent)
+  "Return whether canonical SUBNET lies wholly within same-family PARENT."
+  (multiple-value-bind (family address prefix bits) (parse-pod-cidr subnet)
+    (multiple-value-bind (parent-family parent-address parent-prefix parent-bits)
+        (parse-pod-cidr parent)
+      (and (eq family parent-family)
+           (= bits parent-bits)
+           (<= parent-prefix prefix)
+           (zerop (logand address (1- (ash 1 (- bits prefix)))))
+           (= (ash address (- parent-prefix bits))
+              (ash parent-address (- parent-prefix bits)))
+           (string= subnet
+                    (format nil "~A/~D" (format-pod-address family address) prefix))))))
+
 (defun validate-node-network-routes (network)
-  "Validate NETWORK's peer routes: each must be well-formed, its Pod CIDR a subnet of the
-cluster Pod CIDR and non-overlapping with this node's and the other peers', and its node
-id and underlay address unique. Peer routes require a local underlay address. Returns
-NETWORK; signals INVALID-CNI on any violation."
+  "Validate NETWORK's peer routes across every configured Pod address family."
   (let ((routes (gethash "routes" network #()))
-        (cidrs (list (gethash "nodePodCIDR" network)))
+        (cluster-cidrs
+          (persisted-node-network-cidrs network "clusterPodCIDRs" "clusterPodCIDR"))
+        (cidrs (persisted-node-network-cidrs network "nodePodCIDRs" "nodePodCIDR"))
         (addresses (list (gethash "underlayAddress" network "")))
         (node-ids nil))
     (unless (and (vectorp routes) (not (stringp routes)))
@@ -364,22 +381,30 @@ NETWORK; signals INVALID-CNI on any violation."
     (loop for route across routes
           do (unless (hash-table-p route) (invalid-cni "invalid node route"))
              (let* ((id (required-cni-string route "nodeID"))
-                    (cidr (required-cni-string route "podCIDR"))
+                    (route-cidrs (gr8s.network::route-pod-cidrs route))
                     (address (required-cni-string route "underlayAddress")))
                (handler-case (canonical-node-underlay-address address)
                  (error () (invalid-cni "invalid peer underlay address ~A" address)))
-               (unless (and (network-cidr-subnet-p cidr (gethash "clusterPodCIDR" network))
-                            (notany (lambda (other) (network-cidrs-overlap-p cidr other)) cidrs)
+               (unless (and (= (length route-cidrs) (length cluster-cidrs))
+                            (loop for cidr in route-cidrs
+                                  for cluster-cidr in cluster-cidrs
+                                  always (and (pod-cidr-subnet-p cidr cluster-cidr)
+                                              (notany (lambda (other)
+                                                        (pod-cidrs-overlap-p cidr other))
+                                                      cidrs)))
                             (not (member id node-ids :test #'string=))
                             (not (member address addresses :test #'string=)))
-                 (invalid-cni "conflicting or out-of-range peer route ~A" cidr))
+                 (invalid-cni "conflicting or out-of-range peer routes ~{~A~^, ~}"
+                              route-cidrs))
                (when (string= "wireguard" (gethash "overlayBackend" network "vxlan"))
                  (wireguard-decode-key
                   (required-cni-string route "wireguardPublicKey") "peer public key")
                  (unless (typep (gethash "wireguardListenPort" route)
                                 '(integer 1 65535))
                    (invalid-cni "invalid WireGuard peer listen port")))
-               (push cidr cidrs) (push address addresses) (push id node-ids))))
+               (setf cidrs (nconc route-cidrs cidrs))
+               (push address addresses)
+               (push id node-ids))))
   network)
 
 (defun validate-node-network-object (network)
@@ -425,7 +450,8 @@ conflicting network."
     (when (and (typep runtime 'containerd-runtime) (plusp (length address)))
       (setf (containerd-runtime-host-address runtime) address)))
   (when (node-runtime-manager node-runtime)
-    (validate-pod-pool-host-routes (gethash "clusterPodCIDR" network)
+    (validate-pod-pool-host-routes (persisted-node-network-cidrs
+                                    network "clusterPodCIDRs" "clusterPodCIDR")
                                   (node-runtime-state-directory node-runtime)))
   (bt:with-lock-held ((node-runtime-network-lock node-runtime))
     (let ((existing (node-runtime-network node-runtime)))
@@ -475,13 +501,15 @@ conflicting network."
 
 (defun node-network-overlay-firewall-identity (network)
   "Return NETWORK's firewalld identity as (Pod-CIDR interface UDP-port)."
-  (if (string= "wireguard" (gethash "overlayBackend" network "vxlan"))
-      (list (gethash "nodePodCIDR" network)
+  (let* ((cidrs (persisted-node-network-cidrs network "nodePodCIDRs" "nodePodCIDR"))
+         (cidr-value (if (rest cidrs) cidrs (first cidrs))))
+    (if (string= "wireguard" (gethash "overlayBackend" network "vxlan"))
+      (list cidr-value
             +node-wireguard-interface+
             (gethash "wireguardListenPort" network))
-      (list (gethash "nodePodCIDR" network)
+      (list cidr-value
             +node-vxlan-interface+
-            +node-vxlan-udp-port+)))
+            +node-vxlan-udp-port+))))
 
 (defun call-overlay-firewall-function (function identity)
   "Call FUNCTION with the Pod CIDR, interface and UDP port in IDENTITY."

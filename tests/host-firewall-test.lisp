@@ -18,6 +18,16 @@
     ;; The VXLAN underlay UDP port on the uplink.
     (is (equal '("firewall-cmd" "--add-port=4789/udp") (third cmds)))))
 
+(test overlay-firewall-commands-admit-every-local-pod-family
+  (let ((cmds (gr8s::overlay-firewall-commands
+               '("10.80.0.0/20" "fd80::/64"))))
+    (is (= 4 (length cmds)))
+    (is (equal '("firewall-cmd" "--zone" "trusted" "--add-source" "10.80.0.0/20")
+               (second cmds)))
+    (is (equal '("firewall-cmd" "--zone" "trusted" "--add-source" "fd80::/64")
+               (third cmds)))
+    (is (equal '("firewall-cmd" "--add-port=4789/udp") (fourth cmds)))))
+
 (test overlay-firewall-commands-can-withdraw
   (let ((cmds (gr8s::overlay-firewall-commands "10.80.0.0/20" :verb "--remove")))
     (is (equal '("firewall-cmd" "--zone" "trusted" "--remove-interface" "gr8s-vxlan") (first cmds)))

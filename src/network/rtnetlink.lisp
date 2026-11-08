@@ -297,22 +297,55 @@
   (network-link-attributes-by-index
    (native-interface-index (validate-network-interface-name name))))
 
+(defun network-octets-integer (octets)
+  "Decode network-byte-order OCTETS into one unsigned integer."
+  (loop with value = 0 for byte across octets
+        do (setf value (logior (ash value 8) byte))
+        finally (return value)))
+
+(defun network-prefix-octets-integer (octets bits)
+  "Decode an abbreviated network prefix into its BITS-wide address value."
+  (unless (<= (length octets) (/ bits 8))
+    (invalid-cni "route destination has ~D octets for a ~D-bit address"
+                 (length octets) bits))
+  (ash (network-octets-integer octets)
+       (* 8 (- (/ bits 8) (length octets)))))
+
+(defun read-family-host-routes (family)
+  "Read non-default routes for address FAMILY from all Linux routing tables."
+  (let* ((ipv6-p (= family 10))
+         (bits (if ipv6-p 128 32))
+         (zero (make-array (/ bits 8) :element-type '(unsigned-byte 8)
+                                      :initial-element 0)))
+    (loop for message in (call-rtnetlink
+                          26 #x300
+                          (netlink-octets (vector family 0 0 0 0 0 0 0)
+                                           (netlink-integer 0 4)))
+          when (and (>= (length message) 28)
+                    (= 24 (netlink-read-integer message 4 2))
+                    (= family (aref message 16))
+                    (plusp (aref message 17)))
+            collect (let* ((attributes (netlink-attributes message 28))
+                           (destination (gethash 1 attributes zero))
+                           (index (gethash 4 attributes))
+                           (table (gethash 15 attributes)))
+                      (list :cidr (format nil "~A/~D"
+                                          (format-pod-address
+                                           (if ipv6-p :ipv6 :ipv4)
+                                           (network-prefix-octets-integer
+                                            destination bits))
+                                          (aref message 17))
+                            :index (if index (netlink-read-integer index 0 4) 0)
+                            :table (if table (netlink-read-integer table 0 4)
+                                       (aref message 20)))))))
+
 (defun read-ipv4-host-routes ()
   "Read non-default IPv4 routes from all Linux routing tables via rtnetlink."
-  (loop for message in (call-rtnetlink 26 #x300
-                                      (netlink-octets #(2 0 0 0 0 0 0 0) (netlink-integer 0 4)))
-        when (and (>= (length message) 28) (= 24 (netlink-read-integer message 4 2))
-                  (= 2 (aref message 16)) (plusp (aref message 17)))
-          collect (let* ((attributes (netlink-attributes message 28))
-                         (destination (gethash 1 attributes #(0 0 0 0)))
-                         (index (gethash 4 attributes)) (table (gethash 15 attributes)))
-                    (list :cidr (format nil "~A/~D"
-                                        (format-ipv4-integer
-                                         (loop for byte across destination
-                                               for shift from 24 downto 0 by 8 sum (ash byte shift)))
-                                        (aref message 17))
-                          :index (if index (netlink-read-integer index 0 4) 0)
-                          :table (if table (netlink-read-integer table 0 4) (aref message 20))))))
+  (read-family-host-routes 2))
+
+(defun read-ip-host-routes ()
+  "Read non-default IPv4 and IPv6 routes from all Linux routing tables."
+  (append (read-family-host-routes 2) (read-family-host-routes 10)))
 
 (defun network-link-owned-p (name owner)
   "True when the link NAME's alias is exactly OWNER -- i.e. gr8s owns the link."
@@ -512,10 +545,16 @@ Refuse foreign links; concurrent endpoint ADD requests share this interface."
       (loop for message in (call-rtnetlink 22 #x300
                                           (netlink-octets (vector family 0 0 0)
                                                            (netlink-integer 0 4)))
-            thereis (and (>= (length message) 24) (= 20 (netlink-read-integer message 4 2))
-                         (= family (aref message 16)) (= prefix (aref message 17))
-                         (= index (netlink-read-integer message 20 4))
-                         (equalp bytes (gethash 2 (netlink-attributes message 24))))))))
+            do (when (and (>= (length message) 24)
+                          (= 20 (netlink-read-integer message 4 2))
+                          (= family (aref message 16))
+                          (= prefix (aref message 17))
+                          (= index (netlink-read-integer message 20 4)))
+                 (let ((attributes (netlink-attributes message 24)))
+                   (when (equalp bytes (or (gethash 2 attributes)
+                                           (gethash 1 attributes)))
+                     (return t))))
+            finally (return nil)))))
 
 (defun netlink-neighbor-message (family interface state flags)
   "Encode Linux ndmsg fields for a neighbor or VXLAN FDB transaction."
@@ -547,7 +586,7 @@ Refuse foreign links; concurrent endpoint ADD requests share this interface."
 
 (defun network-route-present-p (destination prefix interface &key gateway source)
   "Check a main-table IP route, output interface, gateway and optional source."
-  (multiple-value-bind (family bytes) (network-address-wire-values destination)
+  (multiple-value-bind (family bytes bits) (network-address-wire-values destination)
     (flet ((value-bytes (value)
              (when value
                (multiple-value-bind (other-family other-bytes)
@@ -564,7 +603,9 @@ Refuse foreign links; concurrent endpoint ADD requests share this interface."
                            (= family (aref message 16)) (= prefix (aref message 17))
                            (= 254 (aref message 20))
                            (let ((attributes (netlink-attributes message 28)))
-                             (and (equalp bytes (gethash 1 attributes zero))
+                             (and (= (network-prefix-octets-integer
+                                      (gethash 1 attributes zero) bits)
+                                     (network-prefix-octets-integer bytes bits))
                                   (equalp (netlink-integer index 4) (gethash 4 attributes))
                                   (equalp (value-bytes gateway) (gethash 5 attributes))
                                   (or (not source)
@@ -589,6 +630,10 @@ Refuse foreign links; concurrent endpoint ADD requests share this interface."
       (with-open-file (stream path :direction :output :if-exists :overwrite)
         (write-line "1" stream))))
   nil)
+
+(defun veth-scoped-gateway-addresses (gateways)
+  "Return the IPv6 link-local gateways that must live on each host veth."
+  (remove-if-not (lambda (address) (find #\: address)) gateways))
 
 (defun configure-routed-veth (context address &key (mtu 1450)
                                               (gateway +node-gateway-address+))
@@ -628,9 +673,13 @@ Refuse foreign links; concurrent endpoint ADD requests share this interface."
     (set-network-link-owner host owner)
     (set-network-link-mtu host mtu)
     (ensure-node-gateway gateways)
-    ;; Migrate an endpoint created by the earlier per-veth gateway layout.
+    ;; IPv4 uses the shared dummy gateway. IPv6 link-local addresses are
+    ;; interface-scoped, so the gateway must also live on every host veth.
     (loop for item in gateways
-          do (remove-network-address host item (if (find #\: item) 128 32)))
+          unless (find #\: item)
+            do (remove-network-address host item 32))
+    (dolist (item (veth-scoped-gateway-addresses gateways))
+      (add-network-address host item 128))
     (set-network-link-up host)
     (loop for item in addresses
           for next-gateway in gateways

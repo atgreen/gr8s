@@ -59,6 +59,7 @@
   spec-fingerprint
   (phase "Running")
   (pod-ip "")
+  (pod-ips #())
   status
   container-details
   (logs (make-hash-table :test #'equal)))

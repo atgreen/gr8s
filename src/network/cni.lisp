@@ -47,7 +47,7 @@
   ;; 9=LRU_HASH, 11=LPM_TRIE. The netpol_* maps hold the per-Pod NetworkPolicy and
   ;; are updated as data by the agent (no program recompile).
   '(("rejected_spoofs"      2 4  8  1     0)
-    ("endpoint_identity"    2 4  16 1     128)
+    ("endpoint_identity"    2 4  32 1     128)
     ("traffic_stats"        2 4  8  7     0)
     ("netpol_mode"          2 4  4  2     0)
     ("netpol_egress_cidr"  11 8  4  16384 1)
@@ -77,7 +77,8 @@
                                (uiop:pathname-directory-pathname link-path))))
 
 (defstruct cni-configuration
-  version name type direction program map-pin-root previous-result endpoint-address policy-interface-name)
+  version name type direction program map-pin-root previous-result endpoint-address
+  endpoint-addresses policy-interface-name)
 
 (defstruct cni-context
   container-id netns interface-name)
@@ -220,18 +221,27 @@
             nil)
            (t (invalid-cni "unsupported CNI command ~A" command))))))))
 
-(defun chained-cni-ipv4-address (previous-result)
-  "Return the first valid IPv4 address in a CNI PREVIOUS-RESULT, without its prefix."
+(defun chained-cni-addresses (previous-result)
+  "Return every valid Pod address in a CNI PREVIOUS-RESULT, without prefixes."
   (let ((addresses (gethash "ips" previous-result #())))
-    (loop for entry across addresses
-          for cidr = (and (hash-table-p entry) (gethash "address" entry))
-          for slash = (and (stringp cidr) (position #\/ cidr))
-          for address = (and slash (subseq cidr 0 slash))
-          when (and address
-                    (handler-case (progn (parse-ipv4-integer address) t)
-                      (error () nil)))
-            return address
-          finally (invalid-cni "the primary CNI result has no IPv4 Pod address"))))
+    (let ((result
+            (loop for entry across addresses
+                  for cidr = (and (hash-table-p entry) (gethash "address" entry))
+                  for slash = (and (stringp cidr) (position #\/ cidr))
+                  for address = (and slash (subseq cidr 0 slash))
+                  when (and address
+                            (handler-case
+                                (progn (network-address-wire-values address) t)
+                              (error () nil)))
+                    collect address)))
+      (unless result (invalid-cni "the primary CNI result has no Pod address"))
+      result)))
+
+(defun chained-cni-ipv4-address (previous-result)
+  "Return the first IPv4 Pod address in a CNI PREVIOUS-RESULT."
+  (or (find-if-not (lambda (address) (find #\: address))
+                   (chained-cni-addresses previous-result))
+      (invalid-cni "the primary CNI result has no IPv4 Pod address")))
 
 (defun make-chained-cni-operations (&key (policy (make-cni-operations)))
   "Wrap POLICY for use after an external primary CNI plugin.
@@ -245,8 +255,10 @@ prevResult and only installs, checks, or removes its policy datapath."
      ;; removal is keyed by container/interface pins and does not need an IP.
      (let ((previous (cni-configuration-previous-result configuration)))
        (when (hash-table-p previous)
-         (setf (cni-configuration-endpoint-address configuration)
-               (chained-cni-ipv4-address previous))))
+         (let ((addresses (chained-cni-addresses previous)))
+           (setf (cni-configuration-endpoint-addresses configuration) addresses
+                 (cni-configuration-endpoint-address configuration)
+                 (find-if-not (lambda (address) (find #\: address)) addresses)))))
      (funcall (cni-operations-prepare policy) configuration context))
    :add (cni-operations-add policy)
    :check (cni-operations-check policy)

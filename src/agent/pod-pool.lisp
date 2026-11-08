@@ -141,22 +141,29 @@
                                result)))))
           (unless (string= "" (gethash "underlayAddress" network))
             (if (string= "wireguard" (gethash "overlayBackend" network "vxlan"))
-                (dolist (cidr (cons (format nil "~A/32"
-                                                  (vxlan-router-address
-                                                   (gethash "nodePodCIDR" network)))
-                                    (loop for route across (gethash "routes" network #())
-                                          collect (gethash "podCIDR" route))))
+                (dolist (cidr (append
+                                (loop for local in (persisted-node-network-cidrs
+                                                    network "nodePodCIDRs" "nodePodCIDR")
+                                      collect (format nil "~A/~D"
+                                                      (vxlan-router-address local)
+                                                      (if (find #\: local) 128 32)))
+                                (loop for route across (gethash "routes" network #())
+                                      append (gr8s.network::route-pod-cidrs route))))
                   (push (list :cidr cidr :name +node-wireguard-interface+
                               :owner (node-wireguard-owner network)
                               :kind "wireguard") result))
-                (dolist (cidr (cons (format nil "~A/32"
-                                                  (vxlan-router-address
-                                                   (gethash "nodePodCIDR" network)))
-                                    (loop for route across (gethash "routes" network #())
-                                          append (list (gethash "podCIDR" route)
-                                                       (format nil "~A/32"
-                                                               (vxlan-router-address
-                                                                (gethash "podCIDR" route)))))))
+                (dolist (cidr (append
+                                (loop for local in (persisted-node-network-cidrs
+                                                    network "nodePodCIDRs" "nodePodCIDR")
+                                      collect (format nil "~A/~D"
+                                                      (vxlan-router-address local)
+                                                      (if (find #\: local) 128 32)))
+                                (loop for route across (gethash "routes" network #())
+                                      append (loop for peer in (gr8s.network::route-pod-cidrs route)
+                                                   append (list peer
+                                                                (format nil "~A/~D"
+                                                                        (vxlan-router-address peer)
+                                                                        (if (find #\: peer) 128 32)))))))
                   (push (list :cidr cidr :name +node-vxlan-interface+
                               :owner (node-vxlan-owner network) :kind "vxlan"
                               :mac (vxlan-router-mac (gethash "nodePodCIDR" network))
@@ -180,19 +187,23 @@
                     (equalp (gethash 15 vxlan) #(18 181))))))))
 
 (defun validate-pod-pool-host-routes
-    (cidr state-directory &key (route-reader #'read-ipv4-host-routes)
+    (cidr state-directory &key (route-reader #'read-ip-host-routes)
                               (link-reader #'network-link-attributes-by-index))
   "Reject overlapping host routes, allowing only exact journal-owned dataplane routes.
 This runs while Pods come and go. A Pod's lease outlives its route both ways: ADD persists
 the lease before installing the route, and DEL removes the route before releasing the lease.
 So reading the journal on both sides of the route dump finds the lease of any Pod route in
 it, and an owned route whose link has since gone left with its link."
-  (let* ((before (persisted-node-route-identities state-directory))
+  (let* ((cidrs (cond ((stringp cidr) (list cidr))
+                      ((vectorp cidr) (coerce cidr 'list))
+                      (t cidr)))
+         (before (persisted-node-route-identities state-directory))
          (routes (funcall route-reader))
          (owned (append before (persisted-node-route-identities state-directory))))
     (dolist (route routes)
-      (when (and (plusp (nth-value 1 (parse-ipv4-cidr (getf route :cidr))))
-                 (ipv4-prefixes-overlap-p cidr (getf route :cidr)))
+      (when (and (plusp (nth-value 2 (parse-pod-cidr (getf route :cidr))))
+                 (some (lambda (pool) (pod-cidrs-overlap-p pool (getf route :cidr)))
+                       cidrs))
         (let ((identities (remove-if-not
                            (lambda (item) (string= (getf route :cidr) (getf item :cidr))) owned)))
           (unless (and identities (plusp (getf route :index 0))
@@ -203,12 +214,12 @@ it, and an owned route whose link has since gone left with its link."
                              (and attributes
                                   (some (lambda (identity) (route-link-matches-identity-p attributes identity))
                                         identities)))))
-            (invalid-cni "Pod pool ~A overlaps host route ~A in table ~A"
-                         cidr (getf route :cidr) (getf route :table)))))))
+            (invalid-cni "Pod pool ~{~A~^, ~} overlaps host route ~A in table ~A"
+                         cidrs (getf route :cidr) (getf route :table)))))))
   t)
 
 (defun ensure-controller-node-pool
-    (store state-directory options &key (route-reader #'read-ipv4-host-routes)
+    (store state-directory options &key (route-reader #'read-ip-host-routes)
                                         (link-reader #'network-link-attributes-by-index))
   "Load or persist pool geometry, preserving every existing node assignment."
   (let* ((path (merge-pathnames "network/pool.json"
@@ -229,7 +240,8 @@ it, and an owned route whose link has since gone left with its link."
              (let* ((cidrs (if (getf options :cluster-pod-cidr-supplied-p)
                                (getf options :cluster-pod-cidrs)
                                (node-pool-cluster-cidrs base)))
-                    (prefixes (if (or (getf options :node-pod-prefix-supplied-p)
+                    (prefixes (if (or (getf options :cluster-pod-cidr-supplied-p)
+                                      (getf options :node-pod-prefix-supplied-p)
                                       (getf options :node-pod-prefix-ipv6-supplied-p))
                                   (map 'vector
                                        (lambda (cidr)
@@ -244,7 +256,7 @@ it, and an owned route whose link has since gone left with its link."
         (invalid-cni "refusing to change Pod-pool geometry while node allocations exist"))
       (validate-node-pool-assignments configuration nodes)
       (validate-pod-pool-host-routes
-       (gethash "clusterPodCIDR" configuration)
+       (node-pool-cluster-cidrs configuration)
        (merge-pathnames "agent/runtime/" (uiop:ensure-directory-pathname state-directory))
        :route-reader route-reader :link-reader link-reader)
       (unless (and stored (node-pool-settings-equal-p stored configuration))

@@ -69,6 +69,7 @@
    #:runtime-pod-logs
    #:runtime-pod-phase
    #:runtime-pod-pod-ip
+   #:runtime-pod-pod-ips
    #:runtime-pod-resource-version
    #:runtime-pod-spec-fingerprint
    #:runtime-pod-status

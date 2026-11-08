@@ -608,12 +608,14 @@
         (is (string= message (gethash "msg" response)))))))
 
 (test endpoint-identity-encoding-matches-the-whistler-map-layout
-  (let ((bytes (gr8s::encode-cni-endpoint-identity "10.88.1.2" #(2 17 34 51 68 85))))
-    (is (= 16 (length bytes)))
+  (let ((bytes (gr8s::encode-cni-endpoint-identity
+                '("10.88.1.2" "fd88::102") #(2 17 34 51 68 85))))
+    (is (= 32 (length bytes)))
     (is (= #x0a580102 (gr8s::netlink-read-integer bytes 0 4)))
     (is (= #x02112233 (gr8s::netlink-read-integer bytes 4 4)))
     (is (= #x4455 (gr8s::netlink-read-integer bytes 8 4)))
-    (is (= 1 (gr8s::netlink-read-integer bytes 12 4)))))
+    (is (= 1 (gr8s::netlink-read-integer bytes 12 4)))
+    (is (equalp (0conf:parse-ipv6 "fd88::102") (subseq bytes 16 32)))))
 
 (test endpoint-identity-distinguishes-native-and-chained-policy-attachments
   (let ((native (gr8s::make-cni-configuration :policy-interface-name "gr-owned"))

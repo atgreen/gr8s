@@ -207,6 +207,17 @@ exiting mid-call still abandon it."
                            collect (cri-container-status (containerd-runtime-socket-path runtime)
                                                          (cri-container-summary-id container))))
             (state (load-container-lifecycle-state runtime uid))
+            (pod-ips
+              (cond ((null sandbox)
+                     (let ((address (gethash "podIP" state "")))
+                       (if (string= address "") #() (vector address))))
+                    ((assoc +gr8s-host-network-label+
+                            (cri-pod-sandbox-info-labels sandbox) :test #'string=)
+                     (vector (containerd-node-address runtime)))
+                    (t
+                     (cri-pod-sandbox-ips
+                      (containerd-runtime-socket-path runtime)
+                      (cri-pod-sandbox-info-id sandbox)))))
             (checkpoint-owned-p (plusp (hash-table-count (gethash "containers" state))))
             (history (when (or sandbox checkpoint-owned-p) (incorporate-container-log-history runtime uid state)))
             (all-statuses (container-lifecycle-statuses (mask-post-start-containers runtime details) (or history state)))
@@ -224,10 +235,8 @@ exiting mid-call still abandon it."
               (gethash "resourceVersion" state ""))
           :spec-fingerprint (or (and sandbox (cdr (assoc +gr8s-spec-fingerprint-label+ (cri-pod-sandbox-info-labels sandbox) :test #'string=)))
                                 (gethash "specFingerprint" state))
-          :pod-ip (cond ((null sandbox) (gethash "podIP" state ""))
-                        ((assoc +gr8s-host-network-label+ (cri-pod-sandbox-info-labels sandbox) :test #'string=)
-                         (containerd-node-address runtime))
-                        (t (cri-pod-sandbox-ip (containerd-runtime-socket-path runtime) (cri-pod-sandbox-info-id sandbox))))
+          :pod-ip (if (plusp (length pod-ips)) (aref pod-ips 0) "")
+          :pod-ips pod-ips
           :phase (container-lifecycle-phase statuses (and sandbox (= gr8s.cri.v1::+podsandboxstate-sandbox_ready+
                                                                          (cri-pod-sandbox-info-state sandbox))))
           :container-details details

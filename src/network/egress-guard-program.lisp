@@ -88,9 +88,9 @@
   '((defmap rejected-spoofs :type :array
       :key-size 4 :value-size 8 :max-entries 1)
     ;; Agent-initialized identity: IPv4, MAC high 32 bits, MAC low 16 bits (u32),
-    ;; schema version. A zero-initialized/unconfigured endpoint fails closed.
+    ;; attachment mode, and IPv6. A zero-initialized endpoint fails closed.
     (defmap endpoint-identity :type :array
-      :key-size 4 :value-size 16 :max-entries 1 :map-flags 128) ; RDONLY_PROG
+      :key-size 4 :value-size 32 :max-entries 1 :map-flags 128) ; RDONLY_PROG
     ;; Allowed packets/bytes, dropped packets/bytes, malformed, unsupported, policy.
     (defmap traffic-stats :type :array
       :key-size 4 :value-size 8 :max-entries 7)
@@ -270,6 +270,24 @@
                            (add-pod-counter allowed-packets 1)
                            (add-pod-counter allowed-bytes (ctx u32 0))
                            (return (redirect (load u32 ep 0) 0))))))))
+                ((= protocol #x86dd)
+                 (when (> (+ data 54) data-end) (drop-pod-packet :malformed))
+                 (let ((ip u64 (+ data 14)))
+                   (when (/= (logand (load u8 ip 0) #xf0) #x60)
+                     (drop-pod-packet :malformed))
+                   (when (or (/= (load u32 ip 8) (load u32 identity 16))
+                             (/= (load u32 ip 12) (load u32 identity 20))
+                             (/= (load u32 ip 16) (load u32 identity 24))
+                             (/= (load u32 ip 20) (load u32 identity 28)))
+                     (drop-pod-packet :spoof))
+                   ;; IPv6 NetworkPolicy maps arrive with the remaining
+                   ;; dual-stack policy work. Until then, isolation fails
+                   ;; closed instead of letting IPv6 bypass an active policy.
+                   (let ((egress-on (map-lookup netpol-mode 0))
+                         (ingress-on (map-lookup netpol-mode 1)))
+                     (when (or (and (/= egress-on 0) (/= (load u32 egress-on 0) 0))
+                               (and (/= ingress-on 0) (/= (load u32 ingress-on 0) 0)))
+                       (drop-pod-packet :policy)))))
                 ((= protocol #x0806)
                  (when (> (+ data 42) data-end) (drop-pod-packet :malformed))
                  (let ((arp u64 (+ data 14)))

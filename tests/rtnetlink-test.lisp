@@ -64,6 +64,22 @@
     (is (= 16 (length bytes)))
     (is (equalp (0conf:parse-ipv6 "fd42::17") bytes))))
 
+(test routed-veth-retains-interface-scoped-ipv6-gateway
+  (is (null (gr8s::veth-scoped-gateway-addresses '("169.254.1.1"))))
+  (is (equal '("fe80::1")
+             (gr8s::veth-scoped-gateway-addresses
+              '("169.254.1.1" "fe80::1")))))
+
+(test rtnetlink-decodes-abbreviated-network-prefixes-at-the-high-order-end
+  ;; RTA_DST is permitted to omit trailing zero octets. Those bytes remain the
+  ;; most-significant part of the address, for both address families.
+  (is (string= "10.80.0.0"
+               (gr8s::format-pod-address
+                :ipv4 (gr8s::network-prefix-octets-integer #(10 80) 32))))
+  (is (string= "fd80::"
+               (gr8s::format-pod-address
+                :ipv6 (gr8s::network-prefix-octets-integer #(253 128) 128)))))
+
 (test rtnetlink-reads-real-kernel-link-without-privileges
   ;; This exercises the actual ABI, socket, message parser, and ACK handling.
   ;; RTM_GETLINK is read-only and does not require CAP_NET_ADMIN.
@@ -74,7 +90,8 @@
     (is (plusp index))
     (is (= 1 (length messages)))
     (is (= 16 (gr8s::netlink-read-integer (first messages) 4 2)))
-    (is (= index (gr8s::netlink-read-integer (first messages) 20 4)))))
+    (is (= index (gr8s::netlink-read-integer (first messages) 20 4))))
+  (is-true (gr8s::network-address-present-p "lo" "::1" 128)))
 
 (test routed-cni-keeps-durable-lease-until-endpoint-cleanup-succeeds
   (let* ((directory (merge-pathnames

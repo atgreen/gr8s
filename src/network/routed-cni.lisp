@@ -48,8 +48,9 @@
                                (network-address-present-p
                                 +node-gateway-interface+ gateway
                                 (if (find #\: gateway) 128 32))
-                               (not (network-address-present-p
-                                     host gateway (if (find #\: gateway) 128 32)))
+                               (if (find #\: gateway)
+                                   (network-address-present-p host gateway 128)
+                                   (not (network-address-present-p host gateway 32)))
                                (network-route-present-p
                                 item (if (find #\: item) 128 32) host
                                 :source (unless (find #\: item) gateway)))))
@@ -147,7 +148,8 @@
             (host (funcall install-link context addresses)))
        ;; Keep the durable lease on failure. DEL must remove links and policy
        ;; before releasing an address, including after a crash during ADD.
-       (setf (cni-configuration-endpoint-address configuration) (first addresses))
+       (setf (cni-configuration-endpoint-address configuration) (first addresses)
+             (cni-configuration-endpoint-addresses configuration) addresses)
        (funcall (cni-operations-add policy)
                 configuration context map-path link-path)
        (setf (cni-configuration-previous-result configuration)
@@ -156,7 +158,8 @@
    (lambda (configuration context map-path link-path)
      (let ((addresses (check-pod-addresses ipam (cni-context-container-id context)
                                           (cni-context-interface-name context))))
-       (setf (cni-configuration-endpoint-address configuration) (first addresses))
+       (setf (cni-configuration-endpoint-address configuration) (first addresses)
+             (cni-configuration-endpoint-addresses configuration) addresses)
        (funcall check-link context addresses))
      (funcall (cni-operations-check policy)
               configuration context map-path link-path))

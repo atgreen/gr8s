@@ -187,12 +187,20 @@
                     'gr8s.cri.v1::pod-sandbox-status-response
                     :status (make-instance 'gr8s.cri.v1::pod-sandbox-status
                                            :network (make-instance 'gr8s.cri.v1::pod-sandbox-network-status
-                                                                   :ip "10.88.1.2"))))
+                                                                   :ip "10.88.1.2"
+                                                                   :additional-ips
+                                                                   (list (make-instance
+                                                                          'gr8s.cri.v1::pod-ip
+                                                                          :ip "fd88::2"))))))
          (decoded (ag-proto:deserialize-from-bytes 'gr8s.cri.v1::pod-sandbox-status-response
                                                   (ag-proto:serialize-to-bytes response))))
-    (is (string= "10.88.1.2" (gr8s::cri-pod-sandbox-ip-from-response decoded))))
+    (is (string= "10.88.1.2" (gr8s::cri-pod-sandbox-ip-from-response decoded)))
+    (is (equalp #("10.88.1.2" "fd88::2")
+                (gr8s::cri-pod-sandbox-ips-from-response decoded))))
   (is (string= "" (gr8s::cri-pod-sandbox-ip-from-response
-                    (make-instance 'gr8s.cri.v1::pod-sandbox-status-response)))))
+                    (make-instance 'gr8s.cri.v1::pod-sandbox-status-response))))
+  (is (equalp #() (gr8s::cri-pod-sandbox-ips-from-response
+                   (make-instance 'gr8s.cri.v1::pod-sandbox-status-response)))))
 
 (defun running-task-removal-error (&optional (code ag-grpc:+grpc-status-failed-precondition+))
   "The error containerd 2.4 returns when RemoveContainer meets a task CRI lost track of."

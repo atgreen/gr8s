@@ -26,6 +26,18 @@
         (is (eq facade implementation))
         (is (eq (symbol-package implementation) (find-package '#:gr8s.agent)))))))
 
+(test node-status-merge-preserves-authenticated-additional-pod-addresses
+  (let* ((object (gr8s::core-object
+                  "phase" "Running" "podIP" "10.88.1.2"
+                  "podIPs" (vector (gr8s::core-object "ip" "10.88.1.2")
+                                   (gr8s::core-object "ip" "fd88::2"))))
+         (message (make-instance 'gr8s.node.v1::pod-observed-status
+                                 :phase "Running" :pod-ip "10.88.1.2")))
+    (gr8s.apiserver::merge-node-pod-address-status object message)
+    (is (equalp #("10.88.1.2" "fd88::2")
+                (map 'vector (lambda (item) (gethash "ip" item))
+                     (gethash "podIPs" object))))))
+
 (defun wait-until (predicate &key (timeout 3))
   (let ((deadline (+ (get-internal-real-time)
                      (* timeout internal-time-units-per-second))))
