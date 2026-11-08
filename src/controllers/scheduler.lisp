@@ -396,6 +396,42 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
      pools)
     complete))
 
+(defun dra-device-attribute-value (attribute)
+  "Return ATTRIBUTE's single Kubernetes DRA scalar value."
+  (loop for field in '("int" "bool" "string" "version")
+        do (multiple-value-bind (value present) (gethash field attribute)
+             (when present (return value)))))
+
+(defun dra-device-cel-object (driver device)
+  "Build the CEL device binding for DRIVER's ResourceSlice DEVICE."
+  (let ((attributes (core-object)))
+    (maphash
+     (lambda (qualified-name attribute)
+       (let* ((slash (position #\/ qualified-name :from-end t))
+              (domain (if slash (subseq qualified-name 0 slash) driver))
+              (name (if slash (subseq qualified-name (1+ slash)) qualified-name))
+              (domain-attributes
+                (or (gethash domain attributes)
+                    (setf (gethash domain attributes) (core-object)))))
+         (setf (gethash name domain-attributes) (dra-device-attribute-value attribute))))
+     (gethash "attributes" device (core-object)))
+    (core-object "driver" driver "attributes" attributes
+                 "capacity" (gethash "capacity" device (core-object))
+                 "allowMultipleAllocations" (gethash "allowMultipleAllocations" device nil))))
+
+(defun dra-device-matches-selectors-p (driver device selectors)
+  "Return whether DRIVER's DEVICE satisfies every CEL selector."
+  (let ((binding (dra-device-cel-object driver device)))
+    (handler-case
+        (loop for selector across selectors
+              always (let ((gr8s.resources::*cel-declared-variables* '("device")))
+                       (declare (special gr8s.resources::*cel-declared-variables*))
+                       (gr8s.resources::evaluate-cel-condition
+                        (gr8s.resources::compile-cel-condition
+                         (gethash "expression" (gethash "cel" selector)))
+                        (list (cons "device" binding)))))
+      (error () nil))))
+
 (defun dra-exact-request-results-unlocked (store exact result-name node used)
   "Allocate one ExactCount or All request on NODE under RESULT-NAME."
   (let* ((class-name (and exact (gethash "deviceClassName" exact)))
@@ -403,10 +439,13 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
                      (gethash (core-resource-key "deviceclasses" nil class-name)
                               (pod-store-resources store))))
          (mode (and exact (gethash "allocationMode" exact "ExactCount")))
-         (count (and exact (gethash "count" exact 1))))
+         (count (and exact (gethash "count" exact 1)))
+         (selectors (and class
+                         (concatenate 'vector
+                                      (gethash "selectors" (gethash "spec" class) #())
+                                      (gethash "selectors" exact #())))))
     (unless (and exact class (member mode '("ExactCount" "All") :test #'equal)
-                 (zerop (length (gethash "selectors" exact #())))
-                 (zerop (length (gethash "selectors" (gethash "spec" class) #()))))
+                 selectors)
       (return-from dra-exact-request-results-unlocked (values nil nil)))
     (let ((candidates nil) (pools (make-hash-table :test #'equal)))
       (dolist (slice (dra-current-complete-slices-unlocked store node))
@@ -416,10 +455,11 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
           (loop for device across (gethash "devices" spec #())
                 for name = (gethash "name" device)
                 for key = (dra-device-key driver pool name)
-                do (push (list driver pool name (gethash key used))
-                         (gethash (list driver pool) pools))
-                   (unless (gethash key used)
-                     (push (list driver pool name) candidates)))))
+                when (dra-device-matches-selectors-p driver device selectors)
+                  do (push (list driver pool name (gethash key used))
+                           (gethash (list driver pool) pools))
+                     (unless (gethash key used)
+                       (push (list driver pool name) candidates)))))
       (when (equal mode "All")
         (let ((pool-candidates
                 (sort (loop for devices being the hash-values of pools
