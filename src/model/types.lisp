@@ -64,6 +64,9 @@
   name
   pod-cidr
   (underlay-address "")
+  ;; Public half of the node-local WireGuard identity. The private half never
+  ;; enters the control-plane store.
+  (wireguard-public-key #())
   ;; The port of the node's authenticated kubelet endpoints, or 0 when it serves none.
   (kubelet-port 0)
   (ready-p nil)

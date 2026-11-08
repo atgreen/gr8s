@@ -506,14 +506,18 @@
            (token (gr8s:create-join-token pki "worker-b"))
            (server (gr8s:start-node-grpc-server
                     store :host "127.0.0.1" :port 0 :pki pki
-                    :cluster-pod-cidr "10.96.0.0/12" :node-prefix 20))
+                    :cluster-pod-cidr "10.96.0.0/12" :node-prefix 20
+                    :overlay-backend "wireguard" :wireguard-listen-port 51820))
            (agent-directory (merge-pathnames "worker-b/" path))
            (private-key (merge-pathnames "node.key" agent-directory))
            (certificate (merge-pathnames "node.crt" agent-directory))
            (ca-certificate (merge-pathnames "ca.crt" agent-directory))
            (identity (merge-pathnames "identity.json" agent-directory)))
       (unwind-protect
-           (let ((node-id
+           (multiple-value-bind (wireguard-private-key wireguard-public-key)
+               (gr8s.security::ensure-wireguard-key-pair agent-directory)
+             (declare (ignore wireguard-private-key))
+             (let ((node-id
                    (gr8s:enroll-node-over-grpc
                     "127.0.0.1" (gr8s:node-grpc-server-port server)
                     "worker-b" token (gr8s:cluster-pki-ca-fingerprint pki)
@@ -533,8 +537,12 @@
               "worker-b" identity (lambda (snapshot) (declare (ignore snapshot)))
               :ca-certificate-path ca-certificate
               :certificate-path certificate :private-key-path private-key
+              :wireguard-public-key wireguard-public-key
               :max-sessions 1 :reconnect-delay 0.01)
-             (is (gr8s:node-record-ready-p (gr8s:get-node store "worker-b"))))
+             (is (gr8s:node-record-ready-p (gr8s:get-node store "worker-b")))
+             (is (equalp wireguard-public-key
+                         (gr8s::node-record-wireguard-public-key
+                          (gr8s:get-node store "worker-b"))))))
         (gr8s:stop-node-grpc-server server)))))
 
 (test repeated-node-enrollment-preserves-the-committed-identity
@@ -1249,6 +1257,42 @@
     (is (string= "192.0.2.10"
                  (gr8s::node-record-underlay-address
                   (gr8s:get-node (gr8s:open-store path) "worker-a"))))))
+
+(test wireguard-peer-keys-are-durable-and-projected-only-into-peer-routes
+  (with-temporary-store (store path)
+    (let ((key-a (make-array 32 :element-type '(unsigned-byte 8) :initial-element 10))
+          (key-b (make-array 32 :element-type '(unsigned-byte 8) :initial-element 11)))
+      (gr8s:register-node
+       store (gr8s:make-node-record :id "node-a" :name "worker-a"
+                                    :pod-cidr "10.88.1.0/24"
+                                    :underlay-address "192.0.2.10"
+                                    :wireguard-public-key key-a))
+      (gr8s:register-node
+       store (gr8s:make-node-record :id "node-b" :name "worker-b"
+                                    :pod-cidr "10.88.2.0/24"
+                                    :underlay-address "192.0.2.11"
+                                    :wireguard-public-key key-b))
+      (let* ((reopened (gr8s:open-store path))
+             (server (gr8s::%make-node-grpc-server
+                      :store reopened :port 0 :heartbeat-timeout-seconds 5
+                      :cluster-pod-cidr "10.88.0.0/16" :node-prefix 24
+                      :overlay-backend "wireguard" :wireguard-listen-port 51820))
+             (network (gr8s::assigned-node-network server "worker-a"))
+             (routes (gr8s::assigned-node-routes server "worker-a")))
+        (is (equalp key-a
+                    (gr8s::node-record-wireguard-public-key
+                     (gr8s:get-node reopened "worker-a"))))
+        (is (string= "wireguard"
+                     (slot-value network 'gr8s.node.v1::overlay-backend)))
+        (is (= 51820
+               (slot-value network 'gr8s.node.v1::wireguard-listen-port)))
+        (is (= 1 (length routes)))
+        (is (equalp key-b
+                    (slot-value (first routes)
+                                'gr8s.node.v1::wireguard-public-key)))
+        (is (= 51820
+               (slot-value (first routes)
+                           'gr8s.node.v1::wireguard-listen-port)))))))
 
 (test live-node-sessions-publish-peer-address-changes-and-withdrawals
   (with-temporary-store (store path)

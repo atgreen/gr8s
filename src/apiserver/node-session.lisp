@@ -35,7 +35,8 @@
 (defstruct (node-grpc-server
              (:constructor %make-node-grpc-server
                  (&key store grpc-server thread port heartbeat-timeout-seconds
-                       pki cluster-pod-cidr node-prefix)))
+                       pki cluster-pod-cidr node-prefix overlay-backend
+                       wireguard-listen-port)))
   store
   grpc-server
   thread
@@ -44,6 +45,8 @@
   pki
   cluster-pod-cidr
   node-prefix
+  (overlay-backend "vxlan")
+  (wireguard-listen-port 51820)
   (revisions (make-hash-table :test #'equal))
   (snapshots (make-hash-table :test #'equal))
   (statuses (make-hash-table :test #'equal))
@@ -640,6 +643,11 @@ operation. No-op when no operation matches MESSAGE's id."
                    :node-pod-cidr (node-record-pod-cidr node)
                    :dns-address +dns-pod-server-address+
                    :underlay-address (node-record-underlay-address node)
+                   :overlay-backend (node-grpc-server-overlay-backend server)
+                   :wireguard-listen-port
+                   (if (string= "wireguard" (node-grpc-server-overlay-backend server))
+                       (node-grpc-server-wireguard-listen-port server)
+                       0)
                    :vni 42 :mtu 1450)))
 
 (defun assigned-node-routes (server node-name)
@@ -653,11 +661,21 @@ operation. No-op when no operation matches MESSAGE's id."
                          #'string< :key #'node-record-name)
         unless (or (string= node-name (node-record-name node))
                    (string= "" (node-record-underlay-address node))
-                   (string= "" (node-record-pod-cidr node)))
+                   (string= "" (node-record-pod-cidr node))
+                   (and (string= "wireguard" (node-grpc-server-overlay-backend server))
+                        (/= 32 (length (node-record-wireguard-public-key node)))))
           collect (make-instance 'gr8s.node.v1::node-route
                                  :node-id (node-record-id node)
                                  :pod-cidr (node-record-pod-cidr node)
-                                 :underlay-address (node-record-underlay-address node))))
+                                 :underlay-address (node-record-underlay-address node)
+                                 :wireguard-public-key
+                                 (if (string= "wireguard" (node-grpc-server-overlay-backend server))
+                                     (node-record-wireguard-public-key node)
+                                     #())
+                                 :wireguard-listen-port
+                                 (if (string= "wireguard" (node-grpc-server-overlay-backend server))
+                                     (node-grpc-server-wireguard-listen-port server)
+                                     0))))
 
 (defun attach-node-topology (server node-name snapshot)
   "Fill SNAPSHOT's network and routes slots for NODE-NAME from the store, in place,
@@ -914,11 +932,28 @@ operation. No-op when no operation matches MESSAGE's id."
     (let* ((hello (node-envelope-payload first :hello))
            (node-name (slot-value hello 'gr8s.node.v1::node-name))
            (authenticated (authenticate-node-peer (node-grpc-server-pki server) context node-name))
+           (wireguard-public-key
+             (slot-value hello 'gr8s.node.v1::wireguard-public-key))
            (node (get-node (node-grpc-server-store server) node-name))
            (topology-changed
-             (update-node-underlay-address
-              (node-grpc-server-store server) node-name
-              (slot-value hello 'gr8s.node.v1::underlay-address)))
+             (progn
+               ;; Validate before either durable write so a malformed hello
+               ;; cannot partially change this authenticated node's topology.
+               (unless (or (zerop (length wireguard-public-key))
+                           (= 32 (length wireguard-public-key)))
+                 (error "WireGuard public keys must be empty or exactly 32 bytes"))
+               (when (and (string= "wireguard" (node-grpc-server-overlay-backend server))
+                          (zerop (length wireguard-public-key)))
+                 (error "WireGuard overlay requires a node public key"))
+               (let ((address-changed
+                       (update-node-underlay-address
+                        (node-grpc-server-store server) node-name
+                        (slot-value hello 'gr8s.node.v1::underlay-address)))
+                     (key-changed
+                       (update-node-wireguard-public-key
+                        (node-grpc-server-store server) node-name
+                        wireguard-public-key)))
+                 (or address-changed key-changed))))
            (snapshot (prepare-node-connect-snapshot
                       server node-name
                       (slot-value hello 'gr8s.node.v1::last-applied-revision)))
@@ -1085,7 +1120,9 @@ operation. No-op when no operation matches MESSAGE's id."
                                             (heartbeat-timeout-seconds 15)
                                             pki
                                             (cluster-pod-cidr +default-cluster-pod-cidr+)
-                                            (node-prefix +default-node-pod-prefix+))
+                                            (node-prefix +default-node-pod-prefix+)
+                                            (overlay-backend "vxlan")
+                                            (wireguard-listen-port 51820))
   "Create and start the node control-plane gRPC server on HOST:PORT: register the
    Connect service (and the Enrollment service when PKI is given), spawn its accept
    thread and the heartbeat monitor, and block until it is listening. Errors on a
@@ -1093,6 +1130,10 @@ operation. No-op when no operation matches MESSAGE's id."
    NODE-GRPC-SERVER (with its actual bound port)."
   (unless (plusp heartbeat-timeout-seconds)
     (error "Heartbeat timeout must be positive"))
+  (unless (member overlay-backend '("vxlan" "wireguard") :test #'string=)
+    (error "Overlay backend must be vxlan or wireguard"))
+  (unless (<= 1 wireguard-listen-port 65535)
+    (error "WireGuard listen port must be between 1 and 65535"))
   (let* ((grpc-server (apply #'ag-grpc:make-grpc-server port :host host
                              (node-server-tls-options pki)))
          (server (%make-node-grpc-server
@@ -1102,7 +1143,9 @@ operation. No-op when no operation matches MESSAGE's id."
                   :heartbeat-timeout-seconds heartbeat-timeout-seconds
                   :pki pki
                   :cluster-pod-cidr cluster-pod-cidr
-                  :node-prefix node-prefix)))
+                  :node-prefix node-prefix
+                  :overlay-backend overlay-backend
+                  :wireguard-listen-port wireguard-listen-port)))
     (gr8s.node.v1::register-node-service-service
      grpc-server
      :connect-handler (lambda (context stream)

@@ -112,6 +112,9 @@
           (gethash "underlayAddress" object) (node-record-underlay-address node)
           (gethash "kubeletPort" object) (node-record-kubelet-port node)
           (gethash "ready" object) (not (null (node-record-ready-p node))))
+    (when (plusp (length (node-record-wireguard-public-key node)))
+      (setf (gethash "wireguardPublicKey" object)
+            (ag-grpc:base64-encode (node-record-wireguard-public-key node))))
     (when (node-record-last-heartbeat node)
       (setf (gethash "lastHeartbeat" object) (node-record-last-heartbeat node)))
     (when (node-record-lease-deadline node)
@@ -139,10 +142,23 @@
                     (com.inuoe.jzon:parse input)))
          (heartbeat (gethash "lastHeartbeat" object))
          (deadline (gethash "leaseDeadline" object)))
-    (make-node-record :id (gethash "id" object)
+    (let* ((encoded-key (gethash "wireguardPublicKey" object))
+           (wireguard-public-key
+             (if encoded-key
+                 (handler-case
+                     (let ((key (ag-grpc:base64-decode encoded-key)))
+                       (unless (and (= 32 (length key))
+                                    (string= encoded-key (ag-grpc:base64-encode key)))
+                         (error "not one canonical 32-byte key"))
+                       key)
+                   (error (condition)
+                     (error "Invalid persisted WireGuard public key: ~A" condition)))
+                 #())))
+      (make-node-record :id (gethash "id" object)
                       :name (gethash "name" object)
                       :pod-cidr (gethash "podCIDR" object)
                       :underlay-address (gethash "underlayAddress" object "")
+                      :wireguard-public-key wireguard-public-key
                       :kubelet-port (let ((port (gethash "kubeletPort" object 0))) (if (integerp port) port 0))
                       :last-heartbeat (when (integerp heartbeat) heartbeat)
                       :lease-deadline (when (integerp deadline) deadline)
@@ -159,7 +175,7 @@
                                             (and (stringp time) time))
                       :ready-p (and (eq t (gethash "ready" object))
                                     (integerp heartbeat) (integerp deadline)
-                                    (<= (get-universal-time) deadline)))))
+                                    (<= (get-universal-time) deadline))))))
 
 (defun secure-random-octets (count)
   "Read COUNT cryptographically secure random octets from the operating system."

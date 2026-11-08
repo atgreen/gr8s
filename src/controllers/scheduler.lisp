@@ -223,6 +223,23 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
         (publish-node-change-unlocked store old node))))
   t)
 
+(defun update-node-wireguard-public-key (store node-name public-key)
+  "Persist NODE-NAME's authenticated WireGuard PUBLIC-KEY, returning true when changed."
+  (unless (or (zerop (length public-key)) (= 32 (length public-key)))
+    (error "WireGuard public keys must be empty or exactly 32 bytes"))
+  (let ((public-key (copy-seq public-key)))
+    (with-store-lock (store)
+      (let ((node (get-node-unlocked store node-name)))
+        (unless node (node-conflict "Node ~A is not registered" node-name))
+        (when (equalp public-key (node-record-wireguard-public-key node))
+          (return-from update-node-wireguard-public-key nil))
+        (let ((updated (copy-node-record node)))
+          (setf (node-record-wireguard-public-key updated) public-key)
+          (persist-node store updated)
+          (setf (node-record-wireguard-public-key node) public-key)
+          (note-node-state-change store node)))))
+  t)
+
 (defun allocate-node-pod-cidr-unlocked (store cluster-cidr node-prefix)
   "Return the first free NODE-PREFIX block within CLUSTER-CIDR. Caller holds STORE's lock."
   (multiple-value-bind (address cluster-prefix) (parse-ipv4-cidr cluster-cidr)

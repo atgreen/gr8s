@@ -705,8 +705,11 @@ bare positional state directory for backward compatibility.  A missing
         (enroll-node-over-endpoints
          enrollment-endpoints node-name (getf options :token) (getf options :ca-pin)
          private-key certificate ca-certificate))
-      (multiple-value-bind (runtime manager) (runtime-from-options options)
-        (setf node-runtime
+      (multiple-value-bind (wireguard-private-key wireguard-public-key)
+          (ensure-wireguard-key-pair (getf options :state-directory))
+        (declare (ignore wireguard-private-key))
+        (multiple-value-bind (runtime manager) (runtime-from-options options)
+          (setf node-runtime
               (make-node-runtime
                (agent-state-path options "runtime/") runtime manager
                :dns-forward-rules (getf options :dns-forward-rules)))
@@ -730,6 +733,7 @@ bare positional state directory for backward compatibility.  A missing
                 (when (containerd-runtime-p runtime)
                   (lambda (function)
                     (setf (containerd-runtime-credential-provider-token-function runtime) function)))
+                :wireguard-public-key wireguard-public-key
                 :ca-certificate-path ca-certificate
                 :certificate-path certificate :private-key-path private-key
                 :underlay-address (getf options :node-address)
@@ -737,7 +741,7 @@ bare positional state directory for backward compatibility.  A missing
                 :kubelet-port (if kubelet (getf options :kubelet-port) 0)
                 :stop-predicate stop-predicate))
           (when kubelet (stop-kubelet-server kubelet))
-          (stop-node-runtime node-runtime)))))
+          (stop-node-runtime node-runtime))))))
   0)
 
 (defstruct local-node-agent
@@ -995,7 +999,9 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                   store :host (getf options :node-listen "127.0.0.1")
                   :port (getf options :node-port)
                   :pki pki :cluster-pod-cidr (gethash "clusterPodCIDR" pool)
-                  :node-prefix (gethash "nodePrefix" pool)))
+                  :node-prefix (gethash "nodePrefix" pool)
+                  :overlay-backend (getf options :overlay-backend)
+                  :wireguard-listen-port 51820))
            (when ha
              (configure-raft-node-operation-routing
               (ha-control-plane-member ha) node-server))

@@ -49,6 +49,7 @@
    #:node-record-runtime-ready-p
    #:node-record-taints
    #:node-record-underlay-address
+   #:node-record-wireguard-public-key
    #:node-record-unschedulable
    #:object-value
    #:optional-vector

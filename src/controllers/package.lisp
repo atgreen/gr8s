@@ -27,7 +27,8 @@
    #:reconcile-workloads
    #:schedule-pod
    #:scheduler-metrics-text
-   #:stop-gateway-controller)
+   #:stop-gateway-controller
+   #:update-node-wireguard-public-key)
   (:export
    #:+pod-certificate-request-beta-version+
    #:control-plane-runtime
@@ -50,7 +51,8 @@
    #:reconcile-workloads
    #:schedule-pod
    #:scheduler-metrics-text
-   #:stop-gateway-controller))
+   #:stop-gateway-controller
+   #:update-node-wireguard-public-key))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (let ((controllers (find-package '#:gr8s.controllers))
@@ -76,7 +78,8 @@
                     "RECONCILE-WORKLOADS"
                     "SCHEDULE-POD"
                     "SCHEDULER-METRICS-TEXT"
-                    "STOP-GATEWAY-CONTROLLER"))
+                    "STOP-GATEWAY-CONTROLLER"
+                    "UPDATE-NODE-WIREGUARD-PUBLIC-KEY"))
       (multiple-value-bind (old old-status)
           (find-symbol name composition)
         (declare (ignore old))
