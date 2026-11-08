@@ -28,6 +28,7 @@
    #:schedule-pod
    #:scheduler-metrics-text
    #:stop-gateway-controller
+   #:update-node-wireguard-endpoints
    #:update-node-wireguard-public-key)
   (:export
    #:+pod-certificate-request-beta-version+
@@ -52,6 +53,7 @@
    #:schedule-pod
    #:scheduler-metrics-text
    #:stop-gateway-controller
+   #:update-node-wireguard-endpoints
    #:update-node-wireguard-public-key))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
@@ -79,6 +81,7 @@
                     "SCHEDULE-POD"
                     "SCHEDULER-METRICS-TEXT"
                     "STOP-GATEWAY-CONTROLLER"
+                    "UPDATE-NODE-WIREGUARD-ENDPOINTS"
                     "UPDATE-NODE-WIREGUARD-PUBLIC-KEY"))
       (multiple-value-bind (old old-status)
           (find-symbol name composition)

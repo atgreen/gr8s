@@ -126,15 +126,40 @@
 (test node-underlay-and-peer-route-fields-survive-protobuf-roundtrips
   (let* ((public-key (make-array 32 :element-type '(unsigned-byte 8)
                                     :initial-element 17))
+         (endpoint (make-instance 'gr8s.node.v1::wireguard-endpoint
+                                  :name "private-lan"
+                                  :address "10.0.0.10"
+                                  :port 51820))
          (hello (make-instance 'gr8s.node.v1::node-hello
                                :node-name "worker-a" :underlay-address "192.0.2.10"
-                               :wireguard-public-key public-key))
+                               :wireguard-public-key public-key
+                               :wireguard-endpoints (list endpoint)))
          (restored (roundtrip-node-message hello 'gr8s.node.v1::node-hello)))
     (is (string= "192.0.2.10" (slot-value restored 'gr8s.node.v1::underlay-address)))
     (is (equalp public-key
-                (slot-value restored 'gr8s.node.v1::wireguard-public-key))))
+                (slot-value restored 'gr8s.node.v1::wireguard-public-key)))
+    (let ((restored-endpoint
+            (first (slot-value restored 'gr8s.node.v1::wireguard-endpoints))))
+      (is (string= "private-lan"
+                   (slot-value restored-endpoint 'gr8s.node.v1::name)))
+      (is (string= "10.0.0.10"
+                   (slot-value restored-endpoint 'gr8s.node.v1::address)))
+      (is (= 51820 (slot-value restored-endpoint 'gr8s.node.v1::port)))))
   (let* ((peer-key (make-array 32 :element-type '(unsigned-byte 8)
                                   :initial-element 29))
+         (peer-endpoint (make-instance 'gr8s.node.v1::wireguard-endpoint
+                                       :name "private-lan"
+                                       :address "10.0.0.11"
+                                       :port 51820))
+         (next-hop
+           (make-instance 'gr8s.node.v1::wireguard-next-hop
+                          :node-id "gateway-id" :node-name "gateway-a"
+                          :underlay-address "192.0.2.20"
+                          :wireguard-public-key
+                          (make-array 32 :element-type '(unsigned-byte 8)
+                                         :initial-element 31)
+                          :wireguard-listen-port 51821
+                          :wireguard-endpoints (list peer-endpoint)))
          (snapshot
            (make-instance
             'gr8s.node.v1::desired-state-snapshot
@@ -150,7 +175,10 @@
                                          :pod-cidrs '("10.88.2.0/24" "fd00:88:2::/64")
                                          :underlay-address "192.0.2.11"
                                          :wireguard-public-key peer-key
-                                         :wireguard-listen-port 51820))))
+                                         :wireguard-listen-port 51820
+                                         :wireguard-endpoints
+                                         (list peer-endpoint)
+                                         :next-hop next-hop))))
          (restored (roundtrip-node-message snapshot 'gr8s.node.v1::desired-state-snapshot)))
     (is (string= "192.0.2.10"
                  (slot-value (slot-value restored 'gr8s.node.v1::network)
@@ -177,4 +205,39 @@
       (is (equalp peer-key
                   (slot-value route 'gr8s.node.v1::wireguard-public-key)))
       (is (= 51820
-             (slot-value route 'gr8s.node.v1::wireguard-listen-port))))))
+             (slot-value route 'gr8s.node.v1::wireguard-listen-port)))
+      (let ((restored-endpoint
+              (first (slot-value route 'gr8s.node.v1::wireguard-endpoints))))
+        (is (string= "private-lan"
+                     (slot-value restored-endpoint 'gr8s.node.v1::name)))
+        (is (string= "10.0.0.11"
+                     (slot-value restored-endpoint 'gr8s.node.v1::address)))
+        (is (= 51820 (slot-value restored-endpoint 'gr8s.node.v1::port))))
+      (let ((restored-hop (slot-value route 'gr8s.node.v1::next-hop)))
+        (is (string= "gateway-a"
+                     (slot-value restored-hop 'gr8s.node.v1::node-name)))
+        (is (string= "192.0.2.20"
+                     (slot-value restored-hop 'gr8s.node.v1::underlay-address)))
+        (is (= 51821
+               (slot-value restored-hop 'gr8s.node.v1::wireguard-listen-port)))))))
+
+(test wireguard-peer-observations-survive-node-status-roundtrips
+  (let* ((peer-key (make-array 32 :element-type '(unsigned-byte 8)
+                                  :initial-element 41))
+         (status
+           (make-instance
+            'gr8s.node.v1::node-status
+            :wireguard-peer-observations
+            (list (make-instance
+                   'gr8s.node.v1::wireguard-peer-observation
+                   :peer-public-key peer-key :address "198.51.100.9" :port 41001
+                   :latest-handshake-unix-seconds 1700000000 :received-bytes 99))))
+         (restored (roundtrip-node-message status 'gr8s.node.v1::node-status))
+         (observation
+           (first (slot-value restored 'gr8s.node.v1::wireguard-peer-observations))))
+    (is (equalp peer-key (slot-value observation 'gr8s.node.v1::peer-public-key)))
+    (is (string= "198.51.100.9" (slot-value observation 'gr8s.node.v1::address)))
+    (is (= 41001 (slot-value observation 'gr8s.node.v1::port)))
+    (is (= 1700000000
+           (slot-value observation 'gr8s.node.v1::latest-handshake-unix-seconds)))
+    (is (= 99 (slot-value observation 'gr8s.node.v1::received-bytes)))))

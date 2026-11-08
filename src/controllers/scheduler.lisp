@@ -84,11 +84,16 @@
             (old (unless (node-record-ready-p node) (node-api-object node))))
         (setf (node-record-ready-p updated) t
               (node-record-last-heartbeat updated) heartbeat
-              (node-record-lease-deadline updated) (+ heartbeat lease-duration))
+              (node-record-lease-deadline updated) (+ heartbeat lease-duration)
+              (node-record-ready-since updated)
+              (or (and (node-record-ready-p node)
+                       (node-record-ready-since node))
+                  heartbeat))
         (persist-node store updated)
         (setf (node-record-ready-p node) t
               (node-record-last-heartbeat node) heartbeat
-              (node-record-lease-deadline node) (node-record-lease-deadline updated))
+              (node-record-lease-deadline node) (node-record-lease-deadline updated)
+              (node-record-ready-since node) (node-record-ready-since updated))
         ;; A node an older gr8s registered has no creation time until its agent returns.
         (when (and old (null (node-record-creation-timestamp node)))
           (setf (node-record-creation-timestamp node) (current-timestamp))
@@ -133,10 +138,12 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
   (let ((updated (copy-node-record node))
         (old (node-api-object node)))
     (setf (node-record-ready-p updated) nil
-          (node-record-runtime-down-message updated) nil)
+          (node-record-runtime-down-message updated) nil
+          (node-record-ready-since updated) nil)
     (persist-node store updated)
     (setf (node-record-ready-p node) nil
-          (node-record-runtime-down-message node) nil)
+          (node-record-runtime-down-message node) nil
+          (node-record-ready-since node) nil)
     (publish-node-change-unlocked store old node)
     (note-node-state-change store node)))
 
@@ -264,6 +271,45 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
            (= left-bits right-bits)
            (let ((shift (- (min left-prefix right-prefix) left-bits)))
              (= (ash left-value shift) (ash right-value shift)))))))
+
+(defun update-node-wireguard-endpoints
+    (store node-name endpoints
+     &key (reflexive-observed-at nil reflexive-observed-at-p))
+  "Validate and persist NODE-NAME's authenticated WireGuard endpoint tuples."
+  (let* ((names nil)
+         (canonical
+          (loop for endpoint in endpoints
+                for name = (first endpoint)
+                for address = (second endpoint)
+                for port = (third endpoint)
+                do (unless (dns-label-p name)
+                     (error "WireGuard endpoint names must be lowercase DNS labels"))
+                   (when (member name names :test #'equal)
+                     (error "duplicate WireGuard endpoint name: ~A" name))
+                   (push name names)
+                   (unless (and (integerp port) (<= 1 port 65535))
+                     (error "WireGuard endpoint ports must be between 1 and 65535"))
+                collect (list name (canonical-node-underlay-address address) port))))
+    (with-store-lock (store)
+      (let ((node (get-node-unlocked store node-name)))
+        (unless node (node-conflict "Node ~A is not registered" node-name))
+        (when (and (equal canonical (node-record-wireguard-endpoints node))
+                   (or (not reflexive-observed-at-p)
+                       (eql reflexive-observed-at
+                            (node-record-wireguard-reflexive-observed-at node))))
+          (return-from update-node-wireguard-endpoints nil))
+        (let ((updated (copy-node-record node)))
+          (setf (node-record-wireguard-endpoints updated) canonical)
+          (when reflexive-observed-at-p
+            (setf (node-record-wireguard-reflexive-observed-at updated)
+                  reflexive-observed-at))
+          (persist-node store updated)
+          (setf (node-record-wireguard-endpoints node) canonical)
+          (when reflexive-observed-at-p
+            (setf (node-record-wireguard-reflexive-observed-at node)
+                  reflexive-observed-at))
+          (note-node-state-change store node)))))
+  t)
 
 (defun allocate-node-pod-cidr-unlocked (store cluster-cidr node-prefix)
   "Return the first free NODE-PREFIX block within CLUSTER-CIDR. Caller holds STORE's lock."

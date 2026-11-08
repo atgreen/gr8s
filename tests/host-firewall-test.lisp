@@ -87,6 +87,21 @@
         (is (member '("firewall-cmd" "--remove-port=7443/tcp") applied :test #'equal))
         (is (member '("firewall-cmd" "--remove-port=10250/tcp") applied :test #'equal))))))
 
+(test control-plane-firewall-follows-the-relay-udp-range-lifecycle
+  (let ((ran '()))
+    (flet ((runner (argv) (push argv ran) (values "" 0)))
+      (is (eq t (gr8s::ensure-control-plane-firewall
+                 7443 :relay-port-start 42000 :relay-max-channels 3
+                 :runner #'runner)))
+      (is (eq t (gr8s::remove-control-plane-firewall
+                 7443 :relay-port-start 42000 :relay-max-channels 3
+                 :runner #'runner)))
+      (let ((applied (reverse ran)))
+        (is (member '("firewall-cmd" "--add-port=42000-42005/udp")
+                    applied :test #'equal))
+        (is (member '("firewall-cmd" "--remove-port=42000-42005/udp")
+                    applied :test #'equal))))))
+
 (test control-plane-firewall-ignores-a-disabled-kubelet-listener
   (let ((ran '()))
     (flet ((runner (argv) (push argv ran) (values "" 0)))

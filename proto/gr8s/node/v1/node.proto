@@ -109,6 +109,15 @@ message CredentialTokenResponse {
   string error_message = 5;
 }
 
+// One authenticated candidate endpoint for a node's WireGuard identity. The
+// enclosing NodeHello is bound to the node's mTLS certificate; the control
+// plane copies these candidates only into routes for that same identity.
+message WireguardEndpoint {
+  string name = 1;
+  string address = 2;
+  uint32 port = 3;
+}
+
 message NodeHello {
   string node_name = 1;
   string boot_id = 2;
@@ -123,6 +132,7 @@ message NodeHello {
   // Public half of the node-local WireGuard identity. The mTLS-authenticated
   // session binds it to node_name; private key material never leaves the node.
   bytes wireguard_public_key = 10;
+  repeated WireguardEndpoint wireguard_endpoints = 11;
 }
 
 message Heartbeat {
@@ -149,6 +159,20 @@ message NodeStatus {
   // keypair locally and reports only the public key, so the control plane can
   // create the PodCertificateRequest. The private key never leaves the node.
   repeated PodCertificateClaim pod_certificate_requests = 5;
+  // Endpoints learned by this node's kernel from authenticated WireGuard
+  // handshakes. The server binds the report to this node's mTLS session.
+  repeated WireguardPeerObservation wireguard_peer_observations = 6;
+}
+
+message WireguardPeerObservation {
+  bytes peer_public_key = 1;
+  string address = 2;
+  uint32 port = 3;
+  uint64 latest_handshake_unix_seconds = 4;
+  uint64 received_bytes = 5;
+  uint32 path_score = 6;
+  bool healthy = 7;
+  uint32 active_flows = 8;
 }
 
 // A node's request that the control plane create a PodCertificateRequest for a
@@ -290,6 +314,24 @@ message NodeRoute {
   bytes wireguard_public_key = 4;
   uint32 wireguard_listen_port = 5;
   repeated string pod_cidrs = 6;
+  repeated WireguardEndpoint wireguard_endpoints = 7;
+  string node_name = 8;
+  // Optional authenticated forwarding peer for sparse topologies. When absent,
+  // the destination node above remains the direct WireGuard peer.
+  WireguardNextHop next_hop = 9;
+  string region = 10;
+  string zone = 11;
+  uint32 capacity_score = 12;
+  uint32 link_cost = 13;
+}
+
+message WireguardNextHop {
+  string node_id = 1;
+  string node_name = 2;
+  string underlay_address = 3;
+  bytes wireguard_public_key = 4;
+  uint32 wireguard_listen_port = 5;
+  repeated WireguardEndpoint wireguard_endpoints = 6;
 }
 
 enum OperationKind {
@@ -300,6 +342,7 @@ enum OperationKind {
   OPERATION_KIND_ATTACH = 4;
   OPERATION_KIND_METRICS = 5;
   OPERATION_KIND_PORT_FORWARD = 6;
+  OPERATION_KIND_NETWORK_EXPLAIN = 7;
 }
 
 message OperationRequest {
@@ -323,6 +366,8 @@ message OperationRequest {
   // (OperationInput.acknowledged_bytes), so the node may hold output back while too
   // much is unacknowledged. An older control plane never acknowledges, and leaves this false.
   bool acknowledges_output = 15;
+  // NETWORK_EXPLAIN: authenticated node ID whose path decision is requested.
+  string peer_id = 16;
 }
 
 message OperationInput {

@@ -1390,6 +1390,29 @@ Watches are long-running requests, which that filter leaves alone."
   "Answer the current request from whichever API handler serves PATH."
   (progn
         (cond
+          ((string= path "/gr8s/v1/network/explain")
+           (unless (eq method :get)
+             (core-resource-error 405 "MethodNotAllowed" "network explain requires GET"))
+           (unless (typep runtime 'gr8s.controllers::control-plane-runtime)
+             (core-resource-error 503 "ServiceUnavailable" "node operation routing is unavailable"))
+           (let ((node (hunchentoot:get-parameter "node"))
+                 (peer (hunchentoot:get-parameter "peer")))
+             (unless (and node peer (dns-label-p node) (dns-label-p peer))
+               (core-resource-error 400 "BadRequest" "valid node and peer are required"))
+             (let* ((operation
+                      (request-node-operation
+                       (gr8s.controllers::control-plane-runtime-node-server runtime)
+                       node
+                       (make-instance 'gr8s.node.v1::operation-request
+                                      :operation-id (generate-uid)
+                                      :kind gr8s.node.v1::+operationkind-operation_kind_network_explain+
+                                      :peer-id peer)
+                       :timeout 5))
+                    (bytes (gr8s.controllers::node-operation-channel-data
+                            operation gr8s.node.v1::+streamchannel-stream_channel_stdout+)))
+               (setf (hunchentoot:content-type*) "application/json")
+               (trivial-utf-8:utf-8-bytes-to-string
+                (coerce bytes '(vector (unsigned-byte 8)))))))
           ((and (uiop:string-prefix-p "/openapi/v3/" path) (not *openapi-v3-completing*))
            (openapi-v3-complete-response store runtime reconciler path))
           ((nth-value 1 (aggregated-api-route store path))

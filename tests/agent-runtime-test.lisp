@@ -2,6 +2,176 @@
 
 (in-suite gr8s)
 
+(test network-explain-node-operation-does-not-require-a-pod
+  (with-temporary-store (ignored directory)
+    (declare (ignore ignored))
+    (let* ((runtime (gr8s::make-node-runtime directory (make-fake-runtime) nil))
+           (state (gr8s::node-runtime-wireguard-path-state runtime))
+           (peer (gr8s::record-wireguard-path-decision
+                  state "peer-a" '("lan" "10.0.0.9" 51820)
+                  '("underlay" "192.0.2.9" 51820) :current-unhealthy 1000))
+           (request (make-instance 'gr8s.node.v1::operation-request
+                                   :operation-id "explain-1"
+                                   :kind gr8s.node.v1::+operationkind-operation_kind_network_explain+
+                                   :peer-id "destination-b"))
+           (replies nil))
+      (setf (gr8s::node-runtime-network runtime)
+            (gr8s::json-object
+             "overlayBackend" "wireguard"
+             "routes"
+             (vector
+              (gr8s::json-object
+               "nodeID" "destination-b" "nodeName" "destination-b"
+               "nextHop" (gr8s::json-object "nodeID" "peer-a"
+                                              "nodeName" "peer-a")))))
+      (setf (gr8s::wireguard-peer-path-state-observations peer)
+            (list (gr8s::make-wireguard-path-observation
+                   :name "lan" :address "10.0.0.9" :port 51820
+                   :handshake-age-seconds 1)))
+      (setf replies (gr8s::handle-node-operation runtime request))
+      (is (= 2 (length replies)))
+      (is (eq :operation-stream (caar replies)))
+      (is (search "\"peerID\":\"peer-a\""
+                  (trivial-utf-8:utf-8-bytes-to-string
+                   (slot-value (cdar replies) 'gr8s.node.v1::data))))
+      (is (search "\"destinationPeerID\":\"destination-b\""
+                  (trivial-utf-8:utf-8-bytes-to-string
+                   (slot-value (cdar replies) 'gr8s.node.v1::data))))
+      (is (search "\"topologyReason\":\"sparse-next-hop\""
+                  (trivial-utf-8:utf-8-bytes-to-string
+                   (slot-value (cdar replies) 'gr8s.node.v1::data)))))))
+
+(test node-runtime-lazily-starts-and-applies-wireguard-path-telemetry
+  (let* ((runtime (gr8s::%make-node-runtime
+                   :wireguard-path-state (gr8s::make-wireguard-path-state)))
+         (network (gr8s::json-object "overlayBackend" "wireguard"))
+         (peer (gr8s::make-wireguard-peer-path-state
+                :peer-id "peer-a" :selected '("lan" "10.0.0.9" 51820)
+                :observations
+                (list (gr8s::make-wireguard-path-observation
+                       :name "lan" :address "10.0.0.9" :port 51820))))
+         (dataplane :telemetry)
+         (starts 0))
+    (setf (gethash "peer-a"
+                   (gr8s::wireguard-path-state-peers
+                    (gr8s::node-runtime-wireguard-path-state runtime)))
+          peer)
+    (flet ((start () (incf starts) dataplane)
+           (poll (actual network)
+             (declare (ignore network))
+             (is (eq dataplane actual))
+             (let ((samples (make-hash-table :test #'equal)))
+               (setf (gethash "peer-a" samples)
+                     (gr8s::make-wireguard-path-telemetry
+                      :rtt-microseconds 1700 :tcp-samples 1))
+               samples)))
+      (gr8s::update-node-runtime-wireguard-path-telemetry
+       runtime network :start #'start :poll #'poll)
+      (gr8s::update-node-runtime-wireguard-path-telemetry
+       runtime network :start #'start :poll #'poll))
+    (is (= 1 starts))
+    (is (= 1700
+           (gr8s::wireguard-path-observation-passive-rtt-microseconds
+            (first (gr8s::wireguard-peer-path-state-observations peer)))))))
+
+(test nat-observations-report-only-fresh-authenticated-wireguard-sessions
+  (let* ((now 1700000200)
+         (key-a (make-array 32 :element-type '(unsigned-byte 8) :initial-element 1))
+         (key-b (make-array 32 :element-type '(unsigned-byte 8) :initial-element 2))
+         (messages
+           (gr8s::wireguard-peer-observation-messages
+            (list
+             (gr8s::make-wireguard-peer-status
+              :public-key key-a :endpoint-address "198.51.100.8" :endpoint-port 41000
+              :latest-handshake-seconds (- now 30) :received-bytes 80)
+             (gr8s::make-wireguard-peer-status
+              :public-key key-b :endpoint-address "198.51.100.9" :endpoint-port 41001
+              :latest-handshake-seconds (- now 500) :received-bytes 90))
+            :now now :fresh-seconds 180)))
+    (is (= 1 (length messages)))
+    (let ((message (first messages)))
+      (is (equalp key-a (slot-value message 'gr8s.node.v1::peer-public-key)))
+      (is (string= "198.51.100.8" (slot-value message 'gr8s.node.v1::address)))
+      (is (= 41000 (slot-value message 'gr8s.node.v1::port)))
+      (is (= 80 (slot-value message 'gr8s.node.v1::received-bytes))))))
+
+(test wireguard-status-projects-bounded-kernel-path-quality
+  (let* ((now 1700000200)
+         (key (make-array 32 :element-type '(unsigned-byte 8) :initial-element 7))
+         (network (gr8s::json-object
+                   "routes" (vector (gr8s::json-object
+                                     "nodeID" "peer-a"
+                                     "wireguardPublicKey" (ag-grpc:base64-encode key)))))
+         (observation (gr8s::make-wireguard-path-observation
+                       :name "underlay" :address "198.51.100.8" :port 41000
+                       :handshake-age-seconds 3 :trial-latency-milliseconds 20
+                       :passive-active-flows 12))
+         (peer (gr8s::make-wireguard-peer-path-state
+                :peer-id "peer-a" :selected '("underlay" "198.51.100.8" 41000)
+                :observations (list observation)))
+         (state (gr8s::make-wireguard-path-state)))
+    (setf (gethash "peer-a" (gr8s::wireguard-path-state-peers state)) peer)
+    (let ((message
+            (first
+             (gr8s::wireguard-peer-observation-messages
+              (list (gr8s::make-wireguard-peer-status
+                     :public-key key :endpoint-address "198.51.100.8"
+                     :endpoint-port 41000 :latest-handshake-seconds (- now 3)
+                     :received-bytes 80))
+              :network network :path-state state :now now))))
+      (is-true (slot-value message 'gr8s.node.v1::healthy))
+      (is (< 0 (slot-value message 'gr8s.node.v1::path-score) 10001))
+      (is (= 12 (slot-value message 'gr8s.node.v1::active-flows))))))
+
+(test service-steering-prefers-local-and-diversifies-a-bounded-set
+  (let* ((network
+           (gr8s::json-object
+            "podCIDR" "10.88.0.0/24"
+            "routes"
+            (vector
+             (gr8s::json-object "nodeID" "a" "nodeName" "a"
+                                "podCIDR" "10.88.1.0/24" "region" "r" "zone" "z1"
+                                "capacityScore" 4000 "linkCost" 1)
+             (gr8s::json-object "nodeID" "b" "nodeName" "b"
+                                "podCIDR" "10.88.2.0/24" "region" "r" "zone" "z2"
+                                "capacityScore" 4000 "linkCost" 10)
+             (gr8s::json-object "nodeID" "c" "nodeName" "c"
+                                "podCIDR" "10.88.3.0/24" "region" "r" "zone" "z1"
+                                "capacityScore" 8000 "linkCost" 1))))
+         (runtime (gr8s::%make-node-runtime
+                   :network network :wireguard-path-state
+                   (gr8s::make-wireguard-path-state)))
+         (ranked (gr8s::steer-service-endpoints
+                  runtime '(("10.88.1.2" 80) ("10.88.0.2" 80)
+                            ("10.88.3.2" 80) ("10.88.2.2" 80))
+                  :maximum 3)))
+    (is (equal '("10.88.0.2" 80) (first ranked)))
+    (is (equal '("10.88.2.2" 80) (second ranked)))
+    (is (= 3 (length ranked)))))
+
+(test sparse-service-steering-uses-gateway-path-health
+  (let* ((route-a (gr8s::json-object
+                   "nodeID" "a" "nodeName" "a" "podCIDR" "10.88.1.0/24"
+                   "region" "r" "zone" "z1" "capacityScore" 4000 "linkCost" 1
+                   "nextHop" (gr8s::json-object "nodeID" "gateway")))
+         (route-b (gr8s::json-object
+                   "nodeID" "b" "nodeName" "b" "podCIDR" "10.88.2.0/24"
+                   "region" "r" "zone" "z2" "capacityScore" 4000 "linkCost" 10))
+         (state (gr8s::make-wireguard-path-state))
+         (failed (gr8s::make-wireguard-path-observation
+                  :name "underlay" :address "192.0.2.20" :port 51820
+                  :handshake-age-seconds 2 :consecutive-failures 2))
+         (peer (gr8s::make-wireguard-peer-path-state
+                :peer-id "gateway" :selected '("underlay" "192.0.2.20" 51820)
+                :observations (list failed)))
+         (runtime (gr8s::%make-node-runtime
+                   :network (gr8s::json-object "routes" (vector route-a route-b))
+                   :wireguard-path-state state)))
+    (setf (gethash "gateway" (gr8s::wireguard-path-state-peers state)) peer)
+    (is (equal '("10.88.2.2" 80)
+               (first (gr8s::steer-service-endpoints
+                       runtime '(("10.88.1.2" 80) ("10.88.2.2" 80))))))))
+
 (test node-agent-has-an-explicit-package-boundary
   (let ((agent (find-package '#:gr8s.agent))
         (composition (find-package '#:gr8s)))
@@ -593,6 +763,49 @@
                  :cluster-pod-cidrs '("10.88.0.0/16" "fd88::/48")
                  :node-pod-cidrs '("10.88.8.0/24" "fd88:0:0:8::/64")
                  :dns-address "169.254.1.1" :mtu 1450 :vni 42))
+
+(test assigned-wireguard-endpoint-candidates-reach-the-agent-network-model
+  (let* ((endpoint (make-instance 'gr8s.node.v1::wireguard-endpoint
+                                  :name "private" :address "10.0.0.2"
+                                  :port 51820))
+         (route (make-instance
+                 'gr8s.node.v1::node-route
+                 :node-id "peer" :pod-cidr "10.88.9.0/24"
+                 :underlay-address "192.0.2.2"
+                 :wireguard-public-key
+                 (make-array 32 :element-type '(unsigned-byte 8)
+                                :initial-element 7)
+                 :wireguard-listen-port 51820
+                 :wireguard-endpoints (list endpoint)
+                 :next-hop
+                 (make-instance
+                  'gr8s.node.v1::wireguard-next-hop
+                  :node-id "gateway" :node-name "gateway-a"
+                  :underlay-address "192.0.2.3"
+                  :wireguard-public-key
+                  (make-array 32 :element-type '(unsigned-byte 8)
+                                 :initial-element 8)
+                  :wireguard-listen-port 51821
+                  :wireguard-endpoints (list endpoint))))
+         (network-message (node-network-for-test))
+         (network nil))
+    (setf (slot-value network-message 'gr8s.node.v1::underlay-address) "192.0.2.1"
+          (slot-value network-message 'gr8s.node.v1::overlay-backend) "wireguard"
+          (slot-value network-message 'gr8s.node.v1::wireguard-listen-port) 51820
+          network (gr8s::node-network-object network-message (list route)))
+    (gr8s::validate-node-network-object network)
+    (let* ((route (aref (gethash "routes" network) 0))
+           (candidate (aref (gethash "wireguardEndpoints" route) 0))
+           (hop (gethash "nextHop" route)))
+      (is (string= "private" (gethash "name" candidate)))
+      (is (string= "10.0.0.2" (gethash "address" candidate)))
+      (is (= 51820 (gethash "port" candidate)))
+      (is (string= "gateway-a" (gethash "nodeName" hop)))
+      (is (string= "192.0.2.3" (gethash "underlayAddress" hop)))
+      (is (= 51821 (gethash "wireguardListenPort" hop)))
+      (setf (gethash "wireguardPublicKey" hop) "not-a-key")
+      (signals gr8s::cni-error
+        (gr8s::validate-node-network-object network)))))
 
 (test assigned-network-and-ipam-restore-before-agent-reconciliation
   (with-temporary-store (store path)

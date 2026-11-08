@@ -52,6 +52,17 @@
   (signals error (parse-cli-options '("wireguard" "rotate-key" "--bogus")))
   (signals error (parse-cli-options '("wireguard" "unknown"))))
 
+(test network-explain-command-requires-node-and-peer
+  (let ((options (parse-cli-options
+                  '("network" "explain" "worker-a" "worker-b"
+                    "--server" "http://127.0.0.1:18080"))))
+    (is (eq :network-explain (getf options :command)))
+    (is (equal "worker-a" (getf options :node)))
+    (is (equal "worker-b" (getf options :peer)))
+    (is (equal "http://127.0.0.1:18080" (getf options :server))))
+  (signals error (parse-cli-options '("network" "explain" "worker-a")))
+  (signals error (parse-cli-options '("network" "bogus" "worker-a" "worker-b"))))
+
 (test external-cni-options-are-explicit-and-validated
   (let ((options
           (parse-cli-options
@@ -321,6 +332,56 @@
     (is (string= "192.0.2.11" (getf options :node-address))))
   (dolist (address '("127.0.0.1" "0.0.0.0" "224.0.0.1" "255.255.255.255" "192.0.2.1/24"))
     (signals error (gr8s::parse-serve-options (list "--node-address" address)))))
+
+(test wireguard-endpoint-options-are-named-repeatable-and-validated
+  (let ((options
+          (gr8s::parse-agent-options
+           '("--server" "192.0.2.1:7443" "--token" "test" "--ca-pin" "test"
+             "--node-name" "worker-a" "--state-directory" "/tmp/worker-a"
+             "--wireguard-endpoint" "private=10.0.0.11:51820"
+             "--wireguard-endpoint" "public=192.0.2.11:51821"))))
+    (is (equal '(("private" "10.0.0.11" 51820)
+                 ("public" "192.0.2.11" 51821))
+               (getf options :wireguard-endpoints))))
+  (dolist (value '("private" "=10.0.0.11:51820" "private=127.0.0.1:51820"
+                   "private=10.0.0.11:0" "private=10.0.0.11:not-a-port"))
+    (signals error
+      (gr8s::parse-agent-options
+       (list "--server" "192.0.2.1:7443" "--token" "test" "--ca-pin" "test"
+             "--node-name" "worker-a" "--state-directory" "/tmp/worker-a"
+             "--wireguard-endpoint" value))))
+  (signals error
+    (gr8s::parse-agent-options
+     '("--server" "192.0.2.1:7443" "--token" "test" "--ca-pin" "test"
+       "--node-name" "worker-a" "--state-directory" "/tmp/worker-a"
+       "--wireguard-endpoint" "private=10.0.0.11:51820"
+       "--wireguard-endpoint" "private=192.0.2.11:51820"))))
+
+(test wireguard-relay-options-are-explicit-and-bounded
+  (let ((options
+          (gr8s::parse-serve-options
+           '("--overlay-backend" "wireguard"
+             "--wireguard-relay-address" "203.0.113.9"
+             "--wireguard-relay-listen" "0.0.0.0"
+             "--wireguard-relay-port-start" "46000"
+             "--wireguard-relay-max-channels" "17"))))
+    (is (string= "203.0.113.9" (getf options :wireguard-relay-address)))
+    (is (string= "0.0.0.0" (getf options :wireguard-relay-listen)))
+    (is (= 46000 (getf options :wireguard-relay-port-start)))
+    (is (= 17 (getf options :wireguard-relay-max-channels))))
+  (signals error
+    (gr8s::parse-serve-options
+     '("--wireguard-relay-address" "203.0.113.9")))
+  (signals error
+    (gr8s::parse-serve-options
+     '("--overlay-backend" "wireguard"
+       "--wireguard-relay-address" "203.0.113.9"
+       "--wireguard-relay-port-start" "65535")))
+  (signals error
+    (gr8s::parse-serve-options
+     '("--overlay-backend" "wireguard"
+       "--wireguard-relay-address" "203.0.113.9"
+       "--raft-init"))))
 
 (test dns-forward-options-apply-to-serve-and-standalone-agents
   (let ((agent (gr8s::parse-agent-options

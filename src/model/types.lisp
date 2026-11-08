@@ -70,6 +70,12 @@
   ;; Public half of the node-local WireGuard identity. The private half never
   ;; enters the control-plane store.
   (wireguard-public-key #())
+  ;; Authenticated candidate endpoints as (NAME IPV4 PORT) tuples. The legacy
+  ;; underlay address and cluster listen port remain the implicit default.
+  (wireguard-endpoints nil)
+  ;; Unix time of the last authenticated fresh-handshake observation that
+  ;; established the server-owned nat-reflexive endpoint.
+  wireguard-reflexive-observed-at
   ;; The port of the node's authenticated kubelet endpoints, or 0 when it serves none.
   (kubelet-port 0)
   (ready-p nil)
@@ -78,6 +84,10 @@
   runtime-down-message
   last-heartbeat
   lease-deadline
+  ;; First heartbeat of the current uninterrupted ready lease. Unlike
+  ;; LAST-HEARTBEAT this does not advance on renewal, so gateway recovery
+  ;; hysteresis survives control-plane restart.
+  ready-since
   (labels nil)
   (annotations nil)
   (resource-version "1")

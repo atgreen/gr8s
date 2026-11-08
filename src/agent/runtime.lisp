@@ -32,6 +32,10 @@
   dns-forward-rules
   network
   network-reconciler
+  ;; Authenticated WireGuard endpoint observations and last-known-good choices.
+  wireguard-path-state
+  wireguard-path-state-path
+  wireguard-path-telemetry
   ;; (Pod CIDR, interface, UDP port) admitted to firewalld during this process
   ;; lifetime. Cached snapshots repeat the same network, so do not spawn
   ;; firewall-cmd for each one; retaining all three fields also makes a backend
@@ -184,6 +188,14 @@ START-NODE-RUNTIME does that."
              :dynamic-resource-manager dynamic-resource-manager
              :dns-forward-rules dns-forward-rules
              :network-reconciler network-reconciler
+             :wireguard-path-state-path (merge-pathnames "wireguard-paths.json" directory)
+             :wireguard-path-state
+             (handler-case
+                 (load-wireguard-path-state (merge-pathnames "wireguard-paths.json" directory))
+               (error (condition)
+                 (format *error-output* "gr8s: ignoring invalid WireGuard path state: ~A~%"
+                         condition)
+                 (make-wireguard-path-state)))
              :store store :reconciler (make-reconciler store runtime))))
       (when dynamic-resource-manager
         (setf (gr8s.runtime.containerd:containerd-runtime-dynamic-resource-prepare-function runtime)
@@ -232,6 +244,32 @@ until they all succeed so a partial apply can be retried."
   "Parse the node-network JSON at PATH, or return NIL when the file does not exist."
   (when (probe-file path) (com.inuoe.jzon:parse path)))
 
+(defun wireguard-endpoint-messages-object (endpoints)
+  (coerce
+   (mapcar (lambda (endpoint)
+             (json-object "name" (slot-value endpoint 'gr8s.node.v1::name)
+                          "address" (slot-value endpoint 'gr8s.node.v1::address)
+                          "port" (slot-value endpoint 'gr8s.node.v1::port)))
+           endpoints)
+   'vector))
+
+(defun wireguard-next-hop-object (hop)
+  (let ((object
+          (json-object
+           "nodeID" (slot-value hop 'gr8s.node.v1::node-id)
+           "nodeName" (slot-value hop 'gr8s.node.v1::node-name)
+           "underlayAddress" (slot-value hop 'gr8s.node.v1::underlay-address)
+           "wireguardPublicKey"
+           (ag-grpc:base64-encode
+            (slot-value hop 'gr8s.node.v1::wireguard-public-key))
+           "wireguardListenPort"
+           (slot-value hop 'gr8s.node.v1::wireguard-listen-port))))
+    (let ((endpoints (slot-value hop 'gr8s.node.v1::wireguard-endpoints)))
+      (when endpoints
+        (setf (gethash "wireguardEndpoints" object)
+              (wireguard-endpoint-messages-object endpoints))))
+    object))
+
 (defun node-network-object (network &optional routes)
   "Build the persisted node-network object (version 1) from the node-protocol NETWORK
 message and its ROUTES. This is the on-disk and in-memory shape the rest of this file
@@ -269,14 +307,32 @@ validates and reconciles against."
                               (list (slot-value route 'gr8s.node.v1::pod-cidr)))
                           'vector)
                   "underlayAddress"
-                  (slot-value route 'gr8s.node.v1::underlay-address)))
+                  (slot-value route 'gr8s.node.v1::underlay-address)
+                  "region" (let ((value (slot-value route 'gr8s.node.v1::region)))
+                             (if (plusp (length value)) value "unknown-region"))
+                  "zone" (let ((value (slot-value route 'gr8s.node.v1::zone)))
+                           (if (plusp (length value)) value "unknown-zone"))
+                  "capacityScore" (slot-value route 'gr8s.node.v1::capacity-score)
+                  "linkCost" (let ((value (slot-value route 'gr8s.node.v1::link-cost)))
+                               (if (plusp value) value 100))))
                (key (slot-value route 'gr8s.node.v1::wireguard-public-key))
-               (port (slot-value route 'gr8s.node.v1::wireguard-listen-port)))
+               (port (slot-value route 'gr8s.node.v1::wireguard-listen-port))
+               (name (slot-value route 'gr8s.node.v1::node-name))
+               (next-hop (slot-value route 'gr8s.node.v1::next-hop)))
+           (when (plusp (length name))
+             (setf (gethash "nodeName" object) name))
            (when (plusp (length key))
              (setf (gethash "wireguardPublicKey" object)
                    (ag-grpc:base64-encode key)))
            (when (plusp port)
              (setf (gethash "wireguardListenPort" object) port))
+           (let ((endpoints (slot-value route 'gr8s.node.v1::wireguard-endpoints)))
+             (when endpoints
+               (setf (gethash "wireguardEndpoints" object)
+                     (wireguard-endpoint-messages-object endpoints))))
+           (when next-hop
+             (setf (gethash "nextHop" object)
+                   (wireguard-next-hop-object next-hop)))
            object))
        routes)
       'vector))))
@@ -366,6 +422,46 @@ Signals INVALID-CNI on a malformed CIDR."
            (string= subnet
                     (format nil "~A/~D" (format-pod-address family address) prefix))))))
 
+(defun validate-wireguard-peer-object (peer description)
+  "Validate one authenticated direct peer or sparse next-hop JSON object."
+  (unless (hash-table-p peer)
+    (invalid-cni "invalid WireGuard ~A" description))
+  (let ((id (required-cni-string peer "nodeID")))
+    (unless (dns-label-p (gethash "nodeName" peer id))
+      (invalid-cni "invalid WireGuard ~A node name" description)))
+  (let ((name (gethash "nodeName" peer (gethash "nodeID" peer)))
+        (address (required-cni-string peer "underlayAddress")))
+    (unless (dns-label-p name)
+      (invalid-cni "invalid WireGuard ~A node name" description))
+    (handler-case (canonical-node-underlay-address address)
+      (error () (invalid-cni "invalid WireGuard ~A underlay address" description))))
+  (wireguard-decode-key
+   (required-cni-string peer "wireguardPublicKey")
+   (format nil "~A public key" description))
+  (unless (typep (gethash "wireguardListenPort" peer) '(integer 1 65535))
+    (invalid-cni "invalid WireGuard ~A listen port" description))
+  (let ((names nil)
+        (endpoints (gethash "wireguardEndpoints" peer #())))
+    (unless (and (vectorp endpoints) (not (stringp endpoints)))
+      (invalid-cni "WireGuard ~A endpoints must be an array" description))
+    (loop for endpoint across endpoints
+          do (unless (hash-table-p endpoint)
+               (invalid-cni "invalid WireGuard ~A endpoint" description))
+             (let ((name (required-cni-string endpoint "name"))
+                   (address (required-cni-string endpoint "address"))
+                   (port (gethash "port" endpoint)))
+               (unless (and (dns-label-p name)
+                            (not (member name names :test #'equal)))
+                 (invalid-cni "invalid or duplicate WireGuard ~A endpoint name"
+                              description))
+               (handler-case (canonical-node-underlay-address address)
+                 (error ()
+                   (invalid-cni "invalid WireGuard ~A endpoint address" description)))
+               (unless (typep port '(integer 1 65535))
+                 (invalid-cni "invalid WireGuard ~A endpoint port" description))
+               (push name names))))
+  peer)
+
 (defun validate-node-network-routes (network)
   "Validate NETWORK's peer routes across every configured Pod address family."
   (let ((routes (gethash "routes" network #()))
@@ -381,6 +477,7 @@ Signals INVALID-CNI on a malformed CIDR."
     (loop for route across routes
           do (unless (hash-table-p route) (invalid-cni "invalid node route"))
              (let* ((id (required-cni-string route "nodeID"))
+                    (name (gethash "nodeName" route id))
                     (route-cidrs (gr8s.network::route-pod-cidrs route))
                     (address (required-cni-string route "underlayAddress")))
                (handler-case (canonical-node-underlay-address address)
@@ -397,11 +494,21 @@ Signals INVALID-CNI on a malformed CIDR."
                  (invalid-cni "conflicting or out-of-range peer routes ~{~A~^, ~}"
                               route-cidrs))
                (when (string= "wireguard" (gethash "overlayBackend" network "vxlan"))
-                 (wireguard-decode-key
-                  (required-cni-string route "wireguardPublicKey") "peer public key")
-                 (unless (typep (gethash "wireguardListenPort" route)
-                                '(integer 1 65535))
-                   (invalid-cni "invalid WireGuard peer listen port")))
+                 (validate-wireguard-peer-object route "peer")
+                 (let ((next-hop (gethash "nextHop" route)))
+                   (when next-hop
+                     (validate-wireguard-peer-object next-hop "next hop"))))
+               (unless (dns-label-p name)
+                 (invalid-cni "invalid peer node name ~A" name))
+               (dolist (field '("region" "zone"))
+                 (let ((value (gethash field route "unknown")))
+                   (unless (and (stringp value) (plusp (length value))
+                                (<= (length value) 253))
+                     (invalid-cni "invalid peer ~A" field))))
+               (unless (typep (gethash "capacityScore" route 0) '(integer 0 100000))
+                 (invalid-cni "invalid peer capacity score"))
+               (unless (typep (gethash "linkCost" route 100) '(integer 0 100))
+                 (invalid-cni "invalid peer link cost"))
                (setf cidrs (nconc route-cidrs cidrs))
                (push address addresses)
                (push id node-ids))))
@@ -593,6 +700,111 @@ without a network reconciler. Returns NIL."
             (ensure-node-gateway))))))
   nil)
 
+(defun update-node-runtime-wireguard-path-telemetry
+    (node-runtime network
+     &key (start #'try-start-wireguard-path-telemetry-dataplane)
+       (poll #'poll-wireguard-path-telemetry))
+  "Lazily sample passive telemetry before endpoint selection can change."
+  (unless (node-runtime-wireguard-path-telemetry node-runtime)
+    (setf (node-runtime-wireguard-path-telemetry node-runtime) (funcall start)))
+  (let ((dataplane (node-runtime-wireguard-path-telemetry node-runtime)))
+    (when dataplane
+      (apply-wireguard-path-telemetry-samples
+       (node-runtime-wireguard-path-state node-runtime)
+       (funcall poll dataplane network))))
+  nil)
+
+(defun reconcile-node-runtime-wireguard-paths (node-runtime)
+  "Observe, trial and durably select WireGuard endpoints; fail soft on a tick."
+  (let ((network (node-runtime-network node-runtime)))
+    (when (and network
+               (string= "wireguard" (gethash "overlayBackend" network "vxlan")))
+      (handler-case
+          (progn
+            (update-node-runtime-wireguard-path-telemetry node-runtime network)
+            (reconcile-wireguard-path-state
+             (node-runtime-wireguard-path-state node-runtime) network
+             :probe-function (lambda (route) (probe-wireguard-route route)))
+            (reconcile-wireguard-path-mtus
+             (node-runtime-wireguard-path-state node-runtime) network)
+            (apply-wireguard-selected-safe-mtu
+             (node-runtime-wireguard-path-state node-runtime) network)
+            (persist-wireguard-path-state
+             (node-runtime-wireguard-path-state-path node-runtime)
+             (node-runtime-wireguard-path-state node-runtime))
+            ;; Path evidence is runtime state, not a control-plane snapshot; make
+            ;; Service choices follow it on the same reconciliation tick.
+            (when (node-runtime-service-lb-controller node-runtime)
+              (converge-service-lb-controller
+               (node-runtime-service-lb-controller node-runtime))))
+        (error (condition)
+          (format *error-output* "gr8s: WireGuard path reconciliation failed: ~A~%"
+                  condition)))))
+  nil)
+
+(defun service-endpoint-route (network address)
+  (find-if (lambda (route)
+             (ignore-errors
+               (ipv4-cidr-contains-p (gethash "podCIDR" route) address)))
+           (coerce (gethash "routes" network #()) 'list)))
+
+(defun steer-service-endpoints (node-runtime endpoints &key (maximum 4))
+  "Choose a bounded, deterministic backend subset from local authenticated state."
+  (let ((network (node-runtime-network node-runtime))
+        (state (node-runtime-wireguard-path-state node-runtime)))
+    (if (or (null network) (<= (length endpoints) 1))
+        endpoints
+        (let* ((routes (coerce (gethash "routes" network #()) 'list))
+               ;; A same-zone route carries the source's authenticated region/zone.
+               ;; When this node is alone in its zone, keep a distinct local domain.
+               (same-zone-route (find 1 routes :key (lambda (route)
+                                                      (gethash "linkCost" route 100))))
+               (local-domain
+                 (if same-zone-route
+                     (list (gethash "region" same-zone-route "unknown-region")
+                           (gethash "zone" same-zone-route "unknown-zone"))
+                     (list "local" "local")))
+               (ranked
+                (rank-network-steering-candidates
+                 (loop for endpoint in endpoints
+                       for address = (first endpoint)
+                       for route = (service-endpoint-route network address)
+                       for next-hop = (and route (gethash "nextHop" route))
+                       for peer-id = (and route (gethash "nodeID" (or next-hop route)))
+                       for peer = (and peer-id state
+                                       (gethash peer-id
+                                                (wireguard-path-state-peers state)))
+                       for observation = (and peer
+                                              (wireguard-peer-path-state-selected peer)
+                                              (wireguard-observation-for-endpoint
+                                               peer
+                                               (wireguard-peer-path-state-selected peer)))
+                       collect
+                       (list
+                        :value endpoint
+                        :node-name (if route (gethash "nodeName" route) "local")
+                        :same-node (null route)
+                        :same-zone (and route (= 1 (gethash "linkCost" route 100)))
+                        :same-region (and route (<= (gethash "linkCost" route 100) 10))
+                        :failure-domain (if route
+                                            (list (gethash "region" route "unknown-region")
+                                                  (gethash "zone" route "unknown-zone"))
+                                            local-domain)
+                        :capacity (if route (gethash "capacityScore" route 0) 100000)
+                        :link-cost (if route (gethash "linkCost" route 100) 0)
+                        :healthy (if observation
+                                     (wireguard-path-healthy-p observation)
+                                     t)
+                        :path-score (if observation
+                                        (wireguard-path-score observation)
+                                        (if route 10000 0))
+                        :active-flows
+                        (if observation
+                            (wireguard-path-observation-passive-active-flows observation)
+                            0))))))
+          (mapcar (lambda (candidate) (getf candidate :value))
+                  (subseq ranked 0 (min (length ranked) (max 1 (min maximum 16)))))))))
+
 (defun handle-node-runtime-cni
     (node-runtime request &key (chained-operations (make-chained-cni-operations)))
   "Service one agent CNI REQUEST in the manager's configured ownership mode.
@@ -658,6 +870,7 @@ health-check servers and runtime deletions."
                 (node-runtime-reconciler node-runtime)
                 :before-reconcile (lambda ()
                                     (reconcile-cached-node-network node-runtime)
+                                    (reconcile-node-runtime-wireguard-paths node-runtime)
                                     ;; Re-run dataplane convergence every tick, not only on a new
                                     ;; control-plane snapshot: the out-of-process CNI plugin adds Pod
                                     ;; allocations the agent must pick up to populate local/host/remote
@@ -682,6 +895,10 @@ health-check servers and runtime deletions."
     (stop-host-port-forwarders (node-runtime-host-port-forwarders node-runtime))
     (stop-host-port-forwarders (node-runtime-node-port-forwarders node-runtime))
     (stop-health-check-servers (node-runtime-health-check-servers node-runtime))
+    (when (node-runtime-wireguard-path-telemetry node-runtime)
+      (stop-wireguard-path-telemetry-dataplane
+       (node-runtime-wireguard-path-telemetry node-runtime))
+      (setf (node-runtime-wireguard-path-telemetry node-runtime) nil))
     (stop-runtime-deletions (node-runtime-runtime node-runtime))))
 
 (defun call-with-agent-cni-server
@@ -726,7 +943,11 @@ the node from starting."
       (setf (node-runtime-service-lb node-runtime) dataplane
             (node-runtime-service-lb-controller node-runtime)
             (make-service-lb-controller (node-runtime-store node-runtime) dataplane
-                                        (node-runtime-node-name node-runtime))))
+                                        (node-runtime-node-name node-runtime)
+                                        :endpoint-steerer
+                                        (lambda (endpoints)
+                                          (steer-service-endpoints
+                                           node-runtime endpoints)))))
     (handler-case
         (setf (node-runtime-gateway-steering node-runtime) (start-gateway-steering))
       (error (condition)
@@ -1011,6 +1232,53 @@ exists."
    :service-account-uid (or (getf claim :service-account-uid) "")
    :max-expiration-seconds (or (getf claim :max-expiration-seconds) 0)))
 
+(defun wireguard-peer-observation-messages
+    (statuses &key network path-state
+                    (now (- (get-universal-time) 2208988800)) (fresh-seconds 180))
+  "Encode fresh kernel-observed WireGuard sessions as NAT rendezvous evidence."
+  (loop for status in statuses
+        for handshake = (wireguard-peer-status-latest-handshake-seconds status)
+        when (and (= 32 (length (wireguard-peer-status-public-key status)))
+                  (not (string= "" (wireguard-peer-status-endpoint-address status)))
+                  (<= 1 (wireguard-peer-status-endpoint-port status) 65535)
+                  (plusp (wireguard-peer-status-received-bytes status))
+                  (<= 0 (- now handshake) fresh-seconds))
+          collect
+          (let* ((route
+                   (and network
+                        (find (wireguard-peer-status-public-key status)
+                              (coerce (gethash "routes" network #()) 'list)
+                              :test #'equalp
+                              :key (lambda (candidate)
+                                     (ignore-errors
+                                       (ag-grpc:base64-decode
+                                        (gethash "wireguardPublicKey" candidate "")))))))
+                 (peer (and route path-state
+                            (gethash (gethash "nodeID" route)
+                                     (wireguard-path-state-peers path-state))))
+                 (observation
+                   (and peer (wireguard-peer-path-state-selected peer)
+                        (wireguard-observation-for-endpoint
+                         peer (wireguard-peer-path-state-selected peer)))))
+            (make-instance
+             'gr8s.node.v1::wireguard-peer-observation
+             :peer-public-key (wireguard-peer-status-public-key status)
+             :address (wireguard-peer-status-endpoint-address status)
+             :port (wireguard-peer-status-endpoint-port status)
+             :latest-handshake-unix-seconds handshake
+             :received-bytes (wireguard-peer-status-received-bytes status)
+             :path-score (if observation
+                             (steering-bounded-integer
+                              (wireguard-path-score observation) 10000 10000)
+                             10000)
+             :healthy (and observation (wireguard-path-healthy-p observation))
+             :active-flows (if observation
+                               (steering-bounded-integer
+                                (wireguard-path-observation-passive-active-flows
+                                 observation)
+                                1000)
+                               0)))))
+
 (defun node-runtime-status (node-runtime &key (counter-reader #'read-cni-policy-counters))
   "Build the node's NODE-STATUS heartbeat: observation timestamp, pending podCertificate
 claims, registered CSI drivers (rescanned here, on this thread, so a slow driver can't
@@ -1031,6 +1299,13 @@ while the server still assigns that UID at that version."
        (handler-case (scan-csi-plugin-registry)
          (error (condition) (format *error-output* "gr8s CSI registry scan failed: ~A~%" condition)))
        (csi-driver-registrations))
+     :wireguard-peer-observations
+     (handler-case
+         (wireguard-peer-observation-messages
+          (read-wireguard-peer-statuses)
+          :network (node-runtime-network node-runtime)
+          :path-state (node-runtime-wireguard-path-state node-runtime))
+       (error () nil))
      :pods
      (bt:with-lock-held ((node-runtime-observed-lock node-runtime))
        ;; Prune deleted UIDs and never publish a cache entry for an older Pod
@@ -1073,12 +1348,17 @@ while the server still assigns that UID at that version."
   (let ((network (bt:with-lock-held ((node-runtime-network-lock node-runtime))
                    (node-runtime-network node-runtime)))
         (key-path (node-runtime-wireguard-key-path node-runtime)))
-    (wireguard-metrics-text
-     network (or (node-runtime-node-name node-runtime) "")
-     :key-age-reader
-     (lambda ()
-       (let ((written (and (probe-file key-path) (file-write-date key-path))))
-         (and written (max 0 (- (get-universal-time) written))))))))
+    (concatenate
+     'string
+     (wireguard-metrics-text
+      network (or (node-runtime-node-name node-runtime) "")
+      :key-age-reader
+      (lambda ()
+        (let ((written (and (probe-file key-path) (file-write-date key-path))))
+          (and written (max 0 (- (get-universal-time) written))))))
+     (wireguard-path-metrics-text
+      (node-runtime-wireguard-path-state node-runtime)
+      (or (node-runtime-node-name node-runtime) "")))))
 
 (defun receive-node-snapshot-intent (node-runtime snapshot)
   "Persist exact urgent deletion intent before cancelling creation or waiting for runtime I/O."
@@ -1389,15 +1669,53 @@ stored Pod's UID does not match the request's."
                               namespace name)))
     pod))
 
+(defun wireguard-network-explanation (node-runtime destination-peer-id)
+  "Explain DESTINATION-PEER-ID through its effective direct or sparse peer."
+  (let* ((network (node-runtime-network node-runtime))
+         (route
+           (and network
+                (find destination-peer-id (gethash "routes" network #())
+                      :test #'string=
+                      :key (lambda (candidate)
+                             (gethash "nodeID" candidate)))))
+         (hop (and route (gethash "nextHop" route)))
+         (effective-peer-id
+           (if hop (required-cni-string hop "nodeID") destination-peer-id))
+         (object
+           (wireguard-path-explanation-object
+            (node-runtime-wireguard-path-state node-runtime) effective-peer-id)))
+    (setf (gethash "destinationPeerID" object) destination-peer-id
+          (gethash "nextHopPeerID" object) effective-peer-id
+          (gethash "topologyReason" object)
+          (if hop "sparse-next-hop" "direct-peer"))
+    (when route
+      (setf (gethash "destinationPodCIDR" object) (gethash "podCIDR" route)))
+    object))
+
 (defun handle-node-operation (node-runtime request)
   "Carry out a synchronous node operation for REQUEST -- container logs, or a one-shot
 exec -- and return the list of (tag . message) replies to emit (a stdout/stderr stream
 plus a completion response). Verifies the Pod is assigned first; any error, including an
 unsupported kind, becomes a single failed response."
   (handler-case
-      (progn
-        (assigned-operation-pod node-runtime request)
-        (case (slot-value request 'gr8s.node.v1::kind)
+      (let ((kind (slot-value request 'gr8s.node.v1::kind)))
+        (unless (= kind gr8s.node.v1::+operationkind-operation_kind_network_explain+)
+          (assigned-operation-pod node-runtime request))
+        (case kind
+          (#.gr8s.node.v1::+operationkind-operation_kind_network_explain+
+           (let ((json
+                   (com.inuoe.jzon:stringify
+                    (wireguard-network-explanation
+                     node-runtime
+                     (slot-value request 'gr8s.node.v1::peer-id)))))
+             (list
+              (cons :operation-stream
+                    (node-operation-stream
+                     request gr8s.node.v1::+streamchannel-stream_channel_stdout+
+                     (trivial-utf-8:string-to-utf-8-bytes json)))
+              (cons :operation-response
+                    (node-operation-response
+                     request gr8s.node.v1::+operationstatus-operation_status_complete+)))))
           (#.gr8s.node.v1::+operationkind-operation_kind_logs+
            (let ((logs
                    (runtime-logs

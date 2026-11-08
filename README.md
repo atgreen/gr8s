@@ -20,6 +20,18 @@ Every node that completes the blob becomes a seeder. The private swarm is
 authenticated with node certificates and mTLS, and strict mode gives containerd
 no direct-registry escape hatch that could turn a DaemonSet into a pull storm.
 
+**The encrypted network tunes itself.** WireGuard peers advertise authenticated
+multi-homed endpoints; gr8s combines active trials with JIT-compiled eBPF path
+telemetry, fails away from broken paths quickly, and adopts improvements slowly
+with last-known-good rollback. It coordinates NAT traversal, offers an encrypted
+relay for hostile NATs, discovers packet-size black holes, and switches large
+clusters to resilient region/zone-aware sparse routing. Every choice is inspectable
+with `gr8s network explain NODE PEER`. See the
+[self-tuning WireGuard design and operations](docs/networking.md#self-tuning-wireguard-overlay).
+The same bounded score steers eBPF Service backend subsets and orders authenticated
+BitTorrent image peers, preferring locality and healthy paths without letting any
+reported metric dominate or collapse failure-domain diversity.
+
 **Post-quantum secure by default.** gr8s carries its own pure-Lisp TLS 1.3 stack
 — no OpenSSL, no C — and every internal channel (the Kubernetes API, the node
 agent protocol, and Raft) prefers **post-quantum hybrid key exchange
