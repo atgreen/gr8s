@@ -36,6 +36,10 @@
   overlay-firewall-pod-cidr
   ipam
   cni-operations
+  ;; Durable endpoints created by an operator-owned primary CNI before the
+  ;; optional gr8s policy plugin. Keyed by (container-id . interface-name).
+  (external-cni-endpoints (make-hash-table :test #'equal))
+  (external-cni-endpoints-lock (bt:make-lock "gr8s external CNI endpoints"))
   (observed-statuses (make-hash-table :test #'equal))
   (assigned-versions (make-hash-table :test #'equal))
   (observed-lock (bt:make-lock "gr8s node observations"))
@@ -72,6 +76,81 @@
   ;; their destination ports without opening host-wide listening sockets.
   gateway-steering)
 
+(defun node-runtime-external-cni-endpoints-path (node-runtime)
+  "Return the durable external-CNI endpoint registry path for NODE-RUNTIME."
+  (merge-pathnames "external-cni-endpoints.json"
+                   (node-runtime-state-directory node-runtime)))
+
+(defun node-runtime-external-cni-endpoint-list (node-runtime)
+  "Return external endpoints as sorted (container-id interface-name address) rows."
+  (bt:with-lock-held ((node-runtime-external-cni-endpoints-lock node-runtime))
+    (sort
+     (loop for key being the hash-keys of (node-runtime-external-cni-endpoints node-runtime)
+             using (hash-value address)
+           collect (list (car key) (cdr key) address))
+     #'string< :key (lambda (row) (format nil "~A/~A" (first row) (second row))))))
+
+(defun persist-node-runtime-external-cni-endpoints (node-runtime)
+  "Atomically persist NODE-RUNTIME's external endpoint registry. Caller holds its lock."
+  (write-private-text-atomically
+   (node-runtime-external-cni-endpoints-path node-runtime)
+   (com.inuoe.jzon:stringify
+    (json-object
+     "version" 1
+     "endpoints"
+     (coerce
+      (sort
+       (loop for key being the hash-keys of (node-runtime-external-cni-endpoints node-runtime)
+               using (hash-value address)
+             collect (json-object "containerID" (car key)
+                                  "interfaceName" (cdr key)
+                                  "address" address))
+       #'string< :key (lambda (entry)
+                        (format nil "~A/~A" (gethash "containerID" entry)
+                                (gethash "interfaceName" entry))))
+      'vector)))))
+
+(defun load-node-runtime-external-cni-endpoints (node-runtime)
+  "Load NODE-RUNTIME's durable external endpoint registry, if present."
+  (let ((path (node-runtime-external-cni-endpoints-path node-runtime)))
+    (when (probe-file path)
+      (let* ((object (com.inuoe.jzon:parse (uiop:read-file-string path)))
+             (entries (and (hash-table-p object) (gethash "endpoints" object))))
+        (unless (and (= 1 (gethash "version" object 0)) (vectorp entries))
+          (error "invalid external CNI endpoint registry"))
+        (loop for entry across entries
+              for container = (and (hash-table-p entry) (gethash "containerID" entry))
+              for interface = (and (hash-table-p entry) (gethash "interfaceName" entry))
+              for address = (and (hash-table-p entry) (gethash "address" entry))
+              do (unless (and (safe-cni-container-id-p container)
+                              (stringp interface) (plusp (length interface))
+                              (ignore-errors (gr8s::parse-ipv4-integer address)))
+                   (error "invalid external CNI endpoint registry entry"))
+                 (setf (gethash (cons container interface)
+                                (node-runtime-external-cni-endpoints node-runtime))
+                       address)))))
+  node-runtime)
+
+(defun update-node-runtime-external-cni-endpoint
+    (node-runtime command container interface &optional address)
+  "Persist a successful external chained ADD or DEL in NODE-RUNTIME's registry."
+  (when (member command '("ADD" "DEL") :test #'string=)
+    (let ((key (cons container interface)))
+      (bt:with-lock-held ((node-runtime-external-cni-endpoints-lock node-runtime))
+        (let ((old (gethash key (node-runtime-external-cni-endpoints node-runtime)))
+              (present (nth-value 1 (gethash key (node-runtime-external-cni-endpoints node-runtime)))))
+          (if (string= command "ADD")
+              (setf (gethash key (node-runtime-external-cni-endpoints node-runtime)) address)
+              (remhash key (node-runtime-external-cni-endpoints node-runtime)))
+          (handler-case
+              (persist-node-runtime-external-cni-endpoints node-runtime)
+            (error (condition)
+              (if present
+                  (setf (gethash key (node-runtime-external-cni-endpoints node-runtime)) old)
+                  (remhash key (node-runtime-external-cni-endpoints node-runtime)))
+              (error condition)))))))
+  nil)
+
 (defun make-node-runtime (state-directory runtime manager
                           &key (network-reconciler
                                  (when manager #'reconcile-node-vxlan-network))
@@ -94,6 +173,8 @@ START-NODE-RUNTIME does that."
              :dns-forward-rules dns-forward-rules
              :network-reconciler network-reconciler
              :store store :reconciler (make-reconciler store runtime))))
+      (when (and manager (string= "external" (managed-containerd-cni-mode manager)))
+        (load-node-runtime-external-cni-endpoints node-runtime))
       (let ((applied (read-node-network-file (node-runtime-network-path node-runtime)))
             (pending (read-node-network-file (node-runtime-network-pending-path node-runtime))))
         (when (or (null manager)
@@ -364,7 +445,28 @@ the native node IPAM. Native mode dispatches to the assigned routed CNI operatio
   (if (and (node-runtime-manager node-runtime)
            (string= "external"
                     (managed-containerd-cni-mode (node-runtime-manager node-runtime))))
-      (handle-agent-cni-request request :operations chained-operations :chained t)
+      (let ((response
+              (handle-agent-cni-request request :operations chained-operations :chained t)))
+        (if (slot-value response 'gr8s.node.v1::success)
+            (handler-case
+                (let* ((command (slot-value request 'gr8s.node.v1::command))
+                       (configuration
+                         (when (string= command "ADD")
+                           (parse-cni-configuration
+                            (trivial-utf-8:utf-8-bytes-to-string
+                             (slot-value request 'gr8s.node.v1::network-configuration))
+                            :require-previous t)))
+                       (address (and configuration
+                                     (chained-cni-ipv4-address
+                                      (cni-configuration-previous-result configuration)))))
+                  (update-node-runtime-external-cni-endpoint
+                   node-runtime command
+                   (slot-value request 'gr8s.node.v1::container-id)
+                   (slot-value request 'gr8s.node.v1::interface-name)
+                   address)
+                  response)
+              (error (condition) (agent-cni-error-response condition)))
+            response))
       (let ((operations
               (bt:with-lock-held ((node-runtime-network-lock node-runtime))
                 (node-runtime-cni-operations node-runtime))))
@@ -876,56 +978,66 @@ snapshot application."
   (bt:with-lock-held (*node-network-policy-lock*)
     (converge-node-network-policies-unlocked node-runtime)))
 
-(defun converge-node-network-policies-unlocked (node-runtime)
+(defun converge-node-network-policies-unlocked
+    (node-runtime &key (policy-converger #'converge-pod-network-policies))
   "Write every local Pod's dataplane into its pinned maps, with the caller holding
 *node-network-policy-lock*: the same-node Pod->Pod delivery table and the Pod->host
 redirect table (each populated first and independently, since the NetworkPolicy
 resolution below can throw on an unsupported policy), then the resolved NetworkPolicy in
-both directions. Reloads IPAM first to pick up allocations the out-of-process CNI plugin
-added. A no-op unless the agent is managed with IPAM and a store."
+both directions. Native mode reloads IPAM first to pick up allocations the
+out-of-process CNI plugin added. External mode uses the durable endpoint registry
+written after chained CNI ADD and deliberately skips native-veth delivery maps.
+A no-op unless the agent is managed with a store and known endpoints."
   (let ((manager (node-runtime-manager node-runtime))
         (ipam (node-runtime-ipam node-runtime))
         (store (node-runtime-store node-runtime)))
-    (when (and manager ipam store)
+    (when (and manager store)
       ;; The out-of-process CNI plugin persists every allocation to the ipam file;
       ;; reload it so the dataplane tables below cover Pods added since the agent's
       ;; ipam was opened, not only those present at startup (podster-6yd).
-      (ignore-errors (reload-node-ipam-allocations ipam))
-      (let ((root (managed-containerd-bpf-directory manager))
-            (endpoints (bt:with-lock-held ((node-ipam-lock ipam))
-                         (loop for key being the hash-keys of (node-ipam-allocations ipam)
-                                 using (hash-value address)
-                               collect (list (car key) (cdr key) address)))))
+      (when ipam (ignore-errors (reload-node-ipam-allocations ipam)))
+      (let* ((root (managed-containerd-bpf-directory manager))
+             (native-p (string= "native" (managed-containerd-cni-mode manager)))
+             (endpoints
+               (if native-p
+                   (when ipam
+                     (bt:with-lock-held ((node-ipam-lock ipam))
+                       (loop for key being the hash-keys of (node-ipam-allocations ipam)
+                               using (hash-value address)
+                             collect (list (car key) (cdr key) address))))
+                   (node-runtime-external-cni-endpoint-list node-runtime))))
         ;; Same-node Pod->Pod delivery table (epic podster-pnd): every local Pod
         ;; gets the node-wide {dest IP -> ifindex/MAC} table so the egress guard
         ;; can redirect in-cluster traffic past the host firewall's FORWARD reject.
         ;; Populate it FIRST and independently: resolving an unsupported
         ;; NetworkPolicy (below) can throw, and keeping that resolution out of this
         ;; let's bindings is what lets the delivery table still be written.
-        (converge-node-local-pod-delivery
-         endpoints
-         :directory-fn (lambda (sandbox)
-                         (nth-value 2 (cni-pin-paths root sandbox))))
+        (when native-p
+          (converge-node-local-pod-delivery
+           endpoints
+           :directory-fn (lambda (sandbox)
+                           (nth-value 2 (cni-pin-paths root sandbox)))))
         ;; Pod->host delivery table (podster-9b1): every local Pod gets the node's
         ;; host-local destinations (the API server 10.96.0.1, this node's own IP)
         ;; so the egress guard redirects that traffic to lo, past the host
         ;; firewall's INPUT reject. Independent and fail-soft, like the table above.
-        (converge-node-host-redirect
-         (mapcar #'first endpoints)
-         (ignore-errors (containerd-node-address (node-runtime-runtime node-runtime)))
-         :directory-fn (lambda (sandbox)
-                         (nth-value 2 (cni-pin-paths root sandbox))))
+        (when native-p
+          (converge-node-host-redirect
+           (mapcar #'first endpoints)
+           (ignore-errors (containerd-node-address (node-runtime-runtime node-runtime)))
+           :directory-fn (lambda (sandbox)
+                           (nth-value 2 (cni-pin-paths root sandbox)))))
         ;; NetworkPolicy, both directions (origin/main). Spec resolution can throw
         ;; on an unsupported policy, so it stays after the delivery tables above,
         ;; which must populate regardless.
         (let ((specs (network-policy-specs-from-objects
                       (list-core-resources store "networkpolicies")))
               (ip-map (pod-ip-identity-map store)))
-          (converge-pod-network-policies
-           specs endpoints
-           :pod-finder (lambda (address) (gethash address ip-map))
-           :directory-fn (lambda (sandbox)
-                           (nth-value 2 (cni-pin-paths root sandbox)))))))))
+          (funcall policy-converger
+                   specs endpoints
+                   :pod-finder (lambda (address) (gethash address ip-map))
+                   :directory-fn (lambda (sandbox)
+                                   (nth-value 2 (cni-pin-paths root sandbox)))))))))
 
 (defvar *runtime-outage-snapshot-wait-seconds* 2
   "How long a snapshot waits for a restarting container runtime before giving up this attempt.")

@@ -179,8 +179,11 @@ agent socket at `<state>/containerd/run/gr8s-cni.sock`, and `mapPinRoot` at
 `<state>/containerd/bpf`. ADD and CHECK require the primary plugin's
 `prevResult`; gr8s extracts the assigned IPv4 address, attaches its policy guards
 to `CNI_IFNAME` inside the Pod namespace, and returns the previous result
-unchanged. Omitting the gr8s entry leaves policy entirely with the external
-plugin. External mode still creates only the owned `169.254.1.1/32` node-local
+unchanged. Successful ADD/DEL operations update an atomic local endpoint
+registry, which survives agent restart and drives subsequent gr8s NetworkPolicy
+map convergence without assuming native IPAM or native veth names. Omitting the
+gr8s entry leaves policy entirely with the external plugin. External mode still
+creates only the owned `169.254.1.1/32` node-local
 gateway while the embedded DNS listener is running, so the Pod resolver address
 remains reachable without claiming the external plugin's dataplane.
 

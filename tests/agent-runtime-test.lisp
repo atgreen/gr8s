@@ -623,6 +623,51 @@
       (is-true (slot-value response 'gr8s.node.v1::success))
       (is (string= "10.244.1.9" seen)))))
 
+(test external-cni-endpoints-survive-agent-restart-and-delete
+  (with-temporary-store (store path)
+    (assert store)
+    (let* ((manager
+             (gr8s::make-managed-containerd
+              :state-directory path :executable "/opt/containerd" :oci-runtime "/opt/runc"
+              :cni-bin-directory "/opt/cni/bin" :cni-mode "external"
+              :cni-config-directory "/etc/cni/net.d"))
+           (runtime (gr8s::make-node-runtime path (make-fake-runtime) manager))
+           (operations
+             (gr8s::make-cni-operations
+              :add (lambda (&rest arguments) (declare (ignore arguments)))
+              :delete (lambda (&rest arguments) (declare (ignore arguments)))))
+           (chained (gr8s::make-chained-cni-operations :policy operations))
+           (config
+             (com.inuoe.jzon:stringify
+              (gr8s::json-object
+               "cniVersion" "1.0.0" "mapPinRoot" "/run/gr8s/bpf"
+               "prevResult"
+               (gr8s::json-object "cniVersion" "1.0.0"
+                                  "ips" (vector (gr8s::json-object "address" "10.244.1.9/24")))))))
+      (is-true (slot-value
+                (gr8s::handle-node-runtime-cni
+                 runtime (agent-cni-request-for-test "ADD" config)
+                 :chained-operations chained)
+                'gr8s.node.v1::success))
+      (is (equal '(("sandbox-agent" "eth0" "10.244.1.9"))
+                 (gr8s::node-runtime-external-cni-endpoint-list runtime)))
+      (let ((seen nil))
+        (gr8s::converge-node-network-policies-unlocked
+         runtime :policy-converger
+         (lambda (specs endpoints &rest arguments)
+           (declare (ignore specs arguments))
+           (setf seen endpoints)))
+        (is (equal '(("sandbox-agent" "eth0" "10.244.1.9")) seen)))
+      (let ((restored (gr8s::make-node-runtime path (make-fake-runtime) manager)))
+        (is (equal '(("sandbox-agent" "eth0" "10.244.1.9"))
+                   (gr8s::node-runtime-external-cni-endpoint-list restored)))
+        (is-true (slot-value
+                  (gr8s::handle-node-runtime-cni
+                   restored (agent-cni-request-for-test "DEL" config)
+                   :chained-operations chained)
+                  'gr8s.node.v1::success))
+        (is-false (gr8s::node-runtime-external-cni-endpoint-list restored))))))
+
 (test external-cni-mode-does-not-apply-the-native-overlay-or-ipam
   (with-temporary-store (store path)
     (assert store)
