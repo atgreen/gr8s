@@ -225,6 +225,51 @@
       (is (equal '("registry.example.test/tenant") (getf attributes :required-annotations)))
       (is (equal '("registry.example.test/region") (getf attributes :optional-annotations))))))
 
+(test credential-provider-receives-bound-token-and-service-account-annotations
+  (let* ((directory
+           (uiop:ensure-directory-pathname
+            (sb-posix:mkdtemp
+             (namestring (merge-pathnames "gr8s-token-provider-XXXXXX"
+                                           (uiop:temporary-directory))))))
+         (plugin (merge-pathnames "token-provider" directory))
+         (calls (merge-pathnames "calls" directory))
+         (provider
+           (gr8s::make-image-credential-provider
+            :name "token-provider" :executable (namestring plugin)
+            :api-version "credentialprovider.kubelet.k8s.io/v1"
+            :match-images '("registry.example.test") :default-cache-seconds 60
+            :token-attributes
+            '(:audience "registry.example.test" :cache-type "ServiceAccount"
+              :require-service-account t :required-annotations ("tenant.example/id")
+              :optional-annotations ("tenant.example/region"))))
+         (pod (pull-secret-test-pod))
+         (requests nil))
+    (setf (gethash "serviceAccountName" (gethash "spec" (pod-to-object pod))) "builder")
+    (unwind-protect
+         (progn
+           (with-open-file (out plugin :direction :output :if-exists :supersede)
+             (format out "#!/bin/sh~%")
+             (format out "request=$(cat)~%")
+             (format out "printf '%s' \"$request\" >> ~S~%" (namestring calls))
+             (format out "case \"$request\" in *'\"serviceAccountToken\":\"bound-token\"'*'\"tenant.example/id\":\"acme\"'*) ;; *) exit 2;; esac~%")
+             (format out "printf '%s\\n' '{\"kind\":\"CredentialProviderResponse\",\"apiVersion\":\"credentialprovider.kubelet.k8s.io/v1\",\"cacheKeyType\":\"Global\",\"cacheDuration\":\"1m\",\"auth\":{\"registry.example.test\":{\"username\":\"token-user\",\"password\":\"password\"}}}'~%"))
+           (sb-posix:chmod (namestring plugin) #o700)
+           (let ((runtime
+                   (gr8s::make-containerd-runtime
+                    :log-root directory :credential-providers (list provider)
+                    :credential-provider-token-function
+                    (lambda (requested-pod audience required optional)
+                      (push (list requested-pod audience required optional) requests)
+                      (values "bound-token"
+                              (gr8s::core-object "tenant.example/id" "acme")
+                              '(:namespace "sonobuoy" :name "builder" :uid "sa-uid"))))))
+             (is (equal '(("token-user" . "password"))
+                        (gr8s::pod-image-pull-credentials
+                         runtime pod "c" "registry.example.test/team/a:1")))
+             (is (= 1 (length requests)))
+             (is (equal "registry.example.test" (second (first requests))))))
+      (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
+
 (test malformed-node-registry-credential-files-fail-runtime-construction
   (uiop:with-temporary-file (:pathname file :stream stream :keep nil)
     (write-string "{\"auths\":7}" stream)

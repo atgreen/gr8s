@@ -66,6 +66,7 @@
    #:containerd-runtime
    #:containerd-runtime-p
    #:containerd-runtime-credential-providers
+   #:containerd-runtime-credential-provider-token-function
    #:containerd-termination-file
    #:cri-status-timestamp
    #:directory-disk-bytes
@@ -162,6 +163,7 @@
    #:containerd-runtime-p
    #:containerd-runtime-availability
    #:containerd-runtime-credential-providers
+   #:containerd-runtime-credential-provider-token-function
    #:containerd-runtime-deletions
    #:containerd-runtime-dns-options
    #:containerd-runtime-dns-searches
@@ -256,5 +258,7 @@
                   "CRI-VERSION-INFO-RUNTIME-API-VERSION"
                   "CRI-VERSION-INFO-RUNTIME-NAME"
                   "CRI-VERSION-INFO-RUNTIME-VERSION"
-                  "CRI-VERSION-INFO-VERSION" "MAKE-CONTAINERD-RUNTIME"))
+                  "CRI-VERSION-INFO-VERSION"
+                  "CONTAINERD-RUNTIME-CREDENTIAL-PROVIDER-TOKEN-FUNCTION"
+                  "MAKE-CONTAINERD-RUNTIME"))
     (export (find-symbol name '#:gr8s.runtime.containerd) '#:gr8s)))

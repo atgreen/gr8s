@@ -33,6 +33,8 @@
   registry-credentials
   ;; Kubelet-compatible executable credential providers, in configured order.
   credential-providers
+  ;; Obtains a Pod-bound token and ServiceAccount identity from the control plane.
+  credential-provider-token-function
   resource-store
   probes
   (lifecycle-lock (bt:make-lock "native lifecycle checkpoint writes"))
@@ -49,7 +51,8 @@
     (&key (socket-path "/run/containerd/containerd.sock")
           (log-root "/var/log/gr8s/pods/")
           (host-network t)
-          dns-servers dns-searches dns-options registry-credentials credential-providers availability)
+          dns-servers dns-searches dns-options registry-credentials credential-providers
+          credential-provider-token-function availability)
   "Build a CONTAINERD-RUNTIME, defaulting the CRI socket, Pod log root and
    host-network on. AVAILABILITY, when given, is a managed containerd's readiness
    handle; NIL trusts an external runtime to already be up."
@@ -62,7 +65,8 @@
    :dns-searches dns-searches
    :dns-options dns-options
    :registry-credentials registry-credentials
-   :credential-providers credential-providers))
+   :credential-providers credential-providers
+   :credential-provider-token-function credential-provider-token-function))
 
 (defun call-containerd-runtime (thunk)
   "Call THUNK and return its values. Re-signals a runtime-error or

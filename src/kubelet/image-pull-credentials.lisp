@@ -124,11 +124,16 @@ Provider names resolve only within BIN-DIRECTORY and are returned in configurati
                           (error "Credential provider ~A has an invalid environment entry" name))
                      collect (format nil "~A=~A" variable value))))))))
 
-(defun credential-provider-response-entries (provider image)
+(defun credential-provider-response-entries (provider image &optional token annotations)
   "Invoke PROVIDER for IMAGE and return its validated registry entries and cache metadata."
   (let* ((request (core-object "kind" "CredentialProviderRequest"
                                "apiVersion" (image-credential-provider-api-version provider)
                                "image" image))
+         (request-ready
+           (progn
+             (when token (setf (gethash "serviceAccountToken" request) token))
+             (when annotations (setf (gethash "serviceAccountAnnotations" request) annotations))
+             request))
          (command (append (list "/usr/bin/env")
                           (image-credential-provider-environment provider)
                           (list (image-credential-provider-executable provider))
@@ -136,7 +141,7 @@ Provider names resolve only within BIN-DIRECTORY and are returned in configurati
          (output
            (sb-ext:with-timeout *credential-provider-timeout-seconds*
              (uiop:run-program
-              command :input (make-string-input-stream (com.inuoe.jzon:stringify request))
+              command :input (make-string-input-stream (com.inuoe.jzon:stringify request-ready))
               :output '(:string :stripped t) :error-output :string)))
          (response (handler-case (com.inuoe.jzon:parse output)
                      (error () (error "Credential provider ~A returned malformed JSON"
@@ -172,7 +177,35 @@ Provider names resolve only within BIN-DIRECTORY and are returned in configurati
         ((equal type "Registry") (subseq repository 0 (position #\/ repository)))
         ((equal type "Global") "")))
 
-(defun image-credential-provider-entries (providers image)
+(defun credential-provider-pod-context (provider runtime pod)
+  "Return PROVIDER's token, annotations, cache identity and eligibility for POD."
+  (let ((attributes (image-credential-provider-token-attributes provider)))
+    (unless attributes (return-from credential-provider-pod-context (values nil nil nil t)))
+    (let* ((spec (and pod (gethash "spec" (pod-to-object pod))))
+           (service-account (and spec (gethash "serviceAccountName" spec ""))))
+      (when (zerop (length service-account))
+        (return-from credential-provider-pod-context
+          (values nil nil nil (not (getf attributes :require-service-account)))))
+      (let ((function (and runtime (containerd-runtime-credential-provider-token-function runtime))))
+        (unless function (error "No control-plane token provider is connected"))
+        (multiple-value-bind (token annotations identity)
+            (funcall function pod (getf attributes :audience)
+                     (getf attributes :required-annotations)
+                     (getf attributes :optional-annotations))
+          (let ((cache-identity
+                  (list identity
+                        (loop for key being the hash-keys of (or annotations (core-object))
+                                using (hash-value value)
+                              collect (cons key value)))))
+            (when (equal "Token" (getf attributes :cache-type))
+              (setf cache-identity
+                    (list cache-identity
+                          (octets-to-hex
+                           (ironclad:digest-sequence
+                            :sha256 (trivial-utf-8:string-to-utf-8-bytes token))))))
+            (values token annotations cache-identity t)))))))
+
+(defun image-credential-provider-entries (providers image &optional runtime pod)
   "Return matching executable-provider registry entries for IMAGE in provider order."
   (let ((repository (image-repository image)) (now (funcall *credential-provider-clock*)))
     (loop for provider in providers
@@ -180,24 +213,35 @@ Provider names resolve only within BIN-DIRECTORY and are returned in configurati
                      (image-credential-provider-match-images provider))
             append
             (handler-case
-                (bt:with-lock-held ((image-credential-provider-lock provider))
-                  (let ((cache (image-credential-provider-cache provider)))
-                    (multiple-value-bind (cached hit)
-                        (loop for type in '("Image" "Registry" "Global")
-                              for key = (cons type (credential-provider-cache-key type repository))
-                              for value = (gethash key cache)
-                              when (and value (> (car value) now))
-                                do (return (values (cdr value) t))
-                              finally (return (values nil nil)))
-                      (if hit
-                          cached
-                          (multiple-value-bind (entries type duration)
-                              (credential-provider-response-entries provider image)
-                            (when (plusp duration)
-                              (setf (gethash
-                                     (cons type (credential-provider-cache-key type repository)) cache)
-                                    (cons (+ now duration) entries)))
-                            entries)))))
+                (multiple-value-bind (token annotations identity eligible)
+                    (credential-provider-pod-context provider runtime pod)
+                  (when eligible
+                    (bt:with-lock-held ((image-credential-provider-lock provider))
+                      (let ((cache (image-credential-provider-cache provider)))
+                        (multiple-value-bind (cached hit)
+                            (loop for type in '("Image" "Registry" "Global")
+                                  for key = (list identity type (credential-provider-cache-key type repository))
+                                  for value = (gethash key cache)
+                                  when (and value (> (car value) now))
+                                    do (return (values (cdr value) t))
+                                  finally (return (values nil nil)))
+                          (if hit
+                              cached
+                              (multiple-value-bind (entries type duration)
+                                  (if (image-credential-provider-token-attributes provider)
+                                      (credential-provider-response-entries provider image token annotations)
+                                      (credential-provider-response-entries provider image))
+                                (when (and token
+                                           (equal "ServiceAccount"
+                                                  (getf (image-credential-provider-token-attributes provider)
+                                                        :cache-type))
+                                           (some (lambda (entry) (equal token (cddr entry))) entries))
+                                  (error "Credential provider returned its bound token as a cached password"))
+                                (when (plusp duration)
+                                  (setf (gethash
+                                         (list identity type (credential-provider-cache-key type repository)) cache)
+                                        (cons (+ now duration) entries)))
+                                entries)))))))
               ;; Plugin errors do not prevent credentials from earlier keyrings
               ;; from being attempted, and their output may contain credentials.
               (error () nil)))))
@@ -345,7 +389,7 @@ Every matching credential is returned, because the kubelet tries them all to all
           (append entries
                   (containerd-runtime-registry-credentials runtime)
                   (image-credential-provider-entries
-                   (containerd-runtime-credential-providers runtime) image)))
+                   (containerd-runtime-credential-providers runtime) image runtime pod)))
     (matching-registry-credentials entries (image-repository image))))
 
 (defun image-pull-job-key (image credentials)
