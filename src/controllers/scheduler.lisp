@@ -317,22 +317,189 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
         (and status (gethash "resourceClaimName" status)))))
 
 (defun pod-dra-claims-unlocked (store pod)
-  "Return POD's resolved ResourceClaims and true, or NIL/NIL until every claim exists and is allocated."
+  "Return POD's resolved ResourceClaims and true, or NIL/NIL until every claim exists and is reservable."
   (let ((claims nil))
     (loop for reference across (gethash "resourceClaims" (gethash "spec" (pod-to-object pod)) #())
           for name = (pod-dra-claim-name-unlocked store pod reference)
           do (unless name (return-from pod-dra-claims-unlocked (values nil nil)))
              (let ((claim (gethash (core-resource-key "resourceclaims" (pod-namespace pod) name)
                                    (pod-store-resources store))))
-               (unless (and claim (gethash "allocation" (gethash "status" claim (core-object))))
+               (unless claim
                  (return-from pod-dra-claims-unlocked (values nil nil)))
-               (let ((reserved (gethash "reservedFor" (gethash "status" claim) #())))
+               (let ((reserved (gethash "reservedFor" (gethash "status" claim (core-object)) #())))
                  (when (and (plusp (length reserved))
                             (not (find (pod-uid pod) reserved :test #'equal
                                       :key (lambda (consumer) (gethash "uid" consumer)))))
                    (return-from pod-dra-claims-unlocked (values nil nil))))
                (push claim claims)))
     (values (nreverse claims) t)))
+
+(defun dra-device-key (driver pool device)
+  "Return the identity used to prevent one DRA device from being allocated twice."
+  (list driver pool device))
+
+(defun dra-allocated-device-keys-unlocked (store)
+  "Return an EQUAL set of devices present in committed ResourceClaim allocations."
+  (let ((used (make-hash-table :test #'equal)))
+    (loop for object being the hash-values of (pod-store-resources store)
+          when (equal "ResourceClaim" (gethash "kind" object))
+            do (loop for result across (gethash "results"
+                                                  (gethash "devices"
+                                                           (gethash "allocation"
+                                                                    (gethash "status" object (core-object))
+                                                                    (core-object))
+                                                           (core-object))
+                                                  #())
+                     do (setf (gethash (dra-device-key (gethash "driver" result)
+                                                       (gethash "pool" result)
+                                                       (gethash "device" result))
+                                       used)
+                              t)))
+    used))
+
+(defun dra-slice-available-on-node-p (slice node)
+  "Return whether every device in SLICE is available on NODE."
+  (let ((spec (gethash "spec" slice)))
+    (cond ((gethash "allNodes" spec) t)
+          ((gethash "nodeName" spec)
+           (equal (gethash "nodeName" spec) (node-record-name node)))
+          ((gethash "nodeSelector" spec)
+           (some (lambda (term) (node-selector-term-matches-p term node))
+                 (gethash "nodeSelectorTerms" (gethash "nodeSelector" spec) #())))
+          ;; Per-device node selection needs the device's own nodeName or
+          ;; nodeSelector and is implemented with the broader selector slice.
+          (t nil))))
+
+(defun dra-current-complete-slices-unlocked (store node)
+  "Return current-generation ResourceSlices whose pools are complete on NODE."
+  (let ((pools (make-hash-table :test #'equal)) (complete nil))
+    (loop for slice being the hash-values of (pod-store-resources store)
+          when (equal "ResourceSlice" (gethash "kind" slice))
+            do (let* ((spec (gethash "spec" slice))
+                      (pool (gethash "pool" spec))
+                      (key (list (gethash "driver" spec) (gethash "name" pool))))
+                 (push slice (gethash key pools))))
+    (maphash
+     (lambda (key slices)
+       (declare (ignore key))
+       (let* ((generation (loop for slice in slices
+                                maximize (gethash "generation" (gethash "pool" (gethash "spec" slice)))))
+              (current (remove-if-not
+                        (lambda (slice)
+                          (= generation (gethash "generation" (gethash "pool" (gethash "spec" slice)))))
+                        slices))
+              (expected (gethash "resourceSliceCount"
+                                 (gethash "pool" (gethash "spec" (first current))))))
+         (when (= expected (length current))
+           (dolist (slice current)
+             (when (dra-slice-available-on-node-p slice node) (push slice complete))))))
+     pools)
+    complete))
+
+(defun dra-exact-request-results-unlocked (store exact result-name node used)
+  "Allocate one ExactCount or All request on NODE under RESULT-NAME."
+  (let* ((class-name (and exact (gethash "deviceClassName" exact)))
+         (class (and class-name
+                     (gethash (core-resource-key "deviceclasses" nil class-name)
+                              (pod-store-resources store))))
+         (mode (and exact (gethash "allocationMode" exact "ExactCount")))
+         (count (and exact (gethash "count" exact 1))))
+    (unless (and exact class (member mode '("ExactCount" "All") :test #'equal)
+                 (zerop (length (gethash "selectors" exact #())))
+                 (zerop (length (gethash "selectors" (gethash "spec" class) #()))))
+      (return-from dra-exact-request-results-unlocked (values nil nil)))
+    (let ((candidates nil) (pools (make-hash-table :test #'equal)))
+      (dolist (slice (dra-current-complete-slices-unlocked store node))
+        (let* ((spec (gethash "spec" slice))
+               (driver (gethash "driver" spec))
+               (pool (gethash "name" (gethash "pool" spec))))
+          (loop for device across (gethash "devices" spec #())
+                for name = (gethash "name" device)
+                for key = (dra-device-key driver pool name)
+                do (push (list driver pool name (gethash key used))
+                         (gethash (list driver pool) pools))
+                   (unless (gethash key used)
+                     (push (list driver pool name) candidates)))))
+      (when (equal mode "All")
+        (let ((pool-candidates
+                (sort (loop for devices being the hash-values of pools
+                            unless (or (null devices) (find t devices :key #'fourth))
+                              collect devices)
+                      #'string< :key (lambda (devices)
+                                       (format nil "~A/~A" (first (first devices))
+                                               (second (first devices)))))))
+          (unless pool-candidates
+            (return-from dra-exact-request-results-unlocked (values nil nil)))
+          (setf candidates
+                (mapcar (lambda (candidate) (subseq candidate 0 3))
+                        (first pool-candidates))
+                count (length candidates))))
+      (setf candidates (sort candidates #'string<
+                             :key (lambda (candidate) (format nil "~{~A~^/~}" candidate))))
+      (unless (<= count (length candidates))
+        (return-from dra-exact-request-results-unlocked (values nil nil)))
+      (values
+       (map 'vector
+            (lambda (candidate)
+              (destructuring-bind (driver pool device) candidate
+                (setf (gethash (dra-device-key driver pool device) used) t)
+                (core-object "request" result-name
+                             "driver" driver "pool" pool "device" device)))
+            (subseq candidates 0 count))
+       t))))
+
+(defun dra-request-results-unlocked (store request node used)
+  "Allocate REQUEST on NODE, honoring an ordered FirstAvailable list."
+  (let ((name (gethash "name" request)) (exact (gethash "exactly" request)))
+    (when exact
+      (return-from dra-request-results-unlocked
+        (dra-exact-request-results-unlocked store exact name node used)))
+    (loop for subrequest across (gethash "firstAvailable" request #())
+          do (multiple-value-bind (results ready)
+                 (dra-exact-request-results-unlocked
+                  store subrequest
+                  (format nil "~A/~A" name (gethash "name" subrequest)) node used)
+               (when ready (return-from dra-request-results-unlocked (values results t)))))
+    (values nil nil)))
+
+(defun dra-allocation-for-claim-unlocked (store claim node used)
+  "Build CLAIM's structured allocation on NODE, returning it and success."
+  (let ((results nil)
+        (requests (gethash "requests" (gethash "devices" (gethash "spec" claim) (core-object)) #())))
+    (loop for request across requests
+          do (multiple-value-bind (request-results ready)
+                 (dra-request-results-unlocked store request node used)
+               (unless ready (return-from dra-allocation-for-claim-unlocked (values nil nil)))
+               (loop for result across request-results do (push result results))))
+    (values
+     (core-object
+      "devices" (core-object "results" (coerce (nreverse results) 'vector))
+      "nodeSelector"
+      (core-object
+       "nodeSelectorTerms"
+       (vector (core-object
+                "matchFields"
+                (vector (core-object "key" "metadata.name" "operator" "In"
+                                     "values" (vector (node-record-name node))))))))
+     t)))
+
+(defun pod-dra-allocation-plan-unlocked (store pod node)
+  "Return POD's claim/allocation plan for NODE and true, or NIL/NIL when unavailable."
+  (multiple-value-bind (claims ready) (pod-dra-claims-unlocked store pod)
+    (unless ready (return-from pod-dra-allocation-plan-unlocked (values nil nil)))
+    (let ((used (dra-allocated-device-keys-unlocked store)) (plan nil))
+      (dolist (claim claims)
+        (let ((allocation (gethash "allocation" (gethash "status" claim (core-object)))))
+          (if allocation
+              (unless (dra-allocation-available-on-node-p claim node)
+                (return-from pod-dra-allocation-plan-unlocked (values nil nil)))
+              (multiple-value-bind (new-allocation allocated)
+                  (dra-allocation-for-claim-unlocked store claim node used)
+                (unless allocated
+                  (return-from pod-dra-allocation-plan-unlocked (values nil nil)))
+                (setf allocation new-allocation)))
+          (push (cons claim allocation) plan)))
+      (values (nreverse plan) t))))
 
 (defun dra-allocation-available-on-node-p (claim node)
   "Return whether CLAIM's committed allocation is available on NODE."
@@ -343,23 +510,26 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
               (gethash "nodeSelectorTerms" selector #())))))
 
 (defun pod-dra-node-compatible-p (store pod node)
-  "Return whether all allocated claims of POD may be reserved and used on NODE.
+  "Return whether all claims of POD may be allocated or reserved and used on NODE.
 Call with STORE's lock held."
-  (multiple-value-bind (claims ready) (pod-dra-claims-unlocked store pod)
-    (and ready (every (lambda (claim) (dra-allocation-available-on-node-p claim node)) claims))))
+  (nth-value 1 (pod-dra-allocation-plan-unlocked store pod node)))
 
-(defun reserve-pod-dra-claims-unlocked (store pod)
-  "Persist POD in each allocated claim's status.reservedFor. Caller holds STORE's lock."
-  (multiple-value-bind (claims ready) (pod-dra-claims-unlocked store pod)
+(defun reserve-pod-dra-claims-unlocked (store pod node)
+  "Atomically allocate NODE's devices and reserve every claim for POD. Caller holds STORE's lock."
+  (multiple-value-bind (plan ready) (pod-dra-allocation-plan-unlocked store pod node)
     (unless ready (return-from reserve-pod-dra-claims-unlocked nil))
-    (when claims
+    (when plan
       (let* ((resources (copy-core-resource-index store))
              (revision (1+ (pod-store-resource-revision store))))
-        (dolist (claim claims)
-          (let* ((object (copy-core-object claim))
+        (dolist (entry plan)
+          (let* ((claim (car entry))
+                 (object (copy-core-object claim))
                  (metadata (gethash "metadata" object))
-                 (status (gethash "status" object))
+                 (status (or (gethash "status" object)
+                             (setf (gethash "status" object) (core-object))))
                  (reserved (gethash "reservedFor" status #())))
+            (unless (gethash "allocation" status)
+              (setf (gethash "allocation" status) (copy-core-object (cdr entry))))
             (unless (find (pod-uid pod) reserved :test #'equal
                           :key (lambda (consumer) (gethash "uid" consumer)))
               (setf (gethash "reservedFor" status)
@@ -374,7 +544,7 @@ Call with STORE's lock held."
 
 (defun persist-pod-assignment (store pod node-name)
   "Assign POD to NODE-NAME, advance its resource version, and persist it."
-  (unless (reserve-pod-dra-claims-unlocked store pod)
+  (unless (reserve-pod-dra-claims-unlocked store pod (get-node-unlocked store node-name))
     (error "ResourceClaims for ~A/~A changed during scheduling" (pod-namespace pod) (pod-name pod)))
   (let* ((object (pod-to-object pod))
          (spec (gethash "spec" object))
