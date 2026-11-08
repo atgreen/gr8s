@@ -21,6 +21,28 @@
       (is-false (gr8s:node-record-ready-p node))
       (is (string= "worker-a" (gr8s:pod-node-name restored-pod))))))
 
+(test dual-stack-node-cidrs-survive-state-and-node-api-roundtrips
+  (with-temporary-store (store directory)
+    (gr8s:register-node
+     store (gr8s:make-node-record :id "dual-id" :name "dual"
+                                  :pod-cidr "10.64.0.0/20"
+                                  :pod-cidrs #("10.64.0.0/20" "fd00:64::/64")))
+    (let* ((reopened (open-store directory))
+           (node (gr8s:get-node reopened "dual"))
+           (api (gr8s::node-api-object node)))
+      (is (equalp #("10.64.0.0/20" "fd00:64::/64")
+                  (gr8s:node-record-all-pod-cidrs node)))
+      (is (equal "10.64.0.0/20" (gethash "podCIDR" (gethash "spec" api))))
+      (is (equalp #("10.64.0.0/20" "fd00:64::/64")
+                  (gethash "podCIDRs" (gethash "spec" api))))))
+  ;; State written before dual-stack fields remains one-family state.
+  (let* ((legacy (gr8s::parse-node-record
+                  (gr8s::core-object "id" "legacy-id" "name" "legacy"
+                                     "podCIDR" "10.65.0.0/20")))
+         (api (gr8s::node-api-object legacy)))
+    (is (equalp #("10.65.0.0/20") (gr8s:node-record-all-pod-cidrs legacy)))
+    (is (equalp #("10.65.0.0/20") (gethash "podCIDRs" (gethash "spec" api))))))
+
 (test duplicate-node-identities-and-pod-cidrs-are-rejected
   (with-temporary-store (store path)
     (gr8s:register-node store

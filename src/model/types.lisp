@@ -63,6 +63,9 @@
   id
   name
   pod-cidr
+  ;; Every assigned family, primary first. POD-CIDR remains the compatibility
+  ;; accessor for older state and callers while the dataplane is migrated.
+  (pod-cidrs #())
   (underlay-address "")
   ;; Public half of the node-local WireGuard identity. The private half never
   ;; enters the control-plane store.
@@ -91,6 +94,13 @@
   ;; When the node was first registered, as an RFC 3339 timestamp; NIL for a node an older
   ;; gr8s registered until its agent registers again.
   creation-timestamp)
+
+(defun node-record-all-pod-cidrs (node)
+  "Return NODE's assigned Pod CIDRs, accepting records from before dual-stack storage."
+  (let ((cidrs (node-record-pod-cidrs node)))
+    (if (plusp (length cidrs)) cidrs
+        (let ((primary (node-record-pod-cidr node)))
+          (if (and (stringp primary) (plusp (length primary))) (vector primary) #())))))
 
 (defun node-record-runtime-ready-p (node)
   "Return whether NODE's agent holds its lease and its container runtime can run Pods."

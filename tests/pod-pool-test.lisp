@@ -47,6 +47,18 @@
         (is (string= original (uiop:read-file-string (merge-pathnames "network/pool.json" path))))
         (is (string= node-cidr (gr8s:node-record-pod-cidr (gr8s:get-node store "worker"))))))))
 
+(test explicit-dual-stack-pool-persists-both-family-geometries
+  (with-temporary-store (store path)
+    (let* ((options (parse-cli-options
+                     '("serve" "--cluster-pod-cidr" "10.112.0.0/12,fd70::/48"
+                       "--node-pod-prefix" "22" "--node-pod-prefix-ipv6" "64")))
+           (pool (ensure-test-controller-node-pool store path options)))
+      (is (equalp #("10.112.0.0/12" "fd70::/48")
+                  (gr8s::node-pool-cluster-cidrs pool)))
+      (is (equalp #(22 64) (gr8s::node-pool-prefixes pool)))
+      (is (equalp pool (ensure-test-controller-node-pool
+                        (open-store path) path (parse-cli-options '("serve"))))))))
+
 (test previous-default-pool-and-node-identities-survive-upgrade
   (with-temporary-store (store path)
     (gr8s:register-node store (make-test-node "old-worker" "old-node" "10.88.3.0/24"))
@@ -84,6 +96,23 @@
     (is (string= "10.80.16.0/20" (gr8s:allocate-node-pod-cidr store "10.80.0.0/12" 20))))
   (is-true (gr8s::ipv4-prefixes-overlap-p "10.80.0.0/12" "10.95.255.255/32"))
   (is-false (gr8s::ipv4-prefixes-overlap-p "10.80.0.0/12" "10.96.0.0/32")))
+
+(test dual-stack-node-block-allocation-is-stable-and-family-independent
+  (with-temporary-store (store path)
+    (values path)
+    (let ((first (gr8s:allocate-node-pod-cidrs
+                  store '("10.80.0.0/12" "fd80::/48") '(20 64))))
+      (is (equalp #("10.80.0.0/20" "fd80::/64") first))
+      (gr8s:register-node
+       store (gr8s:make-node-record :id "node-1" :name "worker-1"
+                                    :pod-cidr (aref first 0) :pod-cidrs first)))
+    (let ((second (gr8s:allocate-node-pod-cidrs
+                   store '("10.80.0.0/12" "fd80::/48") '(20 64))))
+      (is (equalp #("10.80.16.0/20" "fd80:0:0:1::/64") second))
+      ;; Reopening the committed state chooses the same next pair.
+      (is (equalp second
+                  (gr8s:allocate-node-pod-cidrs
+                   (open-store path) '("10.80.0.0/12" "fd80::/48") '(20 64)))))))
 
 (defun pool-test-network (routes &optional (underlay "192.0.2.1"))
   "Create a canonical durable network object for route-ownership tests."

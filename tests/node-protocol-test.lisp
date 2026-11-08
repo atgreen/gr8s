@@ -140,11 +140,14 @@
             'gr8s.node.v1::desired-state-snapshot
             :network (make-instance 'gr8s.node.v1::node-network-config
                                      :node-pod-cidr "10.88.1.0/24"
+                                     :node-pod-cidrs '("10.88.1.0/24" "fd00:88:1::/64")
+                                     :cluster-pod-cidrs '("10.88.0.0/16" "fd00:88::/48")
                                      :underlay-address "192.0.2.10"
                                      :overlay-backend "wireguard"
                                      :wireguard-listen-port 51820)
             :routes (list (make-instance 'gr8s.node.v1::node-route
                                          :node-id "node-b" :pod-cidr "10.88.2.0/24"
+                                         :pod-cidrs '("10.88.2.0/24" "fd00:88:2::/64")
                                          :underlay-address "192.0.2.11"
                                          :wireguard-public-key peer-key
                                          :wireguard-listen-port 51820))))
@@ -155,6 +158,15 @@
     (is (string= "10.88.2.0/24"
                  (slot-value (first (slot-value restored 'gr8s.node.v1::routes))
                              'gr8s.node.v1::pod-cidr)))
+    (is (equal '("10.88.1.0/24" "fd00:88:1::/64")
+               (slot-value (slot-value restored 'gr8s.node.v1::network)
+                           'gr8s.node.v1::node-pod-cidrs)))
+    (is (equal '("10.88.0.0/16" "fd00:88::/48")
+               (slot-value (slot-value restored 'gr8s.node.v1::network)
+                           'gr8s.node.v1::cluster-pod-cidrs)))
+    (is (equal '("10.88.2.0/24" "fd00:88:2::/64")
+               (slot-value (first (slot-value restored 'gr8s.node.v1::routes))
+                           'gr8s.node.v1::pod-cidrs)))
     (is (string= "wireguard"
                  (slot-value (slot-value restored 'gr8s.node.v1::network)
                              'gr8s.node.v1::overlay-backend)))

@@ -209,20 +209,28 @@ complete snapshot to the next one."
    if the server's node id or assigned Pod CIDR changed from what was persisted, if
    the node id is empty, or if the CIDR is invalid. On success persists the node id
    and Pod CIDR to IDENTITY-PATH, even when this reconnect brings no newer snapshot."
-  (let ((node-id (slot-value hello 'gr8s.node.v1::node-id))
+  (let* ((node-id (slot-value hello 'gr8s.node.v1::node-id))
         (cidr (slot-value hello 'gr8s.node.v1::assigned-pod-cidr))
+        (announced (slot-value hello 'gr8s.node.v1::assigned-pod-cidrs))
+        (cidrs (if announced (coerce announced 'vector) (vector cidr)))
         (persisted-node-id (gethash "nodeId" identity ""))
-        (persisted-cidr (gethash "assignedPodCIDR" identity "")))
+        (persisted-cidr (gethash "assignedPodCIDR" identity ""))
+        (persisted-cidrs (gethash "assignedPodCIDRs" identity)))
     (when (and (plusp (length persisted-node-id))
                (not (string= persisted-node-id node-id)))
       (error "Server node identity changed from ~S to ~S" persisted-node-id node-id))
     (when (zerop (length node-id)) (error "Server assigned an empty node identity"))
-    (validate-network-cidr cidr)
+    (unless (and (plusp (length cidrs)) (string= cidr (aref cidrs 0)))
+      (error "Server primary Pod CIDR does not match its ordered allocation"))
+    (loop for assigned across cidrs do (parse-pod-cidr assigned))
     (when (and (plusp (length persisted-cidr)) (not (string= persisted-cidr cidr)))
       (error "Server Pod CIDR changed from ~S to ~S" persisted-cidr cidr))
+    (when (and persisted-cidrs (not (equalp persisted-cidrs cidrs)))
+      (error "Server Pod CIDRs changed from ~S to ~S" persisted-cidrs cidrs))
     ;; Persist the allocation even when this reconnect has no newer snapshot.
     (setf (gethash "nodeId" identity) node-id
-          (gethash "assignedPodCIDR" identity) cidr)
+          (gethash "assignedPodCIDR" identity) cidr
+          (gethash "assignedPodCIDRs" identity) cidrs)
     (persist-agent-identity identity-path identity)))
 
 (defun write-agent-session-envelope (session variant payload)
@@ -273,10 +281,17 @@ applicable method for NIL rather than finding a closed connection."
 
 (defun validate-node-snapshot-identity (identity snapshot)
   "Reject another node allocation before an arrival observer can persist any deletion intent."
-  (let ((network (slot-value snapshot 'gr8s.node.v1::network))
-        (assigned (gethash "assignedPodCIDR" identity)))
+  (let* ((network (slot-value snapshot 'gr8s.node.v1::network))
+         (assigned (gethash "assignedPodCIDR" identity))
+         (assigned-all (or (gethash "assignedPodCIDRs" identity)
+                           (and assigned (vector assigned))))
+         (announced-all (and network (slot-value network 'gr8s.node.v1::node-pod-cidrs)))
+         (network-all (and network
+                           (if announced-all (coerce announced-all 'vector)
+                               (vector (slot-value network 'gr8s.node.v1::node-pod-cidr))))))
     (when (and network assigned
-               (not (string= assigned (slot-value network 'gr8s.node.v1::node-pod-cidr))))
+               (or (not (string= assigned (slot-value network 'gr8s.node.v1::node-pod-cidr)))
+                   (not (equalp assigned-all network-all))))
       (error "Snapshot Pod CIDR does not match the durable node allocation"))))
 
 (defun apply-node-snapshot-and-respond

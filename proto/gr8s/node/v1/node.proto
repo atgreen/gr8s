@@ -238,6 +238,7 @@ message ServerHello {
   string node_id = 1;
   uint32 heartbeat_interval_seconds = 2;
   string assigned_pod_cidr = 3;
+  repeated string assigned_pod_cidrs = 4;
 }
 
 message DesiredStateSnapshot {
@@ -278,6 +279,8 @@ message NodeNetworkConfig {
   string underlay_address = 6;
   string overlay_backend = 7; // vxlan | wireguard
   uint32 wireguard_listen_port = 8;
+  repeated string cluster_pod_cidrs = 9;
+  repeated string node_pod_cidrs = 10;
 }
 
 message NodeRoute {
@@ -286,6 +289,7 @@ message NodeRoute {
   string underlay_address = 3;
   bytes wireguard_public_key = 4;
   uint32 wireguard_listen_port = 5;
+  repeated string pod_cidrs = 6;
 }
 
 enum OperationKind {

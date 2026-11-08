@@ -109,6 +109,7 @@
     (setf (gethash "id" object) (node-record-id node)
           (gethash "name" object) (node-record-name node)
           (gethash "podCIDR" object) (node-record-pod-cidr node)
+          (gethash "podCIDRs" object) (copy-seq (node-record-all-pod-cidrs node))
           (gethash "underlayAddress" object) (node-record-underlay-address node)
           (gethash "kubeletPort" object) (node-record-kubelet-port node)
           (gethash "ready" object) (not (null (node-record-ready-p node))))
@@ -154,9 +155,16 @@
                    (error (condition)
                      (error "Invalid persisted WireGuard public key: ~A" condition)))
                  #())))
-      (make-node-record :id (gethash "id" object)
+      (let* ((stored-cidrs (gethash "podCIDRs" object))
+             (primary (gethash "podCIDR" object))
+             (cidrs (if (and (vectorp stored-cidrs) (not (stringp stored-cidrs))
+                             (plusp (length stored-cidrs)))
+                        stored-cidrs
+                        (if (and (stringp primary) (plusp (length primary))) (vector primary) #()))))
+       (make-node-record :id (gethash "id" object)
                       :name (gethash "name" object)
-                      :pod-cidr (gethash "podCIDR" object)
+                      :pod-cidr (if (plusp (length cidrs)) (aref cidrs 0) primary)
+                      :pod-cidrs (copy-seq cidrs)
                       :underlay-address (gethash "underlayAddress" object "")
                       :wireguard-public-key wireguard-public-key
                       :kubelet-port (let ((port (gethash "kubeletPort" object 0))) (if (integerp port) port 0))
@@ -175,7 +183,7 @@
                                             (and (stringp time) time))
                       :ready-p (and (eq t (gethash "ready" object))
                                     (integerp heartbeat) (integerp deadline)
-                                    (<= (get-universal-time) deadline))))))
+                                    (<= (get-universal-time) deadline)))))))
 
 (defun secure-random-octets (count)
   "Read COUNT cryptographically secure random octets from the operating system."

@@ -240,36 +240,91 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
           (note-node-state-change store node)))))
   t)
 
+(defun parse-pod-cidr (cidr)
+  "Return CIDR's family, integer address, prefix and address width."
+  (let ((slash (and (stringp cidr) (position #\/ cidr))))
+    (unless slash (error "Invalid Pod CIDR ~S" cidr))
+    (let* ((address (subseq cidr 0 slash))
+           (ipv6-p (not (null (find #\: address))))
+           (bits (if ipv6-p 128 32))
+           (prefix (parse-integer cidr :start (1+ slash) :junk-allowed nil))
+           (value (if ipv6-p (ipv6-integer address) (parse-ipv4-integer address))))
+      (unless (<= 0 prefix bits) (error "Invalid Pod CIDR prefix ~S" cidr))
+      (values (if ipv6-p :ipv6 :ipv4) value prefix bits))))
+
+(defun format-pod-address (family value)
+  "Format VALUE as an address in FAMILY."
+  (if (eq family :ipv6) (format-ipv6-integer value) (format-ipv4-integer value)))
+
+(defun pod-cidrs-overlap-p (left right)
+  "Return whether same-family Pod CIDRs LEFT and RIGHT intersect."
+  (multiple-value-bind (left-family left-value left-prefix left-bits) (parse-pod-cidr left)
+    (multiple-value-bind (right-family right-value right-prefix right-bits) (parse-pod-cidr right)
+      (and (eq left-family right-family)
+           (= left-bits right-bits)
+           (let ((shift (- (min left-prefix right-prefix) left-bits)))
+             (= (ash left-value shift) (ash right-value shift)))))))
+
 (defun allocate-node-pod-cidr-unlocked (store cluster-cidr node-prefix)
   "Return the first free NODE-PREFIX block within CLUSTER-CIDR. Caller holds STORE's lock."
-  (multiple-value-bind (address cluster-prefix) (parse-ipv4-cidr cluster-cidr)
-    (unless (<= cluster-prefix node-prefix 32)
+  (multiple-value-bind (family address cluster-prefix bits) (parse-pod-cidr cluster-cidr)
+    (unless (<= cluster-prefix node-prefix bits)
       (error "Node prefix /~D does not fit cluster CIDR ~A"
              node-prefix cluster-cidr))
     (let* ((cluster-mask (if (zerop cluster-prefix)
                              0
-                             (logand #xffffffff
-                                     (ash #xffffffff (- 32 cluster-prefix)))))
+                             (ldb (byte bits 0)
+                                  (ash (1- (ash 1 bits)) (- bits cluster-prefix)))))
            (base (logand address cluster-mask))
-           (block-size (ash 1 (- 32 node-prefix)))
+           (block-size (ash 1 (- bits node-prefix)))
            (block-count (ash 1 (- node-prefix cluster-prefix))))
       (loop for index below block-count
             for candidate = (format nil "~A/~D"
-                                    (format-ipv4-integer
+                                    (format-pod-address family
                                      (+ base (* index block-size)))
                                     node-prefix)
             unless (loop for node being the hash-values
                            of (pod-store-nodes store)
-                         thereis (and (plusp (length (node-record-pod-cidr node)))
-                                      (ipv4-prefixes-overlap-p candidate (node-record-pod-cidr node))))
+                         thereis (loop for assigned across (node-record-all-pod-cidrs node)
+                                       thereis (pod-cidrs-overlap-p candidate assigned)))
               return candidate
             finally (error "No free /~D PodCIDR remains in ~A"
                            node-prefix cluster-cidr)))))
+
+(defun normalize-pod-pool-geometry (cluster-cidrs node-prefixes)
+  "Return ordered CIDR and prefix lists, accepting the legacy singular form."
+  (let ((cidrs (etypecase cluster-cidrs
+                 (string (list cluster-cidrs))
+                 (vector (coerce cluster-cidrs 'list))
+                 (list cluster-cidrs)))
+        (prefixes (etypecase node-prefixes
+                    (integer (list node-prefixes))
+                    (vector (coerce node-prefixes 'list))
+                    (list node-prefixes))))
+    (unless (and cidrs (= (length cidrs) (length prefixes)))
+      (error "Pod pool CIDRs and node prefixes must be non-empty and have equal lengths"))
+    (let ((families (mapcar (lambda (cidr) (nth-value 0 (parse-pod-cidr cidr))) cidrs)))
+      (unless (= (length families) (length (remove-duplicates families)))
+        (error "Pod pool may contain at most one CIDR per address family")))
+    (values cidrs prefixes)))
+
+(defun allocate-node-pod-cidrs-unlocked (store cluster-cidrs node-prefixes)
+  "Allocate one deterministic node block from every configured Pod address family."
+  (multiple-value-bind (cidrs prefixes)
+      (normalize-pod-pool-geometry cluster-cidrs node-prefixes)
+    (map 'vector (lambda (cidr prefix)
+                   (allocate-node-pod-cidr-unlocked store cidr prefix))
+         cidrs prefixes)))
 
 (defun allocate-node-pod-cidr (store cluster-cidr node-prefix)
   "Return the first free NODE-PREFIX block within CLUSTER-CIDR."
   (with-store-lock (store)
     (allocate-node-pod-cidr-unlocked store cluster-cidr node-prefix)))
+
+(defun allocate-node-pod-cidrs (store cluster-cidrs node-prefixes)
+  "Return one free node block for every configured cluster Pod CIDR."
+  (with-store-lock (store)
+    (allocate-node-pod-cidrs-unlocked store cluster-cidrs node-prefixes)))
 
 (defun install-node-enrollment-command
     (store node-id node-name cluster-cidr node-prefix creation-timestamp)
@@ -282,11 +337,12 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
       (loop for node being the hash-values of (pod-store-nodes store)
             when (string= node-id (node-record-id node))
               do (node-conflict "Node identity ~A is already claimed" node-id))
-      (let ((node
-              (make-node-record
-               :id node-id :name node-name
-               :pod-cidr (allocate-node-pod-cidr-unlocked store cluster-cidr node-prefix)
-               :creation-timestamp creation-timestamp)))
+      (let* ((pod-cidrs (allocate-node-pod-cidrs-unlocked store cluster-cidr node-prefix))
+             (node
+               (make-node-record
+                :id node-id :name node-name
+                :pod-cidr (aref pod-cidrs 0) :pod-cidrs pod-cidrs
+                :creation-timestamp creation-timestamp)))
         (setf (gethash node-name (pod-store-nodes store)) node)
         (publish-node-change-unlocked store nil node)
         node))))

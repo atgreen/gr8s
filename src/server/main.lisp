@@ -127,7 +127,9 @@
                        :node-name "gr8s-local"
                        :disable-agent nil
                        :cluster-pod-cidr +default-cluster-pod-cidr+
+                       :cluster-pod-cidrs (vector +default-cluster-pod-cidr+)
                        :node-pod-prefix +default-node-pod-prefix+
+                       :node-pod-prefix-ipv6 64
                        :overlay-backend "vxlan"
                        :runtime "containerd"
                        :containerd-mode "managed"
@@ -164,14 +166,29 @@
                      ((string= option "--debug-slynk-port")
                       (setf (getf options :debug-slynk-port) (parse-port value)))
                      ((string= option "--cluster-pod-cidr")
-                      (validate-network-cidr value)
-                      (setf (getf options :cluster-pod-cidr) value
+                      (let ((cidrs (coerce (uiop:split-string value :separator '(#\,)) 'vector)))
+                        (validate-node-pool-config
+                         (make-node-pool-config
+                          (aref cidrs 0) (getf options :node-pod-prefix)
+                          cidrs (map 'vector (lambda (cidr)
+                                               (if (find #\: cidr)
+                                                   (getf options :node-pod-prefix-ipv6)
+                                                   (getf options :node-pod-prefix)))
+                                     cidrs)))
+                        (setf (getf options :cluster-pod-cidr) (aref cidrs 0)
+                              (getf options :cluster-pod-cidrs) cidrs))
+                      (setf
                             (getf options :cluster-pod-cidr-supplied-p) t))
                      ((string= option "--node-pod-prefix")
                       (let ((prefix (parse-integer value :junk-allowed nil)))
                         (unless (<= 1 prefix 30) (error "node Pod prefix must be 1..30"))
                         (setf (getf options :node-pod-prefix) prefix
                               (getf options :node-pod-prefix-supplied-p) t)))
+                     ((string= option "--node-pod-prefix-ipv6")
+                      (let ((prefix (parse-integer value :junk-allowed nil)))
+                        (unless (<= 1 prefix 126) (error "IPv6 node Pod prefix must be 1..126"))
+                        (setf (getf options :node-pod-prefix-ipv6) prefix
+                              (getf options :node-pod-prefix-ipv6-supplied-p) t)))
                      ((string= option "--overlay-backend")
                       (unless (member value '("vxlan" "wireguard") :test #'string=)
                         (error "overlay backend must be vxlan or wireguard"))
@@ -1056,6 +1073,8 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                   :port (getf options :node-port)
                   :pki pki :cluster-pod-cidr (gethash "clusterPodCIDR" pool)
                   :node-prefix (gethash "nodePrefix" pool)
+                  :cluster-pod-cidrs (node-pool-cluster-cidrs pool)
+                  :node-prefixes (node-pool-prefixes pool)
                   :overlay-backend (getf options :overlay-backend)
                   :wireguard-listen-port 51820))
            (when ha
@@ -1259,7 +1278,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (format t "  notices      Print third-party copyright and license notices~%~%")
   (format t "serve options:~%")
   (format t "  --state-directory DIR   --listen IPV4   --port PORT   --node-port PORT   --node-name NAME~%")
-  (format t "  --kubeconfig FILE   --cluster-pod-cidr CIDR   --node-pod-prefix BITS   --disable-agent~%")
+  (format t "  --kubeconfig FILE   --cluster-pod-cidr CIDR[,CIDR]   --node-pod-prefix BITS   --node-pod-prefix-ipv6 BITS   --disable-agent~%")
   (format t "  --overlay-backend vxlan|wireguard~%")
   (format t "  --runtime containerd|fake   --containerd-mode managed|external~%")
   (format t "  --containerd-{executable,oci-runtime,socket,log-root} PATH   --containerd-no-sync~%")

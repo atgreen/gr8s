@@ -1426,6 +1426,39 @@
         (signals error (gr8s::accept-agent-server-hello identity identity-path hello))
         (is (string= original (uiop:read-file-string identity-path)))))))
 
+(test server-hello-persists-and-protects-the-complete-dual-stack-allocation
+  (with-temporary-store (store path)
+    (values store)
+    (let* ((identity-path (merge-pathnames "agent/identity.json" path))
+           (identity (gr8s::make-agent-identity "worker-a" :node-id "node-1"))
+           (hello (make-instance
+                   'gr8s.node.v1::server-hello
+                   :node-id "node-1" :assigned-pod-cidr "10.88.0.0/20"
+                   :assigned-pod-cidrs '("10.88.0.0/20" "fd88::/64"))))
+      (gr8s::accept-agent-server-hello identity identity-path hello)
+      (is (equalp #("10.88.0.0/20" "fd88::/64")
+                  (gethash "assignedPodCIDRs" identity)))
+      (let ((original (uiop:read-file-string identity-path)))
+        (setf (slot-value hello 'gr8s.node.v1::assigned-pod-cidrs)
+              '("10.88.0.0/20" "fd88:0:0:1::/64"))
+        (signals error (gr8s::accept-agent-server-hello identity identity-path hello))
+        (is (string= original (uiop:read-file-string identity-path)))))))
+
+(test dual-stack-enrollment-allocates-both-families-from-committed-node-state
+  (with-temporary-store (store path)
+    (values path)
+    (let ((first (gr8s::install-node-enrollment-command
+                  store "id-a" "worker-a" '("10.88.0.0/16" "fd88::/48")
+                  '(24 64) "2026-11-08T00:00:00Z"))
+          (second nil))
+      (setf second (gr8s::install-node-enrollment-command
+                    store "id-b" "worker-b" '("10.88.0.0/16" "fd88::/48")
+                    '(24 64) "2026-11-08T00:00:01Z"))
+      (is (equalp #("10.88.0.0/24" "fd88::/64")
+                  (gr8s:node-record-all-pod-cidrs first)))
+      (is (equalp #("10.88.1.0/24" "fd88:0:0:1::/64")
+                  (gr8s:node-record-all-pod-cidrs second))))))
+
 (test snapshot-cidr-is-checked-before-runtime-application-or-acknowledgement
   (let ((identity (gr8s::make-agent-identity "worker-a"))
         (snapshot (empty-desired-snapshot)))
@@ -1439,6 +1472,16 @@
        (lambda (snapshot) (declare (ignore snapshot))
          (fail "mismatched snapshot reached the runtime"))))
     (is (= 0 (gethash "lastAppliedRevision" identity)))))
+
+(test legacy-snapshot-singular-cidr-matches-a-new-vector-identity
+  (let ((identity (gr8s::make-agent-identity "worker-a"))
+        (snapshot (empty-desired-snapshot)))
+    (setf (gethash "assignedPodCIDR" identity) "10.88.0.0/20"
+          (gethash "assignedPodCIDRs" identity) #("10.88.0.0/20")
+          (slot-value snapshot 'gr8s.node.v1::network)
+          (make-instance 'gr8s.node.v1::node-network-config
+                         :node-pod-cidr "10.88.0.0/20"))
+    (finishes (gr8s::validate-node-snapshot-identity identity snapshot))))
 
 (test tls-enrollment-verifies-the-server-before-consuming-its-token
   (with-temporary-store (store path)

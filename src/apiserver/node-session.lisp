@@ -35,7 +35,7 @@
 (defstruct (node-grpc-server
              (:constructor %make-node-grpc-server
                  (&key store grpc-server thread port heartbeat-timeout-seconds
-                       pki cluster-pod-cidr node-prefix overlay-backend
+                       pki cluster-pod-cidr node-prefix cluster-pod-cidrs node-prefixes overlay-backend
                        wireguard-listen-port image-tracker)))
   store
   grpc-server
@@ -45,6 +45,8 @@
   pki
   cluster-pod-cidr
   node-prefix
+  cluster-pod-cidrs
+  node-prefixes
   (overlay-backend "vxlan")
   (wireguard-listen-port 51820)
   (image-tracker (gr8s.image-distribution::make-image-tracker))
@@ -642,6 +644,8 @@ operation. No-op when no operation matches MESSAGE's id."
     (make-instance 'gr8s.node.v1::node-network-config
                    :cluster-pod-cidr (node-grpc-server-cluster-pod-cidr server)
                    :node-pod-cidr (node-record-pod-cidr node)
+                   :cluster-pod-cidrs (copy-list (node-grpc-server-cluster-pod-cidrs server))
+                   :node-pod-cidrs (coerce (node-record-all-pod-cidrs node) 'list)
                    :dns-address +dns-pod-server-address+
                    :underlay-address (node-record-underlay-address node)
                    :overlay-backend (node-grpc-server-overlay-backend server)
@@ -671,6 +675,7 @@ operation. No-op when no operation matches MESSAGE's id."
           collect (make-instance 'gr8s.node.v1::node-route
                                  :node-id (node-record-id node)
                                  :pod-cidr (node-record-pod-cidr node)
+                                 :pod-cidrs (coerce (node-record-all-pod-cidrs node) 'list)
                                  :underlay-address (node-record-underlay-address node)
                                  :wireguard-public-key
                                  (if (string= "wireguard" (node-grpc-server-overlay-backend server))
@@ -992,7 +997,9 @@ operation. No-op when no operation matches MESSAGE's id."
                           :hello (make-instance 'gr8s.node.v1::server-hello
                                                 :node-id (node-record-id node)
                                                 :heartbeat-interval-seconds heartbeat-interval
-                                                :assigned-pod-cidr (node-record-pod-cidr node))
+                                               :assigned-pod-cidr (node-record-pod-cidr node)
+                                               :assigned-pod-cidrs
+                                               (coerce (node-record-all-pod-cidrs node) 'list))
                           :sequence 1))
                  ;; Every session starts from a complete snapshot.
                  (ag-grpc:stream-send
@@ -1088,8 +1095,8 @@ operation. No-op when no operation matches MESSAGE's id."
                    (if commit
                        (let ((payload
                                (list (generate-uid) node-name
-                                     (node-grpc-server-cluster-pod-cidr server)
-                                     (node-grpc-server-node-prefix server)
+                                     (node-grpc-server-cluster-pod-cidrs server)
+                                     (node-grpc-server-node-prefixes server)
                                      (current-timestamp))))
                          (funcall commit :node-enrollment payload)
                          ;; A leader returns its apply result directly. A follower's
@@ -1102,15 +1109,16 @@ operation. No-op when no operation matches MESSAGE's id."
                                    do (sleep 0.05))
                              (error "Committed enrollment for node ~A was not applied locally"
                                     node-name)))
-                       (register-node
-                        store
-                        (make-node-record
-                         :id (generate-uid) :name node-name
-                         :pod-cidr
-                         (allocate-node-pod-cidr
+                       (let ((pod-cidrs
+                               (allocate-node-pod-cidrs
+                                store
+                                (node-grpc-server-cluster-pod-cidrs server)
+                                (node-grpc-server-node-prefixes server))))
+                         (register-node
                           store
-                          (node-grpc-server-cluster-pod-cidr server)
-                          (node-grpc-server-node-prefix server)))))))))
+                          (make-node-record
+                           :id (generate-uid) :name node-name
+                           :pod-cidr (aref pod-cidrs 0) :pod-cidrs pod-cidrs))))))))
       (make-instance
        'gr8s.node.v1::enroll-response
        :protocol-version +node-protocol-version+
@@ -1200,6 +1208,8 @@ operation. No-op when no operation matches MESSAGE's id."
                                             pki
                                             (cluster-pod-cidr +default-cluster-pod-cidr+)
                                             (node-prefix +default-node-pod-prefix+)
+                                            cluster-pod-cidrs
+                                            node-prefixes
                                             (overlay-backend "vxlan")
                                             (wireguard-listen-port 51820))
   "Create and start the node control-plane gRPC server on HOST:PORT: register the
@@ -1213,7 +1223,10 @@ operation. No-op when no operation matches MESSAGE's id."
     (error "Overlay backend must be vxlan or wireguard"))
   (unless (<= 1 wireguard-listen-port 65535)
     (error "WireGuard listen port must be between 1 and 65535"))
-  (let* ((grpc-server (apply #'ag-grpc:make-grpc-server port :host host
+  (multiple-value-bind (cluster-pod-cidrs node-prefixes)
+      (normalize-pod-pool-geometry (or cluster-pod-cidrs cluster-pod-cidr)
+                                   (or node-prefixes node-prefix))
+   (let* ((grpc-server (apply #'ag-grpc:make-grpc-server port :host host
                              (node-server-tls-options pki)))
          (server (%make-node-grpc-server
                   :store store
@@ -1221,8 +1234,10 @@ operation. No-op when no operation matches MESSAGE's id."
                   :port port
                   :heartbeat-timeout-seconds heartbeat-timeout-seconds
                   :pki pki
-                  :cluster-pod-cidr cluster-pod-cidr
-                  :node-prefix node-prefix
+                  :cluster-pod-cidr (first cluster-pod-cidrs)
+                  :node-prefix (first node-prefixes)
+                  :cluster-pod-cidrs cluster-pod-cidrs
+                  :node-prefixes node-prefixes
                   :overlay-backend overlay-backend
                   :wireguard-listen-port wireguard-listen-port)))
     (gr8s.node.v1::register-node-service-service
@@ -1251,7 +1266,7 @@ operation. No-op when no operation matches MESSAGE's id."
           (node-grpc-server-monitor-thread server)
           (bt:make-thread (lambda () (monitor-node-heartbeats server))
                           :name "gr8s node heartbeat monitor"))
-    server))
+    server)))
 
 (defun stop-node-grpc-server (server)
   "Stop SERVER: signal its loops to stop, stop the gRPC server, and join its monitor

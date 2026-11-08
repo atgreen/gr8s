@@ -135,6 +135,7 @@
    #:container-spec-name
    #:container-spec-ports
    #:allocate-node-pod-cidr
+   #:allocate-node-pod-cidrs
    #:cluster-pki-ca-certificate-path
    #:cluster-pki-ca-fingerprint
    #:cluster-pki-ca-private-key-path
@@ -175,6 +176,8 @@
    #:node-record-last-heartbeat
    #:node-record-name
    #:node-record-pod-cidr
+   #:node-record-pod-cidrs
+   #:node-record-all-pod-cidrs
    #:node-record-ready-p
    #:node-grpc-server-port
    #:node-session-acknowledged-revision

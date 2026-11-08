@@ -450,7 +450,7 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
      "spec" (let ((spec (core-object "unschedulable" (not (null (node-record-unschedulable node))))))
               (when (plusp (length (node-record-pod-cidr node)))
                 (setf (gethash "podCIDR" spec) (node-record-pod-cidr node)
-                      (gethash "podCIDRs" spec) (vector (node-record-pod-cidr node))))
+                      (gethash "podCIDRs" spec) (copy-seq (node-record-all-pod-cidrs node))))
               (when (plusp (length (node-record-taints node)))
                 (setf (gethash "taints" spec) (copy-core-object (node-record-taints node))))
               spec)

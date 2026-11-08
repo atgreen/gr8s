@@ -8,43 +8,77 @@
 
 (in-package #:gr8s)
 
-(defun make-node-pool-config (cidr node-prefix)
+(defun make-node-pool-config (cidr node-prefix &optional (cidrs (vector cidr)) (node-prefixes (vector node-prefix)))
   "Construct the versioned on-disk pool configuration object."
-  (json-object "version" 1 "clusterPodCIDR" cidr "nodePrefix" node-prefix))
+  (json-object "version" 1
+               "clusterPodCIDR" cidr "nodePrefix" node-prefix
+               "clusterPodCIDRs" (coerce cidrs 'vector)
+               "nodePrefixes" (coerce node-prefixes 'vector)))
+
+(defun node-pool-cluster-cidrs (configuration)
+  "Return CONFIGURATION's ordered families, including legacy pool files."
+  (let ((cidrs (gethash "clusterPodCIDRs" configuration)))
+    (if (and (vectorp cidrs) (plusp (length cidrs)))
+        cidrs (vector (gethash "clusterPodCIDR" configuration)))))
+
+(defun node-pool-prefixes (configuration)
+  "Return CONFIGURATION's ordered per-family node prefixes, including legacy files."
+  (let ((prefixes (gethash "nodePrefixes" configuration)))
+    (if (and (vectorp prefixes) (plusp (length prefixes)))
+        prefixes (vector (gethash "nodePrefix" configuration)))))
 
 (defun validate-node-pool-config (configuration)
   "Validate canonical IPv4 pool geometry and reserved-address exclusions."
   (unless (and (hash-table-p configuration) (eql 1 (gethash "version" configuration)))
     (invalid-cni "invalid Pod-pool configuration format"))
-  (let ((cidr (gethash "clusterPodCIDR" configuration))
-        (node-prefix (gethash "nodePrefix" configuration)))
-    (unless (stringp cidr) (invalid-cni "cluster Pod CIDR must be a string"))
-    (multiple-value-bind (address prefix) (validate-network-cidr cidr)
-      (unless (string= cidr (format nil "~A/~D" (format-ipv4-integer address) prefix))
-        (invalid-cni "cluster Pod CIDR must be canonical"))
-      (unless (and (typep node-prefix '(integer 1 30)) (<= prefix node-prefix))
-        (invalid-cni "node Pod prefix /~A does not fit pool ~A" node-prefix cidr)))
+  (let ((cidrs (node-pool-cluster-cidrs configuration))
+        (prefixes (node-pool-prefixes configuration)))
+    (unless (= (length cidrs) (length prefixes))
+      (invalid-cni "cluster Pod CIDRs and node prefixes must have equal lengths"))
+    (handler-case
+        (multiple-value-bind (normalized-cidrs normalized-prefixes)
+            (normalize-pod-pool-geometry cidrs prefixes)
+          (declare (ignore normalized-cidrs normalized-prefixes)))
+      (error (condition) (invalid-cni "invalid Pod-pool geometry: ~A" condition)))
+    (loop for cidr across cidrs for node-prefix across prefixes
+          do (handler-case
+                 (multiple-value-bind (family address prefix bits) (parse-pod-cidr cidr)
+                   (unless (string= cidr (format nil "~A/~D" (format-pod-address family address) prefix))
+                     (invalid-cni "cluster Pod CIDR must be canonical"))
+                   (unless (and (typep node-prefix `(integer 1 ,(- bits 2)))
+                                (<= prefix node-prefix)
+                                (zerop (logand address (1- (ash 1 (- bits prefix))))))
+                     (invalid-cni "node Pod prefix /~A does not fit pool ~A" node-prefix cidr)))
+               (cni-error (condition) (error condition))
+               (error (condition) (invalid-cni "invalid Pod pool ~A: ~A" cidr condition))))
     (dolist (reserved '("0.0.0.0/8" "127.0.0.0/8" "169.254.0.0/16" "224.0.0.0/4"
-                        "240.0.0.0/4" "10.96.0.1/32"))
-      (when (ipv4-prefixes-overlap-p cidr reserved)
-        (invalid-cni "Pod pool ~A overlaps reserved range ~A" cidr reserved))))
+                        "240.0.0.0/4" "10.96.0.1/32" "::/128" "::1/128"
+                        "fe80::/10" "ff00::/8"))
+      (loop for cidr across cidrs
+            when (pod-cidrs-overlap-p cidr reserved)
+              do (invalid-cni "Pod pool ~A overlaps reserved range ~A" cidr reserved))))
   configuration)
 
 (defun node-pool-settings-equal-p (left right)
   "Compare the immutable allocation geometry of two pool configurations."
-  (and (string= (gethash "clusterPodCIDR" left) (gethash "clusterPodCIDR" right))
-       (= (gethash "nodePrefix" left) (gethash "nodePrefix" right))))
+  (and (equalp (node-pool-cluster-cidrs left) (node-pool-cluster-cidrs right))
+       (equalp (node-pool-prefixes left) (node-pool-prefixes right))))
 
 (defun validate-node-pool-assignments (configuration nodes)
   "Reject persisted node blocks outside the configured fixed-size pool."
   (dolist (node nodes)
-    (let ((cidr (node-record-pod-cidr node)))
-      (multiple-value-bind (address prefix) (validate-network-cidr cidr)
-        (declare (ignore address))
-        (unless (and (= prefix (gethash "nodePrefix" configuration))
-                     (network-cidr-subnet-p cidr (gethash "clusterPodCIDR" configuration)))
-          (invalid-cni "node ~A has Pod CIDR ~A incompatible with the configured pool"
-                       (node-record-name node) cidr))))))
+    (let ((assigned (node-record-all-pod-cidrs node))
+          (pools (node-pool-cluster-cidrs configuration))
+          (prefixes (node-pool-prefixes configuration)))
+      (unless (= (length assigned) (length pools))
+        (invalid-cni "node ~A has ~D Pod CIDRs, configured pool has ~D"
+                     (node-record-name node) (length assigned) (length pools)))
+      (loop for cidr across assigned for pool across pools for expected across prefixes
+            do (multiple-value-bind (family address prefix bits) (parse-pod-cidr cidr)
+                 (declare (ignore address bits))
+                 (unless (and (= prefix expected) (pod-cidrs-overlap-p cidr pool))
+                   (invalid-cni "node ~A has Pod CIDR ~A incompatible with pool ~A"
+                                (node-record-name node) cidr pool)))))))
 
 (defun legacy-node-pool-config (nodes)
   "Recognize the previously shipped /16 pool with /24 node allocations."
@@ -168,11 +202,19 @@ it, and an owned route whose link has since gone left with its link."
     (validate-node-pool-config base)
     (let ((configuration
             (validate-node-pool-config
-             (make-node-pool-config
-              (if (getf options :cluster-pod-cidr-supplied-p)
-                  (getf options :cluster-pod-cidr) (gethash "clusterPodCIDR" base))
-              (if (getf options :node-pod-prefix-supplied-p)
-                  (getf options :node-pod-prefix) (gethash "nodePrefix" base))))))
+             (let* ((cidrs (if (getf options :cluster-pod-cidr-supplied-p)
+                               (getf options :cluster-pod-cidrs)
+                               (node-pool-cluster-cidrs base)))
+                    (prefixes (if (or (getf options :node-pod-prefix-supplied-p)
+                                      (getf options :node-pod-prefix-ipv6-supplied-p))
+                                  (map 'vector
+                                       (lambda (cidr)
+                                         (if (find #\: cidr)
+                                             (getf options :node-pod-prefix-ipv6)
+                                             (getf options :node-pod-prefix)))
+                                       cidrs)
+                                  (node-pool-prefixes base))))
+               (make-node-pool-config (aref cidrs 0) (aref prefixes 0) cidrs prefixes)))))
       (when (and nodes (or stored legacy)
                  (not (node-pool-settings-equal-p configuration base)))
         (invalid-cni "refusing to change Pod-pool geometry while node allocations exist"))
