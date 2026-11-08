@@ -30,7 +30,7 @@ The comparisons have different meanings:
 |---|---|---|
 | Conformance | No current build has passed the certified-conformance suite. The checked-in ledger's newest full result is round 4 at 64/446 tests; it predates substantial current functionality, so it is evidence of neither current failure counts nor current parity. A fresh run is required before making a conformance claim. | [Conformance ledger](CONFORMANCE.md); documentation refresh `podster-9do` |
 | IP families | Allocated Pod and Service networking is IPv4-only. `PreferDualStack` is accepted but produces a single IPv4 family; `RequireDualStack` and IPv6-only Services are refused. IPv6 DNS enforcement is deferred with IPv6 Pod networking. | [Services](networking.md#services--load-balancing); `tests/services-test.lisp`; `podster-n2iv`; `podster-yge` |
-| Dynamic Resource Allocation | ResourceClaim, ResourceClaimTemplate, ResourceSlice, and DeviceClass storage APIs exist, but there is no allocator/controller or node preparation path that turns claims into devices assigned to Pods. | `src/resources/typed-apis.lisp`; `podster-08qi` |
+| Dynamic Resource Allocation | The APIs exist, Pod/container claim references are validated, and already-allocated direct claims constrain scheduling and are reserved for the selected Pod. ResourceClaimTemplate expansion, structured allocation from ResourceSlices/DeviceClasses, and kubelet plugin prepare/unprepare are still missing. | `src/resources/typed-apis.lisp`; `src/controllers/scheduler.lisp`; `podster-08qi` |
 
 Registry credentials and resource metrics are no longer gaps. Pod and
 ServiceAccount `imagePullSecrets`, node-wide Docker credential files, and
@@ -45,13 +45,14 @@ real k3s replacement than several missing optional APIs:
 
 | Priority | Gap | Why it is material | Tracking |
 |---|---|---|---|
-| P0 | Fresh certified-conformance evidence | The only result preserved from the 192.168.1.10 attempt is a focused 8-test run (8 passed, 3,205 skipped), not a certified run. Without a current full result, portable behavior remains unmeasured and prioritization is partly speculative. | `podster-9do` |
-| P0 | Control-plane memory safety | Serializing the complete core-state blob can exhaust the SBCL heap. Independently, retrying a disconnected Raft follower has caused an unbounded AppendEntries queue and founder OOM; the queue fix has focused coverage but still needs live HA revalidation. Either path can terminate the control plane. | `podster-061`; `podster-8r7`; per-key replication `podster-bwu.2` |
-| P1 | Host firewall independence | Pod-to-Pod, Service, and API traffic is not yet independent of firewalld policy. The trusted-zone workaround is transitional; the selected fix is an eBPF host-routing path that bypasses netfilter for cluster traffic. | `podster-pnd`; `podster-bgn.3`; cleanup `podster-ntp` |
+| P0 | Control-plane memory safety | Serializing the complete core-state blob can exhaust the SBCL heap. Independently, retrying a disconnected Raft follower caused an unbounded AppendEntries queue and founder OOM. The queue is now coalesced in focused tests but still lacks live HA revalidation; the whole-state serializer remains open. Either path can terminate the control plane. | `podster-061`; `podster-8r7`; per-key replication `podster-bwu.2` |
+| P0 evidence blocker | Fresh certified-conformance evidence | The only result preserved from the 192.168.1.10 attempt is a focused 8-test run (8 passed, 3,205 skipped), not a certified run. This is not itself a missing feature, but it prevents a defensible compatibility claim and leaves the ranking partly inferential. | `podster-7lq`; `podster-9do` |
 | P1 | HA state and failover consistency | Image tracker leases/swarms are not yet consistent across control-plane members, Pod replication retains a leader-crash window, and a follower can lose its node-heartbeat monitor after a rejected consensus write. These can surface as stale availability or incorrect failover behavior. | `podster-i5vx`; `podster-bwu.1`; `podster-7ni6.3.5` |
 | P1 | Secrets at rest | Kubernetes Secret values are persisted without encryption. A stolen state directory or backup therefore exposes workload credentials, and there is no staged key-rotation or re-encryption workflow. | `podster-dcge`; [Secret API](configmap-secret-api.md) |
 | P1 | Installation and recovery lifecycle | There is no k3s-like installer/service/upgrade lifecycle, supported operator backup/restore workflow, or cluster certificate inventory and rotation command set. These are the largest day-zero and day-two operational omissions. | `podster-7g65`; `podster-oime`; `podster-6l63` |
 | P1 | IPv6 and dual-stack networking | IPv4-only networking excludes IPv6-only sites and does not honor portable `RequireDualStack` workloads. This is more material than optional addon parity, but less urgent than current crash and HA defects for an IPv4 deployment. | `podster-n2iv` |
+| P2 | Host firewall independence | Real two-node firewalld acceptance passes through gr8s-managed coexistence rules, so this is no longer a basic connectivity blocker. The remaining gap is a zero-firewall-mutation eBPF path and retirement of the trusted-zone integration. | `podster-pnd`; cleanup `podster-ntp` |
+| P2 | Complete DRA workload lifecycle | Direct preallocated claims now participate in placement and reservation, but template expansion, device allocation, and kubelet plugin preparation remain. This blocks portable DRA workloads but affects fewer ordinary clusters than the P1 items above. | `podster-08qi` |
 
 The open empirical compatibility map under `podster-bgn` contains narrower API
 and wire-format defects found by running a real controller stack. Those issues
@@ -100,9 +101,6 @@ conformance work.
 
 - External SQL/etcd datastores. k3s supports SQLite by default and etcd, MySQL,
   and PostgreSQL alternatives; gr8s intentionally owns its Raft store.
-- The opt-in Spegel distributed OCI registry mirror. gr8s can preload images and
-  use registry credentials, but has no peer-to-peer registry mirror. See the
-  [k3s registry-mirror documentation](https://docs.k3s.io/installation/registry-mirror).
 - Kubernetes-native automated node upgrades through Rancher's
   system-upgrade-controller. See [automated upgrades](https://docs.k3s.io/upgrades/automated).
 - Rootless/server-in-container modes, alternative CNI backends, and cloud-provider
@@ -120,6 +118,9 @@ themselves:
 - The in-agent Gateway and Ingress implementation replaces the default Traefik path.
 - In-process local-path, NFS, Service, EndpointSlice, scheduler, and workload
   controllers replace separate upstream controller binaries or addon Pods.
+- Strict authenticated peer-to-peer OCI distribution replaces the opt-in Spegel
+  embedded registry mirror. It distributes verified image content directly
+  between node caches rather than exposing a registry API.
 - A single `gr8s` executable supplies server and agent roles instead of bundling
   upstream Kubernetes component binaries.
 
