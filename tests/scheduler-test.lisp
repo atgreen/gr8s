@@ -546,6 +546,178 @@
         (is (equal "gpu-0" (gethash "device" ordinary-result)))
         (is-false (gethash "adminAccess" ordinary-result))))))
 
+(test scheduler-accounts-consumable-dra-capacity-across-claims
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((node (make-test-node "worker-a" "node-a" "10.64.0.0/20")))
+      (gr8s:register-node store node)
+      (gr8s:mark-node-ready store "worker-a" 100))
+    (gr8s::create-core-resource
+     store "deviceclasses"
+     (gr8s::core-object
+      "apiVersion" "resource.k8s.io/v1" "kind" "DeviceClass"
+      "metadata" (gr8s::core-object "name" "memory")
+      "spec" (gr8s::core-object "selectors" #()))
+     nil)
+    (gr8s::create-core-resource
+     store "resourceslices"
+     (gr8s::core-object
+      "apiVersion" "resource.k8s.io/v1" "kind" "ResourceSlice"
+      "metadata" (gr8s::core-object "name" "memory")
+      "spec" (gr8s::core-object
+              "driver" "devices.example.com"
+              "pool" (gr8s::core-object "name" "pool" "generation" 1
+                                         "resourceSliceCount" 1)
+              "nodeName" "worker-a"
+              "devices"
+              (vector
+               (gr8s::core-object
+                "name" "memory-0" "allowMultipleAllocations" t
+                "capacity" (gr8s::core-object
+                            "memory" (gr8s::core-object "value" "10"))))))
+     nil)
+    (labels ((create-claim (name amount)
+               (gr8s::create-core-resource
+                store "resourceclaims"
+                (gr8s::core-object
+                 "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
+                 "metadata" (gr8s::core-object "name" name)
+                 "spec" (gr8s::core-object
+                         "devices" (gr8s::core-object
+                                    "requests"
+                                    (vector
+                                     (gr8s::core-object
+                                      "name" "memory"
+                                      "exactly"
+                                      (gr8s::core-object
+                                       "deviceClassName" "memory"
+                                       "capacity"
+                                       (gr8s::core-object
+                                        "requests"
+                                        (gr8s::core-object "memory" amount))))))))
+                "default"))
+             (allocate (claim pod)
+               (let ((node (gr8s:schedule-pod
+                            store (create-pod store (dra-test-pod pod claim)))))
+                 (values node
+                         (and node
+                              (aref (gethash
+                                     "results"
+                                     (gethash "devices"
+                                              (gethash "allocation"
+                                                       (gethash "status"
+                                                                (gr8s::get-core-resource
+                                                                 store "resourceclaims"
+                                                                 "default" claim)))
+                                              (gr8s::core-object))
+                                     #())
+                                    0))))))
+      (create-claim "share-a" "4")
+      (create-claim "share-b" "4")
+      (create-claim "exhausted" "3")
+      (multiple-value-bind (first-node first) (allocate "share-a" "pod-a")
+        (multiple-value-bind (second-node second) (allocate "share-b" "pod-b")
+          (is (equal "worker-a" (and first-node (gr8s:node-record-name first-node))))
+          (is (equal "worker-a" (and second-node (gr8s:node-record-name second-node))))
+          (is (equal "memory-0" (gethash "device" first)))
+          (is (equal "4" (gethash "memory" (gethash "consumedCapacity" first))))
+          (is (stringp (gethash "shareID" first)))
+          (is (stringp (gethash "shareID" second)))
+          (is (not (equal (gethash "shareID" first) (gethash "shareID" second))))))
+      (is (null (allocate "exhausted" "pod-c"))))))
+
+(test dra-consumable-capacity-resolves-names-and-request-policies
+  (let* ((driver "devices.example.com")
+         (device
+           (gr8s::core-object
+            "capacity"
+            (gr8s::core-object
+             "memory"
+             (gr8s::core-object
+              "value" "10"
+              "requestPolicy"
+              (gr8s::core-object "validValues" (vector "2" "4" "8")))
+             "devices.example.com/bandwidth"
+             (gr8s::core-object
+              "value" "100"
+              "requestPolicy"
+              (gr8s::core-object
+               "validRange"
+               (gr8s::core-object "min" "10" "max" "100" "step" "10"))))))
+         (exact
+           (gr8s::core-object
+            "capacity"
+            (gr8s::core-object
+             "requests" (gr8s::core-object "memory" "3" "bandwidth" "11"))))
+         (consumed (gr8s::dra-device-consumed-capacity
+                    driver device nil exact)))
+    (is (equal "4" (gethash "memory" consumed)))
+    (is (equal "20" (gethash "devices.example.com/bandwidth" consumed)))))
+
+(test dra-admin-allocations-still-consume-shared-device-capacity
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let* ((result (gr8s::core-object
+                    "request" "memory" "driver" "devices.example.com"
+                    "pool" "pool" "device" "memory-0"
+                    "adminAccess" t "shareID" "share-a"
+                    "consumedCapacity" (gr8s::core-object "memory" "4")))
+           (claim (gr8s::core-object
+                   "apiVersion" "resource.k8s.io/v1" "kind" "ResourceClaim"
+                   "metadata" (gr8s::core-object "name" "admin" "namespace" "default")
+                   "status" (gr8s::core-object
+                             "allocation" (gr8s::core-object
+                                           "devices" (gr8s::core-object
+                                                      "results" (vector result)))))))
+      (gr8s::with-store-lock (store)
+        (setf (gethash (gr8s::core-resource-key
+                        "resourceclaims" "default" "admin")
+                       (gr8s::pod-store-resources store))
+              claim)
+        (let* ((used (gr8s::dra-allocated-device-keys-unlocked store))
+               (usage (gethash (gr8s::dra-device-key
+                                "devices.example.com" "pool" "memory-0")
+                               used)))
+          (is (equal "4" (gethash "memory" usage))))))))
+
+(test dra-consumable-capacity-applies-defaults-and-rejects-invalid-requests
+  (let* ((driver "devices.example.com")
+         (device
+           (gr8s::core-object
+            "capacity"
+            (gr8s::core-object
+             "memory" (gr8s::core-object
+                       "value" "10"
+                       "requestPolicy" (gr8s::core-object "default" "2"
+                                                          "validValues"
+                                                          (vector "2" "4" "8")))
+             "bandwidth" (gr8s::core-object "value" "5"))))
+         (defaults
+           (gr8s::dra-device-consumed-capacity
+            driver device nil (gr8s::core-object))))
+    (is (equal "2" (gethash "memory" defaults)))
+    (is (equal "5" (gethash "bandwidth" defaults)))
+    (is-false
+     (gr8s::dra-device-consumed-capacity
+      driver device nil
+      (gr8s::core-object
+       "capacity" (gr8s::core-object
+                   "requests" (gr8s::core-object "unknown" "1")))))
+    (is-false
+     (gr8s::dra-device-consumed-capacity
+      driver device nil
+      (gr8s::core-object
+       "capacity"
+       (gr8s::core-object
+        "requests" (gr8s::core-object "memory" "2"
+                                       "devices.example.com/memory" "2")))))
+    (is-false
+     (gr8s::dra-device-consumed-capacity
+      driver device nil
+      (gr8s::core-object
+       "capacity" (gr8s::core-object
+                   "requests" (gr8s::core-object "memory" "9")))))))
+
 (test scheduler-allocates-all-matching-dra-devices-from-one-pool
   (with-temporary-store (store path)
     (declare (ignore path))

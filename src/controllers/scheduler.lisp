@@ -338,6 +338,164 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
   "Return the identity used to prevent one DRA device from being allocated twice."
   (list driver pool device))
 
+(defun dra-quantity-add (left right)
+  "Return the exact sum of two Kubernetes resource quantities."
+  (let* ((scale (min (gr8s::container-quantity-scale left)
+                     (gr8s::container-quantity-scale right)))
+         (left-coefficient
+           (* (gr8s::container-quantity-coefficient left)
+              (expt 10 (- (gr8s::container-quantity-scale left) scale))))
+         (right-coefficient
+           (* (gr8s::container-quantity-coefficient right)
+              (expt 10 (- (gr8s::container-quantity-scale right) scale)))))
+    (gr8s::normalize-container-quantity
+     (gr8s::make-container-quantity
+      :coefficient (+ left-coefficient right-coefficient) :scale scale))))
+
+(defun dra-capacity-usage-add (usage consumed)
+  "Return a copy of USAGE with the quantity strings in CONSUMED added."
+  (let ((result (if (hash-table-p usage)
+                    (copy-core-object usage)
+                    (core-object))))
+    (maphash
+     (lambda (name amount)
+       (let ((before (gethash name result "0")))
+         (setf (gethash name result)
+               (gr8s::container-quantity-string
+                (dra-quantity-add
+                 (gr8s::parse-container-quantity before "allocated DRA capacity")
+                 (gr8s::parse-container-quantity amount "consumed DRA capacity"))))))
+     consumed)
+    result))
+
+(defun dra-quantity-at-scale (quantity scale)
+  "Return QUANTITY's integer coefficient when expressed at SCALE."
+  (* (gr8s::container-quantity-coefficient quantity)
+     (expt 10 (- (gr8s::container-quantity-scale quantity) scale))))
+
+(defun dra-quantity-round-up (requested minimum step)
+  "Round REQUESTED upward to MINIMUM plus an integer multiple of STEP."
+  (when (minusp (gr8s::container-quantity-compare requested minimum))
+    (return-from dra-quantity-round-up minimum))
+  (let* ((scale (min (gr8s::container-quantity-scale requested)
+                     (gr8s::container-quantity-scale minimum)
+                     (gr8s::container-quantity-scale step)))
+         (requested-value (dra-quantity-at-scale requested scale))
+         (minimum-value (dra-quantity-at-scale minimum scale))
+         (step-value (dra-quantity-at-scale step scale))
+         (difference (- requested-value minimum-value))
+         (steps (ceiling difference step-value)))
+    (gr8s::normalize-container-quantity
+     (gr8s::make-container-quantity
+      :coefficient (+ minimum-value (* steps step-value)) :scale scale))))
+
+(defun dra-resolve-capacity-requests (driver capacity requests)
+  "Resolve REQUESTS to CAPACITY's exact keys, or return NIL when they mismatch."
+  (let ((resolved (core-object)) (valid t))
+    (maphash
+     (lambda (request-name amount)
+       (let* ((slash (position #\/ request-name))
+              (domain (and slash (subseq request-name 0 slash)))
+              (identifier (if slash (subseq request-name (1+ slash)) request-name))
+              (driver-qualified (format nil "~A/~A" driver identifier))
+              (capacity-name
+                (cond ((nth-value 1 (gethash request-name capacity)) request-name)
+                      ((and (or (null domain) (equal domain driver))
+                            (nth-value 1 (gethash identifier capacity)))
+                       identifier)
+                      ((and (or (null domain) (equal domain driver))
+                            (nth-value 1 (gethash driver-qualified capacity)))
+                       driver-qualified))))
+         (if (or (null capacity-name)
+                 (nth-value 1 (gethash capacity-name resolved)))
+             (setf valid nil)
+             (setf (gethash capacity-name resolved) amount))))
+     requests)
+    (and valid resolved)))
+
+(defun dra-capacity-consumption (entry requested requested-p)
+  "Return ENTRY's policy-adjusted consumption and whether it is valid."
+  (let* ((limit (gr8s::parse-container-quantity
+                 (gethash "value" entry) "device DRA capacity"))
+         (policy (gethash "requestPolicy" entry (core-object)))
+         (amount (gr8s::parse-container-quantity
+                  (if requested-p
+                      requested
+                      (gethash "default" policy (gethash "value" entry)))
+                  "requested DRA capacity")))
+    (when (minusp (gr8s::container-quantity-compare
+                   amount (gr8s::parse-container-quantity "0" "DRA capacity")))
+      (return-from dra-capacity-consumption (values nil nil)))
+    (when requested-p
+      (let ((values (gethash "validValues" policy))
+            (range (gethash "validRange" policy)))
+        (cond ((and (vectorp values) (plusp (length values)))
+               (let ((rounded
+                       (find-if
+                        (lambda (candidate)
+                          (not (plusp (gr8s::container-quantity-compare
+                                      amount
+                                      (gr8s::parse-container-quantity
+                                       candidate "DRA capacity policy")))))
+                        values)))
+                 (unless rounded
+                   (return-from dra-capacity-consumption (values nil nil)))
+                 (setf amount (gr8s::parse-container-quantity
+                               rounded "DRA capacity policy"))))
+              ((hash-table-p range)
+               (let ((minimum (gr8s::parse-container-quantity
+                               (gethash "min" range) "DRA capacity range"))
+                     (step (and (gethash "step" range)
+                                (gr8s::parse-container-quantity
+                                 (gethash "step" range) "DRA capacity range"))))
+                 (setf amount (if step
+                                  (dra-quantity-round-up amount minimum step)
+                                  (if (minusp (gr8s::container-quantity-compare
+                                              amount minimum))
+                                      minimum amount)))
+                 (when (and (gethash "max" range)
+                            (plusp (gr8s::container-quantity-compare
+                                    amount
+                                    (gr8s::parse-container-quantity
+                                     (gethash "max" range)
+                                     "DRA capacity range"))))
+                   (return-from dra-capacity-consumption (values nil nil))))))))
+    (values amount
+            (not (plusp (gr8s::container-quantity-compare amount limit))))))
+
+(defun dra-device-consumed-capacity (driver device usage exact)
+  "Return DEVICE's consumption map when EXACT fits remaining capacity, else NIL."
+  (let ((capacity (gethash "capacity" device (core-object)))
+        (requests (gethash "requests" (gethash "capacity" exact (core-object))
+                           (core-object)))
+        (consumed (core-object))
+        (fits t))
+    (let ((resolved (dra-resolve-capacity-requests driver capacity requests)))
+      (unless resolved
+        (return-from dra-device-consumed-capacity nil))
+    (maphash
+     (lambda (name entry)
+       (multiple-value-bind (requested requested-valid-p)
+           (multiple-value-bind (raw present) (gethash name resolved)
+             (dra-capacity-consumption entry raw present))
+         (if (not requested-valid-p)
+             (setf fits nil)
+             (let* ((already (if (hash-table-p usage)
+                                 (gethash name usage "0") "0"))
+                    (total (dra-quantity-add
+                            (gr8s::parse-container-quantity
+                             already "allocated DRA capacity")
+                            requested)))
+               (when (plusp (gr8s::container-quantity-compare
+                             total
+                             (gr8s::parse-container-quantity
+                              (gethash "value" entry) "device DRA capacity")))
+                 (setf fits nil))
+               (setf (gethash name consumed)
+                     (gr8s::container-quantity-string requested))))))
+     capacity)
+    (when fits consumed))))
+
 (defun dra-allocated-device-keys-unlocked (store)
   "Return an EQUAL set of devices present in committed ResourceClaim allocations."
   (let ((used (make-hash-table :test #'equal)))
@@ -350,12 +508,17 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
                                                                     (core-object))
                                                            (core-object))
                                                   #())
-                     unless (gethash "adminAccess" result)
-                       do (setf (gethash (dra-device-key (gethash "driver" result)
-                                                         (gethash "pool" result)
-                                                         (gethash "device" result))
-                                         used)
-                                t)))
+                     do (let ((key (dra-device-key (gethash "driver" result)
+                                                   (gethash "pool" result)
+                                                   (gethash "device" result))))
+                          (cond ((gethash "shareID" result)
+                                 (setf (gethash key used)
+                                       (dra-capacity-usage-add
+                                        (gethash key used)
+                                        (gethash "consumedCapacity" result
+                                                 (core-object)))))
+                                ((not (gethash "adminAccess" result))
+                                 (setf (gethash key used) t))))))
     used))
 
 (defun dra-slice-available-on-node-p (slice node)
@@ -481,9 +644,15 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
        (lambda (candidate)
          (let ((result (core-object "request" result-name
                                     "driver" (first candidate) "pool" (second candidate)
-                                    "device" (third candidate))))
+                                    "device" (third candidate)))
+               (device (fifth candidate))
+               (consumed (sixth candidate)))
            (when admin-access
              (setf (gethash "adminAccess" result) t))
+           (when (gethash "allowMultipleAllocations" device)
+             (setf (gethash "shareID" result) (generate-uid))
+             (when (plusp (hash-table-count consumed))
+               (setf (gethash "consumedCapacity" result) consumed)))
            result))
        candidates))
 
@@ -508,12 +677,16 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
              (pool (gethash "name" (gethash "pool" spec))))
         (loop for device across (gethash "devices" spec #())
               for name = (gethash "name" device)
+              for usage = (gethash (dra-device-key driver pool name) used)
+              for multiple = (gethash "allowMultipleAllocations" device)
+              for consumed = (and multiple (not (eq t usage))
+                                  (dra-device-consumed-capacity
+                                   driver device usage exact))
               when (and (dra-device-available-on-node-p slice device node)
                         (dra-device-tolerated-p device exact)
-                        (dra-device-matches-selectors-p driver device selectors))
-                do (push (list driver pool name
-                               (gethash (dra-device-key driver pool name) used))
-                         matching))))
+                        (dra-device-matches-selectors-p driver device selectors)
+                        (or (not multiple) consumed))
+                do (push (list driver pool name usage device consumed) matching))))
     (setf matching (sort matching #'string<
                          :key (lambda (candidate)
                                 (format nil "~A/~A/~A" (first candidate)
@@ -525,10 +698,14 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
           (maphash
            (lambda (key candidates)
              (declare (ignore key))
-             (unless (and (not admin-access) (find t candidates :key #'fourth))
+             (unless (and (not admin-access)
+                          (find-if (lambda (candidate)
+                                     (and (not (gethash "allowMultipleAllocations"
+                                                        (fifth candidate)))
+                                          (fourth candidate)))
+                                   candidates))
                (push (dra-candidates-to-results
-                      (mapcar (lambda (candidate) (subseq candidate 0 3))
-                              (nreverse candidates))
+                      (nreverse candidates)
                       result-name admin-access)
                      options)))
            pools)
@@ -544,8 +721,11 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
            (funcall function (dra-candidates-to-results
                               combination result-name admin-access)))
          (loop for candidate in matching
-               unless (and (not admin-access) (fourth candidate))
-               collect (subseq candidate 0 3))
+               unless (and (not admin-access)
+                           (not (gethash "allowMultipleAllocations"
+                                         (fifth candidate)))
+                           (fourth candidate))
+               collect candidate)
          count))))
 
 (defun dra-map-request-options-unlocked (function store request node used)
@@ -623,29 +803,51 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
         (solution nil)
         (claim-used (make-hash-table :test #'equal)))
     (labels ((try-option (option index results)
-               (let* ((keys (map 'list
-                                 (lambda (result)
-                                   (dra-device-key (gethash "driver" result)
-                                                   (gethash "pool" result)
-                                                   (gethash "device" result)))
-                                 option))
-                      (admin-access
-                        (and (plusp (length option))
-                             (every (lambda (result) (gethash "adminAccess" result))
-                                    option))))
-                 (unless (or (some (lambda (key) (gethash key claim-used)) keys)
-                             (and (not admin-access)
-                                  (some (lambda (key) (gethash key used)) keys)))
-                   (let ((new-global-keys
-                           (remove-if (lambda (key) (gethash key used)) keys)))
-                     (dolist (key keys)
-                       (setf (gethash key claim-used) t
-                             (gethash key used) t))
-                     (unwind-protect
-                          (search-request (1+ index)
-                                          (append results (coerce option 'list)))
-                       (dolist (key keys) (remhash key claim-used))
-                       (dolist (key new-global-keys) (remhash key used)))))))
+               (let ((states nil) (conflict nil))
+                 (loop for result across option
+                       for key = (dra-device-key (gethash "driver" result)
+                                                 (gethash "pool" result)
+                                                 (gethash "device" result))
+                       for shared = (gethash "shareID" result)
+                       do (multiple-value-bind (usage usage-present) (gethash key used)
+                            (multiple-value-bind (local local-present)
+                                (gethash key claim-used)
+                              (push (list key usage usage-present local local-present
+                                          result shared)
+                                    states)
+                              (when (if shared
+                                        (eq t usage)
+                                        (or local-present
+                                            (and (not (gethash "adminAccess" result))
+                                                 usage-present)))
+                                (setf conflict t)))))
+                 (unless conflict
+                   (dolist (state states)
+                     (destructuring-bind (key usage usage-present local local-present
+                                          result shared)
+                         state
+                       (declare (ignore usage-present local local-present))
+                       (if shared
+                           (setf (gethash key used)
+                                 (dra-capacity-usage-add
+                                  usage (gethash "consumedCapacity" result
+                                                 (core-object))))
+                           (setf (gethash key claim-used) t
+                                 (gethash key used) t))))
+                   (unwind-protect
+                        (search-request (1+ index)
+                                        (append results (coerce option 'list)))
+                     (dolist (state states)
+                       (destructuring-bind (key usage usage-present local local-present
+                                            result shared)
+                           state
+                         (declare (ignore result shared))
+                         (if usage-present
+                             (setf (gethash key used) usage)
+                             (remhash key used))
+                         (if local-present
+                             (setf (gethash key claim-used) local)
+                             (remhash key claim-used))))))))
              (search-request (index results)
                (if (= index (length requests))
                    (let ((vector (coerce results 'vector)))
