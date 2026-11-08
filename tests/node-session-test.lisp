@@ -1294,14 +1294,19 @@
                (slot-value (first routes)
                            'gr8s.node.v1::wireguard-listen-port)))))))
 
-(test live-node-sessions-publish-peer-address-changes-and-withdrawals
+(test live-node-sessions-publish-peer-address-and-key-changes-and-withdrawals
   (with-temporary-store (store path)
     (dolist (entry '(("node-a" "worker-a" "10.88.1.0/24")
                      ("node-b" "worker-b" "10.88.2.0/24")))
       (gr8s:register-node store (gr8s:make-node-record
                                 :id (first entry) :name (second entry)
                                 :pod-cidr (third entry))))
-    (let* ((server (gr8s:start-node-grpc-server store :host "127.0.0.1" :port 0))
+    (let* ((key-a (make-array 32 :element-type '(unsigned-byte 8) :initial-element 10))
+           (key-b (make-array 32 :element-type '(unsigned-byte 8) :initial-element 11))
+           (key-c (make-array 32 :element-type '(unsigned-byte 8) :initial-element 12))
+           (server (gr8s:start-node-grpc-server
+                    store :host "127.0.0.1" :port 0
+                    :overlay-backend "wireguard" :wireguard-listen-port 51820))
            (control (gr8s::make-node-session-control))
            (agent nil) (snapshots nil)
            (lock (bt:make-lock "peer snapshot observations")))
@@ -1310,14 +1315,20 @@
                    (let* ((snapshot (first snapshots))
                           (peer (and snapshot (first (slot-value snapshot 'gr8s.node.v1::routes)))))
                      (and peer (slot-value peer 'gr8s.node.v1::underlay-address)))))
-               (connect-peer (address)
+               (latest-peer-key ()
+                 (bt:with-lock-held (lock)
+                   (let* ((snapshot (first snapshots))
+                          (peer (and snapshot (first (slot-value snapshot 'gr8s.node.v1::routes)))))
+                     (and peer (slot-value peer 'gr8s.node.v1::wireguard-public-key)))))
+               (connect-peer (address key)
                  (gr8s:run-node-session
                   "127.0.0.1" (gr8s:node-grpc-server-port server) "worker-b"
                   (merge-pathnames "peer-b/identity.json" path)
                   (lambda (snapshot)
                     (is (string= address (slot-value (slot-value snapshot 'gr8s.node.v1::network)
                                                      'gr8s.node.v1::underlay-address))))
-                  :underlay-address address :max-sessions 1)))
+                  :underlay-address address :wireguard-public-key key
+                  :max-sessions 1)))
         (unwind-protect
              (progn
                (setf agent
@@ -1328,14 +1339,21 @@
                          (merge-pathnames "peer-a/identity.json" path)
                          (lambda (snapshot)
                            (bt:with-lock-held (lock) (push snapshot snapshots)) nil)
-                         :underlay-address "192.0.2.10" :control control
+                         :underlay-address "192.0.2.10"
+                         :wireguard-public-key key-a :control control
                          :reconnect-delay 0.01))))
                (is-true (wait-until (lambda () (bt:with-lock-held (lock) snapshots)) :timeout 5))
-               (connect-peer "192.0.2.11")
+               (connect-peer "192.0.2.11" key-b)
                (is-true (wait-until (lambda () (equal "192.0.2.11" (latest-peer-address))) :timeout 5))
-               (connect-peer "192.0.2.12")
+               (is-true (equalp key-b (latest-peer-key)))
+               (connect-peer "192.0.2.12" key-b)
                (is-true (wait-until (lambda () (equal "192.0.2.12" (latest-peer-address))) :timeout 5))
-               (connect-peer "")
+               (connect-peer "192.0.2.12" key-c)
+               (is-true (wait-until (lambda () (equalp key-c (latest-peer-key))) :timeout 5))
+               (is (equalp key-c
+                           (gr8s::node-record-wireguard-public-key
+                            (gr8s:get-node store "worker-b"))))
+               (connect-peer "" key-c)
                (is-true (wait-until (lambda () (null (latest-peer-address))) :timeout 5)))
           (gr8s::cancel-node-session control)
           (when agent
