@@ -312,6 +312,22 @@
                                :netns "/proc/99/ns/net" :interface-name "eth0")
        (gr8s::make-chained-cni-operations)))))
 
+(test chained-cni-delete-does-not-require-a-previous-result
+  (let ((removed nil)
+        (configuration
+          "{\"cniVersion\":\"1.0.0\",\"mapPinRoot\":\"/run/gr8s/bpf\"}"))
+    (gr8s::dispatch-cni-command
+     "DEL" configuration
+     (gr8s::make-cni-context :container-id "sandbox-external"
+                             :interface-name "eth0")
+     (gr8s::make-chained-cni-operations
+      :policy
+      (gr8s::make-cni-operations
+       :delete (lambda (config context map-path link-path directory)
+                 (declare (ignore config context map-path link-path directory))
+                 (setf removed t)))))
+    (is-true removed)))
+
 (test cni-delete-does-not-require-a-network-namespace
   (let* ((removed nil)
         (operations
@@ -598,6 +614,17 @@
     (is (= #x02112233 (gr8s::netlink-read-integer bytes 4 4)))
     (is (= #x4455 (gr8s::netlink-read-integer bytes 8 4)))
     (is (= 1 (gr8s::netlink-read-integer bytes 12 4)))))
+
+(test endpoint-identity-distinguishes-native-and-chained-policy-attachments
+  (let ((native (gr8s::make-cni-configuration :policy-interface-name "gr-owned"))
+        (chained (gr8s::make-cni-configuration)))
+    (is (= 1 (gr8s::cni-policy-attachment-mode native)))
+    (is (= 2 (gr8s::cni-policy-attachment-mode chained)))
+    (is (= 2 (gr8s::netlink-read-integer
+              (gr8s::encode-cni-endpoint-identity
+               "10.240.0.2" #(10 11 12 13 14 15)
+               (gr8s::cni-policy-attachment-mode chained))
+              12 4)))))
 
 (test routed-policy-selects-the-host-interface-without-entering-the-pod
   (let ((configuration (gr8s::make-cni-configuration :policy-interface-name "gr-owned"))

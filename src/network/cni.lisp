@@ -240,9 +240,13 @@ prevResult and only installs, checks, or removes its policy datapath."
   (make-cni-operations
    :prepare
    (lambda (configuration context)
-     (setf (cni-configuration-endpoint-address configuration)
-           (chained-cni-ipv4-address
-            (cni-configuration-previous-result configuration)))
+     ;; The runtime supplies prevResult for ADD and CHECK, but the CNI contract
+     ;; permits DEL after partial setup and without any previous result. Policy
+     ;; removal is keyed by container/interface pins and does not need an IP.
+     (let ((previous (cni-configuration-previous-result configuration)))
+       (when (hash-table-p previous)
+         (setf (cni-configuration-endpoint-address configuration)
+               (chained-cni-ipv4-address previous))))
      (funcall (cni-operations-prepare policy) configuration context))
    :add (cni-operations-add policy)
    :check (cni-operations-check policy)

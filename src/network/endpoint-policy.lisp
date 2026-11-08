@@ -56,17 +56,30 @@
        :name name :type type :key-size key-size :value-size value-size
        :max-entries max-entries :flags flags :fd fd))))
 
-(defun encode-cni-endpoint-identity (address mac)
+(defconstant +cni-policy-native-attachment+ 1)
+(defconstant +cni-policy-chained-attachment+ 2)
+
+(defun cni-policy-attachment-mode (configuration)
+  "Return the datapath attachment mode for CONFIGURATION. Native routing guards
+   a host veth and may use host-interface redirects; a chained CNI guard runs on
+   the Pod interface and must leave delivery to the primary plugin."
+  (if (cni-configuration-policy-interface-name configuration)
+      +cni-policy-native-attachment+
+      +cni-policy-chained-attachment+))
+
+(defun encode-cni-endpoint-identity
+    (address mac &optional (attachment-mode +cni-policy-native-attachment+))
   "Encode the datapath endpoint-identity value from the Pod's ADDRESS (dotted
    IPv4) and 6-byte MAC: the IPv4 integer, the MAC split across two words, and a
-   trailing 1. Signals INVALID-CNI when MAC is missing or not 6 bytes long."
+   trailing ATTACHMENT-MODE. Signals INVALID-CNI when MAC is missing or not 6
+   bytes long."
   (unless (and mac (= 6 (length mac)))
     (invalid-cni "the Pod interface has no Ethernet identity"))
   (netlink-octets
    (netlink-integer (parse-ipv4-integer address) 4)
    (netlink-integer (loop for index below 4 sum (ash (aref mac index) (- 24 (* index 8)))) 4)
    (netlink-integer (+ (ash (aref mac 4) 8) (aref mac 5)) 4)
-   (netlink-integer 1 4)))
+   (netlink-integer attachment-mode 4)))
 
 (defun cni-endpoint-identity (configuration context)
   "Build the endpoint-identity value for the Pod described by CONFIGURATION and
@@ -78,7 +91,8 @@
      address
      (call-with-cni-network-namespace
       (cni-context-netns context)
-      (lambda () (gethash 1 (network-link-attributes (cni-context-interface-name context))))))))
+      (lambda () (gethash 1 (network-link-attributes (cni-context-interface-name context)))))
+     (cni-policy-attachment-mode configuration))))
 
 (defun initialize-cni-identity (map configuration context)
   "Write the Pod's endpoint identity into MAP at key 0, the entry the datapath

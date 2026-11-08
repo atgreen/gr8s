@@ -147,7 +147,9 @@
         ;; rematerialize tc-data across a lookup and lose the verifier range.
         (if (/= identity 0)
           (progn
-            (when (/= (load u32 identity 12) 1) (drop-pod-packet :spoof))
+            ;; Zero is an uninitialized identity. Mode 1 guards the native host
+            ;; veth; mode 2 guards a primary plugin's interface inside the Pod.
+            (when (= (load u32 identity 12) 0) (drop-pod-packet :spoof))
             (when (or (/= (ntohl (load u32 data 6)) (load u32 identity 4))
                       (/= (ntohs (load u16 data 10)) (load u32 identity 8)))
               (drop-pod-packet :spoof))
@@ -177,7 +179,8 @@
                    ;; (bytes 2-3), so one dport test covers both; for TCP every
                    ;; inbound segment of the flow is redirected the same way.
                    (let ((l4-proto u8 (load u8 ip 9)))
-                     (when (and (or (= l4-proto 17) (= l4-proto 6)) ; UDP or TCP
+                     (when (and (= (load u32 identity 12) 1)        ; native host veth
+                                (or (= l4-proto 17) (= l4-proto 6)) ; UDP or TCP
                                 (= (logand (load u8 ip 0) 15) 5)   ; no IP options (ihl = 5)
                                 (= (ntohl (load u32 ip 16)) #xa9fe0101) ; dst = 169.254.1.1
                                 (<= (+ data 42) data-end)          ; L4 ports in bounds
@@ -198,7 +201,8 @@
                    ;; agent populates host-redirect-v4 with the node's host-local
                    ;; destinations. The scalar u32 key is the dst in network order,
                    ;; the same bytes the agent writes (see host-redirect-key).
-                   (when (/= (map-lookup host-redirect-v4 (load u32 ip 16)) 0)
+                   (when (and (= (load u32 identity 12) 1)
+                              (/= (map-lookup host-redirect-v4 (load u32 ip 16)) 0))
                      ;; The lookup reset the verifier's proven packet range; re-prove
                      ;; the L2 bounds before rewriting the MAC header.
                      (when (> (+ data 14) data-end) (drop-pod-packet :malformed))
@@ -248,23 +252,24 @@
                    ;; A map lookup resets the verifier's proven packet range, so
                    ;; re-prove the L2 bounds before rewriting the MAC header.
                    (when (> (+ data 34) data-end) (drop-pod-packet :malformed))
-                   (let ((lpk (make-local-pod-key)))
-                     (setf (local-pod-key-prefixlen lpk) 32
-                           (local-pod-key-addr lpk) (load u32 ip 16))
-                     ;; lpk is a variable (we setf its fields), so the key expr
-                     ;; is not a literal make- form -- lower-map-lookup can't see
-                     ;; it is a struct pointer and would spill the POINTER value
-                     ;; as the key. Use map-lookup-ptr so R2 = &lpk (its contents).
-                     (let ((ep (map-lookup-ptr local-pod-v4 lpk)))
-                       (when (/= ep 0)
-                         (when (> (+ data 14) data-end) (drop-pod-packet :malformed))
-                         (store u32 data 0 (load u32 ep 4))    ; dst MAC [0:4] = Pod MAC
-                         (store u16 data 4 (load u16 ep 8))    ; dst MAC [4:6]
-                         (store u32 data 6 (load u32 ep 10))   ; src MAC [0:4] = veth MAC
-                         (store u16 data 10 (load u16 ep 14))  ; src MAC [4:6]
-                         (add-pod-counter allowed-packets 1)
-                         (add-pod-counter allowed-bytes (ctx u32 0))
-                         (return (redirect (load u32 ep 0) 0)))))))
+                   (when (= (load u32 identity 12) 1)
+                     (let ((lpk (make-local-pod-key)))
+                       (setf (local-pod-key-prefixlen lpk) 32
+                             (local-pod-key-addr lpk) (load u32 ip 16))
+                       ;; lpk is a variable (we setf its fields), so the key expr
+                       ;; is not a literal make- form -- lower-map-lookup can't see
+                       ;; it is a struct pointer and would spill the POINTER value
+                       ;; as the key. Use map-lookup-ptr so R2 = &lpk (its contents).
+                       (let ((ep (map-lookup-ptr local-pod-v4 lpk)))
+                         (when (/= ep 0)
+                           (when (> (+ data 14) data-end) (drop-pod-packet :malformed))
+                           (store u32 data 0 (load u32 ep 4))    ; dst MAC [0:4] = Pod MAC
+                           (store u16 data 4 (load u16 ep 8))    ; dst MAC [4:6]
+                           (store u32 data 6 (load u32 ep 10))   ; src MAC [0:4] = veth MAC
+                           (store u16 data 10 (load u16 ep 14))  ; src MAC [4:6]
+                           (add-pod-counter allowed-packets 1)
+                           (add-pod-counter allowed-bytes (ctx u32 0))
+                           (return (redirect (load u32 ep 0) 0))))))))
                 ((= protocol #x0806)
                  (when (> (+ data 42) data-end) (drop-pod-packet :malformed))
                  (let ((arp u64 (+ data 14)))
