@@ -19,9 +19,44 @@
 
 (defstruct image-credential-provider
   "One validated kubelet exec credential provider and its private response cache."
-  name executable match-images default-cache-seconds api-version args environment
+  name executable match-images default-cache-seconds api-version args environment token-attributes
   (cache (make-hash-table :test #'equal))
   (lock (bt:make-lock "image credential provider cache")))
+
+(defun credential-provider-token-attributes (value name)
+  "Validate VALUE as kubelet v1 service-account token attributes for provider NAME."
+  (when value
+    (let* ((attributes (require-object value "tokenAttributes"))
+           (audience (gethash "serviceAccountTokenAudience" attributes))
+           (cache-type (gethash "cacheType" attributes))
+           (required-pair (multiple-value-list (gethash "requireServiceAccount" attributes)))
+           (require-service-account (first required-pair))
+           (required (credential-provider-string-vector
+                      (gethash "requiredServiceAccountAnnotationKeys" attributes #())
+                      "requiredServiceAccountAnnotationKeys"))
+           (optional (credential-provider-string-vector
+                      (gethash "optionalServiceAccountAnnotationKeys" attributes #())
+                      "optionalServiceAccountAnnotationKeys")))
+      (unless (and (stringp audience) (plusp (length audience)))
+        (error "Credential provider ~A token audience is required" name))
+      (unless (member cache-type '("ServiceAccount" "Token") :test #'equal)
+        (error "Credential provider ~A token cacheType must be ServiceAccount or Token" name))
+      (unless (and (second required-pair) (typep require-service-account 'boolean))
+        (error "Credential provider ~A requireServiceAccount must be boolean" name))
+      (dolist (key (append required optional))
+        (unless (core-qualified-key-p key)
+          (error "Credential provider ~A annotation key ~S is not qualified" name key)))
+      (unless (= (length required) (length (remove-duplicates required :test #'equal)))
+        (error "Credential provider ~A has duplicate required annotation keys" name))
+      (unless (= (length optional) (length (remove-duplicates optional :test #'equal)))
+        (error "Credential provider ~A has duplicate optional annotation keys" name))
+      (when (intersection required optional :test #'equal)
+        (error "Credential provider ~A annotation keys must be either required or optional" name))
+      (when (and required (not require-service-account))
+        (error "Credential provider ~A requires annotations but not a ServiceAccount" name))
+      (list :audience audience :cache-type cache-type
+            :require-service-account require-service-account
+            :required-annotations required :optional-annotations optional))))
 
 (defun credential-provider-duration-seconds (value context)
   "Parse VALUE as a nonnegative Go duration, signaling a configuration error otherwise."
@@ -64,8 +99,6 @@ Provider names resolve only within BIN-DIRECTORY and are returned in configurati
                (setf (gethash name seen) t)
                (unless (equal api-version "credentialprovider.kubelet.k8s.io/v1")
                  (error "Credential provider ~A uses unsupported apiVersion ~A" name api-version))
-               (when (gethash "tokenAttributes" provider)
-                 (error "Credential provider ~A requests unsupported tokenAttributes" name))
                (unless (probe-file executable)
                  (error "Credential provider executable ~A does not exist" executable))
             collect
@@ -77,6 +110,8 @@ Provider names resolve only within BIN-DIRECTORY and are returned in configurati
              (credential-provider-duration-seconds
               (gethash "defaultCacheDuration" provider) "defaultCacheDuration")
              :args (credential-provider-string-vector (gethash "args" provider #()) "args")
+             :token-attributes
+             (credential-provider-token-attributes (gethash "tokenAttributes" provider) name)
              :environment
              (let ((environment (gethash "env" provider #())))
                (unless (vectorp environment) (error "env must be an array"))

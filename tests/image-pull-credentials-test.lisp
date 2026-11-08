@@ -212,12 +212,18 @@
       (gr8s::image-credential-provider-entries (list provider) "registry.example.test/b:1"))
     (is (= 1 calls))))
 
-(test service-account-token-credential-provider-config-is-rejected-until-supported
+(test service-account-token-credential-provider-config-is-validated-and-loaded
   (uiop:with-temporary-file (:pathname config :stream out :keep nil)
     (format out
-            "apiVersion: kubelet.config.k8s.io/v1~%kind: CredentialProviderConfig~%providers:~%- name: env~%  matchImages: [registry.example.test]~%  defaultCacheDuration: 30s~%  apiVersion: credentialprovider.kubelet.k8s.io/v1~%  tokenAttributes: {}~%")
+            "apiVersion: kubelet.config.k8s.io/v1~%kind: CredentialProviderConfig~%providers:~%- name: env~%  matchImages: [registry.example.test]~%  defaultCacheDuration: 30s~%  apiVersion: credentialprovider.kubelet.k8s.io/v1~%  tokenAttributes:~%    serviceAccountTokenAudience: registry.example.test~%    cacheType: ServiceAccount~%    requireServiceAccount: true~%    requiredServiceAccountAnnotationKeys: [registry.example.test/tenant]~%    optionalServiceAccountAnnotationKeys: [registry.example.test/region]~%")
     (finish-output out)
-    (signals error (gr8s::load-image-credential-providers config #p"/usr/bin/"))))
+    (let* ((provider (first (gr8s::load-image-credential-providers config #p"/usr/bin/")))
+           (attributes (gr8s::image-credential-provider-token-attributes provider)))
+      (is (equal "registry.example.test" (getf attributes :audience)))
+      (is (equal "ServiceAccount" (getf attributes :cache-type)))
+      (is (getf attributes :require-service-account))
+      (is (equal '("registry.example.test/tenant") (getf attributes :required-annotations)))
+      (is (equal '("registry.example.test/region") (getf attributes :optional-annotations))))))
 
 (test malformed-node-registry-credential-files-fail-runtime-construction
   (uiop:with-temporary-file (:pathname file :stream stream :keep nil)
