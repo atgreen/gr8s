@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Privileged native two-node smoke; uses routed underlay veths, no bridge.
+"""Privileged native two-node overlay smoke; uses routed underlay veths, no bridge.
 
 Run after make native. Requires ip, nsenter, nft, kubectl, and root. Temporary
 NAT applies only to the test underlay's external image/DNS downloads. Each
-node keeps its own mount/network namespaces across agent restarts.
+node keeps its own mount/network namespaces across agent restarts. Set
+GR8S_OVERLAY_BACKEND=wireguard to exercise encryption, capture proof and key
+rotation; the default remains vxlan.
 """
 import ipaddress
 import json
@@ -45,6 +47,10 @@ class Smoke:
         self.table = self.prefix
         self.api_port = int(os.environ.get('GR8S_TWO_NODE_PORT', '18084'))
         self.node_port = int(os.environ.get('GR8S_TWO_NODE_AGENT_PORT', '17443'))
+        self.overlay = os.environ.get('GR8S_OVERLAY_BACKEND', 'vxlan')
+        assert self.overlay in ('vxlan', 'wireguard'), self.overlay
+        self.overlay_interface = 'gr8s-wg' if self.overlay == 'wireguard' else 'gr8s-vxlan'
+        self.encryption_proved = False
         self.pool = ipaddress.ip_network(os.environ.get('GR8S_SMOKE_UNDERLAY', '198.18.253.0/29'))
         assert self.pool.version == 4 and self.pool.prefixlen == 29
         self.hosts = [str(self.pool.network_address + 1), str(self.pool.network_address + 5)]
@@ -84,7 +90,10 @@ class Smoke:
     def setup(self):
         assert os.geteuid() == 0, 'root is required'
         assert self.binary.is_file(), 'run make native first'
-        for command in ('ip', 'nsenter', 'nft', 'kubectl', 'mount'):
+        commands = ['ip', 'nsenter', 'nft', 'kubectl', 'mount']
+        if self.overlay == 'wireguard':
+            commands.append('tcpdump')
+        for command in commands:
             assert shutil.which(command), f'missing {command}'
         # Refuse to replace an existing connected route to the test underlay.
         routes = json.loads(run('ip', '-j', '-4', 'route', 'show').stdout)
@@ -138,6 +147,7 @@ class Smoke:
         self.server = self.start([self.binary, 'serve', '--disable-agent', '--runtime', 'fake',
                                  '--state-directory', self.root / 'control', '--port', self.api_port,
                                  '--node-listen', '0.0.0.0', '--node-port', self.node_port,
+                                 '--overlay-backend', self.overlay,
                                  '--kubeconfig', self.kubeconfig], 'control')
         wait_for('control plane', lambda: self.kubeconfig.exists() and
                  self.kubectl('get', '--raw', '/readyz').returncode == 0)
@@ -171,6 +181,42 @@ class Smoke:
             assert identities == expected, f'Pod identity/assignment changed: {identities} != {expected}'
         return identities
 
+    def prove_wireguard_encryption(self, identities):
+        if self.overlay != 'wireguard' or self.encryption_proved:
+            return
+        # BusyBox ping accepts a single payload byte. A long repeated marker is
+        # still distinctive enough to prove that known inner payload is absent.
+        marker_byte = '47'
+        marker = bytes.fromhex(marker_byte) * 64
+        capture_path = self.root / 'wireguard-underlay.pcap'
+        keeper = self.keepers[0]
+        capture = subprocess.Popen(
+            ['nsenter', f'--mount=/proc/{keeper.pid}/ns/mnt',
+             f'--net=/run/netns/{self.namespaces[0]}', '--',
+             'tcpdump', '-U', '-i', 'underlay', '-w', str(capture_path),
+             'udp', 'port', '51820', 'or', 'icmp'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        try:
+            time.sleep(1)
+            self.kubectl('exec', 'two-node-0', '--', 'ping', '-c', '3', '-W', '2',
+                         '-s', '1200', '-p', marker_byte, identities[1][2])
+        finally:
+            capture.send_signal(signal.SIGINT)
+            _, error = capture.communicate(timeout=10)
+        assert capture.returncode == 0, error
+        packets = capture_path.read_bytes()
+        assert marker not in packets, 'known Pod payload appeared in plaintext on the underlay'
+        encrypted = run('tcpdump', '-nn', '-r', capture_path,
+                        'udp', 'port', '51820').stdout.splitlines()
+        assert encrypted, 'capture contained no WireGuard UDP packets'
+        plaintext = run('tcpdump', '-nn', '-r', capture_path, 'icmp', 'and',
+                        '(', 'host', identities[0][2], 'or', 'host', identities[1][2],
+                        ')').stdout.splitlines()
+        assert not plaintext, f'capture exposed unencapsulated Pod packets: {plaintext}'
+        self.encryption_proved = True
+        print('Underlay capture contains WireGuard UDP, no Pod ICMP and no known plaintext',
+              flush=True)
+
     def traffic(self, identities):
         for index in range(2):
             peer = identities[1 - index][2]
@@ -185,10 +231,12 @@ class Smoke:
             assert self.kubectl('exec', f'two-node-{index}', '--', 'ip', 'neigh', 'show',
                                 '169.254.1.1').stdout.strip().endswith('PERMANENT')
             route = json.loads(self.in_node(index, 'ip', '-j', 'route', 'get', peer).stdout)
-            assert route[0]['dev'] == 'gr8s-vxlan', route
-            counters = json.loads(self.in_node(index, 'ip', '-s', '-j', 'link', 'show', 'gr8s-vxlan').stdout)
+            assert route[0]['dev'] == self.overlay_interface, route
+            counters = json.loads(self.in_node(
+                index, 'ip', '-s', '-j', 'link', 'show', self.overlay_interface).stdout)
             stats = counters[0].get('stats64', counters[0].get('stats'))
             assert stats['tx']['packets'] > 0 and stats['rx']['packets'] > 0, counters
+        self.prove_wireguard_encryption(identities)
         # Pause reconciliation while demonstrating that the Pod cannot bypass
         # a down tunnel. Inject directly into the Pod namespace during the pause.
         namespace_root = self.root / 'agent-0/containerd/run/io.containerd.grpc.v1.cri/netns'
@@ -197,21 +245,22 @@ class Smoke:
         assert len(pod_namespaces) == 1, pod_namespaces
         self.agents[0].send_signal(signal.SIGSTOP)
         try:
-            self.in_node(0, 'ip', 'link', 'set', 'gr8s-vxlan', 'down')
+            self.in_node(0, 'ip', 'link', 'set', self.overlay_interface, 'down')
             assert self.in_node(0, 'nsenter', f'--net={pod_namespaces[0]}', '--',
                                 'ping', '-c', '1', '-W', '1', identities[1][2],
                                 check=False).returncode != 0
         finally:
-            self.in_node(0, 'ip', 'link', 'set', 'gr8s-vxlan', 'up')
+            self.in_node(0, 'ip', 'link', 'set', self.overlay_interface, 'up')
             self.agents[0].send_signal(signal.SIGCONT)
-        wait_for('VXLAN state restored without a new snapshot', lambda:
+        wait_for(f'{self.overlay} state restored without a new snapshot', lambda:
                  self.kubectl('exec', 'two-node-0', '--', 'ping', '-c', '1', '-W', '1',
                               identities[1][2], check=False).returncode == 0, timeout=15)
 
     def exercise(self):
         for index in range(2):
             pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': f'two-node-{index}'},
-                   'spec': {'nodeName': f'worker-{index}', 'containers': [
+                   'spec': {'nodeName': f'worker-{index}', 'terminationGracePeriodSeconds': 1,
+                            'containers': [
                        {'name': 'main', 'image': 'docker.io/library/busybox:1.37.0',
                         'command': ['sh', '-c', f'echo two-node-{index}; sleep 600']}]}}
             self.kubectl('create', '-f', '-', input=json.dumps(pod))
@@ -220,16 +269,25 @@ class Smoke:
         if os.environ.get('GR8S_TWO_NODE_FAIL_AFTER_CREATE') == '1':
             raise RuntimeError('forced two-node failure after creating Pods')
         self.traffic(identities)
-        print('Two-node native VXLAN connectivity, DNS, logs, exec and tunnel-dependency checks passed', flush=True)
+        print(f'Two-node native {self.overlay} connectivity, DNS, logs, exec and '
+              'tunnel-dependency checks passed', flush=True)
         restart_started = int(time.time())
         self.agents[0].terminate()
         self.agents[0].wait(timeout=20)
         # The stopped agent's existing Pod and pinned dataplane stay alive.
         self.kubectl('exec', 'two-node-1', '--', 'ping', '-c', '2', '-W', '2', identities[0][2])
+        if self.overlay == 'wireguard':
+            result = run(self.binary, 'wireguard', 'rotate-key', '--state-directory',
+                         self.root / 'agent-0')
+            assert result.stdout.startswith('WireGuard public key: '), result.stdout
+            print(result.stdout.strip(), flush=True)
         print('Restarting enrolled worker-0 without a bootstrap token', flush=True)
         self.start_agent(0)
         wait_for('unchanged Pods after restart', lambda: self.check_pods(identities))
         self.traffic(identities)
+        if self.overlay == 'wireguard':
+            print('Post-rotation encrypted cross-node traffic confirms peer-key convergence',
+                  flush=True)
         for index in range(2):
             def recovered(index=index):
                 lines = self.metrics().splitlines()
@@ -246,7 +304,8 @@ class Smoke:
             plugin = config['plugins'][0]
             plugin.update(cniVersion=config['cniVersion'], name=config['name'])
             sandboxes = self.in_node(index, 'find', state / 'bpf', '-mindepth', '1',
-                                     '-maxdepth', '1', '-type', 'd').stdout.splitlines()
+                                     '-maxdepth', '1', '-type', 'd',
+                                     '!', '-name', 'service-lb').stdout.splitlines()
             namespaces = self.in_node(index, 'find', state / 'run/io.containerd.grpc.v1.cri/netns',
                                       '-mindepth', '1', '-maxdepth', '1').stdout.splitlines()
             assert len(sandboxes) == len(namespaces) == 1, (sandboxes, namespaces)
@@ -260,7 +319,12 @@ class Smoke:
         # Delete through the API while agents and their CNI services are alive.
         if self.kubeconfig.exists() and self.server and self.server.poll() is None:
             for index in range(2):
-                self.kubectl('delete', 'pod', f'two-node-{index}', '--ignore-not-found', check=False)
+                try:
+                    self.kubectl('delete', 'pod', f'two-node-{index}',
+                                 '--ignore-not-found', '--wait=false', check=False)
+                except subprocess.TimeoutExpired as error:
+                    print(f'Pod deletion timed out for worker-{index}: {error}', flush=True)
+                    self.success = False
             for index, keeper in enumerate(self.keepers):
                 if keeper and keeper.poll() is None:
                     def absent(index=index):
