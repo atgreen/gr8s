@@ -442,12 +442,14 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
         (temporary (managed-containerd-directory manager "containerd/tmp"))
         (runtimes (managed-containerd-runtimes-toml manager))
         (socket (managed-containerd-socket-path manager))
+        (registry-config (managed-containerd-directory manager "containerd/certs.d"))
         (cni-config (managed-containerd-cni-config-directory-path manager))
         (snapshotter (managed-containerd-snapshotter manager)))
     (format
      nil
      "version = 4~%root = '~A'~%state = '~A'~%temp = '~A'~%~
 [plugins]~%~:[~;  [plugins.'io.containerd.metadata.v1.bolt']~%    no_sync = true~%~]  [plugins.'io.containerd.cri.v1.images']~%    snapshotter = '~A'~%~
+    [plugins.'io.containerd.cri.v1.images'.registry]~%      config_path = '~A'~%~
   [plugins.'io.containerd.cri.v1.runtime']~%    disable_apparmor = true~%    restrict_oom_score_adj = true~%    netns_mounts_under_state_dir = true~%~
     [plugins.'io.containerd.cri.v1.runtime'.containerd]~%      default_runtime_name = 'runc'~%~A~
     [plugins.'io.containerd.cri.v1.runtime'.cni]~%      bin_dirs = ~A~%      conf_dir = '~A'~%      use_internal_loopback = true~%~
@@ -457,7 +459,7 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
     [[plugins.'io.containerd.transfer.v1.local'.unpack_config]]~%      platform = '~A'~%      snapshotter = '~A'~%~
   [plugins.'io.containerd.server.v1.grpc']~%    address = '~A'~%~
   [plugins.'io.containerd.server.v1.ttrpc']~%    address = '~A.ttrpc'~%"
-     root state temporary (managed-containerd-metadata-no-sync manager) snapshotter
+     root state temporary (managed-containerd-metadata-no-sync manager) snapshotter registry-config
      runtimes
      (toml-string-list (managed-containerd-cni-bin-directory-list manager))
      cni-config (managed-containerd-shim-socket-directory manager)

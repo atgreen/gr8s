@@ -17,7 +17,7 @@
   :version "1.37.2"
   :depends-on ("0conf/dns-wire" "ag-grpc" "bordeaux-threads" "cffi" "chipz" "cl-cancel"
                "com.inuoe.jzon" "hunchentoot" "cl-ppcre"
-               "pure-tls/acme" "drakma"
+               "pure-tls/acme" "drakma" "ironclad"
                "sb-posix" "slynk" "trivial-utf-8" "usocket" "version-string"
                "whistler/loader")
   :serial t
@@ -61,6 +61,16 @@
                                            (:file "node-protocol")))
                              (:file "foundation/dns")
                              (:file "foundation/json")
+                             (:module "image-distribution"
+                              :serial t
+                              :components ((:file "package")
+                                           (:file "bencode")
+                                           (:file "torrent-v2")
+                                           (:file "tracker")
+                                           (:file "peer-wire")
+                                           (:file "piece-store")
+                                           (:file "oci-cache")
+                                           (:file "oci-mirror")))
                              (:module "model"
                               :serial t
                               :components ((:file "package")
@@ -112,6 +122,7 @@
                                            (:file "certificate-profiles")
                                            (:file "pki")
                                            (:file "node-tls")
+                                           (:file "image-peer-tls")
                                            (:file "raft-tls")
                                            (:file "csr-crypto")
                                            (:file "compat")))
@@ -364,6 +375,11 @@
                 :serial t
                 :components ((:file "package")
                              (:file "protocol-package-test")
+                             (:file "torrent-v2-test")
+                             (:file "image-tracker-test")
+                             (:file "peer-wire-test")
+                             (:file "oci-cache-test")
+                             (:file "oci-mirror-test")
                              (:file "websocket-test")
                              (:file "node-protocol-test")
                              (:file "dns-test")

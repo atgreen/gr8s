@@ -24,6 +24,19 @@
   (jobs (make-hash-table :test #'equal))
   (lock (bt:make-lock "native image pulls")))
 
+(defun prepare-image-mirror-host (runtime image)
+  "Install IMAGE's containerd hosts.toml just before PullImage. A runtime with
+no managed mirror fields retains the previous external-containerd behavior."
+  (let ((directory
+          (gr8s.runtime.containerd::containerd-runtime-registry-host-config-directory runtime))
+        (port (gr8s.runtime.containerd::containerd-runtime-image-mirror-port runtime)))
+    (when (and directory port)
+      (let* ((repository (image-repository image))
+             (slash (position #\/ repository))
+             (host (if slash (subseq repository 0 slash) repository)))
+        (gr8s.image-distribution::ensure-containerd-registry-host-config
+         directory host port)))))
+
 (defun start-image-pull (runtime manager image credentials)
   "Replace the pull record of IMAGE and CREDENTIALS with a running background pull."
   (let ((job (make-image-pull-job)) (clock *container-lifecycle-clock*))
@@ -33,6 +46,7 @@
            (lambda ()
              (handler-case
                  (progn
+                   (prepare-image-mirror-host runtime image)
                    (pull-image-with-credentials (containerd-runtime-socket-path runtime) image credentials)
                    (bt:with-lock-held ((image-pull-manager-lock manager))
                      (setf (image-pull-job-state job) :done

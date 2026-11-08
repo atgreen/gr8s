@@ -1,0 +1,277 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+
+(in-package #:gr8s.image-distribution)
+
+(defconstant +default-image-piece-length+ (* 1024 1024))
+
+(defun valid-registry-host-p (host)
+  (and (stringp host) (plusp (length host))
+       (every (lambda (character)
+                (or (alphanumericp character)
+                    (find character ".-_:")))
+              host)))
+
+(defun registry-origin-host (registry-host)
+  (if (member registry-host '("docker.io" "index.docker.io") :test #'string-equal)
+      "registry-1.docker.io"
+      registry-host))
+
+(defun containerd-registry-hosts-text (registry-host mirror-port)
+  "Render strict containerd hosts.toml with no direct-registry escape hatch.
+The original host is carried in a fixed header; only the lease-holding mirror
+may fetch a missing blob from it."
+  (unless (valid-registry-host-p registry-host)
+    (error "Invalid OCI registry host ~S" registry-host))
+  (unless (typep mirror-port '(integer 1 65535))
+    (error "Invalid OCI mirror port ~S" mirror-port))
+  (let ((origin (registry-origin-host registry-host)))
+   (format nil
+          "server = \"http://127.0.0.1:~D\"~%~%[host.\"http://127.0.0.1:~D\"]~%  capabilities = [\"pull\", \"resolve\"]~%  [host.\"http://127.0.0.1:~D\".header]~%    X-Gr8s-Upstream = [\"~A\"]~%"
+          mirror-port mirror-port mirror-port origin)))
+
+(defun registry-host-config-path (directory registry-host)
+  (merge-pathnames (format nil "~A/hosts.toml" registry-host)
+                   (uiop:ensure-directory-pathname directory)))
+
+(defun ensure-containerd-registry-host-config
+    (directory registry-host mirror-port)
+  (let ((path (registry-host-config-path directory registry-host)))
+    (ensure-directories-exist path)
+    (with-open-file (stream path :direction :output :if-exists :supersede
+                                 :if-does-not-exist :create)
+      (write-string (containerd-registry-hosts-text registry-host mirror-port)
+                    stream))
+    path))
+
+(defun upstream-request-headers (headers)
+  "Forward only registry negotiation and authorization headers. Hop-by-hop and
+mirror-routing headers never cross the loopback trust boundary."
+  (loop for (name . value) in headers
+        when (member (string-downcase (string name))
+                     '("authorization" "accept" "user-agent" "range"
+                       "if-none-match") :test #'string=)
+          collect (cons name value)))
+
+(defun upstream-registry-url (host path)
+  (unless (valid-registry-host-p host) (error "Invalid registry host ~S" host))
+  (unless (and (stringp path) (uiop:string-prefix-p "/v2/" path))
+    (error "Invalid registry path ~S" path))
+  (format nil "https://~A~A" host path))
+
+(defun proxy-oci-registry-request (method host path headers)
+  "Proxy a non-blob Distribution request, preserving auth challenges and media
+types. Drakma returns the byte body so manifests/configs remain exact."
+  (multiple-value-bind (body status response-headers)
+      (drakma:http-request
+       (upstream-registry-url host path) :method method
+       :additional-headers (upstream-request-headers headers)
+       :force-binary t :redirect nil :proxy nil)
+    (values body status response-headers)))
+
+(defun fetch-oci-registry-blob (temporary host repository digest headers)
+  "Stream one registry blob into TEMPORARY. Digest verification is deliberately
+owned by ENSURE-OCI-BLOB after this function returns."
+  (multiple-value-bind (stream status response-headers)
+      (drakma:http-request
+       (upstream-registry-url host (format nil "/v2/~A/blobs/~A" repository digest))
+       :method :get :additional-headers (upstream-request-headers headers)
+       :want-stream t :force-binary t :redirect 5 :proxy nil)
+    (declare (ignore response-headers))
+    (unwind-protect
+         (progn
+           (unless (<= 200 status 299)
+             (error "Registry ~A returned HTTP ~D for ~A" host status digest))
+           (with-open-file (output temporary :direction :output
+                                      :if-does-not-exist :create
+                                      :if-exists :supersede
+                                      :element-type '(unsigned-byte 8))
+             (let ((buffer (make-array 65536 :element-type '(unsigned-byte 8))))
+               (loop for count = (read-sequence buffer stream)
+                     while (plusp count)
+                     do (write-sequence buffer output :end count))))
+           t)
+      (when (streamp stream) (close stream :abort t)))))
+
+(defun tracker-status (response)
+  (let ((status (getf response :status)))
+    (etypecase status
+      (keyword status)
+      (string (intern (string-upcase status) :keyword)))))
+
+(defun call-tracker (tracker-call action digest &rest arguments)
+  (apply tracker-call action digest arguments))
+
+(defun call-with-origin-renewal
+    (tracker-call digest token function &key (renewal-interval 30))
+  "Run FUNCTION while renewing TOKEN until it returns. Renewal failures abort
+the fetch owner before it can publish under a stale lease."
+  (let ((stopping nil)
+        (failure nil)
+        (lock (bt:make-lock "gr8s image origin renewal"))
+        (changed (bt:make-condition-variable :name "gr8s image origin renewal")))
+    (let ((thread
+            (bt:make-thread
+             (lambda ()
+               (handler-case
+                   (loop
+                     (bt:with-lock-held (lock)
+                       (when stopping (return))
+                       (bt:condition-wait changed lock :timeout renewal-interval)
+                       (when stopping (return)))
+                     (call-tracker tracker-call :renew digest :token token))
+                 (error (condition)
+                   (setf failure condition))))
+             :name "gr8s image origin lease renewal")))
+      (unwind-protect
+           (multiple-value-prog1 (funcall function)
+             (when failure (error failure)))
+        (bt:with-lock-held (lock)
+          (setf stopping t)
+          (bt:condition-notify changed))
+        (bt:join-thread thread)))))
+
+(defun ensure-strict-p2p-blob
+    (cache digest tracker-call peer-fetch origin-fetch publish-seed
+     &key (piece-length +default-image-piece-length+) (wait-interval 0.1)
+          (renewal-interval 30))
+  "Materialize DIGEST without a registry stampede. TRACKER-CALL serializes the
+cold fetch. PEER-FETCH receives TEMPORARY, METAINFO and PEERS. ORIGIN-FETCH is
+invoked only while this node holds the exclusive lease. PUBLISH-SEED receives
+the verified path, torrent and token and must publish the initial seed before
+waiters can observe final metadata."
+  (let ((held-token nil)
+        (cached (oci-cache-blob-path cache digest)))
+   (when (verified-oci-blob-p cached digest)
+     (funcall publish-seed cached
+              (make-oci-blob-torrent cached digest piece-length) nil)
+     (return-from ensure-strict-p2p-blob cached))
+   (labels ((peer (temporary)
+             (let ((view (call-tracker tracker-call :lookup digest)))
+               (when (eq :available (tracker-status view))
+                 (funcall peer-fetch temporary digest (getf view :metainfo)
+                          (getf view :peers)))))
+           (origin (temporary)
+             (loop
+               for lease = (call-tracker tracker-call :acquire digest)
+               for status = (tracker-status lease)
+               do (case status
+                    (:granted
+                     (let ((token (getf lease :token)))
+                       (setf held-token token)
+                       (call-with-origin-renewal
+                        tracker-call digest token
+                        (lambda () (funcall origin-fetch temporary))
+                        :renewal-interval renewal-interval)
+                       (return t)))
+                    (:available
+                     (when (peer temporary) (return t))
+                     (sleep wait-interval))
+                    ((:waiting :missing) (sleep wait-interval))
+                    (otherwise
+                     (error "Unexpected image tracker acquire status ~S" status)))))
+           (publish (path source)
+             (let ((torrent (make-oci-blob-torrent path digest piece-length)))
+               (when (and (eq source :origin) (null held-token))
+                 (error "Cannot publish ~A without its origin lease" digest))
+               (funcall publish-seed path torrent
+                        (and (eq source :origin) held-token)))))
+    (ensure-oci-blob cache digest :peer-fetch #'peer :origin-fetch #'origin
+                     :publish #'publish))))
+
+(defstruct (oci-mirror (:constructor %make-oci-mirror))
+  cache tracker-call peer-fetch origin-fetch publish-seed proxy-request
+  acceptor)
+
+(defclass oci-mirror-acceptor (hunchentoot:easy-acceptor)
+  ((mirror :initarg :mirror :reader acceptor-oci-mirror)))
+
+(defun make-oci-mirror
+    (directory tracker-call peer-fetch origin-fetch publish-seed proxy-request)
+  "Construct a loopback OCI Distribution mirror. Network behavior is injected
+so registry credentials remain request-scoped and peer transport remains mTLS."
+  (%make-oci-mirror
+   :cache (make-oci-blob-cache directory) :tracker-call tracker-call
+   :peer-fetch peer-fetch :origin-fetch origin-fetch
+   :publish-seed publish-seed :proxy-request proxy-request))
+
+(defun oci-blob-request (path)
+  (multiple-value-bind (match captures)
+      (cl-ppcre:scan-to-strings
+       "^/v2/(.+)/blobs/(sha256:[0-9A-Fa-f]{64})$" path)
+    (when match (values (aref captures 0) (aref captures 1)))))
+
+(defun copy-proxy-response-headers (headers)
+  (dolist (header headers)
+    (let ((name (string-downcase (string (car header)))))
+      (when (member name
+                    '("content-type" "content-length" "docker-content-digest"
+                      "etag" "www-authenticate" "location")
+                    :test #'string=)
+        (setf (hunchentoot:header-out (car header))
+              (if (string= name "content-length")
+                  (parse-integer (princ-to-string (cdr header)))
+                  (cdr header)))))))
+
+(defun handle-oci-mirror-request (mirror method path upstream headers)
+  "Serve one Distribution request. Blob bodies are always local verified files;
+all other endpoints are credential-preserving upstream proxy requests."
+  (unless (valid-registry-host-p upstream)
+    (setf (hunchentoot:return-code*) 400)
+    (return-from handle-oci-mirror-request "invalid upstream registry"))
+  (multiple-value-bind (repository digest) (oci-blob-request path)
+    (if digest
+        (handler-case
+            (let ((pathname
+                    (ensure-strict-p2p-blob
+                     (oci-mirror-cache mirror) digest
+                     (oci-mirror-tracker-call mirror)
+                     (oci-mirror-peer-fetch mirror)
+                     (lambda (temporary)
+                       (funcall (oci-mirror-origin-fetch mirror)
+                                temporary upstream repository digest headers))
+                     (oci-mirror-publish-seed mirror))))
+              (setf (hunchentoot:header-out :docker-content-digest) digest
+                    (hunchentoot:content-type*) "application/octet-stream")
+              (if (eq method :head)
+                  (progn
+                    (setf (hunchentoot:content-length*)
+                          (with-open-file (stream pathname :element-type '(unsigned-byte 8))
+                            (file-length stream)))
+                    "")
+                  (hunchentoot:handle-static-file pathname "application/octet-stream")))
+          (error (condition)
+            ;; A failed local optimization must preserve containerd's configured
+            ;; upstream fallback rather than returning corrupt or partial bytes.
+            (setf (hunchentoot:return-code*) 503)
+            (format nil "image mirror unavailable: ~A" condition)))
+        (multiple-value-bind (body status response-headers)
+            (funcall (oci-mirror-proxy-request mirror)
+                     method upstream path headers)
+          (setf (hunchentoot:return-code*) status)
+          (copy-proxy-response-headers response-headers)
+          body))))
+
+(defmethod hunchentoot:acceptor-dispatch-request
+    ((acceptor oci-mirror-acceptor) request)
+  (handle-oci-mirror-request
+   (acceptor-oci-mirror acceptor)
+   (hunchentoot:request-method* request)
+   (hunchentoot:script-name* request)
+   (or (hunchentoot:header-in* :x-gr8s-upstream request) "")
+   (hunchentoot:headers-in* request)))
+
+(defun start-oci-mirror (mirror &key (port 0))
+  "Start MIRROR on IPv4 loopback only and return its assigned port."
+  (when (oci-mirror-acceptor mirror)
+    (error "OCI mirror is already running"))
+  (let ((acceptor (make-instance 'oci-mirror-acceptor
+                                 :mirror mirror :address "127.0.0.1" :port port)))
+    (hunchentoot:start acceptor)
+    (setf (oci-mirror-acceptor mirror) acceptor)
+    (hunchentoot:acceptor-port acceptor)))
+
+(defun stop-oci-mirror (mirror)
+  (let ((acceptor (shiftf (oci-mirror-acceptor mirror) nil)))
+    (when acceptor (hunchentoot:stop acceptor)))
+  mirror)

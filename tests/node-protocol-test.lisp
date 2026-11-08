@@ -94,25 +94,34 @@
 (test generated-node-services-have-the-required-rpc-shapes
   (is (fboundp 'gr8s.node.v1::enrollment-service-enroll))
   (is (fboundp 'gr8s.node.v1::node-service-connect))
+  (is (fboundp 'gr8s.node.v1::node-service-track-image))
   (let ((server (ag-grpc:make-grpc-server 0)))
     (gr8s.node.v1::register-enrollment-service-service
      server :enroll-handler (lambda (request context)
                               (declare (ignore request context))))
     (gr8s.node.v1::register-node-service-service
      server :connect-handler (lambda (context stream)
-                               (declare (ignore context stream))))
+                               (declare (ignore context stream)))
+     :track-image-handler (lambda (request context)
+                            (declare (ignore request context))))
     (let ((enroll
             (ag-grpc::server-get-handler
              server "/gr8s.node.v1.EnrollmentService/Enroll"))
           (connect
             (ag-grpc::server-get-handler
-             server "/gr8s.node.v1.NodeService/Connect")))
+             server "/gr8s.node.v1.NodeService/Connect"))
+          (track-image
+            (ag-grpc::server-get-handler
+             server "/gr8s.node.v1.NodeService/TrackImage")))
       (is (not (null enroll)))
       (is-false (ag-grpc::handler-client-streaming-p enroll))
       (is-false (ag-grpc::handler-server-streaming-p enroll))
       (is (not (null connect)))
       (is-true (ag-grpc::handler-client-streaming-p connect))
-      (is-true (ag-grpc::handler-server-streaming-p connect)))))
+      (is-true (ag-grpc::handler-server-streaming-p connect))
+      (is (not (null track-image)))
+      (is-false (ag-grpc::handler-client-streaming-p track-image))
+      (is-false (ag-grpc::handler-server-streaming-p track-image)))))
 
 (test node-underlay-and-peer-route-fields-survive-protobuf-roundtrips
   (let* ((public-key (make-array 32 :element-type '(unsigned-byte 8)

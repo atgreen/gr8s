@@ -35,6 +35,10 @@
   credential-providers
   ;; Obtains a Pod-bound token and ServiceAccount identity from the control plane.
   credential-provider-token-function
+  ;; Managed nodes populate a per-registry hosts.toml immediately before CRI
+  ;; PullImage so containerd tries the local P2P mirror, then its real upstream.
+  registry-host-config-directory
+  image-mirror-port
   resource-store
   probes
   (lifecycle-lock (bt:make-lock "native lifecycle checkpoint writes"))
@@ -52,7 +56,8 @@
           (log-root "/var/log/gr8s/pods/")
           (host-network t)
           dns-servers dns-searches dns-options registry-credentials credential-providers
-          credential-provider-token-function availability)
+          credential-provider-token-function availability
+          registry-host-config-directory image-mirror-port)
   "Build a CONTAINERD-RUNTIME, defaulting the CRI socket, Pod log root and
    host-network on. AVAILABILITY, when given, is a managed containerd's readiness
    handle; NIL trusts an external runtime to already be up."
@@ -66,7 +71,9 @@
    :dns-options dns-options
    :registry-credentials registry-credentials
    :credential-providers credential-providers
-   :credential-provider-token-function credential-provider-token-function))
+   :credential-provider-token-function credential-provider-token-function
+   :registry-host-config-directory registry-host-config-directory
+   :image-mirror-port image-mirror-port))
 
 (defun call-containerd-runtime (thunk)
   "Call THUNK and return its values. Re-signals a runtime-error or

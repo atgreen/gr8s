@@ -11,6 +11,39 @@ service EnrollmentService {
 
 service NodeService {
   rpc Connect(stream AgentEnvelope) returns (stream ServerEnvelope);
+  // Private swarm coordination. The node_name is bound to the mTLS client
+  // certificate by the server and is never accepted as a bearer identity.
+  rpc TrackImage(ImageTrackerRequest) returns (ImageTrackerResponse);
+}
+
+message ImageTrackerRequest {
+  string node_name = 1;
+  string action = 2; // lookup | acquire | renew | publish | announce | withdraw
+  string digest = 3;
+  bytes lease_token = 4;
+  bytes metainfo = 5;
+  string peer_address = 6;
+  uint32 peer_port = 7;
+  bytes peer_id = 8;
+  bool complete = 9;
+}
+
+message ImageTrackerPeer {
+  string node_name = 1;
+  string address = 2;
+  uint32 port = 3;
+  bytes peer_id = 4;
+  bool complete = 5;
+}
+
+message ImageTrackerResponse {
+  string status = 1; // available | missing | waiting | granted | ok | error
+  bytes lease_token = 2;
+  uint64 expires_at = 3;
+  bytes metainfo = 4;
+  bytes infohash = 5;
+  repeated ImageTrackerPeer peers = 6;
+  string error_message = 7;
 }
 
 message EnrollRequest {
