@@ -718,7 +718,12 @@ bare positional state directory for backward compatibility.  A missing
         (unwind-protect
              (progn
                (start-node-runtime node-runtime)
-               (setf kubelet (start-agent-kubelet-server options node-name runtime))
+               (setf kubelet (start-agent-kubelet-server
+                              options node-name runtime
+                              :network-metrics-function
+                              (lambda ()
+                                (gr8s.agent:node-runtime-wireguard-metrics-text
+                                 node-runtime))))
                (run-node-session
                 host port node-name identity
                 (lambda (snapshot)

@@ -103,6 +103,8 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
                       :auth (gr8s::make-kubelet-auth :client-ca (gr8s::cluster-pki-ca-certificate pki)
                                                      :review (kubelet-test-review calls))
                       :stats-function #'kubelet-test-node-stats
+                      :network-metrics-function
+                      (constantly "gr8s_wireguard_telemetry_available{node=\"node-a\"} 1\n")
                       :states-function (lambda () (values 1 '(("running" . 2) ("exited" . 1))))))
              (port (hunchentoot:acceptor-port server)))
         (unwind-protect
@@ -143,6 +145,7 @@ is user alice, and only alice may get nodes/metrics, and system:masters anything
                    (is (search (format nil "kubelet_running_containers{container_state=\"running\"} 2~%") text))
                    (is (search (format nil "kubelet_running_containers{container_state=\"exited\"} 1~%") text))
                    (is (search "kubelet_running_pods 1" text))
+                   (is (search "gr8s_wireguard_telemetry_available{node=\"node-a\"} 1" text))
                    (is (search "# TYPE process_resident_memory_bytes gauge" text))
                    (is (search "# TYPE process_start_time_seconds gauge" text)))))
           (gr8s::stop-kubelet-server server))))))

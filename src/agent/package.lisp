@@ -8,6 +8,7 @@
   (:shadow
    #:cancel-node-session
    #:make-node-session-control
+   #:node-runtime-wireguard-metrics-text
    #:node-session-cancelled-p
    #:run-node-session)
   (:export
@@ -21,6 +22,7 @@
         (composition (find-package '#:gr8s)))
     (dolist (name '("CANCEL-NODE-SESSION"
                     "MAKE-NODE-SESSION-CONTROL"
+                    "NODE-RUNTIME-WIREGUARD-METRICS-TEXT"
                     "NODE-SESSION-CANCELLED-P"
                     "RUN-NODE-SESSION"))
       (let ((old (find-symbol name composition))

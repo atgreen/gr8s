@@ -316,6 +316,8 @@ own subresource and fall back to proxy; /stats and /metrics have only theirs."
    (cadvisor-function :initarg :cadvisor-function :initform (constantly nil) :reader kubelet-acceptor-cadvisor-function)
    (probes-function :initarg :probes-function :initform (constantly nil) :reader kubelet-acceptor-probes-function)
    (states-function :initarg :states-function :initform (lambda () (values 0 nil)) :reader kubelet-acceptor-states-function)
+   (network-metrics-function :initarg :network-metrics-function :initform (constantly "")
+                             :reader kubelet-acceptor-network-metrics-function)
    (volumes-function :initarg :volumes-function :initform (constantly nil) :reader kubelet-acceptor-volumes-function))
   (:documentation "Serve a node's kubelet endpoints to authenticated, authorized callers over TLS.")
   (:default-initargs
@@ -345,7 +347,7 @@ own subresource and fall back to proxy; /stats and /metrics have only theirs."
   (setf (hunchentoot:return-code*) code (hunchentoot:content-type*) content-type)
   text)
 
-(defun kubelet-own-metrics-text (states node-name &optional volumes)
+(defun kubelet-own-metrics-text (states node-name &optional volumes network-metrics)
   "Render the kubelet's own /metrics: STATES, the running Pod count and container states, the
 instrumented runtime operations and Pod latencies, its identity, the statistics of VOLUMES,
 the (namespace claim host-path) of each mounted claim, and the process collector."
@@ -361,6 +363,7 @@ the (namespace claim host-path) of each mounted claim, and the process collector
       (write-prometheus-family out "kubelet_running_pods" "[ALPHA] Number of pods that have a running pod sandbox" "gauge"
                                (list (list nil (first states)))))
     (write-string (kubelet-volume-stats-text volumes) out)
+    (when network-metrics (write-string network-metrics out))
     (write-string (process-metrics-text) out)))
 
 (defvar *kubelet-process-start-time* (get-universal-time)
@@ -471,7 +474,8 @@ sorted HTML listing, a file as itself, and a directory named without its trailin
      (kubelet-text-response
       200 (kubelet-own-metrics-text (ignore-errors (multiple-value-list (funcall (kubelet-acceptor-states-function acceptor))))
                                     (kubelet-acceptor-node-name acceptor)
-                                    (ignore-errors (funcall (kubelet-acceptor-volumes-function acceptor))))
+                                    (ignore-errors (funcall (kubelet-acceptor-volumes-function acceptor)))
+                                    (ignore-errors (funcall (kubelet-acceptor-network-metrics-function acceptor))))
       "text/plain; version=0.0.4; charset=utf-8"))
     ((and (equal path "/metrics/resource") (member method '(:get :head)))
      (let ((text (handler-case (kubelet-resource-metrics-text (funcall (kubelet-acceptor-stats-function acceptor)))
@@ -516,6 +520,7 @@ sorted HTML listing, a file as itself, and a directory named without its trailin
 (defun start-kubelet-server (&key (address "0.0.0.0") (port +kubelet-default-port+) certificate key
                                   node-name auth stats-function (cadvisor-function (constantly nil))
                                   (states-function (lambda () (values 0 nil))) (probes-function (constantly nil))
+                                  (network-metrics-function (constantly ""))
                                   (volumes-function (constantly nil)))
   "Start serving NODE-NAME's kubelet endpoints. STATS-FUNCTION returns a fresh KUBELET-NODE-STATS."
   (hunchentoot:start
@@ -525,6 +530,7 @@ sorted HTML listing, a file as itself, and a directory named without its trailin
                                     :private-key (pure-tls:load-private-key key)
                                     :node-name node-name :auth auth :stats-function stats-function
                                     :cadvisor-function cadvisor-function :states-function states-function
+                                    :network-metrics-function network-metrics-function
                                     :probes-function probes-function :volumes-function volumes-function
                                     :access-log-destination nil :message-log-destination *error-output*)))
 
@@ -568,7 +574,7 @@ sorted HTML listing, a file as itself, and a directory named without its trailin
 
 ;;; The agent side
 
-(defun start-agent-kubelet-server (options node-name runtime)
+(defun start-agent-kubelet-server (options node-name runtime &key (network-metrics-function (constantly "")))
   "Start the agent's kubelet listener when OPTIONS give it a port and its credentials exist,
 returning it, or NIL. A port another process holds leaves the node without one, as reported."
   (let ((port (or (getf options :kubelet-port) 0))
@@ -586,6 +592,7 @@ returning it, or NIL. A port another process holds leaves the node without one, 
                  :stats-function (lambda () (collect-kubelet-node-stats runtime node-name))
                  :cadvisor-function (lambda () (runtime-cadvisor-entries runtime))
                  :states-function (lambda () (runtime-container-state-counts runtime))
+                 :network-metrics-function network-metrics-function
                  :volumes-function (lambda () (runtime-claim-volume-paths runtime))
                  :probes-function (lambda () (and (typep runtime 'containerd-runtime)
                                                   (containerd-runtime-probes runtime))))))

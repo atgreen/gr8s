@@ -48,6 +48,14 @@
     (is-false (search (ag-grpc:base64-encode private-key)
                       (com.inuoe.jzon:stringify network)))))
 
+(test wireguard-get-device-request-is-a-netlink-dump
+  (let ((message
+          (gr8s::generic-netlink-request-message
+           41 0 1
+           (gr8s::netlink-attribute 2 (gr8s::netlink-string "gr8s-wg"))
+           :flags #x300)))
+    (is (= #x305 (gr8s::netlink-read-integer message 6 2)))))
+
 (test wireguard-network-intent-requires-complete-authenticated-peer-data
   (let ((network (node-network-with-routes-for-test nil)))
     (setf (gethash "overlayBackend" network) "wireguard"

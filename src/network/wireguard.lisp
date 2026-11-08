@@ -80,15 +80,20 @@
                    collect (netlink-attribute
                             #x8000 (wireguard-peer-attributes route))))))))
 
-(defun call-generic-netlink (family-id command version attributes &key (timeout 5))
+(defun generic-netlink-request-message (family-id command version attributes &key (flags 0))
+  "Encode one acknowledged Generic Netlink request with additional FLAGS."
+  (netlink-message
+   family-id (logior flags 5)
+   (netlink-octets (vector command version 0 0) attributes)))
+
+(defun call-generic-netlink (family-id command version attributes &key (timeout 5) (flags 0))
   "Send COMMAND and ATTRIBUTES to one Generic Netlink FAMILY-ID and return replies."
   (let ((fd (%rtnl-socket 16 (logior 3 #o2000000) 16)) ; NETLINK_GENERIC
         (address (netlink-octets (netlink-integer 16 2)
                                  (make-array 10 :element-type '(unsigned-byte 8)
                                                 :initial-element 0)))
-        (message (netlink-message
-                  family-id 5
-                  (netlink-octets (vector command version 0 0) attributes)))
+        (message (generic-netlink-request-message
+                  family-id command version attributes :flags flags))
         (buffer (make-array 65536 :element-type '(unsigned-byte 8)))
         (replies nil)
         (deadline (+ (get-internal-real-time)
@@ -198,7 +203,8 @@
   (wireguard-peer-statuses-from-messages
    (call-generic-netlink
     (generic-netlink-family-id "wireguard") 0 1
-    (netlink-attribute 2 (netlink-string interface)))))
+    (netlink-attribute 2 (netlink-string interface))
+    :flags #x300))) ; NLM_F_ROOT | NLM_F_MATCH (NLM_F_DUMP)
 
 (defun node-wireguard-owner (network)
   "Return the ownership alias for NETWORK's node-local WireGuard device."

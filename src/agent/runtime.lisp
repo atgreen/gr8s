@@ -966,6 +966,25 @@ while the server still assigns that UID at that version."
                 collect message)))
      :endpoints (node-runtime-endpoint-telemetry node-runtime counter-reader))))
 
+(defun node-runtime-wireguard-key-path (node-runtime)
+  "Return the node-local WireGuard private-key path outside runtime state."
+  (merge-pathnames
+   "wireguard.key"
+   (uiop:pathname-parent-directory-pathname
+    (node-runtime-state-directory node-runtime))))
+
+(defun node-runtime-wireguard-metrics-text (node-runtime)
+  "Read and render this runtime's selected WireGuard overlay telemetry."
+  (let ((network (bt:with-lock-held ((node-runtime-network-lock node-runtime))
+                   (node-runtime-network node-runtime)))
+        (key-path (node-runtime-wireguard-key-path node-runtime)))
+    (wireguard-metrics-text
+     network (or (node-runtime-node-name node-runtime) "")
+     :key-age-reader
+     (lambda ()
+       (let ((written (and (probe-file key-path) (file-write-date key-path))))
+         (and written (max 0 (- (get-universal-time) written))))))))
+
 (defun receive-node-snapshot-intent (node-runtime snapshot)
   "Persist exact urgent deletion intent before cancelling creation or waiting for runtime I/O."
   ;; Parse every assignment before changing any local intent. One that can't
