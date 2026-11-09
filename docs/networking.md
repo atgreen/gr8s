@@ -158,15 +158,30 @@ its source port after backend replacement; see
 FIN sequence ends and their acknowledgments are tracked in both directions.
 Half-closed connections retain the established lifetime so the peer can send its
 final data. After both FINs are acknowledged, the retained entry expires after
-120 seconds. A reset whose sequence matches observed receiver ACK progress
-expires after 10 seconds; a SYN-SENT refusal must acknowledge the current SYN.
+120 seconds. A reset whose sequence matches both observed receiver ACK progress
+and the sender stream end expires after 10 seconds; a SYN-SENT refusal must
+acknowledge the current SYN.
 Delayed packets still use the retained translation but do not refresh terminal
 metadata or timestamps. Invalid resets reach the endpoint for challenge-ACK
-handling without shortening the mapping's lifetime. Window and late-segment
-validation, TCP timestamps, out-of-order close coverage and the remainder of TCP
-lifecycle handling remain unfinished. See
+handling without shortening the mapping's lifetime. See
 [the TCP close evidence](service-tcp-close-validation-2026-11-09.json) for bytecode,
 kernel GC and actual guest reset/graceful-close checks.
+The tracker parses bounded TCP options, negotiates window scaling in both
+directions, leaves SYN windows unscaled, and retains the largest advertised
+window to allow retransmissions after window shrinkage. In-window FINs can
+arrive before preceding data; closure still requires cumulative peer ACKs.
+Stale or missing negotiated timestamps, out-of-window data, and ACKs beyond the
+observed stream keep their translation without refreshing tracking state.
+Timestamp floors advance only at the receiver ACK edge and age independently
+after 24 days. RST handling does not require timestamps. Fresh timestamps can
+distinguish new connections at a reused tuple, including the same initial
+sequence after closure; SYN-ACK timestamp echoes protect the new handshake.
+Retained entries from earlier agents keep compatibility tracking until a new
+SYN records option negotiation. The pinned TCP value remains 64 bytes with
+previously used field offsets preserved. See
+[the TCP option evidence](service-tcp-options-validation-2026-11-09.json).
+Complete TCP lifecycle coverage and established guest connections across agent
+restart remain unfinished.
 Kernel packet tests additionally cover program lifetime. Source NAT/hairpin,
 return-tuple collision resolution, IPv6 packet translation and external Service
 replacement remain in development. Hairpin and conflicting return tuples
@@ -200,7 +215,9 @@ binary to the VM, and pass `--tcp-client /root/service-tcp-client`. The runner
 verifies its checksum after copying it into the guest, binds a fixed source port,
 replaces the Service backend, then verifies both the new response and the pinned
 TCP generation metadata. It also verifies reset and graceful-close metadata
-using real guest connections. `make test-service-tcp-state` exercises the interpreter;
+using real guest connections, observes negotiated window/timestamp options,
+and deletes/recreates a Service at the same VIP and client tuple.
+`make test-service-tcp-state` exercises the interpreter;
 add `--kernel` to the Python runner in a disposable root VM for kernel execution.
 
 `NodePort` and `LoadBalancer` Services allocate node ports from 30000–32767. The

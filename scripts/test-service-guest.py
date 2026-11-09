@@ -75,7 +75,10 @@ def read_tcp_state(path, key):
             "serverISN": struct.unpack_from("<I", value, 12)[0],
             "clientEnd": struct.unpack_from("<I", value, 16)[0],
             "serverEnd": struct.unpack_from("<I", value, 20)[0],
-            "flags": struct.unpack_from("<I", value, 48)[0]}
+            "flags": struct.unpack_from("<H", value, 48)[0],
+            "clientScale": value[54] & 15, "serverScale": value[55] & 15,
+            "clientTimestamp": struct.unpack_from("<I", value, 56)[0],
+            "serverTimestamp": struct.unpack_from("<I", value, 60)[0]}
 
 
 def packet_counters(cluster):
