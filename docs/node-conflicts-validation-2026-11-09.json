@@ -1,0 +1,44 @@
+{
+  "date": "2026-11-09",
+  "scope": "Node committed preconditions, revision ordering, follower results and heartbeat monitor retries",
+  "passed": true,
+  "checks": 790,
+  "suites": {
+    "ha-node-cidr": 77,
+    "pod-transactions": 65,
+    "ha-pod-failover": 29,
+    "api-defaults": 93,
+    "durable-resource-watches": 526
+  },
+  "coverage": [
+    "Reject stale same-Node writes before any state, revision or watch changes",
+    "Independent-key writes with identical author revisions receive ordered commit revisions",
+    "Exact retry preserves revision and watch event count",
+    "Forward a rejected Node proposal through a real loopback follower RPC and return node-conflict",
+    "Convert application conflict to Kubernetes HTTP 409",
+    "POST and PUT Node HTTP responses report the committed revision",
+    "Committed readiness parsing is independent of replica wall time; explicit monitor expiry changes readiness",
+    "Failed apply file persistence does not consume the commit revision",
+    "Heartbeat monitor continues through conflict and unavailable consensus ticks"
+  ],
+  "nativeBuild": {
+    "passed": true,
+    "sha256": "8baf5b36d37d1f17731b2377eb459f0571abee84372a88797b52246111b1a7df"
+  },
+  "limitations": [
+    "Legacy v1 deltas remain readable; all members must run the updated implementation for v2 precondition guarantees",
+    "Cross-Node identity and network claim uniqueness at apply is tracked by podster-ucm.2.6",
+    "No general cross-resource atomicity or power-loss proof",
+    "Production startup WAL recovery, streamed store artifacts and automatic compaction remain open",
+    "Focused suites only; full suite failures tracked separately"
+  ],
+  "nativeStartupSmoke": {
+    "passed": true,
+    "native": true,
+    "runtime": "fake",
+    "evidence": "/tmp/gr8s-native-scratch-2qk84989",
+    "reclaimedPayloadBytes": 1048576,
+    "liveOwnerPreserved": true,
+    "gracefulShutdown": true
+  }
+}

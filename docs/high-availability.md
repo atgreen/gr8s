@@ -109,8 +109,16 @@ publish Node watch transitions on every replica; lease-only renewals do not crea
 client events. Runtime-down reports also replicate. Enrollment retries finish a
 previously failed Node file write before acknowledging success. See the
 [Node transaction validation](node-transactions-validation-2026-11-09.json).
-Concurrent writes authored by different members to the same Node still require
-apply-time conflict handling and ordered revision assignment (`podster-ucm.2.3.2`).
+Node deltas include their expected committed record. Apply rejects stale writes
+before changing any key, assigns successful public changes revisions in commit
+order, and returns those revisions to the author. Follower proposals return the
+application conflict result too. Exact retries do not duplicate watch events.
+Lease parsing during apply preserves committed readiness independently of replica
+wall clocks; the heartbeat monitor retries conflicts and unavailable consensus.
+The [concurrency validation](node-conflicts-validation-2026-11-09.json) covers these
+paths. Legacy version-1 deltas remain readable; these guarantees require all
+members to run the updated implementation. Cross-Node identity and network-claim
+uniqueness at apply time remains under `podster-ucm.2.6`.
 These transactions do not provide cross-resource atomicity.
 
 The Raft core preserves its vote when stepping down within the same term, and

@@ -142,7 +142,7 @@
       (bt:with-lock-held ((pod-store-consensus-write-lock store))
         (let ((*pending-consensus-commit* nil) (*pending-pod-commit* nil) (*pending-node-commit* nil)
               (*core-write-active* t) (*pod-write-context* (make-pod-write-context :store store))
-              (payload nil) (node-payload nil))
+              (payload nil) (node-payload nil) (node-records nil))
           (multiple-value-prog1
               (bt:with-lock-held ((pod-store-lock store))
                 (unless (pod-store-consensus-pod-revision store)
@@ -153,7 +153,10 @@
                        (when *pending-pod-commit*
                          (setf payload (pod-state-delta-json store *pod-write-context*)))
                        (when *pending-node-commit*
-                         (setf node-payload (node-state-delta-json *pending-node-commit* (pod-store-pod-revision store)))))
+                         (setf node-payload (node-state-delta-json *pending-node-commit* (pod-store-pod-revision store))
+                               node-records (loop for (name . nil) in *pending-node-commit*
+                                                  for node = (gethash name (pod-store-nodes store))
+                                                  when node collect node))))
                   (restore-staged-pods *pod-write-context*)))
             (let ((*pod-write-context* nil))
               (when *pending-consensus-commit*
@@ -164,7 +167,14 @@
                     (error 'kubernetes-error :status-code 409 :reason "Conflict"
                            :message "Pod changed before its consensus transaction committed"))))
               (when node-payload
-                (funcall (pod-store-consensus-commit-fn store) :node-delta node-payload))))))
+                (let ((result (funcall (pod-store-consensus-commit-fn store) :node-delta node-payload)))
+                  (when (and (consp result) (eq :node-conflict (first result)))
+                    (error 'kubernetes-error :status-code 409 :reason "Conflict"
+                           :message "Node changed before its consensus transaction committed"))
+                  (when (and (consp result) (eq :node-ok (first result)))
+                    (dolist (entry (second result))
+                      (let ((record (find (first entry) node-records :key #'node-record-name :test #'equal)))
+                        (when record (setf (node-record-resource-version record) (second entry))))))))))))
       (bt:with-lock-held ((pod-store-lock store)) (funcall function))))
 
 (defun pod-delta-current (store entry)

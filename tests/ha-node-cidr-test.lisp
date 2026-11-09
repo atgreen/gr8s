@@ -71,7 +71,8 @@
       (seed-ha-readiness-nodes other-member)
       (setf (gr8s::pod-store-consensus-commit-fn session-owner)
             (lambda (tag payload)
-              (apply-ha-node-command other-member (list tag payload))))
+              (apply-ha-node-command other-member (list tag payload))
+              (apply-ha-node-command session-owner (list tag payload))))
       (let ((now (get-universal-time)))
         (gr8s::mark-node-ready session-owner "worker-a" now :lease-duration 15)
         (is (ha-node-ready-p other-member "worker-a"))
@@ -122,6 +123,14 @@
                                         (list s1 s2 s3)))
                       :timeout 10)
                      "the NotReady transition replicates to every member")
+                 (let ((stale (capture-ha-node-write
+                               s2 (lambda () (gr8s::update-node-kubelet-port s2 "worker-a" 10250)))))
+                   (gr8s::update-node-underlay-address s1 "worker-a" "192.0.2.10")
+                   (multiple-value-bind (result committed)
+                       (gr8s::raft-member-forward-propose-sync
+                        (gr8s::ha-control-plane-member h2) (list :node-delta stale))
+                     (is (eq t committed))
+                     (is (equal '(:node-conflict) result))))
                  ;; Kill the leader; a survivor keeps the CIDR assignment.
                  (gr8s::stop-ha-control-plane h1)
                  (setf h1 nil)
@@ -236,3 +245,125 @@
           (error "Abort private mutation")))
       (is (eq original (gethash "worker-a" (gr8s::pod-store-nodes store))))
       (is (equal "" (gr8s::node-record-underlay-address original))))))
+
+(defun capture-ha-node-write (store function)
+  (let ((original (gr8s::pod-store-consensus-commit-fn store)) (payload nil))
+    (unwind-protect
+         (progn
+           (setf (gr8s::pod-store-consensus-commit-fn store)
+                 (lambda (tag json)
+                   (unless (eq tag :node-delta) (error "Unexpected command"))
+                   (setf payload json)))
+           (funcall function)
+           payload)
+      (setf (gr8s::pod-store-consensus-commit-fn store) original))))
+
+(test stale-same-node-writes-conflict-without-changing-state
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (seed-ha-readiness-nodes store)
+    (let ((first (capture-ha-node-write store
+                  (lambda () (gr8s::update-node-underlay-address store "worker-a" "192.0.2.10"))))
+          (stale (capture-ha-node-write store
+                  (lambda () (gr8s::update-node-kubelet-port store "worker-a" 10250)))))
+      (is (eq :node-ok (first (gr8s::install-node-state-delta store first))))
+      (let ((revision (gr8s::pod-store-pod-revision store))
+            (events (gr8s::pod-store-node-watch-journal-length store)))
+        (is (equal '(:node-conflict) (gr8s::install-node-state-delta store stale)))
+        (is (= revision (gr8s::pod-store-pod-revision store)))
+        (is (= events (gr8s::pod-store-node-watch-journal-length store)))
+        (is (= 0 (gr8s::node-record-kubelet-port (gr8s:get-node store "worker-a"))))
+        ;; Retrying a successful command neither allocates another revision nor emits an event.
+        (is (eq :node-ok (first (gr8s::install-node-state-delta store first))))
+        (is (= revision (gr8s::pod-store-pod-revision store)))
+        (is (= events (gr8s::pod-store-node-watch-journal-length store)))))))
+
+(test node-commit-revisions-order-independent-key-writes
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (seed-ha-readiness-nodes store)
+    (let ((a (capture-ha-node-write store
+               (lambda () (gr8s::update-node-kubelet-port store "worker-a" 10250))))
+          (b (capture-ha-node-write store
+               (lambda () (gr8s::update-node-kubelet-port store "worker-b" 10251)))))
+      (gr8s::install-node-state-delta store a)
+      (gr8s::install-node-state-delta store b)
+      (let ((av (parse-integer (gr8s::node-record-resource-version (gr8s:get-node store "worker-a"))))
+            (bv (parse-integer (gr8s::node-record-resource-version (gr8s:get-node store "worker-b")))))
+        (is (< av bv))
+        (is (= bv (gr8s::pod-store-pod-revision store)))
+        (let ((node (gr8s:get-node store "worker-a")))
+          (setf (gr8s::pod-store-consensus-commit-fn store)
+                (lambda (tag json)
+                  (declare (ignore tag))
+                  ;; Model another committed object's revision before this apply.
+                  (incf (gr8s::pod-store-pod-revision store) 5)
+                  (gr8s::install-node-state-delta store json)))
+          (let ((returned (gr8s::mark-node-ready store "worker-a" (get-universal-time))))
+            (is (not (eq node returned)))
+            (is (equal (gr8s::node-record-resource-version returned)
+                       (gr8s::node-record-resource-version (gr8s:get-node store "worker-a"))))))))))
+
+(test node-conflict-result-becomes-an-api-conflict
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (seed-ha-readiness-nodes store)
+    (setf (gr8s::pod-store-consensus-commit-fn store)
+          (lambda (&rest arguments) (declare (ignore arguments)) (list :node-conflict)))
+    (handler-case
+        (progn (gr8s::mark-node-ready store "worker-a" (get-universal-time))
+               (fail "Expected a conflict"))
+      (gr8s:kubernetes-error (condition)
+        (is (= 409 (gr8s::kubernetes-error-status-code condition)))))))
+
+(test committed-node-lease-parsing-does-not-use-replica-wall-time
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (seed-ha-readiness-nodes store)
+    (let ((payload (capture-ha-node-write store
+                     (lambda () (gr8s::mark-node-ready store "worker-a" 1 :lease-duration 15)))))
+      (gr8s::install-node-state-delta store payload)
+      (is (ha-node-ready-p store "worker-a")
+          "Raft apply reproduces committed readiness even after its deadline")
+      (gr8s::expire-node-heartbeats store 2 :now 17)
+      (is (not (ha-node-ready-p store "worker-a"))
+          "the explicit expiry transition changes readiness"))))
+
+(test failed-node-apply-persistence-does-not-consume-commit-revision
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (seed-ha-readiness-nodes store)
+    (let ((payload (capture-ha-node-write store
+                     (lambda () (gr8s::update-node-kubelet-port store "worker-a" 10250))))
+          (revision (gr8s::pod-store-pod-revision store))
+          (original (symbol-function 'gr8s::persist-node)))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s::persist-node)
+                   (lambda (&rest arguments) (declare (ignore arguments)) (error "Injected apply failure")))
+             (signals error (gr8s::install-node-state-delta store payload)))
+        (setf (symbol-function 'gr8s::persist-node) original))
+      (is (= revision (gr8s::pod-store-pod-revision store)))
+      (is (= 0 (gr8s::node-record-kubelet-port (gr8s:get-node store "worker-a"))))
+      (gr8s::install-node-state-delta store payload)
+      (is (= (1+ revision) (gr8s::pod-store-pod-revision store))))))
+
+(test heartbeat-monitor-survives-conflicts-and-unavailable-consensus
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((server (gr8s::%make-node-grpc-server :store store))
+          (calls 0)
+          (original (symbol-function 'gr8s::reconcile-node-heartbeats)))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s::reconcile-node-heartbeats)
+                   (lambda (s now)
+                     (declare (ignore now))
+                     (incf calls)
+                     (case calls
+                       (1 (error 'gr8s:kubernetes-error :status-code 409 :reason "Conflict" :message "Lease renewed"))
+                       (2 (error 'gr8s:kubernetes-error :status-code 503 :reason "ServiceUnavailable" :message "No leader"))
+                       (t (setf (gr8s::node-grpc-server-stopping-p s) t)))))
+             (gr8s::monitor-node-heartbeats server)
+             (is (= 3 calls)))
+        (setf (symbol-function 'gr8s::reconcile-node-heartbeats) original)))))

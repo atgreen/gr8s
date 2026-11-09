@@ -285,3 +285,22 @@ appends to a Pod that does not already tolerate those taints.")
       (is (= 1 (json-path (gr8s::update-core-resource store "statefulsets" "alpha" "plain"
                                                       (lambda (object) (setf (gethash "replicas" (gethash "spec" object)) 1) object))
                           "spec" "replicas"))))))
+
+(test node-api-responses-use-the-committed-revision
+  (with-core-api (store path)
+    (values store path)
+    (setf (gr8s::pod-store-consensus-commit-fn store)
+          (lambda (tag json)
+            (unless (eq tag :node-delta) (error "Unexpected command"))
+            (incf (gr8s::pod-store-pod-revision store) 5)
+            (gr8s::install-node-state-delta store json)))
+    (let ((created (check-core-status
+                    201 "/api/v1/nodes" :method :post
+                    :object (gr8s::core-object "apiVersion" "v1" "kind" "Node"
+                                              "metadata" (gr8s::core-object "name" "commit-version")))))
+      (is (equal (json-path created "metadata" "resourceVersion")
+                 (gr8s::node-record-resource-version (gr8s:get-node store "commit-version"))))
+      (setf (gethash "changed" (gethash "labels" (gethash "metadata" created))) "true")
+      (let ((updated (check-core-status 200 "/api/v1/nodes/commit-version" :method :put :object created)))
+        (is (equal (json-path updated "metadata" "resourceVersion")
+                   (gr8s::node-record-resource-version (gr8s:get-node store "commit-version"))))))))

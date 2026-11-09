@@ -67,9 +67,11 @@ apply time, and status-only commands cannot resurrect deleted objects. A
 heap use, application conflicts, native leadership handoff and persisted Pod
 recovery. Node writes also stage private records and publish only after consensus;
 [validation](node-transactions-validation-2026-11-09.json) covers failed proposals,
-replica watch publication and enrollment persistence retries. Same-Node concurrent
-write conflicts, general cross-resource transactions and production crash-recovery
-integration remain open.
+replica watch publication and enrollment persistence retries.
+[Concurrent Node write validation](node-conflicts-validation-2026-11-09.json) covers
+stale-write conflicts, commit-ordered watch revisions, follower conflict responses
+and heartbeat monitor retries. Cross-Node claim uniqueness at apply, general
+cross-resource transactions and production crash-recovery integration remain open.
 
 In-process patch trains now provide signed, journaled rolling Lisp updates. Full
 binary upgrades (including incorporation of installed patches), installation,

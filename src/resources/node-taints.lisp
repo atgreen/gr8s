@@ -124,13 +124,16 @@
       (setf (node-record-taints node) taints)
       (if (core-resource-dry-run-p)
           (json-response (node-api-object node) 201)
-          (with-store-lock (store)
-            (when (get-node-unlocked store name)
-              (core-resource-error 409 "AlreadyExists" "nodes ~S already exists" name))
-            (publish-node-change-unlocked store nil node)
-            (setf (gethash name (pod-store-nodes store)) node)
-            (note-node-desired-change store node)   ; desired API write (8ia.4)
-            (json-response (node-api-object node) 201))))))
+          (json-response
+           (node-api-object
+            (with-store-lock (store)
+              (when (get-node-unlocked store name)
+                (core-resource-error 409 "AlreadyExists" "nodes ~S already exists" name))
+              (publish-node-change-unlocked store nil node)
+              (setf (gethash name (pod-store-nodes store)) node)
+              (note-node-desired-change store node)
+              node))
+           201)))))
 
 (defun delete-node-response (store name)
   "Delete an API-registered Node; a node an agent runs on leaves by stopping that agent."

@@ -126,7 +126,7 @@
       (setf (gethash "creationTimestamp" object) (node-record-creation-timestamp node)))
     object))
 
-(defun parse-node-record (input)
+(defun parse-node-record (input &key (expire-leases t))
   "Parse JSON text or an object into a NODE-RECORD."
   (let* ((object (if (hash-table-p input)
                     input
@@ -137,7 +137,7 @@
     (let* ((persisted-ready-p
              (and (eq t (gethash "ready" object))
                   (integerp heartbeat) (integerp deadline)
-                  (<= (get-universal-time) deadline)))
+                  (or (not expire-leases) (<= (get-universal-time) deadline))))
            (encoded-key (gethash "wireguardPublicKey" object))
            (wireguard-public-key
              (if encoded-key
@@ -487,17 +487,27 @@ every HA member, including a member that did not own the reporting agent session
                    'vector))
      table)))
 
+(defun node-replicated-object (node)
+  (when node
+    (let ((object (node-record-to-object node)))
+      (setf (gethash "runtimeDownMessage" object) (node-record-runtime-down-message node))
+      object)))
+
 (defun node-state-delta-json (changes &optional revision)
   "Serialize the Nodes actually changed by one transaction. A missing named
 Node is a tombstone. Unrelated stale member state never enters the command."
   (com.inuoe.jzon:stringify
    (store-json-object
-    "version" 1
+    "version" (if *pod-write-context* 2 1)
     "resourceVersion" (write-to-string (or revision 0))
     "changes"
     (coerce
      (loop for (name . object-json) in (reverse changes)
            collect (store-json-object "name" name
+                                "expected" (or (and *pod-write-context*
+                                                    (node-replicated-object
+                                                     (gethash name (pod-write-context-nodes *pod-write-context*))))
+                                               'null)
                                 "object" (if object-json
                                              (com.inuoe.jzon:parse object-json)
                                              'null)))
@@ -517,10 +527,7 @@ renewals use the same compact one-key delta without changing resourceVersion."
            ;; the live hash table after releasing this lock would race them.
            (object-json (and node
                              (com.inuoe.jzon:stringify
-                              (let ((object (node-record-to-object node)))
-                                (setf (gethash "runtimeDownMessage" object)
-                                      (node-record-runtime-down-message node))
-                                object)))))
+                              (node-replicated-object node)))))
       (setf *pending-node-commit*
             (acons name object-json
                    (remove name *pending-node-commit* :key #'car :test #'equal))))))
@@ -546,12 +553,39 @@ renewals use the same compact one-key delta without changing resourceVersion."
               do (ignore-errors (delete-file (node-path store node)))
                  (remhash name (pod-store-nodes store))))))
 
+(defun node-object-same-state-p (left right)
+  "Compare a retry's desired state independently of its assigned commit revision."
+  (if (and (hash-table-p left) (hash-table-p right))
+      (let ((a (copy-pod-status-value left)) (b (copy-pod-status-value right)))
+        (remhash "resourceVersion" a)
+        (remhash "resourceVersion" b)
+        (json-value-equal-p a b))
+      (eq left right)))
+
+(defun node-public-change-p (old new)
+  (if (and old new)
+      (let ((copy (copy-pod-status-value new)))
+        (setf (gethash "resourceVersion" (gethash "metadata" copy))
+              (gethash "resourceVersion" (gethash "metadata" old)))
+        (not (json-value-equal-p old copy)))
+      (not (eq old new))))
+
 (defun install-node-state-delta (store json)
-  "Apply committed Node keys and their watch transitions in Raft log order."
+  "Validate all Node preconditions, then publish in committed revision order."
   (bt:with-lock-held ((pod-store-lock store))
-    (let ((delta (com.inuoe.jzon:parse json))
-          (*core-write-active* nil))
-      (loop for change across (gethash "changes" delta #())
+    (let* ((delta (com.inuoe.jzon:parse json))
+           (changes (gethash "changes" delta #()))
+           (checked (eql 2 (gethash "version" delta)))
+           (*core-write-active* nil)
+           (results nil))
+      (when checked
+        (loop for change across changes
+              for current = (or (node-replicated-object
+                                 (gethash (gethash "name" change) (pod-store-nodes store))) 'null)
+              unless (or (json-value-equal-p current (gethash "expected" change))
+                         (node-object-same-state-p current (gethash "object" change)))
+                do (return-from install-node-state-delta (list :node-conflict))))
+      (loop for change across changes
             for name = (gethash "name" change)
             for object = (gethash "object" change)
             for existing = (gethash name (pod-store-nodes store))
@@ -559,23 +593,32 @@ renewals use the same compact one-key delta without changing resourceVersion."
             do (let ((new nil) (revision nil))
                  (if (eq object 'null)
                      (when existing
+                       (setf revision (max (1+ (pod-store-pod-revision store))
+                                       (replicated-pod-revision (gethash "resourceVersion" delta))))
                        (let ((path (node-path store existing)))
                          (when (probe-file path) (delete-file path)))
-                       (remhash name (pod-store-nodes store))
-                       (setf revision (replicated-pod-revision (gethash "resourceVersion" delta))))
-                     (let ((node (parse-node-record object)))
-                       (setf (node-record-runtime-down-message node)
-                             (gethash "runtimeDownMessage" object))
+                       (remhash name (pod-store-nodes store)))
+                     (let ((node (parse-node-record object :expire-leases nil)))
+                       (setf (node-record-runtime-down-message node) (gethash "runtimeDownMessage" object))
+                       (let* ((candidate (funcall (store-policy-node-view *store-policy*) node))
+                              (changed (node-public-change-p old candidate)))
+                         (setf (node-record-resource-version node)
+                               (if changed
+                                   (write-to-string
+                                    (max (1+ (pod-store-pod-revision store))
+                                     (replicated-pod-revision (node-record-resource-version node))))
+                                   (node-record-resource-version existing))))
                        (persist-node store node)
                        (setf (gethash name (pod-store-nodes store)) node
                              new (funcall (store-policy-node-view *store-policy*) node)
-                             revision (replicated-pod-revision (node-record-resource-version node)))))
+                             revision (replicated-pod-revision (node-record-resource-version node)))
+                       (push (list name (node-record-resource-version node)) results)))
                  (when revision
                    (advance-replicated-pod-revision-unlocked store revision)
                    (unless (json-value-equal-p old new)
                      (funcall (store-policy-node-event *store-policy*) store revision old new)))))
-      (advance-replicated-pod-revision-unlocked store (replicated-pod-revision (gethash "resourceVersion" delta)))
-      (save-consensus-pod-revision-unlocked store))))
+      (save-consensus-pod-revision-unlocked store)
+      (list :node-ok (nreverse results)))))
 
 (defun open-store (path)
   "Open or create a durable store at PATH and rebuild its in-memory indexes."

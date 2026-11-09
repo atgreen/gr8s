@@ -1639,7 +1639,13 @@ candidates; agents still require their transactional handshake/probe gates."
    timeout and evict sessions that have gone silent."
   (loop until (node-grpc-server-stopping-p server)
         do (let ((now (funcall (node-grpc-server-clock server))))
-             (reconcile-node-heartbeats server now)
+             (handler-case (reconcile-node-heartbeats server now)
+               (kubernetes-error (condition)
+                 ;; A renewed lease may win consensus while this member's
+                 ;; expiry is in flight. Retry from committed state next tick;
+                 ;; temporary loss of a leader must not kill monitoring either.
+                 (unless (member (kubernetes-error-status-code condition) '(409 503))
+                   (error condition))))
              (evict-silent-node-sessions server now))
            (sleep 0.05)))
 
