@@ -44,7 +44,8 @@ and per-Pod state lives in its maps, so every Pod loads the same program.")
 (defvar *egress-guard-specs-lock* (bt:make-lock "gr8s egress guard compile"))
 
 (defun egress-guard-specs (&key service-packets)
-  "Compile the egress guard on first use; it takes about 0.5s on a test VM."
+  "Return shared relocatable specs. Native builds prepare both variants before
+dumping the image; source-based runs compile lazily on first use."
   (bt:with-lock-held (*egress-guard-specs-lock*)
     (if service-packets
         (or *service-egress-guard-specs*
