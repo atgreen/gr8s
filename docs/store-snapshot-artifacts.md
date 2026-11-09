@@ -419,3 +419,32 @@ those envelopes on disk and application loading authenticates and decrypts them.
 Reload must replace a previously loaded policy rather than retain it across a
 generation change. A generation's encrypted data requires the corresponding
 cluster identity key; an artifact alone is not an identity backup.
+
+## Local revisions for a live restore
+
+`materialize-store-snapshot` accepts `:minimum-resource-revision` and
+`:minimum-pod-revision` for a live restore. Supply values strictly above the
+member's current resource revision and its Pod revision reservation ceiling,
+respectively. The caller must quiesce all ingress before taking these values;
+if writes overtake a staged generation, rematerialize it with fresh minima.
+
+With a resource minimum, materialization gives every resource the new boundary
+revision and discards pre-restore history. Its history floors advance to that
+boundary so old watches and signed continuation pages expire instead of reading
+a different state under an old revision. With a Pod minimum, Pods, Nodes and Pod
+publications receive the new local boundary; matching observation revisions are
+translated with the desired Pod revision. The original artifact and its digest
+remain unchanged. Transformation happens one validated record at a time.
+
+A private `metadata/snapshot-boundary.json` records the materialized clocks and
+artifact index/term. Live reload checks it under the barriers before creating an
+intent or changing selection, rejects clocks overtaken by the running member,
+and verifies the loaded clocks before acknowledging recovery. A failed partial
+load can retry the same selected generation. Standalone writes after restore
+maintain the durable committed Pod clock so they can survive reopening.
+
+These local revision checks do not prove the artifact is newer than the member's
+applied Raft state. Production snapshot installation must also validate its
+index/term against the actual member and coordinate WAL recovery. Older
+artifacts and manually prepared generations can still be opened at startup;
+they need rematerialization before using this live reload path.

@@ -40,6 +40,27 @@
                (zerop (pod-store-active-requests store)))
     (store-access-unavailable "Application reload requires a drained access gate")))
 
+(defun check-store-reload-revisions (store id descriptor)
+  "Reject stale staged clocks BEFORE intent or selection changes. Caller holds all barriers."
+  (let* ((path (store-generation-root (pod-store-path store) id))
+         (boundary (progn (check-store-generation-directory (merge-pathnames "metadata/" path))
+                          (read-private-generation-json (merge-pathnames "metadata/snapshot-boundary.json" path)))))
+    (unless (and (hash-table-p boundary) (= 5 (hash-table-count boundary))
+                 (eql 1 (gethash "version" boundary))
+                 (eql (gethash "index" descriptor) (gethash "index" boundary))
+                 (eql (gethash "term" descriptor) (gethash "term" boundary))
+                 (typep (gethash "resourceRevision" boundary) '(unsigned-byte 64))
+                 (typep (gethash "podRevision" boundary) '(unsigned-byte 64)))
+      (error "Invalid materialized snapshot revision boundary"))
+    ;; A failed load may already have installed these exact clocks. Retry the
+    ;; pending generation without demanding another revision bump.
+    (unless (and (not (pod-store-application-loaded-p store)) (equal path (store-data-path store)))
+      (unless (and (> (gethash "resourceRevision" boundary) (pod-store-resource-revision store))
+                   (> (gethash "podRevision" boundary) (max (pod-store-pod-revision store)
+                                                           (pod-store-pod-revision-ceiling store))))
+        (error "Snapshot generation must be rematerialized above the member's revision clocks")))
+    boundary))
+
 (defun reload-store-application (store id &key call-with-member-lock commit-recovery)
   "Replace application state on STORE itself, leaving access blocked on success or failure.
 Caller has quiesced remaining node/controller/retained-reference ingress. Lock order:
@@ -55,7 +76,7 @@ It runs under the barriers and must not reenter public store operations."
                  (not (and call-with-member-lock commit-recovery))))
     (error "HA application reload requires member barrier and durable recovery callbacks"))
   (bt:with-lock-held ((pod-store-lock store)) (require-store-reload-quiescence store))
-  (let ((thread (bt:current-thread)) (started nil) (loaded nil) (descriptor nil))
+  (let ((thread (bt:current-thread)) (started nil) (loaded nil) (descriptor nil) (boundary nil))
     (bt:with-lock-held ((pod-store-workload-lock store))
       (bt:with-lock-held ((pod-store-credential-lock store))
         (bt:with-lock-held ((pod-store-consensus-write-lock store))
@@ -67,6 +88,8 @@ It runs under the barriers and must not reenter public store operations."
              (setf started t)
              (bt:with-lock-held ((pod-store-lock store))
                (require-store-reload-quiescence store)
+               (setf descriptor (checked-store-generation-descriptor (pod-store-path store) id))
+               (setf boundary (check-store-reload-revisions store id descriptor))
                ;; Validate and durably announce target BEFORE releasing old data.
                (setf descriptor (begin-store-restore (pod-store-path store) id))
                (setf (pod-store-application-loaded-p store) nil)
@@ -78,6 +101,9 @@ It runs under the barriers and must not reenter public store operations."
                  ;; Reclaim released payloads before allocating the new application.
                  (sb-ext:gc :full t)
                  (load-store-application-files store))
+               (unless (and (= (pod-store-resource-revision store) (gethash "resourceRevision" boundary))
+                            (>= (pod-store-pod-revision store) (gethash "podRevision" boundary)))
+                 (error "Loaded application clocks disagree with staged snapshot boundary"))
                (when commit-recovery (funcall commit-recovery descriptor store))
                (finish-store-restore store descriptor)
                (setf (pod-store-application-loaded-p store) t loaded t)))))))

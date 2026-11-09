@@ -44,7 +44,9 @@
            (multiple-value-bind (path descriptor records)
                (gr8s.resources::materialize-store-snapshot
                 directory target (gr8s.raft.transport::raft-snapshot-file-digest target)
-                :expected-index 1 :expected-term 1)
+                :expected-index 1 :expected-term 1
+                :minimum-resource-revision (when reload (1+ (gr8s::pod-store-resource-revision store)))
+                :minimum-pod-revision (when reload (1+ (gr8s::pod-store-pod-revision-ceiling store))))
              (declare (ignore path))
              (setf materialized-count records reload-descriptor descriptor)))
          (when (and reload (not legacy))

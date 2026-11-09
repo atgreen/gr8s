@@ -113,7 +113,8 @@ client can see, so they cost neither a revision nor an event."
   ;; Commits replace the journal's head in one word, so an idle watch can skip the lock.
   ;; REVISION stays put: the counter can pass an event that is not yet in the journal.
   (let ((newest (first (pod-store-node-watch-journal store))))
-    (when (or (null newest) (<= (first newest) revision))
+    (when (and (<= (pod-store-node-watch-floor store) revision (pod-store-pod-revision store))
+               (or (null newest) (<= (first newest) revision)))
       (return-from node-watch-events (values nil revision))))
   (let ((matches (node-selection-predicate labels fields)))
     (with-store-lock (store)

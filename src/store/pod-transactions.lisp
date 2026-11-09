@@ -178,7 +178,11 @@
                         (when record (setf (node-record-resource-version record) (second entry))))))))))))
       (bt:with-lock-held ((pod-store-lock store))
         (ensure-store-available store)
-        (funcall function))))
+        (unwind-protect (funcall function)
+          ;; A restored generation carries a committed clock even when reopened
+          ;; standalone. Keep it current after local writes as well as HA apply.
+          (when (pod-store-consensus-pod-revision store)
+            (save-consensus-pod-revision-unlocked store))))))
 
 (defun pod-delta-current (store entry)
   (gethash (pod-key (gethash "namespace" entry) (gethash "name" entry)) (pod-store-pods store)))

@@ -4,10 +4,16 @@
 (def-suite store-restore-intent :in gr8s)
 (in-suite store-restore-intent)
 
+(defun materialize-live-test-snapshot (store root artifact)
+  (gr8s.resources::materialize-store-snapshot
+   root artifact (snapshot-test-digest artifact)
+   :minimum-resource-revision (1+ (gr8s::pod-store-resource-revision store))
+   :minimum-pod-revision (1+ (gr8s::pod-store-pod-revision-ceiling store))))
+
 (defun make-restore-intent-fixture (store root)
   (let ((artifact (merge-pathnames "restore-source.jsonl" root)))
     (capture-valid-store-snapshot store artifact)
-    (let ((descriptor (nth-value 1 (gr8s.resources::materialize-store-snapshot root artifact (snapshot-test-digest artifact)))))
+    (let ((descriptor (nth-value 1 (materialize-live-test-snapshot store root artifact))))
       (ha-make-pod store "legacy-later")
       descriptor)))
 

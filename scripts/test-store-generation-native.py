@@ -63,6 +63,8 @@ def main():
         apiVersion="v1", kind="Pod", metadata=dict(name="published-pod", namespace="default",
                                                    uid=published_uid, resourceVersion="3"),
         spec=dict(nodeName="external-worker", containers=[dict(name="main", image="busybox")])))
+    # Materialized generations carry this clock even when reopened standalone.
+    private_json(generation / "metadata" / "consensus-pod-revision.txt", 3)
     legacy_uid = "33333333-3333-4333-8333-333333333333"
     private_json(state / (legacy_uid + ".json"), dict(
         apiVersion="v1", kind="Pod", metadata=dict(name="legacy-pod", namespace="default",
@@ -112,6 +114,8 @@ def main():
                 except urllib.error.HTTPError as error:
                     assert error.code == 404
                 published = request("/api/v1/namespaces/default/pods/published-pod")
+                committed_clock = int((generation / "metadata" / "consensus-pod-revision.txt").read_text())
+                assert committed_clock >= int(published["metadata"]["resourceVersion"]), "committed Pod clock lags publication"
                 if cycle == 0:
                     published_before_restart = published
                     saved = json.loads((generation / "publications" / (published_uid + ".json")).read_text())
@@ -136,6 +140,7 @@ def main():
         result.update(passed=True, generationLoaded=True, legacyPodExcluded=True,
                       pendingRestoreRecovered=args.pending_restore,
                       applicationWriteSurvivesRestart=True, podPublicationSurvivesRestart=True,
+                      committedPodClockSurvivesRestart=True,
                       memberPrivateFilePreserved=True,
                       gracefulShutdown=True)
     except Exception as error:

@@ -43,7 +43,7 @@
         (write-snapshot-test-records source
                                     (append (butlast other-rows) (reverse tracker-rows) (last other-rows))))
       (multiple-value-bind (path descriptor)
-          (gr8s.resources::materialize-store-snapshot root source (snapshot-test-digest source))
+          (materialize-live-test-snapshot store root source)
         (is (probe-file (merge-pathnames "image-tracker/state.jsonl" path)))
         (gr8s.image-distribution::tracker-acquire-origin
          tracker "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "later")
@@ -91,7 +91,7 @@
       (let* ((records (remove-if #'gr8s.image-distribution::image-tracker-record-p (read-store-snapshot-records source)))
              (legacy (snapshot-index-records-path root records)))
         (multiple-value-bind (path descriptor)
-            (gr8s.resources::materialize-store-snapshot root legacy (snapshot-test-digest legacy))
+            (materialize-live-test-snapshot store root legacy)
           (is (not (probe-file (merge-pathnames "image-tracker/state.jsonl" path))))
           (gr8s.store::quiesce-store-access store :timeout 0)
           (gr8s.store::reload-store-application store (gethash "generation" descriptor))

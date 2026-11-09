@@ -56,6 +56,7 @@
     result))
 
 (defun materialize-store-snapshot (root source expected-digest &key expected-index expected-term
+                                                                minimum-resource-revision minimum-pod-revision
                                                                 (generation-id (generate-uid)))
   "Build and complete a fresh application generation; NEVER select it or mutate a live store.
 An expected SHA256 binds the artifact to its descriptor. Pre-completion failures
@@ -64,11 +65,15 @@ validated marker visible. This function never writes the live selector."
   (unless (and (stringp expected-digest) (= 64 (length expected-digest))
                (every (lambda (c) (find c "0123456789abcdef")) expected-digest))
     (error "Invalid expected snapshot digest"))
+  (dolist (minimum (list minimum-resource-revision minimum-pod-revision))
+    (unless (or (null minimum) (typep minimum '(unsigned-byte 64)))
+      (error "Invalid snapshot materialization revision minimum")))
   (let* ((path (gr8s.store::create-store-generation root generation-id))
          (artifact (merge-pathnames "staging-artifact.part" path))
          (staged (gr8s.store::make-pod-store (uiop:ensure-directory-pathname root)))
          (fields '("items" "customResourceItems" "workloadDeletions" "jobControllerStates" "templateHistory"))
-         (spools nil) (tracker-output nil) (tracker-count 0) (counts (make-hash-table :test #'equal)) (header nil) (clocks nil) (record-count nil))
+         (spools nil) (tracker-output nil) (tracker-count 0) (counts (make-hash-table :test #'equal))
+         (header nil) (clocks nil) (target-clocks nil) (record-count nil))
     (setf (gr8s.store::pod-store-data-root staged) path)
     (dolist (directory '("objects/" "nodes/" "observations/" "publications/" "metadata/" "image-tracker/"))
       (gr8s.store::ensure-store-generation-directory (merge-pathnames directory path) path))
@@ -92,22 +97,51 @@ validated marker visible. This function never writes the live selector."
                 (lambda (record)
                   (let ((kind (gethash "kind" record)) (object (gethash "object" record)))
                     (cond
+                      ((equal kind "clocks")
+                       ;; Keep the validator's source clocks untouched.
+                       (setf target-clocks (alexandria:copy-hash-table record))
+                       (when minimum-resource-revision
+                         (let ((revision (max minimum-resource-revision (gethash "resourceRevision" record))))
+                           (unless (< revision (1- (expt 2 64))) (error "No resource revision space remains after restore"))
+                           (setf (gethash "resourceRevision" target-clocks) revision
+                                 (gethash "templateHistoryFloor" target-clocks) revision
+                                 (gethash "resourceHistoryStart" target-clocks) revision)))
+                       (when minimum-pod-revision
+                         (setf (gethash "podRevision" target-clocks)
+                               (max minimum-pod-revision (gethash "podRevision" record)))
+                         (unless (< (+ (gethash "podRevision" target-clocks) gr8s.store::*pod-revision-reservation*)
+                                    (1- (expt 2 64)))
+                           (error "No Pod revision reservation space remains after restore"))))
                       ((gr8s.image-distribution::image-tracker-record-p record)
                        (com.inuoe.jzon:stringify record :stream tracker-output)
                        (terpri tracker-output)
                        (incf tracker-count))
                       ((equal kind "resource")
+                       (when minimum-resource-revision
+                         (setf (gethash "resourceVersion" (gethash "metadata" object))
+                               (write-to-string (gethash "resourceRevision" target-clocks))))
                        (let ((resource (gethash "resource" record)))
                          (if (custom-resource-key-p resource)
                              (emit "customResourceItems" (core-object "resource" resource "object" object))
                              (emit "items" object))))
                       ((equal kind "workloadDeletion") (emit "workloadDeletions" (gethash "value" record) (gethash "key" record)))
                       ((equal kind "jobControllerState") (emit "jobControllerStates" (gethash "value" record) (gethash "key" record)))
-                      ((equal kind "history") (emit "templateHistory" (gethash "entry" record)))
+                      ((equal kind "history")
+                       (unless minimum-resource-revision (emit "templateHistory" (gethash "entry" record))))
                       ((equal kind "node")
+                       (when minimum-pod-revision
+                         (setf (gethash "resourceVersion" object) (write-to-string (gethash "podRevision" target-clocks))))
                        (write-snapshot-generation-json
                         (merge-pathnames (format nil "nodes/~A.json" (gethash "id" object)) path) object))
                       ((equal kind "pod")
+                       (when minimum-pod-revision
+                         (let* ((metadata (gethash "metadata" object)) (old (gethash "resourceVersion" metadata))
+                                (new (write-to-string (gethash "podRevision" target-clocks)))
+                                (checkpoint (gethash "checkpoint" record)))
+                           (setf (gethash "resourceVersion" metadata) new
+                                 (gethash "resourceVersion" (gethash "publication" record)) new)
+                           (when (equal old (gethash "observedResourceVersion" checkpoint))
+                             (setf (gethash "observedResourceVersion" checkpoint) new))))
                        (let* ((pod (gr8s.store::store-parse-pod object)) (uid (pod-uid pod))
                               (publication (gethash "publication" record)))
                          (write-snapshot-generation-json (merge-pathnames (format nil "~A.json" uid) path) object)
@@ -116,6 +150,7 @@ validated marker visible. This function never writes the live selector."
                          (gr8s.store::persist-pod-publication
                           staged pod :status (gethash "status" publication)
                           :revision (parse-integer (gethash "resourceVersion" publication)))))))))))
+           (setf clocks target-clocks)
            (finish-output tracker-output)
            (sb-posix:fsync (sb-sys:fd-stream-fd tracker-output))
            (close tracker-output)
@@ -151,6 +186,10 @@ validated marker visible. This function never writes the live selector."
              (write-snapshot-generation-file
               (merge-pathnames name path)
               (lambda (stream) (write-string (write-to-string (gethash "podRevision" clocks)) stream))))
+           (write-snapshot-generation-json
+            (merge-pathnames "metadata/snapshot-boundary.json" path)
+            (core-object "version" 1 "index" (gethash "index" header) "term" (gethash "term" header)
+                         "resourceRevision" (gethash "resourceRevision" clocks) "podRevision" (gethash "podRevision" clocks)))
            (dolist (field fields) (delete-file (merge-pathnames (format nil "staging-~A.part" field) path)))
            (delete-file artifact)
            (dolist (directory '("objects/" "nodes/" "observations/" "publications/" "metadata/" "image-tracker/" ""))
