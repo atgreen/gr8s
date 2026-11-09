@@ -35,14 +35,14 @@ It holds replicated state including Secrets, so only its owner may read it."
 
 (defun file-raft-write (storage form)
   "Append FORM to STORAGE's WAL as one compact, single-line record (printer
-   specials bound off), then terminate the line, flush, and best-effort fsync so a
+   specials bound off), then terminate the line, flush, and fsync so a
    committed record survives a crash."
   (let ((stream (file-raft-storage-stream storage))
         (*print-readably* nil) (*print-circle* nil) (*print-pretty* nil))
     (prin1 form stream)
     (terpri stream)
     (finish-output stream)
-    (ignore-errors (sb-posix:fsync (sb-sys:fd-stream-fd stream)))))
+    (sb-posix:fsync (sb-sys:fd-stream-fd stream))))
 
 (defmethod raft-storage-save-hard-state ((storage file-raft-storage) term vote)
   (file-raft-write storage (list :hard term vote)))

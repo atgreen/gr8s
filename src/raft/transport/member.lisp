@@ -87,7 +87,7 @@
 (defun raft-link-enqueue (link message)
   "Append MESSAGE to LINK's outbox under its lock for its sender thread to
    encode and deliver. A new AppendEntries supersedes every older unsent one:
-   each retry already contains the peer's complete suffix from NEXT-INDEX, so
+   each retry already contains the latest bounded batch from NEXT-INDEX, so
    retaining stale retries only duplicates large log payloads while a peer is
    unreachable. Other Raft messages retain their order. Fire-and-forget: never
    blocks on the peer."

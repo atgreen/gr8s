@@ -419,6 +419,7 @@
                              (:file "witness-command-test")
                              (:file "ha-leader-gate-test")
                              (:file "ha-store-test")
+                             (:file "core-recovery-test")
                              (:file "ha-control-plane-test")
                              (:file "ha-controller-write-test")
                              (:file "ha-pod-failover-test")
