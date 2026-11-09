@@ -224,6 +224,9 @@
 
 (defun prepare-node-pod-resources (manager pod)
   "Reserve all providers durably, then exclude new dedicated CPUs from shared containers."
+  ;; Snapshot application can admit a Pod before the periodic worker runs.
+  (when (and (node-resource-manager-runtime manager) (node-resource-manager-store manager))
+    (reconcile-node-resource-manager manager :repair nil))
   (bt:with-lock-held ((node-resource-manager-lock manager))
     (unless (gethash (pod-uid pod) (node-resource-manager-allocations manager))
       (let* ((devices (node-resource-manager-devices manager))
@@ -263,6 +266,26 @@
     (when node (setf (gr8s.cri.v1::cpuset-mems resources) (write-to-string node)))
     resources))
 
+(defun update-node-container-affinity (manager pod container id)
+  "A container may exit between ListContainers and UpdateContainerResources."
+  (let ((socket (containerd-runtime-socket-path (node-resource-manager-runtime manager))))
+    (handler-case
+        (cri-update-container-resources socket id (node-container-resources manager pod container))
+      (error (failure)
+        (multiple-value-bind (status absent)
+            (handler-case (values (cri-container-status socket id) nil)
+              (ag-grpc:grpc-status-error (condition)
+                (values nil (= ag-grpc:+grpc-status-not-found+ (ag-grpc:grpc-status-error-code condition))))
+              (error () (values nil nil)))
+          (unless (or absent (and status (= gr8s.cri.v1::+containerstate-container_exited+ (cri-container-info-state status))))
+            (error failure)))))))
+
+(defun repair-node-cpu-sets (manager)
+  "Periodic/release repair must leave lifecycle cleanup able to make progress.
+Admission still calls the strict reconciler before starting a dedicated container."
+  (handler-case (reconcile-node-cpu-sets manager)
+    (error (condition) (format *error-output* "gr8s CPU affinity repair will retry: ~A~%" condition))))
+
 (defun reconcile-node-cpu-sets (manager)
   "Apply affinities to existing live containers before admitting exclusive work."
   (let ((runtime (node-resource-manager-runtime manager)) (store (node-resource-manager-store manager)))
@@ -282,15 +305,14 @@
                            (applied (and entry (gethash "appliedResources" entry))))
                       (when applied
                         (setf container (copy-core-object container) (gethash "resources" container) applied)))
-                    (cri-update-container-resources (containerd-runtime-socket-path runtime) (cri-container-summary-id summary)
-                                                    (node-container-resources manager pod container))))))))))))
+                    (update-node-container-affinity manager pod container (cri-container-summary-id summary))))))))))))
 
 (defun release-node-pod-resources (manager pod)
   "Return CPUs and NUMA reservations only after native cleanup has completed."
   (bt:with-lock-held ((node-resource-manager-lock manager))
     (when (remhash (pod-uid pod) (node-resource-manager-allocations manager))
       (save-node-resource-checkpoint manager)
-      (reconcile-node-cpu-sets manager))))
+      (repair-node-cpu-sets manager))))
 
 (defun node-resource-capacity-entries (manager &key allocatable)
   "Report actual capacity, subtracting explicit CPU reservations from allocatable."
@@ -313,7 +335,15 @@
                      (not (gr8s.store::json-value-equal-p (gethash "containerRequests" plan) (resource-container-request-snapshot pod)))))
         (values "Infeasible" "Replace this Pod to change its dedicated CPU or NUMA reservation")))))
 
-(defun reconcile-node-resource-manager (manager)
+(defun resource-container-executing-p (runtime summary)
+  "Only an authoritative Exited/NotFound result permits releasing an affinity."
+  (handler-case
+      (/= gr8s.cri.v1::+containerstate-container_exited+
+          (cri-container-info-state (cri-container-status (containerd-runtime-socket-path runtime) (cri-container-summary-id summary))))
+    (ag-grpc:grpc-status-error (condition) (/= ag-grpc:+grpc-status-not-found+ (ag-grpc:grpc-status-error-code condition)))
+    (error () t)))
+
+(defun reconcile-node-resource-manager (manager &key (repair t))
   "Release terminal reservations only after no assigned container can execute."
   (when manager
     (bt:with-lock-held ((node-resource-manager-lock manager))
@@ -323,20 +353,17 @@
          (lambda (uid plan)
            (declare (ignore plan))
            (let ((pod (find uid pods :key #'pod-uid :test #'equal)))
-             (when (or (null pod) (terminal-pod-phase-p (gethash "phase" (or (pod-observed-status store pod) (core-object)))))
+             (when (or (null pod) (deletion-requested-p pod) (terminal-pod-phase-p (gethash "phase" (or (pod-observed-status store pod) (core-object)))))
                (let ((sandbox (containerd-owned-sandbox runtime uid)))
-                 (unless (and sandbox (some (lambda (summary)
-                                            (member (cri-container-summary-state summary)
-                                                    (list gr8s.cri.v1::+containerstate-container_running+
-                                                          gr8s.cri.v1::+containerstate-container_created+)))
-                                          (containerd-containers runtime sandbox)))
+                 (unless (and sandbox (some (lambda (summary) (resource-container-executing-p runtime summary))
+                                            (containerd-containers runtime sandbox)))
                    (push uid released)
                    (when (and pod (node-resource-manager-devices manager))
                      (release-plugin-devices (node-resource-manager-devices manager) pod)))))))
          (node-resource-manager-allocations manager))
         (dolist (uid released) (remhash uid (node-resource-manager-allocations manager)))
         (when released (save-node-resource-checkpoint manager))
-        (when (equal "static" (node-resource-manager-policy manager)) (reconcile-node-cpu-sets manager))))))
+        (when (and repair (equal "static" (node-resource-manager-policy manager))) (repair-node-cpu-sets manager))))))
 
 (defun validate-resource-checkpoint (manager)
   "Fail closed on malformed, overlapping, offline or reserved CPU assignments."

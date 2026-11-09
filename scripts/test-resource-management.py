@@ -225,6 +225,13 @@ def main():
         assert over.returncode != 0 and "hugepage-touched=2" in over.stdout and "hugepage-touched=3" not in over.stdout, over
         proof["hugepageOverLimitExit"] = over.returncode
         proof["passed"] = True
+    except Exception as error:
+        proof["failure"] = repr(error)
+        if smoke.process is not None and smoke.process.poll() is None:
+            for resource in ("pods", "nodes", "events"):
+                result = smoke.k("get", resource, "-o", "json", check=False)
+                (directory / f"failure-{resource}.json").write_text(result.stdout or result.stderr)
+        raise
     finally:
         if smoke.process is not None:
             for name in list(smoke.names):

@@ -40,7 +40,7 @@
         (loop for reference across (gethash "claims" (gethash "resources" container (core-object)) #())
               for name = (cdr (assoc (gethash "name" reference) pairs :test #'equal))
               for prepared = (and name (gethash (core-resource-key "resourceclaims" (pod-namespace pod) name) (dra-manager-claims manager)))
-              when prepared collect
+              when (and prepared (gethash (pod-uid pod) (dra-prepared-claim-pod-uids prepared))) collect
                 (make-instance 'pr::dynamic-resource :claim-name name :claim-namespace (pod-namespace pod)
                   :claim-resources
                   (loop for driver being the hash-keys of (dra-prepared-claim-driver-devices prepared) using (hash-value devices)
