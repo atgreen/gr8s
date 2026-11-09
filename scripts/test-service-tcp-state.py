@@ -21,9 +21,9 @@ def request(port, seq, ack=0, flags=2, **kwargs):
     return p.packet(sport=port, seq=seq, ack=ack, tcp_flags=flags, **kwargs)
 
 
-def reply(port, seq, ack, flags=0x12, backend=p.BACKEND, payload=b""):
+def reply(port, seq, ack, flags=0x12, backend=p.BACKEND, payload=b"", **kwargs):
     return p.packet(source=backend, destination=p.CLIENT, sport=8080, dport=port,
-                    seq=seq, ack=ack, tcp_flags=flags, payload=payload)
+                    seq=seq, ack=ack, tcp_flags=flags, payload=payload, **kwargs)
 
 
 def translate_reply(runner, data, port):
@@ -249,6 +249,37 @@ def closure(runner):
 
 
 
+
+def reordered_closure(runner):
+    cases = 0
+    for index, start in enumerate((1000, 0xfffffffc, 0)):
+        for server_first in (False, True):
+            port = 50500 + index * 2 + server_first
+            c, s = establish(runner, port, start, start)
+            # The FIN arrives before the preceding data. The endpoint's later
+            # cumulative ACK proves the gap filled; it must complete the close.
+            if server_first:
+                translate_reply(runner, reply(port, (s + 3) & 0xffffffff, c, 0x11), port)
+                translate_reply(runner, reply(port, s, c, 0x18, payload=b"abc"), port)
+                s = (s + 4) & 0xffffffff
+                p.assert_forward(runner, request(port, c, s, 0x11))
+                c = (c + 1) & 0xffffffff
+                assert not tcp_flags(runner, port) & 256
+                translate_reply(runner, reply(port, s, c, 0x10), port)
+            else:
+                p.assert_forward(runner, request(port, (c + 3) & 0xffffffff, s, 0x11))
+                p.assert_forward(runner, request(port, c, s, 0x18, payload=b"abc"))
+                c = (c + 4) & 0xffffffff
+                translate_reply(runner, reply(port, s, c, 0x11), port)
+                s = (s + 1) & 0xffffffff
+                assert not tcp_flags(runner, port) & 256
+                p.assert_forward(runner, request(port, c, s, 0x10))
+            assert tcp_flags(runner, port) & 256, "reordered FIN never reached closed state"
+            p.assert_unlocked(runner)
+            cases += 6
+    return cases
+
+
 def closure_gc(runner, gc):
     cases = 0
     for reverse_gc in (False, True):
@@ -354,6 +385,7 @@ def main():
     runner = cls(programs, ids, descriptors)
     try:
         print(f"Service TCP closure ({cls.__name__}): {closure(runner)} cases passed")
+        print(f"Service TCP reordered close: {reordered_closure(runner)} cases passed")
     finally:
         runner.close()
     limited = dict(descriptors)
