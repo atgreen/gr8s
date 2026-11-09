@@ -1,257 +1,187 @@
 # gr8s
 
-**A clean-slate, eBPF-native Kubernetes — control plane, node agent, container
-runtime, networking, and datastore — in one self-contained binary.**
+**A self-contained, eBPF-native Kubernetes implementation in Common Lisp.**
 
-gr8s is a small, Kubernetes-compatible cluster that ships as a *single* native
-executable. The same binary serves the Kubernetes API, schedules Pods, runs the
-node, speaks CRI to an embedded containerd, implements the CNI plugin, and
-**compiles its own eBPF dataplane** — with no kube-proxy, no iptables, no Envoy,
-no etcd, and no C toolchain anywhere in the build.
+gr8s brings a Kubernetes API server, controllers, scheduler, node agent,
+container runtime, networking, and datastore together in one native executable.
+Use `kubectl` and Kubernetes manifests to run workloads on a single node or
+across a cluster.
 
-It is not a fork or a repackaging of upstream Kubernetes. Almost everything
-above the container runtime is written from scratch in Common Lisp. The result
-is a cluster you can read, reason about, and run from one file.
+The control plane and node agent are written from scratch in Common Lisp.
+The binary embeds containerd and runc to run containers, compiles its own eBPF
+programs for networking, and includes a Raft datastore for high availability.
 
-**Images spread node-to-node.** On a cold multi-node rollout, gr8s grants one
-node the exclusive right to fetch each missing OCI blob, verifies it, and then
-distributes it to the other nodes with the actual BitTorrent v2 peer protocol.
-Every node that completes the blob becomes a seeder. The private swarm is
-authenticated with node certificates and mTLS, and strict mode gives containerd
-no direct-registry escape hatch that could turn a DaemonSet into a pull storm.
-
-**The encrypted network tunes itself.** WireGuard peers advertise authenticated
-multi-homed endpoints; gr8s combines active trials with JIT-compiled eBPF path
-telemetry, fails away from broken paths quickly, and adopts improvements slowly
-with last-known-good rollback. It coordinates NAT traversal, offers an encrypted
-relay for hostile NATs, discovers packet-size black holes, and switches large
-clusters to resilient region/zone-aware sparse routing. Every choice is inspectable
-with `gr8s network explain NODE PEER`. See the
-[self-tuning WireGuard design and operations](docs/networking.md#self-tuning-wireguard-overlay).
-The same bounded score steers eBPF Service backend subsets and orders authenticated
-BitTorrent image peers, preferring locality and healthy paths without letting any
-reported metric dominate or collapse failure-domain diversity.
-
-**Post-quantum secure by default.** gr8s carries its own pure-Lisp TLS 1.3 stack
-— no OpenSSL, no C — and every internal channel (the Kubernetes API, the node
-agent protocol, and Raft) prefers **post-quantum hybrid key exchange
-(X25519MLKEM768, FIPS 203 ML-KEM-768)** on every handshake. Because gr8s owns
-both ends of its own mutually-authenticated TLS, that traffic actually lands on
-the hybrid — so cluster communications resist "harvest-now, decrypt-later"
-attacks out of the box, with classical X25519/P-256 as automatic fallback.
-
-> **Status:** gr8s is young and ambitious. It implements a large and growing
-> slice of the Kubernetes API, but it has **not** passed Kubernetes conformance,
-> and we say so plainly ([details](docs/CONFORMANCE.md)). It is a great place to
-> explore a modern, eBPF-first design — not yet a drop-in replacement for a
-> production k3s cluster. The concrete missing and partial capabilities are
-> maintained in the [Kubernetes and k3s gap inventory](docs/k3s-gap-inventory.md).
-
----
+> **Project status:** gr8s is experimental and has **not passed Kubernetes
+> conformance**. It is intended for exploration, development, and testing;
+> compatibility and operational behavior need evaluation before production use.
+> See the [API coverage](docs/kubernetes-surface.md),
+> [known gaps](docs/k3s-gap-inventory.md), and
+> [conformance results](docs/CONFORMANCE.md) for the current scope and evidence.
 
 ## Why gr8s?
 
-If you like k3s — one small binary, embedded containerd, airgap-friendly, no
-heavyweight dependencies — gr8s will feel familiar. The difference is *what's
-inside*. k3s packages the standard upstream Kubernetes components (kube-apiserver,
-kubelet, kube-proxy) with iptables + flannel for networking and etcd/SQLite for
-storage. gr8s rebuilds those pieces around primitives the ecosystem spent a
-decade bolting *onto* Kubernetes — and makes them foundational instead:
-
-| | **k3s** | **gr8s** |
-|---|---|---|
-| Implementation | Upstream Kubernetes, bundled | Clean-slate, in Common Lisp |
-| Service load balancing | kube-proxy + iptables | **eBPF socket LB** (no kube-proxy, no iptables) |
-| Pod networking / CNI | flannel | **Lisp-compiled eBPF** + native rtnetlink |
-| NetworkPolicy | depends on CNI | **eBPF firewall at the Pod veth** |
-| Ingress / Gateway | Traefik | **The agent is the gateway** (JIT-compiled routes, `sk_lookup`) |
-| Datastore | SQLite / embedded etcd | **Built-in Raft**, written from scratch |
-| Build toolchain | Go | Lisp — **no C toolchain, no LLVM** |
-| Container runtime | containerd via CRI | containerd via CRI *(same boundary)* |
-
-The through-line: **eBPF *is* the dataplane, Raft *is* the datastore, and the
-agent *is* the gateway** — one language, one static image.
-
----
-
-## eBPF-centric networking
-
-gr8s has no kube-proxy and no iptables. Packet handling lives in the kernel,
-programmed from Lisp through **Whistler**, a compiler that turns s-expressions
-straight into eBPF bytecode — no LLVM, no clang, no `.c`, no hand-written ELF.
-Four small programs do the work:
-
-- **Service load balancing** — a `cgroup/connect4` **socket load balancer**
-  rewrites a Pod's `connect(2)` directly to a ready backend. No DNAT, no
-  conntrack, no kube-proxy hop. ClientIP session affinity is supported.
-- **Same-node fast path** — Pod-to-Pod traffic to a destination on the same node
-  is redirected straight to the target veth, bypassing the kernel forward path.
-- **NetworkPolicy as a compiled firewall** — policies become data in per-Pod eBPF
-  maps enforced at the Pod's host veth; a policy change is a *map update*, not a
-  recompile.
-- **Anti-spoof egress guard** — every Pod's egress is checked against its exact
-  IPAM address and MAC in-kernel, with per-endpoint counters.
-
-Because the eBPF compiler lives *inside* the running agent, these programs are
-compiled and loaded on the fly — and the whole design opens the door to tracing,
-flow visibility, and load-aware balancing as first-class, low-overhead features.
-
-→ **[Networking & the eBPF dataplane](docs/networking.md)** — services, Gateway
-API, NetworkPolicy, the egress guard, DNS, and cross-node VXLAN in depth.
-
----
-
-## Sandboxed & microVM runtimes
-
-gr8s treats the OCI runtime as a swappable layer. `RuntimeClass` is supported,
-and the runtime-handler configuration is **data-driven**, so stronger-isolation
-runtimes register as handlers and a Pod opts into one by its `runtimeClassName` —
-default `runc` for one workload, a sandbox or a microVM for the next, on the same
-node.
-
-Two isolation classes are the target:
-
-- **Sandboxed runtimes** — **gVisor (`runsc`)**, a userspace kernel that
-  intercepts syscalls, is the first optional runtime being wired in.
-- **microVM runtimes** — hardware-virtualized isolation in the
-  **Kata Containers / Firecracker** style, where each Pod gets its own lightweight
-  VM and kernel. This is the "virt-ready" direction the handler layer is built for.
-
-The configuration seam has landed (a Pod can already be pointed at an
-alternate runtime handler); automatic fetch-verify-install of a runtime and a Pod
-booting under it end-to-end are in progress (tracked under `podster-mgw`).
-
-→ **[Runtime & the container stack](docs/runtime.md)** — the embedded containerd
-payload, CRI boundary, RuntimeClass, and the pluggable sandbox/microVM design.
-
----
+- **One executable to deploy.** The same binary runs a complete single-node
+  cluster, a control plane, or a worker agent. It carries its container runtime
+  and CNI integration, and supports preloaded images for airgapped nodes.
+- **Familiar Kubernetes workflows.** Workload controllers, scheduling, RBAC,
+  Services, persistent storage, and custom resources are available through the
+  Kubernetes API. The [compatibility reference](docs/kubernetes-surface.md)
+  documents supported behavior and limitations.
+- **An integrated eBPF dataplane.** Service load balancing, NetworkPolicy,
+  same-node forwarding, and Pod anti-spoofing run in the kernel. The agent
+  compiles eBPF directly from Lisp using Whistler, without clang or LLVM.
+- **Built-in cluster coordination.** Raft replicates control-plane state without
+  an external database. Node enrollment and internal communication use
+  certificate-based authentication.
+- **Cluster-aware networking and image delivery.** An adaptive WireGuard overlay
+  selects paths between nodes. Authenticated BitTorrent v2 peers share verified
+  image blobs, reducing repeated registry downloads during multi-node rollouts.
+- **A Common Lisp system you can inspect.** The API, controllers, agent,
+  networking compiler, and datastore share one language. An optional Slynk
+  endpoint supports live inspection in development environments.
 
 ## Getting started
 
-You need **Linux 6.6+** (with TCX eBPF support), **SBCL**, **`kubectl`**, and
-**root** (for container namespaces, cgroups, mounts, and loading eBPF).
+Build on Linux with **SBCL** and the project's ASDF dependencies. Running the
+cluster requires **Linux 6.6+ with TCX eBPF support**, **root privileges**, and
+working cgroups. Install **`kubectl`** to use the Kubernetes API. See
+[build requirements](docs/building-and-testing.md#requirements) and
+[runtime payload details](docs/runtime.md#the-self-contained-payload) for setup.
+Use a disposable Linux VM for an initial trial.
+
+From the repository root:
 
 ```sh
-# Build the single self-contained binary.
 make native
 
-# Run a one-node cluster (control plane + node in one process).
+# Start a single-node cluster; leave this running.
 sudo build/gr8s serve \
   --state-directory /tmp/gr8s-state \
   --kubeconfig /tmp/gr8s.kubeconfig
-
-# From another terminal, talk to it with kubectl as usual.
-kubectl --kubeconfig /tmp/gr8s.kubeconfig apply -f pod.yaml
-kubectl --kubeconfig /tmp/gr8s.kubeconfig get pods
-kubectl --kubeconfig /tmp/gr8s.kubeconfig describe pod POD_NAME
 ```
 
-That's a working cluster from one binary — no system containerd, no host glibc,
-no separate CNI helper. To add a second node, preload images for airgap nodes,
-run against an external containerd, or run the full test suite, see
-**[Building, running & testing](docs/building-and-testing.md)**.
+In another terminal, create a Pod and wait for it to become ready. The kubeconfig
+is owner-only, so these commands use `sudo` to read the file created by the server.
+The node needs registry access to download the image.
 
----
+```sh
+sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig run web \
+  --image=docker.io/library/nginx:1.27 --restart=Never
+sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig wait \
+  --for=condition=Ready pod/web --timeout=180s
+sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig get pods -o wide
+sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig logs web
 
-## Architecture at a glance
+# Remove the example workload when finished.
+sudo kubectl --kubeconfig /tmp/gr8s.kubeconfig delete pod web
+```
+
+Stop the server with Ctrl-C. The state directory holds cluster state for reuse
+on the next start.
+
+For [adding worker nodes](docs/building-and-testing.md#a-second-node),
+[preloading images](docs/runtime.md#preloaded-images-airgap), external containerd,
+and testing, see [Building, running & testing](docs/building-and-testing.md).
+
+## Kubernetes capabilities
+
+The implemented API surface includes:
+
+| Area | Capabilities |
+|---|---|
+| Workloads | Pods, Deployments, ReplicaSets, StatefulSets, DaemonSets, Jobs, ReplicationControllers, rolling updates, owner-reference garbage collection |
+| Scheduling | Resource requests and limits, node affinity and anti-affinity, taints and tolerations, priority and preemption, host ports, ephemeral-storage eviction |
+| Configuration and identity | ConfigMaps, Secrets, ServiceAccounts, bound tokens, RBAC, certificate issuance, admission webhooks, CEL admission policies |
+| Networking | ClusterIP, NodePort and LoadBalancer Services, EndpointSlices, NetworkPolicy, Gateway API, cluster DNS |
+| Storage | PersistentVolumes and Claims, StorageClasses, local-path provisioning, NFS, CSI drivers |
+| Observability | Metrics endpoints, cAdvisor and API server/scheduler series, resource metrics for `kubectl top` |
+| Extensibility | Schema-backed custom resources, defaulting, pruning, validation, finalizers |
+
+Support varies by feature; this overview does not imply complete upstream
+semantics. The [Kubernetes API surface](docs/kubernetes-surface.md) is the detailed
+reference for supported operations, validation evidence, and limitations.
+
+## How it fits together
 
 ```text
-kubectl -> gr8s HTTP API -> scheduler -> desired-state snapshot
-                                           |
-                                           v
-                              gRPC NodeService.Connect
-                                           |
-                                           v
-                    gr8s agent -> reconciler -> CRI v1 -> containerd
-                                                            |
-                                                            +-> runc
-                                                            +-> gr8s CNI client
-                                                                      |
-                                                               agent Unix socket
-                                                                      |
-                                                        IPAM -> routed veths
-                                                                      |
-                                                               Whistler TC/eBPF
+kubectl -> Kubernetes API -> controllers and scheduler -> desired state
+                                                        |
+                                                  node protocol
+                                                        |
+                                                     agent
+                                                   /       \
+                                         CRI / containerd   networking
+                                                |           /       \
+                                               runc    routed veths   eBPF
 ```
 
-The control plane schedules Pods and publishes desired state; the agent owns the
-node runtime and reports observed status. Both live in the same binary and cross
-the same ag-gRPC boundary, so `gr8s serve` is a complete cluster and a separately
-launched `gr8s agent` is just another node.
+`gr8s serve` runs the control plane and a local agent. Workers run `gr8s agent`
+and connect over an authenticated gRPC node protocol. The control plane schedules
+work and publishes desired state; agents reconcile containers and networking and
+report status. The agent manages its own containerd instance by default.
 
-→ **[Design & compatibility boundary](docs/design.md)** ·
-**[Kubernetes API surface](docs/kubernetes-surface.md)** (what works today, in detail).
+For a replicated control plane, Raft supports three voting members or two
+members plus a witness. A quorum can continue after a leader failure;
+single-node operation requires no Raft configuration. See
+[High availability](docs/high-availability.md) for membership and durability
+guarantees, and [Design](docs/design.md) for component boundaries.
 
----
+## Networking and security
 
-## High availability
+Whistler, the embedded Lisp-to-eBPF compiler, lets the agent compile and load
+networking programs at runtime. A socket load balancer directs Pod connections
+to ready Service backends. Programs at Pod veths enforce NetworkPolicy and
+anti-spoofing, while a same-node fast path redirects traffic to local Pods.
+The agent also implements Gateway API routing.
 
-The control plane can run multi-master on a **Raft consensus layer written from
-scratch in Common Lisp** — no etcd, no external database. A three-member cluster
-(or two members plus a headless *witness*) survives the loss of its leader with
-no loss of committed state, proven end-to-end in a smoke test that kills the
-leader. HA is opt-in: with no `--raft-*` flag, `gr8s serve` runs exactly as the
-single-node path always has.
+For cross-node traffic, the WireGuard overlay combines authenticated endpoint
+advertisements, active path trials, and eBPF telemetry. It supports NAT traversal,
+encrypted relaying, packet-size discovery, and topology-aware sparse routing.
+`gr8s network explain NODE PEER` exposes path-selection decisions. Path health
+and locality also inform Service backend selection and image-peer ordering.
 
-→ **[High availability](docs/high-availability.md)** — the Raft design,
-membership, mTLS between members, and the failover guarantees.
+Internal TLS uses a pure-Lisp TLS 1.3 implementation and prefers hybrid
+X25519MLKEM768 key exchange, combining classical and post-quantum cryptography.
+Classical X25519/P-256 remains available as a fallback. Image distribution uses
+node certificates and mutual TLS to authenticate its private peer swarm;
+verified blobs can be seeded by each node that receives them.
 
----
+See [Networking & the eBPF dataplane](docs/networking.md) for configuration,
+protocol details, and operational behavior.
 
-## What works today
+## Container runtimes
 
-gr8s implements a broad and growing slice of Kubernetes, including:
+The embedded containerd uses runc by default. `RuntimeClass` resolves Pod
+overhead, scheduling constraints, and the CRI runtime handler, allowing Pods
+to select configured handlers on a node.
 
-- **Workloads** — Pods, Deployments, ReplicaSets, StatefulSets, DaemonSets, Jobs,
-  ReplicationControllers, with real controllers, rolling updates, and owner-ref
-  garbage collection.
-- **Scheduling** — requests/limits, node (anti-)affinity, taints/tolerations,
-  priority & preemption, `hostPort`, ephemeral-storage eviction.
-- **Config & identity** — ConfigMaps, Secrets, ServiceAccounts, bound ES256
-  tokens, full RBAC, CSR/certificate issuance, admission webhooks, and CEL
-  admission policies.
-- **Networking** — Services (ClusterIP/NodePort/LoadBalancer), EndpointSlices,
-  NetworkPolicy, the Gateway API, and cluster DNS.
-- **Storage** — PersistentVolumes/Claims, StorageClasses, a default `local-path`
-  provisioner, NFS, and CSI driver support.
-- **Observability** — kubelet metrics endpoints, cAdvisor and apiserver/scheduler
-  series on `/metrics`, and a native resource-metrics API for `kubectl top`.
-- **CRDs** — schema-backed custom resources with defaulting, pruning, validation,
-  and finalizers.
+Automatic installation and end-to-end validation of optional gVisor and microVM
+runtimes are still in progress. See [Runtime & the container stack](docs/runtime.md)
+for the supported configuration and current limits.
 
-→ **[Full Kubernetes API surface](docs/kubernetes-surface.md)** for the detailed,
-evidence-backed list and the known gaps.
+## Development and documentation
 
----
+Run the unit and HTTP tests with `make test`. Tests that load eBPF programs or
+run real containers require a privileged environment; use a disposable VM and
+follow the [testing guide](docs/building-and-testing.md#test-matrix).
 
-## Honest about scope
-
-Every capability above is backed by committed evidence records in
-[`docs/`](docs/), and conformance numbers are reported as-is. **gr8s has not
-passed Kubernetes conformance.** What it offers today is a remarkably compact,
-readable, eBPF-native implementation of a large part of Kubernetes — and a clean
-foundation for the ideas a retrofitted stack makes hard. See
-[`docs/CONFORMANCE.md`](docs/CONFORMANCE.md) for the current conformance posture.
-
----
-
-## Documentation
-
+- [Building, running & testing](docs/building-and-testing.md)
+- [Kubernetes API surface](docs/kubernetes-surface.md)
 - [Networking & the eBPF dataplane](docs/networking.md)
 - [Runtime & the container stack](docs/runtime.md)
-- [High availability (pure-Lisp Raft)](docs/high-availability.md)
-- [Kubernetes API surface](docs/kubernetes-surface.md)
-- [Building, running & testing](docs/building-and-testing.md)
+- [High availability](docs/high-availability.md)
 - [Design & compatibility boundary](docs/design.md)
 - [Multi-node design](docs/multi-node-design.md)
-- [Conformance posture](docs/CONFORMANCE.md)
+- [Known compatibility gaps](docs/k3s-gap-inventory.md)
+- [Conformance results](docs/CONFORMANCE.md)
 
 ## Versioning
 
-gr8s versions itself as the **Kubernetes API version it implements plus a gr8s
-release suffix**, following the k3s convention (k3s's `v1.31.4+k3s1`). The ASDF
-`:version` in `gr8s.asd` is the Kubernetes API version (`1.37.2`) and the single
-source of truth for `/version`, a Node's `kubeletVersion`, and the startup
-banner. The release suffix lives in a git tag (`v1.37.2-gr8s.0`). Cutting a
-release is just a tag; the binary, `/version`, `kubeletVersion`, and banner all
-report it with no code change.
+gr8s versions combine the Kubernetes API version with a gr8s release suffix,
+for example `v1.37.2-gr8s.0`. The API version identifies the compatibility target;
+it does not indicate Kubernetes conformance. `gr8s version` and the Kubernetes
+`/version` endpoint report the version of the running build.
+
+## License
+
+[Apache License 2.0](LICENSE).
