@@ -909,6 +909,14 @@ health-check servers and runtime deletions."
                                     (gr8s.kubelet::reconcile-node-resource-manager (node-runtime-resource-manager node-runtime))
                                     (reconcile-cached-node-network node-runtime)
                                     (reconcile-node-runtime-wireguard-paths node-runtime)
+                                    (when (node-runtime-service-lb node-runtime)
+                                      (handler-case
+                                          (when (gr8s.network:service-packet-gc-compatible-p
+                                                 (node-runtime-service-lb node-runtime))
+                                            (gr8s.network:sweep-service-packet-state
+                                             (node-runtime-service-lb node-runtime)))
+                                        (error (condition)
+                                          (format *error-output* "gr8s: Service flow GC failed: ~A~%" condition))))
                                     ;; Re-run dataplane convergence every tick, not only on a new
                                     ;; control-plane snapshot: the out-of-process CNI plugin adds Pod
                                     ;; allocations the agent must pick up to populate local/host/remote

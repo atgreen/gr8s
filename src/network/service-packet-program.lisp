@@ -229,6 +229,70 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
       (pkt-write-address flow target meta t)
       (pkt-count replies))))
 
+(defun gr8s.network::service-packet-gc-program-form ()
+  "Maintenance only: input is an Ethernet/IPv4 envelope with kind at34, key at36.
+Runs through BPF_PROG_TEST_RUN, never attached to a traffic interface. Results:
+0 unchanged, 1 reclaimed, 2 contention/helper failure, 3 invalid input."
+  '(defprog gr8s-packet-gc (:type :tc :section "classifier" :license "GPL")
+     (let ((flow (make-gr8s-pkt-flow)) (target (make-gr8s-pkt-pair))
+           (locked-forward (make-gr8s-pkt-flow)) (locked-reverse (make-gr8s-pkt-flow))
+           (held-locks u32 0) (changed u32 0) (failed u64 0)
+           (now u64 (ktime-get-ns)) (data u64 (tc-data)) (data-end u64 (tc-data-end)))
+       (when (> (+ data 52) data-end) (return 3))
+       (when (> (load u8 data 34) 1) (return 3))
+       (when (/= (skb-load-bytes (ctx-ptr) 36 flow 16) 0) (return 3))
+       (when (or (/= (gr8s-pkt-flow-pad0 flow) 0) (/= (gr8s-pkt-flow-pad1 flow) 0)
+                 (and (/= (gr8s-pkt-flow-protocol flow) 6) (/= (gr8s-pkt-flow-protocol flow) 17)))
+         (return 3))
+       (if (= (load u8 data 34) 0)
+           (progn
+             (pkt-lock :forward flow)
+             (when-let ((held (map-lookup-ptr gr8s-pkt-forward flow)))
+               (when (> (- now (load u64 held 8)) (pkt-lifetime flow))
+                 (setf (gr8s-pkt-pair-first target) (load u64 held 0))
+                 (pkt-make-reverse-key locked-reverse flow (gr8s-pkt-pair-first target))
+                 (pkt-lock :reverse locked-reverse)
+                 ;; The forward reservation prevents refresh/replacement
+                 ;; while its paired reverse reservation is taken.
+                 (when-let ((entry (map-lookup-ptr gr8s-pkt-reverse locked-reverse)))
+                   (when (= (load u64 entry 0)
+                            (logior (cast u64 (gr8s-pkt-flow-destination flow))
+                                    (<< (cast u64 (gr8s-pkt-flow-dport flow)) 32)))
+                     (when (/= (map-delete-ptr gr8s-pkt-reverse locked-reverse) 0)
+                       (pkt-drop failed))))
+                 (when (/= (map-delete-ptr gr8s-pkt-forward flow) 0) (pkt-drop failed))
+                 (setf changed 1))))
+           (progn
+             (pkt-lock :reverse flow)
+             (when-let ((entry (map-lookup-ptr gr8s-pkt-reverse flow)))
+               (let ((service u64 (load u64 entry 0)))
+                 (setf (gr8s-pkt-flow-source locked-forward) (gr8s-pkt-flow-destination flow)
+                       (gr8s-pkt-flow-destination locked-forward) (cast u32 service)
+                       (gr8s-pkt-flow-sport locked-forward) (gr8s-pkt-flow-dport flow)
+                       (gr8s-pkt-flow-dport locked-forward) (cast u16 (>> service 32))
+                       (gr8s-pkt-flow-protocol locked-forward) (gr8s-pkt-flow-protocol flow))
+                 (pkt-lock :forward locked-forward)
+                 (let ((held (map-lookup-ptr gr8s-pkt-forward locked-forward)))
+                   (if (= held 0)
+                       (setf changed 1)
+                       (if (/= (load u64 held 0)
+                               (logior (cast u64 (gr8s-pkt-flow-source flow))
+                                       (<< (cast u64 (gr8s-pkt-flow-sport flow)) 32)))
+                           ;; Retire only the obsolete reverse entry when a
+                           ;; replacement backend owns this live forward key.
+                           (setf changed 1)
+                           (when (> (- now (load u64 held 8)) (pkt-lifetime flow))
+                             (when (/= (map-delete-ptr gr8s-pkt-forward locked-forward) 0)
+                               (pkt-drop failed))
+                             (setf changed 1))))
+                   (when (/= changed 0)
+                     (when (/= (map-delete-ptr gr8s-pkt-reverse flow) 0) (pkt-drop failed))))))))
+       ;; Return constants after releasing helper-clobbered registers; the
+       ;; decision itself is made while CHANGED is still live in the SSA path.
+       (if (= changed 0)
+           (progn (pkt-unlock) (return 0))
+           (progn (pkt-unlock) (return 1))))))
+
 (defun gr8s.network::service-packet-processing-form (body)
   `(
          (setf (gr8s-pkt-meta-l4 meta) (+ 14 (* (logand (load u8 data 14) 15) 4)))
@@ -376,3 +440,12 @@ ordinary guard source is immutable and still compiles without Service support."
                                               (service-packet-forward-form))
                  (service-packet-program-form 'whistler::gr8s-packet-reverse
                                               (service-packet-reverse-form))))))
+
+(defun compile-service-packet-gc ()
+  "Compile maintenance against the exact packet flow/coordination schemas."
+  (compile-whistler-program
+   (service-packet-map-forms)
+   (append *service-packet-struct-forms* (list (service-packet-gc-program-form)))))
+
+(setf *service-packet-gc-program-forms*
+      (append *service-packet-struct-forms* (list (service-packet-gc-program-form))))

@@ -221,7 +221,8 @@ def main():
         errors = []
         for path in args.report_directory.glob("agent-*.log"):
             errors.extend(line for line in path.read_text(errors="replace").splitlines()
-                          if "Service LB convergence failed:" in line)
+                          if any(message in line for message in ("Service LB convergence failed:",
+                          "Service flow GC failed:", "Service flow GC deferred:")))
         report["convergenceErrors"] = errors
         if errors:
             report["passed"] = False

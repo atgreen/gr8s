@@ -7,7 +7,7 @@
 ;;;; the map descriptors they share.  scripts/test-endpoint-policy.py reads this in place of
 ;;;; parsing an ELF object.
 ;;;;
-;;;; Usage: sbcl --script scripts/compile-endpoint-policy-fixture.lisp OUTPUT [service-lb|service-packet-lb]
+;;;; Usage: sbcl --script scripts/compile-endpoint-policy-fixture.lisp OUTPUT [service-lb|service-packet-lb|service-packet-guard|service-packet-gc]
 ;;;; The optional selector emits the Service socket or packet programs instead of endpoint guards.
 
 (require :asdf)
@@ -23,10 +23,12 @@
 (let ((arguments (uiop:command-line-arguments)))
   (unless (and (<= 1 (length arguments) 2)
                (or (= 1 (length arguments))
-                   (member (second arguments) '("service-lb" "service-packet-lb" "service-packet-guard") :test #'equal)))
-    (error "usage: sbcl --script compile-endpoint-policy-fixture.lisp OUTPUT [service-lb|service-packet-lb]"))
+                   (member (second arguments) '("service-lb" "service-packet-lb" "service-packet-guard" "service-packet-gc") :test #'equal)))
+    (error "usage: sbcl --script compile-endpoint-policy-fixture.lisp OUTPUT [service-lb|service-packet-lb|service-packet-guard|service-packet-gc]"))
   (multiple-value-bind (map-specs program-specs)
-      (cond ((equal "service-packet-guard" (second arguments))
+      (cond ((equal "service-packet-gc" (second arguments))
+             (gr8s.network::compile-service-packet-gc))
+            ((equal "service-packet-guard" (second arguments))
              (compile-egress-guard :service-packets t))
             ((equal "service-packet-lb" (second arguments))
              (gr8s.network::compile-service-packet-lb))

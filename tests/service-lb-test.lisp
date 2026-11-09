@@ -956,3 +956,141 @@
       (is (calls-helper-p (first programs) 187))
       (is (calls-helper-p (second programs) 187))
       (is (not (calls-helper-p (third programs) 187))))))
+
+
+(test service-packet-maintenance-is-loaded-but-never-attached
+  (let ((attached nil))
+    (let ((dataplane
+            (gr8s::start-service-lb-dataplane
+             "/fake/cgroup" "/fake/pins"
+             :compile (lambda () (values nil nil)) :ensure-directory (constantly nil)
+             :load-programs (lambda (&rest ignored)
+                              (declare (ignore ignored))
+                              (list (cons "gr8s_service_lb" (fake-lb-program 900021))
+                                    (cons "gr8s_packet_gc" (whistler/loader::make-prog-info
+                                                           :name "gr8s_packet_gc" :section-name "classifier"
+                                                           :type 3 :fd 900022))))
+             :attach (lambda (fd &rest ignored)
+                       (declare (ignore ignored)) (push fd attached) :attachment))))
+      (is (equal '(900021) attached))
+      (is (= 2 (length (gr8s::service-lb-dataplane-programs dataplane)))))))
+
+(test service-packet-maintenance-loader-uses-tc-without-cgroup-attach-type
+  (let ((calls nil))
+    (gr8s::load-service-lb-programs
+     (list (list :name "gr8s_packet_gc" :section "classifier" :license "GPL" :insns #())
+           (list :name "gr8s_service_lb" :section "cgroup/connect4" :license "GPL" :insns #()))
+     nil :load-program (lambda (insns type license &key expected-attach-type)
+                         (declare (ignore insns license))
+                         (push (list type expected-attach-type) calls) 900023))
+    (is (equal (list (list 18 whistler/loader:+bpf-cgroup-inet4-connect+) '(3 0)) calls))))
+
+(defun service-packet-gc-fixture ()
+  (let ((keys (make-hash-table :test #'equal)))
+    (loop for name in '("gr8s_pkt_forward" "gr8s_pkt_reverse") for count in '(4 3)
+          do (setf (gethash name keys)
+                   (loop for i from 1 to count
+                         collect (let ((key (make-array 16 :element-type '(unsigned-byte 8)
+                                                       :initial-element 0)))
+                                   (setf (aref key 0) i (aref key 12) 17) key))))
+    (values
+     (gr8s::%make-service-lb-dataplane
+      :programs (list (cons "gr8s_packet_gc" (fake-lb-program 900031)))
+      :maps (list (fake-lb-map "gr8s_pkt_forward" 900032)
+                  (fake-lb-map "gr8s_pkt_reverse" 900033)))
+     keys
+     (lambda (map previous)
+       (let ((entries (gethash (whistler/loader:map-info-name map) keys)))
+         (if previous (second (member previous entries :test #'equalp)) (first entries)))))))
+
+(test service-packet-gc-bounds-batches-and-resumes-through-deletion
+  (multiple-value-bind (dataplane keys next-key) (service-packet-gc-fixture)
+    (let ((seen nil))
+      (flet ((gc-run (fd direction key)
+               (is (= 900031 fd))
+               (push (list direction (aref key 0)) seen)
+               (let ((name (if (zerop direction) "gr8s_pkt_forward" "gr8s_pkt_reverse")))
+                 (setf (gethash name keys) (remove key (gethash name keys) :test #'equalp)))
+               1))
+        (dotimes (i 4)
+          (declare (ignore i))
+          (multiple-value-bind (scanned reclaimed deferred)
+              (gr8s.network:sweep-service-packet-state dataplane :budget 1 :next-key next-key :run #'gc-run)
+            (is (<= scanned 2))
+            (is (= scanned reclaimed))
+            (is (zerop deferred))))
+        (is (equal '((0 1) (1 1) (0 2) (1 2) (0 3) (1 3) (0 4)) (nreverse seen)))
+        (is (= 7 (gr8s::service-lb-dataplane-gc-scanned dataplane)))
+        (is (= 7 (gr8s::service-lb-dataplane-gc-reclaimed dataplane)))
+        (is (every #'null (loop for value being the hash-values of keys collect value)))))))
+
+(test service-packet-gc-defers-contention-and-recovers-after-run-failure
+  (multiple-value-bind (dataplane keys next-key) (service-packet-gc-fixture)
+    (declare (ignore keys))
+    (let ((seen nil))
+      (signals simple-error
+        (gr8s.network:sweep-service-packet-state
+         dataplane :budget 1 :next-key next-key
+         :run (lambda (&rest ignored) (declare (ignore ignored)) (error "syscall interrupted"))))
+      (is (= 1 (gr8s::service-lb-dataplane-gc-failures dataplane)))
+      (multiple-value-bind (scanned reclaimed deferred)
+          (gr8s.network:sweep-service-packet-state
+           dataplane :budget 1 :next-key next-key
+           :run (lambda (fd direction key)
+                  (declare (ignore fd)) (push (list direction (aref key 0)) seen) 2))
+        (is (= 2 scanned))
+        (is (zerop reclaimed))
+        (is (= 2 deferred)))
+      (is (equal '((1 1) (0 2)) seen))
+      (is (= 2 (gr8s::service-lb-dataplane-gc-deferred dataplane)))
+      (signals type-error
+        (gr8s.network:sweep-service-packet-state dataplane :budget 0)))))
+
+(test service-packet-gc-is-idle-without-a-maintenance-program
+  (let ((called nil))
+    (is (zerop (gr8s.network:sweep-service-packet-state
+                (gr8s::%make-service-lb-dataplane)
+                :next-key (lambda (&rest ignored) (declare (ignore ignored)) (setf called t))
+                :run (lambda (&rest ignored) (declare (ignore ignored)) (setf called t)))))
+    (is-false called)))
+
+
+(test service-packet-gc-defers-uncoordinated-retained-endpoints
+  (multiple-value-bind (dataplane keys next-key) (service-packet-gc-fixture)
+    (declare (ignore keys next-key))
+    (dolist (name '("gr8s_pkt_fwd_lock" "gr8s_pkt_rev_lock"))
+      (push (fake-lb-map name (if (search "fwd" name) 900034 900035))
+            (gr8s::service-lb-dataplane-maps dataplane)))
+    (let ((legacy t) (queries 0) (*error-output* (make-string-output-stream)))
+      (flet ((verify ()
+               (gr8s.network:service-packet-gc-compatible-p
+                dataplane :paths (constantly '("endpoint/gr8s_pkt_stages"))
+                :map-id #'whistler/loader:map-info-fd
+                :stage-map-ids (lambda (path)
+                                 (declare (ignore path)) (incf queries)
+                                 (list (if legacy '(900032 900033)
+                                           '(900032 900033 900034 900035))
+                                       '(900032 900033 900034 900035))))))
+        (is-false (verify))
+        (is-false (gr8s::service-lb-dataplane-gc-compatible-p dataplane))
+        (is (search "Service flow GC deferred:" (get-output-stream-string *error-output*)))
+        (is-false (verify))
+        (is (equal "" (get-output-stream-string *error-output*)))
+        (setf legacy nil)
+        (is-true (verify))
+        (is (null (gr8s::service-lb-dataplane-gc-warning dataplane)))
+        (is-true (verify))
+        (is (= 3 queries))))))
+
+
+(test service-packet-maintenance-load-failure-closes-earlier-hooks
+  (let ((closed nil))
+    (signals simple-error
+      (gr8s::load-service-lb-programs
+       (list (list :name "gr8s_service_lb" :section "cgroup/connect4" :license "GPL" :insns #())
+             (list :name "gr8s_packet_gc" :section "classifier" :license "GPL" :insns #()))
+       nil :load-program (lambda (insns type license &key expected-attach-type)
+                           (declare (ignore insns license expected-attach-type))
+                           (if (= type 3) (error "collector rejected") 900041))
+       :close-fd (lambda (fd) (push fd closed))))
+    (is (equal '(900041) closed))))

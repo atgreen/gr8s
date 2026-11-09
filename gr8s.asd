@@ -218,6 +218,7 @@
                                            (:file "service-lb-program")
                                            (:file "service-packet-program")
                                            (:file "service-lb-dataplane")
+                                           (:file "service-packet-state")
                                            (:file "network-policy-program")
                                            (:file "network-policy")
                                            (:file "vxlan")
