@@ -7,6 +7,33 @@
 (defun snapshot-test-digest (path)
   (gr8s.raft.transport::raft-snapshot-file-digest path))
 
+(test encrypted-secret-snapshot-restores-with-cluster-identity
+  (with-temporary-store (store root)
+    (let ((artifact (merge-pathnames "encrypted.jsonl" root))
+          (sentinel "c25hcHNob3Qtc2VudGluZWw="))
+      (gr8s::enable-secret-encryption store)
+      (gr8s::create-core-resource
+       store "secrets"
+       (gr8s::core-object
+        "apiVersion" "v1" "kind" "Secret"
+        "metadata" (gr8s::core-object "name" "restored" "namespace" "default")
+        "data" (gr8s::core-object "password" sentinel))
+       "default")
+      (gr8s.resources::capture-store-snapshot store artifact 17 3)
+      (is (null (search sentinel (uiop:read-file-string artifact))))
+      (multiple-value-bind (path descriptor)
+          (gr8s.resources::materialize-store-snapshot
+           root artifact (snapshot-test-digest artifact)
+           :expected-index 17 :expected-term 3)
+        (declare (ignore path))
+        (gr8s.store::publish-store-generation root (gethash "generation" descriptor))
+        (let* ((restored (gr8s:open-store root))
+               (secret (gr8s::get-core-resource
+                        restored "secrets" "default" "restored")))
+          (is (equal sentinel (gethash "password" (gethash "data" secret))))
+          (is-true (gethash "enabled"
+                            (gr8s::secret-encryption-status restored))))))))
+
 (test snapshot-materialization-reopens-application-state-and-preserves-member-root
   (with-temporary-store (store root)
     (let* ((artifact (merge-pathnames "source.jsonl" root))
