@@ -22,6 +22,8 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import signal
+import time
 import subprocess
 import sys
 import urllib.parse
@@ -49,9 +51,13 @@ def main():
     parser.add_argument("--ctr", type=Path)
     parser.add_argument("--tcp-client", type=Path,
                         help="optional static service-tcp-client probe for real guest source-port reuse")
+    parser.add_argument("--tcp-restart", action="store_true",
+                        help="keep one guest TCP socket across selector changes and both agent restarts")
     parser.add_argument("--state-parent", type=Path, default=Path("/var/tmp"))
     parser.add_argument("--kata-agent-timeout-ms", type=int, default=120000)
     args = parser.parse_args()
+    if args.tcp_restart and not args.tcp_client:
+        parser.error("--tcp-restart requires --tcp-client")
     if os.geteuid() != 0 or not Path("/dev/kvm").exists():
         sys.exit("run as root in a disposable VM with nested KVM")
     os.environ["GR8S_ENABLE_PACKET_SERVICES"] = "1"
@@ -61,6 +67,8 @@ def main():
     args.report_directory.mkdir(parents=True, exist_ok=True)
     report = {"root": str(smoke.root), "checks": [], "overlay": smoke.overlay,
               "kataSHA256": args.kata_sha256, "agentReconnectTimeoutMs": args.kata_agent_timeout_ms}
+
+    traces = []
 
     def save():
         (args.report_directory / "report.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -283,6 +291,131 @@ def main():
                   replaced_state["backend"] == backend_ip and
                   replaced_state["clientISN"] != state_after["clientISN"] and
                   bool(replaced_state["flags"] & 4), {"connection": third, "state": replaced_state})
+        if args.tcp_restart:
+            # One process connects once; every line is another HTTP exchange on
+            # that socket. No exec stream is kept open across agent shutdown.
+            hold_log = "/tmp/gr8s-held-tcp.jsonl"
+            hold_stop = "/tmp/gr8s-held-tcp.stop"
+            hold_exit = "/tmp/gr8s-held-tcp.exit"
+            local_port = 25092
+            # Capture on both sides of the node veth/guest tap path. These
+            # processes belong to the fixture and survive agent shutdown.
+            namespaces = smoke.in_node(0, "find", smoke.root /
+                "agent-0/containerd/run/io.containerd.grpc.v1.cri/netns",
+                "-mindepth", "1", "-maxdepth", "1").stdout.splitlines()
+            pod_namespace = None
+            for namespace in namespaces:
+                addresses = json.loads(smoke.in_node(0, "nsenter", f"--net={namespace}", "--",
+                                                     "ip", "-j", "addr", "show").stdout)
+                if any(a.get("local") == client_ip for link in addresses for a in link.get("addr_info", [])):
+                    pod_namespace = namespace
+                    break
+            if pod_namespace is None:
+                raise RuntimeError("client network namespace not found for TCP trace")
+            prefix = ["nsenter", f"--mount=/proc/{smoke.keepers[0].pid}/ns/mnt",
+                      f"--net=/run/netns/{smoke.namespaces[0]}", "--"]
+            for label, extra in (("node", []), ("pod", ["nsenter", f"--net={pod_namespace}", "--"])):
+                trace_path = args.report_directory / f"held-tcp-{label}-trace.jsonl"
+                traces.append(subprocess.Popen(prefix + extra + ["python3", str(Path(guest.__file__).resolve()),
+                              "--trace-tcp", str(local_port), str(trace_path)]))
+                overlay.wait_for(f"{label} TCP trace starts", trace_path.exists, timeout=10)
+            smoke.kubectl("exec", CLIENT, "--", "sh", "-c",
+                           f"rm -f {hold_log} {hold_stop} {hold_exit}; "
+                           f"({probe_path} {reuse_vip} {local_port} hold {hold_stop} "
+                           f">{hold_log} 2>&1; echo $? >{hold_exit}) </dev/null >/dev/null 2>&1 &")
+
+            def held_responses():
+                output = smoke.kubectl("exec", CLIENT, "--", "cat", hold_log).stdout
+                (args.report_directory / "held-tcp.jsonl").write_text(output)
+                try:
+                    return [json.loads(line) for line in output.splitlines() if line.strip()]
+                except ValueError as error:
+                    raise RuntimeError(f"held probe output is not JSON: {output[-1024:]!r}") from error
+
+            def workload_identity():
+                return {name: {"uid": pod["metadata"]["uid"], "ip": pod["status"]["podIP"],
+                               "containers": [c["containerID"] for c in pod["status"]["containerStatuses"]]}
+                        for name in (CLIENT, BACKEND) for pod in (get("pod", name),)}
+
+            def map_ids(index):
+                path = smoke.root / f"agent-{index}/containerd/bpf/service-lb"
+                reader = Path(__file__).with_name("test-service-restart.py").resolve()
+                observed = json.loads(smoke.in_node(index, "python3", reader, "--inspect", path).stdout)
+                return {name: value["id"] for name, value in observed.items()}
+
+            responses = overlay.wait_for("held guest socket responding", lambda: held_responses() or None,
+                                         timeout=60)
+            held_state = tcp_state()
+            identity_before = workload_identity()
+            check("guestTcpHeldEstablished", responses[0]["body"] == BACKEND and
+                  held_state["backend"] == backend_ip and held_state["flags"] & 4 and
+                  not held_state["flags"] & 384, {"response": responses[0], "state": held_state})
+            apply(traffic.service("guest-tcp-reuse", [traffic.HTTP],
+                                  selector={"test.gr8s.io/pod": alternate}))
+            # A distinct fresh socket proves the selector update reached the
+            # dataplane while the held connection remains on the old backend.
+            local_port = 25093
+            fresh = observed_when("new guest flow uses updated selector", fixed_connection,
+                                  lambda answer: answer.get("body") == alternate)
+            local_port = 25092
+            check("guestTcpHeldSelectorChanged", fresh["body"] == alternate, fresh)
+            for index in range(2):
+                before_maps = map_ids(index)
+                report.setdefault("heldRestartSnapshots", []).append(
+                    {"node": index, "maps": before_maps, "state": tcp_state(), "atMs": time.time_ns() // 1000000})
+                save()
+                smoke.agents[index].send_signal(signal.SIGTERM)
+                smoke.agents[index].wait(timeout=180)
+                smoke.agents[index] = None
+                stopped_state = tcp_state()
+                down_started = time.monotonic()
+                # Read pinned state from the retained node namespace; API exec
+                # on the deliberately stopped client agent is unavailable.
+                def advanced_while_down():
+                    current = tcp_state()
+                    return current if (current["clientEnd"] != stopped_state["clientEnd"] and
+                                       current["serverEnd"] != stopped_state["serverEnd"]) else None
+                offline_state = overlay.wait_for("held guest exchanges while agent down",
+                                                 advanced_while_down, timeout=30)
+                check(f"guestTcpHeldDuringAgent{index}Stop",
+                      offline_state["clientISN"] == held_state["clientISN"] and
+                      offline_state["serverISN"] == held_state["serverISN"] and
+                      offline_state["backend"] == backend_ip and
+                      offline_state["flags"] & 4 and not offline_state["flags"] & 384,
+                      {"before": stopped_state, "after": offline_state,
+                       "agentDownSeconds": time.monotonic() - down_started})
+                report["heldRestartSnapshots"][-1]["beforeStartMs"] = time.time_ns() // 1000000
+                save()
+                smoke.start_agent(index)
+                report["heldRestartSnapshots"][-1]["readyMs"] = time.time_ns() // 1000000
+                save()
+                # Establish a baseline after readiness, then require a later
+                # response; pre-restart log lines cannot satisfy this check.
+                previous = held_responses()[-1]["request"]
+                def response_after_readiness():
+                    rows = held_responses()
+                    return rows if rows and rows[-1]["request"] > previous else None
+                responses = overlay.wait_for("held guest responses after agent restart",
+                                             response_after_readiness, timeout=90)
+                current_state = tcp_state()
+                after_maps = map_ids(index)
+                check(f"guestTcpHeldAfterAgent{index}Restart",
+                      all(row["body"] == BACKEND and row["localPort"] == 25092 and
+                          row["peerIP"] == reuse_vip for row in responses) and
+                      [row["request"] for row in responses] == list(range(1, len(responses) + 1)) and
+                      current_state["clientISN"] == held_state["clientISN"] and
+                      current_state["serverISN"] == held_state["serverISN"] and
+                      current_state["backend"] == backend_ip and current_state["flags"] & 4 and
+                      not current_state["flags"] & 384 and
+                      workload_identity() == identity_before and before_maps == after_maps,
+                      {"responses": responses, "state": current_state,
+                       "workloads": workload_identity(), "mapsBefore": before_maps, "mapsAfter": after_maps})
+            smoke.kubectl("exec", CLIENT, "--", "touch", hold_stop)
+            overlay.wait_for("held probe exits cleanly", lambda:
+                smoke.kubectl("exec", CLIENT, "--", "cat", hold_exit, check=False).stdout.strip() == "0",
+                timeout=30)
+            final_state = tcp_state()
+            check("guestTcpHeldGracefulClose", bool(final_state["flags"] & 256), final_state)
         apply(client_policy([]))
         for protocol, port in (("http", 80), ("udp", 81)):
             answer = observed_when(f"default-deny {protocol}", lambda: dial(vip, port, protocol), denied)
@@ -314,6 +447,23 @@ def main():
     except (Exception, KeyboardInterrupt) as error:
         report["passed"] = False
         report["error"] = f"{type(error).__name__}: {error}"
+        for index in range(2):
+            if smoke.agents[index] is None and smoke.server and smoke.server.poll() is None:
+                try:
+                    smoke.start_agent(index)
+                except Exception as restart_error:
+                    report[f"cleanupRestartError{index}"] = str(restart_error)
+        if args.tcp_restart and "tcp_state" in locals():
+            try:
+                report["failureTcpState"] = tcp_state()
+                report["failurePacketCounters"] = {str(i): counters(i) for i in range(2)}
+                if "map_ids" in locals():
+                    report["failureMapIds"] = {str(i): map_ids(i) for i in range(2)}
+                if "hold_exit" in locals():
+                    report["heldProbeExit"] = smoke.kubectl("exec", CLIENT, "--", "cat", hold_exit,
+                                                          check=False).stdout.strip()
+            except Exception as diagnostic_error:
+                report["failureDiagnosticError"] = str(diagnostic_error)
         for resource in ("pods", "events", "endpointslices", "networkpolicies"):
             try:
                 (args.report_directory / (resource + ".json")).write_text(
@@ -321,6 +471,10 @@ def main():
             except Exception:
                 pass
     finally:
+        for trace in traces:
+            if trace.poll() is None:
+                trace.terminate()
+            trace.wait(timeout=10)
         if args.tcp_client and smoke.server and smoke.server.poll() is None:
             try:
                 smoke.kubectl("delete", "pod", "tcp-alternate", "--ignore-not-found", "--wait=false", check=False)

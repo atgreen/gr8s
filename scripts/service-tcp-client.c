@@ -1,6 +1,6 @@
 /* SPDX-FileCopyrightText: 2026 Anthony Green
  * SPDX-License-Identifier: Apache-2.0
- * Test-only guest probe: one HTTP connection from a fixed source port, then RST or FIN.
+ * Test-only guest probe: HTTP requests on one fixed-port socket, then RST or FIN.
  * Build statically on the development host; the guest needs no compiler/libc.
  */
 #define _POSIX_C_SOURCE 200809L
@@ -13,6 +13,7 @@
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 static void fail(const char *message) {
@@ -30,34 +31,13 @@ static void json_string(const char *text) {
     putchar('"');
 }
 
-int main(int argc, char **argv) {
-    if (argc != 3 && (argc != 4 || strcmp(argv[3], "fin"))) {
-        fprintf(stderr, "usage: service-tcp-client SERVICE_IPV4 LOCAL_PORT [fin]\n");
-        return 2;
-    }
-    char *end = NULL;
-    long port = strtol(argv[2], &end, 10);
-    if (!end || *end || port < 1024 || port > 65535) return 2;
-    alarm(12);
-    int fd = socket(AF_INET, SOCK_STREAM, 0), yes = 1;
-    if (fd < 0) fail("socket");
-    struct linger reset = {.l_onoff = 1, .l_linger = 0};
-    struct timeval timeout = {.tv_sec = 10};
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) ||
-        (argc == 3 && setsockopt(fd, SOL_SOCKET, SO_LINGER, &reset, sizeof(reset))) ||
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) ||
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout))) fail("setsockopt");
-    struct sockaddr_in local = {.sin_family = AF_INET, .sin_port = htons((unsigned short)port)};
-    struct sockaddr_in peer = {.sin_family = AF_INET, .sin_port = htons(80)};
-    if (inet_pton(AF_INET, argv[1], &peer.sin_addr) != 1) return 2;
-    if (bind(fd, (struct sockaddr *)&local, sizeof(local))) fail("bind");
-    if (connect(fd, (struct sockaddr *)&peer, sizeof(peer))) fail("connect");
+static void request_once(int fd, unsigned serial) {
     static const char request[] = "GET /hostname HTTP/1.1\r\nHost: gr8s-service-test\r\nConnection: keep-alive\r\n\r\n";
     size_t sent = 0;
     while (sent < sizeof(request) - 1) {
         ssize_t count = send(fd, request + sent, sizeof(request) - 1 - sent, 0);
         if (count < 0) { if (errno == EINTR) continue; fail("send"); }
-        if (!count) return 1;
+        if (!count) exit(1);
         sent += (size_t)count;
     }
     char response[8192], *body = NULL;
@@ -65,13 +45,13 @@ int main(int argc, char **argv) {
     while (used < sizeof(response) - 1) {
         ssize_t count = recv(fd, response + used, sizeof(response) - 1 - used, 0);
         if (count < 0) { if (errno == EINTR) continue; fail("recv"); }
-        if (!count) { fprintf(stderr, "incomplete HTTP response\n"); return 1; }
+        if (!count) { fprintf(stderr, "incomplete HTTP response\n"); exit(1); }
         used += (size_t)count;
         response[used] = 0;
         if (!body) {
             char *header_end = strstr(response, "\r\n\r\n");
             if (!header_end) continue;
-            if (strncmp(response, "HTTP/1.1 200 ", 13)) { fprintf(stderr, "unexpected HTTP status\n"); return 1; }
+            if (strncmp(response, "HTTP/1.1 200 ", 13)) { fprintf(stderr, "unexpected HTTP status\n"); exit(1); }
             body = header_end + 4;
             int length_seen = 0;
             for (char *line = response; line < header_end;) {
@@ -84,13 +64,14 @@ int main(int argc, char **argv) {
                 line = next + 2;
             }
             if (!length_seen || wanted > sizeof(response) - (size_t)(body - response) - 1) {
-                fprintf(stderr, "missing/oversized Content-Length\n"); return 1;
+                fprintf(stderr, "missing/oversized Content-Length\n"); exit(1);
             }
         }
         if (used - (size_t)(body - response) >= wanted) break;
     }
-    if (!body || used - (size_t)(body - response) < wanted) return 1;
+    if (!body || used - (size_t)(body - response) < wanted) exit(1);
     body[wanted] = 0;
+    struct sockaddr_in local, peer;
     socklen_t size = sizeof(local);
     if (getsockname(fd, (struct sockaddr *)&local, &size)) fail("getsockname");
     size = sizeof(peer);
@@ -101,8 +82,46 @@ int main(int argc, char **argv) {
     printf("{\"localIP\":"); json_string(local_ip);
     printf(",\"localPort\":%u,\"peerIP\":", ntohs(local.sin_port)); json_string(peer_ip);
     printf(",\"peerPort\":%u,\"body\":", ntohs(peer.sin_port)); json_string(body);
-    puts("}");
-    if (argc == 4) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_REALTIME, &now)) fail("clock_gettime");
+    printf(",\"request\":%u,\"completedAtMs\":%lld}\n", serial,
+           (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000);
+    fflush(stdout);
+}
+
+int main(int argc, char **argv) {
+    int graceful = argc == 4 && !strcmp(argv[3], "fin");
+    int held = argc == 5 && !strcmp(argv[3], "hold");
+    if (argc != 3 && !graceful && !held) {
+        fprintf(stderr, "usage: service-tcp-client SERVICE_IPV4 LOCAL_PORT [fin | hold STOP_FILE]\n");
+        return 2;
+    }
+    char *end = NULL;
+    long port = strtol(argv[2], &end, 10);
+    if (!end || *end || port < 1024 || port > 65535) return 2;
+    alarm(held ? 900 : 12);
+    int fd = socket(AF_INET, SOCK_STREAM, 0), yes = 1;
+    if (fd < 0) fail("socket");
+    struct linger reset = {.l_onoff = 1, .l_linger = 0};
+    struct timeval timeout = {.tv_sec = 10};
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) ||
+        (!graceful && !held && setsockopt(fd, SOL_SOCKET, SO_LINGER, &reset, sizeof(reset))) ||
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) ||
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout))) fail("setsockopt");
+    struct sockaddr_in local = {.sin_family = AF_INET, .sin_port = htons((unsigned short)port)};
+    struct sockaddr_in peer = {.sin_family = AF_INET, .sin_port = htons(80)};
+    if (inet_pton(AF_INET, argv[1], &peer.sin_addr) != 1) return 2;
+    if (bind(fd, (struct sockaddr *)&local, sizeof(local))) fail("bind");
+    if (connect(fd, (struct sockaddr *)&peer, sizeof(peer))) fail("connect");
+    unsigned serial = 0;
+    do {
+        request_once(fd, ++serial);
+        if (!held) break;
+        if (!access(argv[4], F_OK)) break;
+        struct timespec interval = {.tv_sec = 1};
+        while (nanosleep(&interval, &interval) && errno == EINTR) {}
+    } while (1);
+    if (graceful || held) {
         if (shutdown(fd, SHUT_WR)) fail("shutdown");
         char tail[256];
         for (;;) {

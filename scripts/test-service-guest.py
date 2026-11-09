@@ -20,6 +20,8 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import socket
+import time
 import struct
 import subprocess
 import sys
@@ -29,6 +31,33 @@ spec = importlib.util.spec_from_file_location(
     "service_traffic", Path(__file__).with_name("test-service-traffic.py"))
 traffic = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(traffic)
+
+
+def trace_tcp(port, output):
+    """Record only the test tuple from this network namespace, for at most15min."""
+    with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3)) as capture, \
+            output.open("w", buffering=1) as log:
+        capture.settimeout(1)
+        deadline = time.monotonic() + 900
+        while time.monotonic() < deadline:
+            try:
+                packet, address = capture.recvfrom(65535)
+            except TimeoutError:
+                continue
+            if len(packet) < 54 or packet[12:14] != b"\x08\x00" or packet[23] != 6:
+                continue
+            offset = 14 + (packet[14] & 15) * 4
+            if offset < 34 or len(packet) < offset + 20:
+                continue
+            sport, dport, seq, ack = struct.unpack_from("!HHII", packet, offset)
+            if port not in (sport, dport):
+                continue
+            record = {"atNs": time.time_ns(), "interface": address[0], "packetType": address[2],
+                      "source": str(ipaddress.ip_address(packet[26:30])),
+                      "destination": str(ipaddress.ip_address(packet[30:34])),
+                      "sport": sport, "dport": dport, "seq": seq, "ack": ack,
+                      "flags": packet[offset + 13], "wire": packet.hex()}
+            log.write(json.dumps(record) + "\n")
 
 
 def read_pinned_values(path, keys, value_size):
@@ -237,7 +266,9 @@ def main():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--read-packet-counters":
+    if len(sys.argv) == 4 and sys.argv[1] == "--trace-tcp":
+        trace_tcp(int(sys.argv[2]), Path(sys.argv[3]))
+    elif len(sys.argv) == 3 and sys.argv[1] == "--read-packet-counters":
         print(json.dumps(read_packet_counters(Path(sys.argv[2]))))
     elif len(sys.argv) == 4 and sys.argv[1] == "--read-tcp-state":
         print(json.dumps(read_tcp_state(Path(sys.argv[2]), bytes.fromhex(sys.argv[3]))))

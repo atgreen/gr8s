@@ -184,6 +184,7 @@ class Smoke:
             self.start_agent(index, enroll=True)
 
     def start_agent(self, index, enroll=False):
+        started_at = int(time.time())
         args = [self.binary, 'agent', '--server', f'{self.hosts[0]}:{self.node_port}',
                 '--node-name', f'worker-{index}', '--node-address', self.addresses[index],
                 '--state-directory', self.root / f'agent-{index}', '--runtime', 'containerd',
@@ -201,9 +202,15 @@ class Smoke:
         self.agents[index] = self.start(['nsenter', f'--mount=/proc/{keeper.pid}/ns/mnt',
                                         f'--net=/run/netns/{self.namespaces[index]}', '--', *args],
                                        f'agent-{index}')
-        wait_for(f'worker-{index} connection', lambda:
-                 f'gr8s_dataplane_node_ready{{node="worker-{index}"}} 1' in self.metrics(),
-                 timeout=self.startup_timeout)
+        def fresh_connection():
+            metrics = self.metrics().splitlines()
+            ready = f'gr8s_dataplane_node_ready{{node="worker-{index}"}} 1'
+            prefix = f'gr8s_dataplane_observed_timestamp_seconds{{node="worker-{index}"}} '
+            observed = next((int(line[len(prefix):]) for line in metrics if line.startswith(prefix)), 0)
+            # The server retains the previous ready gauge during a reconnect.
+            # Require a report produced after this process started.
+            return ready in metrics and observed > started_at
+        wait_for(f'worker-{index} fresh connection', fresh_connection, timeout=self.startup_timeout)
 
     def check_pods(self, expected=None):
         pods = [self.pod(index) for index in range(2)]
