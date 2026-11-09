@@ -124,7 +124,8 @@ deleted while the agent was offline, including sparse orphan backend slots.
 A native two-node restart regression verifies withdrawal, retained map IDs,
 unchanged Pod identities and recovered Service traffic. See
 [the restart validation evidence](service-map-restart-validation-2026-11-09.json).
-Guest connection-state survival across agent restart remains unverified.
+An established guest TCP connection has also survived graceful restart of both
+agents without reconnecting; see the restart evidence below.
 Packet flows expire after 180 seconds of UDP inactivity, 120 seconds for pending
 TCP handshakes, or two hours for established and legacy TCP flows, counting
 requests and replies. A separate TCP metadata map records initial sequence
@@ -144,12 +145,25 @@ it never holds a packet reservation across a userspace pause or agent exit.
 Collection preserves fresh flows and does not refresh their timestamps. Affinity
 state is separately bounded by its LRU map and validated on use.
 
-Before collecting retained state, the agent checks that existing endpoint NAT
-programs reference the current flow, reservation and TCP metadata maps. Older
-experimental endpoint programs defer GC with a diagnostic until those endpoints
-are refreshed or recreated. The agent reports verified retained pipelines and
-logs enumeration/syscall failures; its dataplane tracks scanned, reclaimed,
-deferred and failed transactions. See
+Before collecting retained state, the agent verifies and refreshes pinned native
+endpoint programs. It loads replacements against the existing maps before
+publishing them, then prepends drop guards in both TCX directions. These guards
+drain earlier packet executions before the agent changes the continuation table
+and entry programs. The agent verifies the resulting kernel programs and map
+references before removing the guards. Map and TCX link identities are preserved.
+An interrupted refresh retains its guards for retry; CNI CHECK rejects that
+endpoint until recovery. CNI changes serialize with refresh, and endpoint deletion
+detaches retained guards as well as the ordinary links.
+
+The agent prepares at most eight uncached endpoints per reconciliation tick.
+Pending upgrades, incompatible map schemas, unsupported attachment modes and
+failed kernel operations defer GC with diagnostics. Automatic refresh currently
+supports native attachments. Retained TCP translations without observed handshake
+metadata use the conservative legacy lifetime; refresh does not invent sequence
+numbers or shorten their lifetime on FIN/RST. Newly observed connections use the
+current TCP tracker. The agent reports verified retained pipelines and logs
+enumeration/syscall failures; its dataplane tracks scanned, reclaimed, deferred
+and failed transactions. See
 [the expiry evidence](service-packet-expiry-validation-2026-11-09.json) and
 [the background collection evidence](service-packet-gc-validation-2026-11-09.json).
 The generation and handshake stage is validated by an actual Kata guest reusing
@@ -232,6 +246,18 @@ agent is stopped, a further HTTP response after readiness returns, unchanged
 TCP initial sequences and backend, retained map IDs, and unchanged Pod/container
 identities. New connections must reach the updated backend while the held
 connection keeps its original backend, then closes gracefully.
+For historical-program upgrade coverage, first build
+`make build/gr8s-legacy-service-packet-guard-test.json`, copy that fixture and
+`scripts/test-service-program-upgrade.py` into the VM, and add
+`--tcp-upgrade /root/gr8s-legacy-service-packet-guard-test.json`. This installs the
+pre-reservation NAT stages while the client agent is stopped and requires their
+automatic refresh, retained map/link identities and activation of flow collection.
+The held connection uses legacy tracking after refresh because its handshake
+metadata was absent; a new connection must use the current tracker. Alternatively,
+`--tcp-interrupted-upgrade` leaves two drop guards and a missing reverse stage
+across restart. That mode requires blocked offline traffic, automatic recovery
+and preservation of the held connection's original TCP metadata. Its test client
+allows a longer receive deadline for the intentional interruption.
 
 `NodePort` and `LoadBalancer` Services allocate node ports from 30000–32767. The
 agent relays each in userspace, for TCP and UDP, with client-address affinity, so
