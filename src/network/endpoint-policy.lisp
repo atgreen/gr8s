@@ -41,7 +41,9 @@
    its kernel type, key and value sizes, capacity and flags against the expected
    spec in +CNI-POLICY-MAP-SPECS+. Signals INVALID-CNI on any schema mismatch.
    OBJECT-INFO is the info query, injectable for tests."
-  (let* ((spec (assoc name +cni-policy-map-specs+ :test #'string=))
+  (let* ((spec (or (assoc name +cni-policy-map-specs+ :test #'string=)
+                   (when (equal name "gr8s_pkt_stages") '("gr8s_pkt_stages" 3 4 4 8 0))
+                   (assoc name (service-packet-map-specs) :test #'string=)))
          (info (funcall object-info fd)))
     (destructuring-bind (&optional sname type key-size value-size max-entries flags) spec
       (declare (ignore sname))

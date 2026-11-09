@@ -71,7 +71,7 @@ def check_checksums(data):
     assert checksum(pseudo + l4) == 0, "bad transport checksum"
 
 
-def read_fixture(path):
+def read_fixture(path, names=("gr8s_packet_forward", "gr8s_packet_reverse")):
     document = json.load(open(path))
     specs = document["maps"]
     descriptors = {s["name"]: (s["type"], s["key_size"], s["value_size"],
@@ -83,7 +83,7 @@ def read_fixture(path):
         for offset, index in program["relocations"]:
             struct.pack_into("<I", code, offset + 4, ids[specs[index]["name"]])
         programs[program["name"]] = bytes(code)
-    assert set(programs) == {"gr8s_packet_forward", "gr8s_packet_reverse"}, programs.keys()
+    assert set(programs) == set(names), programs.keys()
     return programs, ids, descriptors
 
 

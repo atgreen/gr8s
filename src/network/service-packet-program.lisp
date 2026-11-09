@@ -47,7 +47,9 @@
          (gr8s-pkt-flow-destination ,reverse) (gr8s-pkt-flow-source ,flow)
          (gr8s-pkt-flow-sport ,reverse) (cast u16 (>> ,backend 32))
          (gr8s-pkt-flow-dport ,reverse) (gr8s-pkt-flow-sport ,flow)
-         (gr8s-pkt-flow-protocol ,reverse) (gr8s-pkt-flow-protocol ,flow)))
+         (gr8s-pkt-flow-protocol ,reverse) (gr8s-pkt-flow-protocol ,flow)
+         (gr8s-pkt-flow-pad0 ,reverse) 0
+         (gr8s-pkt-flow-pad1 ,reverse) 0))
 
 (defmacro pkt-write-address (flow target meta reverse)
   "Rewrite one address and transport port, maintaining IP and TCP/UDP checksums.
@@ -77,7 +79,11 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
          (pkt-drop failed)))))
 
 (defun gr8s.network::service-packet-forward-form ()
-  '((let ((key u64 (logior (<< (cast u64 (gr8s-pkt-flow-protocol flow)) 48)
+  ;; One 16-byte scratch key serves affinity, membership and reverse lookups.
+  ;; Reconstruct its fields at every use to keep the combined guard below the
+  ;; kernel's stack limit without retaining unrelated stack structs.
+  '((let ((probe (make-gr8s-pkt-pair)))
+      (let ((key u64 (logior (<< (cast u64 (gr8s-pkt-flow-protocol flow)) 48)
                            (logior (<< (cast u64 (gr8s-pkt-flow-destination flow)) 16)
                                     (cast u64 (gr8s-pkt-flow-dport flow))))))
       (when-let ((held (map-lookup-ptr gr8s-pkt-forward flow)))
@@ -88,15 +94,14 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
           (let ((count u32 (load u16 service 0)))
             (when (= count 0) (pkt-drop empty))
             (let ((offset u32 (mod (get-prandom-u32) count))
-                  (client (make-gr8s-pkt-pair))
                   (sticky u32 (load u16 service 2))
                   (timeout u64 (load u32 service 8)))
-              (setf (gr8s-pkt-pair-first client) key
-                    (gr8s-pkt-pair-second client) (cast u64 (gr8s-pkt-flow-source flow)))
+              (setf (gr8s-pkt-pair-first probe) key
+                    (gr8s-pkt-pair-second probe) (cast u64 (gr8s-pkt-flow-source flow)))
               (when (/= sticky 0)
-                (when-let ((held (map-lookup-ptr gr8s-pkt-affinity client)))
+                (when-let ((held (map-lookup-ptr gr8s-pkt-affinity probe)))
                   (when (<= (- (/ now 1000000000) (load u64 held 8)) timeout)
-                    (let ((probe (make-gr8s-pkt-pair)))
+                    (progn
                       (setf (gr8s-pkt-pair-first probe) key
                             (gr8s-pkt-pair-second probe) (load u64 held 0))
                       (when-let ((index (map-lookup-ptr gr8s-backend-index-v4 probe)))
@@ -106,7 +111,7 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
                 (when-let ((backend (map-lookup gr8s-backend-v4 slot)))
                   (setf (gr8s-pkt-pair-first target) (load u64 backend 0))))
               (when (= (gr8s-pkt-pair-first target) 0) (pkt-drop membership))
-              (let ((probe (make-gr8s-pkt-pair)))
+              (progn
                 (setf (gr8s-pkt-pair-first probe) key
                       (gr8s-pkt-pair-second probe) (gr8s-pkt-pair-first target))
                 (when (= (map-lookup-ptr gr8s-backend-index-v4 probe) 0)
@@ -115,20 +120,19 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
               ;; traffic path. Do not emit a DNAT-only connection that cannot reply.
               (when (= (cast u32 (gr8s-pkt-pair-first target)) (gr8s-pkt-flow-source flow))
                 (pkt-drop collision))
-              (let ((reverse (make-gr8s-pkt-flow))
-                    (entry (make-gr8s-pkt-pair)))
-                (pkt-make-reverse-key reverse flow (gr8s-pkt-pair-first target))
+              (let ((entry (make-gr8s-pkt-pair)))
+                (pkt-make-reverse-key probe flow (gr8s-pkt-pair-first target))
                 (setf (gr8s-pkt-pair-first entry)
                       (logior (cast u64 (gr8s-pkt-flow-destination flow))
                                (<< (cast u64 (gr8s-pkt-flow-dport flow)) 32))
                       (gr8s-pkt-pair-second entry) now)
-                (when-let ((existing (map-lookup-ptr gr8s-pkt-reverse reverse)))
+                (when-let ((existing (map-lookup-ptr gr8s-pkt-reverse probe)))
                   (when (/= (load u64 existing 0) (gr8s-pkt-pair-first entry))
                     (pkt-drop collision)))
                 ;; NOEXIST reserves a reverse tuple. Recheck after a racing
                 ;; insert; another Service can never take ownership silently.
-                (when (/= (map-update-ptr gr8s-pkt-reverse reverse entry 1) 0)
-                  (let ((existing (map-lookup-ptr gr8s-pkt-reverse reverse)))
+                (when (/= (map-update-ptr gr8s-pkt-reverse probe entry 1) 0)
+                  (let ((existing (map-lookup-ptr gr8s-pkt-reverse probe)))
                     (when (= existing 0) (pkt-drop failed))
                     (when (/= (load u64 existing 0) (gr8s-pkt-pair-first entry))
                       (pkt-drop collision))))
@@ -138,16 +142,17 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
               (when (/= (map-update-ptr gr8s-pkt-forward flow target 1) 0)
                 (pkt-drop failed))
               (when (/= sticky 0)
-                (let ((entry (make-gr8s-pkt-pair)))
-                  (setf (gr8s-pkt-pair-first entry) (gr8s-pkt-pair-first target)
-                        (gr8s-pkt-pair-second entry) (/ now 1000000000))
-                  (map-update-ptr gr8s-pkt-affinity client entry 0))))))))
+                (progn
+                  (setf (gr8s-pkt-pair-first probe) key
+                        (gr8s-pkt-pair-second probe) (cast u64 (gr8s-pkt-flow-source flow))
+                        (gr8s-pkt-pair-second target) (/ now 1000000000))
+                  (map-update-ptr gr8s-pkt-affinity probe target 0))))))))
       (when (/= (gr8s-pkt-pair-first target) 0)
         ;; Confirm the reverse reservation before sending another packet. A
         ;; failed or concurrent publication must not create a one-way NAT flow.
-        (let ((reverse (make-gr8s-pkt-flow)))
-          (pkt-make-reverse-key reverse flow (gr8s-pkt-pair-first target))
-          (let ((entry (map-lookup-ptr gr8s-pkt-reverse reverse)))
+        (progn
+          (pkt-make-reverse-key probe flow (gr8s-pkt-pair-first target))
+          (let ((entry (map-lookup-ptr gr8s-pkt-reverse probe)))
             (when (= entry 0) (pkt-drop failed))
             (when (/= (load u64 entry 0)
                       (logior (cast u64 (gr8s-pkt-flow-destination flow))
@@ -157,7 +162,7 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
         (when (/= (map-update-ptr gr8s-pkt-forward flow target 0) 0)
           (pkt-drop failed))
         (pkt-write-address flow target meta nil)
-        (pkt-count requests)))))
+        (pkt-count requests))))))
 
 (defun gr8s.network::service-packet-reverse-form ()
   '((when-let ((entry (map-lookup-ptr gr8s-pkt-reverse flow)))
@@ -183,29 +188,8 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
       (pkt-write-address flow target meta t)
       (pkt-count replies))))
 
-(defun gr8s.network::service-packet-program-form (name body)
-  `(defprog ,name (:type :tc :section "classifier" :license "GPL")
-     (let ((requests (map-lookup gr8s-pkt-stats 0))
-           (replies (map-lookup gr8s-pkt-stats 1))
-           (empty (map-lookup gr8s-pkt-stats 2))
-           (membership (map-lookup gr8s-pkt-stats 3))
-           (collision (map-lookup gr8s-pkt-stats 4))
-           (failed (map-lookup gr8s-pkt-stats 5))
-           (malformed (map-lookup gr8s-pkt-stats 6))
-           (now u64 (ktime-get-ns)))
-       (let ((flow (make-gr8s-pkt-flow)) (target (make-gr8s-pkt-pair))
-             (meta (make-gr8s-pkt-meta))
-             (data u64 (tc-data)) (data-end u64 (tc-data-end)))
-         (when (> (+ data 14) data-end) (pkt-drop malformed))
-         (when (/= (eth-type data) #x0800) (return TC_ACT_OK))
-         (when (> (+ data 34) data-end) (pkt-drop malformed))
-         (when (/= (logand (load u8 data 14) #xf0) #x40) (pkt-drop malformed))
-         (when (< (logand (load u8 data 14) 15) 5) (pkt-drop malformed))
-         ;; Fragment reassembly and non-TCP/UDP are handled by their normal
-         ;; stack paths. This packet translator does not guess an absent port.
-         (when (/= (logand (ntohs (load u16 data 20)) #x3fff) 0) (return TC_ACT_OK))
-         (when (and (/= (load u8 data 23) 6) (/= (load u8 data 23) 17))
-           (return TC_ACT_OK))
+(defun gr8s.network::service-packet-processing-form (body)
+  `(
          (setf (gr8s-pkt-meta-l4 meta) (+ 14 (* (logand (load u8 data 14) 15) 4)))
          (when (or (< (gr8s-pkt-meta-l4 meta) 34) (> (gr8s-pkt-meta-l4 meta) 74))
            (pkt-drop malformed))
@@ -225,8 +209,43 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
          ;; repeated scalar stack loads to retain a verifier packet-range ID.
          (when (/= (skb-load-bytes (ctx-ptr) (gr8s-pkt-meta-l4 meta) (+ flow 8) 4) 0)
            (pkt-drop malformed))
-         ,@body
-         TC_ACT_OK))))
+         ,@body))
+
+(defun gr8s.network::service-packet-body-form (body &key continue-guard)
+  "Build a packet translator body. CONTINUE-GUARD skips ineligible packets without
+returning from the enclosing guard, so non-Service traffic still crosses policy."
+  `(let ((requests (map-lookup gr8s-pkt-stats 0))
+         (replies (map-lookup gr8s-pkt-stats 1))
+         (empty (map-lookup gr8s-pkt-stats 2))
+         (membership (map-lookup gr8s-pkt-stats 3))
+         (collision (map-lookup gr8s-pkt-stats 4))
+         (failed (map-lookup gr8s-pkt-stats 5))
+         (malformed (map-lookup gr8s-pkt-stats 6))
+         (now u64 (ktime-get-ns)))
+     (let ((flow (make-gr8s-pkt-flow)) (target (make-gr8s-pkt-pair))
+           (meta (make-gr8s-pkt-meta))
+           (data u64 (tc-data)) (data-end u64 (tc-data-end)))
+       ,@(if continue-guard
+             `((when (> (+ data 34) data-end) (pkt-drop malformed))
+               (when (and (= (eth-type data) #x0800)
+                          (= (logand (load u8 data 14) #xf0) #x40)
+                          (= (logand (ntohs (load u16 data 20)) #x3fff) 0)
+                          (or (= (load u8 data 23) 6) (= (load u8 data 23) 17)))
+                 ,@(gr8s.network::service-packet-processing-form body)))
+             `((when (> (+ data 14) data-end) (pkt-drop malformed))
+               (when (/= (eth-type data) #x0800) (return TC_ACT_OK))
+               (when (> (+ data 34) data-end) (pkt-drop malformed))
+               (when (/= (logand (load u8 data 14) #xf0) #x40) (pkt-drop malformed))
+               (when (< (logand (load u8 data 14) 15) 5) (pkt-drop malformed))
+               (when (/= (logand (ntohs (load u16 data 20)) #x3fff) 0) (return TC_ACT_OK))
+               (when (and (/= (load u8 data 23) 6) (/= (load u8 data 23) 17))
+                 (return TC_ACT_OK))
+               ,@(gr8s.network::service-packet-processing-form body)
+               TC_ACT_OK)))))
+
+(defun gr8s.network::service-packet-program-form (name body)
+  `(defprog ,name (:type :tc :section "classifier" :license "GPL")
+     ,(gr8s.network::service-packet-body-form body)))
 
 (in-package #:gr8s.network)
 
@@ -238,6 +257,71 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
                                   :test #'equal))
            *service-lb-map-forms*)
           *service-packet-extra-map-forms*))
+
+(defun service-packet-map-specs ()
+  "Shared CNI map schemas, derived from the same forms the compiler consumes."
+  (mapcar (lambda (form)
+            (let ((options (cddr form)))
+              (list (substitute #\_ #\- (string-downcase (symbol-name (second form))))
+                    (whistler/compiler:resolve-map-type (getf options :type))
+                    (getf options :key-size) (getf options :value-size)
+                    (getf options :max-entries) (or (getf options :map-flags) 0))))
+          (service-packet-map-forms)))
+
+(defparameter *service-packet-stage-map-form*
+  '(whistler::defmap whistler::gr8s-pkt-stages :type :prog-array
+     :key-size 4 :value-size 4 :max-entries 8))
+
+(defun service-packet-guard-forms ()
+  "Compose a tail-call pipeline that preserves identity/policy/NAT ordering.
+Each stage gets a fresh BPF stack. An unpopulated stage fails closed. The
+ordinary guard source is immutable and still compiles without Service support."
+  (let* ((anchor '(whistler::when
+                   (/= (whistler::ntohl (whistler::ipv4-src-addr whistler::ip))
+                       (whistler::load whistler::u32 whistler::identity 0))
+                   (whistler::drop-pod-packet :spoof)))
+         (replacements 0))
+    (labels ((insert-forward (form)
+               (cond ((and (consp form) (eq (car form) 'let)
+                           (position anchor (cddr form) :test #'equal))
+                      (incf replacements)
+                      ;; Keep the canonical IPv4 validation prefix. Policy and
+                      ;; delivery run in their own unmodified stage after NAT.
+                      `(let ,(second form)
+                         ,@(subseq (cddr form) 0 (1+ (position anchor (cddr form) :test #'equal)))
+                         (whistler::tail-call whistler::gr8s-pkt-stages 0)
+                         (return whistler::TC_ACT_SHOT)))
+                     ((and (consp form) (eq (car form) 'cond)
+                           (equal (caadr form) '(= whistler::protocol #x0800)))
+                      ;; ARP, IPv6 and other traffic go straight to the complete
+                      ;; canonical policy/identity guard, without a NAT stage.
+                      `(cond ,(insert-forward (second form))
+                             (t (whistler::tail-call whistler::gr8s-pkt-stages 1)
+                                (return whistler::TC_ACT_SHOT))))
+                     ((consp form) (mapcar #'insert-forward form))
+                     (t form))))
+      (let* ((forms (mapcar #'insert-forward *egress-guard-program-forms*))
+             (ingress (find "GR8S-INGRESS-GUARD" forms
+                            :key (lambda (form) (symbol-name (second form))) :test #'equal))
+             (body (fourth ingress))
+             (policy (copy-tree (first *egress-guard-program-forms*))))
+        (unless (and (= replacements 1) ingress (eq (car body) 'let)
+                     (equal (car (last body)) 'whistler::TC_ACT_OK))
+          (error "Endpoint guard Service translation boundaries changed"))
+        (setf (second policy) 'whistler::gr8s-egress-policy
+              (car (last body))
+              '(progn (whistler::tail-call whistler::gr8s-pkt-stages 2)
+                      whistler::TC_ACT_SHOT))
+        (append
+         *service-packet-struct-forms* forms
+         (list policy
+               `(whistler::defprog whistler::gr8s-packet-forward
+                    (:type :tc :section "classifier" :license "GPL")
+                  ,(service-packet-body-form (service-packet-forward-form) :continue-guard t)
+                  (whistler::tail-call whistler::gr8s-pkt-stages 1)
+                  whistler::TC_ACT_SHOT)
+               (service-packet-program-form 'whistler::gr8s-packet-reverse
+                                            (service-packet-reverse-form))))))))
 
 (defun compile-service-packet-lb ()
   "Compile the IPv4 TCP/UDP forward and reverse TC classifiers over shared maps."
