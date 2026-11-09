@@ -99,8 +99,9 @@ QEMU, Cloud Hypervisor, Firecracker, and Dragonball hypervisor configurations.
 `gr8s runtime install gvisor` and `gr8s runtime install kata` download,
 checksum-verify, and stage the optional runtime. Both runtimes have been validated
 end-to-end with Pods. Use `--state-directory` to select the agent's state
-directory: `<state>/agent` for the local agent started by `gr8s serve`, or the
-worker's state directory for `gr8s agent`.
+directory: the same `--state-directory` passed to `gr8s serve` or `gr8s agent`.
+The local agent's containerd data lives under `<state>/agent`, while addons are
+loaded from the node state root at `<state>/runtime-addons`.
 
 Restart gr8s after installation so the agent loads the runtime addon, then create
 a `RuntimeClass` with handler `gvisor` or `kata`. Set a Pod's `runtimeClassName`
