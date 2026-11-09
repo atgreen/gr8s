@@ -139,8 +139,12 @@ files expire after 60 seconds. Control-plane transfers use the state filesystem;
 other members default to their WAL directory, or a temporary directory for
 volatile test members. Each transfer is limited to 16 GiB. A log-only checkpoint
 without an application snapshot callback cannot be transferred as application state.
-Crash-abandoned transfer-file cleanup remains under `podster-ucm.11.2.1`;
-the current cleanup guarantees cover running members and graceful shutdown.
+Transfer files live in private, versioned directories with lifetime ownership locks.
+Startup and subsequent allocations reclaim abandoned directories while preserving
+live transfers. Cleanup does not follow symlinks or remove unknown contents;
+legacy unmarked directories are preserved. The
+[scratch cleanup validation](raft-snapshot-scratch-validation-2026-11-09.json)
+covers process death, live-owner exclusion and native startup.
 The [snapshot-transfer validation record](raft-snapshot-transfer-validation-2026-11-09.json)
 covers interrupted mTLS transfer, voter/learner catch-up and leadership handoff
 with a witness. Run `make test-raft-snapshots` for the focused suite.

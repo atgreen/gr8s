@@ -157,8 +157,7 @@
 
 (defun snapshot-test-cleanup-member (member)
   (gr8s.raft.transport::raft-member-clear-snapshot-receiver member)
-  (when (gr8s.raft.transport::raft-member-snapshot-root member)
-    (uiop:delete-directory-tree (gr8s.raft.transport::raft-member-snapshot-root member) :validate t :if-does-not-exist :ignore)))
+  (gr8s.raft.transport::raft-member-close-snapshot-root member))
 
 (test snapshot-chunks-are-private-ordered-retryable-and-applied-only-when-complete
   (let* ((source (snapshot-test-source)) (message (snapshot-test-message source)) (bytes (snapshot-test-bytes message))
@@ -359,5 +358,188 @@
              (is (= 0 (gr8s::raft-node-snapshot-index node)))
              (is (= 1 (gr8s::raft-last-log-index node))))
         (gr8s::close-file-raft-storage storage)))))
+
+(defun snapshot-owner-test-member (base)
+  (gr8s::make-raft-member :node (gr8s::make-raft-node :id "owner-test")
+                          :snapshot-directory base :running t))
+
+(defun snapshot-owner-test-payload (root &optional (name "out-test.snapshot"))
+  (let ((path (merge-pathnames name root)))
+    (gr8s.raft.transport::raft-snapshot-create-file path)
+    (with-open-file (stream path :direction :output :if-exists :overwrite)
+      (write-string "snapshot payload must survive while its owner lives" stream))
+    path))
+
+(defun snapshot-owner-test-abandon (member)
+  (let ((root (gr8s.raft.transport::raft-member-snapshot-root member)))
+    (sb-posix:close (gr8s.raft.transport::raft-member-snapshot-owner-fd member))
+    (setf (gr8s.raft.transport::raft-member-snapshot-owner-fd member) nil
+          (gr8s.raft.transport::raft-member-snapshot-root member) nil)
+    root))
+
+(test snapshot-root-locks-protect-live-members-in-the-same-process
+  (with-temporary-store (unused base)
+    (declare (ignore unused))
+    (let* ((left (snapshot-owner-test-member base)) (right (snapshot-owner-test-member base))
+           (root (gr8s.raft.transport::raft-member-snapshot-root-unlocked left))
+           (payload (snapshot-owner-test-payload root)))
+      (unwind-protect
+           (progn
+             (gr8s.raft.transport::raft-member-snapshot-root-unlocked right)
+             (is (not (null (probe-file payload))))
+             (is (= #o700 (logand #o777 (sb-posix:stat-mode (sb-posix:stat root)))))
+             (is (= #o700 (logand #o777 (sb-posix:stat-mode
+                                       (sb-posix:stat (uiop:pathname-parent-directory-pathname root))))))
+             (is (plusp (logand 1 (cffi:foreign-funcall "fcntl" :int
+                                   (gr8s.raft.transport::raft-member-snapshot-owner-fd left) :int 1 :int)))) ; F_GETFD
+             (gr8s.raft.transport::raft-member-close-snapshot-root left)
+             (is (not (probe-file root)))
+             (is (not (null (probe-file (gr8s.raft.transport::raft-member-snapshot-root right))))))
+        (snapshot-test-cleanup-member left)
+        (snapshot-test-cleanup-member right)))))
+
+(test snapshot-root-reaping-reclaims-unlocked-payload-and-incomplete-creation
+  (with-temporary-store (unused base)
+    (declare (ignore unused))
+    (let* ((old (snapshot-owner-test-member base)) (fresh (snapshot-owner-test-member base))
+           (root (gr8s.raft.transport::raft-member-snapshot-root-unlocked old))
+           (payload (snapshot-owner-test-payload root))
+           (empty (uiop:ensure-directory-pathname
+                   (sb-posix:mkdtemp (namestring (merge-pathnames ".raft-transfer-v2-XXXXXX" (uiop:pathname-parent-directory-pathname root))))))
+           (legacy (uiop:ensure-directory-pathname
+                    (sb-posix:mkdtemp (namestring (merge-pathnames ".raft-transfer-XXXXXX" (uiop:pathname-parent-directory-pathname root)))))))
+      (unwind-protect
+           (progn
+             (snapshot-owner-test-payload legacy)
+             (snapshot-owner-test-abandon old)
+             (gr8s.raft.transport::raft-member-snapshot-root-unlocked fresh)
+             (is (not (probe-file payload)))
+             (is (not (probe-file root)))
+             (is (not (probe-file empty)))
+             (is (not (null (probe-file (merge-pathnames "out-test.snapshot" legacy))))))
+        (snapshot-test-cleanup-member fresh)))))
+
+(test snapshot-root-reaping-preserves-symlinks-hardlinks-and-unknown-content
+  (with-temporary-store (unused base)
+    (declare (ignore unused))
+    (dolist (variant '(:payload-link :owner-link :root-link :hard-link :unknown-file :unknown-directory :public-mode))
+      (let* ((old (snapshot-owner-test-member base)) (fresh (snapshot-owner-test-member base))
+             (root (gr8s.raft.transport::raft-member-snapshot-root-unlocked old))
+             (payload (snapshot-owner-test-payload root))
+             (outside (merge-pathnames (format nil "outside-~A" variant) base))
+             (actual-root root))
+        (unwind-protect
+             (progn
+               (gr8s.raft.transport::raft-snapshot-create-file outside)
+               (with-open-file (stream outside :direction :output :if-exists :overwrite) (write-string "do not touch" stream))
+               (snapshot-owner-test-abandon old)
+               (ecase variant
+                 (:payload-link (sb-posix:unlink (namestring payload)) (sb-posix:symlink (namestring outside) (namestring payload)))
+                 (:owner-link (sb-posix:unlink (namestring (merge-pathnames ".owner" root)))
+                              (sb-posix:symlink (namestring outside) (namestring (merge-pathnames ".owner" root))))
+                 (:root-link
+                  (setf actual-root (merge-pathnames "outside-root/" base))
+                  (sb-posix:rename (namestring root) (namestring actual-root))
+                  (sb-posix:symlink (namestring actual-root) (string-right-trim "/" (namestring root))))
+                 (:hard-link (sb-posix:unlink (namestring payload)) (sb-posix:link (namestring outside) (namestring payload)))
+                 (:unknown-file (snapshot-owner-test-payload root "user-notes"))
+                 (:unknown-directory (ensure-directories-exist (merge-pathnames "user-directory/" root)))
+                 (:public-mode (sb-posix:chmod (namestring root) #o755)))
+               (gr8s.raft.transport::raft-member-snapshot-root-unlocked fresh)
+               (is (equal "do not touch" (uiop:read-file-string outside)) "~A preserves outside data" variant)
+               (is (not (null (probe-file actual-root))) "~A preserves unrecognized root" variant)
+               (is (not (null (probe-file (merge-pathnames "out-test.snapshot" actual-root))))))
+          (snapshot-test-cleanup-member fresh))))))
+
+(test snapshot-ownership-reaping-recovers-after-a-real-process-is-killed
+  (with-temporary-store (unused base)
+    (declare (ignore unused))
+    (let* ((script (merge-pathnames "snapshot-owner-child.lisp" base))
+           (ready (merge-pathnames "snapshot-owner-ready.txt" base))
+           (log (merge-pathnames "snapshot-owner-child.log" base))
+           (process nil) (restarted nil) (live (snapshot-owner-test-member base)) (fresh (snapshot-owner-test-member base))
+           (live-root (gr8s.raft.transport::raft-member-snapshot-root-unlocked live))
+           (live-payload (snapshot-owner-test-payload live-root)))
+      (with-open-file (stream script :direction :output :if-does-not-exist :create)
+        (format stream "(require :asdf)~%(asdf:load-asd ~S)~%(asdf:load-system :gr8s)~%"
+                (namestring (merge-pathnames "gr8s.asd" (asdf:system-source-directory :gr8s))))
+        (format stream "(let* ((member (gr8s.raft.transport:make-raft-member :node (gr8s.raft:make-raft-node :id ~S) :snapshot-directory ~S)) (root (gr8s.raft.transport::raft-member-snapshot-root-unlocked member)) (file (merge-pathnames ~S root)))~%" "child" (namestring base) "in-crash.snapshot")
+        (write-line "(gr8s.raft.transport::raft-snapshot-create-file file)" stream)
+        (write-line "(with-open-file (out file :direction :output :if-exists :overwrite) (write-string (make-string 65536 :initial-element (code-char 120)) out))" stream)
+        (format stream "(gr8s::write-private-text-atomically ~S (namestring root))~%" (namestring ready))
+        (write-line "(loop (sleep 1)))" stream))
+      (unwind-protect
+           (progn
+             (setf process (sb-ext:run-program "sbcl" (list "--noinform" "--non-interactive" "--load" (namestring script))
+                                               :search t :wait nil :input nil :output log :error :output))
+             (poll-until (lambda () (or (probe-file ready) (not (sb-ext:process-alive-p process)))) :timeout 60)
+             (unless (probe-file ready)
+               (error "Snapshot child did not become ready (~A):~%~A"
+                      (sb-ext:process-status process) (uiop:read-file-string log)))
+             (is (not (null (probe-file ready))))
+             (let* ((child-root (uiop:ensure-directory-pathname (string-trim '(#\Newline #\Return) (uiop:read-file-string ready))))
+                    (payload (merge-pathnames "in-crash.snapshot" child-root)))
+               (gr8s.raft.transport::raft-member-snapshot-root-unlocked fresh)
+               (is (not (null (probe-file payload))) "a live foreign process owns its payload")
+               (is (= 65536 (with-open-file (stream payload :element-type '(unsigned-byte 8)) (file-length stream))))
+               (gr8s.raft.transport::raft-member-close-snapshot-root fresh)
+               (sb-ext:process-kill process 9)
+               (sb-ext:process-wait process)
+               (is (eq :signaled (sb-ext:process-status process)))
+               (setf restarted (gr8s::start-raft-member "restarted" :snapshot-directory base))
+               (is (not (probe-file child-root)))
+               (is (not (probe-file payload)))
+               (is (not (null (probe-file live-payload))) "the other live member remains intact")))
+        (when process
+          (when (sb-ext:process-alive-p process) (sb-ext:process-kill process 9) (sb-ext:process-wait process))
+          (sb-ext:process-close process))
+        (when restarted (gr8s::stop-raft-member restarted))
+        (snapshot-test-cleanup-member fresh)
+        (snapshot-test-cleanup-member live)))))
+
+(test snapshot-root-rejects-public-or-symlinked-ownership-namespaces
+  (with-temporary-store (unused base)
+    (declare (ignore unused))
+    (let* ((member (snapshot-owner-test-member base))
+           (namespace (merge-pathnames (format nil ".gr8s-raft-transfers-v2-~D/" (sb-posix:geteuid)) base))
+           (outside (merge-pathnames "operator-data/" base)))
+      (sb-posix:mkdir (namestring namespace) #o755)
+      (sb-posix:chmod (namestring namespace) #o755)
+      (unwind-protect
+           (progn
+             (signals error (gr8s.raft.transport::raft-member-snapshot-root-unlocked member))
+             (is (null (gr8s.raft.transport::raft-member-snapshot-root member)))
+             (sb-posix:rmdir (namestring namespace))
+             (sb-posix:mkdir (namestring outside) #o700)
+             (let ((payload (snapshot-owner-test-payload outside)))
+               (sb-posix:symlink (namestring outside) (string-right-trim "/" (namestring namespace)))
+               (signals error (gr8s.raft.transport::raft-member-snapshot-root-unlocked member))
+               (is (not (null (probe-file payload))))
+               (sb-posix:unlink (string-right-trim "/" (namestring namespace))))
+             (is (not (null (gr8s.raft.transport::raft-member-snapshot-root-unlocked member))))
+             (is (not (null (probe-file (merge-pathnames "out-test.snapshot" outside))))))
+        (snapshot-test-cleanup-member member)))))
+
+(test ha-serve-reclaims-scratch-before-opening-the-store
+  (with-temporary-store (unused base)
+    (declare (ignore unused))
+    (let* ((old (snapshot-owner-test-member (merge-pathnames "raft/transfers/" base)))
+           (root (gr8s.raft.transport::raft-member-snapshot-root-unlocked old))
+           (original (symbol-function 'gr8s:open-store)) (opened nil))
+      (snapshot-owner-test-payload root)
+      (snapshot-owner-test-abandon old)
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s:open-store)
+                   (lambda (directory)
+                     (declare (ignore directory))
+                     (setf opened t)
+                     (is (not (probe-file root)))
+                     (throw 'snapshot-store-opened :opened)))
+             (is (eq :opened
+                     (catch 'snapshot-store-opened
+                       (gr8s.server::serve (list :state-directory base :listen "127.0.0.1" :port 0 :raft-init t)))))
+             (is-true opened))
+        (setf (symbol-function 'gr8s:open-store) original)))))
 
 (in-suite gr8s)

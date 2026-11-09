@@ -517,15 +517,16 @@
   (multiple-value-bind (host port) (parse-agent-server (getf options :join))
     (let* ((state (uiop:ensure-directory-pathname (getf options :state-directory)))
            (root (merge-pathnames "raft/" state))
-           (credentials (ensure-raft-joiner-credentials
-                         root (getf options :member-id) host port
-                         :role :witness :node-name (getf options :node-name)
-                         :token (getf options :token) :ca-pin (getf options :ca-pin)))
+           (credentials (progn
+                          (gr8s.raft.transport::raft-reap-snapshot-directory root)
+                          (ensure-raft-joiner-credentials
+                           root (getf options :member-id) host port
+                           :role :witness :node-name (getf options :node-name)
+                           :token (getf options :token) :ca-pin (getf options :ca-pin))))
            (storage (open-file-raft-storage (merge-pathnames "witness.log" root)))
            (member (start-raft-member (getf options :member-id)
                                       :host (getf options :listen)
                                       :port (getf options :port)
-                                      :apply-fn (lambda (command) (declare (ignore command)) nil)
                                       :storage storage
                                       :credentials credentials)))
       (unwind-protect
@@ -1349,7 +1350,11 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          (port (getf options :port))
          (state-directory
            (uiop:ensure-directory-pathname (getf options :state-directory)))
-         (store (open-store state-directory))
+         (store (progn
+                  (when (or (getf options :raft-init) (getf options :raft-join))
+                    (gr8s.raft.transport::raft-reap-snapshot-directory
+                     (merge-pathnames "raft/transfers/" state-directory)))
+                  (open-store state-directory)))
          (patch-policy-checked
            (when gr8s.patch:*manager*
              (validate-patch-admission store (gr8s.patch::octets

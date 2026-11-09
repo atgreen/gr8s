@@ -1,0 +1,45 @@
+{
+  "date": "2026-11-09",
+  "scope": "Raft snapshot transfer scratch ownership and crash cleanup",
+  "focusedChecks": 564,
+  "suites": {
+    "snapshot": 142,
+    "witnessCommand": 10,
+    "raft": 212,
+    "transport": 34,
+    "membership": 20,
+    "tls": 96,
+    "cluster": 10,
+    "haPod": 29,
+    "haNode": 11
+  },
+  "passed": true,
+  "nativeBuild": {
+    "passed": true,
+    "sha256": "7a3a713267a813057e768e3d8b3e109c251b91b4cccb07fc040e69ba953a9297"
+  },
+  "nativeStartup": {
+    "passed": true,
+    "native": true,
+    "runtime": "fake",
+    "evidence": "/tmp/gr8s-native-scratch-w2vyp19w",
+    "reclaimedPayloadBytes": 1048576,
+    "liveOwnerPreserved": true,
+    "gracefulShutdown": true
+  },
+  "coverage": [
+    "Actual SBCL child SIGKILL followed by member startup cleanup",
+    "Live ownership lock exclusion, including owners in the same process",
+    "Private namespace and file permissions; close-on-exec ownership descriptor",
+    "Preservation of symlinks, hardlinks, unknown files, subdirectories and legacy roots",
+    "HA serve cleanup before store open",
+    "Actual witness command snapshot catch-up and persisted snapshot boundary"
+  ],
+  "reproduceNative": "python3 scripts/test-snapshot-scratch.py --gr8s build/gr8s",
+  "limitations": [
+    "Recognized v2 scratch roots only; legacy and unknown contents are preserved",
+    "No power-loss proof",
+    "Production streamed application artifacts, automatic compaction and startup WAL recovery remain open",
+    "Intermittent enrollment TLS issue remains tracked separately"
+  ]
+}

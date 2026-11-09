@@ -82,7 +82,7 @@
   ;; Installed after the node gRPC server starts. RelayOperation dispatches
   ;; incoming frames here; NIL on witnesses and transport-only tests.
   operation-server
-  snapshot-directory snapshot-root snapshot-receiver
+  snapshot-directory snapshot-root snapshot-owner-fd snapshot-receiver
   (snapshot-max-bytes (* 16 1024 1024 1024))
   ;; This member's RAFT-CREDENTIALS. Only in-process tests run without any.
   credentials)
@@ -186,8 +186,11 @@
                 :send-fn (lambda (to msg)
                            (let ((link (gethash to (raft-member-links member))))
                              (when link (raft-link-enqueue link msg))))))
-         (server (apply #'ag-grpc:make-grpc-server port :host host
-                        (gr8s::raft-server-tls-options credentials))))
+         (server (progn
+                   (setf (raft-member-node member) node)
+                   (raft-member-reap-snapshot-orphans member)
+                   (apply #'ag-grpc:make-grpc-server port :host host
+                          (gr8s::raft-server-tls-options credentials)))))
     (setf (raft-member-node member) node
           (raft-member-grpc-server member) server
           (raft-member-running member) t)
@@ -458,7 +461,5 @@ id, or NIL."
   (when (and (raft-member-server-thread member) (bt:thread-alive-p (raft-member-server-thread member)))
     (ignore-errors (bt:join-thread (raft-member-server-thread member))))
   (bt:with-lock-held ((raft-member-lock member))
-    (raft-member-clear-snapshot-receiver member)
-    (when (raft-member-snapshot-root member)
-      (uiop:delete-directory-tree (raft-member-snapshot-root member) :validate t :if-does-not-exist :ignore)
-      (setf (raft-member-snapshot-root member) nil))))
+    (unwind-protect (raft-member-clear-snapshot-receiver member)
+      (raft-member-close-snapshot-root member))))

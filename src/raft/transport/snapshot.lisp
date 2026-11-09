@@ -7,18 +7,162 @@
 (defstruct raft-snapshot-receiver from term index last-term token digest total path stream (offset 0)
   (activity (get-internal-real-time)))
 
+(defparameter *raft-snapshot-root-prefix* ".raft-transfer-v2-")
+
+(defun raft-snapshot-map-directory (directory function)
+  "Read literal names without resolving symlinks or traversing child directories."
+  (let ((handle (sb-posix:opendir (namestring directory))))
+    (unwind-protect
+         (loop for entry = (sb-posix:readdir handle) until (sb-alien:null-alien entry)
+               for name = (sb-posix:dirent-name entry)
+               unless (member name '("." "..") :test #'string=) do (funcall function name))
+      (sb-posix:closedir handle))))
+
+(defun raft-snapshot-directory-names (directory)
+  (let ((names nil))
+    (raft-snapshot-map-directory directory (lambda (name) (push name names)))
+    (nreverse names)))
+
+(defun raft-snapshot-private-stat-p (stat directory-p)
+  (and (= (sb-posix:stat-uid stat) (sb-posix:geteuid))
+       (= (logand #o777 (sb-posix:stat-mode stat)) (if directory-p #o700 #o600))
+       (if directory-p (sb-posix:s-isdir (sb-posix:stat-mode stat))
+           (and (sb-posix:s-isreg (sb-posix:stat-mode stat)) (= 1 (sb-posix:stat-nlink stat))))))
+
+(defun raft-snapshot-close-on-exec (fd)
+  (unless (zerop (cffi:foreign-funcall "fcntl" :int fd :int 2 :int 1 :int)) ; F_SETFD, FD_CLOEXEC
+    (error "Cannot protect snapshot ownership descriptor across exec")))
+
+(defun raft-snapshot-flock (fd &optional nonblocking)
+  (zerop (cffi:foreign-funcall "flock" :int fd :int (if nonblocking 6 2) :int))) ; LOCK_EX [| LOCK_NB]
+
+(defun raft-snapshot-with-base-lock (base function)
+  "Serialize root creation/reaping without creating a shared lock file in /tmp."
+  (let ((fd (sb-posix:open (string-right-trim "/" (namestring base))
+                           (logior sb-posix:o-rdonly sb-posix:o-directory sb-posix:o-nofollow) 0)))
+    (unwind-protect
+         (progn
+           (raft-snapshot-close-on-exec fd)
+           (unless (raft-snapshot-private-stat-p (sb-posix:fstat fd) t)
+             (error "Snapshot transfer namespace is not private to this user"))
+           (unless (raft-snapshot-flock fd) (error "Cannot lock snapshot transfer directory"))
+           (funcall function))
+      (sb-posix:close fd))))
+
+(defun raft-snapshot-remove-owned-root (root)
+  "Remove only our flat scratch format. Caller owns its lifetime lock and base lock.
+Unknown files, directories, symlinks, hard links or permissions preserve the root."
+  (when (raft-snapshot-private-stat-p (sb-posix:lstat (string-right-trim "/" (namestring root))) t)
+    (let ((names (raft-snapshot-directory-names root)))
+      (when (every (lambda (name)
+                     (and (or (string= name ".owner")
+                              (and (or (uiop:string-prefix-p "in-" name) (uiop:string-prefix-p "out-" name))
+                                   (uiop:string-suffix-p name ".snapshot")))
+                          (raft-snapshot-private-stat-p (sb-posix:lstat (namestring (merge-pathnames name root))) nil)))
+                   names)
+        (dolist (name (remove ".owner" names :test #'string=))
+          (sb-posix:unlink (namestring (merge-pathnames name root))))
+        (when (member ".owner" names :test #'string=)
+          (sb-posix:unlink (namestring (merge-pathnames ".owner" root))))
+        (sb-posix:rmdir (namestring root))
+        t))))
+
+(defun raft-snapshot-reap-root (root)
+  (handler-case
+      (let ((stat (sb-posix:lstat (string-right-trim "/" (namestring root)))))
+        (when (raft-snapshot-private-stat-p stat t)
+          (let ((names (raft-snapshot-directory-names root)))
+            (cond
+              ;; A creator killed before installing .owner cannot have written
+              ;; payload. The base lock excludes every live v2 root creator.
+              ((null names) (sb-posix:rmdir (namestring root)) t)
+              ((and (member ".owner" names :test #'string=)
+                    (raft-snapshot-private-stat-p (sb-posix:lstat (namestring (merge-pathnames ".owner" root))) nil))
+               (let ((fd (sb-posix:open (namestring (merge-pathnames ".owner" root))
+                                         (logior sb-posix:o-rdwr sb-posix:o-nofollow) 0)))
+                 (unwind-protect
+                      (when (and (raft-snapshot-private-stat-p (sb-posix:fstat fd) nil)
+                                 (raft-snapshot-flock fd t))
+                        (raft-snapshot-remove-owned-root root))
+                   (sb-posix:close fd))))))))
+    (sb-posix:syscall-error () nil)))
+
+(defun raft-snapshot-reap-orphans-unlocked (base)
+  "Caller holds the base lock. Live roots stay protected even in the same PID."
+  (let ((count 0))
+    (raft-snapshot-map-directory
+     base (lambda (name)
+            (when (and (uiop:string-prefix-p *raft-snapshot-root-prefix* name)
+                       (= (length name) (+ (length *raft-snapshot-root-prefix*) 6))
+                       (every #'alphanumericp (subseq name (length *raft-snapshot-root-prefix*)))
+                       (raft-snapshot-reap-root (uiop:ensure-directory-pathname (merge-pathnames name base))))
+              (incf count))))
+    count))
+
+(defun raft-snapshot-private-base (directory)
+  "Use a private per-user namespace even when DIRECTORY is a shared temporary directory."
+  (let ((base (merge-pathnames (format nil ".gr8s-raft-transfers-v2-~D/" (sb-posix:geteuid)) directory)))
+    (handler-case (sb-posix:mkdir (namestring base) #o700)
+      (sb-posix:syscall-error (condition)
+        (unless (= sb-posix:eexist (sb-posix:syscall-errno condition)) (error condition))))
+    (unless (raft-snapshot-private-stat-p (sb-posix:lstat (string-right-trim "/" (namestring base))) t)
+      (error "Snapshot transfer namespace is not a private owned directory"))
+    base))
+
+(defun raft-member-snapshot-base (member)
+  (let ((storage (raft-node-storage (raft-member-node member))))
+    (uiop:ensure-directory-pathname
+     (or (raft-member-snapshot-directory member)
+         (when (typep storage 'file-raft-storage)
+           (uiop:pathname-directory-pathname (merge-pathnames (file-raft-storage-path storage))))
+         (uiop:temporary-directory)))))
+
+(defun raft-reap-snapshot-directory (directory)
+  "Reclaim abandoned scratch before startup needs to write credentials or the store."
+  (ensure-directories-exist directory)
+  (let ((base (raft-snapshot-private-base directory)))
+    (raft-snapshot-with-base-lock base (lambda () (raft-snapshot-reap-orphans-unlocked base)))))
+
+(defun raft-member-reap-snapshot-orphans (member)
+  (raft-reap-snapshot-directory (raft-member-snapshot-base member)))
+
 (defun raft-member-snapshot-root-unlocked (member)
   (or (raft-member-snapshot-root member)
-      (let* ((storage (raft-node-storage (raft-member-node member)))
-             (base (uiop:ensure-directory-pathname
-                    (or (raft-member-snapshot-directory member)
-                        (when (typep storage 'file-raft-storage)
-                          (uiop:pathname-directory-pathname (merge-pathnames (file-raft-storage-path storage))))
-                        (uiop:temporary-directory)))))
+      (let ((base (raft-member-snapshot-base member)))
         (ensure-directories-exist base)
-        (setf (raft-member-snapshot-root member)
-              (uiop:ensure-directory-pathname
-               (sb-posix:mkdtemp (namestring (merge-pathnames ".raft-transfer-XXXXXX" base))))))))
+        (setf base (raft-snapshot-private-base base))
+        (raft-snapshot-with-base-lock
+         base (lambda ()
+                (raft-snapshot-reap-orphans-unlocked base)
+                (let ((root (uiop:ensure-directory-pathname
+                             (sb-posix:mkdtemp (namestring (merge-pathnames
+                                                           (concatenate 'string *raft-snapshot-root-prefix* "XXXXXX") base)))))
+                      (fd nil) (complete nil))
+                  (unwind-protect
+                       (progn
+                         (setf fd (sb-posix:open (namestring (merge-pathnames ".owner" root))
+                                                (logior sb-posix:o-rdwr sb-posix:o-creat sb-posix:o-excl sb-posix:o-nofollow) #o600))
+                         (raft-snapshot-close-on-exec fd)
+                         (unless (raft-snapshot-flock fd) (error "Cannot own snapshot transfer root"))
+                         (sb-sys:without-interrupts
+                           (setf (raft-member-snapshot-root member) root
+                                 (raft-member-snapshot-owner-fd member) fd complete t))
+                         root)
+                    (unless complete
+                      (when fd (ignore-errors (sb-posix:close fd)))
+                      (ignore-errors (sb-posix:unlink (namestring (merge-pathnames ".owner" root))))
+                      (ignore-errors (sb-posix:rmdir (namestring root)))))))))))
+
+(defun raft-member-close-snapshot-root (member)
+  "Keep ownership until deletion finishes, so another member cannot reap live IO."
+  (let ((root (raft-member-snapshot-root member)) (fd (raft-member-snapshot-owner-fd member)))
+    (unwind-protect
+         (progn
+           (setf (raft-member-snapshot-root member) nil (raft-member-snapshot-owner-fd member) nil)
+           (when (and root fd)
+             (raft-snapshot-with-base-lock (uiop:pathname-parent-directory-pathname root)
+                                          (lambda () (raft-snapshot-remove-owned-root root)))))
+      (when fd (sb-posix:close fd)))))
 
 (defun raft-snapshot-new-path (member prefix)
   (merge-pathnames (format nil "~A-~A.snapshot" prefix (gr8s::generate-uid))
