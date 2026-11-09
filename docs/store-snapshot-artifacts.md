@@ -121,3 +121,8 @@ selector. Failure after rename reports uncertainty: the new selector may already
 be visible, and neither completed generation is removed or rolled back. Power-loss
 recovery must inspect the durable selection and restore intent. Generation garbage
 collection is not enabled.
+
+The [generation selection validation](store-generation-validation-2026-11-09.json)
+covers reopen, write routing, credential preservation, publication failures and
+native startup/restart with a prebuilt generation. Reproduce the native check with
+`python3 scripts/test-store-generation-native.py --gr8s build/gr8s`.

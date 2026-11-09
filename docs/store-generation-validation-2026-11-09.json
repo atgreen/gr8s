@@ -1,0 +1,60 @@
+{
+  "date": "2026-11-09",
+  "scope": "Application data routing and complete-generation selection; no live artifact restore",
+  "passed": true,
+  "checks": 418,
+  "suites": {
+    "store-generation": 46,
+    "store-snapshot": 59,
+    "core-recovery": 20,
+    "ha-node-cidr": 77,
+    "pod-transactions": 65,
+    "service-accounts": 151
+  },
+  "coverage": [
+    "Legacy layout remains the default without a selector",
+    "Selected generation loads Pod, Node, observation, core resources and committed clocks",
+    "Subsequent Pod/Node/core writes persist in selected generation and survive reopen",
+    "Actual ServiceAccount signing key and issuer-record bytes/paths remain at stable member root",
+    "Reject incomplete generations and attempts to overwrite completion markers",
+    "Reject malformed selectors, descriptor/marker mismatch, links, hardlinked metadata, public generation directories and FIFO metadata",
+    "Pre-rename failure preserves the prior selector and removes temporary metadata",
+    "Post-rename sync failure reports uncertainty and retains both complete choices"
+  ],
+  "mergedValidation": {
+    "sourceCommit": "339085b",
+    "integratedMain": "351d211",
+    "checks": 109,
+    "suites": {
+      "store-generation": 46,
+      "store-snapshot": 59,
+      "egress-cache": 4
+    },
+    "passed": true
+  },
+  "nativeBuild": {
+    "passed": true,
+    "sha256": "97a8c6ea976d95ab060b270dcc8f1c130229e47e476b435dcc176d06da2faef3"
+  },
+  "nativeStartupAndRestart": {
+    "passed": true,
+    "native": true,
+    "runtime": "fake",
+    "evidence": "/tmp/gr8s-generation-native-mc2sesij",
+    "generationLoaded": true,
+    "legacyPodExcluded": true,
+    "applicationWriteSurvivesRestart": true,
+    "memberPrivateFilePreserved": true,
+    "gracefulShutdown": true
+  },
+  "nativeFixtureNote": "Completed generation metadata/application files are seeded directly; this verifies native path selection, not artifact materialization or digest verification. Fake runtime; no root/container/BPF execution.",
+  "reproduceNative": "python3 scripts/test-store-generation-native.py --gr8s build/gr8s",
+  "remaining": [
+    "Staged artifact materialization and cross-record validation",
+    "Restore intent, live reader blocking/reload and interruption recovery",
+    "Production WAL recovery and applied-boundary coordination",
+    "Artifact transport/lifetime and automatic compaction",
+    "Power-loss acceptance and constrained-heap full restore/restart/failover"
+  ],
+  "fullGoalComplete": false
+}
