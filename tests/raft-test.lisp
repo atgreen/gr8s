@@ -455,4 +455,143 @@
     (is (null (gr8s::raft-node-voted-for node)))
     (is (equal "leader" (gr8s::raft-node-leader-id node)))))
 
+(defclass checkpoint-failing-raft-storage (gr8s.raft:file-raft-storage)
+  ((phase :initarg :phase :accessor checkpoint-failure-phase)))
+
+(defmethod gr8s.raft::file-raft-checkpoint-sync :before
+    ((storage checkpoint-failing-raft-storage) phase fd)
+  (declare (ignore fd))
+  (when (eq phase (checkpoint-failure-phase storage))
+    (error "Injected checkpoint ~A fsync failure" phase)))
+
+(defun raft-wal-size (path)
+  (with-open-file (stream path :element-type '(unsigned-byte 8)) (file-length stream)))
+
+(test raft-file-checkpoints-reclaim-history-and-retain-exact-tail
+  (with-raft-temp-dir (path)
+    (let* ((storage (gr8s::open-file-raft-storage path))
+           (node (make-standalone-node :storage storage :snapshot/restore t)))
+      (unwind-protect
+           (progn
+             (setf (gr8s::raft-node-current-term node) 7 (gr8s::raft-node-voted-for node) "peer")
+             (gr8s::raft-persist-hard-state node)
+             (dotimes (round 5)
+               (dotimes (i 20)
+                 (gr8s::raft-log-append node
+                   (gr8s::make-raft-entry :term 7 :command
+                     (list :set "x" (list round i (make-string 8192 :initial-element #\x))))))
+               (let* ((boundary (- (gr8s::raft-last-log-index node) 2))
+                      (before (raft-wal-size path)))
+                 (setf (gr8s::raft-node-commit-index node) boundary)
+                 (gr8s::raft-apply-committed node)
+                 (gr8s::raft-compact node boundary)
+                 (is (< (raft-wal-size path) (/ before 3)))
+                 (is (< (raft-wal-size path) 26000))
+                 (let ((recovered (gr8s::load-raft-log path)))
+                   (is (= 7 (gr8s::raft-recovered-term recovered)))
+                   (is (equal "peer" (gr8s::raft-recovered-vote recovered)))
+                   (is (= boundary (gr8s::raft-recovered-snapshot-index recovered)))
+                   (is (equal (list (1+ boundary) (+ boundary 2))
+                              (mapcar #'gr8s::raft-entry-index (gr8s::raft-recovered-entries recovered)))))))
+             (is (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat path)))))
+             ;; Exercise truncation and replacement after checkpointing; writes
+             ;; must reach the renamed inode rather than the discarded stream.
+             (gr8s::raft-log-truncate node 100)
+             (gr8s::raft-log-append node (gr8s::make-raft-entry :term 8 :command '(:set "x" "replacement")))
+             (gr8s::close-file-raft-storage storage)
+             (multiple-value-bind (node2 kv2) (make-standalone-node :snapshot/restore t)
+               (unwind-protect
+                    (progn
+                      (gr8s::recover-raft-node node2 path)
+                      (is (= 98 (gr8s::raft-node-last-applied node2)))
+                      (is (= 100 (gr8s::raft-last-log-index node2)))
+                      (is (= 8 (gr8s::raft-log-term node2 100)))
+                      (setf (gr8s::raft-node-commit-index node2) 100)
+                      (gr8s::raft-apply-committed node2)
+                      (is (equal "replacement" (gethash "x" kv2))))
+                 (gr8s::close-file-raft-storage (gr8s::raft-node-storage node2)))))
+        (gr8s::close-file-raft-storage storage)))))
+
+(test raft-checkpoint-pre-rename-failure-keeps-old-wal-and-removes-temporary
+  (with-raft-temp-dir (path)
+    (let* ((storage (change-class (gr8s::open-file-raft-storage path)
+                                  'checkpoint-failing-raft-storage :phase :file))
+           (node (make-standalone-node :storage storage :snapshot/restore t)))
+      (unwind-protect
+           (progn
+             (dotimes (i 5)
+               (gr8s::raft-log-append node (gr8s::make-raft-entry :term 1 :command (list :set "x" i))))
+             (setf (gr8s::raft-node-commit-index node) 3)
+             (gr8s::raft-apply-committed node)
+             (let ((before (uiop:read-file-string path)))
+               (signals error (gr8s::raft-compact node 3))
+               (is (equal before (uiop:read-file-string path))))
+             (is (= 0 (gr8s::raft-node-snapshot-index node)))
+             (is (= 5 (gr8s::raft-last-log-index node)))
+             (is (null (directory (format nil "~A.checkpoint-*" path))))
+             (setf (checkpoint-failure-phase storage) nil)
+             (gr8s::raft-compact node 3)
+             (is (= 3 (gr8s::raft-recovered-snapshot-index (gr8s::load-raft-log path)))))
+        (gr8s::close-file-raft-storage storage)))))
+
+(test raft-checkpoint-post-rename-failure-requires-recovery
+  (with-raft-temp-dir (path)
+    (let* ((storage (change-class (gr8s::open-file-raft-storage path)
+                                  'checkpoint-failing-raft-storage :phase :directory))
+           (node (make-standalone-node :storage storage :snapshot/restore t)))
+      (unwind-protect
+           (progn
+             (dotimes (i 5)
+               (gr8s::raft-log-append node (gr8s::make-raft-entry :term 1 :command (list :set "x" i))))
+             (setf (gr8s::raft-node-commit-index node) 3)
+             (gr8s::raft-apply-committed node)
+             (signals error (gr8s::raft-compact node 3))
+             (is (= 0 (gr8s::raft-node-snapshot-index node)))
+             (is (= 5 (gr8s::raft-last-log-index node)))
+             (is (null (gr8s::file-raft-storage-stream storage)))
+             (let ((before (uiop:read-file-string path)))
+               (signals error (gr8s.raft:raft-storage-save-hard-state storage 2 "other"))
+               (signals error (gr8s::raft-compact node 3))
+               (is (equal before (uiop:read-file-string path))))
+             (is (null (directory (format nil "~A.checkpoint-*" path))))
+             (multiple-value-bind (node2 kv2) (make-standalone-node :snapshot/restore t)
+               (unwind-protect
+                    (progn
+                      (gr8s::recover-raft-node node2 path)
+                      (is (= 3 (gr8s::raft-node-snapshot-index node2)))
+                      (is (= 5 (gr8s::raft-last-log-index node2)))
+                      (is (= 2 (gethash "x" kv2))))
+                 (gr8s::close-file-raft-storage (gr8s::raft-node-storage node2)))))
+        (gr8s::close-file-raft-storage storage)))))
+
+(test raft-checkpoint-unreadable-state-does-not-replace-valid-wal
+  (with-raft-temp-dir (path)
+    (let* ((storage (gr8s::open-file-raft-storage path))
+           (node (make-standalone-node :storage storage)))
+      (unwind-protect
+           (progn
+             (gr8s::raft-log-append node (gr8s::make-raft-entry :term 1 :command '(:set "x" 1)))
+             (setf (gr8s::raft-node-commit-index node) 1
+                   (gr8s::raft-node-last-applied node) 1
+                   (gr8s::raft-node-snapshot-fn node) (lambda () (make-hash-table)))
+             (let ((before (uiop:read-file-string path)))
+               (signals print-not-readable (gr8s::raft-compact node 1))
+               (is (equal before (uiop:read-file-string path))))
+             (is (= 0 (gr8s::raft-node-snapshot-index node)))
+             (is (null (directory (format nil "~A.checkpoint-*" path))))
+             (gr8s.raft:raft-storage-save-hard-state storage 2 "peer")
+             (is (= 2 (gr8s::raft-recovered-term (gr8s::load-raft-log path)))))
+        (gr8s::close-file-raft-storage storage)))))
+
+(defvar *raft-wal-reader-evaluated* nil)
+
+(test raft-wal-recovery-never-evaluates-reader-forms
+  (with-raft-temp-dir (path)
+    (ensure-directories-exist path)
+    (with-open-file (stream path :direction :output :if-does-not-exist :create)
+      (write-string "#.(progn (setf gr8s/tests::*raft-wal-reader-evaluated* t) '(:hard 1 nil))" stream))
+    (let ((*raft-wal-reader-evaluated* nil) (*read-eval* t))
+      (signals reader-error (gr8s::load-raft-log path))
+      (is (null *raft-wal-reader-evaluated*)))))
+
 (in-suite gr8s)

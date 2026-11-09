@@ -44,7 +44,10 @@ specific allocation paths; they do not establish an unrestricted cluster size.
 Replication retries now use bounded entry batches instead of serializing the
 whole retained suffix. Compaction/truncation clear discarded backing-array slots,
 and snapshot persistence precedes in-memory compaction. These primitive fixes do
-not enable production snapshotting by themselves. Production HA still retains its
+not enable production snapshotting by themselves. Explicit file-backed compaction
+now atomically replaces its WAL, reclaiming discarded records; the
+[checkpoint validation](raft-checkpoint-validation-2026-11-09.json) covers repeated
+reclamation, failure boundaries and tail recovery. Production HA still retains its
 committed Raft log without automatic compaction
 or snapshot catch-up; that P0 work remains open. Live disconnected-peer acceptance
 and the other HA correctness items also remain open.

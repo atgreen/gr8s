@@ -116,6 +116,15 @@ errors leave their old in-memory log intact. Current-state snapshot callbacks mu
 capture exactly the applied boundary. See the
 [primitive validation record](raft-memory-validation-2026-11-09.json).
 
+Explicit file-backed compaction replaces the WAL with the current hard state,
+snapshot, and retained suffix. The replacement is written to a private sibling
+file, synchronized, renamed, and followed by a directory synchronization. Failure
+before rename preserves the old WAL. Failure after rename closes the backend;
+recovery must establish its durable outcome before further writes. The write path
+does not reread discarded WAL history, and recovery disables reader evaluation.
+The [checkpoint validation record](raft-checkpoint-validation-2026-11-09.json)
+includes repeated reclamation, fault injection, and constrained-heap tail recovery.
+
 Automatic production snapshot compaction and snapshot transfer to lagging members
 remain under `podster-ucm.11`; the retained log is therefore not yet bounded over
 the lifetime of a cluster. Operator backup/restore is separate work under

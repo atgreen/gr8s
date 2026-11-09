@@ -39,6 +39,8 @@ It holds replicated state including Secrets, so only its owner may read it."
    committed record survives a crash."
   (let ((stream (file-raft-storage-stream storage))
         (*print-readably* nil) (*print-circle* nil) (*print-pretty* nil))
+    (unless (and stream (open-stream-p stream))
+      (error "Raft WAL is closed; recover it before writing"))
     (prin1 form stream)
     (terpri stream)
     (finish-output stream)
@@ -57,9 +59,67 @@ It holds replicated state including Secrets, so only its owner may read it."
 (defmethod raft-storage-save-snapshot ((storage file-raft-storage) index term state)
   (file-raft-write storage (list :snapshot index term state)))
 
+(defgeneric file-raft-checkpoint-sync (storage phase fd)
+  (:documentation "Synchronize a checkpoint file or its containing directory.")
+  (:method ((storage file-raft-storage) phase fd)
+    (declare (ignore storage phase))
+    (sb-posix:fsync fd)))
+
+(defmethod raft-storage-replace-snapshot
+    ((storage file-raft-storage) index term state hard-term vote entries)
+  "Replace the WAL without reading or retaining discarded historical records.
+The old WAL remains usable on a pre-rename failure. A post-rename failure closes
+both streams: its durable outcome is uncertain and requires recovery before use."
+  (unless (and (file-raft-storage-stream storage)
+               (open-stream-p (file-raft-storage-stream storage)))
+    (error "Raft WAL is closed; recover it before checkpointing"))
+  (let* ((target (namestring (merge-pathnames (file-raft-storage-path storage))))
+         (temporary (format nil "~A.checkpoint-~36R" target (random (expt 36 20))))
+         (old (file-raft-storage-stream storage))
+         (stream nil) (created nil) (renamed nil) (completed nil))
+    (unwind-protect
+         (progn
+           (let ((fd (sb-posix:open temporary
+                                    (logior sb-posix:o-wronly sb-posix:o-creat sb-posix:o-excl) #o600)))
+             (setf created t)
+             (handler-case
+                 (setf stream (sb-sys:make-fd-stream fd :output t :element-type 'character
+                                                    :external-format :utf-8 :auto-close t))
+               (error (condition) (sb-posix:close fd) (error condition))))
+           (let ((*print-readably* t) (*print-circle* nil) (*print-pretty* nil)
+                 (*read-eval* nil))
+             (flet ((record (form) (prin1 form stream) (terpri stream)))
+               (record (list :hard hard-term vote))
+               (record (list :snapshot index term state))
+               (map nil (lambda (entry)
+                          (when (> (raft-entry-index entry) index)
+                            (record (list :entry (raft-entry-index entry)
+                                          (raft-entry-term entry) (raft-entry-command entry)))))
+                    entries)))
+           (finish-output stream)
+           (file-raft-checkpoint-sync storage :file (sb-sys:fd-stream-fd stream))
+           ;; RENAME takes exact path strings, including extensionless WAL names.
+           (sb-sys:without-interrupts
+             (sb-posix:rename temporary target)
+             (setf renamed t (file-raft-storage-stream storage) stream))
+           (let ((fd (sb-posix:open
+                      (namestring (uiop:pathname-directory-pathname target)) sb-posix:o-rdonly 0)))
+             (unwind-protect (file-raft-checkpoint-sync storage :directory fd)
+               (sb-posix:close fd)))
+           (close old)
+           (setf completed t))
+      (unless completed
+        (when stream (ignore-errors (close stream :abort t)))
+        (when renamed
+          (ignore-errors (close old :abort t))
+          (setf (file-raft-storage-stream storage) nil)))
+      (when (and created (probe-file temporary)) (delete-file temporary)))))
+
 (defun close-file-raft-storage (storage)
   "Close STORAGE's WAL stream, ignoring any error."
-  (ignore-errors (close (file-raft-storage-stream storage))))
+  (when (file-raft-storage-stream storage)
+    (ignore-errors (close (file-raft-storage-stream storage))))
+  (setf (file-raft-storage-stream storage) nil))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Recovery: replay the WAL into the persisted Raft fields.
@@ -72,7 +132,8 @@ It holds replicated state including Secrets, so only its owner may read it."
 (defun load-raft-log (path)
   "Replay the WAL at PATH and return a RAFT-RECOVERED with the durable state.
    A missing file recovers empty state."
-  (let ((term 0) (vote nil)
+  (let ((*read-eval* nil)
+        (term 0) (vote nil)
         (by-index (make-hash-table))    ; index -> (term . command)
         (snapshot-index 0) (snapshot-term 0) (snapshot-state nil))
     (when (probe-file path)

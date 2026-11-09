@@ -1,0 +1,78 @@
+{
+  "date": "2026-11-09",
+  "tracking": [
+    "podster-ucm.11",
+    "podster-ucm.11.1"
+  ],
+  "scope": "Atomic file-backed WAL reclamation during explicit Raft compaction. Automatic production snapshots, snapshot transfer and durable production recovery remain incomplete.",
+  "changes": [
+    "Core compaction passes its exact hard-state and borrowed log sequence to the storage replacement protocol",
+    "Stream only the hard-state, snapshot and retained suffix into a 0600 sibling file; fsync, rename and fsync the parent directory",
+    "Preserve old WAL and core state on failures before rename; require recovery after post-rename failure",
+    "Reject unreadable checkpoint state and disable read-time evaluation during WAL recovery"
+  ],
+  "verification": {
+    "raftFinal": {
+      "checks": 212,
+      "failures": 0,
+      "log": "/tmp/gr8s-raft-checkpoint-final.log"
+    },
+    "expanded": {
+      "checks": 343,
+      "suites": [
+        "raft",
+        "raft-transport",
+        "raft-cluster",
+        "raft-membership",
+        "raft-failover",
+        "ha-store",
+        "ha-control-plane",
+        "ha-pod-failover",
+        "ha-node-cidr"
+      ],
+      "failures": 0,
+      "log": "/tmp/gr8s-raft-checkpoint-final-expanded.log"
+    },
+    "memory": {
+      "passed": true,
+      "rounds": 16,
+      "entries": 2048,
+      "payloadBytes": 65536,
+      "cumulativePayloadMiB": 128,
+      "maxCheckpointBytes": 196722,
+      "retainedTailEntries": 2,
+      "restartRecovered": true,
+      "heapLimitMiB": 384,
+      "seconds": 3.637978
+    },
+    "memoryLog": "/tmp/gr8s-raft-checkpoint-memory.log",
+    "previousImplementation": {
+      "source": "8c75f76:src/raft/core.lisp",
+      "sameFixture": true,
+      "result": "First checkpoint leaves 8,457,942 bytes in the WAL, exceeding the 256 KiB retained-file assertion",
+      "log": "/tmp/gr8s-raft-checkpoint-memory-baseline.log"
+    },
+    "nativeBuild": "passed",
+    "nativeBuildLog": "/tmp/gr8s-raft-checkpoint-native.log",
+    "nativeBinarySHA256": "3b7f197a90c2601f2f0ad93a39932b71e5d78707f96b56bb7046ade912932e3c",
+    "faultTests": [
+      "Repeated checkpoint reclamation preserves exact hard-state and suffix across reopen, truncation and append",
+      "Pre-rename file fsync failure leaves old WAL bytes and core boundary intact and removes temporary files",
+      "Post-rename directory fsync failure closes storage, rejects further writes and recovers the replacement snapshot and tail",
+      "Unreadable state cannot replace a valid WAL",
+      "Recovery rejects read-time evaluation even when its caller allows it"
+    ]
+  },
+  "remaining": [
+    "Production application snapshot capture and restore at the exact applied boundary, including membership",
+    "Snapshot catch-up for disconnected voters, witnesses and learners",
+    "Automatic retained log compaction and bounded lifetime retention in a production cluster",
+    "Production voter/witness hard-state and log recovery under podster-ucm.2.1"
+  ],
+  "limitations": [
+    "The memory fixture invokes explicit compaction on a standalone Raft state machine, not on a running production cluster.",
+    "Fsync errors are injected at real file and directory synchronization boundaries; no power-cut test was performed.",
+    "The native binary builds, but this checkpoint does not include a new native workload or privileged dataplane test.",
+    "Full-suite baseline and intermittent Node bootstrap failures recorded previously remain open."
+  ]
+}

@@ -110,6 +110,12 @@
   (:method ((storage null) index) (declare (ignore index)) nil))
 (defgeneric raft-storage-save-snapshot (storage index term state)
   (:method ((storage null) index term state) (declare (ignore index term state)) nil))
+(defgeneric raft-storage-replace-snapshot (storage index term state hard-term vote entries)
+  (:documentation "Persist a snapshot with exact hard state and log tail. ENTRIES
+is a borrowed sequence; retain only entries after INDEX. Caller holds the node lock.")
+  (:method (storage index term state hard-term vote entries)
+    (declare (ignore hard-term vote entries))
+    (raft-storage-save-snapshot storage index term state)))
 
 (defun raft-persist-hard-state (node)
   "Persist NODE's current term and vote to durable storage so they survive a
@@ -188,7 +194,9 @@ cannot reconstruct an arbitrary older application revision."
            (state (and (raft-node-snapshot-fn node) (funcall (raft-node-snapshot-fn node)))))
       ;; Snapshot construction or persistence may fail; keep the complete old log
       ;; and boundary until the durable replacement succeeds.
-      (raft-storage-save-snapshot (raft-node-storage node) upto term state)
+      (raft-storage-replace-snapshot
+       (raft-node-storage node) upto term state
+       (raft-node-current-term node) (raft-node-voted-for node) (raft-node-log node))
       (let* ((log (raft-node-log node)) (end (fill-pointer log)) (remaining (- end drop)))
         (loop for i from drop below end do (setf (aref log (- i drop)) (aref log i)))
         ;; A fill pointer does not hide array slots from the garbage collector.

@@ -22,7 +22,7 @@ NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
 NODE_PROTOCOL_LISP := src/generated/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 
-.PHONY: test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory test-patches test-live-patching all help containerd-bundle generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api check smoke smoke-two-node run kubeconfig notices native clean
+.PHONY: test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory test-patches test-live-patching all help containerd-bundle generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api check smoke smoke-two-node run kubeconfig notices native clean
 
 all: native
 
@@ -38,6 +38,7 @@ help:
 	@echo "  test-live-patching Test signed in-process upgrades across three fake-runtime control planes"
 	@echo "  test-pod-transactions Test per-Pod consensus writes, conflicts, checkpoints and failover"
 	@echo "  test-pod-transaction-memory Update a large Pod population within a 384 MiB heap"
+	@echo "  test-raft-checkpoint-memory Reclaim Raft WAL history and recover its tail within a 384 MiB heap"
 	@echo "  test-core-recovery Test journal recovery, corruption detection, and history budgets"
 	@echo "  test-core-recovery-memory Recover a 512 MiB journal within a 384 MiB Lisp heap"
 	@echo "  test-core-api Verify ConfigMap/Secret kubectl workflows and restart persistence"
@@ -77,6 +78,9 @@ test-pod-transactions: generate-protocol
 
 test-pod-transaction-memory:
 	$(SBCL) --dynamic-space-size 384 --noinform --non-interactive --load scripts/test-pod-transaction-memory.lisp
+
+test-raft-checkpoint-memory:
+	$(SBCL) --dynamic-space-size 384 --noinform --non-interactive --load scripts/test-raft-checkpoint-memory.lisp
 
 test-core-recovery: generate-protocol
 	$(SBCL) --noinform --non-interactive --eval '(require :asdf)' --eval '(asdf:load-system "gr8s/tests")' --eval '(unless (fiveam:run! (quote gr8s/tests::core-recovery)) (uiop:quit 1))'

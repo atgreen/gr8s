@@ -122,6 +122,7 @@
    #:raft-storage-append-entry
    #:raft-storage-save-hard-state
    #:raft-storage-save-snapshot
+   #:raft-storage-replace-snapshot
    #:raft-storage-truncate
    #:raft-tick
    #:recover-raft-node)
