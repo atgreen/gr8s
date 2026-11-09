@@ -217,19 +217,22 @@
     (multiple-value-bind (node kv) (make-standalone-node :storage (gr8s::open-file-raft-storage path)
                                                          :snapshot/restore t)
       (dotimes (i 5) (gr8s::raft-log-append node (gr8s::make-raft-entry :term 2 :command (list :set "x" i))))
-      (setf (gr8s::raft-node-commit-index node) 5)
-      (gr8s::raft-apply-committed node)                    ; kv now has x=4
-      (is (= 4 (gethash "x" kv)))
+      (setf (gr8s::raft-node-commit-index node) 3)
+      (gr8s::raft-apply-committed node)                    ; only the prefix through entry 3 is applied
+      (is (= 2 (gethash "x" kv)))
       (gr8s::raft-compact node 3)                          ; persists snapshot image of kv
       (gr8s::close-file-raft-storage (gr8s::raft-node-storage node)))
     ;; Recover: snapshot image restores the state machine; the tail survives.
     (multiple-value-bind (node2 kv2) (make-standalone-node :snapshot/restore t)
       (gr8s::recover-raft-node node2 path)
-      (is (= 4 (gethash "x" kv2)) "state machine restored from snapshot")
+      (is (= 2 (gethash "x" kv2)) "state machine restored from snapshot")
       (is (= 3 (gr8s::raft-node-snapshot-index node2)))
       (is (= 5 (gr8s::raft-last-log-index node2)))         ; entries 4,5 survived compaction
       (is (not (null (gr8s::raft-log-entry node2 4))))
       (is (= 3 (gr8s::raft-node-last-applied node2)))      ; applied up to the snapshot boundary
+      (setf (gr8s::raft-node-commit-index node2) 5)
+      (gr8s::raft-apply-committed node2)
+      (is (= 4 (gethash "x" kv2)) "tail is applied once after the exact prefix snapshot")
       (gr8s::close-file-raft-storage (gr8s::raft-node-storage node2)))))
 
 (test raft-single-node-self-elects
@@ -239,3 +242,116 @@
     (gr8s::raft-propose (rsim-node sim "solo") '(:set "z" 9))
     (rsim-run sim 1)
     (is (= 9 (gethash "z" (rsim-kv sim "solo"))))))
+
+(in-suite raft)
+(defclass failing-raft-storage ()
+  ((operation :initarg :operation :accessor failing-raft-operation)))
+(defmethod gr8s.raft:raft-storage-append-entry ((storage failing-raft-storage) entry)
+  (declare (ignore entry))
+  (when (eq :append (failing-raft-operation storage)) (error "Injected append failure")))
+(defmethod gr8s.raft:raft-storage-truncate ((storage failing-raft-storage) index)
+  (declare (ignore index))
+  (when (eq :truncate (failing-raft-operation storage)) (error "Injected truncate failure")))
+(defmethod gr8s.raft:raft-storage-save-snapshot ((storage failing-raft-storage) index term state)
+  (declare (ignore index term state))
+  (when (eq :snapshot (failing-raft-operation storage)) (error "Injected snapshot failure")))
+
+(test raft-failed-storage-keeps-log-and-compaction-boundary
+  (let* ((storage (make-instance 'failing-raft-storage :operation nil))
+         (node (make-standalone-node :storage storage)))
+    (dotimes (i 5)
+      (gr8s::raft-log-append node (gr8s::make-raft-entry :term 1 :command (list :set "x" i))))
+    (setf (failing-raft-operation storage) :append)
+    (signals error (gr8s::raft-log-append node (gr8s::make-raft-entry :term 1 :command '(:set "x" 99))))
+    (is (= 5 (gr8s::raft-last-log-index node)))
+    (setf (failing-raft-operation storage) :truncate)
+    (signals error (gr8s::raft-log-truncate node 4))
+    (is (= 5 (gr8s::raft-last-log-index node)))
+    (is (equal '(:set "x" 4) (gr8s::raft-entry-command (gr8s::raft-log-entry node 5))))
+    (setf (failing-raft-operation storage) :snapshot
+          (gr8s::raft-node-commit-index node) 3)
+    (signals error (gr8s::raft-compact node 3))
+    (is (= 0 (gr8s::raft-node-snapshot-index node)))
+    (is (= 5 (gr8s::raft-last-log-index node)))
+    (is (equal '(:set "x" 0) (gr8s::raft-entry-command (gr8s::raft-log-entry node 1))))))
+
+(test raft-truncation-and-compaction-release-backing-array-references
+  (let ((node (make-standalone-node)))
+    (dotimes (i 8)
+      (gr8s::raft-log-append node (gr8s::make-raft-entry :term 1 :command (list :set "x" i))))
+    (gr8s::raft-log-truncate node 6)
+    (let ((log (gr8s::raft-node-log node)))
+      (loop for i from 5 below 8 do (is (null (aref log i)))))
+    (setf (gr8s::raft-node-commit-index node) 3)
+    (gr8s::raft-compact node 3)
+    (is (= 2 (fill-pointer (gr8s::raft-node-log node))))
+    (is (= 4 (gr8s::raft-entry-index (gr8s::raft-log-entry node 4))))
+    (let ((log (gr8s::raft-node-log node)))
+      (loop for i from 2 below 8 do (is (null (aref log i)))))
+    (signals error (gr8s::raft-log-truncate node 3))))
+
+(test raft-snapshot-refuses-to-label-current-state-as-an-older-prefix
+  (multiple-value-bind (node kv) (make-standalone-node :snapshot/restore t)
+    (declare (ignore kv))
+    (dotimes (i 5)
+      (gr8s::raft-log-append node (gr8s::make-raft-entry :term 1 :command (list :set "x" i))))
+    (setf (gr8s::raft-node-commit-index node) 5)
+    (gr8s::raft-apply-committed node)
+    (signals error (gr8s::raft-compact node 3))
+    (is (= 0 (gr8s::raft-node-snapshot-index node)))
+    (gr8s::raft-compact node 5)
+    (is (= 5 (gr8s::raft-node-snapshot-index node)))
+    (is (= 0 (fill-pointer (gr8s::raft-node-log node))))))
+(test raft-catch-up-batches-are-bounded-and-cover-the-complete-log
+  (let ((node (make-standalone-node)))
+    (setf (gr8s.raft::raft-node-append-entry-limit node) 3
+          (gr8s.raft::raft-node-append-byte-budget node) 10000)
+    (dotimes (i 20)
+      (gr8s::raft-log-append node
+       (gr8s::make-raft-entry :term 1 :command (list :set "x" (make-string 100 :initial-element #\x)))))
+    (let ((seen nil))
+      (loop with next = 1 while (<= next 20) do
+        (setf (gethash "peer" (gr8s::raft-node-next-index node)) next)
+        (let* ((message (gr8s::raft-append-message node "peer"))
+               (entries (getf message :entries)))
+          (is (= (1- next) (getf message :prev-log-index)))
+          (is (<= 1 (length entries) 3))
+          (setf seen (append seen (mapcar #'gr8s::raft-entry-index entries)))
+          (incf next (length entries))))
+      (is (equal (loop for i from 1 to 20 collect i) seen)))
+    ;; The byte budget independently limits batches below the entry-count limit.
+    (setf (gethash "peer" (gr8s::raft-node-next-index node)) 1
+          (gr8s.raft::raft-node-append-byte-budget node) 1200)
+    (is (= 1 (length (getf (gr8s::raft-append-message node "peer") :entries))))
+    ;; A single oversized entry makes progress without dragging its suffix along.
+    (setf (gethash "peer" (gr8s::raft-node-next-index node)) 1
+          (gr8s.raft::raft-node-append-byte-budget node) 1)
+    (is (= 1 (length (getf (gr8s::raft-append-message node "peer") :entries))))))
+
+(test raft-restoring-new-snapshot-releases-old-tail-and-ignores-stale-state
+  (multiple-value-bind (node kv) (make-standalone-node :snapshot/restore t)
+    (dotimes (i 5)
+      (gr8s::raft-log-append node (gr8s::make-raft-entry :term 1 :command (list :set "x" i))))
+    (gr8s::raft-restore-snapshot node 8 2 '(("x" . 80)))
+    (is (= 80 (gethash "x" kv)))
+    (is (= 8 (gr8s::raft-node-last-applied node)))
+    (loop for i below 5 do (is (null (aref (gr8s::raft-node-log node) i))))
+    (is (null (gr8s::raft-restore-snapshot node 7 1 '(("x" . 70)))))
+    (is (= 80 (gethash "x" kv)))))
+(test raft-partitioned-follower-catches-up-through-bounded-batches
+  (let ((sim (three-node-sim)))
+    (dolist (entry (rsim-nodes sim))
+      (setf (gr8s.raft::raft-node-append-entry-limit (cdr entry)) 2))
+    (rsim-run sim 8)
+    (setf (rsim-groups sim) '(("a" "b") ("c")))
+    (dotimes (i 50)
+      (gr8s::raft-propose (rsim-node sim "a") (list :set "counter" i))
+      (rsim-run sim 1))
+    (is (= 49 (gethash "counter" (rsim-kv sim "a"))))
+    (is (null (gethash "counter" (rsim-kv sim "c"))))
+    (setf (rsim-groups sim) nil)
+    (rsim-run sim 40)
+    (dolist (id '("a" "b" "c"))
+      (is (= 49 (gethash "counter" (rsim-kv sim id))))
+      (is (= 50 (gr8s::raft-node-commit-index (rsim-node sim id)))))))
+(in-suite gr8s)

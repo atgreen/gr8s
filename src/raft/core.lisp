@@ -30,6 +30,10 @@
   (log (make-array 0 :adjustable t :fill-pointer 0))  ; vector of RAFT-ENTRY after snapshot-index
   (commit-index 0 :type fixnum)
   (last-applied 0 :type fixnum)
+  ;; Bound retry encoding and per-peer outbox payload while a follower is behind.
+  ;; A single legacy large command may exceed the budget and is sent alone.
+  (append-entry-limit 64 :type (integer 1 *))
+  (append-byte-budget (* 1024 1024) :type (integer 1 *))
   ;; compaction: entries <= snapshot-index are discarded; snapshot-term is the
   ;; term of the last entry the snapshot includes. log[0] is index snapshot-index+1.
   (snapshot-index 0 :type fixnum)
@@ -144,47 +148,64 @@
   (raft-log-term node (raft-log-length node)))
 
 (defun raft-log-truncate (node index)
-  "Drop every entry at absolute INDEX and beyond."
-  (setf (fill-pointer (raft-node-log node))
-        (max 0 (- index (raft-node-snapshot-index node) 1)))
-  (raft-storage-truncate (raft-node-storage node) index))
+  "Durably drop uncommitted entries at INDEX and beyond, releasing their payloads."
+  (when (<= index (raft-node-commit-index node))
+    (error "Cannot truncate committed Raft entries at ~D" index))
+  (let* ((log (raft-node-log node))
+         (end (fill-pointer log))
+         (start (min end (max 0 (- index (raft-node-snapshot-index node) 1)))))
+    ;; A storage error must leave the existing log available for retry/recovery.
+    (raft-storage-truncate (raft-node-storage node) index)
+    (loop for i from start below end do (setf (aref log i) nil))
+    (setf (fill-pointer log) start)))
 
 (defun raft-log-append (node entry)
-  "Append ENTRY to NODE's log, stamp its index slot with its new absolute
-   position, persist it, and return ENTRY."
-  (vector-push-extend entry (raft-node-log node))
-  (setf (raft-entry-index entry) (raft-log-length node))
+  "Persist ENTRY before publishing it in NODE's log."
+  (setf (raft-entry-index entry) (1+ (raft-last-log-index node)))
   (raft-storage-append-entry (raft-node-storage node) entry)
+  (vector-push-extend entry (raft-node-log node))
   entry)
 
 ;;; ---------------------------------------------------------------------------
 ;;; Snapshot / compaction.
 
 (defun raft-compact (node upto)
-  "Discard committed log entries at/below absolute index UPTO, folding them into
-   the snapshot. UPTO must be <= commit-index. Persists the snapshot."
+  "Persist a snapshot before releasing its committed prefix. When SNAPSHOT-FN
+captures current application state, UPTO must equal LAST-APPLIED: that callback
+cannot reconstruct an arbitrary older application revision."
   (when (and (> upto (raft-node-snapshot-index node)) (<= upto (raft-node-commit-index node)))
-    (let ((term (raft-log-term node upto))
-          (drop (- upto (raft-node-snapshot-index node))))
-      ;; shift the in-memory tail left by DROP entries
-      (let* ((v (raft-node-log node)) (n (fill-pointer v)))
-        (loop for i from drop below n do (setf (aref v (- i drop)) (aref v i)))
-        (setf (fill-pointer v) (max 0 (- n drop))))
+    (when (and (raft-node-snapshot-fn node) (/= upto (raft-node-last-applied node)))
+      (error "A Raft application snapshot must cover exactly last-applied ~D, not ~D"
+             (raft-node-last-applied node) upto))
+    (let* ((term (raft-log-term node upto))
+           (drop (- upto (raft-node-snapshot-index node)))
+           (state (and (raft-node-snapshot-fn node) (funcall (raft-node-snapshot-fn node)))))
+      ;; Snapshot construction or persistence may fail; keep the complete old log
+      ;; and boundary until the durable replacement succeeds.
+      (raft-storage-save-snapshot (raft-node-storage node) upto term state)
+      (let* ((log (raft-node-log node)) (end (fill-pointer log)) (remaining (- end drop)))
+        (loop for i from drop below end do (setf (aref log (- i drop)) (aref log i)))
+        ;; A fill pointer does not hide array slots from the garbage collector.
+        (loop for i from remaining below end do (setf (aref log i) nil))
+        (setf (fill-pointer log) remaining))
       (setf (raft-node-snapshot-index node) upto
-            (raft-node-snapshot-term node) term)
-      (raft-storage-save-snapshot (raft-node-storage node) upto term
-                                  (and (raft-node-snapshot-fn node)
-                                       (funcall (raft-node-snapshot-fn node)))))))
+            (raft-node-snapshot-term node) term))))
 
 (defun raft-restore-snapshot (node index term state)
-  "Install a snapshot into NODE (used on recovery and, later, InstallSnapshot):
-   drop the log, set the snapshot boundary, and restore the state machine."
-  (setf (fill-pointer (raft-node-log node)) 0
-        (raft-node-snapshot-index node) index
+  "Restore a newer snapshot into memory; the caller owns durable installation.
+Stale snapshots cannot roll back committed state. Snapshot transport must persist
+an atomic replacement, including its log-tail policy, before calling this helper."
+  (when (<= index (raft-node-commit-index node))
+    (return-from raft-restore-snapshot nil))
+  (when (raft-node-restore-fn node) (funcall (raft-node-restore-fn node) state))
+  (let ((log (raft-node-log node)))
+    (loop for i below (fill-pointer log) do (setf (aref log i) nil))
+    (setf (fill-pointer log) 0))
+  (setf (raft-node-snapshot-index node) index
         (raft-node-snapshot-term node) term
-        (raft-node-last-applied node) (max (raft-node-last-applied node) index)
-        (raft-node-commit-index node) (max (raft-node-commit-index node) index))
-  (when (raft-node-restore-fn node) (funcall (raft-node-restore-fn node) state)))
+        (raft-node-last-applied node) index
+        (raft-node-commit-index node) index)
+  t)
 
 (defun raft-majority (node)
   "The quorum size: a strict majority of the cluster, floor(N/2)+1 for N = this
@@ -334,14 +355,35 @@
 ;;; ---------------------------------------------------------------------------
 ;;; Leader replication.
 
+(defun raft-command-wire-weight (command)
+  "Conservative printed-wire weight for ordinary Raft command data, without
+materializing its encoded string. Strings dominate gr8s's JSON-bearing commands."
+  (typecase command
+    (null 3)
+    (string (+ 2 (* 6 (length command))))
+    (cons (+ 3 (raft-command-wire-weight (car command))
+               (raft-command-wire-weight (cdr command))))
+    (vector (+ 3 (loop for value across command sum (1+ (raft-command-wire-weight value)))))
+    (symbol (+ 32 (length (symbol-name command))))
+    (integer (+ 4 (integer-length command)))
+    (t 128)))
+
 (defun raft-append-message (node peer)
-  "Build the AppendEntries message for PEER: the entries from its next-index
-   onward, the preceding entry's index and term for the log-match check, and the
-   leader's commit index."
+  "Build a bounded AppendEntries batch beginning at PEER's next-index.
+Retries never encode the entire retained suffix. One oversized command travels
+alone so existing persisted commands remain deliverable."
   (let* ((next (gethash peer (raft-node-next-index node) (1+ (raft-last-log-index node))))
          (prev-index (1- next))
-         (entries (loop for i from next to (raft-last-log-index node)
-                        collect (raft-log-entry node i))))
+         (bytes 0)
+         (entries
+           (loop for i from next to (raft-last-log-index node)
+                 for count from 0
+                 for entry = (raft-log-entry node i)
+                 for weight = (+ 128 (raft-command-wire-weight (raft-entry-command entry)))
+                 while (and (< count (raft-node-append-entry-limit node))
+                            (or (zerop count) (<= (+ bytes weight) (raft-node-append-byte-budget node))))
+                 do (incf bytes weight)
+                 collect entry)))
     (list :type :append-entries
           :term (raft-node-current-term node)
           :from (raft-node-id node)

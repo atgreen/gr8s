@@ -1,0 +1,55 @@
+{
+  "date": "2026-11-09",
+  "tracking": "podster-ucm.11",
+  "scope": "Raft memory/durability primitives and bounded AppendEntries batches. Automatic production snapshot compaction/catch-up remains incomplete.",
+  "changes": [
+    "Clear backing-array references during truncation, compaction and snapshot restore",
+    "Persist log append/truncate/snapshot before publishing in-memory mutation",
+    "Propagate fsync failures",
+    "Require current-state snapshot callback to cover exactly last-applied",
+    "Reject stale snapshot restores",
+    "Bound AppendEntries by64 entries and conservative1MiB command-weight budget; permit oversized single commands for compatibility"
+  ],
+  "verification": {
+    "checks": 537,
+    "suites": 20,
+    "failed": 0,
+    "logs": [
+      "/tmp/gr8s-raft-memory-primitives-final.log",
+      "/tmp/gr8s-raft-ha-expanded.log"
+    ],
+    "nativeBuild": "passed",
+    "nativeBuildLog": "/tmp/gr8s-raft-native.log",
+    "nativeCluster": {
+      "passed": true,
+      "processes": 3,
+      "preservedPIDs": [
+        745525,
+        745557,
+        745650
+      ],
+      "rollout": "patch-4c4fea7110c5baa0081b4c0b",
+      "restartRecovered": true,
+      "witness": true,
+      "native": true,
+      "cliWatchCompleted": true,
+      "runtime": "fake",
+      "evidence": "/tmp/gr8s-live-patch-gnl5zu4j"
+    },
+    "nativeBinarySHA256": "3be46e89615d92f3af2d15faff188636e7b131c9d5da92066eff492c0038c277"
+  },
+  "remaining": [
+    "Production snapshot capture/restore with membership and exact application boundary",
+    "Atomic WAL replacement and retained-log compaction",
+    "Snapshot catch-up for disconnected followers and learners",
+    "Production hard-state/log recovery:podster-ucm.2.1",
+    "Retry a failed state-machine apply without skipping entries:podster-ucm.2.2",
+    "Replace complete Pod-state serialization with per-Pod transactions:podster-ucm.12"
+  ],
+  "limitations": [
+    "The weight budget is a conservative estimate for normal command data, not a hard RPC byte limit. A single oversized command is still delivered alone.",
+    "The new batching catch-up test is a deterministic partition simulation; expanded suites also exercise real loopback gRPC and mTLS.",
+    "No BPF or real-container tests are required by these changes.",
+    "The native cluster check uses the signed patch rollout harness with two voters and a witness, fake workload runtime, leadership handoff and follower restart; it is not snapshot catch-up acceptance."
+  ]
+}

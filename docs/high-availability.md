@@ -5,15 +5,18 @@ scratch in Common Lisp — **no etcd, no external database**. Members talk over 
 same ag-gRPC transport as everything else. The Raft core (leader election, log
 replication, the §5.4.2 commit rule, apply-once-in-order) runs under a
 deterministic in-process simulator for failover/partition tests *and* under real
-gRPC, from one implementation. The log is a durable write-ahead log with
-snapshot/compaction and crash recovery.
+gRPC, from one implementation. The core provides a durable write-ahead-log backend
+and snapshot/recovery primitives. Wiring durable recovery into every production
+role, and automatic snapshot compaction/catch-up, remain active work; see the
+scope below.
 
 ## The consistency plane
 
 gr8s splits state along a **consistency plane**: durable desired state (the
 stored API resources) is proposed through Raft so every member converges, while
-observed status, endpoint telemetry, node heartbeats/leases, and self-expiring
-Events stay off the log — each member keeps its own and agents re-report after a
+self-expiring Events and endpoint telemetry stay local. Pod observations and
+published status, and node heartbeat/readiness deltas, also replicate so a newly
+elected leader can serve current API state. Agents reconnect and re-report after
 failover.
 
 What is replicated, and verified to survive a leader kill with its identity
@@ -74,11 +77,27 @@ stands up a three-member cluster over HTTP, creates a resource through the leade
 kills the leader, and requires the survivors to keep serving the committed data
 and accept new writes.
 
-## Honest about scope
+## Current limits
 
-gr8s has not passed Kubernetes conformance, and HA does not change that. Pod
-desired state uses a leader-applies-then-replicate model (so a multi-step
-controller transaction sees its own writes), which leaves a narrow window on a
-leader crash mid-commit; and replication currently ships the whole resource index
-per write rather than per-key deltas. Both are tracked as refinements, not
-correctness gaps — no *committed* desired state is lost on failover.
+Core API resources replicate as per-key deltas. Pod desired state and observations
+still use a complete Pod-state blob, with local mutation before consensus in some
+paths; narrowing that transaction/replication boundary remains correctness and
+memory work. Focused failover tests do not prove arbitrary crash/restart safety.
+
+The production voter startup does not yet attach/recover the core's durable Raft
+backend. Witnesses write a private WAL but do not yet recover its previous hard
+state and log on startup. These are active correctness gaps under
+`podster-ucm.2.1`, not established crash-safety guarantees. The core's tested WAL
+and snapshot helpers alone do not close those integration gaps.
+
+Replication retries use bounded batches: at most 64 entries and a conservative
+1 MiB command-weight budget. A single oversized existing command travels alone.
+Compaction/truncation release discarded backing-array references, and persistence
+errors leave their old in-memory log intact. Current-state snapshot callbacks must
+capture exactly the applied boundary. See the
+[primitive validation record](raft-memory-validation-2026-11-09.json).
+
+Automatic production snapshot compaction and snapshot transfer to lagging members
+remain under `podster-ucm.11`; the retained log is therefore not yet bounded over
+the lifetime of a cluster. Operator backup/restore is separate work under
+`podster-ucm.3`. gr8s has not passed Kubernetes conformance.
