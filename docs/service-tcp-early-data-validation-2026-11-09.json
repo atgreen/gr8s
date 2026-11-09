@@ -1,0 +1,974 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c.4",
+  "nativeCommit": "d7a998e",
+  "nativeVersion": "gr8s 1.37.2-gd7a998e, patch level 0",
+  "nativeSHA256": "cca566f434720f6df1f90de231dff18b2f3d6f64d3523b1e016e9b485dd2adda",
+  "testCommit": "9d06be6",
+  "guestProbeSHA256": "4770254e2f1236cfa0a93fee6a6aa19b1e5bb0bf2e8a804e1c1edfd757695113",
+  "tcpReference": "https://www.rfc-editor.org/rfc/rfc9293.html#section-3.10.7.3",
+  "regressionBefore": "New early-data refusal test failed against pre-change packet bytecode: valid ACK of SYN alone did not set reset state.",
+  "change": "In SYN-SENT accept reset ACKs where ISS<ACK<=SND.NXT, including SYN payload not fully acknowledged. Established reset checks and64-byte TCP metadata ABI unchanged.",
+  "focusedChecks": {
+    "passed": 7088,
+    "failed": 0,
+    "skipped": 0,
+    "coverage": "All88 CNI/node-session tests and Service/networking/egress-guard/NetworkPolicy suites."
+  },
+  "interpreterLog": "python3 scripts/test-service-tcp-state.py build/gr8s-service-packet-test.json build/gr8s-service-packet-gc-test.json\nService TCP generations (Interpreter): 59 cases passed\nService TCP closure (Interpreter): 120 cases passed\nService TCP early-data refusal: 63 cases passed\nService TCP early-data handshake: 81 cases passed\nService TCP reordered close: 36 cases passed\nService TCP options (Interpreter): 51 cases passed\nService TCP simultaneous open: 38 cases passed\nService TCP retained options: 4 cases passed\nService TCP metadata capacity: 4 cases passed\nService TCP closure GC: 24 cases passed\nService TCP metadata GC: 6 cases passed\nService TCP orphan/capacity GC: 6 cases passed\npython3 scripts/test-service-packet-program.py build/gr8s-service-packet-test.json\nService TC bytecode (interpreter): 26 packet/flow/checksum cases passed\nService TC expiry/coordination: 21 cases passed\nService TC capacity: 5 publication/recovery cases passed\npython3 scripts/test-service-packet-gc.py build/gr8s-service-packet-test.json build/gr8s-service-packet-gc-test.json\nService GC (Interpreter): 29 ownership/expiry/reservation cases passed\nService GC capacity recovery: 5 cases passed\nService GC reverse capacity recovery: 7 cases passed\npython3 scripts/test-service-packet-guard.py build/gr8s-service-packet-guard-test.json\nService endpoint guard (interpreter): 19 source-validation/policy/NAT/routing cases passed\npython3 scripts/test-service-lb-program.py build/gr8s-service-test.json\nService socket bytecode: slot-repacking isolation passed for IPv4/IPv6, TCP/UDP, with/without affinity\n",
+  "kernelLog": "Service TCP generations (Kernel): 58 cases passed\nService TCP closure (Kernel): 120 cases passed\nService TCP early-data refusal: 63 cases passed\nService TCP early-data handshake: 81 cases passed\nService TCP reordered close: 36 cases passed\nService TCP options (Kernel): 50 cases passed\nService TCP simultaneous open: 38 cases passed\nService TCP retained options: 4 cases passed\nService TCP metadata capacity: 4 cases passed\nService TCP closure GC: 24 cases passed\nService TCP metadata GC: 6 cases passed\nService TCP orphan/capacity GC: 6 cases passed\nService TC bytecode (kernel): 23 packet/flow/checksum cases passed\nService TC expiry/coordination: 21 cases passed\nService TC capacity: 5 publication/recovery cases passed\nService GC (Kernel): 29 ownership/expiry/reservation cases passed\nService GC capacity recovery: 5 cases passed\nService GC reverse capacity recovery: 7 cases passed\nService GC concurrent traffic: 512 worker iterations passed\nService endpoint guard (kernel): 21 source-validation/policy/NAT/routing cases passed\nService socket kernel hooks: IPv4/IPv6 TCP/UDP translation, UDP replies, slot-repacking isolation and recovery passed\n",
+  "earlyDataCases": {
+    "refusal": 63,
+    "handshakeThroughClose": 81,
+    "coverage": "Ordinary/zero/wrapped ISNs, SYN-only/partial/full payload ACKs, stale/future/bare reset rejection, no repeated-reset refresh; early SYN-ACK response data, partial-data retransmission, established state and full FIN/ACK closure."
+  },
+  "developmentFailure": "Initial kernel-only timestamp assertion captured state before Kernel.advance aged pinned timestamps; corrected9d06be6 to capture after clock emulation. Full kernel rerun passed.",
+  "fixtures": {
+    "gr8s-service-packet-test.json": "8504b23840f8c987e16b9d0e29dc915d552163190f6d5dcfa41b161714a9b166",
+    "gr8s-service-packet-gc-test.json": "af1673659bc68f6382d92f03d26e3bd3614e0c24712d474989b87c2f13bcd5de",
+    "gr8s-service-packet-guard-test.json": "49861de6a122346ce5ea893d3af3179ea6b86cd564bc7bf5582f29f20a6761a8",
+    "gr8s-service-test.json": "642849a3d0ce8aec18b5c2fb8e2b7d2aafcd3ca0317d96c0c38d3b2d21726f12"
+  },
+  "abruptGuest": {
+    "reportSHA256": "01860bc4b3d96c41c42ff95197d61dd706a5dfa93f881a6942e0873f4592a818",
+    "report": {
+      "root": "/var/tmp/gr8s-two-node.g1fhcwf1",
+      "checks": [
+        {
+          "name": "differentNodes",
+          "passed": true,
+          "observed": {
+            "client": "10.80.0.1",
+            "backend": "10.80.16.1",
+            "nodes": [
+              "worker-0",
+              "worker-1"
+            ]
+          }
+        },
+        {
+          "name": "realGuestKernel",
+          "passed": true,
+          "observed": {
+            "guest": "6.18.56",
+            "host": "6.19.10-300.fc44.x86_64",
+            "qemu": [
+              {
+                "pid": 1884887,
+                "command": "/var/tmp/gr8s-two-node.g1fhcwf1/agent-0/runtime-addons/kata/opt/kata/bin/qemu-system-x86_64 -name sandbox-03f611589b94479abdd43ad453f901dcfc91e37605b4b8f5a668fb5361778797 -kernel /var/tmp/gr8s-two-node.g1fhcwf1/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/vmlinux-6.18.56-208 -append reboot=k panic=1 systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket agent.log_vport=1025 root=/dev/pmem0p1 rootflags=dax,data=ordered,errors=remount-ro ro rootfstype=ext4 agent.cdh_api_timeout=50 agent.log=debug cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1 selinux=0 console=hvc0 -smp 1 -machine q35,accel=kvm,nvdimm=on,kernel_irqchip=on,memory-backend=entire-guest-memory-share -cpu host,pmu=off -m 2G,slots=10,maxmem=3903M -object memory-backend-file,id=entire-guest-memory-share,mem-path=/dev/shm,size=2G,share=on,prealloc=off,readonly=off -qmp unix:fd=16,server=on,wait=off -rtc base=utc,clock=host,driftfix=slew -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0 -device pci-bridge,bus=pcie.0,id=pci-bridge-0,chassis_nr=1,shpc=off,addr=2,io-reserve=4k,mem-reserve=1m,pref64-reserve=1m -device virtio-scsi-pci,id=scsi0,disable-modern=true -device vhost-vsock-pci,disable-modern=true,vhostfd=17,guest-cid=3013254946 -netdev tap,id=network-tap0_kata,vhost=on,vhostfds=20,fds=19 -device virtio-net-pci,netdev=network-tap0_kata,mac=02:73:fc:1e:fe:ff,disable-modern=true,mq=on,vectors=4 -chardev socket,id=virtiofsd-chardev,path=/run/kata/03f611589b94479abdd43ad453f901dcfc91e37605b4b8f5a668fb5361778797/root/virtiofsd.sock -device vhost-user-fs-pci,chardev=virtiofsd-chardev,tag=kataShared,queue-size=1024 -object memory-backend-file,id=TODO,mem-path=/var/tmp/gr8s-two-node.g1fhcwf1/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/kata-ubuntu-resolute.image,size=256M,share=off,prealloc=off,readonly=on -device nvdimm,memdev=TODO,unarmed=on -device virtio-serial-pci,id=serial0 -device virtconsole,id=console0,chardev=charconsole0 -chardev socket,id=charconsole0,server=on,wait=off,path=/run/kata/03f611589b94479abdd43ad453f901dcfc91e37605b4b8f5a668fb5361778797/root/console.sock -vga none -no-user-config -nodefaults -nographic -no-reboot "
+              }
+            ]
+          }
+        },
+        {
+          "name": "worker0UsesOverlay",
+          "passed": true,
+          "observed": [
+            {
+              "dst": "10.80.16.1",
+              "gateway": "10.80.16.0",
+              "dev": "gr8s-vxlan",
+              "prefsrc": "10.80.0.0",
+              "flags": [],
+              "uid": 0,
+              "cache": []
+            }
+          ]
+        },
+        {
+          "name": "worker1UsesOverlay",
+          "passed": true,
+          "observed": [
+            {
+              "dst": "10.80.0.1",
+              "gateway": "10.80.0.0",
+              "dev": "gr8s-vxlan",
+              "prefsrc": "10.80.16.0",
+              "flags": [],
+              "uid": 0,
+              "cache": []
+            }
+          ]
+        },
+        {
+          "name": "httpDirectBackend",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "httpCrossNodeClusterIP",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "httpTCBothDirections",
+          "passed": true,
+          "observed": {
+            "before": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "after": [
+              6,
+              4,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "name": "httpPreservesSource",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "10.80.0.1:44444"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpDirectBackend",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpCrossNodeClusterIP",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpTCBothDirections",
+          "passed": true,
+          "observed": {
+            "before": [
+              12,
+              8,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "after": [
+              13,
+              9,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "name": "udpPreservesSource",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "10.80.0.1:52119"
+              ]
+            }
+          }
+        },
+        {
+          "name": "nativeSocketAcceleration",
+          "passed": true,
+          "observed": {
+            "response": "two-node-1",
+            "before": [
+              [
+                14,
+                10,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            ],
+            "after": [
+              [
+                14,
+                10,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            ]
+          }
+        },
+        {
+          "name": "guestTcpProbeVerified",
+          "passed": true,
+          "observed": "4770254e2f1236cfa0a93fee6a6aa19b1e5bb0bf2e8a804e1c1edfd757695113"
+        },
+        {
+          "name": "guestTcpInitialGeneration",
+          "passed": true,
+          "observed": {
+            "connection": {
+              "localIP": "10.80.0.1",
+              "localPort": 25090,
+              "peerIP": "10.96.0.11",
+              "peerPort": 80,
+              "body": "two-node-1",
+              "request": 1,
+              "completedAtMs": 1794266181305
+            },
+            "state": {
+              "backend": "10.80.16.1",
+              "backendPort": 8080,
+              "clientISN": 2255304260,
+              "serverISN": 3009046694,
+              "clientEnd": 2255304336,
+              "serverEnd": 3009046822,
+              "flags": 64647,
+              "clientScale": 8,
+              "serverScale": 9,
+              "clientTimestamp": 2300773421,
+              "serverTimestamp": 3461414644
+            }
+          }
+        },
+        {
+          "name": "guestTcpResetObserved",
+          "passed": true,
+          "observed": {
+            "backend": "10.80.16.1",
+            "backendPort": 8080,
+            "clientISN": 2255304260,
+            "serverISN": 3009046694,
+            "clientEnd": 2255304336,
+            "serverEnd": 3009046822,
+            "flags": 64647,
+            "clientScale": 8,
+            "serverScale": 9,
+            "clientTimestamp": 2300773421,
+            "serverTimestamp": 3461414644
+          }
+        },
+        {
+          "name": "guestTcpOptionsTracked",
+          "passed": true,
+          "observed": {
+            "backend": "10.80.16.1",
+            "backendPort": 8080,
+            "clientISN": 2255304260,
+            "serverISN": 3009046694,
+            "clientEnd": 2255304336,
+            "serverEnd": 3009046822,
+            "flags": 64647,
+            "clientScale": 8,
+            "serverScale": 9,
+            "clientTimestamp": 2300773421,
+            "serverTimestamp": 3461414644
+          }
+        },
+        {
+          "name": "guestTcpSourcePortReused",
+          "passed": true,
+          "observed": {
+            "before": {
+              "localIP": "10.80.0.1",
+              "localPort": 25090,
+              "peerIP": "10.96.0.11",
+              "peerPort": 80,
+              "body": "two-node-1",
+              "request": 1,
+              "completedAtMs": 1794266181305
+            },
+            "after": {
+              "localIP": "10.80.0.1",
+              "localPort": 25090,
+              "peerIP": "10.96.0.11",
+              "peerPort": 80,
+              "body": "tcp-alternate",
+              "request": 1,
+              "completedAtMs": 1794266183118
+            }
+          }
+        },
+        {
+          "name": "guestTcpNewGenerationSelectsReplacement",
+          "passed": true,
+          "observed": {
+            "before": {
+              "backend": "10.80.16.1",
+              "backendPort": 8080,
+              "clientISN": 2255304260,
+              "serverISN": 3009046694,
+              "clientEnd": 2255304336,
+              "serverEnd": 3009046822,
+              "flags": 64647,
+              "clientScale": 8,
+              "serverScale": 9,
+              "clientTimestamp": 2300773421,
+              "serverTimestamp": 3461414644
+            },
+            "after": {
+              "backend": "10.80.16.2",
+              "backendPort": 8080,
+              "clientISN": 2283630401,
+              "serverISN": 4029452746,
+              "clientEnd": 2283630477,
+              "serverEnd": 4029452877,
+              "flags": 64647,
+              "clientScale": 8,
+              "serverScale": 9,
+              "clientTimestamp": 2300775233,
+              "serverTimestamp": 2979847738
+            },
+            "replacement": "10.80.16.2"
+          }
+        },
+        {
+          "name": "guestTcpGracefulCloseObserved",
+          "passed": true,
+          "observed": {
+            "connection": {
+              "localIP": "10.80.0.1",
+              "localPort": 25091,
+              "peerIP": "10.96.0.11",
+              "peerPort": 80,
+              "body": "tcp-alternate",
+              "request": 1,
+              "completedAtMs": 1794266183978
+            },
+            "state": {
+              "backend": "10.80.16.2",
+              "backendPort": 8080,
+              "clientISN": 2283159925,
+              "serverISN": 3112714172,
+              "clientEnd": 2283160002,
+              "serverEnd": 3112714304,
+              "flags": 64895,
+              "clientScale": 8,
+              "serverScale": 9,
+              "clientTimestamp": 813927882,
+              "serverTimestamp": 2226629940
+            }
+          }
+        },
+        {
+          "name": "guestTcpServiceIdentityReplaced",
+          "passed": true,
+          "observed": {
+            "beforeUID": "8ed7394c-722d-4664-a295-352face796e9",
+            "afterUID": "e117c312-89a6-4c3e-a800-854916b9e5b6",
+            "vip": "10.96.0.11"
+          }
+        },
+        {
+          "name": "guestTcpRecreatedServiceUsesCurrentBackend",
+          "passed": true,
+          "observed": {
+            "connection": {
+              "localIP": "10.80.0.1",
+              "localPort": 25090,
+              "peerIP": "10.96.0.11",
+              "peerPort": 80,
+              "body": "two-node-1",
+              "request": 1,
+              "completedAtMs": 1794266186610
+            },
+            "state": {
+              "backend": "10.80.16.1",
+              "backendPort": 8080,
+              "clientISN": 2322478544,
+              "serverISN": 3091908399,
+              "clientEnd": 2322478620,
+              "serverEnd": 3091908527,
+              "flags": 64647,
+              "clientScale": 8,
+              "serverScale": 9,
+              "clientTimestamp": 2300778726,
+              "serverTimestamp": 3461419951
+            }
+          }
+        },
+        {
+          "name": "guestTcpHeldEstablished",
+          "passed": true,
+          "observed": {
+            "response": {
+              "localIP": "10.80.0.1",
+              "localPort": 25092,
+              "peerIP": "10.96.0.11",
+              "peerPort": 80,
+              "body": "two-node-1",
+              "request": 1,
+              "completedAtMs": 1794266187833
+            },
+            "state": {
+              "backend": "10.80.16.1",
+              "backendPort": 8080,
+              "clientISN": 3522646980,
+              "serverISN": 2867849985,
+              "clientEnd": 3522647056,
+              "serverEnd": 2867850113,
+              "flags": 64519,
+              "clientScale": 8,
+              "serverScale": 9,
+              "clientTimestamp": 4087365486,
+              "serverTimestamp": 3479008473
+            }
+          }
+        },
+        {
+          "name": "guestTcpHeldSelectorChanged",
+          "passed": true,
+          "observed": {
+            "localIP": "10.80.0.1",
+            "localPort": 25093,
+            "peerIP": "10.96.0.11",
+            "peerPort": 80,
+            "body": "tcp-alternate",
+            "request": 1,
+            "completedAtMs": 1794266190274
+          }
+        },
+        {
+          "name": "guestTcpAgent0Killed",
+          "passed": true,
+          "observed": {
+            "pid": 1884311,
+            "signal": "SIGKILL",
+            "exitStatus": -9
+          }
+        },
+        {
+          "name": "guestTcpHeldDuringAgent0Stop",
+          "passed": true,
+          "observed": {
+            "before": {
+              "backend": "10.80.16.1",
+              "backendPort": 8080,
+              "clientISN": 3522646980,
+              "serverISN": 2867849985,
+              "clientEnd": 3522647206,
+              "serverEnd": 2867850367,
+              "flags": 64519,
+              "clientScale": 8,
+              "serverScale": 9,
+              "clientTimestamp": 4087367512,
+              "serverTimestamp": 3479010503
+            },
+            "after": {
+              "backend": "10.80.16.1",
+              "backendPort": 8080,
+              "clientISN": 3522646980,
+              "serverISN": 2867849985,
+              "clientEnd": 3522647281,
+              "serverEnd": 2867850494,
+              "flags": 64519,
+              "clientScale": 8,
+              "serverScale": 9,
+              "clientTimestamp": 4087368535,
+              "serverTimestamp": 3479011526
+            },
+            "agentDownSeconds": 0.13730247202329338
+          }
+        },
+        {
+          "name": "guestTcpHeldAfterAgent0Restart",
+          "passed": true,
+          "observed": {
+            "state": {
+              "backend": "10.80.16.1",
+              "backendPort": 8080,
+              "clientISN": 3522646980,
+              "serverISN": 2867849985,
+              "clientEnd": 3522648931,
+              "serverEnd": 2867853288,
+              "flags": 64519,
+              "clientScale": 8,
+              "serverScale": 9,
+              "clientTimestamp": 4087391357,
+              "serverTimestamp": 3479034336
+            },
+            "workloads": {
+              "two-node-0": {
+                "uid": "d9bf09ff-41e2-459f-a41d-c976e51b9152",
+                "ip": "10.80.0.1",
+                "containers": [
+                  "containerd://4a95ad5f165b2b2711f5c5a865b78333e03961f91f46f6b07fbe2d1a43d8f049"
+                ]
+              },
+              "two-node-1": {
+                "uid": "9bbc9e15-a9aa-40f8-9af8-aa2acc23f9a5",
+                "ip": "10.80.16.1",
+                "containers": [
+                  "containerd://40534d922c6bc4b7b46b988d56470f68a494c87bdbb32b20b65a2b649615a3d3"
+                ]
+              }
+            },
+            "mapsBefore": {
+              "gr8s_backend_index_v4": 44832,
+              "gr8s_backend_index_v6": 44837,
+              "gr8s_backend_v4": 44831,
+              "gr8s_backend_v6": 44836,
+              "gr8s_pkt_affinity": 44844,
+              "gr8s_pkt_forward": 44842,
+              "gr8s_pkt_fwd_lock": 44840,
+              "gr8s_pkt_rev_lock": 44841,
+              "gr8s_pkt_reverse": 44843,
+              "gr8s_pkt_stats": 44846,
+              "gr8s_pkt_tcp": 44845,
+              "gr8s_service_v4": 44830,
+              "gr8s_service_v6": 44835
+            },
+            "mapsAfter": {
+              "gr8s_backend_index_v4": 44832,
+              "gr8s_backend_index_v6": 44837,
+              "gr8s_backend_v4": 44831,
+              "gr8s_backend_v6": 44836,
+              "gr8s_pkt_affinity": 44844,
+              "gr8s_pkt_forward": 44842,
+              "gr8s_pkt_fwd_lock": 44840,
+              "gr8s_pkt_rev_lock": 44841,
+              "gr8s_pkt_reverse": 44843,
+              "gr8s_pkt_stats": 44846,
+              "gr8s_pkt_tcp": 44845,
+              "gr8s_service_v4": 44830,
+              "gr8s_service_v6": 44835
+            },
+            "responseSummary": {
+              "count": 26,
+              "first": {
+                "localIP": "10.80.0.1",
+                "localPort": 25092,
+                "peerIP": "10.96.0.11",
+                "peerPort": 80,
+                "body": "two-node-1",
+                "request": 1,
+                "completedAtMs": 1794266187833
+              },
+              "last": {
+                "localIP": "10.80.0.1",
+                "localPort": 25092,
+                "peerIP": "10.96.0.11",
+                "peerPort": 80,
+                "body": "two-node-1",
+                "request": 26,
+                "completedAtMs": 1794266213717
+              },
+              "contiguousSerials": true,
+              "maxResponseGapMs": 1216
+            }
+          }
+        },
+        {
+          "name": "guestTcpAgent1Killed",
+          "passed": true,
+          "observed": {
+            "pid": 1884467,
+            "signal": "SIGKILL",
+            "exitStatus": -9
+          }
+        },
+        {
+          "name": "guestTcpHeldDuringAgent1Stop",
+          "passed": true,
+          "observed": {
+            "before": {
+              "backend": "10.80.16.1",
+              "backendPort": 8080,
+              "clientISN": 3522646980,
+              "serverISN": 2867849985,
+              "clientEnd": 3522649006,
+              "serverEnd": 2867853415,
+              "flags": 64519,
+              "clientScale": 8,
+              "serverScale": 9,
+              "clientTimestamp": 4087392387,
+              "serverTimestamp": 3479035376
+            },
+            "after": {
+              "backend": "10.80.16.1",
+              "backendPort": 8080,
+              "clientISN": 3522646980,
+              "serverISN": 2867849985,
+              "clientEnd": 3522649081,
+              "serverEnd": 2867853542,
+              "flags": 64519,
+              "clientScale": 8,
+              "serverScale": 9,
+              "clientTimestamp": 4087393408,
+              "serverTimestamp": 3479036395
+            },
+            "agentDownSeconds": 0.14339602598920465
+          }
+        },
+        {
+          "name": "guestTcpHeldAfterAgent1Restart",
+          "passed": true,
+          "observed": {
+            "state": {
+              "backend": "10.80.16.1",
+              "backendPort": 8080,
+              "clientISN": 3522646980,
+              "serverISN": 2867849985,
+              "clientEnd": 3522650056,
+              "serverEnd": 2867855193,
+              "flags": 64519,
+              "clientScale": 8,
+              "serverScale": 9,
+              "clientTimestamp": 4087406756,
+              "serverTimestamp": 3479049741
+            },
+            "workloads": {
+              "two-node-0": {
+                "uid": "d9bf09ff-41e2-459f-a41d-c976e51b9152",
+                "ip": "10.80.0.1",
+                "containers": [
+                  "containerd://4a95ad5f165b2b2711f5c5a865b78333e03961f91f46f6b07fbe2d1a43d8f049"
+                ]
+              },
+              "two-node-1": {
+                "uid": "9bbc9e15-a9aa-40f8-9af8-aa2acc23f9a5",
+                "ip": "10.80.16.1",
+                "containers": [
+                  "containerd://40534d922c6bc4b7b46b988d56470f68a494c87bdbb32b20b65a2b649615a3d3"
+                ]
+              }
+            },
+            "mapsBefore": {
+              "gr8s_backend_index_v4": 44850,
+              "gr8s_backend_index_v6": 44855,
+              "gr8s_backend_v4": 44849,
+              "gr8s_backend_v6": 44854,
+              "gr8s_pkt_affinity": 44862,
+              "gr8s_pkt_forward": 44860,
+              "gr8s_pkt_fwd_lock": 44858,
+              "gr8s_pkt_rev_lock": 44859,
+              "gr8s_pkt_reverse": 44861,
+              "gr8s_pkt_stats": 44864,
+              "gr8s_pkt_tcp": 44863,
+              "gr8s_service_v4": 44848,
+              "gr8s_service_v6": 44853
+            },
+            "mapsAfter": {
+              "gr8s_backend_index_v4": 44850,
+              "gr8s_backend_index_v6": 44855,
+              "gr8s_backend_v4": 44849,
+              "gr8s_backend_v6": 44854,
+              "gr8s_pkt_affinity": 44862,
+              "gr8s_pkt_forward": 44860,
+              "gr8s_pkt_fwd_lock": 44858,
+              "gr8s_pkt_rev_lock": 44859,
+              "gr8s_pkt_reverse": 44861,
+              "gr8s_pkt_stats": 44864,
+              "gr8s_pkt_tcp": 44863,
+              "gr8s_service_v4": 44848,
+              "gr8s_service_v6": 44853
+            },
+            "responseSummary": {
+              "count": 41,
+              "first": {
+                "localIP": "10.80.0.1",
+                "localPort": 25092,
+                "peerIP": "10.96.0.11",
+                "peerPort": 80,
+                "body": "two-node-1",
+                "request": 1,
+                "completedAtMs": 1794266187833
+              },
+              "last": {
+                "localIP": "10.80.0.1",
+                "localPort": 25092,
+                "peerIP": "10.96.0.11",
+                "peerPort": 80,
+                "body": "two-node-1",
+                "request": 41,
+                "completedAtMs": 1794266229104
+              },
+              "contiguousSerials": true,
+              "maxResponseGapMs": 1216
+            }
+          }
+        },
+        {
+          "name": "guestTcpHeldGracefulClose",
+          "passed": true,
+          "observed": {
+            "backend": "10.80.16.1",
+            "backendPort": 8080,
+            "clientISN": 3522646980,
+            "serverISN": 2867849985,
+            "clientEnd": 3522650207,
+            "serverEnd": 2867855448,
+            "flags": 64895,
+            "clientScale": 8,
+            "serverScale": 9,
+            "clientTimestamp": 4087408844,
+            "serverTimestamp": 3479051828
+          }
+        },
+        {
+          "name": "httpGuestEgressDenied",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "errors": [
+                "Get \"http://10.96.0.10:80/hostname\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpGuestEgressDenied",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "errors": [
+                "reading from udp connection failed. err:'read udp 10.80.0.1:52649->10.96.0.10:81: i/o timeout'"
+              ]
+            }
+          }
+        },
+        {
+          "name": "httpPolicySeesBackendAndAllowsReplies",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpPolicySeesBackendAndAllowsReplies",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "httpRemoteIngressDenied",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "errors": [
+                "Get \"http://10.96.0.10:80/hostname\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpRemoteIngressDenied",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "errors": [
+                "reading from udp connection failed. err:'read udp 10.80.0.1:36382->10.96.0.10:81: i/o timeout'"
+              ]
+            }
+          }
+        },
+        {
+          "name": "httpRemoteIngressRecovers",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "udpRemoteIngressRecovers",
+          "passed": true,
+          "observed": {
+            "returncode": 0,
+            "body": {
+              "responses": [
+                "two-node-1"
+              ]
+            }
+          }
+        },
+        {
+          "name": "coldCniAddsMeetDeadline",
+          "passed": true,
+          "observed": {
+            "0": 0,
+            "1": 0
+          }
+        }
+      ],
+      "overlay": "vxlan",
+      "kataSHA256": "1463a2b86845f4d3d8e87f2f764ec59856fc0fee3520967a79ade32762be2e97",
+      "agentReconnectTimeoutMs": 120000,
+      "heldRestartSnapshots": [
+        {
+          "node": 0,
+          "maps": {
+            "gr8s_backend_index_v4": 44832,
+            "gr8s_backend_index_v6": 44837,
+            "gr8s_backend_v4": 44831,
+            "gr8s_backend_v6": 44836,
+            "gr8s_pkt_affinity": 44844,
+            "gr8s_pkt_forward": 44842,
+            "gr8s_pkt_fwd_lock": 44840,
+            "gr8s_pkt_rev_lock": 44841,
+            "gr8s_pkt_reverse": 44843,
+            "gr8s_pkt_stats": 44846,
+            "gr8s_pkt_tcp": 44845,
+            "gr8s_service_v4": 44830,
+            "gr8s_service_v6": 44835
+          },
+          "state": {
+            "backend": "10.80.16.1",
+            "backendPort": 8080,
+            "clientISN": 3522646980,
+            "serverISN": 2867849985,
+            "clientEnd": 3522647206,
+            "serverEnd": 2867850367,
+            "flags": 64519,
+            "clientScale": 8,
+            "serverScale": 9,
+            "clientTimestamp": 4087367512,
+            "serverTimestamp": 3479010503
+          },
+          "atMs": 1794266200801,
+          "stopSignal": "SIGKILL",
+          "exitStatus": -9,
+          "beforeStartMs": 1794266201300,
+          "readyMs": 1794266219118
+        },
+        {
+          "node": 1,
+          "maps": {
+            "gr8s_backend_index_v4": 44850,
+            "gr8s_backend_index_v6": 44855,
+            "gr8s_backend_v4": 44849,
+            "gr8s_backend_v6": 44854,
+            "gr8s_pkt_affinity": 44862,
+            "gr8s_pkt_forward": 44860,
+            "gr8s_pkt_fwd_lock": 44858,
+            "gr8s_pkt_rev_lock": 44859,
+            "gr8s_pkt_reverse": 44861,
+            "gr8s_pkt_stats": 44864,
+            "gr8s_pkt_tcp": 44863,
+            "gr8s_service_v4": 44848,
+            "gr8s_service_v6": 44853
+          },
+          "state": {
+            "backend": "10.80.16.1",
+            "backendPort": 8080,
+            "clientISN": 3522646980,
+            "serverISN": 2867849985,
+            "clientEnd": 3522649006,
+            "serverEnd": 2867853415,
+            "flags": 64519,
+            "clientScale": 8,
+            "serverScale": 9,
+            "clientTimestamp": 4087392387,
+            "serverTimestamp": 3479035376
+          },
+          "atMs": 1794266225712,
+          "stopSignal": "SIGKILL",
+          "exitStatus": -9,
+          "beforeStartMs": 1794266226211,
+          "readyMs": 1794266238314
+        }
+      ],
+      "passed": true,
+      "cleanupCompleted": true
+    },
+    "agentLogs": {
+      "0": {
+        "sha256": "cc96136f3d237bf5bd1abad73813fb31aca224994acaea42ffb1d699947428ca",
+        "cniTimeouts": 0,
+        "diagnostics": []
+      },
+      "1": {
+        "sha256": "aba7929754730f72e169452ed8e243eae76e36f01ff12f36f190d26515ff56f9",
+        "cniTimeouts": 0,
+        "diagnostics": [
+          "gr8s: Service packet upgrade deferred for /var/tmp/gr8s-two-node.g1fhcwf1/agent-1/containerd/bpf/0ce92ea01aac778e392f1f353914a049f11c956b88dcf51255c2a3b9b728d46a/: BPF error in open pinned BPF object at /var/tmp/gr8s-two-node.g1fhcwf1/agent-1/containerd/bpf/0ce92ea01aac778e392f1f353914a049f11c956b88dcf51255c2a3b9b728d46a/gr8s_pkt_stages: errno 2 (No such file or directory)",
+          "gr8s: Service flow GC deferred: packet pipeline upgrades are pending"
+        ]
+      }
+    },
+    "restartReadinessMs": {
+      "0": 17818,
+      "1": 12103
+    }
+  },
+  "hostedCI": "Hosted unit jobs on9d06be6 and739e29a could not start because GitHub account payments failed or spending limits need increasing. Privileged hosted job skipped. No full-repository green claim.",
+  "scope": "TCP lifecycle increment: valid early-data refusal and actual established guest socket across SIGKILL of both agents. Earlier artifacts cover generation, reset/close, options, graceful restart and retained upgrades. Parent remains open for SNAT/hairpin/collisions, IPv6 packet NAT, packet NodePort/Local/Cluster/source/health checks, broader readiness/churn/termination/affinity/empty-Service coverage and diagnostics. No GSO/physical-host/NIC-offload claim."
+}

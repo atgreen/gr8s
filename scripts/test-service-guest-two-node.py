@@ -53,6 +53,8 @@ def main():
                         help="optional static service-tcp-client probe for real guest source-port reuse")
     parser.add_argument("--tcp-restart", action="store_true",
                         help="keep one guest TCP socket across selector changes and both agent restarts")
+    parser.add_argument("--tcp-abrupt-restart", action="store_true",
+                        help="use SIGKILL for both held-connection agent restarts")
     parser.add_argument("--tcp-upgrade", type=Path,
                         help="install historical packet stages while the client agent is stopped")
     parser.add_argument("--tcp-interrupted-upgrade", action="store_true",
@@ -62,6 +64,8 @@ def main():
     args = parser.parse_args()
     if args.tcp_restart and not args.tcp_client:
         parser.error("--tcp-restart requires --tcp-client")
+    if args.tcp_abrupt_restart and not args.tcp_restart:
+        parser.error("--tcp-abrupt-restart requires --tcp-restart")
     if (args.tcp_upgrade or args.tcp_interrupted_upgrade) and not args.tcp_restart:
         parser.error("upgrade checks require --tcp-restart")
     if args.tcp_upgrade and args.tcp_interrupted_upgrade:
@@ -389,9 +393,15 @@ def main():
                     {"node": index, "maps": before_maps, "state": tcp_state(), "atMs": time.time_ns() // 1000000})
                 save()
                 stopped_pid = smoke.agents[index].pid
-                smoke.agents[index].send_signal(signal.SIGTERM)
-                smoke.agents[index].wait(timeout=180)
+                stop_signal = signal.SIGKILL if args.tcp_abrupt_restart else signal.SIGTERM
+                smoke.agents[index].send_signal(stop_signal)
+                stop_status = smoke.agents[index].wait(timeout=180)
                 smoke.agents[index] = None
+                report["heldRestartSnapshots"][-1]["stopSignal"] = stop_signal.name
+                report["heldRestartSnapshots"][-1]["exitStatus"] = stop_status
+                if args.tcp_abrupt_restart:
+                    check(f"guestTcpAgent{index}Killed", stop_status == -signal.SIGKILL,
+                          {"pid": stopped_pid, "signal": stop_signal.name, "exitStatus": stop_status})
                 if (args.tcp_upgrade or args.tcp_interrupted_upgrade) and index == 0:
                     tables = smoke.in_node(0, "find", shared_root.parent, "-mindepth", "2", "-maxdepth", "2",
                                            "-name", "gr8s_pkt_stages").stdout.splitlines()
