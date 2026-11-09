@@ -149,6 +149,7 @@
           "member-identity-mismatch"
           "Raft join for ~A used another member's certificate" id)))
       (pki (gr8s::validate-token pki token node-name)))
+    (gr8s.server::validate-member-patch-admission member (gr8s.node.v1::patch-inventory-json request))
     (bt:with-lock-held ((raft-member-lock member))
       (if (not (raft-leader-p node))
           ;; Redirect: point the joiner at the leader we last heard from.
@@ -187,7 +188,9 @@
                                         :role (string-downcase (symbol-name role))
                                         :node-name (or node-name "")
                                         :join-token (or token "")
-                                        :api-url (or api-url ""))))
+                                        :api-url (or api-url "")
+                                        :patch-inventory-json (if gr8s.patch:*manager*
+                                                                  (gr8s.patch::octets (com.inuoe.jzon:stringify (gr8s.patch:inventory gr8s.patch:*manager*))) #()))))
            (values (gr8s.node.v1::raft-transport-join stub request :timeout timeout)))
       (ignore-errors (ag-grpc:channel-close channel)))))
 

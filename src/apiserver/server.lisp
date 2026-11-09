@@ -79,6 +79,10 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
 (defun ha-redirect-response (acceptor request)
   "When this member is not the Raft leader and REQUEST mutates, return a redirect
    to the leader (or a 503 if the leader is unknown); else NIL to serve locally."
+  ;; Patch commands authenticate locally and relay over member mTLS, preserving
+  ;; the CLI session across leadership transfer without forwarding local tokens.
+  (when (equal (hunchentoot:script-name request) "/apis/gr8s.io/v1/patchrollouts")
+    (return-from ha-redirect-response nil))
   (let ((status-fn (acceptor-leader-status-fn acceptor)))
     (when status-fn
       (multiple-value-bind (self-leader-p leader-url) (funcall status-fn)
@@ -141,6 +145,10 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
         (setf (hunchentoot:content-type*) "text/plain; charset=utf-8"
               (hunchentoot:header-out "X-Content-Type-Options") "nosniff")
         (cond
+          ((and (equal endpoint "readyz") gr8s.patch:*manager*
+                (not (equal "healthy" (gethash "state" (gr8s.patch:inventory gr8s.patch:*manager*)))))
+           (setf (hunchentoot:return-code*) 503)
+           "patch recovery required")
           ((and check (plusp (length check)))
            (if (member check checks :test #'equal)
                "ok"

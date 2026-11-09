@@ -1450,7 +1450,9 @@ candidates; agents still require their transactional handshake/probe gates."
                       (slot-value endpoint 'gr8s.node.v1::port)))
               (slot-value hello 'gr8s.node.v1::wireguard-endpoints)))
            (node (get-node (node-grpc-server-store server) node-name))
-           (previously-ready-p (node-record-ready-p node))
+           (patch-admission (gr8s.server::validate-patch-admission (node-grpc-server-store server)
+                                                                 (slot-value hello 'gr8s.node.v1::patch-inventory-json)))
+           (previously-ready-p (and patch-admission (node-record-ready-p node)))
            (topology-changed
              (progn
                ;; Validate before either durable write so a malformed hello

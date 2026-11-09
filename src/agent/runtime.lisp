@@ -2158,6 +2158,9 @@ errors becomes a failed response; an error on any other variant is re-signaled."
         (:operation-request
          (cond
            ((= (slot-value payload 'gr8s.node.v1::kind)
+               gr8s.node.v1::+operationkind-operation_kind_patch+)
+            (gr8s.patch::start-node-patch-operation payload emit))
+           ((= (slot-value payload 'gr8s.node.v1::kind)
                gr8s.node.v1::+operationkind-operation_kind_metrics+)
             (start-metrics-operation node-runtime payload emit))
            ((= (slot-value payload 'gr8s.node.v1::kind)

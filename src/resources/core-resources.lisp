@@ -131,6 +131,7 @@
 (defun stored-resource-type (resource)
   "Return the descriptor for a durable Kubernetes resource collection."
   (or (assoc resource *stored-resource-types* :test #'equal)
+      (assoc resource *internal-stored-resource-types* :test #'equal)
       (error "Unknown stored resource ~S" resource)))
 
 (defun core-resource-kind (resource)
@@ -183,7 +184,7 @@ each commit a bounded multiple of what it changed, whatever the size of the stor
                (when (gethash key index) (error "Duplicate persisted core resource ~S" key))
                (setf (gethash key index) object))))
       (loop for object across (gethash "items" state #())
-            do (add (or (first (find (gethash "kind" object) *stored-resource-types* :key #'second :test #'equal))
+            do (add (or (first (find (gethash "kind" object) (append *stored-resource-types* *internal-stored-resource-types*) :key #'second :test #'equal))
                         (error "Invalid stored resource kind"))
                     object))
       (loop for entry across (gethash "customResourceItems" state #())
@@ -329,7 +330,7 @@ whether the journal must be rewritten (a torn record) and its complete bytes."
             ;; A torn record must not end up in the middle of the journal.
             (pod-store-core-checkpoint-needed store) torn)
       (loop for object across (gethash "items" state)
-            for resource = (or (first (find (gethash "kind" object) *stored-resource-types*
+            for resource = (or (first (find (gethash "kind" object) (append *stored-resource-types* *internal-stored-resource-types*)
                                            :key #'second :test #'equal))
                                (error "Invalid stored resource kind"))
             for key = (core-resource-key-from-object resource object)

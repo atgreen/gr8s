@@ -47,8 +47,9 @@
 ;;
 ;; The service, backend and index maps are NO_PREALLOC hashes so memory tracks live
 ;; Services/backends; the LRUs forget clients and sockets that have long gone away.
-;; A backend value doubles as the backend's identity: the index finds where a backend
-;; sits now, so affinity follows the backend rather than a slot that a change shifts.
+;; A backend value doubles as the backend's identity: the index checks membership
+;; for every Service while shared slots are repacked, and finds the current offset
+;; so affinity follows the backend rather than a slot that a change shifts.
 (defparameter gr8s.network::*service-lb-map-forms*
   '((defmap gr8s-service-v4 :type :hash
       :key-size 8 :value-size 16 :max-entries 4096 :map-flags 1)
@@ -115,6 +116,17 @@ replies as coming from the address the client sent to."
                (let ((slot u32 (+ (load u32 service 4) offset)))
                  (when-let ((backend u64 (map-lookup gr8s-backend-v4 slot)))
                    (let ((identity u64 (load u64 backend 0)))
+                     ;; A reconcile may have repacked this slot for another
+                     ;; Service before publishing our new base. Validate the
+                     ;; copied backend identity before using it, even without
+                     ;; affinity. A miss fails closed and the next connect can
+                     ;; retry after reconciliation has completed.
+                     (let ((member-key (make-gr8s-lb-pair)))
+                       (setf (gr8s-lb-pair-first member-key) key
+                             (gr8s-lb-pair-second member-key) identity)
+                       (when (= (map-lookup-ptr gr8s-backend-index-v4 member-key) 0)
+                         (set-retval #xffffff91)
+                         (return 0)))
                      (when (> sticky 0)
                        (let ((entry (make-gr8s-lb-pair)))
                          (setf (gr8s-lb-pair-first entry) identity
@@ -125,8 +137,8 @@ replies as coming from the address the client sent to."
                          (setf (gr8s-lb-pair-first socket) (get-socket-cookie (ctx-ptr))
                                (gr8s-lb-pair-second socket) identity)
                          (setf (getmap gr8s-reverse-v4 socket) (logior vip (<< vport 32)))))
-                     (setf (ctx user-ip4) (load u32 backend 0))
-                     (setf (ctx user-port) (cast u32 (load u16 backend 4)))))))))))
+                     (setf (ctx user-ip4) (cast u32 identity))
+                     (setf (ctx user-port) (cast u32 (logand (>> identity 32) #xffff)))))))))))
      1))
 
 (defun gr8s.network::service-lb-v6-steer-program (name section)
@@ -177,35 +189,53 @@ replies as coming from the address the client sent to."
                            (when (< found count) (setf offset found))))))))
                (let ((slot u32 (+ (load u32 service 4) offset)))
                  (when-let ((backend u64 (map-lookup gr8s-backend-v6 slot)))
-                   (when (> sticky 0)
-                     (let ((entry (make-gr8s-lb-v6-affinity-value)))
-                       (setf (gr8s-lb-v6-affinity-value-address entry 0) (load u32 backend 0)
-                             (gr8s-lb-v6-affinity-value-address entry 1) (load u32 backend 4)
-                             (gr8s-lb-v6-affinity-value-address entry 2) (load u32 backend 8)
-                             (gr8s-lb-v6-affinity-value-address entry 3) (load u32 backend 12)
-                             (gr8s-lb-v6-affinity-value-port entry) (load u16 backend 16)
-                             (gr8s-lb-v6-affinity-value-seen entry) now)
-                       (map-update-ptr gr8s-affinity-v6 client entry 0)))
-                   (when (= (ctx protocol) 17)
-                     (let ((socket (make-gr8s-lb-v6-reverse-key))
-                           (original (make-gr8s-lb-v6-address)))
-                       (setf (gr8s-lb-v6-reverse-key-cookie socket) (get-socket-cookie (ctx-ptr))
-                             (gr8s-lb-v6-reverse-key-address socket 0) (load u32 backend 0)
-                             (gr8s-lb-v6-reverse-key-address socket 1) (load u32 backend 4)
-                             (gr8s-lb-v6-reverse-key-address socket 2) (load u32 backend 8)
-                             (gr8s-lb-v6-reverse-key-address socket 3) (load u32 backend 12)
-                             (gr8s-lb-v6-reverse-key-port socket) (load u16 backend 16)
-                             (gr8s-lb-v6-address-address original 0) (ctx user-ip6 0)
-                             (gr8s-lb-v6-address-address original 1) (ctx user-ip6 1)
-                             (gr8s-lb-v6-address-address original 2) (ctx user-ip6 2)
-                             (gr8s-lb-v6-address-address original 3) (ctx user-ip6 3)
-                             (gr8s-lb-v6-address-port original) (cast u16 (ctx user-port)))
-                       (map-update-ptr gr8s-reverse-v6 socket original 0)))
-                   (setf (ctx user-ip6 0) (load u32 backend 0)
-                         (ctx user-ip6 1) (load u32 backend 4)
-                         (ctx user-ip6 2) (load u32 backend 8)
-                         (ctx user-ip6 3) (load u32 backend 12)
-                         (ctx user-port) (cast u32 (load u16 backend 16))))))))))
+                   ;; Copy the selected address into the membership key before
+                   ;; invoking another helper. Use that checked copy for every
+                   ;; subsequent operation, rather than rereading the slot.
+                   (let ((member-key (make-gr8s-lb-v6-index-key)))
+                     (setf (gr8s-lb-v6-index-key-vip-address member-key 0) (gr8s-lb-v6-service-key-address key 0)
+                           (gr8s-lb-v6-index-key-vip-address member-key 1) (gr8s-lb-v6-service-key-address key 1)
+                           (gr8s-lb-v6-index-key-vip-address member-key 2) (gr8s-lb-v6-service-key-address key 2)
+                           (gr8s-lb-v6-index-key-vip-address member-key 3) (gr8s-lb-v6-service-key-address key 3)
+                           (gr8s-lb-v6-index-key-vip-port member-key) (gr8s-lb-v6-service-key-port key)
+                           (gr8s-lb-v6-index-key-protocol member-key) (gr8s-lb-v6-service-key-protocol key)
+                           (gr8s-lb-v6-index-key-backend-address member-key 0) (load u32 backend 0)
+                           (gr8s-lb-v6-index-key-backend-address member-key 1) (load u32 backend 4)
+                           (gr8s-lb-v6-index-key-backend-address member-key 2) (load u32 backend 8)
+                           (gr8s-lb-v6-index-key-backend-address member-key 3) (load u32 backend 12)
+                           (gr8s-lb-v6-index-key-backend-port member-key) (load u16 backend 16))
+                     (when (= (map-lookup-ptr gr8s-backend-index-v6 member-key) 0)
+                       (set-retval #xffffff91)
+                       (return 0))
+                     (when (> sticky 0)
+                       (let ((entry (make-gr8s-lb-v6-affinity-value)))
+                         (setf (gr8s-lb-v6-affinity-value-address entry 0) (gr8s-lb-v6-index-key-backend-address member-key 0)
+                               (gr8s-lb-v6-affinity-value-address entry 1) (gr8s-lb-v6-index-key-backend-address member-key 1)
+                               (gr8s-lb-v6-affinity-value-address entry 2) (gr8s-lb-v6-index-key-backend-address member-key 2)
+                               (gr8s-lb-v6-affinity-value-address entry 3) (gr8s-lb-v6-index-key-backend-address member-key 3)
+                               (gr8s-lb-v6-affinity-value-port entry) (gr8s-lb-v6-index-key-backend-port member-key)
+                               (gr8s-lb-v6-affinity-value-seen entry) now)
+                         (map-update-ptr gr8s-affinity-v6 client entry 0)))
+                     (when (= (ctx protocol) 17)
+                       (let ((socket (make-gr8s-lb-v6-reverse-key))
+                             (original (make-gr8s-lb-v6-address)))
+                         (setf (gr8s-lb-v6-reverse-key-cookie socket) (get-socket-cookie (ctx-ptr))
+                               (gr8s-lb-v6-reverse-key-address socket 0) (gr8s-lb-v6-index-key-backend-address member-key 0)
+                               (gr8s-lb-v6-reverse-key-address socket 1) (gr8s-lb-v6-index-key-backend-address member-key 1)
+                               (gr8s-lb-v6-reverse-key-address socket 2) (gr8s-lb-v6-index-key-backend-address member-key 2)
+                               (gr8s-lb-v6-reverse-key-address socket 3) (gr8s-lb-v6-index-key-backend-address member-key 3)
+                               (gr8s-lb-v6-reverse-key-port socket) (gr8s-lb-v6-index-key-backend-port member-key)
+                               (gr8s-lb-v6-address-address original 0) (ctx user-ip6 0)
+                               (gr8s-lb-v6-address-address original 1) (ctx user-ip6 1)
+                               (gr8s-lb-v6-address-address original 2) (ctx user-ip6 2)
+                               (gr8s-lb-v6-address-address original 3) (ctx user-ip6 3)
+                               (gr8s-lb-v6-address-port original) (cast u16 (ctx user-port)))
+                         (map-update-ptr gr8s-reverse-v6 socket original 0)))
+                     (setf (ctx user-ip6 0) (gr8s-lb-v6-index-key-backend-address member-key 0)
+                           (ctx user-ip6 1) (gr8s-lb-v6-index-key-backend-address member-key 1)
+                           (ctx user-ip6 2) (gr8s-lb-v6-index-key-backend-address member-key 2)
+                           (ctx user-ip6 3) (gr8s-lb-v6-index-key-backend-address member-key 3)
+                           (ctx user-port) (cast u32 (gr8s-lb-v6-index-key-backend-port member-key)))))))))))
      1))
 
 ;; The program forms: one 16-octet pair type the maps' keys and values share, the

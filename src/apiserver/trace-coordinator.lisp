@@ -51,7 +51,10 @@
                 "groupVersion" "gr8s.io/v1"
                 "resources" (vector (core-object "name" "traces" "singularName" "trace"
                                                   "namespaced" t "kind" "Trace"
-                                                  "verbs" #("create"))))))
+                                                  "verbs" #("create"))
+                                    (core-object "name" "patchrollouts" "singularName" "patchrollout"
+                                                 "namespaced" nil "kind" "PatchRollout"
+                                                 "verbs" #("create" "get" "list"))))))
 
 (defun release-trace-coordinator-slot (coordinator)
   "Return COORDINATOR's cluster-wide session slot exactly once."

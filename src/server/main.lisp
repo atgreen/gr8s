@@ -713,7 +713,12 @@ The new identity takes effect when the node agent next starts."
          (member (first arguments) '("help" "--help" "-h") :test #'string=))
      (list :command :help))
     ((member (first arguments) '("version" "--version" "-v") :test #'string=)
-     (list :command :version))
+     (let ((tail (rest arguments)) (options (list :command :version)))
+       (when tail
+         (unless (and (equal (first tail) "--state-directory") (second tail) (null (cddr tail)))
+           (error "version accepts --state-directory DIR"))
+         (setf (getf options :state-directory) (second tail)))
+       options))
     ((string= "notices" (first arguments))
      (list :command :notices))
     ((string= "serve" (first arguments))
@@ -728,6 +733,8 @@ The new identity takes effect when the node agent next starts."
      (parse-kubeconfig-options (rest arguments)))
     ((string= "runtime" (first arguments))
      (parse-runtime-options (rest arguments)))
+    ((string= "patch" (first arguments))
+     (gr8s.patch:parse-options (rest arguments)))
     ((string= "trace" (first arguments))
      (parse-trace-options (rest arguments)))
     ((string= "wireguard" (first arguments))
@@ -1269,10 +1276,9 @@ handler and never gets here. A busy host makes this race likely."
                ;; reconciles nothing and simply waits to be promoted.
                (when (let ((gate (reconciliation-worker-leader-gate worker)))
                        (or (null gate) (funcall gate)))
-                 (when (reconciliation-worker-before-reconcile worker)
-                   (funcall (reconciliation-worker-before-reconcile worker)))
-                 (reconcile-all (reconciliation-worker-reconciler worker)
-                                :observer (reconciliation-worker-observer worker)))
+                 (gr8s.patch:call-in-domain
+                  "controller-pass"
+                  (lambda () (funcall (symbol-function 'run-controller-pass) worker))))
              ;; Timeouts are serious conditions, not errors, and a late one can land here.
              ((or error sb-ext:timeout bt2:timeout) (error)
                (format *error-output* "gr8s reconciliation error: ~A~%" error)))
@@ -1344,6 +1350,10 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          (state-directory
            (uiop:ensure-directory-pathname (getf options :state-directory)))
          (store (open-store state-directory))
+         (patch-policy-checked
+           (when gr8s.patch:*manager*
+             (validate-patch-admission store (gr8s.patch::octets
+                                              (com.inuoe.jzon:stringify (gr8s.patch:inventory gr8s.patch:*manager*))))))
          (pool (ensure-controller-node-pool store state-directory options))
          (pki (ensure-control-plane-pki state-directory options))
          (server nil)
@@ -1356,6 +1366,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
          (ha nil)
          (memory-monitor nil)
          (local-agent nil))
+    (declare (ignore patch-policy-checked))
     (setf *shutdown-requested* nil)
     (install-shutdown-handlers)
     (unwind-protect
@@ -1403,6 +1414,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                 (getf options :wireguard-relay-max-channels))))
            (let* ((runtime (make-control-plane-runtime store node-server))
                   (reconciler (make-reconciler store runtime)))
+             (when gr8s.patch:*manager* (start-patch-coordinator store node-server ha))
              (unless (getf options :disable-agent)
                (setf local-agent
                      (start-local-node-agent
@@ -1511,6 +1523,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                (when api-server (stop-server api-server))
                (when (or api-server service-network-created) (remove-in-cluster-network pki))
                (setf (pod-store-in-cluster-config store) nil))))
+      (stop-patch-coordinator)
       (when local-agent (stop-local-node-agent local-agent))
       (when ha (stop-ha-control-plane ha))
       (when node-server
@@ -1584,6 +1597,10 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (format t "Runtime:~%")
   (format t "  runtime install <gvisor|kata>   Download, verify and stage a sandbox runtime~%")
   (format t "  runtime list                    List embedded assets and installed addons~%~%")
+  (format t "Patches:~%")
+  (format t "  patch inspect IMAGE | plan IMAGE [--level N] | apply PLAN [--watch]~%")
+  (format t "  patch status [PLAN] | pause PLAN | resume PLAN | abort PLAN~%")
+  (format t "  patch history --node NODE | import OCI-LAYOUT --state-directory DIR~%~%")
   (format t "Tools:~%")
   (format t "  kubeconfig   Print or write a cluster kubeconfig~%")
   (format t "  doctor       Diagnose a node's state directory~%")
@@ -1659,7 +1676,11 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
               (install-memory-hooks))
             (case (getf options :command)
               (:help (print-help) 0)
-              (:version (format t "gr8s ~A~%" +gr8s-version+) 0)
+              (:version
+               (let* ((root (uiop:ensure-directory-pathname (or (getf options :state-directory) (default-state-directory))))
+                      (journal (merge-pathnames "patches/journal.json" root))
+                      (level (if (probe-file journal) (gethash "level" (gr8s.patch::read-json journal) 0) 0)))
+                 (format t "gr8s ~A, patch level ~D~%" +gr8s-version+ level)) 0)
               (:notices (print-notices) 0)
               (:kubeconfig
                (if (getf options :output)
@@ -1679,6 +1700,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
               (:runtime-list
                (print-runtime-list (getf options :state-directory))
                0)
+              (:patch (gr8s.patch:run-command options))
               (:trace (run-trace-command options))
               (:wireguard-rotate-key
                (rotate-wireguard-node-key options))
@@ -1692,15 +1714,15 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                                   (when (getf options :cluster-pod-cidr)
                                     (list :cluster-pod-cidr (getf options :cluster-pod-cidr))))))
                    1 0))
-              (:serve (serve options))
+              (:serve (unwind-protect (progn (bootstrap-patches options) (serve options)) (shutdown-patches)))
               (:agent
                (setf *shutdown-requested* nil)
                (install-shutdown-handlers)
-               (agent options))
+               (unwind-protect (progn (bootstrap-patches options) (agent options)) (shutdown-patches)))
               (:witness
                (setf *shutdown-requested* nil)
                (install-shutdown-handlers)
-               (run-witness options))))
+               (unwind-protect (progn (bootstrap-patches options) (run-witness options)) (shutdown-patches)))))
         (error (error)
           (format *error-output* "gr8s: ~A~%" error)
           2))))

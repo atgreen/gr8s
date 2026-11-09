@@ -40,6 +40,11 @@
 ;; hook never fires; set +GR8S-VERSION+ here instead, while the git repo is present.
 (setf gr8s:+gr8s-version+ (version-string:make-version-string :gr8s :include-git-p t))
 
+;; Base systems are supplied by the dumped image. Patch systems may depend on
+;; them on hosts without this checkout; no ASDF operation should reload them.
+(dolist (system (asdf:already-loaded-systems))
+  (asdf:register-immutable-system system))
+
 (defun gr8s-native-main ()
   ;; The runtime reads only a leading --dynamic-space-size or --control-stack-size, and
   ;; passes the rest on. Older wrappers end the runtime's options explicitly.

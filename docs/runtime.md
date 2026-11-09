@@ -80,30 +80,31 @@ pending with the runtime's error. The runtime-handler configuration is
 register as handlers and a Pod opts into one with its `runtimeClassName` — default
 `runc` for one workload, a sandbox or microVM for the next, on the same node.
 
-Two isolation classes are the target (tracked under `podster-mgw`):
+Two optional runtimes provide stronger workload isolation:
 
 ### Sandboxed runtimes — gVisor
 
 **gVisor (`runsc`)** is a userspace application kernel that intercepts a
 container's syscalls instead of passing them straight to the host kernel, shrinking
-the host attack surface without a full VM. It is the first optional runtime being
-wired in.
+the host attack surface without a full VM.
 
-### microVM runtimes — Kata / Firecracker
+### microVM runtimes — Kata Containers
 
-The handler layer is built to be **virt-ready**: hardware-virtualized isolation in
-the **Kata Containers / Firecracker** style, where each Pod runs in its own
-lightweight virtual machine with its own guest kernel. This gives VM-grade
-isolation while keeping container ergonomics, and is the direction the pluggable
-layer is designed for beyond gVisor.
+**Kata Containers** runs Pods in lightweight virtual machines with their own
+guest kernels, providing hardware-virtualized isolation. The installer supports
+QEMU, Cloud Hypervisor, Firecracker, and Dragonball hypervisor configurations.
 
-### Status
+### Installation and use
 
-The configuration seam has landed (PR #125) — a Pod can already be pointed at an
-alternate runtime handler. Still in progress: a `gr8s`-driven runtime install that
-fetches, checksum-verifies, and registers a runtime (`podster-rpc`), and proving a
-Pod boots end-to-end under gVisor (`podster-nhf`) and, beyond that, under a
-microVM runtime.
+`gr8s runtime install gvisor` and `gr8s runtime install kata` download,
+checksum-verify, and stage the optional runtime. Both runtimes have been validated
+end-to-end with Pods. Use `--state-directory` to select the agent's state
+directory: `<state>/agent` for the local agent started by `gr8s serve`, or the
+worker's state directory for `gr8s agent`.
+
+Restart gr8s after installation so the agent loads the runtime addon, then create
+a `RuntimeClass` with handler `gvisor` or `kata`. Set a Pod's `runtimeClassName`
+to the name of that `RuntimeClass` to select its isolation runtime.
 
 ## Preloaded images (airgap)
 

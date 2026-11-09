@@ -22,7 +22,7 @@ NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
 NODE_PROTOCOL_LISP := src/generated/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 
-.PHONY: all help containerd-bundle generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api check smoke smoke-two-node run kubeconfig notices native clean
+.PHONY: test-patches test-live-patching all help containerd-bundle generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api check smoke smoke-two-node run kubeconfig notices native clean
 
 all: native
 
@@ -35,6 +35,7 @@ help:
 	@echo "  generate-protocol Generate Common Lisp node-protocol bindings"
 	@echo "  test-protocol-generation Verify standalone protocol generation from a clean output"
 	@echo "  test          Run the unit and HTTP test suite"
+	@echo "  test-live-patching Test signed in-process upgrades across three fake-runtime control planes"
 	@echo "  test-core-api Verify ConfigMap/Secret kubectl workflows and restart persistence"
 	@echo "  test-containerd Include the live CRI/containerd integration tests"
 	@echo "  test-routed-network Test native routed veths in isolated user/network namespaces"
@@ -43,6 +44,7 @@ help:
 	@echo "  test-node-topology Test live node snapshots, VXLAN, and route recovery"
 	@echo "  test-whistler-cni Test the chained Whistler TC/eBPF CNI plugin"
 	@echo "  test-service-lb Load/attach/pin the ClusterIP socket LB on a real kernel (sudo)"
+	@echo "  test-service-lb-program Execute Service socket bytecode across interrupted map updates"
 	@echo "  smoke-service-lb End-to-end: redirect an unrouted ClusterIP connect to backends (sudo)"
 	@echo "  smoke-service-lb-agent End-to-end agent path: Service+EndpointSlice -> redirect (sudo)"
 	@echo "  check         Syntax-check scripts and run tests"
@@ -60,6 +62,12 @@ $(NODE_PROTOCOL_LISP): $(NODE_PROTOCOL_PROTO) scripts/generate-node-protocol.lis
 
 test-protocol-generation:
 	scripts/test-node-protocol-generation.sh
+
+test-patches: generate-protocol
+	$(SBCL) --noinform --non-interactive --eval '(require :asdf)' --eval '(asdf:test-system "gr8s/patch-tests")'
+
+test-live-patching:
+	python3 scripts/test-live-patching.py
 
 test: generate-protocol
 	$(SBCL) --noinform --non-interactive $(TEST_EVAL)
@@ -90,6 +98,14 @@ build/gr8s-endpoint-test.json: src/network/egress-guard-program.lisp src/network
 test-endpoint-policy: build/gr8s-endpoint-test.json
 	python3 scripts/test-endpoint-policy.py $<
 
+# Execute the socket LB bytecode across interrupted Service map updates.
+build/gr8s-service-test.json: src/network/service-lb-program.lisp src/network/service-lb.lisp scripts/compile-endpoint-policy-fixture.lisp
+	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-lb
+
+.PHONY: test-service-lb-program
+test-service-lb-program: build/gr8s-service-test.json
+	python3 scripts/test-service-lb-program.py $<
+
 # Real-root verification that the Service LB JIT-compiles, loads, attaches to a
 # cgroup, pins its maps, and round-trips entries through the kernel. No ELF.
 test-service-lb:
@@ -113,7 +129,7 @@ test-core-api:
 
 test-whistler-cni: containerd-bundle test
 
-check: containerd-bundle test-protocol-generation test-whistler-cni test-endpoint-policy
+check: containerd-bundle test-protocol-generation test-whistler-cni test-endpoint-policy test-service-lb-program
 	sh -n scripts/gr8s scripts/install-containerd.sh scripts/collect-notices.sh \
 	  scripts/verify-static-runtime.sh scripts/smoke.sh scripts/test-core-api.sh
 	scripts/verify-static-runtime.sh build/containerd
