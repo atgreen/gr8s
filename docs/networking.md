@@ -34,11 +34,18 @@ five-second IPC deadline for kernel map creation, verification and attachment;
 it reuses the prepared templates. Source-based runs compile them lazily once.
 An isolated native VM measurement found 16.2 seconds of cold Service template
 compilation versus 39 milliseconds for map creation and kernel program loading.
-Native preparation moves that compilation into the build. The startup probe
-`scripts/probe-native-endpoint-startup.py --gr8s /root/gr8s --require-prepared
---report-directory /var/tmp/startup-evidence` measures both cache variants and
-loads two unattached pipelines, checking that relocation preserves the templates.
-Run it in a disposable root VM with `scripts/gr8s-debug.py` alongside it.
+Native preparation moves that compilation into the build. The startup probe `scripts/probe-native-endpoint-startup.py`
+measures both cache variants and loads unattached Service and ordinary pipelines,
+checking that relocation preserves the templates. Run it in a disposable root VM
+with `scripts/gr8s-debug.py` alongside it:
+
+```sh
+python3 scripts/probe-native-endpoint-startup.py --gr8s /root/gr8s \
+  --require-prepared --report-directory /var/tmp/startup-evidence
+```
+
+Two fresh cross-node native/Kata runs pass all 28 checks with zero CNI ADD
+timeouts on either node. See [the cold-start evidence](service-cni-startup-validation-2026-11-09.json).
 
 Tests exercise the actual compiled bytecode on packet fixtures with both an
 interpreter and the Linux BPF test-run facility. The privileged native smoke
