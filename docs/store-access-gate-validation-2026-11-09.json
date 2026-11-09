@@ -12,13 +12,13 @@
   },
   "nativeBuild": {
     "passed": true,
-    "sha256": "d260d446679913f8ac4163fa73ce04e9fcc163099af64b67bbf7a7bdd34f8cf5"
+    "sha256": "cf8d4897725d82a4685fcd8308fdd60e6fdd67195c65e844f2ceddf873581f19"
   },
   "nativePendingIntentStartupAndRestart": {
     "passed": true,
     "native": true,
     "runtime": "fake",
-    "evidence": "/tmp/gr8s-generation-native-66cy5w1o",
+    "evidence": "/tmp/gr8s-generation-native-gmrm6gp9",
     "generationLoaded": true,
     "legacyPodExcluded": true,
     "pendingRestoreRecovered": true,
@@ -58,5 +58,16 @@
     "Power-loss/restart/failover acceptance and reclamation",
     "Automatic compaction"
   ],
-  "fullGoalComplete": false
+  "fullGoalComplete": false,
+  "finalMergedValidation": {
+    "sourceCommit": "c977414",
+    "integratedMain": "8835d26",
+    "checks": 84,
+    "suites": {
+      "store-access-gate": 32,
+      "store-restore-intent": 50,
+      "cli-treats-a-closed-output-pipe-as-success": 2
+    },
+    "passed": true
+  }
 }
