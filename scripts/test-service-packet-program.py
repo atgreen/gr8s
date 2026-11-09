@@ -344,6 +344,12 @@ def capacity_exercise(runner):
     return 5
 
 
+def assert_unlocked(runner):
+    for name in ("gr8s_pkt_fwd_lock", "gr8s_pkt_rev_lock"):
+        keys = runner.keys(name) if isinstance(runner, Kernel) else runner.maps.entries[name]
+        assert not keys, "tuple lock leaked after success/failure"
+
+
 def flow_key(source=CLIENT, destination=VIP, sport=47000, dport=80, protocol=17):
     return (ipaddress.ip_address(source).packed + ipaddress.ip_address(destination).packed +
             struct.pack("!HHBBH", sport, dport, protocol, 0, 0))
@@ -401,9 +407,7 @@ def expiry_exercise(runner):
     verdict, translated = runner.run("gr8s_packet_reverse", reply)
     assert verdict == OK and endpoints(translated) == (VIP, CLIENT, 80, 47001)
     check_checksums(translated)
-    for name in ("gr8s_pkt_fwd_lock", "gr8s_pkt_rev_lock"):
-        keys = runner.keys(name) if isinstance(runner, Kernel) else runner.maps.entries[name]
-        assert not keys, "tuple lock leaked after success/failure"
+    assert_unlocked(runner)
     return cases + 3
 
 
@@ -412,6 +416,7 @@ def main():
     runner = (Kernel if "--kernel" in sys.argv[2:] else Interpreter)(programs, ids, descriptors)
     try:
         cases = exercise(runner)
+        assert_unlocked(runner)
         print(f"Service TC bytecode ({'kernel' if isinstance(runner, Kernel) else 'interpreter'}): "
               f"{cases} packet/flow/checksum cases passed")
     finally:
@@ -427,6 +432,7 @@ def main():
     runner = (Kernel if "--kernel" in sys.argv[2:] else Interpreter)(programs, ids, limited)
     try:
         cases = capacity_exercise(runner)
+        assert_unlocked(runner)
         print(f"Service TC capacity: {cases} publication/recovery cases passed")
     finally:
         runner.close()

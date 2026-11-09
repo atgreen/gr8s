@@ -220,6 +220,7 @@ def main():
             finally:
                 pin.unlink(missing_ok=True)
                 directory.rmdir()
+        packet.assert_unlocked(runner)
         print(f"Service endpoint guard ({'kernel' if isinstance(runner, packet.Kernel) else 'interpreter'}): "
               f"{count} source-validation/policy/NAT/routing cases passed")
     finally:
