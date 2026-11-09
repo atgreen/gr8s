@@ -144,7 +144,9 @@ Delayed packets still use the retained translation but do not refresh terminal
 metadata or timestamps. Invalid resets reach the endpoint for challenge-ACK
 handling without shortening the mapping's lifetime. Window and late-segment
 validation, TCP timestamps, out-of-order close coverage and the remainder of TCP
-lifecycle handling remain unfinished.
+lifecycle handling remain unfinished. See
+[the TCP close evidence](service-tcp-close-validation-2026-11-09.json) for bytecode,
+kernel GC and actual guest reset/graceful-close checks.
 Kernel packet tests additionally cover program lifetime. Source NAT/hairpin,
 return-tuple collision resolution, IPv6 packet translation and external Service
 replacement remain in development. Hairpin and conflicting return tuples
