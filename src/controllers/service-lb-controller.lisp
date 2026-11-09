@@ -217,13 +217,18 @@ order; a port's external addresses share its ClusterIP's slots when the backends
   node-name                    ; this node, for traffic policies and topology hints
   endpoint-steerer             ; bounded network-quality/locality selector
   (applied-service-keys nil)   ; VIP key byte-vectors currently in the service map
-  (applied-slot-count 0)       ; highest backend slot currently populated
+  (map-state-adopted-p t)      ; fresh maps are empty; retained maps need inventory
+  (applied-backend-keys nil)   ; (family . slot-key) pairs, including sparse retained slots
+  (applied-slot-count 0)       ; slot count in the last successfully applied plan
   (applied-index-keys nil)     ; affinity index keys currently in the index map
   (applied-signature nil))     ; last applied plan, for no-op skipping
 
 (defun make-service-lb-controller (store dataplane &optional node-name &key endpoint-steerer)
   "Drive DATAPLANE's maps from STORE for the node NODE-NAME."
-  (%make-service-lb-controller store dataplane node-name endpoint-steerer))
+  (let ((controller (%make-service-lb-controller store dataplane node-name endpoint-steerer)))
+    (setf (service-lb-controller-map-state-adopted-p controller)
+          (not (gr8s.network:service-lb-dataplane-reopened-p dataplane)))
+    controller))
 
 (defun service-lb-entry-family (entry kind)
   "Infer ENTRY's address family from the byte width of its KIND-specific key or value."
@@ -245,10 +250,40 @@ order; a port's external addresses share its ClusterIP's slots when the backends
                                        (:ipv4 "gr8s_backend_index_v4")
                                        (:ipv6 "gr8s_backend_index_v6"))))))
 
+(defun service-lb-delete-if-present (delete map key)
+  "An absent key already satisfies withdrawal, including after a partial retry."
+  (handler-case (funcall delete map key)
+    (whistler/loader:bpf-error (condition)
+      (unless (= sb-posix:enoent (whistler/loader::bpf-error-errno condition))
+        (error condition)))))
+
+(defun service-lb-adopt-map-state (controller next-key)
+  "Inventory retained control maps without publishing an incomplete read.
+Caller holds the dataplane lock. Only control maps are read; established flow
+and affinity maps retain their kernel state across the restart."
+  (unless (service-lb-controller-map-state-adopted-p controller)
+    (let ((dataplane (service-lb-controller-dataplane controller))
+          (services nil) (backends nil) (indices nil))
+      (dolist (family '(:ipv4 :ipv6))
+        (dolist (kind '(:service :backend :index))
+          (let ((map (service-lb-family-map dataplane family kind)))
+            (when map
+              (loop for key = (funcall next-key map nil) then (funcall next-key map key)
+                    while key
+                    do (ecase kind
+                         (:service (push (copy-seq key) services))
+                         (:backend (push (cons family (copy-seq key)) backends))
+                         (:index (push (copy-seq key) indices))))))))
+      (setf (service-lb-controller-applied-service-keys controller) services
+            (service-lb-controller-applied-backend-keys controller) backends
+            (service-lb-controller-applied-index-keys controller) indices
+            (service-lb-controller-map-state-adopted-p controller) t))))
+
 (defun converge-service-lb-controller
     (controller
      &key (update #'whistler/loader:map-update)
           (delete #'whistler/loader:map-delete)
+          (next-key #'whistler/loader:map-get-next-key)
           (list-services
            (lambda () (list-core-resources (service-lb-controller-store controller) "services")))
           (endpoints-of
@@ -267,44 +302,52 @@ order; a port's external addresses share its ClusterIP's slots when the backends
 Writes every backend before the service that references it (so the program never
 reads a VIP whose slots are missing), then removes freed backend slots and
 withdrawn VIPs.  A plan identical to the last applied one writes nothing."
-  (multiple-value-bind (service-entries backend-entries slot-count index-entries)
+  (bt:with-lock-held ((gr8s.network:service-lb-dataplane-lock
+                       (service-lb-controller-dataplane controller)))
+    (service-lb-adopt-map-state controller next-key)
+    (multiple-value-bind (service-entries backend-entries slot-count index-entries)
       (service-lb-plan (funcall list-services) endpoints-of)
-    (let ((signature (list service-entries backend-entries index-entries)))
-      (unless (equalp signature (service-lb-controller-applied-signature controller))
-        (let* ((dataplane (service-lb-controller-dataplane controller))
-               (new-keys (mapcar #'car service-entries))
-               (new-index-keys (mapcar #'car index-entries)))
-          ;; Add/update first: backends and where each now sits, then the services that point at them.
-          (dolist (entry backend-entries)
-            (funcall update
-                     (service-lb-family-map dataplane (service-lb-entry-family entry :backend) :backend)
-                     (car entry) (cdr entry)))
-          (dolist (entry index-entries)
-            (let ((map (service-lb-family-map dataplane
-                                              (service-lb-entry-family entry :index) :index)))
-              (when map (funcall update map (car entry) (cdr entry)))))
-          (dolist (entry service-entries)
-            (funcall update
-                     (service-lb-family-map dataplane (service-lb-entry-family entry :service) :service)
-                     (car entry) (cdr entry)))
-          ;; Remove withdrawn VIPs and freed backend slots.
-          (dolist (old (service-lb-controller-applied-service-keys controller))
-            (unless (member old new-keys :test #'equalp)
-              (funcall delete
-                       (service-lb-family-map dataplane
-                                              (if (= 8 (length old)) :ipv4 :ipv6) :service)
-                       old)))
-          (loop for slot from slot-count below (service-lb-controller-applied-slot-count controller)
-                do (dolist (family '(:ipv4 :ipv6))
-                     (let ((map (service-lb-family-map dataplane family :backend)))
-                       (when map (funcall delete map (service-lb-backend-key slot))))))
-          (dolist (old (service-lb-controller-applied-index-keys controller))
-            (unless (member old new-index-keys :test #'equalp)
+      (let ((signature (list service-entries backend-entries index-entries)))
+        (unless (equalp signature (service-lb-controller-applied-signature controller))
+          (let* ((dataplane (service-lb-controller-dataplane controller))
+                 (new-keys (mapcar #'car service-entries))
+                 (new-index-keys (mapcar #'car index-entries))
+                 (new-backend-keys
+                   (mapcar (lambda (entry)
+                             (cons (service-lb-entry-family entry :backend) (car entry)))
+                           backend-entries)))
+            ;; Add/update first: backends and where each now sits, then the services that point at them.
+            (dolist (entry backend-entries)
+              (funcall update
+                       (service-lb-family-map dataplane (service-lb-entry-family entry :backend) :backend)
+                       (car entry) (cdr entry)))
+            (dolist (entry index-entries)
               (let ((map (service-lb-family-map dataplane
-                                                (if (= 16 (length old)) :ipv4 :ipv6) :index)))
-                (when map (funcall delete map old)))))
-          (setf (service-lb-controller-applied-index-keys controller) new-index-keys
-                (service-lb-controller-applied-service-keys controller) new-keys
-                (service-lb-controller-applied-slot-count controller) slot-count
-                (service-lb-controller-applied-signature controller) signature)))))
+                                                (service-lb-entry-family entry :index) :index)))
+                (when map (funcall update map (car entry) (cdr entry)))))
+            (dolist (entry service-entries)
+              (funcall update
+                       (service-lb-family-map dataplane (service-lb-entry-family entry :service) :service)
+                       (car entry) (cdr entry)))
+            ;; Remove withdrawn VIPs and freed backend slots.
+            (dolist (old (service-lb-controller-applied-service-keys controller))
+              (unless (member old new-keys :test #'equalp)
+                (service-lb-delete-if-present delete
+                         (service-lb-family-map dataplane
+                                                (if (= 8 (length old)) :ipv4 :ipv6) :service)
+                         old)))
+            (dolist (old (service-lb-controller-applied-backend-keys controller))
+              (unless (member old new-backend-keys :test #'equalp)
+                (let ((map (service-lb-family-map dataplane (car old) :backend)))
+                  (when map (service-lb-delete-if-present delete map (cdr old))))))
+            (dolist (old (service-lb-controller-applied-index-keys controller))
+              (unless (member old new-index-keys :test #'equalp)
+                (let ((map (service-lb-family-map dataplane
+                                                  (if (= 16 (length old)) :ipv4 :ipv6) :index)))
+                  (when map (service-lb-delete-if-present delete map old)))))
+            (setf (service-lb-controller-applied-backend-keys controller) new-backend-keys
+                  (service-lb-controller-applied-index-keys controller) new-index-keys
+                  (service-lb-controller-applied-service-keys controller) new-keys
+                  (service-lb-controller-applied-slot-count controller) slot-count
+                  (service-lb-controller-applied-signature controller) signature))))))
   nil)

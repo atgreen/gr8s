@@ -333,3 +333,53 @@
                  (bt:thread-alive-p (gr8s::image-peer-server-thread server)))
         (ignore-errors (gr8s::stop-image-peer-server server)))
       (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))
+
+(test image-peer-server-stops-blocked-accept-and-tls-readers
+  (let* ((directory (merge-pathnames
+                     (format nil "gr8s-image-blocked-stop-~36R/" (random most-positive-fixnum))
+                     (uiop:temporary-directory)))
+         (pki (gr8s:ensure-cluster-pki (merge-pathnames "pki/" directory))))
+    (unwind-protect
+         (multiple-value-bind (certificate key)
+             (make-test-image-peer-identity pki directory "blocked-stop-node")
+           (dolist (half-open '(nil t))
+             (let* ((server (gr8s::start-image-peer-server
+                             pki certificate key (bt-octets "-GR8001-STOPSTOPSTOP")
+                             :host "0.0.0.0" :port 0))
+                    (port (gr8s::image-peer-server-port server))
+                    (client nil) (stopper nil))
+               (unwind-protect
+                    (progn
+                      (when half-open
+                        (setf client (usocket:socket-connect
+                                      "127.0.0.1" port :element-type '(unsigned-byte 8) :timeout 1))
+                        ;; Leave a TLS reader waiting for the rest of its record.
+                        (write-sequence #(22 3 3 0 20) (usocket:socket-stream client))
+                        (force-output (usocket:socket-stream client))
+                        (loop repeat 500
+                              when (bt:with-lock-held ((gr8s.security::image-peer-server-lock server))
+                                     (not (null (gr8s.security::image-peer-server-clients server))))
+                                do (return)
+                              do (sleep .01)
+                              finally (error "Image peer listener did not accept the test client")))
+                      ;; The old immediate-stop test often closes the socket
+                      ;; before the listener enters ACCEPT and misses the hang.
+                      (sleep .1)
+                      (setf stopper
+                            (bt:make-thread
+                             (lambda () (gr8s::stop-image-peer-server server) :stopped)
+                             :name "test image peer shutdown"))
+                      (let ((result (sb-thread:join-thread stopper :timeout 5 :default :timed-out)))
+                        (is (eq :stopped result))
+                        (when (eq :timed-out result)
+                          (let ((*print-level* 2) (*print-length* 3))
+                            (gr8s::debug-backtraces "image peer" 1))))
+                      (is-false (bt:thread-alive-p (gr8s::image-peer-server-thread server))))
+                 (when client (ignore-errors (usocket:socket-close client)))
+                 ;; Bound the regression even when testing the broken code:
+                 ;; wake its blocked ACCEPT so it can observe the stop flag.
+                 (when (and stopper (bt:thread-alive-p stopper))
+                   (let ((wake (ignore-errors (usocket:socket-connect "127.0.0.1" port :timeout 1))))
+                     (when wake (usocket:socket-close wake)))
+                   (sb-thread:join-thread stopper :timeout 5 :default :still-blocked))))))
+      (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore))))

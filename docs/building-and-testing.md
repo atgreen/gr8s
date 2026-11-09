@@ -185,6 +185,21 @@ Set `GR8S_SMOKE_KEEP_WORKDIR=1` to keep harness logs;
 `GR8S_TWO_NODE_FAIL_AFTER_CREATE=1` exercises failure cleanup after both Pods reach
 Running.
 
+**Service map restart recovery** — in a disposable root VM, copy
+`scripts/test-service-restart.py`, `scripts/test-service-traffic.py` and
+`scripts/smoke-two-node.py` together with the native binary. The regression stops
+one agent while retaining its Pods, deletes a Service while it is offline, seeds
+orphan entries in all six Service control maps, and checks map identity,
+withdrawal, Pod identity and Service traffic after restart. This uses native
+containers; it does not establish guest connection-state survival.
+
+```sh
+python3 test-service-restart.py --gr8s ./gr8s --report-directory ./restart-evidence
+```
+
+Optional `--ctr /path/to/ctr` preloads the test image through the managed
+containerd socket when testing independently of the image mirror.
+
 **Direct containerd checks** (opt-in; require a prepared CRI socket with a working
 CRI plugin, snapshotter, OCI runtime, pause image, and CNI configuration):
 
