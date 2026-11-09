@@ -284,6 +284,9 @@ def main():
         for protocol, port in (("http", 80), ("udp", 81)):
             answer = observed_when(f"backend ingress allow {protocol}", lambda: dial(vip, port, protocol), succeeds)
             check(protocol + "RemoteIngressRecovers", succeeds(answer), answer)
+        cni_timeouts = {str(i): (smoke.root / f"agent-{i}.log").read_text().count(
+            "failed (add): timed out waiting for the gr8s agent CNI service") for i in range(2)}
+        check("coldCniAddsMeetDeadline", not any(cni_timeouts.values()), cni_timeouts)
         report["passed"] = True
     except (Exception, KeyboardInterrupt) as error:
         report["passed"] = False
