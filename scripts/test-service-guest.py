@@ -13,6 +13,7 @@ import argparse
 import ctypes
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -30,8 +31,8 @@ traffic = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(traffic)
 
 
-def read_packet_counters(path):
-    """Read the actual shared TC counters without creating another dataplane."""
+def read_pinned_values(path, keys, value_size):
+    """Read a validated pinned map without creating another dataplane."""
     libc = ctypes.CDLL(None, use_errno=True)
     number = {"x86_64": 321, "aarch64": 280}[platform.machine()]
 
@@ -45,15 +46,36 @@ def read_packet_counters(path):
     name = ctypes.create_string_buffer(os.fsencode(path))
     fd = bpf(7, struct.pack("<QII", ctypes.addressof(name), 0, 0))
     try:
+        info = ctypes.create_string_buffer(256)
+        bpf(15, struct.pack("<IIQ", fd, 256, ctypes.addressof(info)))
+        key_size, actual_value_size = struct.unpack_from("<II", info.raw, 8)
+        if actual_value_size != value_size or any(len(key) != key_size for key in keys):
+            raise ValueError("pinned map schema does not match reader buffers")
         values = []
-        for index in range(7):
-            key = ctypes.create_string_buffer(struct.pack("<I", index))
-            value = ctypes.create_string_buffer(8)
+        for encoded in keys:
+            key = ctypes.create_string_buffer(encoded)
+            value = ctypes.create_string_buffer(value_size)
             bpf(1, struct.pack("<IIQQQ", fd, 0, ctypes.addressof(key), ctypes.addressof(value), 0))
-            values.append(struct.unpack("<Q", value.raw)[0])
+            values.append(value.raw)
         return values
     finally:
         os.close(fd)
+
+
+def read_packet_counters(path):
+    return [struct.unpack("<Q", value)[0] for value in
+            read_pinned_values(path, [struct.pack("<I", index) for index in range(7)], 8)]
+
+
+def read_tcp_state(path, key):
+    value = read_pinned_values(path, [key], 64)[0]
+    return {"backend": str(ipaddress.ip_address(value[:4])),
+            "backendPort": struct.unpack_from("!H", value, 4)[0],
+            "clientISN": struct.unpack_from("<I", value, 8)[0],
+            "serverISN": struct.unpack_from("<I", value, 12)[0],
+            "clientEnd": struct.unpack_from("<I", value, 16)[0],
+            "serverEnd": struct.unpack_from("<I", value, 20)[0],
+            "flags": struct.unpack_from("<I", value, 48)[0]}
 
 
 def packet_counters(cluster):
@@ -214,5 +236,7 @@ def main():
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--read-packet-counters":
         print(json.dumps(read_packet_counters(Path(sys.argv[2]))))
+    elif len(sys.argv) == 4 and sys.argv[1] == "--read-tcp-state":
+        print(json.dumps(read_tcp_state(Path(sys.argv[2]), bytes.fromhex(sys.argv[3]))))
     else:
         main()

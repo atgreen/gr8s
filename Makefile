@@ -136,6 +136,14 @@ build/gr8s-service-packet-test.json: src/network/service-packet-program.lisp src
 test-service-packet-program: build/gr8s-service-packet-test.json
 	python3 scripts/test-service-packet-program.py $<
 
+TCP_CLIENT_LDFLAGS ?= -static
+build/service-tcp-client: scripts/service-tcp-client.c
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror $(TCP_CLIENT_LDFLAGS) $< -o $@
+
+.PHONY: test-service-tcp-state
+test-service-tcp-state: build/gr8s-service-packet-test.json build/gr8s-service-packet-gc-test.json
+	python3 scripts/test-service-tcp-state.py $^
+
 build/gr8s-service-packet-gc-test.json: src/network/service-packet-program.lisp scripts/compile-endpoint-policy-fixture.lisp
 	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-packet-gc
 
@@ -173,7 +181,7 @@ test-core-api:
 
 test-whistler-cni: containerd-bundle test
 
-check: containerd-bundle test-protocol-generation test-whistler-cni test-endpoint-policy test-service-lb-program test-service-packet-program test-service-packet-guard test-service-packet-gc
+check: containerd-bundle test-protocol-generation test-whistler-cni test-endpoint-policy test-service-lb-program test-service-packet-program test-service-packet-guard test-service-packet-gc test-service-tcp-state
 	sh -n scripts/gr8s scripts/install-containerd.sh scripts/collect-notices.sh \
 	  scripts/verify-static-runtime.sh scripts/smoke.sh scripts/test-core-api.sh
 	scripts/verify-static-runtime.sh build/containerd

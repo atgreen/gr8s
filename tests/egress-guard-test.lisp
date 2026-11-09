@@ -19,7 +19,7 @@
                           :key (lambda (program) (getf program :name)))))
         (is (equalp (getf (first plain-programs) :insns) (getf policy :insns)))
         (is (equalp (getf (first plain-programs) :relocs) (getf policy :relocs)))))
-    (is (= 26 (length maps)))
+    (is (= 27 (length maps)))
     (is (= 5 (length programs)))
     (let ((stages (find "gr8s_pkt_stages" maps :test #'equal :key (lambda (map) (getf map :name)))))
       (is (eq :prog-array (getf stages :type)))
