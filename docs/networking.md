@@ -78,10 +78,22 @@ membership check refuses the attempt; later attempts recover after convergence.
 boundaries. The same fixture can be tested with actual attached socket hooks using
 `scripts/test-service-lb-program.py FIXTURE --kernel` inside a disposable root VM.
 Host socket hooks do not intercept connections initiated inside a guest kernel.
-The IPv4 TCP/UDP TC translation engine has passed compiled-bytecode checksum,
-connection, affinity and capacity tests in a disposable VM, but the node agent
-does not attach it yet. Guest networking and external Service replacement remain
-in development; see [the engine validation scope](service-packet-engine-validation-2026-11-09.json).
+The experimental IPv4 TCP/UDP TC Service pipeline can be enabled with
+`GR8S_ENABLE_PACKET_SERVICES=1` on the node agent. The generated CNI configuration
+then binds each endpoint guard to the node's shared pinned Service maps.
+Source validation runs before destination translation; egress policy and local
+delivery see the backend address. Client ingress policy sees the backend before
+reverse translation restores the Service source address. Missing continuation
+programs drop traffic and fail CNI CHECK. The continuation table is pinned with
+the endpoint, and Service map pins survive clean agent shutdown.
+
+This remains disabled by default. Kernel packet tests cover translation, policy
+ordering and program lifetime; they do not establish live guest or cross-node
+support. Flow garbage collection, restart reconciliation, source NAT/hairpin,
+return-tuple collision resolution, IPv6 packet translation and external Service
+replacement remain in development. Hairpin and conflicting return tuples
+currently drop safely. See [the engine validation scope](service-packet-engine-validation-2026-11-09.json)
+and [the guard integration evidence](service-packet-guard-validation-2026-11-09.json).
 
 `NodePort` and `LoadBalancer` Services allocate node ports from 30000–32767. The
 agent relays each in userspace, for TCP and UDP, with client-address affinity, so
