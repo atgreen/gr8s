@@ -117,6 +117,12 @@
   (raft-storage-save-hard-state (raft-node-storage node)
                                 (raft-node-current-term node) (raft-node-voted-for node)))
 
+(defun raft-set-hard-state (node term vote)
+  "Persist TERM and VOTE before publishing either field in memory."
+  (raft-storage-save-hard-state (raft-node-storage node) term vote)
+  (setf (raft-node-current-term node) term
+        (raft-node-voted-for node) vote))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Log helpers (1-based, offset by snapshot-index for compaction).
 
@@ -259,11 +265,11 @@ an atomic replacement, including its log-tail policy, before calling this helper
 
 (defun raft-become-follower (node term &optional leader-id)
   "Revert NODE to a follower at TERM (optionally knowing LEADER-ID): clear its
-   vote, abandon any in-flight membership add and removal delivery, persist the
+   vote only on a higher term, abandon in-flight membership delivery, persist the
    hard state, and restart the election timer."
+  (raft-set-hard-state node term (when (= term (raft-node-current-term node))
+                                  (raft-node-voted-for node)))
   (setf (raft-node-role node) :follower
-        (raft-node-current-term node) term
-        (raft-node-voted-for node) nil
         (raft-node-leader-id node) leader-id
         (raft-node-pre-vote-term node) nil         ; abandon any in-flight pre-election
         ;; Stepping down without a known leader means no recent leader contact, so
@@ -271,7 +277,6 @@ an atomic replacement, including its log-tail policy, before calling this helper
         (raft-node-leader-contact-elapsed node) (if leader-id 0 1000000))
   (clrhash (raft-node-pending-members node))   ; abandon any in-flight add on leadership loss
   (clrhash (raft-node-departing-members node)) ; a new leader restarts removal delivery
-  (raft-persist-hard-state node)
   (raft-reset-election-timer node))
 
 (defun raft-send (node to message)
@@ -312,12 +317,10 @@ an atomic replacement, including its log-tail policy, before calling this helper
   "Start an election: advance to the next term as a candidate, vote for self,
    persist the hard state, restart the election timer, and request votes from
    every peer. Wins at once in a single-node cluster."
+  (raft-set-hard-state node (1+ (raft-node-current-term node)) (raft-node-id node))
   (setf (raft-node-pre-vote-term node) nil)
   (setf (raft-node-role node) :candidate)
-  (incf (raft-node-current-term node))
-  (setf (raft-node-voted-for node) (raft-node-id node)
-        (raft-node-leader-id node) nil)
-  (raft-persist-hard-state node)
+  (setf (raft-node-leader-id node) nil)
   (clrhash (raft-node-votes node))
   (setf (gethash (raft-node-id node) (raft-node-votes node)) t)
   (raft-reset-election-timer node)
@@ -566,8 +569,7 @@ alone so existing persisted commands remain deliverable."
                      (member (raft-node-voted-for node) (list nil candidate) :test #'equal)
                      up-to-date)))
     (when grant
-      (setf (raft-node-voted-for node) candidate)
-      (raft-persist-hard-state node)
+      (raft-set-hard-state node term candidate)
       (raft-reset-election-timer node))
     (raft-send node candidate
                (list :type :request-vote-reply :term (raft-node-current-term node)

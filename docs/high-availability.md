@@ -103,6 +103,12 @@ state and log on startup. These are active correctness gaps under
 `podster-ucm.2.1`, not established crash-safety guarantees. The core's tested WAL
 and snapshot helpers alone do not close those integration gaps.
 
+The Raft core preserves its vote when stepping down within the same term, and
+persists new terms and votes before publishing them in memory. A failed storage
+write leaves the preceding term, vote and role intact and sends no vote grant or
+election request. This primitive guarantee does not supply the missing production
+recovery integration.
+
 Replication retries use bounded batches: at most 64 entries and a conservative
 1 MiB command-weight budget. A single oversized existing command travels alone.
 Compaction/truncation release discarded backing-array references, and persistence

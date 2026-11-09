@@ -1,0 +1,38 @@
+{
+  "date": "2026-11-09",
+  "tracking": "podster-ucm.2.4",
+  "changes": [
+    "Preserve voted-for on same-term step-down, including candidate acceptance of a valid leader heartbeat",
+    "Persist term/vote before changing in-memory hard state or role, sending election requests, or granting a vote"
+  ],
+  "verification": {
+    "checks": 267,
+    "failures": 0,
+    "suites": [
+      "raft",
+      "raft-transport",
+      "raft-cluster",
+      "raft-membership",
+      "raft-failover",
+      "ha-pod-failover",
+      "ha-node-cidr"
+    ],
+    "log": "/tmp/gr8s-raft-hard-state-expanded.log",
+    "regressions": [
+      "Same-term AppendEntries step-down retains vote, rejects another candidate, and keeps the recorded vote when reopening the WAL",
+      "Injected persistence failures during candidacy, higher-term step-down and vote grant preserve the preceding state and emit no election/vote messages",
+      "Successful higher-term step-down clears the previous vote"
+    ],
+    "previousImplementation": {
+      "source": "34949d7:src/raft/core.lisp",
+      "checks": 153,
+      "failures": 11,
+      "log": "/tmp/gr8s-raft-hard-state-baseline.log"
+    }
+  },
+  "limitations": [
+    "These checks cover core voting semantics and real loopback transport/failover; no new native workload or privileged dataplane test was run.",
+    "Production durable recovery and automatic snapshot/catch-up remain incomplete under podster-ucm.2.1 and podster-ucm.11.",
+    "The previously recorded full-suite baseline and intermittent Node bootstrap failures are not resolved by this checkpoint."
+  ]
+}

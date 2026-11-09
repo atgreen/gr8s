@@ -386,3 +386,73 @@
     (gr8s::raft-apply-committed node)
     (is (= 1 effects))))
 (in-suite gr8s)
+
+(in-suite raft)
+
+(defmethod gr8s.raft:raft-storage-save-hard-state ((storage failing-raft-storage) term vote)
+  (declare (ignore term vote))
+  (when (eq :hard (failing-raft-operation storage)) (error "Injected hard-state failure")))
+
+(test raft-same-term-stepdown-retains-durable-vote
+  (with-raft-temp-dir (path)
+    (let* ((storage (gr8s::open-file-raft-storage path))
+           (node (make-standalone-node :storage storage))
+           (replies nil))
+      (unwind-protect
+           (progn
+             (gr8s::raft-become-candidate node)
+             ;; A standalone candidate elected itself; model a candidate still
+             ;; waiting on its peers when another leader's heartbeat arrives.
+             (setf (gr8s::raft-node-role node) :candidate
+                   (gr8s::raft-node-send-fn node)
+                   (lambda (to message) (declare (ignore to)) (push message replies)))
+             (gr8s::raft-handle-message node
+               (list :type :append-entries :from "leader" :term 1
+                     :prev-log-index 0 :prev-log-term 0 :entries nil :leader-commit 0))
+             (is (eq :follower (gr8s::raft-node-role node)))
+             (is (equal "n1" (gr8s::raft-node-voted-for node)))
+             (gr8s::raft-handle-message node
+               (list :type :request-vote :from "other" :term 1 :last-log-index 0 :last-log-term 0))
+             (is (not (getf (first replies) :granted)))
+             (gr8s::close-file-raft-storage storage)
+             (let ((recovered (gr8s::load-raft-log path)))
+               (is (= 1 (gr8s::raft-recovered-term recovered)))
+               (is (equal "n1" (gr8s::raft-recovered-vote recovered)))))
+        (gr8s::close-file-raft-storage storage)))))
+
+(test raft-hard-state-failure-does-not-publish-transitions-or-replies
+  (let* ((storage (make-instance 'failing-raft-storage :operation :hard))
+         (node (make-standalone-node :storage storage))
+         (replies nil))
+    (setf (gr8s::raft-node-current-term node) 3
+          (gr8s::raft-node-voted-for node) "first"
+          (gr8s::raft-node-send-fn node)
+          (lambda (to message) (declare (ignore to)) (push message replies)))
+    (signals error (gr8s::raft-become-candidate node))
+    (is (= 3 (gr8s::raft-node-current-term node)))
+    (is (equal "first" (gr8s::raft-node-voted-for node)))
+    (is (eq :follower (gr8s::raft-node-role node)))
+    (setf (gr8s::raft-node-role node) :leader)
+    (signals error (gr8s::raft-become-follower node 4 "new-leader"))
+    (is (= 3 (gr8s::raft-node-current-term node)))
+    (is (equal "first" (gr8s::raft-node-voted-for node)))
+    (is (eq :leader (gr8s::raft-node-role node)))
+    (setf (gr8s::raft-node-role node) :follower
+          (gr8s::raft-node-voted-for node) nil)
+    (signals error
+      (gr8s::raft-handle-message node
+        (list :type :request-vote :from "other" :term 3 :last-log-index 0 :last-log-term 0)))
+    (is (null (gr8s::raft-node-voted-for node)))
+    (is (null replies))))
+
+(test raft-higher-term-stepdown-clears-vote-only-after-persistence
+  (let* ((storage (make-instance 'failing-raft-storage :operation nil))
+         (node (make-standalone-node :storage storage)))
+    (setf (gr8s::raft-node-current-term node) 4
+          (gr8s::raft-node-voted-for node) "old")
+    (gr8s::raft-become-follower node 5 "leader")
+    (is (= 5 (gr8s::raft-node-current-term node)))
+    (is (null (gr8s::raft-node-voted-for node)))
+    (is (equal "leader" (gr8s::raft-node-leader-id node)))))
+
+(in-suite gr8s)
