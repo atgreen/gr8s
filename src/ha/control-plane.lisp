@@ -57,6 +57,9 @@
                          (:pod-delta (gr8s::install-pod-state-delta store (second command)))
                          (:node-state (gr8s::install-node-state-blob store (second command)))
                          (:node-delta (gr8s::install-node-state-delta store (second command)))
+                         (:image-tracker
+                          (gr8s.image-distribution::tracker-apply-command
+                           (gr8s::pod-store-image-tracker store) (second command)))
                          ;; Enrollment is an operation rather than a follower-authored
                          ;; whole-index snapshot: allocation occurs at this exact log
                          ;; position against the same preceding state on every replica.
@@ -81,8 +84,9 @@
       (t (stop-raft-member member)
          (error "start-ha-control-plane requires :init or :join-host")))
     ;; Durable writes now go through Raft: the leader proposes and commits; a
-    ;; follower proposals are forwarded to the leader. TAG is :core-delta,
-    ;; :pod-state, or :node-delta; each committed command applies on every replica.
+    ;; follower proposals are forwarded to the leader. TAG identifies a durable
+    ;; resource delta or a deterministic image-tracker command; each committed
+    ;; command applies on every replica.
     (setf (gr8s::pod-store-consensus-commit-fn store)
           (lambda (tag json)
             (multiple-value-bind (result committed)

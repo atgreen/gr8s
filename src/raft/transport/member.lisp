@@ -223,7 +223,9 @@
                           :reason (if (eq committed t) "" (string-downcase (symbol-name committed)))
                           :index (or index 0)
                           :application-result
-                          (if (and (consp command) (member (first command) '(:pod-delta :node-delta)))
+                          (if (and (consp command)
+                                   (member (first command)
+                                           '(:pod-delta :node-delta :image-tracker)))
                               (raft-message->octets (list :result result))
                               (make-array 0 :element-type '(unsigned-byte 8)))))))
      :join-handler (lambda (request context)

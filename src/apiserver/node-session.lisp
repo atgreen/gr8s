@@ -1842,6 +1842,31 @@ candidates; agents still require their transactional handshake/probe gates."
                                        (slot-value observation 'gr8s.node.v1::active-flows)
                                        0))))))))))
 
+(defun commit-image-tracker-request (server request action)
+  "Commit one deterministic tracker mutation, locally or through HA Raft."
+  (let* ((tracker (node-grpc-server-image-tracker server))
+         (command
+           (gr8s.image-distribution::make-tracker-command
+            :action action
+            :digest (slot-value request 'gr8s.node.v1::digest)
+            :node-name (slot-value request 'gr8s.node.v1::node-name)
+            :now (funcall (gr8s.image-distribution::image-tracker-clock tracker))
+            :token (if (eq action :acquire)
+                       (gr8s.image-distribution::new-origin-token)
+                       (slot-value request 'gr8s.node.v1::lease-token))
+            :metainfo (slot-value request 'gr8s.node.v1::metainfo)
+            :address (slot-value request 'gr8s.node.v1::peer-address)
+            :port (slot-value request 'gr8s.node.v1::peer-port)
+            :peer-id (slot-value request 'gr8s.node.v1::peer-id)
+            :complete-p (slot-value request 'gr8s.node.v1::complete)))
+         (commit (pod-store-consensus-commit-fn (node-grpc-server-store server)))
+         (result (if commit
+                     (funcall commit :image-tracker command)
+                     (gr8s.image-distribution::tracker-apply-command tracker command))))
+    (when (eq :error (getf result :status))
+      (error "~A" (getf result :message)))
+    result))
+
 (defun handle-image-tracker-request (server request context)
   "Execute one tracker operation for the node identity authenticated by mTLS."
   (let* ((node-name (slot-value request 'gr8s.node.v1::node-name))
@@ -1864,39 +1889,25 @@ candidates; agents still require their transactional handshake/probe gates."
              :peer-ranker (lambda (peers)
                             (rank-image-tracker-peers server node-name peers)))))
           ((string= action "acquire")
-           (multiple-value-bind (status token expires-at owner)
-               (gr8s.image-distribution::tracker-acquire-origin
-                tracker digest node-name)
-             (declare (ignore owner))
-             (response (string-downcase (symbol-name status))
-                       :token token :expires-at expires-at)))
+           (let ((result (commit-image-tracker-request server request :acquire)))
+             (response (string-downcase (symbol-name (getf result :status)))
+                       :token (gr8s.image-distribution::tracker-result-octets
+                               result :token)
+                       :expires-at (getf result :expires-at))))
           ((string= action "renew")
-           (response
-            "ok" :expires-at
-            (gr8s.image-distribution::tracker-renew-origin
-             tracker digest node-name
-             (slot-value request 'gr8s.node.v1::lease-token))))
+           (let ((result (commit-image-tracker-request server request :renew)))
+             (response "ok" :expires-at (getf result :expires-at))))
           ((string= action "publish")
-           (response
-            "ok" :infohash
-            (gr8s.image-distribution::tracker-publish-swarm
-             tracker digest node-name
-             (slot-value request 'gr8s.node.v1::lease-token)
-             (slot-value request 'gr8s.node.v1::metainfo)
-             (slot-value request 'gr8s.node.v1::peer-address)
-             (slot-value request 'gr8s.node.v1::peer-port)
-             (slot-value request 'gr8s.node.v1::peer-id))))
+           (let ((result (commit-image-tracker-request server request :publish)))
+             (response "ok"
+                       :infohash
+                       (gr8s.image-distribution::tracker-result-octets
+                        result :infohash))))
           ((string= action "announce")
-           (gr8s.image-distribution::tracker-announce-peer
-            tracker digest node-name
-            (slot-value request 'gr8s.node.v1::peer-address)
-            (slot-value request 'gr8s.node.v1::peer-port)
-            (slot-value request 'gr8s.node.v1::peer-id)
-            :complete-p (slot-value request 'gr8s.node.v1::complete))
+           (commit-image-tracker-request server request :announce)
            (response "ok"))
           ((string= action "withdraw")
-           (gr8s.image-distribution::tracker-withdraw-peer
-            tracker digest node-name)
+           (commit-image-tracker-request server request :withdraw)
            (response "ok"))
           (t (error "Unknown image tracker action ~S" action)))))))
 
@@ -1956,6 +1967,7 @@ candidates; agents still require their transactional handshake/probe gates."
                   :wireguard-listen-port wireguard-listen-port
                   :wireguard-relay-server relay-server
                   :wireguard-relay-address wireguard-relay-address
+                  :image-tracker (pod-store-image-tracker store)
                   :clock clock
                   :gateway-stability-seconds gateway-stability-seconds))
          (started-p nil))
