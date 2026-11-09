@@ -63,6 +63,30 @@
         (error "Snapshot generation must be rematerialized above the member's revision clocks")))
     boundary))
 
+(defvar *store-application-barriers* nil)
+
+(defun store-application-barriers-owned-p (store)
+  (and (eq store *store-application-barriers*)
+       (every #'sb-thread:holding-mutex-p
+              (list (pod-store-workload-lock store) (pod-store-credential-lock store)
+                    (pod-store-consensus-write-lock store)))))
+
+(defun call-with-store-application-barriers (store function)
+  "Acquire outer restore locks, or reuse this thread's verified complete barrier."
+  (when (or *core-write-active* (eq store *store-request-lease*))
+    (error "Cannot acquire restore barriers from a transaction or leased request"))
+  (if (store-application-barriers-owned-p store)
+      (funcall function)
+      (progn
+        (when (some #'sb-thread:holding-mutex-p
+                    (list (pod-store-workload-lock store) (pod-store-credential-lock store)
+                          (pod-store-consensus-write-lock store)))
+          (error "Cannot acquire restore barriers while holding a partial barrier"))
+        (bt:with-lock-held ((pod-store-workload-lock store))
+          (bt:with-lock-held ((pod-store-credential-lock store))
+            (bt:with-lock-held ((pod-store-consensus-write-lock store))
+              (let ((*store-application-barriers* store)) (funcall function))))))))
+
 (defun reload-store-application (store id &key call-with-member-lock validate-recovery commit-recovery)
   "Replace application state on STORE itself, leaving access blocked on success or failure.
 Caller has quiesced remaining node/controller/retained-reference ingress. Lock order:
@@ -82,9 +106,8 @@ It runs under the barriers and must not reenter public store operations."
     (error "HA application reload requires member barrier, boundary validation and durable recovery callbacks"))
   (bt:with-lock-held ((pod-store-lock store)) (require-store-reload-quiescence store))
   (let ((thread (bt:current-thread)) (started nil) (loaded nil) (descriptor nil) (boundary nil))
-    (bt:with-lock-held ((pod-store-workload-lock store))
-      (bt:with-lock-held ((pod-store-credential-lock store))
-        (bt:with-lock-held ((pod-store-consensus-write-lock store))
+    (call-with-store-application-barriers
+     store (lambda ()
           (funcall
            (or call-with-member-lock #'funcall)
            (lambda ()
@@ -115,6 +138,6 @@ It runs under the barriers and must not reenter public store operations."
                  (error "Loaded application clocks disagree with staged snapshot boundary"))
                (when commit-recovery (funcall commit-recovery descriptor store))
                (finish-store-restore store descriptor)
-               (setf (pod-store-application-loaded-p store) t loaded t)))))))
+               (setf (pod-store-application-loaded-p store) t loaded t))))))
     (unless loaded (error "Member barrier did not complete application reload"))
     (values store descriptor)))

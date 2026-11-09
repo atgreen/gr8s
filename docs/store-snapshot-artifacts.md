@@ -467,9 +467,9 @@ An exact durable pending snapshot may resume after a later election term, but it
 index, term and application artifact digest must still match, and its boundary
 cannot precede the member's committed/applied state. A different pending install
 is rejected. These checks do not acquire ingress barriers, write a WAL snapshot,
-or enable a production restore caller. In particular, the transport's current
-member-lock-first dispatch still needs coordination with the outer application
-writer barriers before production artifact installation can invoke live reload.
+or enable production restore automatically. The optional dispatch barrier
+described below establishes outer application writer locks before member locking; production startup must configure it together
+with the application restore callback.
 
 For startup recovery, the validator's explicit `:recover t` mode accepts an exact
 published snapshot already loaded from the WAL, before its suffix is applied. It
@@ -538,5 +538,49 @@ retention; intermediate chunk calls retain their two-second budget.
 Retention runs under the member mutex and must perform filesystem work only.
 It must not acquire application ingress/writer locks or invoke live application
 reload. Installing these callbacks does not install a production application
-restore callback or enable compaction. Production startup, restore barriers,
-artifact retention rules and automatic compaction still require coordination.
+restore callback or enable compaction. Production startup and its use of the
+restore barriers, artifact retention rules and automatic compaction still require coordination.
+
+`gr8s.resources::configure-member-store-restore` opts a running member and store
+into live application installation. It requires an open file WAL and no pending
+installation, binds the artifact registry, and installs an application restore
+callback plus an outer dispatch barrier. It does not configure application-voter
+startup recovery or automatic compaction.
+
+An incoming final snapshot chunk that advances the committed boundary, a durable
+pending installation, or an unfinished gate resume enters this barrier. Dispatch
+releases the member mutex before rejecting new application requests and draining
+existing leases. Normal Raft messages continue during that drain and while the
+barrier waits for an outstanding consensus writer. The barrier then takes the
+workload, credential and consensus-writer locks before taking the member mutex.
+Live reload reuses these locks only after verifying current-thread ownership of
+all three; it does not acquire them again inside the Raft callback.
+
+Under those barriers, the receiver retains the artifact, writes the WAL snapshot,
+materializes a generation above its local revision clocks and reloads the same
+store object. Its pre-intent and post-load callbacks validate the actual durable
+pending snapshot identity. Raft then publishes configuration and the applied
+boundary and clears its pending install. Only after both application loading and
+Raft publication can the barrier reopen its own access gate.
+
+A failure before WAL adoption can reopen the unchanged application if its WAL
+remains usable. A durable pending install or incomplete application load keeps
+access blocked. An ordinary subsequent Raft RPC retries the pending install under
+the same outer barriers. A failed gate resume after Raft publication also remains
+marked for retry even when no Raft snapshot is pending. The barrier never opens
+a gate that was already blocked by another operation before it arrived.
+
+The memory probe supports `GR8S_SNAPSHOT_LIVE_TRANSFER=1`: it starts a separate
+receiver process with a 384 MiB heap and checks that its live store loads the
+complete payload and publishes the applied boundary. For example:
+
+```sh
+GR8S_SNAPSHOT_LIVE_TRANSFER=1 GR8S_SNAPSHOT_RELOAD=1 \
+  sbcl --dynamic-space-size 384 --noinform --non-interactive \
+  --load scripts/test-store-snapshot-memory.lisp
+```
+
+This probe uses controlled snapshot boundaries and loopback peer traffic. It does
+not prove unmodified `gr8s serve` startup recovery, active native-agent reference
+drain, or production failover after an interrupted installation. Those paths
+remain acceptance requirements before enabling application compaction.

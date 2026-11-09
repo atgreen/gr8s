@@ -132,7 +132,7 @@
   ;; incoming frames here; NIL on witnesses and transport-only tests.
   operation-server
   ;; Filesystem-only callbacks; retention runs under the member lock before WAL adoption.
-  artifact-source-fn artifact-retain-fn
+  artifact-source-fn artifact-retain-fn snapshot-barrier-fn (snapshot-barrier-pending nil)
   snapshot-directory snapshot-root snapshot-owner-fd snapshot-receiver
   (snapshot-max-bytes (* 16 1024 1024 1024))
   ;; This member's RAFT-CREDENTIALS. Only in-process tests run without any.
@@ -223,6 +223,37 @@
         (raft-tick (raft-member-node member))
         (raft-member-expire-snapshot-receiver member)))))
 
+(defun raft-member-dispatch-message-unlocked (member message)
+  (case (getf message :type)
+    (:snapshot-chunk (raft-member-receive-snapshot-chunk member message))
+    (:install-snapshot (error "Snapshots must use bounded chunk transport"))
+    (t (raft-handle-message (raft-member-node member) message))))
+
+(defun raft-member-dispatch-message (member message)
+  "Acquire optional outer snapshot barriers BEFORE the member mutex.
+Normal replication continues while the barrier drains outstanding application writers."
+  (let ((barrier nil))
+    (bt:with-lock-held ((raft-member-lock member))
+      (if (and (raft-member-snapshot-barrier-fn member)
+               (or (raft-node-snapshot-pending (raft-member-node member))
+                   (raft-member-snapshot-barrier-pending member)
+                   (and (eq :snapshot-chunk (getf message :type)) (getf message :done)
+                        (typep (getf message :last-index) '(integer 1 *))
+                        (> (getf message :last-index) (raft-node-commit-index (raft-member-node member))))))
+          (setf barrier (raft-member-snapshot-barrier-fn member))
+          (return-from raft-member-dispatch-message (raft-member-dispatch-message-unlocked member message))))
+    (let ((owner (bt:current-thread)) (started nil) (completed nil) (invalid nil))
+      (funcall barrier member message
+               (lambda ()
+                 (unless (and (eq owner (bt:current-thread)) (not started))
+                   (setf invalid t)
+                   (error "Snapshot barrier must invoke dispatch synchronously exactly once"))
+                 (setf started t)
+                 (bt:with-lock-held ((raft-member-lock member))
+                   (multiple-value-prog1 (raft-member-dispatch-message-unlocked member message)
+                     (setf completed t)))))
+      (unless (and completed (not invalid)) (error "Snapshot barrier did not complete dispatch")))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Lifecycle.
 
@@ -278,11 +309,7 @@
      :deliver-handler (lambda (request context)
                         (let ((msg (gr8s::authenticated-raft-message
                                     credentials request context)))
-                          (bt:with-lock-held ((raft-member-lock member))
-                            (case (getf msg :type)
-                              (:snapshot-chunk (raft-member-receive-snapshot-chunk member msg))
-                              (:install-snapshot (error "Snapshots must use bounded chunk transport"))
-                              (t (raft-handle-message (raft-member-node member) msg)))))
+                          (raft-member-dispatch-message member msg))
                         (make-instance 'gr8s.node.v1::raft-ack))
      :propose-handler
      (lambda (request context)
