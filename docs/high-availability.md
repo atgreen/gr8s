@@ -141,6 +141,9 @@ volatile test members. Each transfer is limited to 16 GiB. A log-only checkpoint
 without an application snapshot callback cannot be transferred as application state.
 Crash-abandoned transfer-file cleanup remains under `podster-ucm.11.2.1`;
 the current cleanup guarantees cover running members and graceful shutdown.
+The [snapshot-transfer validation record](raft-snapshot-transfer-validation-2026-11-09.json)
+covers interrupted mTLS transfer, voter/learner catch-up and leadership handoff
+with a witness. Run `make test-raft-snapshots` for the focused suite.
 
 Production store snapshot capture/restore and automatic compaction remain under
 `podster-ucm.11`. The generic callback path reconstructs an opaque Lisp application

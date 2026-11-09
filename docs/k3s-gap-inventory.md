@@ -52,6 +52,12 @@ committed Raft log without automatic compaction
 or snapshot catch-up; that P0 work remains open. Live disconnected-peer acceptance
 and the other HA correctness items also remain open.
 
+The core and peer transport now support configured snapshot catch-up with bounded
+chunks. A [four-member mTLS validation](raft-snapshot-transfer-validation-2026-11-09.json)
+covers an interrupted transfer, restored voter leadership and continued learner
+replication. Production store artifact capture/restore, crash cleanup and automatic
+compaction remain required before this closes the retained-log gap.
+
 Pod desired state and checkpoints now use per-key staged transactions instead of
 complete Pod-index serialization. Desired UID/version preconditions are checked at
 apply time, and status-only commands cannot resurrect deleted objects. A

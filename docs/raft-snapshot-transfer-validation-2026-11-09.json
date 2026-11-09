@@ -76,11 +76,25 @@
       "condition": "TLS decode_error; server invalid record content type131",
       "tracking": "podster-ucm.2.5",
       "status": "Intermittent cause unresolved; final run passes all96 TLS checks. Not classified as a baseline failure."
+    },
+    "mergedMain": {
+      "main": "721d4e0",
+      "checks": 556,
+      "failures": 0,
+      "suites": [
+        "raft-snapshot",
+        "raft",
+        "service-lb"
+      ],
+      "log": "/tmp/gr8s-snapshot-merged.log",
+      "nativeBuild": "passed",
+      "nativeBuildLog": "/tmp/gr8s-snapshot-merged-native.log",
+      "nativeBinarySHA256": "5a94e322a3bfe4385c6280ead45b808cdc453c6014b8c2ac008860eebc07356a"
     }
   },
   "remaining": [
     "Crash-abandoned scratch roots and partial-file reaping:podster-ucm.11.2.1",
-    "Production streamed application artifacts and exact-boundary store capture/restore:podster-ucm.11",
+    "Production streamed application artifacts and safe automatic compaction:podster-ucm.11.3; requires staged Node writes under podster-ucm.2.3",
     "Production WAL recovery before accepting traffic:podster-ucm.2.1",
     "Automatic compaction and live disconnected production-member acceptance:podster-ucm.11",
     "Intermittent enrollment TLS record failure:podster-ucm.2.5"
