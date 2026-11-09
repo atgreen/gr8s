@@ -1,0 +1,50 @@
+{
+  "date": "2026-11-09",
+  "scope": "Bounded record reader and validation; no live store replacement",
+  "passed": true,
+  "checks": 221,
+  "suites": {
+    "store-snapshot": 59,
+    "core-recovery": 20,
+    "ha-node-cidr": 77,
+    "pod-transactions": 65
+  },
+  "coverage": [
+    "Header/version and expected applied index/term",
+    "Clocks followed by individually validated data and exact end-record count",
+    "Reject missing/repeated framing, torn final line, trailing bytes and unknown record kinds",
+    "Reject invalid resource identity, local Events, Pod checkpoint/publication and history fields",
+    "Reject unsafe Pod UID and Node ID basenames",
+    "Writer record-size rejection leaves no destination or temporary file",
+    "Reader record-size rejection before unbounded line allocation"
+  ],
+  "limits": {
+    "recordBytes": 16777216,
+    "jsonStringCharacters": 2097152,
+    "jsonNesting": 128
+  },
+  "memory": {
+    "heapMiB": 384,
+    "sourceStoreResident": true,
+    "captureAndValidation": {
+      "passed": true,
+      "legacy": false,
+      "records": 1024,
+      "validatedRecords": 1027,
+      "payloadBytes": 67108864,
+      "artifactBytes": 67347524
+    }
+  },
+  "nativeBuild": {
+    "passed": true,
+    "sha256": "3d37bf89b7644830f736bf561dd40f5a9e7ad8a70c4162043f335d5f0159edc3"
+  },
+  "remaining": [
+    "Cross-record duplicate identities, Node claims and CRD relationships checked in staged generation",
+    "Durable generation restore and interrupted-install recovery",
+    "Artifact checksum/ownership/lifetime and binary transport",
+    "Production WAL recovery and automatic compaction",
+    "Real-process restart/failover/catch-up validation"
+  ],
+  "fullGoalComplete": false
+}

@@ -43,12 +43,13 @@
     "sha256": "3f19d19f016bdc73527637da14f7dc2493190f6caa394865f758c8da27b4d7c6"
   },
   "remaining": [
-    "Artifact reader/validation, durable restore generation and interrupted-install recovery",
+    "Durable restore generation and interrupted-install recovery",
     "Binary artifact transport without opaque Lisp reconstruction",
     "Artifact ownership/checksum/lifetime in production WAL and snapshots",
     "Production WAL recovery and automatic compaction",
     "Real-process catch-up/restart/failover acceptance under constrained heap",
     "Capture currently holds the store/member locks during writing; scheduling and latency remain integration work"
   ],
-  "fullGoalComplete": false
+  "fullGoalComplete": false,
+  "readerValidationRecord": "store-snapshot-reader-validation-2026-11-09.json"
 }

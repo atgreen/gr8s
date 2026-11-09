@@ -57,7 +57,7 @@ chunks. A [four-member mTLS validation](raft-snapshot-transfer-validation-2026-1
 covers an interrupted transfer, restored voter leadership and continued learner
 replication. Crash-abandoned transfer cleanup now preserves live owners, with
 [native startup and SIGKILL validation](raft-snapshot-scratch-validation-2026-11-09.json).
-An internal [streamed store artifact writer](store-snapshot-artifacts.md) now exists.
+An internal [streamed store artifact writer and reader](store-snapshot-artifacts.md) now exist.
 Production capture/transport/restore integration and automatic compaction remain
 required before this closes the retained-log gap.
 

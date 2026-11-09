@@ -9,6 +9,7 @@
                                   (uiop:temporary-directory)))
        (count (parse-integer (or (uiop:getenv "GR8S_SNAPSHOT_RECORDS") "1024")))
        (bytes 65536)
+       (validated-count nil)
        (legacy (equal "1" (uiop:getenv "GR8S_SNAPSHOT_LEGACY"))))
   (sb-posix:mkdir (namestring directory) #o700)
   (unwind-protect
@@ -21,6 +22,7 @@
                     "apiVersion" "v1" "kind" "ConfigMap"
                     "metadata" (gr8s::core-object "name" name "namespace" "default" "resourceVersion" "1")
                     "data" (gr8s::core-object "payload" (make-string bytes :element-type 'base-char :initial-element #\x))))))
+         (setf (gr8s::pod-store-resource-revision store) 1)
          (sb-ext:gc :full t)
          (if legacy
              (let ((json (gr8s.resources::core-state-json
@@ -28,10 +30,14 @@
                           (gr8s::pod-store-workload-deletions store)
                           (gr8s::pod-store-job-controller-states store))))
                (gr8s.security::write-private-text-exclusively target json))
-             (gr8s.resources::capture-store-snapshot store target 1 1))
+             (progn
+               (gr8s.resources::capture-store-snapshot store target 1 1)
+               (setf validated-count
+                     (nth-value 2 (gr8s.resources::map-store-snapshot-records
+                                   target nil :expected-index 1 :expected-term 1)))))
          (format t "~&~A~%"
                  (com.inuoe.jzon:stringify
                   (gr8s::core-object "passed" t "legacy" legacy "records" count
-                                    "payloadBytes" (* count bytes)
+                                    "validatedRecords" validated-count "payloadBytes" (* count bytes)
                                     "artifactBytes" (sb-posix:stat-size (sb-posix:stat (namestring target)))))))
     (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore)))
