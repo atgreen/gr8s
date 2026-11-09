@@ -369,7 +369,11 @@
                             (bt:make-thread
                              (lambda () (gr8s::stop-image-peer-server server) :stopped)
                              :name "test image peer shutdown"))
-                      (is (eq :stopped (sb-thread:join-thread stopper :timeout 5 :default :timed-out)))
+                      (let ((result (sb-thread:join-thread stopper :timeout 5 :default :timed-out)))
+                        (is (eq :stopped result))
+                        (when (eq :timed-out result)
+                          (let ((*print-level* 2) (*print-length* 3))
+                            (gr8s::debug-backtraces "image peer" 1))))
                       (is-false (bt:thread-alive-p (gr8s::image-peer-server-thread server))))
                  (when client (ignore-errors (usocket:socket-close client)))
                  ;; Bound the regression even when testing the broken code:

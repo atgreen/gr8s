@@ -164,11 +164,11 @@
                   (image-peer-server-peer-id server)
                   (image-peer-swarm-completed swarm) :handshake handshake)))
            (error () nil))
-      (when tls (ignore-errors (close tls :abort t)))
-      (ignore-errors (usocket:socket-close socket))
       (bt:with-lock-held ((image-peer-server-lock server))
         (setf (image-peer-server-clients server)
-              (delete socket (image-peer-server-clients server) :test #'eq))))))
+              (delete socket (image-peer-server-clients server) :test #'eq)))
+      (when tls (ignore-errors (close tls :abort t)))
+      (ignore-errors (usocket:socket-close socket)))))
 
 (defun run-image-peer-server (server)
   (loop until (image-peer-server-stopping-p server)
@@ -216,22 +216,27 @@
   ;; RECV. Shut down the socket first so blocked readers observe termination.
   (flet ((shutdown (socket)
            (ignore-errors
-             (sb-bsd-sockets:socket-shutdown (usocket:socket socket) :direction :io))
-           (ignore-errors (usocket:socket-close socket))))
+             (sb-bsd-sockets:socket-shutdown (usocket:socket socket) :direction :io))))
     (shutdown (image-peer-server-listener server))
     ;; No accepted connection can be added after this join. Take the client
     ;; snapshot afterwards so an ACCEPT racing shutdown cannot escape cleanup.
     (let ((thread (image-peer-server-thread server)))
       (when (and thread (not (eq thread (bt:current-thread))))
         (ignore-errors (bt:join-thread thread))))
+    (ignore-errors (usocket:socket-close (image-peer-server-listener server)))
     (let ((clients nil) (threads nil))
       (bt:with-lock-held ((image-peer-server-lock server))
         (setf clients (copy-list (image-peer-server-clients server))
-              threads (copy-list (image-peer-server-client-threads server))))
-      (dolist (socket clients) (shutdown socket))
+              threads (copy-list (image-peer-server-client-threads server)))
+        ;; A worker unregisters before closing its stream. Holding the same
+        ;; lock keeps SHUTDOWN from racing a close and descriptor reuse.
+        (dolist (socket clients) (shutdown socket)))
+      ;; Leave each descriptor open until its reader has observed EOF. Closing
+      ;; it immediately can strand SBCL's buffered read on a recycled fd.
       (dolist (thread threads)
         (unless (eq thread (bt:current-thread))
-          (ignore-errors (bt:join-thread thread))))))
+          (ignore-errors (bt:join-thread thread))))
+      (dolist (socket clients) (ignore-errors (usocket:socket-close socket)))))
   server)
 
 (defun load-image-peer-pki (ca-certificate-path)
