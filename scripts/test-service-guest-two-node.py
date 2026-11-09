@@ -53,11 +53,15 @@ def main():
                         help="optional static service-tcp-client probe for real guest source-port reuse")
     parser.add_argument("--tcp-restart", action="store_true",
                         help="keep one guest TCP socket across selector changes and both agent restarts")
+    parser.add_argument("--tcp-upgrade", type=Path,
+                        help="install historical packet stages while the client agent is stopped")
     parser.add_argument("--state-parent", type=Path, default=Path("/var/tmp"))
     parser.add_argument("--kata-agent-timeout-ms", type=int, default=120000)
     args = parser.parse_args()
     if args.tcp_restart and not args.tcp_client:
         parser.error("--tcp-restart requires --tcp-client")
+    if args.tcp_upgrade and not args.tcp_restart:
+        parser.error("--tcp-upgrade requires --tcp-restart")
     if os.geteuid() != 0 or not Path("/dev/kvm").exists():
         sys.exit("run as root in a disposable VM with nested KVM")
     os.environ["GR8S_ENABLE_PACKET_SERVICES"] = "1"
@@ -359,29 +363,61 @@ def main():
                                   lambda answer: answer.get("body") == alternate)
             local_port = 25092
             check("guestTcpHeldSelectorChanged", fresh["body"] == alternate, fresh)
+            legacy_flow = False
+            upgrade_directory = None
+            upgrade_reader = Path(__file__).with_name("test-service-program-upgrade.py").resolve()
+            shared_root = smoke.root / "agent-0/containerd/bpf/service-lb"
+            held_key = (ipaddress.ip_address(client_ip).packed + ipaddress.ip_address(reuse_vip).packed +
+                        struct.pack("!HHBBH", 25092, 80, 6, 0, 0)).hex()
+
+            def flow_state():
+                return json.loads(smoke.in_node(0, "python3", Path(guest.__file__).resolve(),
+                    "--read-service-flow", shared_root / "gr8s_pkt_forward", held_key).stdout)
+
+            def inspect_upgrade():
+                return json.loads(smoke.in_node(0, "python3", upgrade_reader, "--inspect",
+                    "--endpoint-directory", upgrade_directory, "--service-root", shared_root).stdout)
+
             for index in range(2):
                 before_maps = map_ids(index)
                 report.setdefault("heldRestartSnapshots", []).append(
                     {"node": index, "maps": before_maps, "state": tcp_state(), "atMs": time.time_ns() // 1000000})
                 save()
+                stopped_pid = smoke.agents[index].pid
                 smoke.agents[index].send_signal(signal.SIGTERM)
                 smoke.agents[index].wait(timeout=180)
                 smoke.agents[index] = None
-                stopped_state = tcp_state()
+                if args.tcp_upgrade and index == 0:
+                    tables = smoke.in_node(0, "find", shared_root.parent, "-mindepth", "2", "-maxdepth", "2",
+                                           "-name", "gr8s_pkt_stages").stdout.splitlines()
+                    if len(tables) != 1:
+                        raise RuntimeError("expected exactly one retained client endpoint")
+                    upgrade_directory = Path(tables[0]).parent
+                    legacy = json.loads(smoke.in_node(0, "python3", upgrade_reader,
+                        "--fixture", args.tcp_upgrade.resolve(), "--endpoint-directory", upgrade_directory,
+                        "--service-root", shared_root, "--stopped-agent-pid", str(stopped_pid),
+                        "--tcp-key", held_key).stdout)
+                    check("guestTcpLegacyStagesInstalled", legacy["tcpMetadataRemoved"] and
+                          legacy["before"]["requiredMapIds"] == legacy["legacy"]["requiredMapIds"], legacy)
+                    legacy_flow = True
+                stopped_state = flow_state() if legacy_flow else tcp_state()
+                stopped_replies = counters(0)[1]
                 down_started = time.monotonic()
                 # Read pinned state from the retained node namespace; API exec
                 # on the deliberately stopped client agent is unavailable.
                 def advanced_while_down():
-                    current = tcp_state()
-                    return current if (current["clientEnd"] != stopped_state["clientEnd"] and
-                                       current["serverEnd"] != stopped_state["serverEnd"]) else None
+                    current = flow_state() if legacy_flow else tcp_state()
+                    advanced = ((current["stamp"] > stopped_state["stamp"] and counters(0)[1] > stopped_replies)
+                                if legacy_flow else (current["clientEnd"] != stopped_state["clientEnd"] and
+                                                     current["serverEnd"] != stopped_state["serverEnd"]))
+                    return current if advanced else None
                 offline_state = overlay.wait_for("held guest exchanges while agent down",
                                                  advanced_while_down, timeout=30)
                 check(f"guestTcpHeldDuringAgent{index}Stop",
-                      offline_state["clientISN"] == held_state["clientISN"] and
-                      offline_state["serverISN"] == held_state["serverISN"] and
                       offline_state["backend"] == backend_ip and
-                      offline_state["flags"] & 4 and not offline_state["flags"] & 384,
+                      (legacy_flow or (offline_state["clientISN"] == held_state["clientISN"] and
+                                       offline_state["serverISN"] == held_state["serverISN"] and
+                                       offline_state["flags"] & 4 and not offline_state["flags"] & 384)),
                       {"before": stopped_state, "after": offline_state,
                        "agentDownSeconds": time.monotonic() - down_started})
                 report["heldRestartSnapshots"][-1]["beforeStartMs"] = time.time_ns() // 1000000
@@ -403,19 +439,43 @@ def main():
                       all(row["body"] == BACKEND and row["localPort"] == 25092 and
                           row["peerIP"] == reuse_vip for row in responses) and
                       [row["request"] for row in responses] == list(range(1, len(responses) + 1)) and
-                      current_state["clientISN"] == held_state["clientISN"] and
-                      current_state["serverISN"] == held_state["serverISN"] and
+                      (bool(current_state["flags"] & 512) if legacy_flow else
+                       (current_state["clientISN"] == held_state["clientISN"] and
+                        current_state["serverISN"] == held_state["serverISN"])) and
                       current_state["backend"] == backend_ip and current_state["flags"] & 4 and
                       not current_state["flags"] & 384 and
                       workload_identity() == identity_before and before_maps == after_maps,
                       {"responses": responses, "state": current_state,
                        "workloads": workload_identity(), "mapsBefore": before_maps, "mapsAfter": after_maps})
+                if args.tcp_upgrade and index == 0:
+                    upgraded = inspect_upgrade()
+                    required = set(upgraded["requiredMapIds"].values())
+                    check("guestTcpLegacyStagesRefreshed", not upgraded["blockerPins"] and
+                          upgraded["requiredMapIds"] == legacy["before"]["requiredMapIds"] and
+                          upgraded["endpointMapIds"] == legacy["before"]["endpointMapIds"] and
+                          all(upgraded["links"][d]["id"] == legacy["before"]["links"][d]["id"]
+                              for d in ("ingress", "egress")) and
+                          all(required.issubset(upgraded["stages"][i]["mapIds"]) and
+                              upgraded["stages"][i]["tag"] == legacy["before"]["stages"][i]["tag"]
+                              for i in (0, 2)), upgraded)
             smoke.kubectl("exec", CLIENT, "--", "touch", hold_stop)
             overlay.wait_for("held probe exits cleanly", lambda:
                 smoke.kubectl("exec", CLIENT, "--", "cat", hold_exit, check=False).stdout.strip() == "0",
                 timeout=30)
             final_state = tcp_state()
-            check("guestTcpHeldGracefulClose", bool(final_state["flags"] & 256), final_state)
+            if legacy_flow:
+                check("guestTcpLegacyCloseKeepsCompatibilityLifetime", final_state["flags"] & 516 == 516 and
+                      not final_state["flags"] & 384, final_state)
+                local_port = 25094
+                new = observed_when("fresh post-upgrade tuple uses current backend", fixed_connection,
+                                    lambda answer: answer.get("body") == alternate)
+                new_state = tcp_state()
+                check("guestTcpFreshGenerationAfterUpgrade", new["body"] == alternate and
+                      new_state["backend"] == alternate_ip and new_state["flags"] & 7 == 7 and
+                      not new_state["flags"] & 512, {"connection": new, "state": new_state})
+                local_port = 25092
+            else:
+                check("guestTcpHeldGracefulClose", bool(final_state["flags"] & 256), final_state)
         apply(client_policy([]))
         for protocol, port in (("http", 80), ("udp", 81)):
             answer = observed_when(f"default-deny {protocol}", lambda: dial(vip, port, protocol), denied)
