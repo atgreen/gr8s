@@ -34,13 +34,13 @@
   },
   "nativeBuild": {
     "passed": true,
-    "sha256": "97a8c6ea976d95ab060b270dcc8f1c130229e47e476b435dcc176d06da2faef3"
+    "sha256": "a3d4e9e6e540d193e6689027a2a8e95d6ae2987f8f4deb893049cbc6b3a92176"
   },
   "nativeStartupAndRestart": {
     "passed": true,
     "native": true,
     "runtime": "fake",
-    "evidence": "/tmp/gr8s-generation-native-mc2sesij",
+    "evidence": "/tmp/gr8s-generation-native-qizmddx2",
     "generationLoaded": true,
     "legacyPodExcluded": true,
     "applicationWriteSurvivesRestart": true,
@@ -56,5 +56,13 @@
     "Artifact transport/lifetime and automatic compaction",
     "Power-loss acceptance and constrained-heap full restore/restart/failover"
   ],
-  "fullGoalComplete": false
+  "fullGoalComplete": false,
+  "finalMergedValidation": {
+    "sourceCommit": "c849f02",
+    "integratedMain": "5e536e9",
+    "passed": true,
+    "snapshotAndGenerationChecks": 105,
+    "certificateChecks": 34,
+    "installerLifecycleTests": 41
+  }
 }
