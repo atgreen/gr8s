@@ -217,9 +217,10 @@ def main():
             reuse_vip = get("service", "guest-tcp-reuse")["spec"]["clusterIP"]
             local_port = 25090  # outside the default ephemeral range used by ordinary probes
 
-            def fixed_connection():
+            def fixed_connection(mode="reset"):
                 answer = smoke.kubectl("exec", CLIENT, "--request-timeout=30s", "--", probe_path,
-                                       reuse_vip, str(local_port), check=False, timeout=40)
+                                       reuse_vip, str(local_port), *(["fin"] if mode == "fin" else []),
+                                       check=False, timeout=40)
                 try:
                     return json.loads(answer.stdout)
                 except ValueError:
@@ -237,6 +238,7 @@ def main():
             state_before = tcp_state()
             check("guestTcpInitialGeneration", state_before["backend"] == backend_ip and
                   bool(state_before["flags"] & 4), {"connection": first, "state": state_before})
+            check("guestTcpResetObserved", bool(state_before["flags"] & 128), state_before)
             apply(traffic.service("guest-tcp-reuse", [traffic.HTTP],
                                   selector={"test.gr8s.io/pod": alternate}))
             second = observed_when("same guest source port reaches replacement", fixed_connection,
@@ -251,6 +253,13 @@ def main():
             check("guestTcpNewGenerationSelectsReplacement", state_after["backend"] == alternate_ip and
                   state_after["clientISN"] != state_before["clientISN"] and bool(state_after["flags"] & 4),
                   {"before": state_before, "after": state_after, "replacement": alternate_ip})
+            # A second tuple exercises a graceful half-close and the final reply FIN.
+            local_port = 25091
+            graceful = observed_when("graceful guest connection", lambda: fixed_connection("fin"),
+                                     lambda answer: answer.get("body") == alternate)
+            closed = tcp_state()
+            check("guestTcpGracefulCloseObserved", bool(closed["flags"] & 256) and
+                  closed["backend"] == alternate_ip, {"connection": graceful, "state": closed})
         apply(client_policy([]))
         for protocol, port in (("http", 80), ("udp", 81)):
             answer = observed_when(f"default-deny {protocol}", lambda: dial(vip, port, protocol), denied)

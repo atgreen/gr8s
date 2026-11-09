@@ -1,6 +1,6 @@
 /* SPDX-FileCopyrightText: 2026 Anthony Green
  * SPDX-License-Identifier: Apache-2.0
- * Test-only guest probe: one HTTP connection from a fixed source port, then RST.
+ * Test-only guest probe: one HTTP connection from a fixed source port, then RST or FIN.
  * Build statically on the development host; the guest needs no compiler/libc.
  */
 #define _POSIX_C_SOURCE 200809L
@@ -31,8 +31,8 @@ static void json_string(const char *text) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 3) {
-        fprintf(stderr, "usage: service-tcp-client SERVICE_IPV4 LOCAL_PORT\n");
+    if (argc != 3 && (argc != 4 || strcmp(argv[3], "fin"))) {
+        fprintf(stderr, "usage: service-tcp-client SERVICE_IPV4 LOCAL_PORT [fin]\n");
         return 2;
     }
     char *end = NULL;
@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
     struct linger reset = {.l_onoff = 1, .l_linger = 0};
     struct timeval timeout = {.tv_sec = 10};
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) ||
-        setsockopt(fd, SOL_SOCKET, SO_LINGER, &reset, sizeof(reset)) ||
+        (argc == 3 && setsockopt(fd, SOL_SOCKET, SO_LINGER, &reset, sizeof(reset))) ||
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) ||
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout))) fail("setsockopt");
     struct sockaddr_in local = {.sin_family = AF_INET, .sin_port = htons((unsigned short)port)};
@@ -102,6 +102,15 @@ int main(int argc, char **argv) {
     printf(",\"localPort\":%u,\"peerIP\":", ntohs(local.sin_port)); json_string(peer_ip);
     printf(",\"peerPort\":%u,\"body\":", ntohs(peer.sin_port)); json_string(body);
     puts("}");
+    if (argc == 4) {
+        if (shutdown(fd, SHUT_WR)) fail("shutdown");
+        char tail[256];
+        for (;;) {
+            ssize_t count = recv(fd, tail, sizeof(tail), 0);
+            if (count < 0) { if (errno == EINTR) continue; fail("close recv"); }
+            if (!count) break;
+        }
+    }
     if (close(fd)) fail("close");
     return 0;
 }
