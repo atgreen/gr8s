@@ -13,7 +13,8 @@
 ;;;; added since the ipam was opened. A lock guards the in-memory table, and a
 ;;;; failed persist is rolled back so disk and memory never disagree. The network
 ;;;; and broadcast addresses are reserved; exhaustion and malformed state signal
-;;;; CNI errors.
+;;;; CNI errors. Optional Service SNAT leases use a separate table in version 3
+;;;; of the same file; they consume IPv4 pool space but are not Pod interface IPs.
 
 (in-package #:gr8s.network)
 
@@ -27,6 +28,7 @@
   prefixes
   families
   allocations
+  (service-snat-allocations (make-hash-table :test #'equal))
   persister
   (lock (bt:make-lock "gr8s node IPAM")))
 
@@ -50,10 +52,11 @@
     object))
 
 (defun node-ipam-state-object (ipam)
-  "IPAM's full persisted state as a JSON object: version 1 for one CIDR or
-   version 2 for ordered CIDRs, and its
+  "IPAM's persisted state: version 1 for one CIDR, version 2 for ordered CIDRs,
+   or version 3 when private Service SNAT leases exist. Its
    allocations sorted by (sandbox id, interface name) for a stable file."
-  (let* ((plural-p (> (length (node-ipam-cidrs ipam)) 1))
+  (let* ((snat-p (plusp (hash-table-count (node-ipam-service-snat-allocations ipam))))
+         (plural-p (or snat-p (> (length (node-ipam-cidrs ipam)) 1)))
          (entries
           (sort
            (loop for key being the hash-keys of (node-ipam-allocations ipam)
@@ -64,13 +67,25 @@
                   (format nil "~A~C~A"
                           (gethash "sandboxID" entry) #\Null
                           (gethash "interfaceName" entry))))))
-    (if plural-p
-        (json-object "version" 2
-                     "cidrs" (coerce (node-ipam-cidrs ipam) 'vector)
-                     "allocations" (coerce entries 'vector))
-        (json-object "version" 1
-                     "cidr" (node-ipam-cidr ipam)
-                     "allocations" (coerce entries 'vector)))))
+    (let ((state
+            (if plural-p
+                (json-object "version" (if snat-p 3 2)
+                             "cidrs" (coerce (node-ipam-cidrs ipam) 'vector)
+                             "allocations" (coerce entries 'vector))
+                (json-object "version" 1
+                             "cidr" (node-ipam-cidr ipam)
+                             "allocations" (coerce entries 'vector)))))
+      (when snat-p
+        (setf (gethash "serviceSNATAllocations" state)
+              (coerce
+               (sort (loop for key being the hash-keys of (node-ipam-service-snat-allocations ipam)
+                             using (hash-value address)
+                           collect (node-ipam-allocation-object key (list address)))
+                     #'string< :key (lambda (entry)
+                                      (format nil "~A~C~A" (gethash "sandboxID" entry)
+                                              #\Null (gethash "interfaceName" entry))))
+               'vector)))
+      state)))
 
 (defun persist-node-ipam-state (ipam)
   "Persist IPAM's state to its allocations file atomically -- write a uniquely
@@ -113,20 +128,24 @@
         (< network address (1+ last)))))
 
 (defun restore-node-ipam-allocations (path cidrs networks prefixes families)
-  "Read the allocations file at PATH and return the allocation table (a hash table
-   keyed by (sandbox-id . interface-name)). A missing file yields an empty table.
+  "Return Pod and private Service SNAT allocation tables, keyed by endpoint owner.
+   A missing file yields empty tables. Validate both before publishing either.
    Signals a CNI error when the file's version is unsupported, its CIDR is not
    CIDR, an entry is malformed, an address falls outside the usable range of
    NETWORK/PREFIX, or an owner or address is duplicated."
   (let ((allocations (make-hash-table :test #'equal))
+        (snat-allocations (make-hash-table :test #'equal))
         (addresses (make-hash-table :test #'equal)))
     (when (probe-file path)
       (handler-case
           (let* ((state (com.inuoe.jzon:parse path))
                  (version (and (hash-table-p state)
                                (gethash "version" state 0))))
-            (unless (member version '(1 2))
+            (unless (member version '(1 2 3))
               (invalid-cni "IPAM state has an unsupported format"))
+            (when (and (/= version 3)
+                       (nth-value 1 (gethash "serviceSNATAllocations" state)))
+              (invalid-cni "IPAM Service SNAT leases require format 3"))
             (let ((stored-cidrs
                     (if (= version 1)
                         (list (gethash "cidr" state ""))
@@ -176,15 +195,37 @@
                                     (invalid-cni
                                      "IPAM address ~A is outside usable CIDR ~A"
                                      address cidr))
-                                  (when (gethash address addresses)
+                                  (when (gethash (list family numeric-address) addresses)
                                     (invalid-cni "IPAM address ~A has duplicate owners"
                                                  address))
-                                  (setf (gethash address addresses) t))
-                         (setf (gethash key allocations) entry-addresses)))))
+                                  (setf (gethash (list family numeric-address) addresses) t))
+                         (setf (gethash key allocations) entry-addresses))))
+            (when (= version 3)
+              (let ((entries (gethash "serviceSNATAllocations" state))
+                    (index (position :ipv4 families)))
+                (unless (and index (vectorp entries))
+                  (invalid-cni "IPAM Service SNAT state requires IPv4 and an allocation array"))
+                (loop for entry across entries
+                      for sandbox = (and (hash-table-p entry) (gethash "sandboxID" entry))
+                      for interface = (and (hash-table-p entry) (gethash "interfaceName" entry))
+                      for address = (and (hash-table-p entry) (gethash "address" entry))
+                      for key = (pod-address-key sandbox interface)
+                      do (unless (and (valid-pod-address-owner-p sandbox)
+                                      (valid-pod-address-owner-p interface) (stringp address)
+                                      (gethash key allocations) (not (gethash key snat-allocations)))
+                           (invalid-cni "IPAM Service SNAT lease has an invalid or duplicate owner"))
+                         (let ((numeric (parse-ipv4-integer address)))
+                           (unless (and (equal address (format-pod-address :ipv4 numeric))
+                                        (usable-node-ipam-address-p numeric (nth index networks)
+                                                                    (nth index prefixes) 32)
+                                        (not (gethash (list :ipv4 numeric) addresses)))
+                             (invalid-cni "IPAM Service SNAT address ~A is unusable or already owned" address))
+                           (setf (gethash (list :ipv4 numeric) addresses) t
+                                 (gethash key snat-allocations) address))))))
         (cni-error (condition) (error condition))
         (error (condition)
           (invalid-cni "could not restore IPAM state: ~A" condition))))
-    allocations))
+    (values allocations snat-allocations)))
 
 (defun open-node-ipam
     (directory cidr-or-cidrs &key (persister #'persist-node-ipam-state))
@@ -215,13 +256,14 @@
                                 (length (remove-duplicates families))))
             (invalid-cni "node Pod CIDRs must contain each address family at most once"))
           (ensure-directories-exist root)
-          (%make-node-ipam
-           :directory root :cidr (first cidrs) :network (first networks)
-           :prefix (first prefixes) :cidrs cidrs :networks networks
-           :prefixes prefixes :families families
-           :persister persister
-           :allocations
-           (restore-node-ipam-allocations state-path cidrs networks prefixes families)))
+          (multiple-value-bind (allocations snat-allocations)
+              (restore-node-ipam-allocations state-path cidrs networks prefixes families)
+            (%make-node-ipam
+             :directory root :cidr (first cidrs) :network (first networks)
+             :prefix (first prefixes) :cidrs cidrs :networks networks
+             :prefixes prefixes :families families
+             :persister persister
+             :allocations allocations :service-snat-allocations snat-allocations)))
     (cni-error (condition) (error condition))
     (error (condition)
       (invalid-cni "invalid node Pod CIDR ~A: ~A" cidr-or-cidrs condition))))
@@ -234,19 +276,59 @@
    existed at startup. The file is the source of truth (allocate/release persist
    immediately), so a wholesale reload is safe in both managed and in-process modes."
   (bt:with-lock-held ((node-ipam-lock ipam))
-    (setf (node-ipam-allocations ipam)
-          (restore-node-ipam-allocations (node-ipam-state-path ipam)
-                                         (node-ipam-cidrs ipam)
-                                         (node-ipam-networks ipam)
-                                         (node-ipam-prefixes ipam)
-                                         (node-ipam-families ipam))))
+    (multiple-value-bind (allocations snat-allocations)
+        (restore-node-ipam-allocations (node-ipam-state-path ipam)
+                                       (node-ipam-cidrs ipam)
+                                       (node-ipam-networks ipam)
+                                       (node-ipam-prefixes ipam)
+                                       (node-ipam-families ipam))
+      (setf (node-ipam-allocations ipam) allocations
+            (node-ipam-service-snat-allocations ipam) snat-allocations)))
   ipam)
 
+(defun node-ipam-address-identity (address)
+  "One key for every textual spelling of the same IP address."
+  (if (find #\: address)
+      (format-pod-address :ipv6 (ipv6-integer address))
+      (format-pod-address :ipv4 (parse-ipv4-integer address))))
+
+(defun node-ipam-used-addresses (ipam)
+  "Snapshot numeric ownership across both lease tables. Caller holds the lock."
+  (let ((used (make-hash-table :test #'equal)))
+    (loop for allocated being the hash-values of (node-ipam-allocations ipam)
+          do (dolist (address allocated)
+               (setf (gethash (node-ipam-address-identity address) used) t)))
+    (loop for address being the hash-values of (node-ipam-service-snat-allocations ipam)
+          do (setf (gethash (node-ipam-address-identity address) used) t))
+    used))
+
 (defun node-ipam-address-in-use-p (ipam address)
-  "True when ADDRESS (a dotted string) is currently allocated in IPAM. Reads the
-   allocation table without locking; callers hold the IPAM lock."
-  (loop for allocated being the hash-values of (node-ipam-allocations ipam)
-        thereis (member address allocated :test #'string=)))
+  "True when either lease table owns ADDRESS. Caller holds the lock."
+  (gethash (node-ipam-address-identity address) (node-ipam-used-addresses ipam)))
+
+(defun allocate-service-snat-address (ipam sandbox-id interface-name)
+  "Reserve an IPv4 return address for an existing endpoint, never a Pod address.
+The lease shares the node pool and durable transaction with Pod allocations.
+It is not configured in the Pod or exposed through the CNI IP result."
+  (bt:with-lock-held ((node-ipam-lock ipam))
+    (let* ((key (pod-address-key sandbox-id interface-name))
+           (leases (node-ipam-service-snat-allocations ipam))
+           (index (position :ipv4 (node-ipam-families ipam))))
+      (unless (and index (gethash key (node-ipam-allocations ipam)))
+        (invalid-cni "Service SNAT requires an allocated IPv4 Pod endpoint"))
+      (or (gethash key leases)
+          (let* ((used (node-ipam-used-addresses ipam))
+                 (network (nth index (node-ipam-networks ipam)))
+                 (prefix (nth index (node-ipam-prefixes ipam)))
+                 (address
+                   (loop for offset from 1 below (1- (ash 1 (- 32 prefix)))
+                         for candidate = (format-pod-address :ipv4 (+ network offset))
+                         unless (gethash candidate used) return candidate
+                         finally (invalid-cni "Service SNAT IPv4 pool is exhausted"))))
+            (setf (gethash key leases) address)
+            (handler-case (persist-node-ipam ipam)
+              (error (condition) (remhash key leases) (error condition)))
+            address)))))
 
 (defun allocate-pod-addresses (ipam sandbox-id interface-name)
   "Allocate or return the stable ordered address list for a Pod interface."
@@ -255,7 +337,8 @@
            (existing (gethash key (node-ipam-allocations ipam))))
       (when existing
         (return-from allocate-pod-addresses (copy-list existing)))
-      (let ((allocated
+      (let* ((used (node-ipam-used-addresses ipam))
+             (allocated
               (loop for cidr in (node-ipam-cidrs ipam)
                     for family in (node-ipam-families ipam)
                     for network in (node-ipam-networks ipam)
@@ -266,7 +349,7 @@
                     collect
                     (loop for offset from 1 below limit
                           for candidate = (format-pod-address family (+ network offset))
-                          unless (node-ipam-address-in-use-p ipam candidate)
+                          unless (gethash candidate used)
                             return candidate
                           finally
                              (invalid-cni "Pod CIDR ~A is exhausted" cidr)))))
@@ -304,17 +387,22 @@
 
 (defun release-pod-address (ipam sandbox-id interface-name)
   "Release the address allocated to SANDBOX-ID/INTERFACE-NAME in IPAM, persisting
-   the change; restores the entry if the persist fails. A no-op when nothing is
+   the change together with any Service SNAT lease; restore both if persist fails.
+   Callers must retire routes and dataplane ownership before releasing addresses.
+   A no-op when nothing is
    allocated for that key. Holds the IPAM lock. Returns NIL."
   (bt:with-lock-held ((node-ipam-lock ipam))
-    (let ((key (pod-address-key sandbox-id interface-name)))
+    (let* ((key (pod-address-key sandbox-id interface-name))
+           (snat (gethash key (node-ipam-service-snat-allocations ipam))))
       (multiple-value-bind (address present-p)
           (gethash key (node-ipam-allocations ipam))
         (when present-p
           (remhash key (node-ipam-allocations ipam))
+          (remhash key (node-ipam-service-snat-allocations ipam))
           (handler-case
               (persist-node-ipam ipam)
             (error (condition)
               (setf (gethash key (node-ipam-allocations ipam)) address)
+              (when snat (setf (gethash key (node-ipam-service-snat-allocations ipam)) snat))
               (error condition)))))))
   nil)
