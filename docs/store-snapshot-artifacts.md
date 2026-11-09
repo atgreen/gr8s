@@ -337,10 +337,12 @@ runs a full GC, and loads the selected files into the same object. This avoids
 constructing a second fully loaded store. Load or recovery failures retain the
 intent and keep access blocked; retries use the same store and target generation.
 
-For an HA store, `:call-with-member-lock` and `:commit-recovery` are required
-function arguments. The first must invoke its thunk synchronously exactly once
-under the member lock. The second receives the target descriptor and reloaded
-store under the barriers; it must durably coordinate snapshot/applied-index/WAL
+For an HA store, `:call-with-member-lock`, `:validate-recovery` and
+`:commit-recovery` are required function arguments. The first must invoke its
+thunk synchronously exactly once under the member lock. Validation receives the
+target descriptor and store before intent or selection changes and must return
+`T`; a false return or error leaves the existing application selected. The final
+callback receives the target descriptor and reloaded store under the barriers; it must durably coordinate snapshot/applied-index/WAL
 recovery and must not reenter public store operations. The intent is removed only
 after that callback succeeds. These callbacks are integration contracts, not an
 implementation of production member recovery.
@@ -450,3 +452,35 @@ applied Raft state. Production snapshot installation must also validate its
 index/term against the actual member and coordinate WAL recovery. Older
 artifacts and manually prepared generations can still be opened at startup;
 they need rematerialization before using this live reload path.
+
+`gr8s.ha::make-member-generation-validator` creates the pre-intent callback for
+an actual Raft member. Its inputs are the authenticated transfer's sender term,
+snapshot index/term and artifact digest, obtained independently of the generation
+being checked. Validation requires the calling thread to own the member lock.
+For a fresh installation it requires a follower still in the transfer's term and
+a snapshot ahead of both committed and applied state, with a compatible log term.
+The descriptor must match the expected index, term and digest. The callback reads
+current member state at invocation, so advancing the member after staging does
+not leave a stale validation decision usable.
+
+An exact durable pending snapshot may resume after a later election term, but its
+index, term and application artifact digest must still match, and its boundary
+cannot precede the member's committed/applied state. A different pending install
+is rejected. These checks do not acquire ingress barriers, write a WAL snapshot,
+or enable a production restore caller. In particular, the transport's current
+member-lock-first dispatch still needs coordination with the outer application
+writer barriers before production artifact installation can invoke live reload.
+
+For startup recovery, the validator's explicit `:recover t` mode accepts an exact
+published snapshot already loaded from the WAL, before its suffix is applied. It
+checks the member's snapshot index/term and full application reference rather
+than treating an equal applied index as a fresh transfer. Recovery is rejected
+if the member has already committed or applied a newer boundary.
+
+The application reference is a small, readable Lisp value suitable for the WAL:
+`(:gr8s-store-artifact 1 :index INDEX :term TERM :sha256 DIGEST)`. The reference
+binds the artifact identity; it does not contain the artifact bytes. Pending and
+published recovery also validate the enclosing Raft configuration envelope.
+Artifact byte transport, durable placement and retention remain production
+integration work. Both preflight and post-load recovery callbacks run under the
+member and raw store barriers and must not reenter public store operations.

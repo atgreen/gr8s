@@ -63,20 +63,23 @@
         (error "Snapshot generation must be rematerialized above the member's revision clocks")))
     boundary))
 
-(defun reload-store-application (store id &key call-with-member-lock commit-recovery)
+(defun reload-store-application (store id &key call-with-member-lock validate-recovery commit-recovery)
   "Replace application state on STORE itself, leaving access blocked on success or failure.
 Caller has quiesced remaining node/controller/retained-reference ingress. Lock order:
 workload -> credentials -> consensus writer -> supplied member barrier -> raw store.
-HA requires both callbacks. COMMIT-RECOVERY receives descriptor/STORE after load and
+HA requires all three callbacks. VALIDATE-RECOVERY receives descriptor/STORE before
+intent or selection changes and must return T after checking actual member state.
+COMMIT-RECOVERY receives descriptor/STORE after load and
 must durably coordinate member snapshot/applied/WAL state before intent removal.
 It runs under the barriers and must not reenter public store operations."
   (when (or *core-write-active* (eq store *store-request-lease*))
     (error "Cannot reload application state from a transaction or leased request"))
   (when (or (and call-with-member-lock (not (functionp call-with-member-lock)))
+            (and validate-recovery (not (functionp validate-recovery)))
             (and commit-recovery (not (functionp commit-recovery)))
             (and (pod-store-consensus-commit-fn store)
-                 (not (and call-with-member-lock commit-recovery))))
-    (error "HA application reload requires member barrier and durable recovery callbacks"))
+                 (not (and call-with-member-lock validate-recovery commit-recovery))))
+    (error "HA application reload requires member barrier, boundary validation and durable recovery callbacks"))
   (bt:with-lock-held ((pod-store-lock store)) (require-store-reload-quiescence store))
   (let ((thread (bt:current-thread)) (started nil) (loaded nil) (descriptor nil) (boundary nil))
     (bt:with-lock-held ((pod-store-workload-lock store))
@@ -92,6 +95,8 @@ It runs under the barriers and must not reenter public store operations."
                (require-store-reload-quiescence store)
                (setf descriptor (checked-store-generation-descriptor (pod-store-path store) id))
                (setf boundary (check-store-reload-revisions store id descriptor))
+               (when (and validate-recovery (not (eq t (funcall validate-recovery descriptor store))))
+                 (error "Member recovery boundary validation did not succeed"))
                ;; Validate and durably announce target BEFORE releasing old data.
                (setf descriptor (begin-store-restore (pod-store-path store) id))
                (setf (pod-store-application-loaded-p store) nil)
