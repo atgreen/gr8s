@@ -33,6 +33,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gr8s", type=Path, required=True)
     parser.add_argument("--report-directory", type=Path, required=True)
+    parser.add_argument("--legacy-fixture", type=Path)
     args = parser.parse_args()
     if os.geteuid() != 0:
         parser.error("requires root in a disposable VM")
@@ -97,6 +98,16 @@ def main():
         evaluate("setup", f"(gr8s.network::upgrade-probe-setup {debug.lisp_string(str(pins) + '/')} "
                           f"{debug.lisp_string('/run/netns/' + namespace)} {debug.lisp_string(host)})")
         evaluate("current-generation", "(gr8s.network::upgrade-probe-current)")
+        if args.legacy_fixture:
+            validation = run("python3", Path(__file__).with_name("test-service-program-upgrade.py"),
+                "--validate-fixture", args.legacy_fixture.resolve(), "--endpoint-directory", pins / "endpoint",
+                "--service-root", pins / "service-lb", check=False)
+            (args.report_directory / "legacy-validate.stdout").write_text(validation.stdout)
+            (args.report_directory / "legacy-validate.stderr").write_text(validation.stderr)
+            if validation.returncode:
+                raise RuntimeError(f"legacy validation failed: {validation.stderr[-4000:]}")
+            report["checks"].append({"name": "legacy-kernel-acceptance", "passed": True,
+                                     "observed": json.loads(validation.stdout)})
         before = allowed()
         send()
         assert allowed() > before, "valid packet did not traverse the endpoint guard"

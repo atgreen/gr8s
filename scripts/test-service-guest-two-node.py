@@ -55,13 +55,17 @@ def main():
                         help="keep one guest TCP socket across selector changes and both agent restarts")
     parser.add_argument("--tcp-upgrade", type=Path,
                         help="install historical packet stages while the client agent is stopped")
+    parser.add_argument("--tcp-interrupted-upgrade", action="store_true",
+                        help="leave a blocked partial migration across the client agent restart")
     parser.add_argument("--state-parent", type=Path, default=Path("/var/tmp"))
     parser.add_argument("--kata-agent-timeout-ms", type=int, default=120000)
     args = parser.parse_args()
     if args.tcp_restart and not args.tcp_client:
         parser.error("--tcp-restart requires --tcp-client")
-    if args.tcp_upgrade and not args.tcp_restart:
-        parser.error("--tcp-upgrade requires --tcp-restart")
+    if (args.tcp_upgrade or args.tcp_interrupted_upgrade) and not args.tcp_restart:
+        parser.error("upgrade checks require --tcp-restart")
+    if args.tcp_upgrade and args.tcp_interrupted_upgrade:
+        parser.error("select legacy or interrupted upgrade checks, not both")
     if os.geteuid() != 0 or not Path("/dev/kvm").exists():
         sys.exit("run as root in a disposable VM with nested KVM")
     os.environ["GR8S_ENABLE_PACKET_SERVICES"] = "1"
@@ -302,6 +306,7 @@ def main():
             hold_stop = "/tmp/gr8s-held-tcp.stop"
             hold_exit = "/tmp/gr8s-held-tcp.exit"
             local_port = 25092
+            hold_mode = "hold-patient" if args.tcp_interrupted_upgrade else "hold"
             # Capture on both sides of the node veth/guest tap path. These
             # processes belong to the fixture and survive agent shutdown.
             namespaces = smoke.in_node(0, "find", smoke.root /
@@ -325,7 +330,7 @@ def main():
                 overlay.wait_for(f"{label} TCP trace starts", trace_path.exists, timeout=10)
             smoke.kubectl("exec", CLIENT, "--", "sh", "-c",
                            f"rm -f {hold_log} {hold_stop} {hold_exit}; "
-                           f"({probe_path} {reuse_vip} {local_port} hold {hold_stop} "
+                           f"({probe_path} {reuse_vip} {local_port} {hold_mode} {hold_stop} "
                            f">{hold_log} 2>&1; echo $? >{hold_exit}) </dev/null >/dev/null 2>&1 &")
 
             def held_responses():
@@ -387,21 +392,33 @@ def main():
                 smoke.agents[index].send_signal(signal.SIGTERM)
                 smoke.agents[index].wait(timeout=180)
                 smoke.agents[index] = None
-                if args.tcp_upgrade and index == 0:
+                if (args.tcp_upgrade or args.tcp_interrupted_upgrade) and index == 0:
                     tables = smoke.in_node(0, "find", shared_root.parent, "-mindepth", "2", "-maxdepth", "2",
                                            "-name", "gr8s_pkt_stages").stdout.splitlines()
                     if len(tables) != 1:
                         raise RuntimeError("expected exactly one retained client endpoint")
                     upgrade_directory = Path(tables[0]).parent
-                    legacy = json.loads(smoke.in_node(0, "python3", upgrade_reader,
-                        "--fixture", args.tcp_upgrade.resolve(), "--endpoint-directory", upgrade_directory,
-                        "--service-root", shared_root, "--stopped-agent-pid", str(stopped_pid),
-                        "--tcp-key", held_key).stdout)
-                    check("guestTcpLegacyStagesInstalled", legacy["tcpMetadataRemoved"] and
-                          legacy["before"]["requiredMapIds"] == legacy["legacy"]["requiredMapIds"], legacy)
-                    legacy_flow = True
+                    install_args = (["--fixture", args.tcp_upgrade.resolve(), "--tcp-key", held_key]
+                                    if args.tcp_upgrade else ["--interrupt"])
+                    installation = smoke.in_node(0, "python3", upgrade_reader,
+                        "--endpoint-directory", upgrade_directory, "--service-root", shared_root,
+                        "--stopped-agent-pid", str(stopped_pid), *install_args, check=False)
+                    (args.report_directory / "stage-install.stdout").write_text(installation.stdout)
+                    (args.report_directory / "stage-install.stderr").write_text(installation.stderr)
+                    if installation.returncode:
+                        raise RuntimeError(f"stage installation failed: {installation.stderr[-4000:]}")
+                    legacy = json.loads(installation.stdout)
+                    if args.tcp_upgrade:
+                        check("guestTcpLegacyStagesInstalled", legacy["tcpMetadataRemoved"] and
+                              legacy["before"]["requiredMapIds"] == legacy["legacy"]["requiredMapIds"], legacy)
+                        legacy_flow = True
+                    else:
+                        check("guestTcpInterruptedUpgradeInstalled", not legacy["tcpMetadataRemoved"] and
+                              legacy["interrupted"]["stages"][2]["id"] == 0 and
+                              len(legacy["interrupted"]["blockerPins"]) == 2, legacy)
                 stopped_state = flow_state() if legacy_flow else tcp_state()
-                stopped_replies = counters(0)[1]
+                stopped_counters = counters(0)[:2]
+                stopped_replies = stopped_counters[1]
                 down_started = time.monotonic()
                 # Read pinned state from the retained node namespace; API exec
                 # on the deliberately stopped client agent is unavailable.
@@ -411,15 +428,23 @@ def main():
                                 if legacy_flow else (current["clientEnd"] != stopped_state["clientEnd"] and
                                                      current["serverEnd"] != stopped_state["serverEnd"]))
                     return current if advanced else None
-                offline_state = overlay.wait_for("held guest exchanges while agent down",
-                                                 advanced_while_down, timeout=30)
-                check(f"guestTcpHeldDuringAgent{index}Stop",
-                      offline_state["backend"] == backend_ip and
-                      (legacy_flow or (offline_state["clientISN"] == held_state["clientISN"] and
-                                       offline_state["serverISN"] == held_state["serverISN"] and
-                                       offline_state["flags"] & 4 and not offline_state["flags"] & 384)),
-                      {"before": stopped_state, "after": offline_state,
-                       "agentDownSeconds": time.monotonic() - down_started})
+                if args.tcp_interrupted_upgrade and index == 0:
+                    time.sleep(1.5)
+                    offline_state = tcp_state()
+                    check("guestTcpInterruptedUpgradeFailsClosed", offline_state == stopped_state and
+                          counters(0)[:2] == stopped_counters,
+                          {"before": stopped_state, "after": offline_state, "counters": stopped_counters,
+                           "blockedSeconds": time.monotonic() - down_started})
+                else:
+                    offline_state = overlay.wait_for("held guest exchanges while agent down",
+                                                     advanced_while_down, timeout=30)
+                    check(f"guestTcpHeldDuringAgent{index}Stop",
+                          offline_state["backend"] == backend_ip and
+                          (legacy_flow or (offline_state["clientISN"] == held_state["clientISN"] and
+                                           offline_state["serverISN"] == held_state["serverISN"] and
+                                           offline_state["flags"] & 4 and not offline_state["flags"] & 384)),
+                          {"before": stopped_state, "after": offline_state,
+                           "agentDownSeconds": time.monotonic() - down_started})
                 report["heldRestartSnapshots"][-1]["beforeStartMs"] = time.time_ns() // 1000000
                 save()
                 smoke.start_agent(index)
@@ -447,10 +472,11 @@ def main():
                       workload_identity() == identity_before and before_maps == after_maps,
                       {"responses": responses, "state": current_state,
                        "workloads": workload_identity(), "mapsBefore": before_maps, "mapsAfter": after_maps})
-                if args.tcp_upgrade and index == 0:
+                if (args.tcp_upgrade or args.tcp_interrupted_upgrade) and index == 0:
                     upgraded = inspect_upgrade()
                     required = set(upgraded["requiredMapIds"].values())
-                    check("guestTcpLegacyStagesRefreshed", not upgraded["blockerPins"] and
+                    check("guestTcpLegacyStagesRefreshed" if args.tcp_upgrade else "guestTcpInterruptedStagesRecovered",
+                          not upgraded["blockerPins"] and
                           upgraded["requiredMapIds"] == legacy["before"]["requiredMapIds"] and
                           upgraded["endpointMapIds"] == legacy["before"]["endpointMapIds"] and
                           all(upgraded["links"][d]["id"] == legacy["before"]["links"][d]["id"]
@@ -466,6 +492,9 @@ def main():
             if legacy_flow:
                 check("guestTcpLegacyCloseKeepsCompatibilityLifetime", final_state["flags"] & 516 == 516 and
                       not final_state["flags"] & 384, final_state)
+            else:
+                check("guestTcpHeldGracefulClose", bool(final_state["flags"] & 256), final_state)
+            if args.tcp_upgrade or args.tcp_interrupted_upgrade:
                 local_port = 25094
                 new = observed_when("fresh post-upgrade tuple uses current backend", fixed_connection,
                                     lambda answer: answer.get("body") == alternate)
@@ -474,8 +503,6 @@ def main():
                       new_state["backend"] == alternate_ip and new_state["flags"] & 7 == 7 and
                       not new_state["flags"] & 512, {"connection": new, "state": new_state})
                 local_port = 25092
-            else:
-                check("guestTcpHeldGracefulClose", bool(final_state["flags"] & 256), final_state)
         apply(client_policy([]))
         for protocol, port in (("http", 80), ("udp", 81)):
             answer = observed_when(f"default-deny {protocol}", lambda: dial(vip, port, protocol), denied)
@@ -500,6 +527,16 @@ def main():
         for protocol, port in (("http", 80), ("udp", 81)):
             answer = observed_when(f"backend ingress allow {protocol}", lambda: dial(vip, port, protocol), succeeds)
             check(protocol + "RemoteIngressRecovers", succeeds(answer), answer)
+        if args.tcp_upgrade or args.tcp_interrupted_upgrade:
+            agent_log = (smoke.root / "agent-0.log").read_text()
+            marker = "Service packet pipeline refreshed "
+            after_refresh = agent_log.rsplit(marker, 1)[-1] if marker in agent_log else ""
+            check("guestTcpUpgradeGCActivated", marker in agent_log and
+                  "Service flow GC verified " in after_refresh and
+                  "Service flow GC deferred:" not in after_refresh and
+                  "Service flow GC failed:" not in after_refresh,
+                  {"refreshes": agent_log.count(marker),
+                   "verificationAfterRefresh": "Service flow GC verified " in after_refresh})
         cni_timeouts = {str(i): (smoke.root / f"agent-{i}.log").read_text().count(
             "failed (add): timed out waiting for the gr8s agent CNI service") for i in range(2)}
         check("coldCniAddsMeetDeadline", not any(cni_timeouts.values()), cni_timeouts)

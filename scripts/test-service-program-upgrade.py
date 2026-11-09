@@ -9,6 +9,7 @@ No maps or entry links are replaced. --inspect performs no mutations.
 """
 import argparse
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -45,9 +46,12 @@ class Kernel:
         return info.raw
 
     def map_ids(self, fd):
-        info = ctypes.create_string_buffer(self.info(fd), 256)
-        count = struct.unpack_from("<I", info.raw, 52)[0]
+        count = struct.unpack_from("<I", self.info(fd), 52)[0]
+        # A returned info record contains nonzero code/BTF output lengths.
+        # Request only map IDs; do not reuse those lengths with null pointers.
+        info = ctypes.create_string_buffer(256)
         ids = ctypes.create_string_buffer(max(4, count * 4))
+        struct.pack_into("<I", info, 52, count)
         struct.pack_into("<Q", info, 56, ctypes.addressof(ids))
         self.bpf(15, struct.pack("<IIQ", fd, 256, ctypes.addressof(info)))
         return list(struct.unpack_from(f"<{count}I", ids.raw))
@@ -79,7 +83,15 @@ class Kernel:
                 continue
             result["endpointMapIds"][path.name] = struct.unpack_from("<I", self.info(self.open(path)), 4)[0]
         for index in range(3):
-            identity = self.lookup(stages, index)
+            try:
+                identity = self.lookup(stages, index)
+            except OSError as error:
+                if error.errno != errno.ENOENT:
+                    raise
+                identity = 0
+            if not identity:
+                result["stages"].append({"id": 0, "mapIds": [], "tag": None})
+                continue
             fd = self.own(self.bpf(13, struct.pack("<III", identity, 0, 0)))
             result["stages"].append({"id": identity, "mapIds": self.map_ids(fd),
                                       "tag": self.info(fd)[8:16].hex()})
@@ -102,7 +114,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--fixture", type=Path)
+    group.add_argument("--validate-fixture", type=Path,
+                       help="load historical programs against real maps without publishing them")
     group.add_argument("--inspect", action="store_true")
+    group.add_argument("--interrupt", action="store_true",
+                       help="leave pinned drop guards and a missing reverse stage for restart recovery")
     parser.add_argument("--endpoint-directory", type=Path, required=True)
     parser.add_argument("--service-root", type=Path, required=True)
     parser.add_argument("--stopped-agent-pid", type=int)
@@ -115,9 +131,12 @@ def main():
         if args.inspect:
             print(json.dumps(kernel.snapshot(args.endpoint_directory, args.service_root)))
             return
-        if not args.stopped_agent_pid or Path(f"/proc/{args.stopped_agent_pid}").exists():
+        if not args.validate_fixture and (not args.stopped_agent_pid or Path(f"/proc/{args.stopped_agent_pid}").exists()):
             parser.error("the agent must be stopped and reaped before installing historical stages")
-        document = json.loads(args.fixture.read_text())
+        if args.interrupt and args.tcp_key:
+            parser.error("--interrupt preserves existing TCP metadata")
+        fixture = args.fixture or args.validate_fixture
+        document = json.loads(fixture.read_text()) if fixture else {"maps": [], "programs": []}
         specs, maps = document["maps"], []
         for spec in specs:
             path = args.endpoint_directory / spec["name"]
@@ -134,7 +153,13 @@ def main():
             for offset, index in program["relocations"]:
                 struct.pack_into("<I", code, offset + 4, maps[index])
             replacements[program["name"]] = kernel.load(code)
-        assert len(replacements) == 2
+        assert args.interrupt or len(replacements) == 2
+        if args.validate_fixture:
+            print(json.dumps({"fixtureSHA256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
+                              "legacyPrograms": {name: {"mapIds": kernel.map_ids(fd),
+                                  "tag": kernel.info(fd)[8:16].hex()} for name, fd in replacements.items()},
+                              "published": False}))
+            return
         drop = kernel.load(bytes.fromhex("b7000000020000009500000000000000"))
         for direction, attach_type in (("ingress", 46), ("egress", 47)):
             path = args.endpoint_directory / ("gr8s_pkt_upgrade_" + direction)
@@ -150,8 +175,12 @@ def main():
         stages = kernel.open(args.endpoint_directory / "gr8s_pkt_stages")
         for index, name in ((0, "gr8s_packet_forward"), (2, "gr8s_packet_reverse")):
             key = ctypes.create_string_buffer(struct.pack("<I", index))
-            value = ctypes.create_string_buffer(struct.pack("<I", replacements[name]))
-            kernel.bpf(2, struct.pack("<IIQQQ", stages, 0, ctypes.addressof(key), ctypes.addressof(value), 0))
+            if args.interrupt:
+                if index == 2:
+                    kernel.bpf(3, struct.pack("<IIQ", stages, 0, ctypes.addressof(key)))
+            else:
+                value = ctypes.create_string_buffer(struct.pack("<I", replacements[name]))
+                kernel.bpf(2, struct.pack("<IIQQQ", stages, 0, ctypes.addressof(key), ctypes.addressof(value), 0))
         if args.tcp_key:
             raw = bytes.fromhex(args.tcp_key)
             assert len(raw) == 16
@@ -161,6 +190,10 @@ def main():
         after = kernel.snapshot(args.endpoint_directory, args.service_root)
         assert after["links"] == before["links"]
         assert after["requiredMapIds"] == before["requiredMapIds"]
+        if args.interrupt:
+            assert after["stages"][2]["id"] == 0 and len(after["blockerPins"]) == 2
+            print(json.dumps({"before": before, "interrupted": after, "tcpMetadataRemoved": False}))
+            return  # Keep both blockers pinned after every descriptor closes.
         required = set(after["requiredMapIds"].values())
         for index in (0, 2):
             assert after["stages"][index]["id"] != before["stages"][index]["id"]
