@@ -1,0 +1,36 @@
+{
+  "date": "2026-11-09",
+  "passed": true,
+  "fullGoalComplete": false,
+  "scope": "Production witness WAL startup/restart and owned-storage lifecycle; application-voter recovery is not enabled",
+  "checks": {
+    "witness-command": 50,
+    "raft": 212,
+    "raft-snapshot": 142,
+    "ha-control-plane": 37,
+    "ha-store": 43,
+    "total": 484
+  },
+  "observations": [
+    "Recover term/vote/snapshot/suffix before constructing peer RPC listener",
+    "Initial witness role prevents campaigning before join; CLI starts ticking after join",
+    "Member-owned WAL stream closes after server/worker shutdown; externally supplied storage ownership unchanged",
+    "WAL open synchronizes file and parent directory",
+    "Same-term alternate candidate rejected after repeated in-process member restarts",
+    "TLS witness command restarts with saved member certificate, stable port and no replacement enrollment token; new log entry commits each cycle",
+    "Three independent SBCL child processes receive peer vote RPCs then are killed with SIGKILL; term20 vote-a survives rejection of vote-b after restart; term21 vote-b then persists",
+    "Existing snapshot transfer, file-WAL checkpoint, HA forwarding/conflict and three-member failover tests pass"
+  ],
+  "timingObservation": {
+    "initialCliRestartTimeoutSeconds": 20,
+    "initialCliRestartTimeoutCount": 1,
+    "subsequentSuccessfulCliRestartRuns": 3,
+    "cause": "Not established; no reproduction in subsequent standalone/suite runs"
+  },
+  "limitations": [
+    "No physical power-loss or filesystem fault injection for directory entry durability",
+    "No native-binary witness subprocess run in this change; SIGKILL children run source through fresh SBCL processes",
+    "Production application voters still lack WAL startup wiring and exact application-boundary/suffix replay coordination",
+    "Production application-artifact transport, outer barriers and automatic compaction remain unfinished"
+  ]
+}

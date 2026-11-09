@@ -26,8 +26,18 @@
   "Open (creating) an append-only Raft WAL at PATH for continued writes.
 It holds replicated state including Secrets, so only its owner may read it."
   (ensure-directories-exist path)
-  (sb-posix:close (sb-posix:open (namestring path) (logior sb-posix:o-wronly sb-posix:o-creat) #o600))
-  (sb-posix:chmod (namestring path) #o600)
+  (let ((fd (sb-posix:open (namestring path) (logior sb-posix:o-wronly sb-posix:o-creat) #o600)))
+    (unwind-protect
+         (progn
+           (sb-posix:fchmod fd #o600)
+           (sb-posix:fsync fd))
+      (sb-posix:close fd)))
+  ;; A fsynced hard-state record is not durable if a newly created WAL's
+  ;; directory entry can disappear. Publish that entry before serving peers.
+  (let ((fd (sb-posix:open
+             (namestring (uiop:pathname-directory-pathname (merge-pathnames path)))
+             (logior sb-posix:o-rdonly sb-posix:o-directory) 0)))
+    (unwind-protect (sb-posix:fsync fd) (sb-posix:close fd)))
   (make-instance 'file-raft-storage
                  :path path
                  :stream (open path :direction :output :element-type 'character

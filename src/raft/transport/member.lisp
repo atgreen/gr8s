@@ -85,7 +85,16 @@
   snapshot-directory snapshot-root snapshot-owner-fd snapshot-receiver
   (snapshot-max-bytes (* 16 1024 1024 1024))
   ;; This member's RAFT-CREDENTIALS. Only in-process tests run without any.
-  credentials)
+  credentials
+  ;; Only a WAL opened through STORAGE-PATH belongs to this member.
+  owned-storage)
+
+(defun raft-member-close-owned-storage (member)
+  (let ((storage (raft-member-owned-storage member)))
+    (when storage
+      (let ((stream (gr8s.raft::file-raft-storage-stream storage)))
+        (when (and stream (open-stream-p stream)) (close stream)))
+      (setf (raft-member-owned-storage member) nil))))
 
 (defun raft-link-enqueue (link message)
   "Append MESSAGE to LINK's outbox under its lock for its sender thread to
@@ -166,7 +175,7 @@
 ;;; ---------------------------------------------------------------------------
 ;;; Lifecycle.
 
-(defun start-raft-member (id &key (host "127.0.0.1") (port 0) apply-fn storage
+(defun start-raft-member (id &key (host "127.0.0.1") (port 0) apply-fn storage storage-path initial-role
                                   snapshot-fn restore-fn snapshot-directory
                                   ;; election timeout ~1-2s at a 50ms tick; well above gRPC call latency
                                   (timeout-fn (lambda () (+ 20 (random 20))))
@@ -175,7 +184,11 @@
   "Create a member: a raft-node whose SEND-FN enqueues to per-peer outboxes, a
    RaftTransport gRPC server, and the delivery machinery. Peers are set with
    RAFT-MEMBER-SET-PEERS (so a fresh member cannot self-elect before it knows
-   them); ticking starts with RAFT-MEMBER-START."
+   them); ticking starts with RAFT-MEMBER-START. STORAGE-PATH recovers a file WAL
+   before opening the RPC listener and makes the member own/close that storage.
+   INITIAL-ROLE keeps an unconfigured witness/learner from campaigning before join."
+  (when (and storage storage-path) (error "Supply either storage or storage-path"))
+  (unless (member initial-role '(nil :voter :witness :learner)) (error "Invalid initial Raft role"))
   (let* ((member (make-raft-member :host host :port port :credentials credentials
                                   :snapshot-directory snapshot-directory))
          (node (make-raft-node
@@ -188,9 +201,19 @@
                              (when link (raft-link-enqueue link msg))))))
          (server (progn
                    (setf (raft-member-node member) node)
-                   (raft-member-reap-snapshot-orphans member)
-                   (apply #'ag-grpc:make-grpc-server port :host host
-                          (gr8s::raft-server-tls-options credentials)))))
+                   (when initial-role (setf (raft-node-self-role node) initial-role))
+                   (bt:with-lock-held ((raft-member-lock member))
+                     (when storage-path
+                       (recover-raft-node node storage-path)
+                       (setf (raft-member-owned-storage member) (gr8s.raft:raft-node-storage node))))
+                   (handler-case
+                       (progn
+                         (raft-member-reap-snapshot-orphans member)
+                         (apply #'ag-grpc:make-grpc-server port :host host
+                                (gr8s::raft-server-tls-options credentials)))
+                     (error (condition)
+                       (raft-member-close-owned-storage member)
+                       (error condition))))))
     (setf (raft-member-node member) node
           (raft-member-grpc-server member) server
           (raft-member-running member) t)
@@ -275,6 +298,7 @@
           until (and (eql :running (ag-grpc:server-state server)) (ag-grpc::server-socket server))
           do (sleep 0.01))
     (unless (ag-grpc::server-socket server)
+      (stop-raft-member member)
       (error "raft member ~A gRPC server failed to start" id))
     (setf (raft-member-port member) (usocket:get-local-port (ag-grpc::server-socket server)))
     member))
@@ -463,5 +487,7 @@ id, or NIL."
   (when (and (raft-member-server-thread member) (bt:thread-alive-p (raft-member-server-thread member)))
     (ignore-errors (bt:join-thread (raft-member-server-thread member))))
   (bt:with-lock-held ((raft-member-lock member))
-    (unwind-protect (raft-member-clear-snapshot-receiver member)
-      (raft-member-close-snapshot-root member))))
+    (unwind-protect
+         (unwind-protect (raft-member-clear-snapshot-receiver member)
+           (raft-member-close-snapshot-root member))
+      (raft-member-close-owned-storage member))))
