@@ -85,6 +85,17 @@
   version name type direction program map-pin-root previous-result endpoint-address
   endpoint-addresses policy-interface-name service-packet-root)
 
+(defvar *cni-policy-update-lock* (bt:make-lock "gr8s endpoint policy updates")
+  "Serialize agent CNI ADD/DEL with retained endpoint program migration.
+All privileged plugin work is dispatched to this agent through its CNI socket.")
+
+(defun cni-upgrade-block-paths (map-path)
+  "Canonical fail-closed link pins left by an interrupted packet upgrade."
+  (loop for direction in '("ingress" "egress")
+        collect (namestring
+                 (merge-pathnames (concatenate 'string "gr8s_pkt_upgrade_" direction)
+                                  (uiop:pathname-directory-pathname map-path)))))
+
 (defvar *cni-service-packets* nil
   "True while compiling an endpoint guard bound to the node's shared Service maps.")
 
@@ -372,7 +383,12 @@ prevResult and only installs, checks, or removes its policy datapath."
                    (funcall operation
                             (funcall interface-index (cni-context-interface-name context))))))))
 
-(defun install-cni-policy
+(defun install-cni-policy (&rest arguments)
+  "Install policy while excluding endpoint upgrades and CNI deletion."
+  (bt:with-lock-held (*cni-policy-update-lock*)
+    (apply #'%install-cni-policy arguments)))
+
+(defun %install-cni-policy
     (configuration context map-path link-path
      &key (ensure-directory #'ensure-cni-pin-directory)
        (path-exists-p #'probe-file)
@@ -488,6 +504,8 @@ prevResult and only installs, checks, or removes its policy datapath."
        (check-identity #'check-cni-identity)
        (check-link #'check-cni-tcx-link)
        (check-stages #'check-cni-service-stages)
+       (path-exists-p #'probe-file)
+       (staged-links #'cni-policy-staged-links)
        (close-fd #'sb-posix:close)
        (call-in-netns #'call-with-cni-network-namespace)
        (interface-index #'cni-interface-index))
@@ -496,6 +514,9 @@ prevResult and only installs, checks, or removes its policy datapath."
    guard's TCX link is attached on the expected interface in the expected
    direction. Signals through its check/validate operations on any discrepancy;
    returns NIL when consistent."
+  (dolist (path (cni-upgrade-block-paths map-path))
+    (when (or (funcall path-exists-p path) (funcall staged-links path))
+      (invalid-cni "endpoint packet program upgrade is incomplete")))
   (dolist (spec (cni-local-policy-map-specs configuration))
     (let* ((name (first spec))
            (fd (funcall open-pinned (cni-policy-map-path map-path name))))
@@ -526,9 +547,16 @@ prevResult and only installs, checks, or removes its policy datapath."
                  (funcall close-fd fd)))))
   nil)
 
-(defun remove-cni-policy
+(defun remove-cni-policy (&rest arguments)
+  "Delete policy while excluding CNI installation and retained program upgrades."
+  (bt:with-lock-held (*cni-policy-update-lock*)
+    (apply #'%remove-cni-policy arguments)))
+
+(defun %remove-cni-policy
     (configuration context map-path link-path directory
      &key (remove-path #'remove-cni-path)
+       (path-exists-p #'probe-file)
+       (retire-link #'retire-cni-tcx-link)
        (staged-links #'cni-policy-staged-links)
        (remove-directory #'remove-empty-cni-directory))
   "Remove this Pod's policy: unpin both guard links and any staged leftovers,
@@ -539,11 +567,23 @@ prevResult and only installs, checks, or removes its policy datapath."
   (dolist (link (list link-path (cni-ingress-guard-link-path
                                  link-path (if configuration (cni-configuration-direction configuration)
                                                (subseq (file-namestring link-path) (length "tcx-"))))))
-    (funcall remove-path link)
-    (dolist (path (funcall staged-links link)) (funcall remove-path path)))
+    ;; Retire staged entries first so removing the canonical guard cannot
+    ;; expose an older pending program to fresh packets.
+    (dolist (path (funcall staged-links link))
+      (when (funcall path-exists-p path) (funcall retire-link path))
+      (funcall remove-path path))
+    (when (funcall path-exists-p link) (funcall retire-link link))
+    (funcall remove-path link))
   (dolist (name (append (mapcar #'first +cni-policy-map-specs+)
                         '("gr8s_pkt_stages") +cni-legacy-policy-maps+))
     (funcall remove-path (cni-policy-map-path map-path name)))
+  ;; Keep blockers until all ordinary policy/map pins have been retired.
+  (dolist (path (cni-upgrade-block-paths map-path))
+    (dolist (stage (funcall staged-links path))
+      (when (funcall path-exists-p stage) (funcall retire-link stage))
+      (funcall remove-path stage))
+    (when (funcall path-exists-p path) (funcall retire-link path))
+    (funcall remove-path path))
   (funcall remove-directory directory)
   nil)
 
