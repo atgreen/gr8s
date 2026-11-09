@@ -203,7 +203,13 @@ the established socket keeps its original backend, TCP initial sequences, map
 IDs and workload identity, exchanges data while each agent is stopped, and
 responds after fresh readiness returns. See
 [the established-flow restart evidence](service-established-restart-validation-2026-11-09.json).
-Complete TCP lifecycle coverage and abrupt restart validation remain unfinished.
+The fixture also verifies the same held-connection behavior with SIGKILL of each
+agent, checking actual signal exit statuses and preserving the original TCP
+generation through both restarts. Bytecode and kernel checks cover early data in
+SYN/SYN-ACK packets, partial early-data acceptance, retransmission and closure.
+A refusal may acknowledge the SYN without all its payload; only ACKs within the
+observed SYN sequence range can shorten its lifetime. See
+[the early-data and abrupt-restart evidence](service-tcp-early-data-validation-2026-11-09.json).
 Kernel packet tests additionally cover program lifetime. Source NAT/hairpin,
 return-tuple collision resolution, IPv6 packet translation and external Service
 replacement remain in development. Hairpin and conflicting return tuples
@@ -249,6 +255,9 @@ agent is stopped, a further HTTP response after readiness returns, unchanged
 TCP initial sequences and backend, retained map IDs, and unchanged Pod/container
 identities. New connections must reach the updated backend while the held
 connection keeps its original backend, then closes gracefully.
+Add `--tcp-abrupt-restart` to send SIGKILL instead of SIGTERM to both agents;
+the fixture requires each killed process to return the corresponding signal
+status before checking offline traffic and restarting it.
 For historical-program upgrade coverage, first build
 `make build/gr8s-legacy-service-packet-guard-test.json`, copy that fixture and
 `scripts/test-service-program-upgrade.py` into the VM, and add
