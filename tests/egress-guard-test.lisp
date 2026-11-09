@@ -175,3 +175,100 @@
     (is (member 901 closed))
     (is (member 902 closed))
     (is (= (+ 2 (length gr8s::+cni-policy-map-specs+)) (length closed)))))
+
+(test service-guard-can-load-replacements-without-publishing-live-stages
+  (let* ((map-spec '(:name "gr8s_pkt_stages" :type :prog-array :key-size 4
+                    :value-size 4 :max-entries 8 :flags 0))
+         (names '("gr8s_packet_forward" "gr8s_egress_policy" "gr8s_packet_reverse"))
+         (object (gr8s.network::%make-egress-policy-object (list map-spec) nil))
+         (writes nil))
+    (gr8s.network::load-egress-policy-object
+     object '(("gr8s_pkt_stages" . 900101)) :publish-stages nil
+     :create-map (lambda (map) (declare (ignore map)) (error "must reuse the pinned table"))
+     :load-programs (lambda (specs maps)
+                      (declare (ignore specs maps))
+                      (loop for name in names for fd from 900102
+                            collect (cons name (whistler/loader::make-prog-info :fd fd))))
+     :update (lambda (&rest values) (push values writes)))
+    (is (null writes))
+    (is (= 900101 (whistler/loader:map-info-fd
+                  (gr8s.network::egress-policy-object-find-map object "gr8s_pkt_stages"))))
+    (gr8s.network::publish-egress-policy-stages
+     object :update (lambda (map key value)
+                      (declare (ignore map)) (push (list key value) writes)))
+    (is (equalp (loop for fd from 900102 to 900104 for index from 0
+                     collect (list (gr8s::service-lb-bytes index 4) (gr8s::service-lb-bytes fd 4)))
+                (nreverse writes)))
+    (setf writes nil
+          (gr8s.network::egress-policy-object-programs object)
+          (butlast (gr8s.network::egress-policy-object-programs object)))
+    (signals gr8s::cni-error
+      (gr8s.network::publish-egress-policy-stages
+       object :update (lambda (&rest values) (push values writes))))
+    (is (null writes))))
+
+(test packet-upgrade-syscalls-bind-to-the-owned-tcx-link
+  (dolist (direction '(46 47))
+    (let ((info (make-array 256 :element-type '(unsigned-byte 8) :initial-element 0)))
+      (whistler/loader::put-u32 info 0 11)
+      (whistler/loader::put-u32 info 16 71)
+      (whistler/loader::put-u32 info 20 direction)
+      (is (= 900203
+             (gr8s.network::attach-packet-upgrade-blocker
+              900201 900202 info
+              :bpf (lambda (command attribute size context)
+                     (declare (ignore context))
+                     (is (= 28 command)) (is (= 32 size))
+                     (is (equal '(900201 71 8200 900202)
+                                (mapcar (lambda (offset) (gr8s::netlink-read-integer attribute offset 4))
+                                        '(0 4 12 16))))
+                     (is (= direction (gr8s::netlink-read-integer attribute 8 4)))
+                     900203))))
+      (whistler/loader::put-u32 info 0 1)
+      (signals gr8s::cni-error
+        (gr8s.network::attach-packet-upgrade-blocker
+         900201 900202 info :bpf (lambda (&rest ignored)
+                                  (declare (ignore ignored)) (error "must not attach"))))))
+  (gr8s.network::replace-packet-tcx-program
+   900211 900212 900213
+   :bpf (lambda (command attribute size context)
+          (declare (ignore context))
+          (is (= 29 command)) (is (= 16 size))
+          (is (equal '(900211 900212 4 900213)
+                     (loop for offset from 0 below 16 by 4
+                           collect (gr8s::netlink-read-integer attribute offset 4)))))))
+
+(test packet-upgrade-interruptions-never-unblock-unverified-pipelines
+  ;; Interrupt after every externally visible mutation, including after one
+  ;; guard has been removed. Preparation/loading happens before this protocol.
+  (loop for interrupt from 0 to 8
+        do (let* ((links (list (list :direction "ingress") (list :direction "egress")))
+                  (blocked (make-hash-table :test #'equal))
+                  (switched (make-hash-table :test #'equal))
+                  (published nil) (verified nil) (step -1))
+             (labels ((checkpoint () (when (= (incf step) interrupt) (error "injected interruption")))
+                      (all-blocked-p () (every (lambda (link) (gethash (getf link :direction) blocked)) links))
+                      (upgrade ()
+                        (gr8s.network::perform-service-packet-upgrade
+                         :prepared links
+                         :block (lambda (link)
+                                  (setf (gethash (getf link :direction) blocked) t) (checkpoint))
+                         :publish (lambda (object)
+                                    (is (eq :prepared object)) (is-true (all-blocked-p))
+                                    (setf published t) (checkpoint))
+                         :switch (lambda (link object)
+                                   (declare (ignore object))
+                                   (is-true (all-blocked-p)) (is-true published)
+                                   (setf (gethash (getf link :direction) switched) t) (checkpoint))
+                         :verify (lambda (actual object)
+                                   (declare (ignore actual object))
+                                   (is-true (all-blocked-p)) (is (= 2 (hash-table-count switched)))
+                                   (setf verified t) (checkpoint) t)
+                         :unblock (lambda (link)
+                                    (is-true verified)
+                                    (remhash (getf link :direction) blocked) (checkpoint)))))
+               (if (< interrupt 8) (signals simple-error (upgrade)) (is-true (upgrade)))
+               (cond ((< interrupt 2) (is-false published) (is (zerop (hash-table-count switched))))
+                     ((< interrupt 6) (is (= 2 (hash-table-count blocked))))
+                     ((= interrupt 6) (is (= 1 (hash-table-count blocked))) (is-true verified))
+                     (t (is (zerop (hash-table-count blocked))) (is-true verified)))))))

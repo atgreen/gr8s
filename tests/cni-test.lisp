@@ -718,3 +718,14 @@
                (lambda (&rest args) (declare (ignore args))
                  (error "host policy must not enter the Pod namespace"))
                (lambda (name) (is (string= "gr-owned" name)) 42))))))
+
+(test cni-check-rejects-interrupted-packet-upgrades-before-reporting-healthy
+  (dolist (staged '(nil t))
+    (signals gr8s::cni-error
+      (gr8s::check-cni-policy
+       (gr8s::make-cni-configuration) (gr8s::make-cni-context)
+       "/pins/rejected_spoofs" "/pins/tcx-egress"
+       :path-exists-p (lambda (path) (and (not staged) (search "gr8s_pkt_upgrade_ingress" path)))
+       :staged-links (lambda (path) (when (and staged (search "gr8s_pkt_upgrade_ingress" path))
+                                     '("/pins/gr8s_pkt_upgrade_ingress_pending_1")))
+       :open-pinned (lambda (path) (declare (ignore path)) (error "must reject before opening maps"))))))
