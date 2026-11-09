@@ -122,6 +122,24 @@
          journal-path (concatenate 'string (com.inuoe.jzon:stringify record) (string #\Newline)))
         (signals error (open-store path))))))
 
+(test encrypted-secret-recovery-requires-the-cluster-identity
+  (with-temporary-store (store path)
+    (gr8s::enable-secret-encryption store)
+    (gr8s::create-core-resource
+     store "secrets"
+     (core-fixture "Secret" "identity-bound"
+                   "data" (gr8s::core-object "password" "aWRlbnRpdHktc2VudGluZWw="))
+     "default")
+    (let ((key (merge-pathnames "pki/cluster-ca.key" path))
+          (backup (merge-pathnames "pki/cluster-ca.key.backup" path)))
+      (rename-file key backup)
+      (unwind-protect
+           (signals error (open-store path))
+        (when (probe-file backup)
+          (rename-file backup key))))
+    (is (gr8s::get-core-resource (open-store path)
+                                 "secrets" "default" "identity-bound"))))
+
 (test secret-encryption-rotation-stages-retain-old-keys-until-reencrypted
   (with-temporary-store (store path)
     (gr8s::enable-secret-encryption store)
@@ -148,8 +166,15 @@
         (is (= 1 (length keys)))
         (is (equal prepared-id (gethash "id" (aref keys 0))))
         (is (null (search old-id checkpoint)))
-        (is (gr8s::get-core-resource (open-store path)
-                                     "secrets" "default" "credentials"))))))
+        (let ((reopened (open-store path)))
+          (is (gr8s::get-core-resource reopened
+                                       "secrets" "default" "credentials"))
+          (gr8s::disable-secret-encryption reopened)
+          (is-false (gethash "enabled" (gr8s::secret-encryption-status reopened)))
+          (let ((plaintext (uiop:read-file-string
+                            (gr8s::core-resource-state-path reopened))))
+            (is (search "cm90YXRpb24tc2VudGluZWw=" plaintext))
+            (is (null (search "gr8s.io/encryptedData" plaintext)))))))))
 
 (test invalid-core-resource-input-is-rejected-without-changing-state
   (with-temporary-store (store path)
