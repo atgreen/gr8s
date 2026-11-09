@@ -199,40 +199,65 @@ each commit a bounded multiple of what it changed, whatever the size of the stor
     (loop for key across (gethash "delete" delta #()) do (remhash key result))
     result))
 
+(defun make-core-journal-reader (stream path)
+  "Return a record iterator over binary STREAM. Second/third values report a torn
+final record and the byte offset after the last complete record. Memory is bounded
+by one record, not the journal size. Only newline-terminated records are parsed."
+  (let ((buffer (make-array 1024 :element-type '(unsigned-byte 8)
+                                 :adjustable t :fill-pointer 0))
+        (bytes 0))
+    (lambda ()
+      (setf (fill-pointer buffer) 0)
+      (loop for byte = (read-byte stream nil nil) do
+        (cond
+          ((null byte) (return (values nil (plusp (length buffer)) bytes)))
+          ((= byte 10)
+           (let ((record
+                   (handler-case
+                       (com.inuoe.jzon:parse
+                        (trivial-utf-8:utf-8-bytes-to-string buffer)
+                        :max-string-length (* 2 1024 1024))
+                     (error (condition)
+                       (error "Damaged core resource journal record at byte ~D of ~A: ~A"
+                              bytes path condition)))))
+             (setf bytes (file-position stream))
+             (unless (hash-table-p record)
+               (error "Invalid core resource journal record at byte ~D of ~A" bytes path))
+             (return (values record nil bytes))))
+          (t (vector-push-extend byte buffer)))))))
+
 (defun read-core-journal-records (path)
-  "Return PATH's complete journal records in order, whether a torn final record was
-dropped, and the bytes the complete records occupy. Only the last record can be torn,
-by a crash while it was appended; damage anywhere else is an error."
-  (let ((records nil) (torn nil) (bytes 0))
-    (with-open-file (stream path :element-type '(unsigned-byte 8))
-      (let* ((length (file-length stream))
-             (octets (make-array length :element-type '(unsigned-byte 8))))
-        (read-sequence octets stream)
-        (loop with start = 0
-              while (< start length)
-              do (let ((end (position 10 octets :start start)))
-                   (if (null end)
-                       (progn (setf torn t) (return))
-                       (let ((record (handler-case
-                                         (com.inuoe.jzon:parse
-                                          (trivial-utf-8:utf-8-bytes-to-string octets :start start :end end)
-                                          :max-string-length (* 2 1024 1024))
-                                       (error (condition)
-                                         (error "Damaged core resource journal record at byte ~D of ~A: ~A"
-                                                start path condition)))))
-                         (push record records)
-                         (setf start (1+ end) bytes start)))))))
-    (values (nreverse records) torn bytes)))
+  "Return complete records, torn-tail status, and complete bytes for inspection.
+Startup instead passes the streaming iterator directly to REPLAY-CORE-JOURNAL."
+  (with-open-file (stream path :element-type '(unsigned-byte 8))
+    (let ((next (make-core-journal-reader stream path)) (records nil))
+      (loop
+        (multiple-value-bind (record torn bytes) (funcall next)
+          (unless record (return (values (nreverse records) torn bytes)))
+          (push record records))))))
 
 (defun replay-core-journal (state records)
   "Apply journal RECORDS newer than STATE's revision to STATE, a parsed checkpoint,
-rebuilding the history a commit used to write. Return STATE, now in checkpoint form."
+rebuilding the history a commit used to write. RECORDS may be a zero-argument
+iterator instead of a list; its final values are returned after STATE."
   (let* ((index (core-state-index state))
          (history (coerce (gethash "templateHistory" state #()) 'list))
          (floor (gethash "templateHistoryFloor" state (gethash "revision" state)))
          (expirations (gethash "eventExpirations" state (make-hash-table :test #'equal)))
-         (time nil))
-    (dolist (record records)
+         (time nil) (torn nil) (bytes 0))
+    (loop for record = (if (functionp records)
+                          (multiple-value-bind (record tail complete)
+                              (progn
+                                ;; Large decoded strings can survive young-generation
+                                ;; collections and fragment a constrained SBCL heap.
+                                ;; Reclaim them before the next record needs space.
+                                (when (> (sb-kernel:dynamic-usage)
+                                         (* 2/3 (sb-ext:dynamic-space-size)))
+                                  (sb-ext:gc :full t))
+                                (funcall records))
+                            (setf torn tail bytes complete) record)
+                          (pop records))
+          while record do
       (let ((revision (gethash "revision" record)))
         (when (> revision (gethash "revision" state))
           (setf time (gethash "time" record))
@@ -259,7 +284,13 @@ rebuilding the history a commit used to write. Return STATE, now in checkpoint f
                       (apply-core-map-delta (gethash field state (make-hash-table :test #'equal)) delta)))))
           (setf (gethash "revision" state) revision
                 (gethash "resourceHistoryStart" state)
-                (gethash "resourceHistoryStart" record (gethash "resourceHistoryStart" state revision))))))
+                (gethash "resourceHistoryStart" record (gethash "resourceHistoryStart" state revision)))
+          ;; Bound transient history during replay too, not just after the last
+          ;; record. Expired/superseded values must be collectible while reading.
+          (multiple-value-bind (durable durable-floor)
+              (let ((*podtemplate-clock* (constantly time)))
+                (durable-template-history history floor))
+            (setf history durable floor durable-floor)))))
     (when time
       ;; Trim as the last replayed commit would have when it wrote everything.
       (multiple-value-bind (durable durable-floor)
@@ -284,7 +315,7 @@ rebuilding the history a commit used to write. Return STATE, now in checkpoint f
             (coerce (loop for key being the hash-keys of index using (hash-value object)
                           when (custom-resource-key-p (first key))
                             collect (core-object "resource" (first key) "object" object)) 'vector)))
-    state))
+    (values state torn bytes)))
 
 (defun read-durable-core-state (store)
   "Return STORE's durable core-resource state in checkpoint form, the checkpoint with
@@ -300,8 +331,8 @@ whether the journal must be rewritten (a torn record) and its complete bytes."
                    (not (typep (gethash "resourceHistoryStart" state) `(integer 0 ,(gethash "revision" state)))))
           (error "Invalid resource history start at ~A" path))
         (if (probe-file journal)
-            (multiple-value-bind (records torn bytes) (read-core-journal-records journal)
-              (values (replay-core-journal state records) torn bytes))
+            (with-open-file (stream journal :element-type '(unsigned-byte 8))
+              (replay-core-journal state (make-core-journal-reader stream journal)))
             (values state nil 0))))))
 
 (defun load-core-resources (store)

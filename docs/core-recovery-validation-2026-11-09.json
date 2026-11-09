@@ -1,0 +1,55 @@
+{
+  "date": "2026-11-09",
+  "scope": "Incremental core-resource journal recovery and bounded durable history; application-level SBCL process, no containers or BPF.",
+  "tracking": "podster-ucm.1",
+  "regressionBaseline": "187e178",
+  "memory": {
+    "passed": true,
+    "journalBytes": 537325408,
+    "records": 2048,
+    "retainedHistory": 301,
+    "seconds": 18.755868,
+    "heapLimitMiB": 384
+  },
+  "command": "make test-core-recovery-memory",
+  "baseline": {
+    "command": "GR8S_RECOVERY_LEGACY_SOURCE=/tmp/gr8s-core-resources-before-recovery.lisp sbcl --dynamic-space-size 384 --noinform --non-interactive --load scripts/test-core-recovery-memory.lisp",
+    "legacySource": "git show 187e178:src/resources/core-resources.lisp",
+    "exitCode": 1,
+    "failure": "Heap exhausted allocating 537325424 bytes for the full journal buffer.",
+    "log": "/tmp/gr8s-core-recovery-memory-baseline.log"
+  },
+  "unitTests": {
+    "command": "make test-core-recovery",
+    "checks": 20,
+    "passed": 20,
+    "failed": 0,
+    "coverage": [
+      "UTF-8 byte offsets",
+      "torn malformed UTF-8 tail ignored until newline",
+      "complete-record corruption rejected",
+      "streaming startup without eager reader",
+      "history retention floor and byte budget",
+      "torn-tail checkpoint and successful subsequent restart"
+    ]
+  },
+  "remaining": [
+    "Production HA log compaction and snapshot catch-up (podster-ucm.11)",
+    "Full ten-area operational backlog (podster-ucm)",
+    "This fixture proves recovery with a small live state, not unlimited live datastore capacity."
+  ],
+  "regressionSuites": {
+    "checks": 657,
+    "passed": 657,
+    "failed": 0,
+    "suites": [
+      "core-recovery",
+      "ha-store",
+      "ha-control-plane",
+      "podtemplates",
+      "server-side-apply",
+      "patch"
+    ],
+    "log": "/tmp/gr8s-recovery-regression-final.log"
+  }
+}

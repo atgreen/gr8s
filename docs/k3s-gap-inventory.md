@@ -24,6 +24,31 @@ The comparisons have different meanings:
   of outcome through a different architecture. They must not be reported as
   missing features merely because they do not copy k3s internals.
 
+## Current tracking reconciliation (2026-11-09)
+
+The historical IDs below are absent from the available local Dolt databases.
+Current work is tracked by **`podster-ucm`**, with children `.1` (journal recovery),
+`.2` (HA correctness), `.3` (backup/restore), `.4` (secrets encryption), `.5`
+(certificates), `.6` (telemetry), `.7` (installation/upgrades), `.8` (IPv6
+acceptance), `.9` (AddOn/Helm), and `.10` (audit). Child `.11` tracks bounded Raft
+log retention and snapshot catch-up. Historical references remain for provenance,
+not as evidence of their current status.
+
+Source reconciliation found streamed checkpoints, per-key HA deltas, coalesced
+AppendEntries outboxes, and condition-variable waits already implemented. Journal
+recovery now streams records, trims history during replay, applies its byte budget,
+and collects older-generation garbage under heap pressure. A [constrained-heap
+recovery run](core-recovery-validation-2026-11-09.json) replays 512 MiB of journal
+within a 384 MiB heap using default retention settings. These changes address
+specific allocation paths; they do not establish an unrestricted cluster size.
+Production HA still retains its committed Raft log without automatic compaction
+or snapshot catch-up; that P0 work remains open. Live disconnected-peer acceptance
+and the other HA correctness items also remain open.
+
+In-process patch trains now provide signed, journaled rolling Lisp updates. Full
+binary upgrades (including incorporation of installed patches), installation,
+service configuration, and uninstall remain separate lifecycle work.
+
 ## Required Kubernetes parity gaps
 
 | Area | Current difference | Evidence / tracking |
@@ -55,8 +80,8 @@ of code?":
 
 | Rank | Priority | Gap | Why it is material | Tracking |
 |---:|---|---|---|---|
-| 1 | P0 | Control-plane memory safety | Serializing the complete core-state blob has exhausted the SBCL heap and terminated `serve` under memory pressure. This is a demonstrated availability defect in the persistence/replication path, not merely a scaling optimization. The whole-state replication model also amplifies allocation and peer-retry costs as the cluster grows. | `podster-061`; per-key replication `podster-bwu.2` |
-| 2 | P1 | HA availability and failover correctness | A disconnected follower caused an unbounded AppendEntries queue and founder OOM. Queue coalescing has focused coverage but the incident still lacks live HA closure. Idle Raft peer links poll every 2 ms and waste node CPU; image-tracker state is not consistent across members; a follower can lose its node-heartbeat monitor; and Pod replication retains a narrower leader-crash-before-commit window. These are active availability/correctness risks in the k3s-comparable HA path. | `podster-8r7`; `podster-uvi`; `podster-i5vx`; `podster-7ni6.3.5`; `podster-bwu.1` |
+| 1 | P0 | Control-plane memory safety | The historical whole-state allocation paths have been replaced by streamed checkpoints and per-key HA deltas. Journal replay now streams and bounds retained history. Production HA still retains all committed Raft entries without automatic snapshot compaction/catch-up, so historical payload growth remains an availability risk. | `podster-ucm.1`, `podster-ucm.11`; historical `podster-061`, `podster-bwu.2` |
+| 2 | P1 | HA availability and failover correctness | A disconnected follower caused an unbounded AppendEntries queue and founder OOM. Queue coalescing and blocking idle waits are implemented, but the incident still lacks live HA closure. Image-tracker state is not consistent across members; a follower can lose its node-heartbeat monitor; and Pod replication retains a narrower leader-crash-before-commit window. These are active availability/correctness risks in the k3s-comparable HA path. | `podster-8r7`; `podster-uvi`; `podster-i5vx`; `podster-7ni6.3.5`; `podster-bwu.1` |
 | 3 | P1 | Backup and restore | Internal Raft snapshots are not an operator recovery workflow. There is no supported, tested way to capture and restore the datastore together with cluster identity, encryption material, and signing keys, nor scheduled retention and remote-copy support. Until this exists, a cluster cannot be treated as recoverable. | `podster-oime` |
 | 4 | P1 | Secrets at rest | Kubernetes Secret values are persisted without encryption. A stolen state directory or backup therefore exposes workload credentials, and there is no staged key-rotation or re-encryption workflow. This compounds the backup gap: safe recovery artifacts also need confidentiality and key custody. | `podster-dcge`; [Secret API](configmap-secret-api.md) |
 | 5 | P1 | Certificate lifecycle | gr8s has no cluster-wide certificate expiry inventory, warnings, selective leaf rotation, or safe CA/signing-key rotation workflow. Automatic member renewal is not a substitute for an operator-visible trust-lifecycle procedure. | `podster-6l63` |

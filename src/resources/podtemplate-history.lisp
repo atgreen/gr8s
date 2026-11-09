@@ -76,7 +76,8 @@ Also returns this commit's new entries, newest first."
 (defun durable-template-history (history floor)
   "Return the part of HISTORY a commit writes to disk, and the floor a restart resumes from."
   (trim-template-history history floor (funcall *podtemplate-clock*)
-                         *podtemplate-history-seconds* *podtemplate-history-limit*))
+                         *podtemplate-history-seconds* *podtemplate-history-limit*
+                         *resource-watch-history-bytes*))
 
 (defun template-history-after (store revision)
   "Return journal entries newer than REVISION, oldest first, cheaply when they are recent.
