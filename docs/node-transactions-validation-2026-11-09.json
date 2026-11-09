@@ -1,0 +1,42 @@
+{
+  "date": "2026-11-09",
+  "scope": "Stage Node writes until Raft apply, replicate Node watch transitions and runtime health",
+  "passed": true,
+  "checks": 773,
+  "suites": {
+    "ha-node-cidr": 55,
+    "pod-transactions": 65,
+    "ha-pod-failover": 29,
+    "api-defaults": 89,
+    "durable-resource-watches": 526,
+    "heartbeat-expiry": 4,
+    "node-restart": 5
+  },
+  "coverage": [
+    "Failed readiness, deletion and registration proposals preserve committed pointers, files, revision and journal",
+    "Transaction body error restores committed Node pointer before any proposal",
+    "Committed Node deltas publish on both author and replica",
+    "Lease-only renewal does not add a client event",
+    "Runtime-down message reaches both replicas",
+    "Enrollment persistence failure, retry and reopen retain CIDR and revision"
+  ],
+  "nativeBuild": {
+    "passed": true,
+    "sha256": "ccedce837119a21ed89d5364276a92c18cd6a54f937e05429e4eb29cfc8b9b70"
+  },
+  "limitations": [
+    "Concurrent same-Node whole-record writes and ordered watch revisions remain under podster-ucm.2.3.2",
+    "No general cross-resource transaction atomicity",
+    "Production streamed snapshot artifacts, automatic compaction and startup WAL recovery remain open",
+    "Focused suites only; full suite has separately tracked failures"
+  ],
+  "nativeStartupSmoke": {
+    "passed": true,
+    "native": true,
+    "runtime": "fake",
+    "evidence": "/tmp/gr8s-native-scratch-y9mnqzpm",
+    "reclaimedPayloadBytes": 1048576,
+    "liveOwnerPreserved": true,
+    "gracefulShutdown": true
+  }
+}

@@ -2,7 +2,8 @@
 ;;;; SPDX-License-Identifier: Apache-2.0
 (in-package #:gr8s.store)
 
-(defstruct pod-write-context store revision (changes (make-hash-table :test #'equal)) journal)
+(defstruct pod-write-context store revision (changes (make-hash-table :test #'equal)) journal
+  (nodes (make-hash-table :test #'equal)) node-journal)
 (defstruct pod-write-change old desired status snapshots)
 (defparameter *pod-transaction-tables*
   (list #'pod-store-pod-observed-statuses #'pod-store-pod-observed-resource-versions
@@ -14,6 +15,28 @@
 (defun pod-stage-active-p (store)
   (and *core-write-active* *pod-write-context*
        (eq store (pod-write-context-store *pod-write-context*))))
+
+(defun stage-node-write (store name)
+  "Retain this key's committed pointer and return a private working record."
+  (let ((node (gethash name (pod-store-nodes store))))
+    (if (pod-stage-active-p store)
+        (let ((context *pod-write-context*))
+          (multiple-value-bind (old present) (gethash name (pod-write-context-nodes context))
+            (declare (ignore old))
+            (unless present
+              (setf (gethash name (pod-write-context-nodes context)) node)
+              (when node
+                (setf node (copy-node-record node)
+                      (gethash name (pod-store-nodes store)) node))))
+          node)
+        node)))
+
+(defun stage-node-journal (store)
+  (when (and (pod-stage-active-p store)
+             (null (pod-write-context-node-journal *pod-write-context*)))
+    (setf (pod-write-context-node-journal *pod-write-context*)
+          (list (pod-store-node-watch-journal store) (pod-store-node-watch-floor store)
+                (pod-store-node-watch-journal-length store) (pod-store-node-watch-journal-bytes store)))))
 
 (defun stage-pod-write (store pod &key desired status)
   "Remember only the affected key's committed pointers before a private mutation."
@@ -55,6 +78,16 @@
          (destructuring-bind (table uid value present) saved
            (if present (setf (gethash uid table) value) (remhash uid table)))))
      (pod-write-context-changes context))
+    (maphash (lambda (name old)
+               (if old (setf (gethash name (pod-store-nodes store)) old)
+                   (remhash name (pod-store-nodes store))))
+             (pod-write-context-nodes context))
+    (when (pod-write-context-node-journal context)
+      (destructuring-bind (journal floor count bytes) (pod-write-context-node-journal context)
+        (setf (pod-store-node-watch-journal store) journal
+              (pod-store-node-watch-floor store) floor
+              (pod-store-node-watch-journal-length store) count
+              (pod-store-node-watch-journal-bytes store) bytes)))
     (when (pod-write-context-journal context)
       (destructuring-bind (journal floor count bytes) (pod-write-context-journal context)
         (setf (pod-store-pod-watch-journal store) journal

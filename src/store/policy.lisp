@@ -13,6 +13,8 @@
   (error "The gr8s store lifecycle policy is not configured"))
 
 (defstruct (store-policy (:constructor %make-store-policy))
+  (node-view #'missing-store-policy-operation :type function)
+  (node-event #'missing-store-policy-operation :type function)
   (parse-pod #'missing-store-policy-operation :type function)
   (load-resources #'missing-store-policy-operation :type function)
   (prepare-create #'missing-store-policy-operation :type function)

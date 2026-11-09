@@ -244,6 +244,9 @@
 
 (defun persist-node (store node)
   "Atomically persist NODE in STORE's node directory."
+  (when (pod-stage-active-p store)
+    (stage-node-write store (node-record-name node))
+    (return-from persist-node node))
   (ensure-directories-exist (nodes-path store))
   (let* ((target (node-path store node))
          (temporary
@@ -513,7 +516,11 @@ renewals use the same compact one-key delta without changing resourceVersion."
            ;; threads do not take the author-side consensus lock, so serializing
            ;; the live hash table after releasing this lock would race them.
            (object-json (and node
-                             (com.inuoe.jzon:stringify (node-record-to-object node)))))
+                             (com.inuoe.jzon:stringify
+                              (let ((object (node-record-to-object node)))
+                                (setf (gethash "runtimeDownMessage" object)
+                                      (node-record-runtime-down-message node))
+                                object)))))
       (setf *pending-node-commit*
             (acons name object-json
                    (remove name *pending-node-commit* :key #'car :test #'equal))))))
@@ -540,23 +547,33 @@ renewals use the same compact one-key delta without changing resourceVersion."
                  (remhash name (pod-store-nodes store))))))
 
 (defun install-node-state-delta (store json)
-  "Apply one committed key-level Node transaction in Raft log order. Only the
-named Nodes are replaced or deleted; unrelated records remain untouched."
+  "Apply committed Node keys and their watch transitions in Raft log order."
   (bt:with-lock-held ((pod-store-lock store))
-    (let ((delta (com.inuoe.jzon:parse json)))
+    (let ((delta (com.inuoe.jzon:parse json))
+          (*core-write-active* nil))
       (loop for change across (gethash "changes" delta #())
             for name = (gethash "name" change)
             for object = (gethash "object" change)
-            do (if (eq object 'null)
-                   (let ((existing (gethash name (pod-store-nodes store))))
+            for existing = (gethash name (pod-store-nodes store))
+            for old = (and existing (funcall (store-policy-node-view *store-policy*) existing))
+            do (let ((new nil) (revision nil))
+                 (if (eq object 'null)
                      (when existing
-                       (ignore-errors (delete-file (node-path store existing)))
-                       (remhash name (pod-store-nodes store))))
-                   (let ((node (parse-node-record object)))
-                     (persist-node store node)
-                     (setf (gethash name (pod-store-nodes store)) node)
-                     (advance-replicated-pod-revision-unlocked
-                      store (replicated-pod-revision (node-record-resource-version node))))))
+                       (let ((path (node-path store existing)))
+                         (when (probe-file path) (delete-file path)))
+                       (remhash name (pod-store-nodes store))
+                       (setf revision (replicated-pod-revision (gethash "resourceVersion" delta))))
+                     (let ((node (parse-node-record object)))
+                       (setf (node-record-runtime-down-message node)
+                             (gethash "runtimeDownMessage" object))
+                       (persist-node store node)
+                       (setf (gethash name (pod-store-nodes store)) node
+                             new (funcall (store-policy-node-view *store-policy*) node)
+                             revision (replicated-pod-revision (node-record-resource-version node)))))
+                 (when revision
+                   (advance-replicated-pod-revision-unlocked store revision)
+                   (unless (json-value-equal-p old new)
+                     (funcall (store-policy-node-event *store-policy*) store revision old new)))))
       (advance-replicated-pod-revision-unlocked store (replicated-pod-revision (gethash "resourceVersion" delta)))
       (save-consensus-pod-revision-unlocked store))))
 

@@ -51,20 +51,26 @@
   "Persist NODE at a fresh revision and journal it, unless its API view still equals OLD.
 OLD is NODE's view before the change, or NIL when NODE is new. Heartbeats change nothing a
 client can see, so they cost neither a revision nor an event."
+  (stage-node-write store (node-record-name node))
+  (stage-node-journal store)
   (let ((new (node-api-object node)))
     (unless (and old (workload-equal-p old new))
       (let ((revision (next-node-revision-unlocked store node)))
         (setf (node-record-resource-version node) (write-to-string revision)
               (gethash "resourceVersion" (gethash "metadata" new)) (write-to-string revision))
         (persist-node store node)
-        (record-node-watch-event-unlocked store revision old new)))
+        (record-node-watch-event-unlocked store revision old new)
+        (note-node-state-change store node)))
     node))
 
 (defun remove-node-unlocked (store node)
   "Forget NODE durably and journal its final API view as a deletion at a fresh revision."
+  (stage-node-write store (node-record-name node))
+  (stage-node-journal store)
   (let ((old (node-api-object node))
         (path (node-path store node)))
-    (when (probe-file path) (delete-file path))
+    (unless (gr8s.store::pod-stage-active-p store)
+      (when (probe-file path) (delete-file path)))
     (remhash (node-record-name node) (pod-store-nodes store))
     (record-node-watch-event-unlocked store (next-node-revision-unlocked store node) old nil)
     (note-node-desired-change store (node-record-name node))))

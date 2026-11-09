@@ -8,6 +8,8 @@
 (in-package #:gr8s.apiserver)
 
 (gr8s.store:configure-store-policy
+ :node-view #'node-api-object
+ :node-event #'record-node-watch-event-unlocked
  :parse-pod #'parse-pod
  :load-resources #'load-core-resources
  :prepare-create

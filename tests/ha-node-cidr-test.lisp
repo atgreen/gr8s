@@ -166,3 +166,73 @@
        store "enrollment-id" "enrolled-worker" "10.88.0.0/16" 20
        "2026-11-09T00:00:00Z")
       (is (equal revision (gr8s::node-record-resource-version node))))))
+
+(test failed-node-consensus-restores-committed-state
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (seed-ha-readiness-nodes store)
+    (let* ((original (gr8s:get-node store "worker-a"))
+           (file (uiop:read-file-string (gr8s::node-path store original)))
+           (revision (gr8s::pod-store-pod-revision store))
+           (journal (gr8s::pod-store-node-watch-journal store)))
+      (setf (gr8s::pod-store-consensus-commit-fn store)
+            (lambda (tag payload)
+              (declare (ignore payload))
+              (is (eq :node-delta tag))
+              (is (eq original (gethash "worker-a" (gr8s::pod-store-nodes store))))
+              (is (equal file (uiop:read-file-string (gr8s::node-path store original))))
+              (is (= revision (gr8s::pod-store-pod-revision store)))
+              (is (eq journal (gr8s::pod-store-node-watch-journal store)))
+              (error "Injected consensus failure")))
+      (signals error (gr8s::mark-node-ready store "worker-a" (get-universal-time)))
+      (is (null (gr8s::node-record-ready-p original)))
+      (signals error
+        (gr8s::with-store-lock (store) (gr8s::remove-node-unlocked store original)))
+      (is (probe-file (gr8s::node-path store original)))
+      (signals error
+        (gr8s:register-node store (gr8s:make-node-record
+                                  :id "new-worker" :name "new-worker" :pod-cidr "10.88.32.0/20")))
+      (is (null (gethash "new-worker" (gr8s::pod-store-nodes store)))))))
+
+(test committed-node-deltas-publish-on-every-replica
+  (with-temporary-store (store path)
+    (with-temporary-store (replica replica-path)
+      (declare (ignore path replica-path))
+      (dolist (s (list store replica)) (seed-ha-readiness-nodes s))
+      (setf (gr8s::pod-store-consensus-commit-fn store)
+            (lambda (tag payload)
+              (is (eq :node-delta tag))
+              (dolist (s (list store replica)) (gr8s::install-node-state-delta s payload))))
+      (let ((before (gr8s::pod-store-node-watch-journal-length store)))
+        (gr8s::mark-node-ready store "worker-a" (get-universal-time))
+        (dolist (s (list store replica))
+          (is (ha-node-ready-p s "worker-a"))
+          (is (= (1+ before) (gr8s::pod-store-node-watch-journal-length s))))
+        ;; Lease-only renewals persist and replicate without a client event.
+        (gr8s::mark-node-ready store "worker-a" (1+ (get-universal-time)))
+        (is (= (1+ before) (gr8s::pod-store-node-watch-journal-length store)))
+        (gr8s::note-node-runtime-health store "worker-a" "runtime unavailable")
+        (dolist (s (list store replica))
+          (is (equal "runtime unavailable"
+                     (gr8s::node-record-runtime-down-message (gr8s:get-node s "worker-a")))))
+        (let ((node (gr8s:get-node store "worker-b")))
+          (gr8s::with-store-lock (store) (gr8s::remove-node-unlocked store node)))
+        (dolist (s (list store replica))
+          (is (null (gethash "worker-b" (gr8s::pod-store-nodes s)))))))))
+
+(test node-staging-unwinds-before-consensus-on-body-error
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (seed-ha-readiness-nodes store)
+    (let ((original (gr8s:get-node store "worker-a")))
+      (setf (gr8s::pod-store-consensus-commit-fn store)
+            (lambda (&rest arguments)
+              (declare (ignore arguments))
+              (fail "A failed transaction body must not propose")))
+      (signals error
+        (gr8s::with-store-lock (store)
+          (setf (gr8s::node-record-underlay-address
+                 (gr8s::get-node-unlocked store "worker-a")) "192.0.2.10")
+          (error "Abort private mutation")))
+      (is (eq original (gethash "worker-a" (gr8s::pod-store-nodes store))))
+      (is (equal "" (gr8s::node-record-underlay-address original))))))

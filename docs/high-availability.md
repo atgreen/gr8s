@@ -103,6 +103,16 @@ state and log on startup. These are active correctness gaps under
 `podster-ucm.2.1`, not established crash-safety guarantees. The core's tested WAL
 and snapshot helpers alone do not close those integration gaps.
 
+Node writes now stage private records, defer file changes, and restore committed
+pointers, revisions and watch journals before proposing to Raft. Committed deltas
+publish Node watch transitions on every replica; lease-only renewals do not create
+client events. Runtime-down reports also replicate. Enrollment retries finish a
+previously failed Node file write before acknowledging success. See the
+[Node transaction validation](node-transactions-validation-2026-11-09.json).
+Concurrent writes authored by different members to the same Node still require
+apply-time conflict handling and ordered revision assignment (`podster-ucm.2.3.2`).
+These transactions do not provide cross-resource atomicity.
+
 The Raft core preserves its vote when stepping down within the same term, and
 persists new terms and votes before publishing them in memory. A failed storage
 write leaves the preceding term, vote and role intact and sends no vote grant or

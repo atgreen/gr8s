@@ -50,6 +50,8 @@
    #:node-path
    #:node-record-to-object
    #:node-state-delta-json
+   #:stage-node-write
+   #:stage-node-journal
    #:nodes-path
    #:next-pod-revision-unlocked
    #:note-node-desired-change

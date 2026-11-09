@@ -28,7 +28,7 @@
 (defun register-node (store node)
   "Register NODE idempotently while rejecting identity and PodCIDR collisions."
   (with-store-lock (store)
-    (let ((same-name (gethash (node-record-name node) (pod-store-nodes store))))
+    (let ((same-name (stage-node-write store (node-record-name node))))
       (when same-name
         (if (same-node-identity-p same-name node)
             (return-from register-node same-name)
@@ -53,7 +53,7 @@
 
 (defun get-node-unlocked (store name)
   "Return NAME's node record without acquiring STORE's lock."
-  (gethash name (pod-store-nodes store)))
+  (stage-node-write store name))
 
 (defun get-node (store name)
   "Return NAME's node record, or signal a Kubernetes NotFound error."
@@ -156,7 +156,8 @@ receives no new Pods, as kubelet reports \"container runtime is down\"."
                         (< (node-record-lease-deadline node) now)
                         (or (null (node-record-last-heartbeat node))
                             (< (node-record-last-heartbeat node) oldest-acceptable-heartbeat))))
-            collect (progn (persist-node-unavailable store node) node))))
+            collect (let ((working (stage-node-write store (node-record-name node))))
+                      (persist-node-unavailable store working) working))))
 
 (defun parse-ipv4-integer (address)
   "Parse dotted-decimal ADDRESS into an unsigned 32-bit integer."
