@@ -969,6 +969,6 @@
       "1": 12103
     }
   },
-  "hostedCI": "Check latest PR annotation before merge; prior jobs could not start due GitHub account billing/spending restrictions. No full-repository green claim.",
+  "hostedCI": "Hosted unit jobs on9d06be6 and739e29a could not start because GitHub account payments failed or spending limits need increasing. Privileged hosted job skipped. No full-repository green claim.",
   "scope": "TCP lifecycle increment: valid early-data refusal and actual established guest socket across SIGKILL of both agents. Earlier artifacts cover generation, reset/close, options, graceful restart and retained upgrades. Parent remains open for SNAT/hairpin/collisions, IPv6 packet NAT, packet NodePort/Local/Cluster/source/health checks, broader readiness/churn/termination/affinity/empty-Service coverage and diagnostics. No GSO/physical-host/NIC-offload claim."
 }
