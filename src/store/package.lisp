@@ -113,6 +113,7 @@
    #:pod-store-resources
    #:pod-store-scheduling-notes
    #:pod-store-service-account-signing-key
+   #:pod-store-secret-encryption-config
    #:pod-store-template-history
    #:pod-store-template-history-floor
    #:pod-store-template-history-maintained-at

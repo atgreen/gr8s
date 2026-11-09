@@ -144,6 +144,7 @@
                              (:module "resources"
                               :serial t
                               :components ((:file "integration")
+                                           (:file "secret-encryption")
                                            (:file "core-resources")
                                            (:file "store-snapshot")
                                            (:file "store-snapshot-index")

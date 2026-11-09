@@ -82,6 +82,46 @@
         (is (null (search "plain" (uiop:read-file-string path))))
         (is (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat path)))))))))
 
+(test secret-encryption-enable-rewrites-durable-data-and-round-trips
+  (with-temporary-store (store path)
+    (let* ((encoded "c3VwZXItc2VjcmV0LXZhbHVl")
+           (secret (gr8s::create-core-resource
+                    store "secrets"
+                    (core-fixture "Secret" "credentials"
+                                  "data" (gr8s::core-object "password" encoded))
+                    "default")))
+      (is (string= encoded (gethash "password" (gethash "data" secret))))
+      (gr8s::enable-secret-encryption store)
+      (let ((checkpoint (uiop:read-file-string (gr8s::core-resource-state-path store))))
+        (is (null (search encoded checkpoint)))
+        (is (search "encryptedData" checkpoint)))
+      (let* ((reopened (open-store path))
+             (restored (gr8s::get-core-resource reopened "secrets" "default" "credentials")))
+        (is (string= encoded
+                     (gethash "password" (gethash "data" restored))))))))
+
+(test encrypted-secret-journal-round-trips-and-authentication-fails-closed
+  (with-temporary-store (store path)
+    (gr8s::enable-secret-encryption store)
+    (gr8s::create-core-resource
+     store "secrets"
+     (core-fixture "Secret" "credentials"
+                   "data" (gr8s::core-object "password" "am91cm5hbC1zZW50aW5lbA=="))
+     "default")
+    (let* ((journal-path (gr8s::core-journal-path store))
+           (journal (uiop:read-file-string journal-path)))
+      (is (null (search "am91cm5hbC1zZW50aW5lbA==" journal)))
+      (is (search "encryptedData" journal))
+      (is (gr8s::get-core-resource (open-store path) "secrets" "default" "credentials"))
+      (let* ((record (com.inuoe.jzon:parse (string-right-trim '(#\Newline) journal)))
+             (object (gethash "object" (aref (gethash "changes" record) 0)))
+             (envelope (gethash "gr8s.io/encryptedData" object))
+             (ciphertext (gethash "ciphertext" envelope)))
+        (setf (char ciphertext 0) (if (char= (char ciphertext 0) #\A) #\B #\A))
+        (gr8s.security::write-private-text-atomically
+         journal-path (concatenate 'string (com.inuoe.jzon:stringify record) (string #\Newline)))
+        (signals error (open-store path))))))
+
 (test invalid-core-resource-input-is-rejected-without-changing-state
   (with-temporary-store (store path)
     (values path)
