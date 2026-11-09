@@ -135,7 +135,7 @@ or :PENDING. Errors leave pinned blockers intact and must keep GC deferred."
                           do (check-cni-tcx-link fd index direction)
                              (unless (plusp index) (invalid-cni "retained endpoint TCX link is detached"))
                           collect (list :direction direction :program-name name :path path :fd fd
-                                        :info metadata :index index
+                                        :info metadata :index index :old-program-fd nil
                                         :block-path (merge-pathnames
                                                      (concatenate 'string "gr8s_pkt_upgrade_" direction)
                                                      directory)))))
