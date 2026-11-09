@@ -55,11 +55,15 @@ compiled program instruction bytes plus map-fd relocations, ready to hand to the
 loader's map-creation and program-loading steps.  No ELF is produced."
   (whistler/loader::compile-bpf-forms map-forms program-forms))
 
+(defvar *service-packet-gc-program-forms* nil
+  "Maintenance program forms loaded only when packet Services are enabled.")
+
 (defun compile-service-lb (&key packet-services)
   "JIT-compile the ClusterIP socket load balancer. See compile-whistler-program."
   (compile-whistler-program (append *service-lb-map-forms*
                                    (when packet-services *service-packet-extra-map-forms*))
-                            *service-lb-program-forms*))
+                            (append *service-lb-program-forms*
+                                    (when packet-services *service-packet-gc-program-forms*))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Control-plane map byte encoding (byte-order contract in the file header).

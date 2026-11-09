@@ -25,6 +25,14 @@
   maps        ; alist of (name . map-info), e.g. "gr8s_service_v4"
   program     ; prog-info for gr8s_service_lb, the connect4 hook
   programs    ; alist of (name . prog-info) for every hook, connect4 first
+  (gc-cursors (make-hash-table :test #'equal)) ; next unprocessed key per flow map
+  (gc-compatible-p nil)
+  (gc-compatible-stage-count 0)
+  (gc-warning nil)
+  (gc-scanned 0)
+  (gc-reclaimed 0)
+  (gc-deferred 0)
+  (gc-failures 0)
   attachment  ; the cgroup attachment handles returned by attach-cgroup, one per hook
   (lock (bt:make-lock "gr8s service LB dataplane")))
 
@@ -44,14 +52,19 @@
         ((equal section "cgroup/recvmsg6") +bpf-cgroup-udp6-recvmsg+)
         (t (error "No socket address hook for section ~S" section))))
 
-(defun load-service-lb-programs (specs maps)
+(defun load-service-lb-programs
+    (specs maps &key (load-program #'whistler/loader::load-program) (close-fd #'sb-posix:close))
   "Load the compiled program SPECS against MAPS, as Whistler's session loader does, but
 with each hook's attach type chosen here: that loader cannot place a recvmsg4 program.
 Returns an alist of (name . prog-info)."
-  (let ((descriptors (mapcar (lambda (entry) (cons (car entry) (whistler/loader:map-info-fd (cdr entry)))) maps)))
-    (mapcar
+  (let ((descriptors (mapcar (lambda (entry) (cons (car entry) (whistler/loader:map-info-fd (cdr entry)))) maps))
+        (loaded nil) (succeeded nil))
+    (unwind-protect
+         (prog1
+             (mapcar
      (lambda (spec)
-       (let ((instructions (copy-seq (getf spec :insns))) (section (getf spec :section)) (name (getf spec :name)))
+       (let* ((instructions (copy-seq (getf spec :insns))) (section (getf spec :section)) (name (getf spec :name))
+             (maintenance (equal name "gr8s_packet_gc")))
          ;; Each relocation is (instruction-offset map-index): a BPF_LD_IMM64 whose source
          ;; register becomes BPF_PSEUDO_MAP_FD and whose immediate the map's descriptor.
          (loop for (offset index) in (getf spec :relocs)
@@ -61,11 +74,19 @@ Returns an alist of (name . prog-info)."
                         do (setf (aref instructions (+ offset 4 byte)) (ldb (byte 8 (* 8 byte)) descriptor))))
          (cons name (whistler/loader::make-prog-info
                      :name name :section-name section
-                     :type whistler/loader:+bpf-prog-type-cgroup-sock-addr+ :insns instructions
-                     :fd (whistler/loader::load-program instructions whistler/loader:+bpf-prog-type-cgroup-sock-addr+
-                                                        (getf spec :license)
-                                                        :expected-attach-type (service-lb-attach-type section))))))
-     specs)))
+                     :type (if maintenance whistler/loader::+bpf-prog-type-sched-cls+
+                               whistler/loader:+bpf-prog-type-cgroup-sock-addr+) :insns instructions
+                     :fd (let ((fd (funcall load-program instructions
+                                     (if maintenance whistler/loader::+bpf-prog-type-sched-cls+
+                                         whistler/loader:+bpf-prog-type-cgroup-sock-addr+)
+                                     (getf spec :license)
+                                     :expected-attach-type (if maintenance 0 (service-lb-attach-type section)))))
+                           (push fd loaded)
+                           fd)))))
+               specs)
+           (setf succeeded t))
+      (unless succeeded
+        (dolist (fd loaded) (ignore-errors (funcall close-fd fd)))))))
 
 (defun service-lb-pin-directory (state-directory)
   "The bpffs directory under STATE-DIRECTORY that holds the pinned LB maps."
@@ -173,9 +194,10 @@ decides whether a dataplane failure is fatal to the node."
                                         (let ((fd (whistler/loader:prog-info-fd (cdr entry))))
                                           (when (and (integerp fd) (plusp fd)) (ignore-errors (sb-posix:close fd))))))))
                 (dolist (entry programs)
-                  (push (funcall attach (whistler/loader:prog-info-fd (cdr entry)) cgroup-path
+                  (unless (equal (car entry) "gr8s_packet_gc")
+                    (push (funcall attach (whistler/loader:prog-info-fd (cdr entry)) cgroup-path
                                  (service-lb-attach-type (whistler/loader::prog-info-section-name (cdr entry))))
-                        attachments)))
+                        attachments))))
               (%make-service-lb-dataplane
                :cgroup-path cgroup-path
                :pin-directory (namestring (uiop:ensure-directory-pathname pin-directory))
