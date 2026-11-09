@@ -29,6 +29,7 @@
                                "pods" (write-to-string +node-pod-capacity+)))
         (storage (filesystem-capacity-bytes "/var/lib")))
     (when storage (setf (gethash "ephemeral-storage" capacity) (policy-value-string storage :binary)))
+    (maphash (lambda (name value) (setf (gethash name capacity) value)) (node-hugepage-capacity))
     capacity))
 
 (defun node-reported-capacity-entries ()
@@ -58,7 +59,8 @@
 (defun node-allocatable-table (node)
   "Return NODE's exact allocatable amounts from its report and advertised extended resources."
   (let ((table (make-hash-table :test #'equal)))
-    (dolist (source (list (node-record-capacity node) (node-record-extended-resources node)))
+    (dolist (source (list (or (node-record-allocatable node) (node-record-capacity node))
+                          (node-record-extended-resources node)))
       (when source
         (maphash (lambda (name value) (setf (gethash name table) (policy-value value))) source)))
     table))
@@ -92,7 +94,7 @@ resource; an extended resource it does not advertise has zero capacity."
                always (or (zerop amount)
                           (multiple-value-bind (limit known) (gethash name allocatable)
                             (cond (known (<= (+ amount (gethash name used 0)) limit))
-                                  ((extended-resource-name-p name) nil)
+                                  ((or (extended-resource-name-p name) (hugepage-size name)) nil)
                                   (t t))))))))
 
 (defun pod-fits-node-unlocked (store pod node)

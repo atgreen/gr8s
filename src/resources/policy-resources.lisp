@@ -110,6 +110,11 @@
        (position #\/ name)
        (extended-resource-name-p (subseq name (length "requests.")))))
 
+(defun quota-hugepage-resource-name (name)
+  "Return the hugepage resource counted by a bare or requests-prefixed quota."
+  (let ((resource (if (uiop:string-prefix-p "requests." name) (subseq name 9) name)))
+    (when (hugepage-size resource) resource)))
+
 (defun quota-storage-class-resource (name)
   "Return the storage class and its bare resource when NAME is a per-class PVC quota."
   (let* ((marker ".storageclass.storage.k8s.io/") (position (search marker name)))
@@ -122,7 +127,8 @@
   "Require standard or qualified names, and whole numbers for the counted ones."
   (maphash
    (lambda (name value)
-     (unless (or (position #\/ name) (member name +standard-quota-resources+ :test #'equal))
+     (unless (or (position #\/ name) (member name +standard-quota-resources+ :test #'equal)
+                 (quota-hugepage-resource-name name))
        (core-resource-error 422 "Invalid" "spec.hard[~A] must be a standard resource for quota" name))
      (when (or (member name +integer-quota-resources+ :test #'equal)
                (quota-count-resource-name-p name)

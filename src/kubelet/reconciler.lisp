@@ -292,7 +292,7 @@ finishes stops the node starting Pods, and nothing else reports it (podster-uqb.
 (defun pod-recorded-eviction (reconciler pod)
   "Return POD's durable eviction status, if a previous pass evicted it."
   (let ((status (pod-observed-status (reconciler-store reconciler) pod)))
-    (when (and status (equal "Failed" (gethash "phase" status)) (equal "Evicted" (gethash "reason" status)))
+    (when (and status (equal "Failed" (gethash "phase" status)) (member (gethash "reason" status) '("Evicted" "TopologyAffinityError" "OutOfcpu") :test #'equal))
       (copy-core-object status))))
 
 (defun converge-running-pod (reconciler pod)
@@ -588,6 +588,11 @@ terminal phase clients saw, even when a node rebuilt its acknowledgement from le
                  (copy-core-object status)
                  (pod-status "Pending" :reason "ContainerRuntimeUnavailable"
                                        :message (runtime-error-message error))))))
+        (gr8s.runtime:resource-admission-error (error)
+          (let ((status (pod-status "Failed" :reason (gr8s.runtime:resource-admission-error-reason error)
+                                            :message (runtime-error-message error))))
+            (save-pod-observation (reconciler-store reconciler) pod status)
+            (add-pod-status-conditions (reconciler-store reconciler) pod status)))
         (runtime-error (error)
           (format *error-output* "gr8s Pod ~A/~A runtime error: ~A~%" namespace name (runtime-error-message error))
           (add-pod-status-conditions

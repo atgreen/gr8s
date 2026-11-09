@@ -174,6 +174,14 @@
    #:containerd-runtime-dynamic-resource-cdi-device-function
    #:containerd-runtime-dynamic-resource-prepare-function
    #:containerd-runtime-dynamic-resource-unprepare-function
+   #:containerd-runtime-device-plugin-allocation-function
+   #:containerd-effective-container-resources
+   #:containerd-runtime-resource-prepare-function
+   #:containerd-runtime-resource-config-function
+   #:containerd-runtime-resource-release-function
+   #:containerd-runtime-resource-resize-function
+   #:containerd-runtime-device-plugin-release-function
+   #:containerd-runtime-kubelet-root
    #:containerd-runtime-dns-options
    #:containerd-runtime-dns-searches
    #:containerd-runtime-dns-servers

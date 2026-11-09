@@ -25,7 +25,7 @@
      (validate-pod-dns-spec spec)
      (default-host-network-ports spec))
    :resource-validator
-   (lambda (spec) (validate-pod-level-resources spec))))
+   (lambda (spec) (validate-pod-level-resources spec) (validate-pod-hugepages spec))))
 
 (defun parse-pod (input &key allow-generate-name)
   "Parse INPUT through MODEL with gr8s's complete Kubernetes validation policy."

@@ -131,6 +131,37 @@
        (not (uiop:string-prefix-p "kubernetes.io/" name))
        (not (uiop:string-prefix-p "requests." name))))
 
+(defun hugepage-size (name)
+  "Return a canonical hugepages resource's page size in bytes, or NIL."
+  (when (and (stringp name) (uiop:string-prefix-p "hugepages-" name))
+    (let* ((text (subseq name 10))
+           (bytes (ignore-errors (container-quantity-integer (parse-container-quantity text)))))
+      (when (and bytes (>= bytes 4096) (zerop (logand bytes (1- bytes)))
+                 (equal text (container-quantity-string (make-container-quantity :coefficient bytes :format :binary))))
+        bytes))))
+
+(defun validate-hugepage-amount (name value)
+  "Require whole huge pages; unlike CPU/memory, these cannot be overcommitted."
+  (let* ((page (hugepage-size name)) (quantity (parse-container-quantity value))
+         (bytes (container-quantity-integer quantity)))
+    (unless (and page (not (minusp bytes)) (not (minusp (container-quantity-scale quantity)))
+                 (zerop (mod bytes page)))
+      (invalid-pod "Hugepage resource ~A must contain a nonnegative multiple of its page size" name))))
+
+(defun validate-nonovercommittable-resources (resources)
+  "Validate equal requests and limits for devices and huge pages after defaults."
+  (let ((limits (gethash "limits" resources (core-object)))
+        (requests (gethash "requests" resources (core-object))))
+    (dolist (table (list limits requests))
+      (maphash (lambda (name value)
+                 (when (or (hugepage-size name) (extended-resource-name-p name))
+                   (let ((request (gethash name requests)) (limit (gethash name limits)))
+                     (unless (and request limit
+                                  (zerop (container-quantity-compare (parse-container-quantity request)
+                                                                    (parse-container-quantity limit))))
+                       (invalid-pod "Resource ~A requires equal request and limit" name)))
+                   (when (hugepage-size name) (validate-hugepage-amount name value)))) table))))
+
 (defun normalize-container-resources (container &key (default-requests t))
   "Validate compute and extended requirements and round ResourceLists; copy limits to missing requests only for Pods."
   (let ((resources (gethash "resources" container)))
@@ -146,7 +177,7 @@
           (require-object values (format nil "resources.~A" kind))
           (maphash (lambda (name value)
                      (unless (or (member name '("cpu" "memory" "ephemeral-storage") :test #'equal)
-                                 (extended-resource-name-p name))
+                                 (extended-resource-name-p name) (hugepage-size name))
                        (invalid-pod "Resource ~S has no implemented enforcement" name))
                      (let ((quantity (container-quantity-round (parse-container-quantity value) -3)))
                        (when (minusp (container-quantity-coefficient quantity)) (invalid-pod "Resource quantities must be nonnegative"))
@@ -177,6 +208,7 @@
                               (not (and requests (nth-value 1 (gethash name requests)))))
                      (invalid-pod "Extended resource ~A requires equal request and limit" name)))
                  limits)))
+    (validate-nonovercommittable-resources resources)
     resources))
 
 (defun add-resource-list (totals values)
@@ -193,18 +225,18 @@
   "Return a Pod's exact effective requests and limits: containers summed, each init container a floor.
 Unless POD-LEVEL is false, the Pod's own spec.resources replace those sums for what they declare."
   (let ((requests (make-hash-table :test #'equal)) (limits (make-hash-table :test #'equal)))
-    (flet ((list-of (container kind)
-             (let ((resources (gethash "resources" container)))
-               (and resources (gethash kind resources)))))
-      (loop for container across (gethash "containers" spec #())
-            do (add-resource-list requests (list-of container "requests"))
-               (add-resource-list limits (list-of container "limits")))
-      (loop for container across (gethash "initContainers" spec #())
-            do (loop for (kind totals) in (list (list "requests" requests) (list "limits" limits))
-                     do (let ((own (add-resource-list (make-hash-table :test #'equal) (list-of container kind))))
-                          (maphash (lambda (name value)
-                                     (when (> value (gethash name totals 0)) (setf (gethash name totals) value)))
-                                   own)))))
+    (loop for (kind totals) in (list (list "requests" requests) (list "limits" limits))
+          do (let ((sidecars (core-object)) (peak (core-object)))
+               (loop for container across (gethash "containers" spec #())
+                     do (add-resource-list totals (gethash kind (gethash "resources" container (core-object)))))
+               (loop for container across (gethash "initContainers" spec #())
+                     for own = (add-resource-list (core-object) (gethash kind (gethash "resources" container (core-object))))
+                     do (let ((stage (copy-core-object sidecars)))
+                          (maphash (lambda (name amount) (incf (gethash name stage 0) amount)) own)
+                          (when (equal "Always" (gethash "restartPolicy" container)) (setf sidecars stage))
+                          (maphash (lambda (name amount) (setf (gethash name peak) (max amount (gethash name peak 0)))) stage)))
+               (maphash (lambda (name amount) (incf (gethash name totals 0) amount)) sidecars)
+               (maphash (lambda (name amount) (setf (gethash name totals) (max amount (gethash name totals 0)))) peak)))
     (when pod-level (apply-pod-level-resources spec requests limits))
     (when (and overhead (gethash "overhead" spec))
       (add-resource-list requests (gethash "overhead" spec))
@@ -226,6 +258,14 @@ Unless POD-LEVEL is false, the Pod's own spec.resources replace those sums for w
   "Return QUANTITY in whole millicores, rounding up as Kubernetes does."
   (container-quantity-integer quantity :scale -3))
 
+(defun cri-hugepage-size (bytes)
+  "Use CRI binary page-size units, including sub-MiB HugeTLB sizes on other architectures."
+  (let ((unit "B") (divisor 1))
+    (loop for next across #("KB" "MB" "GB" "TB" "PB" "EB")
+          while (and (>= bytes (* divisor 1024)) (zerop (mod bytes (* divisor 1024))))
+          do (setf divisor (* divisor 1024) unit next))
+    (format nil "~D~A" (/ bytes divisor) unit)))
+
 (defun cri-linux-container-resources (container)
   "Derive actual CFS and memory cgroup settings with the kubelet's formulas.
 A container without a CPU request gets the minimum share, as a kubelet gives it."
@@ -239,4 +279,60 @@ A container without a CPU request gets the minimum share, as a kubelet gives it.
      :cpu-quota (if cpu-limit (max 1000 (floor (* (container-milli-cpu cpu-limit) period) 1000)) 0)
      ;; 1024 shares is one CPU, and the kernel's minimum is 2.
      :cpu-shares (max 2 (floor (* (if cpu-request (container-milli-cpu cpu-request) 0) 1024) 1000))
-     :memory-limit-in-bytes (if memory-limit (container-quantity-integer memory-limit) 0))))
+     :memory-limit-in-bytes (if memory-limit (container-quantity-integer memory-limit) 0)
+     :hugepage-limits
+     (let ((amounts (node-hugepage-capacity)))
+       ;; Unrequested sizes must be zero, or an ordinary container can consume
+       ;; the node's preallocated HugeTLB pool without a reservation.
+       (maphash (lambda (name bytes) (declare (ignore bytes)) (setf (gethash name amounts) "0")) amounts)
+       (maphash (lambda (name value) (when (hugepage-size name) (setf (gethash name amounts) value)))
+                (gethash "limits" (gethash "resources" container (core-object)) (core-object)))
+       (loop for name being the hash-keys of amounts using (hash-value value)
+             for size = (hugepage-size name)
+             collect (make-instance 'gr8s.cri.v1::hugepage-limit
+                                    :page-size (cri-hugepage-size size)
+                                    :limit (container-quantity-integer (parse-container-quantity value))))))))
+
+
+(defun pod-hugepage-resource-names (spec)
+  "Return the hugepage sizes the effective Pod request actually reserves."
+  (let ((requests (pod-spec-resource-totals spec)))
+    (loop for name being the hash-keys of requests using (hash-value amount)
+          when (and (hugepage-size name) (plusp amount)) collect name)))
+
+(defun hugepage-volume-resource (spec source)
+  "Resolve a HugePages emptyDir to one requested page size, rejecting ambiguity."
+  (let ((medium (gethash "medium" source "")) (names (pod-hugepage-resource-names spec)))
+    (cond ((equal medium "HugePages")
+           (unless (= 1 (length names)) (invalid-pod "HugePages emptyDir requires exactly one requested page size"))
+           (first names))
+          ((uiop:string-prefix-p "HugePages-" medium)
+           (let ((name (concatenate 'string "hugepages-" (subseq medium 10))))
+             (unless (member name names :test #'equal) (invalid-pod "HugePages volume size ~A has no matching Pod request" medium))
+             name)))))
+
+(defun validate-pod-hugepages (spec)
+  "Require ordinary CPU/memory resources and bind hugepage volumes to requests."
+  (let ((requests (pod-spec-resource-totals spec)))
+    (when (and (pod-hugepage-resource-names spec)
+               (not (or (plusp (gethash "cpu" requests 0)) (plusp (gethash "memory" requests 0)))))
+      (invalid-pod "HugePages require a CPU or memory request")))
+  (loop for volume across (gethash "volumes" spec #())
+        for source = (gethash "emptyDir" volume)
+        when source do (hugepage-volume-resource spec source)))
+
+(defparameter *hugepage-sysfs-directory* #P"/sys/kernel/mm/hugepages/")
+
+(defun node-hugepage-capacity ()
+  "Measure configured HugeTLB pools, including zero-capacity supported sizes."
+  (let ((capacity (core-object)))
+    (dolist (directory (ignore-errors (uiop:subdirectories *hugepage-sysfs-directory*)))
+      (let* ((component (car (last (pathname-directory directory))))
+             (match (cl-ppcre:scan-to-strings "^hugepages-([0-9]+)kB$" component)))
+        (when match
+          (let* ((bytes (* 1024 (parse-integer component :start 10 :junk-allowed t)))
+                 (count (parse-integer (string-trim '(#\Space #\Newline) (uiop:read-file-string (merge-pathnames "nr_hugepages" directory)))))
+                 (name (concatenate 'string "hugepages-" (container-quantity-string
+                                                         (make-container-quantity :coefficient bytes :format :binary)))))
+            (setf (gethash name capacity) (format nil "~D" (* bytes count)))))))
+    capacity))

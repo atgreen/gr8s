@@ -450,7 +450,7 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
      "version = 4~%root = '~A'~%state = '~A'~%temp = '~A'~%~
 [plugins]~%~:[~;  [plugins.'io.containerd.metadata.v1.bolt']~%    no_sync = true~%~]  [plugins.'io.containerd.cri.v1.images']~%    snapshotter = '~A'~%~
     [plugins.'io.containerd.cri.v1.images'.registry]~%      config_path = '~A'~%~
-  [plugins.'io.containerd.cri.v1.runtime']~%    disable_apparmor = true~%    restrict_oom_score_adj = true~%    netns_mounts_under_state_dir = true~%~
+  [plugins.'io.containerd.cri.v1.runtime']~%    disable_apparmor = true~%    disable_hugetlb_controller = false~%    tolerate_missing_hugetlb_controller = false~%    restrict_oom_score_adj = true~%    netns_mounts_under_state_dir = true~%~
     [plugins.'io.containerd.cri.v1.runtime'.containerd]~%      default_runtime_name = 'runc'~%~A~
     [plugins.'io.containerd.cri.v1.runtime'.cni]~%      bin_dirs = ~A~%      conf_dir = '~A'~%      use_internal_loopback = true~%~
   [plugins.'io.containerd.nri.v1.nri']~%    disable = true~%~

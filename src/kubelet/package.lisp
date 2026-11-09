@@ -5,6 +5,8 @@
 
 (defpackage #:gr8s.kubelet
   (:use #:cl #:gr8s)
+  (:local-nicknames (#:dp #:gr8s.deviceplugin.v1beta1)
+                    (#:pr #:gr8s.podresources.v1))
   (:shadow
    #:cleanup-pod-volumes
    #:ensure-container-probe-manager

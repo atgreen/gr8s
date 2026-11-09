@@ -21,6 +21,12 @@
   (:use #:cl)
   (:shadow #:block))
 
+(defpackage #:gr8s.deviceplugin.v1beta1
+  (:use #:cl))
+
+(defpackage #:gr8s.podresources.v1
+  (:use #:cl))
+
 (defpackage #:gr8s.containerd.tasks.v1
   (:use #:cl)
   (:shadow #:signal))

@@ -57,6 +57,21 @@
       (check-core-status 404 item)
       (is (= 1 (length (gr8s::list-core-resources store "podtemplates" "beta")))))))
 
+(test container-port-numbers-may-have-multiple-names
+  (with-core-api (store path)
+    (values store path)
+    (let* ((template (podtemplate-fixture "shared-port"))
+           (container (template-main-container template)))
+      (setf (gethash "ports" container)
+            (vector (gr8s::core-object "name" "api" "containerPort" 8443)
+                    (gr8s::core-object "name" "metrics" "containerPort" 8443)
+                    (gr8s::core-object "containerPort" 8080)
+                    (gr8s::core-object "containerPort" 8081)))
+      (check-core-status 201 "/api/v1/namespaces/default/podtemplates" :method :post :object template)
+      (setf (gethash "name" (gethash "metadata" template)) "duplicate-name"
+            (gethash "name" (aref (gethash "ports" container) 1)) "api")
+      (check-core-status 422 "/api/v1/namespaces/default/podtemplates" :method :post :object template))))
+
 (test podtemplate-protobuf-preserves-inline-fields-quantities-and-named-probe-ports
   (with-core-api (store path)
     (values path)

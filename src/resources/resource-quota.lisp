@@ -31,7 +31,7 @@
                         "requests.ephemeral-storage" "limits.cpu" "limits.memory" "limits.ephemeral-storage")
                  :test #'equal)
          "pods")
-        ((quota-extended-request-name-p name) "pods")
+        ((or (quota-extended-request-name-p name) (quota-hugepage-resource-name name)) "pods")
         ((member name '("services" "services.nodeports" "services.loadbalancers") :test #'equal) "services")
         ((member name '("persistentvolumeclaims" "requests.storage") :test #'equal) "persistentvolumeclaims")
         ((nth-value 1 (quota-storage-class-resource name)) "persistentvolumeclaims")
@@ -49,6 +49,7 @@
           ((equal name "limits.memory") (amount limits "memory"))
           ((equal name "limits.ephemeral-storage") (amount limits "ephemeral-storage"))
           ((quota-extended-request-name-p name) (amount requests (subseq name (length "requests."))))
+          ((quota-hugepage-resource-name name) (amount requests (quota-hugepage-resource-name name)))
           (t 0))))
 
 (defun quota-service-usage (name object)
