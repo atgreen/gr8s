@@ -978,7 +978,9 @@ the node from starting."
          (dataplane
            (and pin-directory
                 ;; The node cgroup2 root whose subtree holds the Pod processes.
-                (try-start-service-lb-dataplane "/sys/fs/cgroup" pin-directory))))
+                (try-start-service-lb-dataplane
+                 "/sys/fs/cgroup" pin-directory
+                 :packet-services (equal "1" (uiop:getenv "GR8S_ENABLE_PACKET_SERVICES"))))))
     (when dataplane
       (setf (node-runtime-service-lb node-runtime) dataplane
             (node-runtime-service-lb-controller node-runtime)
@@ -1001,7 +1003,10 @@ the node from starting."
         (ignore-errors (stop-gateway-steering (node-runtime-gateway-steering node-runtime)))
         (setf (node-runtime-gateway-steering node-runtime) nil))
       (when (node-runtime-service-lb node-runtime)
-        (ignore-errors (stop-service-lb-dataplane (node-runtime-service-lb node-runtime)))
+        ;; Endpoint guards hold these same maps. Keep the canonical pins so a
+        ;; clean agent restart reopens them rather than creating disconnected
+        ;; Service tables while existing endpoint links still use the old ones.
+        (ignore-errors (stop-service-lb-dataplane (node-runtime-service-lb node-runtime) :remove-pins nil))
         (setf (node-runtime-service-lb node-runtime) nil
               (node-runtime-service-lb-controller node-runtime) nil)))))
 

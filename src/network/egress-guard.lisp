@@ -10,10 +10,14 @@
 
 (in-package #:gr8s.network)
 
-(defun compile-egress-guard ()
+(defun compile-egress-guard (&key service-packets)
   "JIT-compile the per-endpoint egress guard. Returns (values map-specs
 prog-specs), the same shape as compile-service-lb."
-  (compile-whistler-program *egress-guard-map-forms* *egress-guard-program-forms*))
+  (compile-whistler-program
+   (append *egress-guard-map-forms*
+           (when service-packets
+             (append (service-packet-map-forms) (list *service-packet-stage-map-form*))))
+   (if service-packets (service-packet-guard-forms) *egress-guard-program-forms*)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; In-process policy object for the CNI installer.
@@ -34,31 +38,45 @@ prog-specs), the same shape as compile-service-lb."
   "The compiled (map-specs . program-specs). The guard's source is fixed in the image
 and per-Pod state lives in its maps, so every Pod loads the same program.")
 
+(defvar *service-egress-guard-specs* nil
+  "The separately cached guard variant that binds to shared Service maps.")
+
 (defvar *egress-guard-specs-lock* (bt:make-lock "gr8s egress guard compile"))
 
-(defun egress-guard-specs ()
+(defun egress-guard-specs (&key service-packets)
   "Compile the egress guard on first use; it takes about 0.5s on a test VM."
   (bt:with-lock-held (*egress-guard-specs-lock*)
-    (or *egress-guard-specs*
-        (setf *egress-guard-specs*
-              (multiple-value-call #'cons (compile-egress-guard))))))
+    (if service-packets
+        (or *service-egress-guard-specs*
+            (setf *service-egress-guard-specs*
+                  (multiple-value-call #'cons (compile-egress-guard :service-packets t))))
+        (or *egress-guard-specs*
+            (setf *egress-guard-specs*
+                  (multiple-value-call #'cons (compile-egress-guard)))))))
 
 (defun compile-egress-policy-object (&rest ignored)
   "Make a policy object for the compiled egress guard. The specs are shared: loading
 patches map fds into a copy of the instructions (session-load-progs). IGNORED absorbs
 the ELF path the CNI installer still passes; there is no ELF to open."
   (declare (ignore ignored))
-  (destructuring-bind (map-specs . program-specs) (egress-guard-specs)
+  (destructuring-bind (map-specs . program-specs)
+      (egress-guard-specs :service-packets *cni-service-packets*)
     (%make-egress-policy-object map-specs program-specs)))
 
 (defun load-egress-policy-object
     (object replacements
      &key (create-map #'whistler/loader::create-map)
+          (update #'whistler/loader:map-update)
           (load-programs #'whistler/loader::session-load-progs))
   "Create the egress maps and load the program.  REPLACEMENTS is an alist of
 (map-name . fd) for maps already pinned on bpffs; those fds are reused so their
 counters persist, and only the remaining maps are created fresh.  CREATE-MAP and
 LOAD-PROGRAMS are injected so the orchestration is testable without CAP_BPF."
+  (when (find "gr8s_pkt_forward" (egress-policy-object-map-specs object)
+              :key (lambda (spec) (getf spec :name)) :test #'equal)
+    (dolist (spec (service-packet-map-specs))
+      (unless (assoc (first spec) replacements :test #'equal)
+        (invalid-cni "shared Service map ~A is unavailable" (first spec)))))
   (let ((maps (loop for spec in (egress-policy-object-map-specs object)
                     for name = (getf spec :name)
                     for fd = (cdr (assoc name replacements :test #'string=))
@@ -76,6 +94,14 @@ LOAD-PROGRAMS are injected so the orchestration is testable without CAP_BPF."
     (setf (egress-policy-object-maps object) maps
           (egress-policy-object-programs object)
           (funcall load-programs (egress-policy-object-program-specs object) maps))
+    (let ((stages (cdr (assoc "gr8s_pkt_stages" maps :test #'equal))))
+      (when stages
+        (loop for name in '("gr8s_packet_forward" "gr8s_egress_policy" "gr8s_packet_reverse")
+              for index from 0
+              for program = (cdr (assoc name (egress-policy-object-programs object) :test #'equal))
+              do (unless program (invalid-cni "Service guard stage ~A is missing" name))
+                 (funcall update stages (service-lb-bytes index 4)
+                          (service-lb-bytes (whistler/loader:prog-info-fd program) 4)))))
     object))
 
 (defun egress-policy-object-find-map (object name)

@@ -208,15 +208,19 @@ def main():
     parser.add_argument("--state-parent", type=Path, default=Path("/var/tmp"))
     parser.add_argument("--api-port", type=int, default=18192)
     parser.add_argument("--node-port", type=int, default=17449)
+    parser.add_argument("--packet-services", action="store_true",
+                        help="also attach the experimental TC Service guard pipeline")
     # gr8s-upstream passes these to every runner; this test has no use for them.
     for ignored in ("--sonobuoy", "--timeout", "--expected-specs", "--focus", "--kubernetes-version"):
         parser.add_argument(ignored)
     arguments = parser.parse_args()
+    if arguments.packet_services:
+        os.environ["GR8S_ENABLE_PACKET_SERVICES"] = "1"
     if os.geteuid() != 0:
         sys.exit("this test runs containers and an eBPF dataplane; use a disposable guest as root")
 
     cluster = Cluster(arguments.gr8s, arguments.state_parent, arguments.api_port, arguments.node_port)
-    report = {"root": str(cluster.root)}
+    report = {"root": str(cluster.root), "packetServices": arguments.packet_services}
     failures = []
 
     def check(name, passed, observed):

@@ -89,6 +89,7 @@ jobs:
           make test
           make test-service-lb-program
           make test-service-packet-program
+          make test-service-packet-guard
 
   privileged:
     name: privileged dataplane (self-hosted, opt-in)

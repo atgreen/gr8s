@@ -1,0 +1,493 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c",
+  "scope": "Opt-in endpoint TC Service guard pipeline with shared pinned Service maps. Disabled by default; enabled by GR8S_ENABLE_PACKET_SERVICES=1.",
+  "sourceSHA256": "6e04c462f389a53c7075e714905ef98659bef702adf0681c5b51644126a4ce42",
+  "fixtureSHA256": "ce58cf17cf3f3cfeb4a347c3763539ec4bc03fb4e53356d083073045fb484eec",
+  "interpreter": {
+    "passed": true,
+    "guardOrderingCases": 19,
+    "rawPacketCases": 26,
+    "capacityCases": 5,
+    "existingEndpointCases": 143,
+    "socketSlotRepacking": "passed"
+  },
+  "kernel": {
+    "passed": true,
+    "environment": "Disposable Fedora VM, SSH port 22293",
+    "execution": "BPF_PROG_TEST_RUN over real programs, shared maps and tail-call stages",
+    "guardOrderingCases": 21,
+    "rawPacketCases": 23,
+    "capacityCases": 5,
+    "coverage": [
+      "Source identity before Service map mutation",
+      "Egress policy on backend identity and target port",
+      "Established ingress reply policy before reverse NAT",
+      "Local delivery after DNAT",
+      "Direct-backend socket traffic without double NAT",
+      "Fragments and ICMP cannot skip policy",
+      "All missing continuation slots fail closed; restored slots recover",
+      "Pinned program table retains stages after loader closes all stage descriptors"
+    ]
+  },
+  "regressions": {
+    "focusedNetworkingChecks": 622,
+    "cniChecks": 169,
+    "failed": 0,
+    "defaultEgressPolicyStageByteIdentical": true
+  },
+  "nativeBuild": {
+    "passed": true,
+    "sha256": "1c8655a2f5104c440b8d56d72eb190a735bcac02dd6fba270236f2d10c4352db"
+  },
+  "scopeLimits": [
+    "No actual guest or cross-node evidence yet",
+    "No packet-path NodePort replacement",
+    "No IPv6 packet NAT",
+    "No flow expiry or GC",
+    "Hairpin and conflicting return tuples drop safely",
+    "Preserved pins do not yet prove stale Service reconciliation after agent restart"
+  ],
+  "liveContainerSmoke": {
+    "status": "passed",
+    "environment": "Disposable Fedora VM, SSH port 22291",
+    "registryWorkaround": "Pulled agnhost directly into the disposable cluster containerd using official containerd v2.4.2 ctr, after mirror blob fetches failed (podster-fp8). Digest-verified mirror-cache seeding alone did not bypass the failure; hosts.toml is regenerated on each CRI pull.",
+    "checksPassed": 27,
+    "observations": {
+      "root": "/var/tmp/gr8s-service-traffic.ka4aloa6",
+      "packetServices": true,
+      "sameNodePodIPWorksBeforeIngressPolicy": {
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "output": ""
+        }
+      },
+      "sameNodeRedirectHonorsIngressPolicy": {
+        "passed": true,
+        "observed": {
+          "returncode": 1,
+          "output": "TIMEOUT\ncommand terminated with exit code 1\n"
+        }
+      },
+      "clusterIPReachesEveryPod": {
+        "passed": true,
+        "observed": [
+          "web-0",
+          "web-1"
+        ]
+      },
+      "podReachesClusterIP": {
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "output": ""
+        }
+      },
+      "externalIPReachesThePods": {
+        "passed": true,
+        "observed": [
+          200,
+          "web-0"
+        ]
+      },
+      "serviceWithoutEndpointsRefuses": {
+        "passed": true,
+        "observed": "10.96.0.12"
+      },
+      "unconnectedUDPIsBalanced": {
+        "passed": true,
+        "observed": [
+          [
+            "web-1",
+            [
+              "10.96.0.10",
+              81
+            ]
+          ],
+          [
+            "web-0",
+            [
+              "10.96.0.10",
+              81
+            ]
+          ],
+          [
+            "web-0",
+            [
+              "10.96.0.10",
+              81
+            ]
+          ],
+          [
+            "web-1",
+            [
+              "10.96.0.10",
+              81
+            ]
+          ],
+          [
+            "web-0",
+            [
+              "10.96.0.10",
+              81
+            ]
+          ],
+          [
+            "web-1",
+            [
+              "10.96.0.10",
+              81
+            ]
+          ]
+        ]
+      },
+      "unconnectedUDPRepliesFromClusterIP": {
+        "passed": true,
+        "observed": [
+          "('10.96.0.10', 81)"
+        ]
+      },
+      "connectedUDPIsBalanced": {
+        "passed": true,
+        "observed": [
+          [
+            "web-1",
+            [
+              "10.96.0.10",
+              81
+            ]
+          ],
+          [
+            "web-1",
+            [
+              "10.96.0.10",
+              81
+            ]
+          ],
+          [
+            "web-1",
+            [
+              "10.96.0.10",
+              81
+            ]
+          ],
+          [
+            "web-1",
+            [
+              "10.96.0.10",
+              81
+            ]
+          ],
+          [
+            "web-1",
+            [
+              "10.96.0.10",
+              81
+            ]
+          ],
+          [
+            "web-0",
+            [
+              "10.96.0.10",
+              81
+            ]
+          ]
+        ]
+      },
+      "connectedUDPRepliesFromClusterIP": {
+        "passed": true,
+        "observed": [
+          "('10.96.0.10', 81)"
+        ]
+      },
+      "affinityHoldsAClient": {
+        "passed": true,
+        "observed": [
+          "web-0"
+        ]
+      },
+      "affinitySurvivesANewBackend": {
+        "passed": true,
+        "observed": {
+          "before": [
+            "web-0"
+          ],
+          "after": [
+            "web-0"
+          ]
+        }
+      },
+      "internalLocalUsesOnlyThisNodesEndpoint": {
+        "passed": true,
+        "observed": [
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ]
+        ]
+      },
+      "internalClusterIncludesRemoteEndpoints": {
+        "passed": true,
+        "observed": [
+          [
+            200,
+            "web-0"
+          ],
+          [
+            null,
+            "<urlopen error timed out>"
+          ],
+          [
+            null,
+            "<urlopen error timed out>"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            null,
+            "<urlopen error timed out>"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            null,
+            "<urlopen error timed out>"
+          ],
+          [
+            null,
+            "<urlopen error timed out>"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            200,
+            "web-0"
+          ],
+          [
+            null,
+            "<urlopen error timed out>"
+          ]
+        ]
+      },
+      "loadBalancerPublishesTheNodeAddress": {
+        "passed": true,
+        "observed": [
+          {
+            "ip": "10.0.2.15",
+            "ipMode": "Proxy"
+          }
+        ]
+      },
+      "loadBalancerNodeAddressServesTheServicePort": {
+        "passed": true,
+        "observed": [
+          200,
+          "web-0"
+        ]
+      },
+      "localLoadBalancerHasHealthCheckNodePort": {
+        "passed": true,
+        "observed": {
+          "allocateLoadBalancerNodePorts": true,
+          "clusterIP": "10.96.0.15",
+          "clusterIPs": [
+            "10.96.0.15"
+          ],
+          "externalTrafficPolicy": "Local",
+          "healthCheckNodePort": 30001,
+          "internalTrafficPolicy": "Cluster",
+          "ipFamilies": [
+            "IPv4"
+          ],
+          "ipFamilyPolicy": "SingleStack",
+          "ports": [
+            {
+              "name": "http",
+              "nodePort": 30000,
+              "port": 80,
+              "protocol": "TCP",
+              "targetPort": 8080
+            }
+          ],
+          "selector": {
+            "app": "web"
+          },
+          "sessionAffinity": "None",
+          "type": "LoadBalancer"
+        }
+      },
+      "healthCheckReportsLocalEndpoints": {
+        "passed": true,
+        "observed": [
+          200,
+          "{\n\t\"service\": {\n\t\t\"namespace\": \"default\",\n\t\t\"name\": \"lb\"\n\t},\n\t\"localEndpoints\": 3,\n\t\"serviceProxyHealthy\": true\n}"
+        ]
+      },
+      "localNodePortServesThisNodesClients": {
+        "passed": true,
+        "observed": [
+          200,
+          "web-2"
+        ]
+      },
+      "healthCheckFailsWithoutLocalEndpoints": {
+        "passed": true,
+        "observed": [
+          503,
+          "{\n\t\"service\": {\n\t\t\"namespace\": \"default\",\n\t\t\"name\": \"lb\"\n\t},\n\t\"localEndpoints\": 0,\n\t\"serviceProxyHealthy\": true\n}"
+        ]
+      },
+      "clusterPolicyClosesHealthCheck": {
+        "passed": true,
+        "observed": [
+          null,
+          "<urlopen error [Errno 111] Connection refused>"
+        ]
+      },
+      "extraRangeAddressIsClaimed": {
+        "passed": true,
+        "observed": {
+          "parentRef": {
+            "group": "",
+            "name": "extra",
+            "namespace": "default",
+            "resource": "services"
+          }
+        }
+      },
+      "extraRangeClusterIPServes": {
+        "passed": true,
+        "observed": [
+          200,
+          "web-1"
+        ]
+      },
+      "localNodePortKeepsOutsideClientTCP": {
+        "passed": true,
+        "observed": "192.168.251.2:49335"
+      },
+      "localNodePortKeepsOutsideClientUDP": {
+        "passed": true,
+        "observed": "192.168.251.2:33827"
+      },
+      "clusterNodePortShowsTheNodeTCP": {
+        "passed": true,
+        "observed": "169.254.1.1:34706"
+      },
+      "clusterNodePortShowsTheNodeUDP": {
+        "passed": true,
+        "observed": "169.254.1.1:54810"
+      },
+      "failures": []
+    },
+    "scope": "Native containers and host clients with experimental TC guards attached; native socket hooks still perform their Service translation. This is not evidence of guest-originated TC translation.",
+    "implementationCommit": "dd36841"
+  },
+  "programs": {
+    "gr8s_egress_guard": 100,
+    "gr8s_ingress_guard": 232,
+    "gr8s_egress_policy": 468,
+    "gr8s_packet_forward": 285,
+    "gr8s_packet_reverse": 176
+  },
+  "mainIntegration": {
+    "commit": "bd466b0",
+    "baseMain": "9e90374",
+    "focusedAndCNIChecks": 791,
+    "passed": true,
+    "nativeSHA256": "efb90fb02e119077f378f458c779844223cae9376c39b296774c5338d0dc04f0",
+    "version": "gr8s 1.37.2-gbd466b0+dirty, patch level 0"
+  },
+  "hostedCI": {
+    "run": 42637564334,
+    "started": false,
+    "reason": "Account payments failed or spending limit needs to be increased; no test steps ran."
+  }
+}

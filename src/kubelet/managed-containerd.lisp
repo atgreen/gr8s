@@ -603,10 +603,15 @@ PID reuse. Return true when an owned live process was reclaimed."
   (let ((map-pin-root (managed-containerd-bpf-directory manager)))
     (format
      nil
-     "{\"cniVersion\":\"1.0.0\",\"name\":\"gr8s\",\"plugins\":[{\"type\":\"gr8s\",\"socket\":~A,\"direction\":\"egress\",\"mapPinRoot\":~A}]}~%"
+     "{\"cniVersion\":\"1.0.0\",\"name\":\"gr8s\",\"plugins\":[{\"type\":\"gr8s\",\"socket\":~A,\"direction\":\"egress\",\"mapPinRoot\":~A~A}]}~%"
      (com.inuoe.jzon:stringify
       (managed-containerd-agent-cni-socket-path manager))
-     (com.inuoe.jzon:stringify (namestring map-pin-root)))))
+     (com.inuoe.jzon:stringify (namestring map-pin-root))
+     (if (equal "1" (uiop:getenv "GR8S_ENABLE_PACKET_SERVICES"))
+         (format nil ",\"servicePacketRoot\":~A"
+                 (com.inuoe.jzon:stringify
+                  (namestring (merge-pathnames "service-lb/" map-pin-root))))
+         ""))))
 
 (defun managed-containerd-cni-config-path (manager)
   "Path to MANAGER's generated gr8s CNI conflist."
