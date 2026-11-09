@@ -51,5 +51,21 @@
       "patch"
     ],
     "log": "/tmp/gr8s-recovery-regression-final.log"
+  },
+  "integration": {
+    "commit": "13fcc33",
+    "mainParent": "c7e6531",
+    "regressionChecks": 650,
+    "passed": 650,
+    "failed": 0,
+    "log": "/tmp/gr8s-recovery-after-merge.log",
+    "memory": {
+      "passed": true,
+      "journalBytes": 537325408,
+      "records": 2048,
+      "retainedHistory": 301,
+      "seconds": 18.222871,
+      "heapLimitMiB": 384
+    }
   }
 }
