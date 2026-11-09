@@ -133,3 +133,36 @@
                           (equal "10.88.0.0/20" (ha-node-cidr s3 "worker-a")))
                      "the podCIDR assignment is not lost on failover"))
             (dolist (h (list h1 h2 h3)) (when h (ignore-errors (gr8s::stop-ha-control-plane h))))))))))
+
+(test enrollment-retry-finishes-failed-node-persistence
+  (with-temporary-store (store path)
+    (let ((original (symbol-function 'gr8s::persist-node)))
+      (unwind-protect
+           (progn
+             (setf (symbol-function 'gr8s::persist-node)
+                   (lambda (&rest arguments)
+                     (declare (ignore arguments))
+                     (error "Injected enrollment persistence failure")))
+             (signals error
+               (gr8s::install-node-enrollment-command
+                store "enrollment-id" "enrolled-worker" "10.88.0.0/16" 20
+                "2026-11-09T00:00:00Z")))
+        (setf (symbol-function 'gr8s::persist-node) original)))
+    (let* ((node (gr8s:get-node store "enrolled-worker"))
+           (revision (gr8s::node-record-resource-version node))
+           (cidr (gr8s:node-record-pod-cidr node)))
+      (is (null (probe-file (gr8s::node-path store node))))
+      (is (eq node
+              (gr8s::install-node-enrollment-command
+               store "enrollment-id" "enrolled-worker" "10.88.0.0/16" 20
+               "2026-11-09T00:00:00Z")))
+      (is (probe-file (gr8s::node-path store node)))
+      (let ((reopened (gr8s:open-store path)))
+        (is (equal cidr (ha-node-cidr reopened "enrolled-worker")))
+        (is (equal revision
+                   (gr8s::node-record-resource-version
+                    (gr8s:get-node reopened "enrolled-worker")))))
+      (gr8s::install-node-enrollment-command
+       store "enrollment-id" "enrolled-worker" "10.88.0.0/16" 20
+       "2026-11-09T00:00:00Z")
+      (is (equal revision (gr8s::node-record-resource-version node))))))

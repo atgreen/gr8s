@@ -380,6 +380,10 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
   (bt:with-lock-held ((pod-store-lock store))
     (let ((existing (get-node-unlocked store node-name)))
       (when existing
+        ;; A previous apply may have indexed this exact enrollment before its
+        ;; file write failed. Finish the durable write before acknowledging a
+        ;; retry; preserve the allocated CIDRs and revision.
+        (persist-node store existing)
         (gr8s.store::save-consensus-pod-revision-unlocked store)
         (return-from install-node-enrollment-command existing))
       (loop for node being the hash-values of (pod-store-nodes store)
