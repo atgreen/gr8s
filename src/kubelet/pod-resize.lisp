@@ -241,6 +241,10 @@ always may, since waiting could not help."
 
 (defun pod-resize-judgement (runtime pod)
   "Return the pending reason and message of POD's declared resources on this node, if any."
+  (let ((judge (gr8s.runtime.containerd:containerd-runtime-resource-resize-function runtime)))
+    (when judge
+      (multiple-value-bind (reason message) (funcall judge pod)
+        (when reason (return-from pod-resize-judgement (values reason message))))))
   (let ((used (make-hash-table :test #'equal))
         (lister (containerd-runtime-pod-lister runtime)))
     (when lister
@@ -297,7 +301,7 @@ A node that cannot take a resize keeps the old resources and says why, as PodRes
              (request-container-update-restart pod state name id) (setf changed t))
             (t
              (cri-update-container-resources (containerd-runtime-socket-path runtime) id
-                                             (cri-linux-container-resources object))
+                                             (gr8s.runtime.containerd:containerd-effective-container-resources runtime pod object))
              (setf (gethash "appliedResources" entry) (copy-core-object desired) changed t))))))
     (when (note-pod-resize-pending state reason message) (setf changed t))
     (when changed (save-container-lifecycle-state runtime uid state))

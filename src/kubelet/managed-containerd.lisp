@@ -450,7 +450,7 @@ synchronization and to report the Node NotReady, as kubelet does for a dead runt
      "version = 4~%root = '~A'~%state = '~A'~%temp = '~A'~%~
 [plugins]~%~:[~;  [plugins.'io.containerd.metadata.v1.bolt']~%    no_sync = true~%~]  [plugins.'io.containerd.cri.v1.images']~%    snapshotter = '~A'~%~
     [plugins.'io.containerd.cri.v1.images'.registry]~%      config_path = '~A'~%~
-  [plugins.'io.containerd.cri.v1.runtime']~%    disable_apparmor = true~%    restrict_oom_score_adj = true~%    netns_mounts_under_state_dir = true~%~
+  [plugins.'io.containerd.cri.v1.runtime']~%    disable_apparmor = true~%    disable_hugetlb_controller = false~%    tolerate_missing_hugetlb_controller = false~%    restrict_oom_score_adj = true~%    netns_mounts_under_state_dir = true~%~
     [plugins.'io.containerd.cri.v1.runtime'.containerd]~%      default_runtime_name = 'runc'~%~A~
     [plugins.'io.containerd.cri.v1.runtime'.cni]~%      bin_dirs = ~A~%      conf_dir = '~A'~%      use_internal_loopback = true~%~
   [plugins.'io.containerd.nri.v1.nri']~%    disable = true~%~
@@ -603,10 +603,15 @@ PID reuse. Return true when an owned live process was reclaimed."
   (let ((map-pin-root (managed-containerd-bpf-directory manager)))
     (format
      nil
-     "{\"cniVersion\":\"1.0.0\",\"name\":\"gr8s\",\"plugins\":[{\"type\":\"gr8s\",\"socket\":~A,\"direction\":\"egress\",\"mapPinRoot\":~A}]}~%"
+     "{\"cniVersion\":\"1.0.0\",\"name\":\"gr8s\",\"plugins\":[{\"type\":\"gr8s\",\"socket\":~A,\"direction\":\"egress\",\"mapPinRoot\":~A~A}]}~%"
      (com.inuoe.jzon:stringify
       (managed-containerd-agent-cni-socket-path manager))
-     (com.inuoe.jzon:stringify (namestring map-pin-root)))))
+     (com.inuoe.jzon:stringify (namestring map-pin-root))
+     (if (equal "1" (uiop:getenv "GR8S_ENABLE_PACKET_SERVICES"))
+         (format nil ",\"servicePacketRoot\":~A"
+                 (com.inuoe.jzon:stringify
+                  (namestring (merge-pathnames "service-lb/" map-pin-root))))
+         ""))))
 
 (defun managed-containerd-cni-config-path (manager)
   "Path to MANAGER's generated gr8s CNI conflist."

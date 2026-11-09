@@ -1,0 +1,545 @@
+{
+  "date": "2026-11-09",
+  "nativeSourceCommit": "a803f83",
+  "reviewedIntegrationCommit": "6fff80af016ad3be3e8acefe40593dde48026020",
+  "environment": {
+    "kernel": "6.19.10-300.fc44.x86_64",
+    "selinux": "Enforcing",
+    "cpuTopology": {
+      "cpus": [
+        {
+          "cpu": 0,
+          "node": 0,
+          "socket": 0,
+          "core": 0
+        },
+        {
+          "cpu": 1,
+          "node": 0,
+          "socket": 0,
+          "core": 1
+        },
+        {
+          "cpu": 2,
+          "node": 1,
+          "socket": 1,
+          "core": 2
+        },
+        {
+          "cpu": 3,
+          "node": 1,
+          "socket": 1,
+          "core": 3
+        }
+      ]
+    }
+  },
+  "native": {
+    "binarySHA256": "4bbaf76b46800077efbfc3845c6fbc72a989a25c005e888fc6d7f79d977b637d",
+    "sharedBefore": "Cpus_allowed_list:\t0-1\nMems_allowed_list:\t0\n",
+    "numaRejection": {
+      "conditions": [
+        {
+          "lastTransitionTime": "2026-11-09T14:05:17Z",
+          "observedGeneration": 1,
+          "status": "True",
+          "type": "PodScheduled"
+        },
+        {
+          "lastTransitionTime": "2026-11-09T14:05:17Z",
+          "observedGeneration": 1,
+          "status": "True",
+          "type": "Initialized"
+        },
+        {
+          "lastTransitionTime": "2026-11-09T14:05:17Z",
+          "observedGeneration": 1,
+          "reason": "PodFailed",
+          "status": "False",
+          "type": "ContainersReady"
+        },
+        {
+          "lastTransitionTime": "2026-11-09T14:05:17Z",
+          "observedGeneration": 1,
+          "reason": "PodFailed",
+          "status": "False",
+          "type": "Ready"
+        }
+      ],
+      "hostIP": "10.0.2.15",
+      "hostIPs": [
+        {
+          "ip": "10.0.2.15"
+        }
+      ],
+      "message": "No common CPU, memory, hugepage and device placement is available for default/unalignable",
+      "observedGeneration": 1,
+      "phase": "Failed",
+      "qosClass": "Guaranteed",
+      "reason": "TopologyAffinityError",
+      "startTime": "2026-11-09T14:05:17Z"
+    },
+    "sharedAfter": "Cpus_allowed_list:\t0\nMems_allowed_list:\t0\n",
+    "containerID": "containerd://404c7af4e98d59b8ab606def841c992a2b8193416d688425fa18042ceedc8002",
+    "processStartTicksBefore": "904033",
+    "beforeRestart": {
+      "allocatable": {
+        "devices": [
+          {
+            "resource_name": "devices.example.test/numa",
+            "device_ids": [
+              "numa1-0",
+              "numa1-1"
+            ],
+            "topology": {
+              "nodes": [
+                {
+                  "ID": 1
+                }
+              ]
+            }
+          }
+        ],
+        "cpu_ids": [
+          1,
+          2,
+          3
+        ],
+        "memory": [
+          {
+            "memory_type": "memory",
+            "size": 2112000000,
+            "topology": {
+              "nodes": [
+                {}
+              ]
+            }
+          },
+          {
+            "memory_type": "memory",
+            "size": 1919234048,
+            "topology": {
+              "nodes": [
+                {
+                  "ID": 1
+                }
+              ]
+            }
+          },
+          {
+            "memory_type": "hugepages-2Mi",
+            "size": 67108864,
+            "topology": {
+              "nodes": [
+                {
+                  "ID": 1
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "get": {
+        "pod_resources": {
+          "name": "exclusive",
+          "namespace": "default",
+          "containers": [
+            {
+              "name": "main",
+              "devices": [
+                {
+                  "resource_name": "devices.example.test/numa",
+                  "device_ids": [
+                    "numa1-0"
+                  ],
+                  "topology": {
+                    "nodes": [
+                      {
+                        "ID": 1
+                      }
+                    ]
+                  }
+                }
+              ],
+              "cpu_ids": [
+                2,
+                3
+              ],
+              "memory": [
+                {
+                  "memory_type": "hugepages-2Mi",
+                  "size": 4194304,
+                  "topology": {
+                    "nodes": [
+                      {
+                        "ID": 1
+                      }
+                    ]
+                  }
+                },
+                {
+                  "memory_type": "memory",
+                  "size": 134217728,
+                  "topology": {
+                    "nodes": [
+                      {
+                        "ID": 1
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "list": {
+        "pod_resources": [
+          {
+            "name": "shared",
+            "namespace": "default",
+            "containers": [
+              {
+                "name": "main",
+                "memory": [
+                  {
+                    "memory_type": "memory",
+                    "size": 134217728,
+                    "topology": {
+                      "nodes": [
+                        {}
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "dedicated",
+            "namespace": "default",
+            "containers": [
+              {
+                "name": "main",
+                "cpu_ids": [
+                  1
+                ],
+                "memory": [
+                  {
+                    "memory_type": "memory",
+                    "size": 134217728,
+                    "topology": {
+                      "nodes": [
+                        {}
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "exclusive",
+            "namespace": "default",
+            "containers": [
+              {
+                "name": "main",
+                "devices": [
+                  {
+                    "resource_name": "devices.example.test/numa",
+                    "device_ids": [
+                      "numa1-0"
+                    ],
+                    "topology": {
+                      "nodes": [
+                        {
+                          "ID": 1
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "cpu_ids": [
+                  2,
+                  3
+                ],
+                "memory": [
+                  {
+                    "memory_type": "hugepages-2Mi",
+                    "size": 4194304,
+                    "topology": {
+                      "nodes": [
+                        {
+                          "ID": 1
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "memory_type": "memory",
+                    "size": 134217728,
+                    "topology": {
+                      "nodes": [
+                        {
+                          "ID": 1
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "notFoundCode": "NotFound"
+    },
+    "debugAffinity": "Cpus_allowed_list:\t2-3\nMems_allowed_list:\t1\nDEBUG_AFFINITY_OK\n",
+    "afterRestart": {
+      "allocatable": {
+        "devices": [
+          {
+            "resource_name": "devices.example.test/numa",
+            "device_ids": [
+              "numa1-0",
+              "numa1-1"
+            ],
+            "topology": {
+              "nodes": [
+                {
+                  "ID": 1
+                }
+              ]
+            }
+          }
+        ],
+        "cpu_ids": [
+          1,
+          2,
+          3
+        ],
+        "memory": [
+          {
+            "memory_type": "memory",
+            "size": 2112000000,
+            "topology": {
+              "nodes": [
+                {}
+              ]
+            }
+          },
+          {
+            "memory_type": "memory",
+            "size": 1919234048,
+            "topology": {
+              "nodes": [
+                {
+                  "ID": 1
+                }
+              ]
+            }
+          },
+          {
+            "memory_type": "hugepages-2Mi",
+            "size": 67108864,
+            "topology": {
+              "nodes": [
+                {
+                  "ID": 1
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "get": {
+        "pod_resources": {
+          "name": "exclusive",
+          "namespace": "default",
+          "containers": [
+            {
+              "name": "main",
+              "devices": [
+                {
+                  "resource_name": "devices.example.test/numa",
+                  "device_ids": [
+                    "numa1-0"
+                  ],
+                  "topology": {
+                    "nodes": [
+                      {
+                        "ID": 1
+                      }
+                    ]
+                  }
+                }
+              ],
+              "cpu_ids": [
+                2,
+                3
+              ],
+              "memory": [
+                {
+                  "memory_type": "hugepages-2Mi",
+                  "size": 4194304,
+                  "topology": {
+                    "nodes": [
+                      {
+                        "ID": 1
+                      }
+                    ]
+                  }
+                },
+                {
+                  "memory_type": "memory",
+                  "size": 134217728,
+                  "topology": {
+                    "nodes": [
+                      {
+                        "ID": 1
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "list": {
+        "pod_resources": [
+          {
+            "name": "dedicated",
+            "namespace": "default",
+            "containers": [
+              {
+                "name": "main",
+                "cpu_ids": [
+                  1
+                ],
+                "memory": [
+                  {
+                    "memory_type": "memory",
+                    "size": 134217728,
+                    "topology": {
+                      "nodes": [
+                        {}
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "exclusive",
+            "namespace": "default",
+            "containers": [
+              {
+                "name": "main",
+                "devices": [
+                  {
+                    "resource_name": "devices.example.test/numa",
+                    "device_ids": [
+                      "numa1-0"
+                    ],
+                    "topology": {
+                      "nodes": [
+                        {
+                          "ID": 1
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "cpu_ids": [
+                  2,
+                  3
+                ],
+                "memory": [
+                  {
+                    "memory_type": "hugepages-2Mi",
+                    "size": 4194304,
+                    "topology": {
+                      "nodes": [
+                        {
+                          "ID": 1
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "memory_type": "memory",
+                    "size": 134217728,
+                    "topology": {
+                      "nodes": [
+                        {
+                          "ID": 1
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "shared",
+            "namespace": "default",
+            "containers": [
+              {
+                "name": "main",
+                "memory": [
+                  {
+                    "memory_type": "memory",
+                    "size": 134217728,
+                    "topology": {
+                      "nodes": [
+                        {}
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "notFoundCode": "NotFound"
+    },
+    "reusedAffinity": "Cpus_allowed_list:\t1\nMems_allowed_list:\t0\n",
+    "afterTerminalAffinity": "Cpus_allowed_list:\t1\nMems_allowed_list:\t0\n",
+    "processStartTicksAfter": "904033",
+    "containerIDAfter": "containerd://404c7af4e98d59b8ab606def841c992a2b8193416d688425fa18042ceedc8002",
+    "hugepageOverLimitExit": 2,
+    "passed": true
+  },
+  "validation": {
+    "focusedChecks": 264,
+    "focusedFailures": 0,
+    "upstreamClient": "k8s.io/kubelet v0.37.2",
+    "draClientFixture": "Prepared Pod ownership, request/subrequest filtering, driver/pool/device/share/CDI fields decoded by the upstream Go client",
+    "fullHostSuite": {
+      "checks": 22098,
+      "passed": 22043,
+      "skipped": 8,
+      "failed": 47
+    },
+    "cleanMainBaseline": {
+      "commit": "bfb222c",
+      "checks": 21977,
+      "passed": 21922,
+      "skipped": 8,
+      "failed": 47
+    },
+    "sameFailureAssertionsAsMain": true,
+    "upstreamPacketEngineCases": 31,
+    "githubCI": "Job cannot start because the account has failed payments or a spending limit"
+  },
+  "followups": {
+    "podster-tci": "Existing full-suite failures",
+    "podster-ve2": "Shutdown requested during early startup",
+    "podster-g2l": "Combined SIGBUS-exec followed immediately by agent restart recovery"
+  },
+  "scope": "Ordinary restart identity is checked before the deliberate over-limit exec fault; this does not certify the combined fault/restart sequence or KubeVirt NUMA conformance."
+}

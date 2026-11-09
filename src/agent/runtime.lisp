@@ -29,6 +29,9 @@
   runtime
   manager
   dynamic-resource-manager
+  device-plugin-manager
+  resource-manager
+  pod-resources-server
   dns-forward-rules
   network
   network-reconciler
@@ -166,7 +169,8 @@
                                      (reconcile-node-overlay-network
                                       network previous-networks
                                       wireguard-private-key))))
-                               dns-forward-rules)
+                               dns-forward-rules (cpu-manager-policy "none") reserved-cpus
+                               (topology-manager-policy "none"))
   "Build and return a NODE-RUNTIME for STATE-DIRECTORY, opening its local desired-state
 store (watch journal disabled, since the control plane serves every watch) and wiring in
 RUNTIME and MANAGER. Replays any persisted node network -- applied or pending -- and
@@ -197,6 +201,31 @@ START-NODE-RUNTIME does that."
                          condition)
                  (make-wireguard-path-state)))
              :store store :reconciler (make-reconciler store runtime))))
+      (when (and manager (containerd-runtime-p runtime))
+        (setf (gr8s.runtime.containerd:containerd-runtime-kubelet-root runtime)
+              (uiop:ensure-directory-pathname gr8s.kubelet::*csi-kubelet-root*))
+        (let ((devices (gr8s.kubelet::make-device-plugin-manager directory)))
+          (setf (node-runtime-device-plugin-manager node-runtime) devices
+                (gr8s.runtime.containerd:containerd-runtime-device-plugin-allocation-function runtime)
+                (lambda (pod container)
+                  (gr8s.kubelet::node-pod-device-config (node-runtime-resource-manager node-runtime) pod container))
+                (gr8s.runtime.containerd:containerd-runtime-device-plugin-release-function runtime)
+                (lambda (pod) (gr8s.kubelet::release-plugin-devices devices pod)))
+          (let ((resources (gr8s.kubelet::make-node-resource-manager
+                            directory :policy cpu-manager-policy :topology-policy topology-manager-policy
+                            :reserved-cpus reserved-cpus :devices devices :runtime runtime :store store
+                            :cpu-state-path (merge-pathnames "cpu_manager_state" (gr8s.runtime.containerd:containerd-runtime-kubelet-root runtime)))))
+            (setf (node-runtime-resource-manager node-runtime) resources
+                  (gr8s.runtime.containerd:containerd-runtime-resource-prepare-function runtime)
+                  (lambda (pod) (gr8s.kubelet::prepare-node-pod-resources resources pod))
+                  (gr8s.runtime.containerd:containerd-runtime-resource-config-function runtime)
+                  (lambda (pod container config)
+                    (bt:with-lock-held ((gr8s.kubelet::node-resource-manager-lock resources))
+                      (gr8s.kubelet::node-container-resources resources pod container config)))
+                  (gr8s.runtime.containerd:containerd-runtime-resource-release-function runtime)
+                  (lambda (pod) (gr8s.kubelet::release-node-pod-resources resources pod))
+                  (gr8s.runtime.containerd:containerd-runtime-resource-resize-function runtime)
+                  (lambda (pod) (gr8s.kubelet::node-resource-resize-verdict resources pod))))))
       (when dynamic-resource-manager
         (setf (gr8s.runtime.containerd:containerd-runtime-dynamic-resource-prepare-function runtime)
               (lambda (pod)
@@ -865,10 +894,19 @@ unwinds every service it started -- the worker, the host- and node-port forwarde
 health-check servers and runtime deletions."
   (unwind-protect
        (progn
+         (when (node-runtime-device-plugin-manager node-runtime)
+           (gr8s.kubelet::start-device-plugin-manager (node-runtime-device-plugin-manager node-runtime)))
+         (when (node-runtime-resource-manager node-runtime)
+           (gr8s.kubelet::verify-node-resource-recovery (node-runtime-resource-manager node-runtime))
+           (gr8s.kubelet::save-node-resource-checkpoint (node-runtime-resource-manager node-runtime))
+           (setf (node-runtime-pod-resources-server node-runtime)
+                 (gr8s.kubelet::start-podresources-server (node-runtime-resource-manager node-runtime)
+                                                        (node-runtime-dynamic-resource-manager node-runtime))))
          (setf (node-runtime-worker node-runtime)
                (start-reconciliation-worker
                 (node-runtime-reconciler node-runtime)
                 :before-reconcile (lambda ()
+                                    (gr8s.kubelet::reconcile-node-resource-manager (node-runtime-resource-manager node-runtime))
                                     (reconcile-cached-node-network node-runtime)
                                     (reconcile-node-runtime-wireguard-paths node-runtime)
                                     ;; Re-run dataplane convergence every tick, not only on a new
@@ -899,7 +937,9 @@ health-check servers and runtime deletions."
       (stop-wireguard-path-telemetry-dataplane
        (node-runtime-wireguard-path-telemetry node-runtime))
       (setf (node-runtime-wireguard-path-telemetry node-runtime) nil))
-    (stop-runtime-deletions (node-runtime-runtime node-runtime))))
+    (stop-runtime-deletions (node-runtime-runtime node-runtime))
+    (gr8s.kubelet::stop-local-resource-server (node-runtime-pod-resources-server node-runtime))
+    (gr8s.kubelet::stop-device-plugin-manager (node-runtime-device-plugin-manager node-runtime))))
 
 (defun call-with-agent-cni-server
     (node-runtime function &key operations)
@@ -938,7 +978,9 @@ the node from starting."
          (dataplane
            (and pin-directory
                 ;; The node cgroup2 root whose subtree holds the Pod processes.
-                (try-start-service-lb-dataplane "/sys/fs/cgroup" pin-directory))))
+                (try-start-service-lb-dataplane
+                 "/sys/fs/cgroup" pin-directory
+                 :packet-services (equal "1" (uiop:getenv "GR8S_ENABLE_PACKET_SERVICES"))))))
     (when dataplane
       (setf (node-runtime-service-lb node-runtime) dataplane
             (node-runtime-service-lb-controller node-runtime)
@@ -961,7 +1003,10 @@ the node from starting."
         (ignore-errors (stop-gateway-steering (node-runtime-gateway-steering node-runtime)))
         (setf (node-runtime-gateway-steering node-runtime) nil))
       (when (node-runtime-service-lb node-runtime)
-        (ignore-errors (stop-service-lb-dataplane (node-runtime-service-lb node-runtime)))
+        ;; Endpoint guards hold these same maps. Keep the canonical pins so a
+        ;; clean agent restart reopens them rather than creating disconnected
+        ;; Service tables while existing endpoint links still use the old ones.
+        (ignore-errors (stop-service-lb-dataplane (node-runtime-service-lb node-runtime) :remove-pins nil))
         (setf (node-runtime-service-lb node-runtime) nil
               (node-runtime-service-lb-controller node-runtime) nil)))))
 
@@ -1290,6 +1335,10 @@ while the server still assigns that UID at that version."
     (make-instance
      'gr8s.node.v1::node-status
      :observed-at-unix-nanos (* (- (get-universal-time) 2208988800) 1000000000)
+     :resource-capacity (gr8s.kubelet::node-resource-capacity-entries (node-runtime-resource-manager node-runtime))
+     :resource-allocatable (gr8s.kubelet::node-resource-capacity-entries (node-runtime-resource-manager node-runtime) :allocatable t)
+     :device-plugin-resources
+     (gr8s.kubelet::device-plugin-resource-entries (node-runtime-device-plugin-manager node-runtime))
      :pod-certificate-requests
      (mapcar #'pod-certificate-claim-message
              (node-pending-pod-certificate-claims (node-runtime-store node-runtime)))

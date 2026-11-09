@@ -174,7 +174,14 @@
 
 (defun pod-volume-directory (runtime pod name)
   "Return the agent-owned directory for POD's named volume."
-  (merge-pathnames (format nil "volumes/~A/" name) (containerd-pod-log-directory runtime (pod-uid pod))))
+  (let* ((root (gr8s.runtime.containerd:containerd-runtime-kubelet-root runtime))
+         (volume (find name (gethash "volumes" (gethash "spec" (pod-to-object pod)) #())
+                       :test #'equal :key (lambda (volume) (gethash "name" volume)))))
+    (if (and root volume (gethash "emptyDir" volume))
+        ;; Node daemons such as KubeVirt find launcher sockets here. This must
+        ;; be a real directory: safepath clients intentionally reject symlinks.
+        (merge-pathnames (format nil "pods/~A/volumes/kubernetes.io~~empty-dir/~A/" (pod-uid pod) name) root)
+        (merge-pathnames (format nil "volumes/~A/" name) (containerd-pod-log-directory runtime (pod-uid pod))))))
 
 (defun pod-fs-group (pod)
   "Return POD's requested filesystem group, if any."
@@ -296,6 +303,24 @@ SHARE names a provisioned volume's export, whose own directory is created on fir
       (unless (zerop (funcall *pod-tmpfs-mount* target options))
         (pod-volume-system-error "mount" target)))))
 
+(defparameter *pod-hugetlbfs-mount*
+  (lambda (target options) (%linux-mount "gr8s-hugepages" target "hugetlbfs" #x6 options)))
+
+(defun ensure-pod-hugepage-volume (directory source pod)
+  "Mount a size-specific hugetlbfs, bounded by the Pod's reserved huge pages."
+  (let* ((spec (gethash "spec" (pod-to-object pod)))
+         (resource (hugepage-volume-resource spec source)))
+    (when (and resource (not (pod-volume-mount-targets directory)))
+      (let* ((page (hugepage-size resource))
+             (requested (gethash resource (pod-spec-resource-totals spec)))
+             (limit (gethash "sizeLimit" source))
+             (bytes (if (member limit '(nil 0 "0") :test #'equal) requested
+                        (min requested (storage-quantity limit "emptyDir.sizeLimit")))))
+        (unless (>= bytes page) (invalid-pod "HugePages volume sizeLimit is smaller than one page"))
+        (unless (zerop (funcall *pod-hugetlbfs-mount* (namestring (truename directory))
+                               (format nil "pagesize=~D,size=~D" page (* page (floor bytes page)))))
+          (pod-volume-system-error "mount hugetlbfs" directory))))))
+
 (defun pod-claim-volume-record (runtime uid volume-name)
   "Return where UID's record of the claim behind VOLUME-NAME is kept. It sits beside the
 Pod's volume directories, which no container mounts, so it outlives an agent restart and
@@ -317,7 +342,11 @@ statistics, and return PATH."
 The Pod's user namespace block is free again once nothing it owns remains."
   (cleanup-pod-csi-volumes uid)
   (release-containerd-user-namespace runtime uid)
-  (let ((directory (merge-pathnames "volumes/" (containerd-pod-log-directory runtime uid))))
+  (dolist (directory
+            (remove nil (list (merge-pathnames "volumes/" (containerd-pod-log-directory runtime uid))
+                              (when (gr8s.runtime.containerd:containerd-runtime-kubelet-root runtime)
+                                (merge-pathnames (format nil "pods/~A/volumes/kubernetes.io~~empty-dir/" uid)
+                                                 (gr8s.runtime.containerd:containerd-runtime-kubelet-root runtime))))))
     (when (probe-file directory)
       (dolist (target (pod-volume-mount-targets directory))
         (if (pod-volume-nfs-mount-p target)
@@ -353,12 +382,19 @@ The Pod's user namespace block is free again once nothing it owns remains."
   (let* ((directory (pod-volume-directory runtime pod (gethash "name" volume)))
          (group (pod-fs-group pod)))
     (ensure-directories-exist directory)
+    (ensure-directories-exist (containerd-pod-log-directory runtime (pod-uid pod)))
+    (when (and (gethash "emptyDir" volume) (gr8s.runtime.containerd:containerd-runtime-kubelet-root runtime))
+      (sb-posix:chmod
+       (namestring (merge-pathnames (format nil "pods/~A/" (pod-uid pod))
+                                    (gr8s.runtime.containerd:containerd-runtime-kubelet-root runtime)))
+       #o700))
     ;; The final directory is bind-mounted into the container. Its parent stays
     ;; private on the host even when Kubernetes requests world-readable files.
     (sb-posix:chmod (namestring (containerd-pod-log-directory runtime (pod-uid pod))) #o700)
     (let ((source (gethash "emptyDir" volume)))
       (when (and source (equal "Memory" (gethash "medium" source)))
-        (ensure-pod-memory-volume directory source pod)))
+        (ensure-pod-memory-volume directory source pod))
+      (when source (ensure-pod-hugepage-volume directory source pod)))
     ;; Applied after mounting because the tmpfs root replaces the directory's mode. As the
     ;; kubelet does, the permission bits become 0777 and special bits such as a tmpfs root's
     ;; sticky bit stay; SetVolumeOwnership then ORs in group rwx and setgid for fsGroup.

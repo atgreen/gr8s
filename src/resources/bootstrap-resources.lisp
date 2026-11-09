@@ -426,10 +426,11 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
         ((member :arm64 *features*) "arm64")
         (t (string-downcase (machine-type)))))
 
-(defun node-resource-list (node)
+(defun node-resource-list (node &key allocatable)
   "Return a fresh list of NODE's measured and advertised resources."
   (let ((list (core-object)))
-    (dolist (source (list (node-record-capacity node) (node-record-extended-resources node)))
+    (dolist (source (list (if allocatable (or (node-record-allocatable node) (node-record-capacity node))
+                             (node-record-capacity node)) (node-record-extended-resources node)))
       (when source
         (maphash (lambda (name value) (setf (gethash name list) value)) source)))
     list))
@@ -469,7 +470,7 @@ api/discovery. Clients resolve `kubectl get ns` and `kubectl get all` through th
                                (vector (core-object "type" "InternalIP" "address" address)) #())
                "daemonEndpoints" (core-object "kubeletEndpoint" (core-object "Port" (node-record-kubelet-port node)))
                "capacity" (node-resource-list node)
-               "allocatable" (node-resource-list node)
+               "allocatable" (node-resource-list node :allocatable t)
                "nodeInfo" (core-object "operatingSystem" "linux" "architecture" (native-node-architecture)
                                         "kubeletVersion" (kubernetes-git-version)))))))
 

@@ -72,7 +72,7 @@ jobs:
           sh -n scripts/gr8s scripts/install-containerd.sh \
             scripts/verify-static-runtime.sh scripts/smoke.sh scripts/test-core-api.sh
 
-      - name: Run unit + HTTP test suite
+      - name: Run unit, HTTP, and Service bytecode tests
         # `make test` runs generate-protocol then (asdf:test-system :gr8s).
         # asdf:test-system exits non-zero if any FiveAM test fails, so a red
         # suite fails the job.
@@ -85,7 +85,11 @@ jobs:
         # the .asd files directly does. Trailing ':' inherits the ocicl config.
         env:
           CL_SOURCE_REGISTRY: "${{ github.workspace }}/:${{ github.workspace }}/ocicl//:"
-        run: make test
+        run: |
+          make test
+          make test-service-lb-program
+          make test-service-packet-program
+          make test-service-packet-guard
 
   privileged:
     name: privileged dataplane (self-hosted, opt-in)

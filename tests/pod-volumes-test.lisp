@@ -564,3 +564,23 @@
         (sb-posix:chmod (namestring path) #o1777)
         (gr8s::materialize-pod-volume runtime pod (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0))
         (is (= #o3777 (logand #o7777 (sb-posix:stat-mode (sb-posix:stat (namestring path))))))))))
+
+(test managed-emptydirs-use-real-kubelet-paths-and-clean-up-by-uid
+  (with-temporary-store (store directory)
+    (let* ((pod (create-pod store (parse-pod
+                  "{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"socket-pod\"},\"spec\":{\"volumes\":[{\"name\":\"sockets\",\"emptyDir\":{}}],\"containers\":[{\"name\":\"main\",\"image\":\"busybox\"}]}}")))
+           (root (merge-pathnames "kubelet/" directory))
+           (runtime (gr8s::make-containerd-runtime :log-root (merge-pathnames "logs/" directory)))
+           (gr8s.kubelet::*csi-kubelet-root* (namestring root))
+           (expected (merge-pathnames (format nil "pods/~A/volumes/kubernetes.io~~empty-dir/sockets/" (gr8s::pod-uid pod)) root))
+           (other (merge-pathnames "pods/another-pod/keep" root)))
+      (setf (gr8s.runtime.containerd:containerd-runtime-kubelet-root runtime) root)
+      (ensure-directories-exist other)
+      (with-open-file (out other :direction :output :if-does-not-exist :create) (write-string "keep" out))
+      (is (equal expected (gr8s::materialize-pod-volume runtime pod (aref (gethash "volumes" (gethash "spec" (pod-to-object pod))) 0))))
+      (is (= sb-posix:s-ifdir (logand sb-posix:s-ifmt (sb-posix:stat-mode (sb-posix:lstat expected)))))
+      (is (= #o700 (logand #o777 (sb-posix:stat-mode
+                                 (sb-posix:stat (merge-pathnames (format nil "pods/~A/" (gr8s::pod-uid pod)) root))))))
+      (gr8s::cleanup-pod-volumes runtime (gr8s::pod-uid pod))
+      (is-false (probe-file expected))
+      (is-true (probe-file other)))))

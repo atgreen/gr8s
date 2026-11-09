@@ -58,15 +58,62 @@ Managed native clusters allocate durable IPv4 ClusterIP Services from
 `10.96.0.0/16`, over TCP, UDP, or SCTP. Services accept JSON and typed Kubernetes
 protobuf requests, including numeric and named target ports.
 
-A **`cgroup/connect4` eBPF socket load balancer** rewrites a Pod's `connect(2)` to
+A **cgroup eBPF socket load balancer** rewrites a native client's `connect(2)` to
 a ready backend, resolving numeric or named target ports against selected Pods or
 manually managed slices. There is no DNAT and no conntrack: the socket connects
 directly to the real backend, so the return path needs no reverse translation.
-Unconnected UDP `sendto(2)` does not pass through it. `sessionAffinity: ClientIP`
+IPv4 and IPv6 `connect` hooks steer connected sockets, `sendmsg` hooks steer
+unconnected UDP `sendto(2)`, and `recvmsg` hooks restore the Service source address
+on UDP replies. `sessionAffinity: ClientIP`
 holds each client's network namespace on one backend until the timeout passes or
 the Service's backend set changes. The reserved `default/kubernetes` Service
 describes the HTTPS API at `10.96.0.1:443`, with matching Endpoints and an
 EndpointSlice.
+
+Before rewriting a socket, the program validates that the selected backend belongs
+to the requested Service. This prevents shared backend-slot repacking from sending
+a connection to another Service during a reconcile or interrupted update. A failed
+membership check refuses the attempt; later attempts recover after convergence.
+`make test-service-lb-program` exercises the compiled bytecode across these update
+boundaries. The same fixture can be tested with actual attached socket hooks using
+`scripts/test-service-lb-program.py FIXTURE --kernel` inside a disposable root VM.
+Host socket hooks do not intercept connections initiated inside a guest kernel.
+The experimental IPv4 TCP/UDP TC Service pipeline can be enabled with
+`GR8S_ENABLE_PACKET_SERVICES=1` on the node agent. The generated CNI configuration
+then binds each endpoint guard to the node's shared pinned Service maps.
+Source validation runs before destination translation; egress policy and local
+delivery see the backend address. Client ingress policy sees the backend before
+reverse translation restores the Service source address. Missing continuation
+programs drop traffic and fail CNI CHECK. The continuation table is pinned with
+the endpoint, and Service map pins survive clean agent shutdown.
+
+This remains disabled by default. A real Kata guest has reached a same-node
+native backend through IPv4 TCP and UDP ClusterIP translation, with TC request
+and reply counters and guest source-IP preservation verified. See
+[the guest validation evidence](service-guest-validation-2026-11-09.json).
+Cross-node guest traffic remains unverified. Kernel packet tests additionally
+cover policy ordering and program lifetime. Flow garbage collection, restart reconciliation, source NAT/hairpin,
+return-tuple collision resolution, IPv6 packet translation and external Service
+replacement remain in development. Hairpin and conflicting return tuples
+currently drop safely. See [the engine validation scope](service-packet-engine-validation-2026-11-09.json)
+and [the guard integration evidence](service-packet-guard-validation-2026-11-09.json).
+
+To repeat the guest test in a disposable root VM with nested KVM, copy
+`scripts/test-service-guest.py` and `scripts/test-service-traffic.py` together,
+then run:
+
+```sh
+python3 test-service-guest.py --gr8s /root/gr8s \
+  --kata-bundle /root/kata-static-4.3.1-amd64.tar.zst \
+  --kata-sha256 VERIFIED_BUNDLE_SHA256 --report-directory /var/tmp/guest-evidence
+```
+
+The runner installs the checksum-pinned addon, enables experimental TC Services,
+and requires a distinct guest kernel, an owned QEMU process, and translation
+counters in both directions. Its test-only Kata configuration allows 120 seconds
+for agent connection on slow nested machines and enables diagnostics. `--ctr`
+can select an existing containerd `ctr` binary to preload the test image directly
+when testing independently of the image mirror.
 
 `NodePort` and `LoadBalancer` Services allocate node ports from 30000–32767. The
 agent relays each in userspace, for TCP and UDP, with client-address affinity, so

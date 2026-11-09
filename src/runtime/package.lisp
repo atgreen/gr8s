@@ -49,6 +49,8 @@
    #:runtime-container-cdi-device-ids
    #:runtime-unprepare-pod-resources
    #:runtime-ephemeral-usage
+   #:resource-admission-error
+   #:resource-admission-error-reason
    #:runtime-error
    #:runtime-error-message
    #:runtime-events

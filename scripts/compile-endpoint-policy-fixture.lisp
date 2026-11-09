@@ -7,7 +7,8 @@
 ;;;; the map descriptors they share.  scripts/test-endpoint-policy.py reads this in place of
 ;;;; parsing an ELF object.
 ;;;;
-;;;; Usage:  sbcl --script scripts/compile-endpoint-policy-fixture.lisp OUTPUT
+;;;; Usage: sbcl --script scripts/compile-endpoint-policy-fixture.lisp OUTPUT [service-lb|service-packet-lb]
+;;;; The optional selector emits the Service socket or packet programs instead of endpoint guards.
 
 (require :asdf)
 (let ((project (truename (merge-pathnames "../" (uiop:pathname-directory-pathname *load-truename*)))))
@@ -20,9 +21,17 @@
 (in-package #:gr8s)
 
 (let ((arguments (uiop:command-line-arguments)))
-  (unless (= 1 (length arguments))
-    (error "usage: sbcl --script compile-endpoint-policy-fixture.lisp OUTPUT"))
-  (multiple-value-bind (map-specs program-specs) (compile-egress-guard)
+  (unless (and (<= 1 (length arguments) 2)
+               (or (= 1 (length arguments))
+                   (member (second arguments) '("service-lb" "service-packet-lb" "service-packet-guard") :test #'equal)))
+    (error "usage: sbcl --script compile-endpoint-policy-fixture.lisp OUTPUT [service-lb|service-packet-lb]"))
+  (multiple-value-bind (map-specs program-specs)
+      (cond ((equal "service-packet-guard" (second arguments))
+             (compile-egress-guard :service-packets t))
+            ((equal "service-packet-lb" (second arguments))
+             (gr8s.network::compile-service-packet-lb))
+            ((second arguments) (compile-service-lb))
+            (t (compile-egress-guard)))
     (flet ((program-document (program)
              (let ((code (copy-seq (getf program :insns)))
                    (relocations (getf program :relocs)))
@@ -35,6 +44,7 @@
                    (setf (aref code (+ offset 1))
                          (logior (logand (aref code (+ offset 1)) #x0f) #x10))))
                (core-object "name" (getf program :name)
+                            "section" (getf program :section)
                             "code" (coerce code 'list)
                             "relocations" (mapcar (lambda (relocation)
                                                     (list (first relocation) (second relocation)))

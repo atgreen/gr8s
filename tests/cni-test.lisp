@@ -25,6 +25,45 @@
 (defparameter *valid-cni-config*
   "{\"cniVersion\":\"1.0.0\",\"name\":\"gr8s\",\"type\":\"gr8s\",\"socket\":\"/run/gr8s/agent-cni.sock\",\"direction\":\"egress\",\"program\":\"/runtime/gr8s-whistler.bpf.o\",\"mapPinRoot\":\"/run/gr8s/bpf\",\"prevResult\":{\"cniVersion\":\"1.0.0\",\"interfaces\":[]}}")
 
+(test cni-service-stages-must-be-present-for-check-to-succeed
+  (let ((seen nil))
+    (gr8s.network::check-cni-service-stages
+     :map :lookup (lambda (map key) (declare (ignore map)) (push key seen) #(1 0 0 0)))
+    (is (equalp '(#(0 0 0 0) #(1 0 0 0) #(2 0 0 0)) (nreverse seen))))
+  (signals gr8s::cni-error
+    (gr8s.network::check-cni-service-stages :map :lookup (constantly nil)))
+  (signals gr8s::cni-error
+    (gr8s.network::check-cni-service-stages :map :lookup (constantly #(0 0 0 0)))))
+
+(test cni-packet-service-root-is-explicit-and-absolute
+  (let ((object (com.inuoe.jzon:parse *valid-cni-config*)))
+    (setf (gethash "servicePacketRoot" object) "/pins/service-lb/")
+    (let ((configuration (gr8s::parse-cni-configuration (com.inuoe.jzon:stringify object))))
+      (is (equal "/pins/service-lb/" (gr8s::cni-configuration-service-packet-root configuration)))
+      (is (= 17 (length (gr8s.network::cni-local-policy-map-specs configuration)))))
+    (setf (gethash "servicePacketRoot" object) "relative/")
+    (signals gr8s::cni-error
+      (gr8s::parse-cni-configuration (com.inuoe.jzon:stringify object)))))
+
+(test cni-enabled-service-guard-never-creates-private-service-tables
+  (let* ((configuration (gr8s::parse-cni-configuration *valid-cni-config*))
+         (opened nil) (closed nil) (loaded nil))
+    (setf (gr8s::cni-configuration-service-packet-root configuration) "/node/service-lb/")
+    ;; Failure opening the second shared map must close the first and stop
+    ;; before a guard object or any private map can be created.
+    (signals error
+      (gr8s::install-cni-policy
+       configuration (gr8s::make-cni-context) "/pins/rejected_spoofs" "/pins/tcx-ingress"
+       :ensure-directory (constantly nil)
+       :open-pinned (lambda (path) (push path opened)
+                      (when (= 2 (length opened)) (error "shared map unavailable")) 777)
+       :validate-map (constantly :map)
+       :open-object (lambda (&rest ignored) (declare (ignore ignored)) (setf loaded t))
+       :close-fd (lambda (fd) (push fd closed))))
+    (is (null loaded))
+    (is (equal '(777) closed))
+    (is (every (lambda (path) (search "/node/service-lb/" path)) opened))))
+
 (test agent-cni-unix-socket-roundtrips-a-typed-request
   (let* ((directory
            (merge-pathnames
@@ -425,6 +464,49 @@
     (is-false (member "/pins/tcx-egress" removed :test #'string=))
     (is-false (member "/pins/rejected_spoofs" removed :test #'string=))
     (is-false (member "/pins/traffic_stats" removed :test #'string=))))
+
+(test cni-service-guard-pins-continuations-before-attachment-and-closes-shared-fds-once
+  (let* ((configuration (gr8s::parse-cni-configuration *valid-cni-config*))
+         (events nil) (closed nil) (reused nil))
+    (setf (gr8s::cni-configuration-service-packet-root configuration) "/node/service-lb/")
+    (let* ((names (mapcar #'first
+                         (append (gr8s.network::cni-local-policy-map-specs configuration)
+                                 (gr8s.network::service-packet-map-specs))))
+           (maps (loop for name in names for fd from 100
+                       collect (cons name (whistler/loader::make-map-info :name name :fd fd)))))
+      (flet ((map-for (name) (cdr (assoc name maps :test #'equal))))
+        (gr8s::install-cni-policy
+         configuration (gr8s::make-cni-context :netns "/fake/netns" :interface-name "eth0")
+         "/pins/rejected_spoofs" "/pins/tcx-ingress"
+         :ensure-directory (constantly nil) :path-exists-p (constantly nil)
+         :open-pinned (lambda (path) (whistler/loader:map-info-fd (map-for (file-namestring path))))
+         :validate-map (lambda (fd name) (declare (ignore fd)) (map-for name))
+         :open-object (lambda (&rest ignored)
+                        (declare (ignore ignored))
+                        (is-true gr8s.network::*cni-service-packets*) :object)
+         :load-object (lambda (object replacements) (declare (ignore object)) (setf reused replacements))
+         :object-map (lambda (object name) (declare (ignore object)) (map-for name))
+         :object-program (constantly :program) :program-fd (constantly 71)
+         :initialize-identity (constantly nil)
+         :pin-object (lambda (fd path) (declare (ignore fd)) (push (list :pin path) events))
+         :rename-pin (constantly nil) :staged-links (constantly nil)
+         :call-in-netns (lambda (path operation) (declare (ignore path)) (funcall operation))
+         :interface-index (constantly 9)
+         :attach-tcx (lambda (&rest ignored) (declare (ignore ignored)) (push '(:attach) events) 81)
+         :close-fd (lambda (fd) (push fd closed))
+         :close-object (lambda (object) (declare (ignore object))
+                         (dolist (entry maps) (push (whistler/loader:map-info-fd (cdr entry)) closed)))))
+      (is (= 7 (length reused)))
+      (dolist (entry maps)
+        (is (= 1 (count (whistler/loader:map-info-fd (cdr entry)) closed))))
+      (let ((ordered (reverse events)))
+        (is (< (position '(:pin "/pins/gr8s_pkt_stages") ordered :test #'equal)
+               (position :attach ordered :key #'first)))
+        ;; Seventeen maps and two TCX links; no shared Service map is pinned here.
+        (is (= 19 (count :pin ordered :key #'first)))
+        (dolist (spec (gr8s.network::service-packet-map-specs))
+          (is-false (member (list :pin (concatenate 'string "/pins/" (first spec)))
+                            ordered :test #'equal)))))))
 
 (test pinned-map-schemas-and-tcx-targets-are-validated-before-use
   (dolist (spec gr8s::+cni-policy-map-specs+)

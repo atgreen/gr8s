@@ -54,6 +54,23 @@ scripts/gr8s serve \
   --containerd-socket /run/containerd/containerd.sock
 ```
 
+## KubeVirt & device plugins
+
+The node accepts kubelet v1beta1 device plugins, reports their healthy inventory,
+checkpoints allocations, and passes device mappings and other allocation
+artifacts to containerd. Managed emptyDir volumes also use the standard kubelet
+paths that KubeVirt's handler needs to locate launcher sockets. See
+[KubeVirt on gr8s](kubevirt.md) for installation and the
+[native boot record](kubevirt-native-2026-11-09.json).
+
+## CPU, NUMA, hugepages and PodResources
+
+Managed nodes support static exclusive CPU allocation, strict Pod-scoped NUMA
+alignment with device-plugin hints, hugepage requests and hugetlbfs volumes, and
+the standard PodResources v1 Unix endpoint. See
+[native resource management](resource-management.md) for policies, restart
+behavior, supported scope and the disposable-VM test.
+
 ## RuntimeClass & pluggable runtimes
 
 `RuntimeClass` admission resolves overhead and scheduling constraints, and the
@@ -82,8 +99,9 @@ QEMU, Cloud Hypervisor, Firecracker, and Dragonball hypervisor configurations.
 `gr8s runtime install gvisor` and `gr8s runtime install kata` download,
 checksum-verify, and stage the optional runtime. Both runtimes have been validated
 end-to-end with Pods. Use `--state-directory` to select the agent's state
-directory: `<state>/agent` for the local agent started by `gr8s serve`, or the
-worker's state directory for `gr8s agent`.
+directory: the same `--state-directory` passed to `gr8s serve` or `gr8s agent`.
+The local agent's containerd data lives under `<state>/agent`, while addons are
+loaded from the node state root at `<state>/runtime-addons`.
 
 Restart gr8s after installation so the agent loads the runtime addon, then create
 a `RuntimeClass` with handler `gvisor` or `kata`. Set a Pod's `runtimeClassName`

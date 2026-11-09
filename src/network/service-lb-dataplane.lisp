@@ -116,6 +116,7 @@ use them; BPF map operations trust the kernel's sizes, not the caller's buffers.
 (defun start-service-lb-dataplane
     (cgroup-path pin-directory
      &key (compile #'compile-service-lb)
+          packet-services
           (create-maps (lambda (specs) (whistler/loader::session-create-maps specs)))
           (load-programs #'load-service-lb-programs)
           (ensure-directory #'ensure-directories-exist)
@@ -131,7 +132,8 @@ CGROUP-PATH is the cgroup2 directory whose subtree the program governs (the
 node's Pod cgroup root).  PIN-DIRECTORY is a bpffs directory for the map pins.
 Returns a SERVICE-LB-DATAPLANE.  Signals through any kernel error; the caller
 decides whether a dataplane failure is fatal to the node."
-  (multiple-value-bind (map-specs program-specs) (funcall compile)
+  (multiple-value-bind (map-specs program-specs)
+      (if packet-services (funcall compile :packet-services t) (funcall compile))
     (let ((maps nil) (opened nil) (pinned nil))
       (handler-case
           (progn
@@ -189,11 +191,11 @@ decides whether a dataplane failure is fatal to the node."
             (ignore-errors (sb-posix:close fd)))
           (error condition))))))
 
-(defun try-start-service-lb-dataplane (cgroup-path pin-directory &key (log *error-output*))
+(defun try-start-service-lb-dataplane (cgroup-path pin-directory &key (log *error-output*) packet-services)
   "Attempt to bring up the socket LB.  On any failure (no CAP_BPF, no bpffs, an
 unattachable cgroup, a kernel too old for cgroup/connect4), log and return NIL so
 the caller can fall back to the userspace Service proxy."
-  (handler-case (start-service-lb-dataplane cgroup-path pin-directory)
+  (handler-case (start-service-lb-dataplane cgroup-path pin-directory :packet-services packet-services)
     (error (condition)
       (format log "~&gr8s: eBPF Service load balancer unavailable, using the userspace proxy: ~A~%"
               condition)
@@ -206,11 +208,17 @@ the caller can fall back to the userspace Service proxy."
 BACKENDS is a list of (ip . target-port); they occupy consecutive slots from
 BASE-SLOT.  The service entry is written last so the program never reads a VIP
 whose backend slots are not yet present."
-  (multiple-value-bind (vip-key service-value backend-entries)
+  (multiple-value-bind (vip-key service-value backend-entries index-entries)
       (service-lb-entries address port base-slot backends)
     (let ((family (if (find #\: address) :ipv6 :ipv4)))
       (dolist (entry backend-entries)
         (funcall update (service-lb-backend-table dataplane family) (car entry) (cdr entry)))
+      (let ((index (service-lb-map dataplane
+                                   (if (eq family :ipv4) "gr8s_backend_index_v4"
+                                       "gr8s_backend_index_v6"))))
+        (when index
+          (dolist (entry index-entries)
+            (funcall update index (car entry) (cdr entry)))))
       (funcall update (service-lb-service-table dataplane family) vip-key service-value))))
 
 (defun stop-service-lb-dataplane

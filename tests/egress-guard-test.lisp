@@ -11,6 +11,50 @@
 (def-suite egress-guard :in gr8s)
 (in-suite egress-guard)
 
+(test service-guard-stages-preserve-the-canonical-policy-program
+  (multiple-value-bind (maps programs) (gr8s::compile-egress-guard :service-packets t)
+    (multiple-value-bind (plain-maps plain-programs) (gr8s::compile-egress-guard)
+      (declare (ignore plain-maps))
+      (let ((policy (find "gr8s_egress_policy" programs :test #'equal
+                          :key (lambda (program) (getf program :name)))))
+        (is (equalp (getf (first plain-programs) :insns) (getf policy :insns)))
+        (is (equalp (getf (first plain-programs) :relocs) (getf policy :relocs)))))
+    (is (= 24 (length maps)))
+    (is (= 5 (length programs)))
+    (let ((stages (find "gr8s_pkt_stages" maps :test #'equal :key (lambda (map) (getf map :name)))))
+      (is (eq :prog-array (getf stages :type)))
+      (is (= 8 (getf stages :max-entries))))))
+
+(test service-guard-requires-shared-maps-and-populates-all-continuations
+  (let* ((gr8s.network::*cni-service-packets* t)
+         (object (gr8s::compile-egress-policy-object))
+         (shared (loop for spec in (gr8s.network::service-packet-map-specs)
+                       for fd from 900 collect (cons (first spec) fd)))
+         (created nil) (writes nil))
+    (signals gr8s::cni-error
+      (gr8s::load-egress-policy-object object nil :create-map (lambda (map) (push map created))))
+    (is (null created))
+    (gr8s::load-egress-policy-object
+     object shared
+     :create-map (lambda (map) (push (whistler/loader:map-info-name map) created)
+                   (setf (whistler/loader:map-info-fd map) (+ 800 (length created))) map)
+     :load-programs
+     (lambda (specs maps)
+       (declare (ignore maps))
+       (loop for spec in specs for fd from 1001
+             collect (cons (getf spec :name)
+                           (whistler/loader::make-prog-info
+                            :name (getf spec :name) :fd fd :type 3
+                            :section-name "classifier" :insns #()))))
+     :update (lambda (map key value)
+               (push (list (whistler/loader:map-info-name map) key value) writes)))
+    (is (= 17 (length created)))
+    (dolist (entry shared) (is (not (member (car entry) created :test #'equal))))
+    (is (equalp (list (list "gr8s_pkt_stages" #(0 0 0 0) (gr8s::service-lb-bytes 1004 4))
+                     (list "gr8s_pkt_stages" #(1 0 0 0) (gr8s::service-lb-bytes 1003 4))
+                     (list "gr8s_pkt_stages" #(2 0 0 0) (gr8s::service-lb-bytes 1005 4)))
+                (nreverse writes)))))
+
 (defun egress-map-spec (specs name)
   (find name specs :key (lambda (s) (getf s :name)) :test #'string=))
 

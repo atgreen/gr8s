@@ -42,6 +42,12 @@ Set in src/service-lb-program.lisp, read in the WHISTLER package.")
 (defvar *service-lb-map-forms* nil
   "Evaluatable (whistler:defmap ...) forms for the ClusterIP socket LB maps.")
 
+(defvar *service-packet-extra-map-forms* nil
+  "Additional shared maps owned by the Service dataplane when TC hooks are enabled.")
+
+(defvar *service-packet-stage-map-form* nil
+  "The per-endpoint tail-call program table, defined with the packet engine.")
+
 (defun compile-whistler-program (map-forms program-forms)
   "JIT-compile MAP-FORMS and PROGRAM-FORMS in-process.
 Returns (values map-specs prog-specs): plists carrying the map metadata and the
@@ -49,9 +55,11 @@ compiled program instruction bytes plus map-fd relocations, ready to hand to the
 loader's map-creation and program-loading steps.  No ELF is produced."
   (whistler/loader::compile-bpf-forms map-forms program-forms))
 
-(defun compile-service-lb ()
+(defun compile-service-lb (&key packet-services)
   "JIT-compile the ClusterIP socket load balancer. See compile-whistler-program."
-  (compile-whistler-program *service-lb-map-forms* *service-lb-program-forms*))
+  (compile-whistler-program (append *service-lb-map-forms*
+                                   (when packet-services *service-packet-extra-map-forms*))
+                            *service-lb-program-forms*))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Control-plane map byte encoding (byte-order contract in the file header).
@@ -135,8 +143,10 @@ that identifies the backend."
 BACKENDS is a list of (ip . target-port) conses, assigned consecutive slots from
 BASE-SLOT.  AFFINITY-TIMEOUT, in seconds, keeps each client on one backend while
 it is active.  REFUSE marks a Service with no endpoints at all.  Returns four values: the VIP key, the service value, a list of
-(backend-key . backend-value) octet-vector pairs, and, for an affinity Service, a
-list of (index-key . offset) pairs that find each backend's offset by its identity."
+(backend-key . backend-value) octet-vector pairs, and a
+list of (index-key . offset) pairs that find each backend's offset by its identity.
+The index is also the dataplane's membership check while backend slots are repacked,
+so every Service needs it, including Services without session affinity."
   (let ((vip-key (service-lb-vip-key address port protocol)))
     (values
      vip-key
@@ -146,8 +156,7 @@ list of (index-key . offset) pairs that find each backend's offset by its identi
            for slot from base-slot
            collect (cons (service-lb-backend-key slot)
                          (service-lb-backend-value ip target-port)))
-     (when affinity-timeout
-       (loop for (ip . target-port) in backends
-             for offset from 0
-             collect (cons (service-lb-index-key vip-key (service-lb-backend-value ip target-port))
-                           (service-lb-bytes offset 4)))))))
+     (loop for (ip . target-port) in backends
+           for offset from 0
+           collect (cons (service-lb-index-key vip-key (service-lb-backend-value ip target-port))
+                         (service-lb-bytes offset 4))))))

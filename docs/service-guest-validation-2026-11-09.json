@@ -1,0 +1,367 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c",
+  "scope": "Actual Kata guest to same-node native backend using opt-in IPv4 TCP/UDP TC ClusterIP translation. This does not prove the remaining original issue scope.",
+  "binarySource": "bd466b0 (main 9e90374 plus PR238 TC integration); no dataplane changes since that build",
+  "nativeSHA256": "efb90fb02e119077f378f458c779844223cae9376c39b296774c5338d0dc04f0",
+  "runnerSHA256": "f29d256064c42231986b53aeb6c184b47c5c91cc84a75f2267272e0fee32a145",
+  "environment": "Disposable Fedora44 VM22291 with nested KVM, 4GB RAM, SELinux enforcing",
+  "kataVersion": "4.3.1",
+  "testAdjustments": [
+    "Official cached bundle SHA256 verified by native installer",
+    "Direct official containerd v2.4.2 ctr image pull bypassed separately tracked OCI mirror fault podster-fp8",
+    "Nested boot exceeded the initial 10s agent connection budget; test-only reconnect_timeout_ms increased to120000 and diagnostics enabled, with config descriptor checksum refreshed. Guest boot then took roughly90s. Runner now applies those same settings before startup.",
+    "Old addon installation instructions corrected in merged PR239 after actual config inspection. Addons belong at the node state root."
+  ],
+  "checksPassed": 8,
+  "remaining": [
+    "Cross-node guest/backend traffic",
+    "Live guest NetworkPolicy and churn/affinity scenarios",
+    "Flow garbage collection and restart reconciliation",
+    "Source NAT/hairpin and return-tuple collision resolution",
+    "IPv6 packet NAT",
+    "Packet NodePort replacement, traffic policies and health checks",
+    "Broader diagnostics and capacity/restart validation"
+  ],
+  "scopeLimits": "Only same-node IPv4 TCP and UDP guest traffic is established here. Native socket acceleration remains enabled. Previously merged kernel/interpreter tests cover other isolated invariants; they do not establish these remaining runtime behaviors.",
+  "firstRunResult": {
+    "clusterRoot": "/var/tmp/gr8s-service-traffic.svqi2gvv",
+    "checks": [
+      {
+        "name": "kataHandlerConfigured",
+        "passed": true,
+        "observed": "/var/tmp/gr8s-service-traffic.svqi2gvv/state/agent/containerd/config.toml"
+      },
+      {
+        "name": "realGuestKernel",
+        "passed": true,
+        "observed": {
+          "guest": "6.18.56",
+          "host": "6.19.10-300.fc44.x86_64",
+          "qemu": [
+            {
+              "pid": 1759512,
+              "command": "/var/tmp/gr8s-service-traffic.svqi2gvv/state/runtime-addons/kata/opt/kata/bin/qemu-system-x86_64 -name sandbox-aadc9282eb65e320be9f4520c900a23dce6d5becbd5fdf8f896aa91085c6d135 -kernel /var/tmp/gr8s-service-traffic.svqi2gvv/state/runtime-addons/kata/opt/kata/share/kata-containers/vmlinux-6.18.56-208 -append reboot=k panic=1 systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket agent.log_vport=1025 root=/dev/pmem0p1 rootflags=dax,data=ordered,errors=remount-ro ro rootfstype=ext4 agent.cdh_api_timeout=50 agent.log=debug cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1 selinux=0 console=hvc0 -smp 1 -machine q35,accel=kvm,nvdimm=on,kernel_irqchip=on,memory-backend=entire-guest-memory-share -cpu host,pmu=off -m 2G,slots=10,maxmem=3903M -object memory-backend-file,id=entire-guest-memory-share,mem-path=/dev/shm,size=2G,share=on,prealloc=off,readonly=off -qmp unix:fd=16,server=on,wait=off -rtc base=utc,clock=host,driftfix=slew -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0 -device pci-bridge,bus=pcie.0,id=pci-bridge-0,chassis_nr=1,shpc=off,addr=2,io-reserve=4k,mem-reserve=1m,pref64-reserve=1m -device virtio-scsi-pci,id=scsi0,disable-modern=true -device vhost-vsock-pci,disable-modern=true,vhostfd=17,guest-cid=3873851512 -netdev tap,id=network-tap0_kata,vhost=on,vhostfds=20,fds=19 -device virtio-net-pci,netdev=network-tap0_kata,mac=02:62:37:be:5c:8b,disable-modern=true,mq=on,vectors=4 -chardev socket,id=virtiofsd-chardev,path=/run/kata/aadc9282eb65e320be9f4520c900a23dce6d5becbd5fdf8f896aa91085c6d135/root/virtiofsd.sock -device vhost-user-fs-pci,chardev=virtiofsd-chardev,tag=kataShared,queue-size=1024 -object memory-backend-file,id=TODO,mem-path=/var/tmp/gr8s-service-traffic.svqi2gvv/state/runtime-addons/kata/opt/kata/share/kata-containers/kata-ubuntu-resolute.image,size=256M,share=off,prealloc=off,readonly=on -device nvdimm,memdev=TODO,unarmed=on -device virtio-serial-pci,id=serial0 -device virtconsole,id=console0,chardev=charconsole0 -chardev socket,id=charconsole0,server=on,wait=off,path=/run/kata/aadc9282eb65e320be9f4520c900a23dce6d5becbd5fdf8f896aa91085c6d135/root/console.sock -vga none -no-user-config -nodefaults -nographic -no-reboot "
+            }
+          ]
+        }
+      },
+      {
+        "name": "httpClusterIP",
+        "passed": true,
+        "observed": {
+          "answer": [
+            200,
+            {
+              "responses": [
+                "backend"
+              ]
+            }
+          ],
+          "countersBefore": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "countersAfter": [
+            6,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "name": "httpUsesTCBothDirections",
+        "passed": true,
+        "observed": {
+          "before": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "after": [
+            6,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "name": "httpPreservesGuestSource",
+        "passed": true,
+        "observed": [
+          200,
+          {
+            "responses": [
+              "10.80.0.2:47972"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "udpClusterIP",
+        "passed": true,
+        "observed": {
+          "answer": [
+            200,
+            {
+              "responses": [
+                "backend"
+              ]
+            }
+          ],
+          "countersBefore": [
+            12,
+            8,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "countersAfter": [
+            13,
+            9,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "name": "udpUsesTCBothDirections",
+        "passed": true,
+        "observed": {
+          "before": [
+            12,
+            8,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "after": [
+            13,
+            9,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "name": "udpPreservesGuestSource",
+        "passed": true,
+        "observed": [
+          200,
+          {
+            "responses": [
+              "10.80.0.2:37521"
+            ]
+          }
+        ]
+      }
+    ],
+    "kataSHA256": "1463a2b86845f4d3d8e87f2f764ec59856fc0fee3520967a79ade32762be2e97",
+    "passed": true
+  },
+  "result": {
+    "clusterRoot": "/var/tmp/gr8s-service-traffic.n3xbq694",
+    "checks": [
+      {
+        "name": "kataHandlerConfigured",
+        "passed": true,
+        "observed": "/var/tmp/gr8s-service-traffic.n3xbq694/state/agent/containerd/config.toml"
+      },
+      {
+        "name": "realGuestKernel",
+        "passed": true,
+        "observed": {
+          "guest": "6.18.56",
+          "host": "6.19.10-300.fc44.x86_64",
+          "qemu": [
+            {
+              "pid": 1762380,
+              "command": "/var/tmp/gr8s-service-traffic.n3xbq694/state/runtime-addons/kata/opt/kata/bin/qemu-system-x86_64 -name sandbox-2b12b5c63ede2af072fe27a97cac39ec14c6d405056eeec8e8b70d33e0f1a2d8 -kernel /var/tmp/gr8s-service-traffic.n3xbq694/state/runtime-addons/kata/opt/kata/share/kata-containers/vmlinux-6.18.56-208 -append reboot=k panic=1 systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket agent.log_vport=1025 root=/dev/pmem0p1 rootflags=dax,data=ordered,errors=remount-ro ro rootfstype=ext4 agent.cdh_api_timeout=50 agent.log=debug cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1 selinux=0 console=hvc0 -smp 1 -machine q35,accel=kvm,nvdimm=on,kernel_irqchip=on,memory-backend=entire-guest-memory-share -cpu host,pmu=off -m 2G,slots=10,maxmem=3903M -object memory-backend-file,id=entire-guest-memory-share,mem-path=/dev/shm,size=2G,share=on,prealloc=off,readonly=off -qmp unix:fd=16,server=on,wait=off -rtc base=utc,clock=host,driftfix=slew -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0 -device pci-bridge,bus=pcie.0,id=pci-bridge-0,chassis_nr=1,shpc=off,addr=2,io-reserve=4k,mem-reserve=1m,pref64-reserve=1m -device virtio-scsi-pci,id=scsi0,disable-modern=true -device vhost-vsock-pci,disable-modern=true,vhostfd=17,guest-cid=1799923295 -netdev tap,id=network-tap0_kata,vhost=on,vhostfds=20,fds=19 -device virtio-net-pci,netdev=network-tap0_kata,mac=02:e5:10:85:8e:ca,disable-modern=true,mq=on,vectors=4 -chardev socket,id=virtiofsd-chardev,path=/run/kata/2b12b5c63ede2af072fe27a97cac39ec14c6d405056eeec8e8b70d33e0f1a2d8/root/virtiofsd.sock -device vhost-user-fs-pci,chardev=virtiofsd-chardev,tag=kataShared,queue-size=1024 -object memory-backend-file,id=TODO,mem-path=/var/tmp/gr8s-service-traffic.n3xbq694/state/runtime-addons/kata/opt/kata/share/kata-containers/kata-ubuntu-resolute.image,size=256M,share=off,prealloc=off,readonly=on -device nvdimm,memdev=TODO,unarmed=on -device virtio-serial-pci,id=serial0 -device virtconsole,id=console0,chardev=charconsole0 -chardev socket,id=charconsole0,server=on,wait=off,path=/run/kata/2b12b5c63ede2af072fe27a97cac39ec14c6d405056eeec8e8b70d33e0f1a2d8/root/console.sock -vga none -no-user-config -nodefaults -nographic -no-reboot "
+            }
+          ]
+        }
+      },
+      {
+        "name": "httpClusterIP",
+        "passed": true,
+        "observed": {
+          "answer": [
+            200,
+            {
+              "responses": [
+                "backend"
+              ]
+            }
+          ],
+          "countersBefore": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "countersAfter": [
+            6,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "name": "httpUsesTCBothDirections",
+        "passed": true,
+        "observed": {
+          "before": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "after": [
+            6,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "name": "httpPreservesGuestSource",
+        "passed": true,
+        "observed": [
+          200,
+          {
+            "responses": [
+              "10.80.0.2:39458"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "udpClusterIP",
+        "passed": true,
+        "observed": {
+          "answer": [
+            200,
+            {
+              "responses": [
+                "backend"
+              ]
+            }
+          ],
+          "countersBefore": [
+            12,
+            8,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "countersAfter": [
+            13,
+            9,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "name": "udpUsesTCBothDirections",
+        "passed": true,
+        "observed": {
+          "before": [
+            12,
+            8,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "after": [
+            13,
+            9,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "name": "udpPreservesGuestSource",
+        "passed": true,
+        "observed": [
+          200,
+          {
+            "responses": [
+              "10.80.0.2:54213"
+            ]
+          }
+        ]
+      }
+    ],
+    "kataSHA256": "1463a2b86845f4d3d8e87f2f764ec59856fc0fee3520967a79ade32762be2e97",
+    "kataTestConfig": {
+      "agentReconnectTimeoutMs": 120000,
+      "debug": true
+    },
+    "passed": true
+  },
+  "repeat": {
+    "passed": true,
+    "checksPassed": 8,
+    "manualIntervention": false,
+    "runnerCommit": "a1de5a2",
+    "execution": "Fresh cluster; checksum-pinned native addon installation, test-only timeout/debug configuration, image preload, guest tests, and cleanup completed by the committed runner."
+  },
+  "hostedCI": {
+    "run": 42641897466,
+    "started": false,
+    "reason": "Account billing/spending limit; no test steps ran."
+  }
+}
