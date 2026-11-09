@@ -64,11 +64,11 @@
 (defun pod-path (store pod)
   "Return the JSON persistence pathname for POD in STORE."
   (merge-pathnames (format nil "~A.json" (pod-uid pod))
-                   (pod-store-path store)))
+                   (store-data-path store)))
 
 (defun nodes-path (store)
   "Return STORE's directory for durable node records."
-  (merge-pathnames "nodes/" (pod-store-path store)))
+  (merge-pathnames "nodes/" (store-data-path store)))
 
 (defun node-path (store node)
   "Return the JSON persistence pathname for NODE in STORE."
@@ -625,8 +625,9 @@ renewals use the same compact one-key delta without changing resourceVersion."
   (let* ((directory (uiop:ensure-directory-pathname path))
          (store (make-pod-store directory)))
     (ensure-directories-exist directory)
+    (setf (pod-store-data-root store) (selected-store-generation-root directory))
     (ensure-directories-exist (nodes-path store))
-    (dolist (file (directory (merge-pathnames "*.json" directory)))
+    (dolist (file (directory (merge-pathnames "*.json" (store-data-path store))))
       (index-pod store (store-parse-pod file)))
     (dolist (file (directory (merge-pathnames "*.json" (nodes-path store))))
       (let ((node (parse-node-record file)))

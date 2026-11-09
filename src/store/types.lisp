@@ -8,6 +8,7 @@
 (defstruct (pod-store (:constructor make-pod-store (path)))
   "Hold durable paths, in-memory indexes, observed status, and the store lock."
   path
+  data-root
   (pods (make-hash-table :test #'equal))
   (nodes (make-hash-table :test #'equal))
   (resources (make-hash-table :test #'equal))

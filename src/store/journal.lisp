@@ -82,7 +82,7 @@
 
 (defun pod-revision-ceiling-path (store)
   "Return STORE's durable revision ceiling."
-  (merge-pathnames "pod-revision.ceiling" (pod-store-path store)))
+  (merge-pathnames "pod-revision.ceiling" (store-data-path store)))
 
 (defun load-pod-revision (store)
   "Resume above every revision that could have been issued before the last shutdown."

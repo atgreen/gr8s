@@ -106,6 +106,7 @@
                              (:module "store"
                               :serial t
                               :components ((:file "types")
+                                           (:file "generations")
                                            (:file "policy")
                                            (:file "observations")
                                            (:file "journal")
@@ -481,6 +482,7 @@
                              (:file "core-resource-http-test")
                              (:file "api-defaults-test")
                              (:file "store-snapshot-test")
+                             (:file "store-generation-test")
                              (:file "pod-runtime-gaps-test")
                              (:file "hpa-controller-test")
                              (:file "resource-metrics-api-test")

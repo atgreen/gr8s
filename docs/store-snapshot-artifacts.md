@@ -79,3 +79,45 @@ store resident. `GR8S_SNAPSHOT_RECORDS` controls the number of 64 KiB resource p
 `GR8S_SNAPSHOT_LEGACY=1` selects whole-state JSON materialization for comparison.
 The [validation record](store-snapshot-artifact-validation-2026-11-09.json)
 distinguishes capture evidence from the remaining restore and transport work.
+
+## Application generation selection
+
+Application paths now use `gr8s.store:store-data-path`. With no selector, this is
+exactly the legacy member root. `pod-store-path` continues to identify the stable
+member root for PKI, signing keys, issuer records and Raft state.
+
+| Data | Location after generation selection |
+|---|---|
+| Desired Pods, Nodes and observation checkpoints | Selected application generation |
+| Core checkpoint/journal and Pod/Node revision files | Selected application generation |
+| PKI and ServiceAccount private signing key | Stable member root |
+| Server-owned credential issuer records | Stable member root |
+| Raft WAL, transfer scratch and snapshot artifacts | Stable member root |
+
+A generation lives under `application-generations/<UUID>/` in a private owned
+`0700` namespace. Its `generation.meta` completion marker records the version,
+UUID, originating snapshot index/term and artifact SHA-256. This is an origin
+marker, not the latest applied Raft index: the selected application files continue
+to change as commands commit. The marker is immutable and its filename is outside
+the desired Pod `*.json` scan.
+
+The private `metadata/application-generation.json` selector must match the complete
+marker exactly. Startup resolves and validates it before loading any application
+files. Invalid selectors, mismatched boundaries/digests, linked metadata,
+nonregular or oversized descriptors, public generation directories and unsafe
+identities fail closed. Legacy stores need no migration or selector.
+
+The internal generation helpers create staging directories, publish completion
+metadata and select complete generations. The caller must first validate and
+synchronize every staged file and subdirectory, quiesce the member, manage restore
+intent, and reload the live indexes. Selection does not change an existing store
+object's indexes or application root. These helpers are not a live restore command;
+staged artifact materialization, crash recovery and Raft integration remain under
+`podster-ucm.11.3.3`.
+
+Metadata publication synchronizes its private temporary file, renames it, then
+synchronizes the parent directory. Failure before rename preserves the prior
+selector. Failure after rename reports uncertainty: the new selector may already
+be visible, and neither completed generation is removed or rolled back. Power-loss
+recovery must inspect the durable selection and restore intent. Generation garbage
+collection is not enabled.

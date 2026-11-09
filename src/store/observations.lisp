@@ -9,7 +9,7 @@
 
 (defun pod-status-state-path (store uid)
   "Return UID's private status checkpoint pathname in STORE."
-  (merge-pathnames (format nil "observations/~A.json" uid) (pod-store-path store)))
+  (merge-pathnames (format nil "observations/~A.json" uid) (store-data-path store)))
 
 (defun copy-pod-status-value (value)
   "Copy JSON status data before publishing it outside a store transaction."
@@ -74,7 +74,7 @@
 (defun load-pod-status-state (store)
   "Restore checkpoints only for the exact desired Pod identity still present on disk."
   (dolist (path (directory (merge-pathnames "observations/*.json"
-                                            (pod-store-path store))))
+                                            (store-data-path store))))
     (let* ((record (com.inuoe.jzon:parse path))
            (uid (gethash "uid" record))
            (pod (gethash (pod-key (gethash "namespace" record)

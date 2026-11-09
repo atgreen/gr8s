@@ -159,11 +159,11 @@
 
 (defun core-resource-state-path (store)
   "Return the pathname of STORE's core-resource checkpoint (objects/state.json)."
-  (merge-pathnames "objects/state.json" (pod-store-path store)))
+  (merge-pathnames "objects/state.json" (gr8s.store:store-data-path store)))
 
 (defun core-journal-path (store)
   "The journal of commits made after the checkpoint at CORE-RESOURCE-STATE-PATH."
-  (merge-pathnames "objects/journal.jsonl" (pod-store-path store)))
+  (merge-pathnames "objects/journal.jsonl" (gr8s.store:store-data-path store)))
 
 (defparameter *core-journal-checkpoint-bytes* (* 8 1024 1024)
   "Journal size past which the next commit writes a checkpoint and starts a new journal.

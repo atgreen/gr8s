@@ -265,7 +265,7 @@ an exact UID and desired revision, so delayed reports cannot recreate a Pod."
       (list :pod-ok))))
 
 (defun consensus-pod-revision-path (store)
-  (merge-pathnames "metadata/consensus-pod-revision.txt" (pod-store-path store)))
+  (merge-pathnames "metadata/consensus-pod-revision.txt" (store-data-path store)))
 
 (defun save-consensus-pod-revision-unlocked (store)
   "Persist the committed clock, independent of speculative reservation ceilings."

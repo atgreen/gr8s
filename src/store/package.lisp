@@ -88,6 +88,7 @@
    #:pod-store-node-watch-journal-length
    #:pod-store-nodes
    #:pod-store-nominated-nodes
+   #:store-data-path
    #:pod-store-path
    #:pod-store-pod-certificates
    #:pod-store-pod-client-statuses
