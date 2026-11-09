@@ -111,11 +111,24 @@ expired forward entry before selecting from the current Service plan. Forward
 and reverse tuple reservations serialize state changes; contention drops the
 packet without waiting, and all reservations are released before the policy
 continuation. Replaced-backend replies fail the forward/reverse ownership check.
-This is lazy expiry: background cleanup of idle/orphan entries and TCP
-SYN/FIN/RST state handling remain unfinished. See
-[the expiry and guest regression evidence](service-packet-expiry-validation-2026-11-09.json).
-Kernel packet tests additionally cover program lifetime. Flow garbage collection,
-source NAT/hairpin,
+The agent also visits at most 128 forward keys and 128 reverse keys per
+reconciliation tick. An unattached BPF maintenance program rechecks lifetime and
+paired ownership under those reservations, reclaiming expired pairs and abandoned
+reverse entries. Userspace enumerates keys and invokes bounded kernel transactions;
+it never holds a packet reservation across a userspace pause or agent exit.
+Collection preserves fresh flows and does not refresh their timestamps. Affinity
+state is separately bounded by its LRU map and validated on use.
+
+Before collecting retained state, the agent checks that existing endpoint NAT
+programs reference the current flow and reservation maps. Pre-reservation
+experimental endpoint programs defer GC with a diagnostic until those endpoints
+are refreshed or recreated. The agent reports verified retained pipelines and
+logs enumeration/syscall failures; its dataplane tracks scanned, reclaimed,
+deferred and failed transactions. See
+[the expiry evidence](service-packet-expiry-validation-2026-11-09.json) and
+[the background collection evidence](service-packet-gc-validation-2026-11-09.json).
+TCP SYN/FIN/RST state handling remains unfinished.
+Kernel packet tests additionally cover program lifetime. Source NAT/hairpin,
 return-tuple collision resolution, IPv6 packet translation and external Service
 replacement remain in development. Hairpin and conflicting return tuples
 currently drop safely. See [the engine validation scope](service-packet-engine-validation-2026-11-09.json)

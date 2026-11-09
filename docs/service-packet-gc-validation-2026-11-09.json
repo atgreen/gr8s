@@ -1,0 +1,949 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c.3",
+  "implementationCommit": "e872832",
+  "testedNativeCommit": "73ad650",
+  "nativeSHA256": "30aaa8998293417c304740ab4b9f6ac300aec7c4655ee0f9ae4f2961c0abde45",
+  "collectorFixtureSHA256": "f2935ed0864be4bcbc5bbe7f2ce57491a6bfd26f07a15a21ee030d34d2cc51e0",
+  "collectorInstructions": 437,
+  "focusedLisp": {
+    "passed": 936,
+    "failed": 0,
+    "serviceLB": 249,
+    "otherNetworkingPolicyAndAll29RootCniTests": 687
+  },
+  "bytecode": {
+    "interpreter": {
+      "ownershipExpiryContention": 29,
+      "forwardCapacityRecovery": 5,
+      "reverseCapacityRecovery": 7
+    },
+    "kernel": {
+      "ownershipExpiryContention": 29,
+      "forwardCapacityRecovery": 5,
+      "reverseCapacityRecovery": 7,
+      "concurrentWorkerIterations": 512
+    },
+    "kernelEnvironment": "Disposable Fedora44 VM22293; BPF_PROG_TEST_RUN; no privileged BPF on development host.",
+    "kernelLog": [
+      "Service GC (Kernel): 29 ownership/expiry/reservation cases passed",
+      "Service GC capacity recovery: 5 cases passed",
+      "Service GC reverse capacity recovery: 7 cases passed",
+      "Service GC concurrent traffic: 512 worker iterations passed"
+    ]
+  },
+  "liveAgentEnvironment": "Disposable Fedora44 VM22292, normal native serve process, experimental packet Services enabled; no Pods/images, synthetic retained map state.",
+  "liveAgentResult": {
+    "root": "/var/tmp/gr8s-service-traffic.h2mky9i2",
+    "checks": [
+      {
+        "name": "canonicalPacketMapsPinned",
+        "passed": true,
+        "observed": {
+          "gr8s_pkt_forward": 49414,
+          "gr8s_pkt_reverse": 49415,
+          "gr8s_pkt_fwd_lock": 49412,
+          "gr8s_pkt_rev_lock": 49413
+        }
+      },
+      {
+        "name": "backgroundReclaimsMoreThanOneBatch",
+        "passed": true,
+        "observed": {
+          "pairs": 300,
+          "seconds": 2.031
+        }
+      },
+      {
+        "name": "abandonedReverseReservationWithdrawn",
+        "passed": true,
+        "observed": "0a5801030a5800021f90c34f11000000"
+      },
+      {
+        "name": "freshForwardAndReverseSurvive",
+        "passed": true,
+        "observed": {
+          "forward": "0a5801031f90000015fc9a5e03c70100",
+          "reverse": "0a60000a005000000000000000000000"
+        }
+      },
+      {
+        "name": "mapIdsPreserved",
+        "passed": true,
+        "observed": {
+          "gr8s_pkt_forward": 49414,
+          "gr8s_pkt_reverse": 49415,
+          "gr8s_pkt_fwd_lock": 49412,
+          "gr8s_pkt_rev_lock": 49413
+        }
+      },
+      {
+        "name": "noServiceMaintenanceErrors",
+        "passed": true,
+        "observed": []
+      }
+    ],
+    "seededExpiredPairs": 300,
+    "batchBudgetPerMap": 128,
+    "passed": true,
+    "cleanupCompleted": true
+  },
+  "restartEnvironment": "Disposable Fedora44 VM22291; two native agents with distinct mount/network namespaces and persistent endpoint programs; official ctr preload bypasses podster-fp8.",
+  "restartResult": {
+    "root": "/var/tmp/gr8s-two-node.f3k03spi",
+    "checks": [
+      {
+        "name": "sixControlMaps",
+        "passed": true,
+        "observed": {
+          "gr8s_backend_index_v4": {
+            "id": 43130,
+            "keySize": 16,
+            "valueSize": 4,
+            "keys": [
+              "00500a60000a06000a5010011f900000",
+              "00500a60000b06000a5010011f900000"
+            ]
+          },
+          "gr8s_backend_index_v6": {
+            "id": 43135,
+            "keySize": 40,
+            "valueSize": 4,
+            "keys": []
+          },
+          "gr8s_backend_v4": {
+            "id": 43129,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": [
+              "00000000",
+              "01000000"
+            ]
+          },
+          "gr8s_backend_v6": {
+            "id": 43134,
+            "keySize": 4,
+            "valueSize": 20,
+            "keys": []
+          },
+          "gr8s_pkt_affinity": {
+            "id": 43142,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_forward": {
+            "id": 43140,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_fwd_lock": {
+            "id": 43138,
+            "keySize": 16,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_pkt_rev_lock": {
+            "id": 43139,
+            "keySize": 16,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_pkt_reverse": {
+            "id": 43141,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_stats": {
+            "id": 43143,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_service_v4": {
+            "id": 43128,
+            "keySize": 8,
+            "valueSize": 16,
+            "keys": [
+              "00500a60000a0600",
+              "00500a60000b0600"
+            ]
+          },
+          "gr8s_service_v6": {
+            "id": 43133,
+            "keySize": 20,
+            "valueSize": 16,
+            "keys": []
+          }
+        }
+      },
+      {
+        "name": "existingWorkloadWhileAgentDown",
+        "passed": true,
+        "observed": {
+          "identities": [
+            [
+              "9613418b-2c17-4dc1-901c-1d26b3d0e930",
+              "worker-0",
+              "10.80.0.1",
+              [
+                "10.80.0.1"
+              ]
+            ],
+            [
+              "99824fdb-9c3a-4d3f-aee8-70daf1608ae6",
+              "worker-1",
+              "10.80.16.1",
+              [
+                "10.80.16.1"
+              ]
+            ]
+          ],
+          "probe": "two-node-1\n"
+        }
+      },
+      {
+        "name": "retainedMapsBeforeRestart",
+        "passed": true,
+        "observed": {
+          "gr8s_backend_index_v4": {
+            "id": 43130,
+            "keySize": 16,
+            "valueSize": 4,
+            "keys": [
+              "00500a60000a06000a5010011f900000",
+              "00500a60000b06000a5010011f900000",
+              "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            ]
+          },
+          "gr8s_backend_index_v6": {
+            "id": 43135,
+            "keySize": 40,
+            "valueSize": 4,
+            "keys": [
+              "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            ]
+          },
+          "gr8s_backend_v4": {
+            "id": 43129,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": [
+              "00000000",
+              "01000000",
+              "eeeeeeee"
+            ]
+          },
+          "gr8s_backend_v6": {
+            "id": 43134,
+            "keySize": 4,
+            "valueSize": 20,
+            "keys": [
+              "eeeeeeee"
+            ]
+          },
+          "gr8s_pkt_affinity": {
+            "id": 43142,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_forward": {
+            "id": 43140,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_fwd_lock": {
+            "id": 43138,
+            "keySize": 16,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_pkt_rev_lock": {
+            "id": 43139,
+            "keySize": 16,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_pkt_reverse": {
+            "id": 43141,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_stats": {
+            "id": 43143,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_service_v4": {
+            "id": 43128,
+            "keySize": 8,
+            "valueSize": 16,
+            "keys": [
+              "00500a60000a0600",
+              "00500a60000b0600",
+              "eeeeeeeeeeeeeeee"
+            ]
+          },
+          "gr8s_service_v6": {
+            "id": 43133,
+            "keySize": 20,
+            "valueSize": 16,
+            "keys": [
+              "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            ]
+          }
+        }
+      },
+      {
+        "name": "allControlMapsContainOrphans",
+        "passed": true,
+        "observed": {
+          "gr8s_backend_index_v4": {
+            "id": 43130,
+            "keySize": 16,
+            "valueSize": 4,
+            "keys": [
+              "00500a60000a06000a5010011f900000",
+              "00500a60000b06000a5010011f900000",
+              "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            ]
+          },
+          "gr8s_backend_index_v6": {
+            "id": 43135,
+            "keySize": 40,
+            "valueSize": 4,
+            "keys": [
+              "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            ]
+          },
+          "gr8s_backend_v4": {
+            "id": 43129,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": [
+              "00000000",
+              "01000000",
+              "eeeeeeee"
+            ]
+          },
+          "gr8s_backend_v6": {
+            "id": 43134,
+            "keySize": 4,
+            "valueSize": 20,
+            "keys": [
+              "eeeeeeee"
+            ]
+          },
+          "gr8s_pkt_affinity": {
+            "id": 43142,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_forward": {
+            "id": 43140,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_fwd_lock": {
+            "id": 43138,
+            "keySize": 16,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_pkt_rev_lock": {
+            "id": 43139,
+            "keySize": 16,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_pkt_reverse": {
+            "id": 43141,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_stats": {
+            "id": 43143,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_service_v4": {
+            "id": 43128,
+            "keySize": 8,
+            "valueSize": 16,
+            "keys": [
+              "00500a60000a0600",
+              "00500a60000b0600",
+              "eeeeeeeeeeeeeeee"
+            ]
+          },
+          "gr8s_service_v6": {
+            "id": 43133,
+            "keySize": 20,
+            "valueSize": 16,
+            "keys": [
+              "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            ]
+          }
+        }
+      },
+      {
+        "name": "serviceAfterRestart",
+        "passed": true,
+        "observed": "10.96.0.10"
+      },
+      {
+        "name": "orphanKeysWithdrawn",
+        "passed": true,
+        "observed": {
+          "gr8s_backend_index_v4": {
+            "id": 43130,
+            "keySize": 16,
+            "valueSize": 4,
+            "keys": [
+              "00500a60000a06000a5010011f900000"
+            ]
+          },
+          "gr8s_backend_index_v6": {
+            "id": 43135,
+            "keySize": 40,
+            "valueSize": 4,
+            "keys": []
+          },
+          "gr8s_backend_v4": {
+            "id": 43129,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": [
+              "00000000"
+            ]
+          },
+          "gr8s_backend_v6": {
+            "id": 43134,
+            "keySize": 4,
+            "valueSize": 20,
+            "keys": []
+          },
+          "gr8s_pkt_affinity": {
+            "id": 43142,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_forward": {
+            "id": 43140,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_fwd_lock": {
+            "id": 43138,
+            "keySize": 16,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_pkt_rev_lock": {
+            "id": 43139,
+            "keySize": 16,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_pkt_reverse": {
+            "id": 43141,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_stats": {
+            "id": 43143,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_service_v4": {
+            "id": 43128,
+            "keySize": 8,
+            "valueSize": 16,
+            "keys": [
+              "00500a60000a0600"
+            ]
+          },
+          "gr8s_service_v6": {
+            "id": 43133,
+            "keySize": 20,
+            "valueSize": 16,
+            "keys": []
+          }
+        }
+      },
+      {
+        "name": "mapIdsPreserved",
+        "passed": true,
+        "observed": {
+          "gr8s_backend_index_v4": {
+            "id": 43130,
+            "keySize": 16,
+            "valueSize": 4,
+            "keys": [
+              "00500a60000a06000a5010011f900000"
+            ]
+          },
+          "gr8s_backend_index_v6": {
+            "id": 43135,
+            "keySize": 40,
+            "valueSize": 4,
+            "keys": []
+          },
+          "gr8s_backend_v4": {
+            "id": 43129,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": [
+              "00000000"
+            ]
+          },
+          "gr8s_backend_v6": {
+            "id": 43134,
+            "keySize": 4,
+            "valueSize": 20,
+            "keys": []
+          },
+          "gr8s_pkt_affinity": {
+            "id": 43142,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_forward": {
+            "id": 43140,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_fwd_lock": {
+            "id": 43138,
+            "keySize": 16,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_pkt_rev_lock": {
+            "id": 43139,
+            "keySize": 16,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_pkt_reverse": {
+            "id": 43141,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_stats": {
+            "id": 43143,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_service_v4": {
+            "id": 43128,
+            "keySize": 8,
+            "valueSize": 16,
+            "keys": [
+              "00500a60000a0600"
+            ]
+          },
+          "gr8s_service_v6": {
+            "id": 43133,
+            "keySize": 20,
+            "valueSize": 16,
+            "keys": []
+          }
+        }
+      },
+      {
+        "name": "deletedServiceWithdrawn",
+        "passed": true,
+        "observed": "00500a60000b0600"
+      },
+      {
+        "name": "podIdentityPreserved",
+        "passed": true,
+        "observed": [
+          [
+            "9613418b-2c17-4dc1-901c-1d26b3d0e930",
+            "worker-0",
+            "10.80.0.1",
+            [
+              "10.80.0.1"
+            ]
+          ],
+          [
+            "99824fdb-9c3a-4d3f-aee8-70daf1608ae6",
+            "worker-1",
+            "10.80.16.1",
+            [
+              "10.80.16.1"
+            ]
+          ]
+        ]
+      },
+      {
+        "name": "retainedPacketStagesVerified",
+        "passed": true,
+        "observed": [
+          "gr8s: Service flow GC verified 1 retained endpoint pipelines"
+        ]
+      }
+    ],
+    "passed": true,
+    "cleanupCompleted": true,
+    "convergenceErrors": []
+  },
+  "guestEnvironment": "Disposable Fedora44 VM22291; distinct node mount/network namespaces, VXLAN, real Kata guest and remote native backend; original21-case policy/source/translation regression with collector active.",
+  "guestResult": {
+    "root": "/var/tmp/gr8s-two-node.s5sra91l",
+    "checks": [
+      {
+        "name": "differentNodes",
+        "passed": true,
+        "observed": {
+          "client": "10.80.0.1",
+          "backend": "10.80.16.1",
+          "nodes": [
+            "worker-0",
+            "worker-1"
+          ]
+        }
+      },
+      {
+        "name": "realGuestKernel",
+        "passed": true,
+        "observed": {
+          "guest": "6.18.56",
+          "host": "6.19.10-300.fc44.x86_64",
+          "qemu": [
+            {
+              "pid": 1803378,
+              "command": "/var/tmp/gr8s-two-node.s5sra91l/agent-0/runtime-addons/kata/opt/kata/bin/qemu-system-x86_64 -name sandbox-a42fee127bfc149aca0f3ad204fc8f858d0caf8eaae9ec1e1a0585bbbadae1f3 -kernel /var/tmp/gr8s-two-node.s5sra91l/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/vmlinux-6.18.56-208 -append reboot=k panic=1 systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket agent.log_vport=1025 root=/dev/pmem0p1 rootflags=dax,data=ordered,errors=remount-ro ro rootfstype=ext4 agent.cdh_api_timeout=50 agent.log=debug cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1 selinux=0 console=hvc0 -smp 1 -machine q35,accel=kvm,nvdimm=on,kernel_irqchip=on,memory-backend=entire-guest-memory-share -cpu host,pmu=off -m 2G,slots=10,maxmem=3903M -object memory-backend-file,id=entire-guest-memory-share,mem-path=/dev/shm,size=2G,share=on,prealloc=off,readonly=off -qmp unix:fd=16,server=on,wait=off -rtc base=utc,clock=host,driftfix=slew -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0 -device pci-bridge,bus=pcie.0,id=pci-bridge-0,chassis_nr=1,shpc=off,addr=2,io-reserve=4k,mem-reserve=1m,pref64-reserve=1m -device virtio-scsi-pci,id=scsi0,disable-modern=true -device vhost-vsock-pci,disable-modern=true,vhostfd=17,guest-cid=3324426458 -netdev tap,id=network-tap0_kata,vhost=on,vhostfds=20,fds=19 -device virtio-net-pci,netdev=network-tap0_kata,mac=02:84:38:50:93:04,disable-modern=true,mq=on,vectors=4 -chardev socket,id=virtiofsd-chardev,path=/run/kata/a42fee127bfc149aca0f3ad204fc8f858d0caf8eaae9ec1e1a0585bbbadae1f3/root/virtiofsd.sock -device vhost-user-fs-pci,chardev=virtiofsd-chardev,tag=kataShared,queue-size=1024 -object memory-backend-file,id=TODO,mem-path=/var/tmp/gr8s-two-node.s5sra91l/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/kata-ubuntu-resolute.image,size=256M,share=off,prealloc=off,readonly=on -device nvdimm,memdev=TODO,unarmed=on -device virtio-serial-pci,id=serial0 -device virtconsole,id=console0,chardev=charconsole0 -chardev socket,id=charconsole0,server=on,wait=off,path=/run/kata/a42fee127bfc149aca0f3ad204fc8f858d0caf8eaae9ec1e1a0585bbbadae1f3/root/console.sock -vga none -no-user-config -nodefaults -nographic -no-reboot "
+            }
+          ]
+        }
+      },
+      {
+        "name": "worker0UsesOverlay",
+        "passed": true,
+        "observed": [
+          {
+            "dst": "10.80.16.1",
+            "gateway": "10.80.16.0",
+            "dev": "gr8s-vxlan",
+            "prefsrc": "10.80.0.0",
+            "flags": [],
+            "uid": 0,
+            "cache": []
+          }
+        ]
+      },
+      {
+        "name": "worker1UsesOverlay",
+        "passed": true,
+        "observed": [
+          {
+            "dst": "10.80.0.1",
+            "gateway": "10.80.0.0",
+            "dev": "gr8s-vxlan",
+            "prefsrc": "10.80.16.0",
+            "flags": [],
+            "uid": 0,
+            "cache": []
+          }
+        ]
+      },
+      {
+        "name": "httpDirectBackend",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "httpCrossNodeClusterIP",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "httpTCBothDirections",
+        "passed": true,
+        "observed": {
+          "before": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "after": [
+            6,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "name": "httpPreservesSource",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "10.80.0.1:60400"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpDirectBackend",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpCrossNodeClusterIP",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpTCBothDirections",
+        "passed": true,
+        "observed": {
+          "before": [
+            12,
+            8,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "after": [
+            13,
+            9,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "name": "udpPreservesSource",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "10.80.0.1:33080"
+            ]
+          }
+        }
+      },
+      {
+        "name": "nativeSocketAcceleration",
+        "passed": true,
+        "observed": {
+          "response": "two-node-1",
+          "before": [
+            [
+              14,
+              10,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          ],
+          "after": [
+            [
+              14,
+              10,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          ]
+        }
+      },
+      {
+        "name": "httpGuestEgressDenied",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "errors": [
+              "Get \"http://10.96.0.10:80/hostname\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpGuestEgressDenied",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "errors": [
+              "reading from udp connection failed. err:'read udp 10.80.0.1:59747->10.96.0.10:81: i/o timeout'"
+            ]
+          }
+        }
+      },
+      {
+        "name": "httpPolicySeesBackendAndAllowsReplies",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpPolicySeesBackendAndAllowsReplies",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "httpRemoteIngressDenied",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "errors": [
+              "Get \"http://10.96.0.10:80/hostname\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpRemoteIngressDenied",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "errors": [
+              "reading from udp connection failed. err:'read udp 10.80.0.1:33425->10.96.0.10:81: i/o timeout'"
+            ]
+          }
+        }
+      },
+      {
+        "name": "httpRemoteIngressRecovers",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpRemoteIngressRecovers",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      }
+    ],
+    "overlay": "vxlan",
+    "kataSHA256": "1463a2b86845f4d3d8e87f2f764ec59856fc0fee3520967a79ade32762be2e97",
+    "agentReconnectTimeoutMs": 120000,
+    "passed": true,
+    "cleanupCompleted": true
+  },
+  "guestMaintenanceErrors": [],
+  "lifecycle": "Collector is loaded but never attached. Agent enumerates at most128 keys per flow map per tick; all tuple acquisition, ownership checks, mutation and release occur inside one kernel invocation. Busy operations defer without waiting. Fresh state is neither removed nor refreshed; stale reverse entries cannot delete a current replacement backend.",
+  "legacyGuardSafety": "GC checks actual map IDs of existing endpoint NAT programs before activation. Legacy programs lacking current flow/reservation references defer GC with a diagnostic until endpoints are refreshed or recreated. Mock legacy gate tests cover deferral/recovery; the live restart observes explicit verification of1 real retained endpoint pipeline. Automatic retained-bytecode upgrade is a separate follow-up.",
+  "references": [
+    "https://www.kernel.org/doc/html/latest/bpf/bpf_prog_run.html",
+    "https://raw.githubusercontent.com/torvalds/linux/master/include/uapi/linux/bpf.h"
+  ],
+  "scope": "Completes bounded IPv4 TCP/UDP idle/orphan reclamation and forward/reverse capacity recovery for current reservation-aware packet programs. TCP SYN/FIN/RST lifecycle, automatic older-bytecode refresh, guest established-flow restart survival, broader live affinity/churn/empty-Service tests, SNAT/hairpin/collision resolution, IPv6 packet translation, packet NodePort and remaining parent diagnostics remain open. Packet Services remain opt-in."
+}
