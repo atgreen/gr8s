@@ -29,7 +29,8 @@
   "True when writes to RESOURCE (a stored-resource plural like \"configmaps\")
    must go through Raft. Every stored resource type is consensus state except
    those explicitly placed on the local plane."
-  (and (assoc resource gr8s::*stored-resource-types* :test #'equal)
+  (and (or (assoc resource gr8s::*stored-resource-types* :test #'equal)
+           (assoc resource gr8s.resources::*internal-stored-resource-types* :test #'equal))
        (not (member resource gr8s::*raft-local-plane-resources* :test #'equal))
        t))
 
