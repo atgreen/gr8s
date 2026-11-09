@@ -4,7 +4,7 @@
 """Measure endpoint bytecode preparation and kernel loading in a disposable root VM.
 
 Starts an owned debug-enabled native server, records first/cached lookup times,
-and loads two unattached private pipelines over opened shared maps. Requires
+and loads unattached private pipelines, reusing opened shared maps when needed. Requires
 kubectl and gr8s-debug.py alongside this script. --require-prepared verifies
 that the native image already contains both endpoint compilation caches.
 """
@@ -47,9 +47,10 @@ def measurements(root):
             (setf object (gr8s.network::compile-egress-policy-object))
             (let ((before (loop for spec in (gr8s.network::egress-policy-object-program-specs object)
                                 collect (copy-seq (getf spec :insns))))
-                  (fds (loop for spec in (gr8s.network::service-packet-map-specs)
+                  (fds (when gr8s.network::*cni-service-packets*
+                         (loop for spec in (gr8s.network::service-packet-map-specs)
                              collect (cons (first spec) (whistler/loader:open-pinned-object
-                                       (concatenate 'string {path} (first spec)))))))
+                                       (concatenate 'string {path} (first spec))))))))
               (gr8s.network::load-egress-policy-object object fds)
               (list :wall-seconds (/ (- (get-internal-real-time) start) (float internal-time-units-per-second))
                     :cpu-seconds (/ (- (get-internal-run-time) cpu) (float internal-time-units-per-second))
@@ -59,7 +60,9 @@ def measurements(root):
                     (equalp before (loop for spec in (gr8s.network::egress-policy-object-program-specs object)
                                          collect (getf spec :insns))))))
           (when object (gr8s.network::close-egress-policy-object object))))"""
-    return forms + [("kernel-load", load), ("kernel-load", load)]
+    plain = load.replace("(gr8s.network::*cni-service-packets* t)",
+                         "(gr8s.network::*cni-service-packets* nil)")
+    return forms + [("kernel-load", load), ("kernel-load", load), ("kernel-load-plain", plain)]
 
 
 def main():
@@ -116,8 +119,8 @@ def main():
                     assert re.search(r":PLAIN-COLD\s+NIL", output) and re.search(r":SERVICE-COLD\s+NIL", output), \
                         "native endpoint caches were not prepared"
                 if name != "cache":
-                    assert (item["maps"], item["programs"]) == ((16, 2) if name == "plain" else (27, 5))
-                if name == "kernel-load":
+                    assert (item["maps"], item["programs"]) == ((16, 2) if name in ("plain", "kernel-load-plain") else (27, 5))
+                if name.startswith("kernel-load"):
                     assert re.search(r":TEMPLATES-UNCHANGED\s+T", output), "loader mutated compiled templates"
         report["passed"] = True
     except (Exception, KeyboardInterrupt) as error:
