@@ -15,7 +15,11 @@
     (pushnew helper whistler/compiler:*builtin-helpers* :test #'equal)))
 
 (defparameter gr8s.network::*service-packet-extra-map-forms*
-  '((defmap gr8s-pkt-forward :type :hash
+  '((defmap gr8s-pkt-fwd-lock :type :hash
+      :key-size 16 :value-size 8 :max-entries 65536 :map-flags 1)
+    (defmap gr8s-pkt-rev-lock :type :hash
+      :key-size 16 :value-size 8 :max-entries 65536 :map-flags 1)
+    (defmap gr8s-pkt-forward :type :hash
       :key-size 16 :value-size 16 :max-entries 65536 :map-flags 1)
     (defmap gr8s-pkt-reverse :type :hash
       :key-size 16 :value-size 16 :max-entries 65536 :map-flags 1)
@@ -36,8 +40,37 @@
 (defmacro pkt-count (pointer)
   `(when (/= ,pointer 0) (atomic-add ,pointer 0 1)))
 
+(defmacro pkt-unlock ()
+  ;; Try-locks are transient map reservations, never persistent flow state.
+  ;; Always release both on every success/drop path; no packet waits on a lock.
+  `(progn
+     (when (/= (logand held-locks 2) 0)
+       (map-delete-ptr gr8s-pkt-rev-lock locked-reverse))
+     (when (/= (logand held-locks 1) 0)
+       (map-delete-ptr gr8s-pkt-fwd-lock locked-forward))
+     (setf held-locks 0)))
+
 (defmacro pkt-drop (counter)
-  `(progn (pkt-count ,counter) (return TC_ACT_SHOT)))
+  `(progn (pkt-count ,counter) (pkt-unlock) (return TC_ACT_SHOT)))
+
+(defmacro pkt-lock (direction key)
+  "Reserve a tuple without waiting. All flow readers/writers follow this protocol.
+A forward packet takes its forward key then its reverse key; a reply takes the
+reverse key then the forward key. Contention drops/releases rather than waiting,
+so opposite acquisition orders cannot deadlock."
+  (let ((map (ecase direction (:forward 'gr8s-pkt-fwd-lock) (:reverse 'gr8s-pkt-rev-lock)))
+        (copy (ecase direction (:forward 'locked-forward) (:reverse 'locked-reverse)))
+        (bit (ecase direction (:forward 1) (:reverse 2))))
+    `(progn
+       (setf (gr8s-pkt-flow-source ,copy) (gr8s-pkt-flow-source ,key)
+             (gr8s-pkt-flow-destination ,copy) (gr8s-pkt-flow-destination ,key)
+             (gr8s-pkt-flow-sport ,copy) (gr8s-pkt-flow-sport ,key)
+             (gr8s-pkt-flow-dport ,copy) (gr8s-pkt-flow-dport ,key)
+             (gr8s-pkt-flow-protocol ,copy) (gr8s-pkt-flow-protocol ,key)
+             (gr8s-pkt-flow-pad0 ,copy) 0 (gr8s-pkt-flow-pad1 ,copy) 0)
+       (when (/= (map-update-ptr ,map ,copy ,copy 1) 0) (pkt-drop failed))
+       (setf held-locks (logior held-locks ,bit)
+             now (ktime-get-ns)))))
 
 (defmacro pkt-lifetime (flow)
   `(if (= (gr8s-pkt-flow-protocol ,flow) 6) 7200000000000 180000000000))
@@ -82,13 +115,17 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
   ;; One 16-byte scratch key serves affinity, membership and reverse lookups.
   ;; Reconstruct its fields at every use to keep the combined guard below the
   ;; kernel's stack limit without retaining unrelated stack structs.
-  '((let ((probe (make-gr8s-pkt-pair)))
+  '((pkt-lock :forward flow)
+    (let ((probe (make-gr8s-pkt-pair)))
       (let ((key u64 (logior (<< (cast u64 (gr8s-pkt-flow-protocol flow)) 48)
                            (logior (<< (cast u64 (gr8s-pkt-flow-destination flow)) 16)
                                     (cast u64 (gr8s-pkt-flow-dport flow))))))
       (when-let ((held (map-lookup-ptr gr8s-pkt-forward flow)))
-        (when (<= (- now (load u64 held 8)) (pkt-lifetime flow))
-          (setf (gr8s-pkt-pair-first target) (load u64 held 0))))
+        (if (<= (- now (load u64 held 8)) (pkt-lifetime flow))
+            (setf (gr8s-pkt-pair-first target) (load u64 held 0))
+            ;; Under the tuple reservation no packet/collector can refresh or
+            ;; republish this key between expiration and NOEXIST insertion.
+            (when (/= (map-delete-ptr gr8s-pkt-forward flow) 0) (pkt-drop failed))))
       (when (= (gr8s-pkt-pair-first target) 0)
         (when-let ((service (map-lookup gr8s-service-v4 key)))
           (let ((count u32 (load u16 service 0)))
@@ -122,6 +159,7 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
                 (pkt-drop collision))
               (let ((entry (make-gr8s-pkt-pair)))
                 (pkt-make-reverse-key probe flow (gr8s-pkt-pair-first target))
+                (pkt-lock :reverse probe)
                 (setf (gr8s-pkt-pair-first entry)
                       (logior (cast u64 (gr8s-pkt-flow-destination flow))
                                (<< (cast u64 (gr8s-pkt-flow-dport flow)) 32))
@@ -152,6 +190,7 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
         ;; failed or concurrent publication must not create a one-way NAT flow.
         (progn
           (pkt-make-reverse-key probe flow (gr8s-pkt-pair-first target))
+          (when (= (logand held-locks 2) 0) (pkt-lock :reverse probe))
           (let ((entry (map-lookup-ptr gr8s-pkt-reverse probe)))
             (when (= entry 0) (pkt-drop failed))
             (when (/= (load u64 entry 0)
@@ -165,15 +204,17 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
         (pkt-count requests))))))
 
 (defun gr8s.network::service-packet-reverse-form ()
-  '((when-let ((entry (map-lookup-ptr gr8s-pkt-reverse flow)))
-      (setf (gr8s-pkt-pair-first target) (load u64 entry 0))
-      (let ((forward (make-gr8s-pkt-flow)))
-        (setf (gr8s-pkt-flow-source forward) (gr8s-pkt-flow-destination flow)
-              (gr8s-pkt-flow-destination forward) (cast u32 (gr8s-pkt-pair-first target))
-              (gr8s-pkt-flow-sport forward) (gr8s-pkt-flow-dport flow)
-              (gr8s-pkt-flow-dport forward) (cast u16 (>> (gr8s-pkt-pair-first target) 32))
-              (gr8s-pkt-flow-protocol forward) (gr8s-pkt-flow-protocol flow))
-        (let ((held (map-lookup-ptr gr8s-pkt-forward forward)))
+  '((pkt-lock :reverse flow)
+    (when-let ((entry (map-lookup-ptr gr8s-pkt-reverse flow)))
+      (let ((service u64 (load u64 entry 0)))
+        (setf (gr8s-pkt-pair-first target) service)
+        (setf (gr8s-pkt-flow-source locked-forward) (gr8s-pkt-flow-destination flow)
+              (gr8s-pkt-flow-destination locked-forward) (cast u32 service)
+              (gr8s-pkt-flow-sport locked-forward) (gr8s-pkt-flow-dport flow)
+              (gr8s-pkt-flow-dport locked-forward) (cast u16 (>> service 32))
+              (gr8s-pkt-flow-protocol locked-forward) (gr8s-pkt-flow-protocol flow))
+        (pkt-lock :forward locked-forward)
+        (let ((held (map-lookup-ptr gr8s-pkt-forward locked-forward)))
           (when (= held 0) (pkt-drop failed))
           (when (> (- now (load u64 held 8)) (pkt-lifetime flow)) (pkt-drop failed))
           (when (/= (load u64 held 0)
@@ -183,7 +224,7 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
           (let ((refreshed (make-gr8s-pkt-pair)))
             (setf (gr8s-pkt-pair-first refreshed) (load u64 held 0)
                   (gr8s-pkt-pair-second refreshed) now)
-            (when (/= (map-update-ptr gr8s-pkt-forward forward refreshed 0) 0)
+            (when (/= (map-update-ptr gr8s-pkt-forward locked-forward refreshed 0) 0)
               (pkt-drop failed)))))
       (pkt-write-address flow target meta t)
       (pkt-count replies))))
@@ -209,7 +250,8 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
          ;; repeated scalar stack loads to retain a verifier packet-range ID.
          (when (/= (skb-load-bytes (ctx-ptr) (gr8s-pkt-meta-l4 meta) (+ flow 8) 4) 0)
            (pkt-drop malformed))
-         ,@body))
+         ,@body
+         (pkt-unlock)))
 
 (defun gr8s.network::service-packet-body-form (body &key continue-guard)
   "Build a packet translator body. CONTINUE-GUARD skips ineligible packets without
@@ -224,6 +266,8 @@ returning from the enclosing guard, so non-Service traffic still crosses policy.
          (now u64 (ktime-get-ns)))
      (let ((flow (make-gr8s-pkt-flow)) (target (make-gr8s-pkt-pair))
            (meta (make-gr8s-pkt-meta))
+           (locked-forward (make-gr8s-pkt-flow)) (locked-reverse (make-gr8s-pkt-flow))
+           (held-locks u32 0)
            (data u64 (tc-data)) (data-end u64 (tc-data-end)))
        ,@(if continue-guard
              `((when (> (+ data 34) data-end) (pkt-drop malformed))
