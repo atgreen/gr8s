@@ -1,0 +1,69 @@
+{
+  "date": "2026-11-10",
+  "passed": true,
+  "fullGoalComplete": false,
+  "codeCommit": "59f841d",
+  "mergedCodeCommit": "ea96f19",
+  "mergedMain": "e2f95b0",
+  "scope": "Opt-in live store artifact restoration through outer application barriers; production voter startup and automatic compaction remain unwired",
+  "targetedChecks": {
+    "store-member-restore": 47,
+    "store-application-reload": 168,
+    "store-access-gate": 56,
+    "store-snapshot-registry": 62,
+    "raft-snapshot": 142,
+    "ha-control-plane": 37,
+    "uniqueTotalAcrossValidationStages": 512
+  },
+  "mergedTreeChecks": {
+    "store-member-restore": 47,
+    "store-application-reload": 168,
+    "egress-guard": 190,
+    "service-lb": 252,
+    "cni-policy-removal-is-idempotent-without-a-network-namespace": 3,
+    "cni-check-rejects-interrupted-packet-upgrades-before-reporting-healthy": 2,
+    "cni-delete-detaches-staged-and-canonical-guards-before-unpinning": 13,
+    "total": 675,
+    "note": "Includes checks repeated from targeted stages; totals are not additive. Networking checks compile/mock kernel interfaces without loading BPF on host."
+  },
+  "observations": [
+    "Member mutex released before draining leases and acquiring workload/credential/consensus-writer locks",
+    "Outstanding writer commits through ordinary peer RPC while final snapshot waits for its writer barrier",
+    "Same store object reloaded with locally rebased revision clocks before Raft snapshot/applied publication",
+    "Failed load retains intent and blocks gate; ordinary heartbeat retries installation and resumes access",
+    "Failed gate resume after Raft publication remains flagged for ordinary RPC retry",
+    "Foreign access gates are never opened; pre-WAL retention failure reopens the unchanged application",
+    "Callback configuration atomic under member mutex; snapshot arriving during partial setup waits and then installs correctly",
+    "Live application install passes over mutual TLS"
+  ],
+  "heapProbe": {
+    "command": "GR8S_SNAPSHOT_LIVE_TRANSFER=1 GR8S_SNAPSHOT_RELOAD=1 sbcl --dynamic-space-size 384 --noinform --non-interactive --load scripts/test-store-snapshot-memory.lisp",
+    "passed": true,
+    "senderHeapMiB": 384,
+    "receiverHeapMiB": 384,
+    "separateReceiverProcess": true,
+    "receiverExitCode": 0,
+    "payloadBytes": 67108864,
+    "artifactBytes": 67347643,
+    "records": 1024,
+    "validatedRecords": 1028,
+    "materializedRecords": 1028,
+    "sourceResidentResourcesAfterOperation": 1024,
+    "sourceReloadedSameStore": true,
+    "liveReceiver": {
+      "passed": true,
+      "liveApplicationRestore": true,
+      "records": 1024,
+      "payloadBytes": 67108864,
+      "appliedIndex": 1,
+      "resourceRevision": 1
+    },
+    "note": "Fresh SBCL processes and loopback RPC with controlled snapshot boundary; verifies receiver resource count, final resource payload and completed intent/gate, plus source-side materialization/reload."
+  },
+  "limitations": [
+    "No unmodified gr8s serve production voter WAL startup or automatic compaction enabled",
+    "No interrupted-install receiver process restart with exact WAL suffix replay in this change",
+    "No native agent retained-reference drain acceptance or constrained-heap TLS/multi-node failover run",
+    "Live barrier bead remains in progress for these integration/acceptance requirements"
+  ]
+}
