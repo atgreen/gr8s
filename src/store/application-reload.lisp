@@ -23,7 +23,7 @@
   '(pod-store-path pod-store-data-root pod-store-access-blocked pod-store-application-loaded-p
     pod-store-active-requests pod-store-access-condition pod-store-in-cluster-config
     pod-store-credential-lock pod-store-service-account-signing-key pod-store-workload-lock
-    pod-store-watch-journal-p pod-store-lock pod-store-consensus-commit-fn pod-store-consensus-write-lock)
+    pod-store-watch-journal-p pod-store-lock pod-store-image-tracker pod-store-consensus-commit-fn pod-store-consensus-write-lock)
   "Member-owned fields retained across reload; DATA-ROOT/LOADED-P are explicitly transitioned.")
 
 (defun reset-store-application (store)
@@ -31,6 +31,7 @@
   (let ((empty (make-pod-store (pod-store-path store))))
     (dolist (accessor *store-application-reload-fields*)
       (funcall (fdefinition (list 'setf accessor)) (funcall accessor empty) store)))
+  (gr8s.image-distribution::clear-image-tracker-state (pod-store-image-tracker store))
   store)
 
 (defun require-store-reload-quiescence (store)

@@ -4,6 +4,10 @@
 (in-package #:gr8s.resources)
 
 (defstruct snapshot-validation-index
+  tracker-config-p
+  (tracker-origins (make-hash-table :test #'equal))
+  (tracker-swarms (make-hash-table :test #'equal))
+  (tracker-peers (make-hash-table :test #'equal))
   (identities (make-hash-table :test #'equal))
   (cidrs (make-hash-table :test #'equal))
   (cidr-descendants (make-hash-table :test #'equal))
@@ -63,6 +67,16 @@
 (defun index-store-snapshot-record (index record)
   (let ((kind (gethash "kind" record)) (object (gethash "object" record)))
     (cond
+      ((gr8s.image-distribution::image-tracker-record-p record)
+       (let ((digest (gethash "digest" record)) (node (gethash "node" record)))
+         (snapshot-claim-identity index kind
+                                  (cond ((equal kind "imageTrackerConfig") "config")
+                                        ((equal kind "imageTrackerPeer") (list digest node))
+                                        (t digest)))
+         (cond ((equal kind "imageTrackerConfig") (setf (snapshot-validation-index-tracker-config-p index) t))
+               ((equal kind "imageTrackerOrigin") (setf (gethash digest (snapshot-validation-index-tracker-origins index)) t))
+               ((equal kind "imageTrackerSwarm") (setf (gethash digest (snapshot-validation-index-tracker-swarms index)) t))
+               ((equal kind "imageTrackerPeer") (setf (gethash digest (snapshot-validation-index-tracker-peers index)) t)))))
       ((equal kind "resource")
        (let* ((resource (gethash "resource" record))
               (namespace (unless (eq 'null (gethash "namespace" record)) (gethash "namespace" record)))
@@ -115,6 +129,21 @@
   index)
 
 (defun finish-store-snapshot-index (index)
+  (when (and (not (snapshot-validation-index-tracker-config-p index))
+             (plusp (+ (hash-table-count (snapshot-validation-index-tracker-origins index))
+                       (hash-table-count (snapshot-validation-index-tracker-swarms index))
+                       (hash-table-count (snapshot-validation-index-tracker-peers index)))))
+    (error "Snapshot tracker data has no configuration"))
+  (maphash (lambda (digest ignored)
+             (declare (ignore ignored))
+             (when (gethash digest (snapshot-validation-index-tracker-swarms index))
+               (error "Snapshot tracker digest has both origin lease and swarm")))
+           (snapshot-validation-index-tracker-origins index))
+  (maphash (lambda (digest ignored)
+             (declare (ignore ignored))
+             (unless (gethash digest (snapshot-validation-index-tracker-swarms index))
+               (error "Snapshot tracker peer has no swarm")))
+           (snapshot-validation-index-tracker-peers index))
   (maphash
    (lambda (shape ignored)
      (declare (ignore ignored))

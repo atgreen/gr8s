@@ -11,7 +11,9 @@
  :node-view #'node-api-object
  :node-event #'record-node-watch-event-unlocked
  :parse-pod #'parse-pod
- :load-resources #'load-core-resources
+ :load-resources (lambda (store)
+                   (load-core-resources store)
+                   (gr8s.image-distribution::load-store-image-tracker store))
  :prepare-create
  (lambda (store pod)
    (default-created-pod pod)

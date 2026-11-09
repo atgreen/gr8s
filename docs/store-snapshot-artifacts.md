@@ -374,3 +374,27 @@ it does not claim that old and new full application heaps remain resident togeth
 The [application reload evidence](store-application-reload-validation-2026-11-09.json)
 records the focused checks, same-object heap result, and the distinct scope of the
 native startup smoke. Production ingress and member/WAL integration remain pending.
+
+## Replicated image tracker state
+
+Snapshots include `imageTrackerConfig`, `imageTrackerOrigin`,
+`imageTrackerSwarm`, and `imageTrackerPeer` records. These preserve lease and peer
+expiry policy, origin tokens and expiry times, verified BEP52 metainfo and
+infohashes, and peer endpoints, identities, completion flags and last-seen times.
+Capture records committed state without expiring entries as a side effect.
+Validation rejects duplicate identities, peers without a swarm, origin leases
+that conflict with a published swarm, missing policy, and invalid binary or
+metainfo fields. Binary values use canonical base64.
+
+Materialization writes a private, synced `image-tracker/state.jsonl` file in the
+application generation. Startup and same-object reload reconstruct the tracker
+from that file. Reload preserves the tracker object, mutex and clock because the
+running node RPC server retains the object; it replaces the contained application
+state. Older artifacts without tracker records load an empty tracker with default
+policy. This compatibility behavior cannot recover tracker state absent from an
+older artifact.
+
+The existing snapshot limits apply: 16 MiB per record and 2 MiB per JSON string.
+Metainfo is currently one base64 string, so larger metainfo needs a chunked format
+before it can be included. This does not enable production compaction or replace
+the required node RPC and background-writer barriers and Raft/WAL recovery hooks.

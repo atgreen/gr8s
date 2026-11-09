@@ -107,7 +107,7 @@
       (multiple-value-bind (path descriptor count)
           (gr8s.resources::materialize-store-snapshot root artifact (snapshot-test-digest artifact))
         (declare (ignore path))
-        (is (= 3 count))
+        (is (= 4 count))
         (gr8s.store::publish-store-generation root (gethash "generation" descriptor))
         (let ((restored (gr8s:open-store root)))
           (is (= 0 (hash-table-count (gr8s::pod-store-resources restored))))

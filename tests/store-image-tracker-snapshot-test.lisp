@@ -1,0 +1,123 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+(in-package #:gr8s/tests)
+(def-suite store-image-tracker-snapshot :in gr8s)
+(in-suite store-image-tracker-snapshot)
+
+(defun populate-snapshot-tracker (store)
+  (let ((tracker (gr8s.store:pod-store-image-tracker store)))
+    (setf (gr8s.image-distribution::image-tracker-clock tracker) (lambda () 1000)
+          (gr8s.image-distribution::image-tracker-origin-lease-seconds tracker) 30
+          (gr8s.image-distribution::image-tracker-peer-ttl-seconds tracker) 90)
+    (gr8s.image-distribution::tracker-acquire-origin
+     tracker "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "origin")
+    (multiple-value-bind (digest torrent) (tracker-test-torrent)
+      (multiple-value-bind (status token)
+          (gr8s.image-distribution::tracker-acquire-origin tracker digest "seed")
+        (declare (ignore status))
+        (gr8s.image-distribution::tracker-publish-swarm
+         tracker digest "seed" token (gr8s.image-distribution::blob-torrent-metainfo torrent)
+         "10.0.0.1" 6881 (bt-octets "-GR8001-AAAAAAAAAAAA")))
+      (gr8s.image-distribution::tracker-announce-peer
+       tracker digest "downloader" "10.0.0.2" 6882 (bt-octets "-GR8001-BBBBBBBBBBBB") :complete-p nil))
+    tracker))
+
+(defun snapshot-tracker-records (tracker)
+  (let ((records nil))
+    (gr8s.image-distribution::map-image-tracker-records tracker (lambda (row) (push row records)))
+    (sort records #'string< :key (lambda (row) (format nil "~A/~A/~A" (gethash "kind" row)
+                                                       (gethash "digest" row) (gethash "node" row))))))
+
+(test tracker-snapshot-restores-complete-state-with-existing-handle
+  (with-temporary-store (store root)
+    (let* ((tracker (populate-snapshot-tracker store))
+           (clock (gr8s.image-distribution::image-tracker-clock tracker))
+           (lock (gr8s.image-distribution::image-tracker-lock tracker))
+           (expected (snapshot-tracker-records tracker))
+           (source (merge-pathnames "tracker-source.jsonl" root)))
+      (gr8s.resources::capture-store-snapshot store source 42 7)
+      ;; Records may arrive in any order, including peers before their swarm.
+      (let* ((records (read-store-snapshot-records source))
+             (tracker-rows (remove-if-not #'gr8s.image-distribution::image-tracker-record-p records))
+             (other-rows (remove-if #'gr8s.image-distribution::image-tracker-record-p records)))
+        (write-snapshot-test-records source
+                                    (append (butlast other-rows) (reverse tracker-rows) (last other-rows))))
+      (multiple-value-bind (path descriptor)
+          (gr8s.resources::materialize-store-snapshot root source (snapshot-test-digest source))
+        (is (probe-file (merge-pathnames "image-tracker/state.jsonl" path)))
+        (gr8s.image-distribution::tracker-acquire-origin
+         tracker "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "later")
+        (gr8s.store::quiesce-store-access store :timeout 0)
+        (gr8s.store::reload-store-application store (gethash "generation" descriptor))
+        (is (eq tracker (gr8s.store:pod-store-image-tracker store)))
+        (is (eq clock (gr8s.image-distribution::image-tracker-clock tracker)))
+        (is (eq lock (gr8s.image-distribution::image-tracker-lock tracker)))
+        (is (equalp expected (snapshot-tracker-records tracker)))
+        (gr8s.store::resume-store-access store)
+        (let ((reopened (gr8s:open-store root)))
+          (is (equalp expected (snapshot-tracker-records (gr8s.store:pod-store-image-tracker reopened)))))))))
+
+(test tracker-snapshot-rejects-duplicates-and-inconsistent-relationships
+  (with-temporary-store (store root)
+    (populate-snapshot-tracker store)
+    (let ((source (merge-pathnames "tracker-source.jsonl" root)))
+      (gr8s.resources::capture-store-snapshot store source 42 7)
+      (dolist (kind '("imageTrackerConfig" "imageTrackerOrigin" "imageTrackerSwarm" "imageTrackerPeer"))
+        (let* ((records (read-store-snapshot-records source))
+               (duplicate (snapshot-index-copy (snapshot-index-row records kind))))
+          (signals error
+            (gr8s.resources::validate-store-snapshot
+             (snapshot-index-records-path root (append (butlast records) (list duplicate (car (last records)))))))))
+      (dolist (kind '("imageTrackerConfig" "imageTrackerSwarm"))
+        (let ((records (remove kind (read-store-snapshot-records source) :test #'equal
+                               :key (lambda (row) (gethash "kind" row)))))
+          (signals error (gr8s.resources::validate-store-snapshot (snapshot-index-records-path root records)))))
+      (dolist (field '("token" "infohash"))
+        (let* ((records (read-store-snapshot-records source))
+               (row (snapshot-index-row records (if (equal field "token") "imageTrackerOrigin" "imageTrackerSwarm"))))
+          (setf (gethash field row) "invalid")
+          (signals error (gr8s.resources::validate-store-snapshot (snapshot-index-records-path root records)))))
+      (let* ((records (read-store-snapshot-records source))
+             (origin (snapshot-index-row records "imageTrackerOrigin"))
+             (swarm (snapshot-index-row records "imageTrackerSwarm")))
+        (setf (gethash "digest" origin) (gethash "digest" swarm))
+        (signals error (gr8s.resources::validate-store-snapshot (snapshot-index-records-path root records)))))))
+
+(test legacy-snapshot-clears-tracker-state-without-replacing-handle
+  (with-temporary-store (store root)
+    (let* ((tracker (populate-snapshot-tracker store))
+           (source (merge-pathnames "legacy-source.jsonl" root)))
+      (gr8s.resources::capture-store-snapshot store source 42 7)
+      (let* ((records (remove-if #'gr8s.image-distribution::image-tracker-record-p (read-store-snapshot-records source)))
+             (legacy (snapshot-index-records-path root records)))
+        (multiple-value-bind (path descriptor)
+            (gr8s.resources::materialize-store-snapshot root legacy (snapshot-test-digest legacy))
+          (is (not (probe-file (merge-pathnames "image-tracker/state.jsonl" path))))
+          (gr8s.store::quiesce-store-access store :timeout 0)
+          (gr8s.store::reload-store-application store (gethash "generation" descriptor))
+          (is (eq tracker (gr8s.store:pod-store-image-tracker store)))
+          (is (zerop (hash-table-count (gr8s.image-distribution::image-tracker-origins tracker))))
+          (is (zerop (hash-table-count (gr8s.image-distribution::image-tracker-swarms tracker))))
+          (is (= 120 (gr8s.image-distribution::image-tracker-origin-lease-seconds tracker)))
+          (is (= 180 (gr8s.image-distribution::image-tracker-peer-ttl-seconds tracker)))
+          (gr8s.store::resume-store-access store))))))
+
+(test tracker-state-loader-rejects-unsafe-files
+  (with-temporary-store (store root)
+    (let ((path (merge-pathnames "image-tracker/state.jsonl" root)))
+      (gr8s.security::write-private-text-exclusively
+       path "{\"kind\":\"imageTrackerConfig\",\"originLeaseSeconds\":30,\"peerTtlSeconds\":90}")
+      (sb-posix:chmod (namestring path) #o644)
+      (signals error (gr8s:open-store root))
+      (sb-posix:chmod (namestring path) #o600)
+      (let ((link (merge-pathnames "tracker-link.jsonl" root)))
+        (sb-posix:link (namestring path) (namestring link))
+        (signals error (gr8s:open-store root))
+        (delete-file link))
+      (let ((target (merge-pathnames "tracker-target.jsonl" root)))
+        (rename-file path target)
+        (sb-posix:symlink (namestring target) (namestring path))
+        (signals error (gr8s:open-store root))
+        (delete-file path))
+      (gr8s.security::write-private-text-exclusively path "")
+      (signals error (gr8s:open-store root)))))

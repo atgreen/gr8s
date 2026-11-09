@@ -10,13 +10,14 @@
 The caller must hold the Raft member lock and supply its exact applied boundary.
 This function neither compacts Raft nor captures member-local credentials."
   (let ((count 0))
-    (labels ((emit (kind &rest fields)
+    (labels ((emit-object (object)
                (let ((start (file-position stream)))
-                 (com.inuoe.jzon:stringify (apply #'core-object "kind" kind fields) :stream stream)
+                 (com.inuoe.jzon:stringify object :stream stream)
                  (when (> (- (file-position stream) start) *store-snapshot-max-record-bytes*)
                    (error "Store snapshot record exceeds byte limit")))
                (terpri stream)
                (incf count))
+             (emit (kind &rest fields) (emit-object (apply #'core-object "kind" kind fields)))
              (entries (kind table)
                (maphash (lambda (key value) (emit kind "key" key "value" value)) table)))
       (emit "header" "format" "gr8s-store-snapshot" "version" 1 "index" index "term" term)
@@ -47,6 +48,7 @@ This function neither compacts Raft nor captures member-local credentials."
                  (declare (ignore name))
                  (emit "node" "object" (gr8s.store::node-replicated-object node)))
                (pod-store-nodes store))
+      (gr8s.image-distribution::map-image-tracker-records (pod-store-image-tracker store) #'emit-object)
       (emit "end" "records" count)
       count)))
 
@@ -155,6 +157,8 @@ No existing artifact may be replaced. The source store is never modified."
   "Check one record independently. Cross-record semantics belong to the staged index."
   (let ((kind (gethash "kind" record)) (object (gethash "object" record)))
     (cond
+      ((gr8s.image-distribution::image-tracker-record-p record)
+       (gr8s.image-distribution::validate-image-tracker-record record))
       ((equal kind "resource")
        (let* ((resource (gethash "resource" record))
               (namespace (gethash "namespace" record))

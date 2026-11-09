@@ -68,13 +68,14 @@ validated marker visible. This function never writes the live selector."
          (artifact (merge-pathnames "staging-artifact.part" path))
          (staged (gr8s.store::make-pod-store (uiop:ensure-directory-pathname root)))
          (fields '("items" "customResourceItems" "workloadDeletions" "jobControllerStates" "templateHistory"))
-         (spools nil) (counts (make-hash-table :test #'equal)) (header nil) (clocks nil) (record-count nil))
+         (spools nil) (tracker-output nil) (tracker-count 0) (counts (make-hash-table :test #'equal)) (header nil) (clocks nil) (record-count nil))
     (setf (gr8s.store::pod-store-data-root staged) path)
-    (dolist (directory '("objects/" "nodes/" "observations/" "publications/" "metadata/"))
+    (dolist (directory '("objects/" "nodes/" "observations/" "publications/" "metadata/" "image-tracker/"))
       (gr8s.store::ensure-store-generation-directory (merge-pathnames directory path) path))
     (unwind-protect
          (progn
            (copy-snapshot-generation-source (pathname source) artifact expected-digest)
+           (setf tracker-output (open-snapshot-generation-output (merge-pathnames "image-tracker/state.jsonl" path)))
            (dolist (field fields)
              (push (cons field (open-snapshot-generation-output
                                (merge-pathnames (format nil "staging-~A.part" field) path))) spools))
@@ -91,6 +92,10 @@ validated marker visible. This function never writes the live selector."
                 (lambda (record)
                   (let ((kind (gethash "kind" record)) (object (gethash "object" record)))
                     (cond
+                      ((gr8s.image-distribution::image-tracker-record-p record)
+                       (com.inuoe.jzon:stringify record :stream tracker-output)
+                       (terpri tracker-output)
+                       (incf tracker-count))
                       ((equal kind "resource")
                        (let ((resource (gethash "resource" record)))
                          (if (custom-resource-key-p resource)
@@ -111,6 +116,10 @@ validated marker visible. This function never writes the live selector."
                          (gr8s.store::persist-pod-publication
                           staged pod :status (gethash "status" publication)
                           :revision (parse-integer (gethash "resourceVersion" publication)))))))))))
+           (finish-output tracker-output)
+           (sb-posix:fsync (sb-sys:fd-stream-fd tracker-output))
+           (close tracker-output)
+           (when (zerop tracker-count) (delete-file (merge-pathnames "image-tracker/state.jsonl" path)))
            (dolist (spool spools) (close (cdr spool)))
            (write-snapshot-generation-file
             (core-resource-state-path staged)
@@ -143,9 +152,10 @@ validated marker visible. This function never writes the live selector."
               (lambda (stream) (write-string (write-to-string (gethash "podRevision" clocks)) stream))))
            (dolist (field fields) (delete-file (merge-pathnames (format nil "staging-~A.part" field) path)))
            (delete-file artifact)
-           (dolist (directory '("objects/" "nodes/" "observations/" "publications/" "metadata/" ""))
+           (dolist (directory '("objects/" "nodes/" "observations/" "publications/" "metadata/" "image-tracker/" ""))
              (gr8s.store::sync-store-generation-directory (merge-pathnames directory path)))
            (let ((descriptor (gr8s.store::complete-store-generation
                               root generation-id (gethash "index" header) (gethash "term" header) expected-digest)))
              (values path descriptor record-count)))
+      (when (and tracker-output (open-stream-p tracker-output)) (close tracker-output))
       (dolist (spool spools) (when (open-stream-p (cdr spool)) (close (cdr spool)))))))

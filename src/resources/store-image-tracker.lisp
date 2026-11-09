@@ -1,0 +1,140 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+(in-package #:gr8s.image-distribution)
+
+(defparameter *image-tracker-snapshot-kinds*
+  '("imageTrackerConfig" "imageTrackerOrigin" "imageTrackerSwarm" "imageTrackerPeer"))
+
+(defun image-tracker-record-p (record)
+  (member (gethash "kind" record) *image-tracker-snapshot-kinds* :test #'equal))
+
+(defun image-tracker-object (&rest pairs)
+  (let ((object (make-hash-table :test #'equal)))
+    (loop for (key value) on pairs by #'cddr do (setf (gethash key object) value))
+    object))
+
+(defun map-image-tracker-records (tracker function)
+  (bt:with-lock-held ((image-tracker-lock tracker))
+    (funcall function (image-tracker-object "kind" "imageTrackerConfig"
+                                          "originLeaseSeconds" (image-tracker-origin-lease-seconds tracker)
+                                          "peerTtlSeconds" (image-tracker-peer-ttl-seconds tracker)))
+    (maphash (lambda (digest lease)
+               (funcall function (image-tracker-object
+                                  "kind" "imageTrackerOrigin" "digest" digest "node" (origin-lease-node-name lease)
+                                  "token" (ag-grpc:base64-encode (origin-lease-token lease))
+                                  "expiresAt" (origin-lease-expires-at lease))))
+             (image-tracker-origins tracker))
+    (maphash
+     (lambda (digest swarm)
+       (funcall function (image-tracker-object
+                          "kind" "imageTrackerSwarm" "digest" digest
+                          "metainfo" (ag-grpc:base64-encode (tracker-swarm-metainfo swarm))
+                          "infohash" (ag-grpc:base64-encode (tracker-swarm-infohash swarm))))
+       (maphash (lambda (node peer)
+                  (funcall function (image-tracker-object
+                                     "kind" "imageTrackerPeer" "digest" digest "node" node
+                                     "address" (tracker-peer-address peer) "port" (tracker-peer-port peer)
+                                     "peerId" (ag-grpc:base64-encode (tracker-peer-peer-id peer))
+                                     "complete" (tracker-peer-complete-p peer) "lastSeen" (tracker-peer-last-seen peer))))
+                (tracker-swarm-peers swarm)))
+     (image-tracker-swarms tracker))))
+
+(defun tracker-record-octets (record key &optional length)
+  (let* ((value (gethash key record)) (bytes (and (stringp value) (ag-grpc:base64-decode value))))
+    (unless (and bytes (or (null length) (= length (length bytes)))
+                 (equal value (ag-grpc:base64-encode bytes)))
+      (error "Invalid snapshot tracker binary field ~A" key))
+    bytes))
+
+(defun validate-image-tracker-record (record)
+  (flet ((positive (key) (let ((value (gethash key record)))
+                          (and (realp value) (> value 0))))
+         (time-value (key) (let ((value (gethash key record)))
+                            (and (realp value) (>= value 0)))))
+    (let ((kind (gethash "kind" record)))
+      (unless (image-tracker-record-p record) (error "Unknown snapshot tracker kind"))
+      (if (equal kind "imageTrackerConfig")
+          (unless (and (positive "originLeaseSeconds") (positive "peerTtlSeconds"))
+            (error "Invalid snapshot tracker policy"))
+          (let ((digest (gethash "digest" record)) (node (gethash "node" record)))
+            (unless (and (stringp digest) (equal digest (canonical-oci-digest digest)))
+              (error "Invalid snapshot tracker digest"))
+            (unless (or (equal kind "imageTrackerSwarm") (and (stringp node) (plusp (length node))))
+              (error "Invalid snapshot tracker node"))
+            (cond
+              ((equal kind "imageTrackerOrigin")
+               (tracker-record-octets record "token" 32)
+               (unless (time-value "expiresAt") (error "Invalid snapshot tracker lease expiry")))
+              ((equal kind "imageTrackerSwarm")
+               (unless (equalp (tracker-record-octets record "infohash" 32)
+                               (validated-metainfo-infohash digest (tracker-record-octets record "metainfo")))
+                 (error "Snapshot tracker metainfo/infohash mismatch")))
+              ((equal kind "imageTrackerPeer")
+               (validate-peer-endpoint (gethash "address" record) (gethash "port" record)
+                                       (tracker-record-octets record "peerId" 20))
+               (unless (and (member (gethash "complete" record) '(t nil)) (time-value "lastSeen"))
+                 (error "Invalid snapshot tracker peer"))))))))
+  record)
+
+(defun clear-image-tracker-state (tracker)
+  (bt:with-lock-held ((image-tracker-lock tracker))
+    (setf (image-tracker-origins tracker) (make-hash-table :test #'equal)
+          (image-tracker-swarms tracker) (make-hash-table :test #'equal)
+          (image-tracker-origin-lease-seconds tracker) 120
+          (image-tracker-peer-ttl-seconds tracker) 180))
+  tracker)
+
+(defun apply-image-tracker-record-unlocked (tracker record)
+  (validate-image-tracker-record record)
+  (let ((kind (gethash "kind" record)) (digest (gethash "digest" record)) (node (gethash "node" record)))
+    (cond
+      ((equal kind "imageTrackerConfig")
+       (setf (image-tracker-origin-lease-seconds tracker) (gethash "originLeaseSeconds" record)
+             (image-tracker-peer-ttl-seconds tracker) (gethash "peerTtlSeconds" record)))
+      ((equal kind "imageTrackerOrigin")
+       (setf (gethash digest (image-tracker-origins tracker))
+             (make-origin-lease :node-name node :token (tracker-record-octets record "token" 32)
+                                :expires-at (gethash "expiresAt" record))))
+      ((equal kind "imageTrackerSwarm")
+       ;; A peer may occur before its swarm in the input.
+       (let ((swarm (or (gethash digest (image-tracker-swarms tracker))
+                        (setf (gethash digest (image-tracker-swarms tracker)) (make-tracker-swarm :digest digest)))))
+         (setf (tracker-swarm-metainfo swarm) (tracker-record-octets record "metainfo")
+               (tracker-swarm-infohash swarm) (tracker-record-octets record "infohash" 32))))
+      ((equal kind "imageTrackerPeer")
+       (let ((swarm (or (gethash digest (image-tracker-swarms tracker))
+                        (setf (gethash digest (image-tracker-swarms tracker)) (make-tracker-swarm :digest digest)))))
+         (put-tracker-peer tracker swarm node (gethash "address" record) (gethash "port" record)
+                           (tracker-record-octets record "peerId" 20) (gethash "complete" record) (gethash "lastSeen" record))))))
+  tracker)
+
+(defun open-image-tracker-state (path)
+  (let ((fd (sb-posix:open (namestring path) (logior sb-posix:o-rdonly sb-posix:o-nofollow sb-posix:o-nonblock) 0)))
+    (handler-case
+        (progn
+          (let ((stat (sb-posix:fstat fd)))
+            (unless (and (sb-posix:s-isreg (sb-posix:stat-mode stat))
+                         (= 1 (sb-posix:stat-nlink stat)) (= (sb-posix:geteuid) (sb-posix:stat-uid stat))
+                         (= #o600 (logand #o777 (sb-posix:stat-mode stat))) (plusp (sb-posix:stat-size stat)))
+              (error "Unsafe image tracker state file")))
+          (sb-sys:make-fd-stream fd :input t :element-type '(unsigned-byte 8) :auto-close t))
+      (error (condition) (sb-posix:close fd) (error condition)))))
+
+(defun load-store-image-tracker (store)
+  (let* ((tracker (gr8s.store:pod-store-image-tracker store))
+         (path (merge-pathnames "image-tracker/state.jsonl" (gr8s.store:store-data-path store))))
+    (clear-image-tracker-state tracker)
+    (when (gr8s.store::store-generation-stat path)
+      (let ((index (gr8s.resources::make-snapshot-validation-index))
+            (buffer (make-array 4096 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+        (bt:with-lock-held ((image-tracker-lock tracker))
+          (with-open-stream (stream (open-image-tracker-state path))
+            (loop for record = (gr8s.resources::read-store-snapshot-record stream buffer (* 16 1024 1024))
+                  while record do
+                    (validate-image-tracker-record record)
+                    (gr8s.resources::index-store-snapshot-record index record)
+                    (apply-image-tracker-record-unlocked tracker record)))
+          (gr8s.resources::finish-store-snapshot-index index)
+          (unless (gr8s.resources::snapshot-validation-index-tracker-config-p index)
+            (error "Snapshot tracker file has no configuration"))))))
+  store)
