@@ -428,8 +428,7 @@ alone so existing persisted commands remain deliverable."
    instead of calling apply-fn; each entry's result resolves and clears any
    pending client callback registered for its index."
   (loop while (< (raft-node-last-applied node) (raft-node-commit-index node))
-        do (incf (raft-node-last-applied node))
-           (let* ((index (raft-node-last-applied node))
+        do (let* ((index (1+ (raft-node-last-applied node)))
                   (entry (raft-log-entry node index))
                   (command (raft-entry-command entry))
                   (result
@@ -443,6 +442,9 @@ alone so existing persisted commands remain deliverable."
                                :configured)
                         (and (raft-node-apply-fn node) (funcall (raft-node-apply-fn node) command))))
                   (callback (gethash index (raft-node-pending node))))
+             ;; A failed application must be retried at this exact log position.
+             ;; Callback failures, in contrast, must never apply the command twice.
+             (setf (raft-node-last-applied node) index)
              (when callback
                (remhash index (raft-node-pending node))
                (funcall callback result)))))
