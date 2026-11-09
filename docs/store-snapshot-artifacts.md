@@ -481,6 +481,31 @@ The application reference is a small, readable Lisp value suitable for the WAL:
 `(:gr8s-store-artifact 1 :index INDEX :term TERM :sha256 DIGEST)`. The reference
 binds the artifact identity; it does not contain the artifact bytes. Pending and
 published recovery also validate the enclosing Raft configuration envelope.
-Artifact byte transport, durable placement and retention remain production
-integration work. Both preflight and post-load recovery callbacks run under the
+Artifact byte transport and integration of durable placement and retention with
+the production WAL remain unfinished. Both preflight and post-load recovery callbacks run under the
 member and raw store barriers and must not reenter public store operations.
+
+Durable artifact storage is available through the internal
+`gr8s.resources::retain-store-snapshot-artifact` function. Supply the stable member
+root, source pathname, expected index, term and lowercase SHA256. It copies and
+hashes bytes in 64 KiB buffers into a private staging file, synchronizes the file,
+and validates the complete snapshot and its boundary before publication. It
+atomically links the file to `snapshot-artifacts/SHA256.jsonl` without overwriting
+an existing artifact, checks the published copy, then synchronizes the directory.
+Only successful return supplies a pathname and reference eligible for a future
+WAL snapshot. An error after publication may leave a valid file visible; retry
+verifies and synchronizes it before acknowledging durability.
+
+`checked-store-snapshot-artifact-path` resolves a reference after restart. It
+rejects missing files, symlinks, unsafe ownership/permissions, changed bytes, and
+mismatched index/term. Registry directories are mode 0700 and files are mode 0600.
+Published files are immutable; these APIs assume exclusive management of the
+member root by its process. Lookup rehashes and validates the artifact without
+assembling its complete payload in memory.
+
+Transfer scratch can be deleted after retention succeeds. Registry files have
+no automatic garbage collection: current or pending WAL snapshots, recoverable
+WAL history and in-flight transfers may depend on them. Interrupted staging files
+are ignored by reference lookup. The registry does not change application
+selection, write the WAL, transport artifact bytes, or enable automatic compaction.
+Those production paths must call it before persisting an artifact reference.

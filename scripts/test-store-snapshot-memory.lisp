@@ -13,6 +13,8 @@
        (materialized-count nil)
        (reload-descriptor nil)
        (reloaded nil)
+       (retained nil)
+       (retain (equal "1" (uiop:getenv "GR8S_SNAPSHOT_RETAIN")))
        (reload (equal "1" (uiop:getenv "GR8S_SNAPSHOT_RELOAD")))
        (materialize (equal "1" (uiop:getenv "GR8S_SNAPSHOT_MATERIALIZE")))
        (legacy (equal "1" (uiop:getenv "GR8S_SNAPSHOT_LEGACY"))))
@@ -40,6 +42,13 @@
                (setf validated-count
                      (nth-value 2 (gr8s.resources::validate-store-snapshot
                                    target :expected-index 1 :expected-term 1)))))
+         (when (and retain (not legacy))
+           (multiple-value-bind (path reference)
+               (gr8s.resources::retain-store-snapshot-artifact
+                directory target 1 1 (gr8s.raft.transport::raft-snapshot-file-digest target))
+             (delete-file target)
+             (setf target (gr8s.resources::checked-store-snapshot-artifact-path directory reference)
+                   retained (equal path target))))
          (when (and (or materialize reload) (not legacy))
            (multiple-value-bind (path descriptor records)
                (gr8s.resources::materialize-store-snapshot
@@ -61,7 +70,7 @@
                         "passed" t "legacy" legacy "records" count
                         "validatedRecords" validated-count "materializedRecords" materialized-count
                         "residentResourcesAfterOperation" (hash-table-count (gr8s::pod-store-resources store))
-                        "reloadedSameStore" reloaded "payloadBytes" (* count bytes)
+                        "reloadedSameStore" reloaded "retainedArtifactAfterTransferCleanup" retained "payloadBytes" (* count bytes)
                         "artifactBytes" (sb-posix:stat-size (sb-posix:stat (namestring target))))))
            (unless reloaded
              (setf (gethash "residentSourceResources" result) (hash-table-count (gr8s::pod-store-resources store))))
