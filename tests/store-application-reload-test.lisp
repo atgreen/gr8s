@@ -381,6 +381,10 @@
                (dolist (entry '(("/resize" . "{\"spec\":{}}")
                                 ("/ephemeralcontainers" . "{\"spec\":{\"ephemeralContainers\":[]}}")
                                 ("/status" . "{\"status\":{}}")))
+                 (is (= 409 (nth-value 1 (request (concatenate 'string url (car entry))
+                                                :method :patch :content-type "application/merge-patch+json"
+                                                :content (com.inuoe.jzon:stringify
+                                                          (gr8s::core-object "metadata" (gr8s::core-object "resourceVersion" old-version)))))))
                  (is (= 200 (nth-value 1 (request (concatenate 'string url (car entry))
                                                 :method :patch :content-type "application/merge-patch+json" :content (cdr entry))))))
                (is (= 200 (nth-value 1 (request url :method :patch :content-type "application/merge-patch+json"
