@@ -210,6 +210,8 @@ def main():
     parser.add_argument("--node-port", type=int, default=17449)
     parser.add_argument("--packet-services", action="store_true",
                         help="also attach the experimental TC Service guard pipeline")
+    parser.add_argument("--ctr", type=Path,
+                        help="preload agnhost directly, independently of the OCI mirror")
     # gr8s-upstream passes these to every runner; this test has no use for them.
     for ignored in ("--sonobuoy", "--timeout", "--expected-specs", "--focus", "--kubernetes-version"):
         parser.add_argument(ignored)
@@ -220,7 +222,8 @@ def main():
         sys.exit("this test runs containers and an eBPF dataplane; use a disposable guest as root")
 
     cluster = Cluster(arguments.gr8s, arguments.state_parent, arguments.api_port, arguments.node_port)
-    report = {"root": str(cluster.root), "packetServices": arguments.packet_services}
+    report = {"root": str(cluster.root), "packetServices": arguments.packet_services,
+              "directImagePreload": arguments.ctr is not None}
     failures = []
 
     def check(name, passed, observed):
@@ -231,6 +234,14 @@ def main():
 
     try:
         cluster.start()
+        if arguments.ctr:
+            runtime_socket = cluster.root / "state/agent/containerd/run/containerd.sock"
+            wait_for("managed containerd socket", 180, runtime_socket.exists)
+            result = subprocess.run([str(arguments.ctr), "--address", str(runtime_socket),
+                                     "--namespace", "k8s.io", "images", "pull", AGNHOST],
+                                    capture_output=True, text=True, timeout=300, check=False)
+            if result.returncode:
+                raise RuntimeError("Image preload failed: " + (result.stdout + result.stderr)[-3000:])
         node = cluster.kubectl("get", "nodes", "-o", "jsonpath={.items[0].metadata.name}")
         cluster.apply(server_pod("web-0"), server_pod("web-1"))
         wait_for("ready servers", 600, lambda: all(
