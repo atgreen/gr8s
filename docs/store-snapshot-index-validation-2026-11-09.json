@@ -1,0 +1,44 @@
+{
+  "date": "2026-11-09",
+  "scope": "Streamed snapshot-wide validation before staged generation completion",
+  "passed": true,
+  "checks": 133,
+  "suites": {
+    "store-snapshot-index": 28,
+    "store-snapshot": 59,
+    "store-generation": 46
+  },
+  "memory": {
+    "passed": true,
+    "legacy": false,
+    "records": 1024,
+    "validatedRecords": 1027,
+    "payloadBytes": 67108864,
+    "artifactBytes": 67347524,
+    "heapMiB": 384,
+    "sourceStoreResident": true
+  },
+  "coverage": [
+    "Duplicate resource, Pod UID/name, Node ID/name and controller-map keys",
+    "Canonical IPv6 underlay and WireGuard identity uniqueness",
+    "Nested IPv4 and IPv6 CIDR overlap in either record order",
+    "Distinct dual-stack Node acceptance",
+    "Custom instances preceding definitions, missing definitions and kind/version/scope mismatches",
+    "Invalid CRD storage count and duplicate definitions",
+    "No end callback before successful snapshot-wide validation"
+  ],
+  "commands": {
+    "memory": "sbcl --dynamic-space-size 384 --noinform --non-interactive --load scripts/test-store-snapshot-memory.lisp"
+  },
+  "remaining": [
+    "Staged application file materialization with durable Pod publication reload",
+    "Artifact digest verification and restore intent",
+    "Live reload and interrupted-install recovery",
+    "Production WAL recovery and automatic compaction"
+  ],
+  "fullGoalComplete": false,
+  "nativeBuild": {
+    "passed": true,
+    "sha256": "dc0fa5ebcfeb291b2ff3a1200df8cd6202441b0c6de67aa37249468874983b18"
+  }
+}

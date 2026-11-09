@@ -33,8 +33,8 @@
              (progn
                (gr8s.resources::capture-store-snapshot store target 1 1)
                (setf validated-count
-                     (nth-value 2 (gr8s.resources::map-store-snapshot-records
-                                   target nil :expected-index 1 :expected-term 1)))))
+                     (nth-value 2 (gr8s.resources::validate-store-snapshot
+                                   target :expected-index 1 :expected-term 1)))))
          (format t "~&~A~%"
                  (com.inuoe.jzon:stringify
                   (gr8s::core-object "passed" t "legacy" legacy "records" count

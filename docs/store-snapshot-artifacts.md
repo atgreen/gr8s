@@ -60,9 +60,9 @@ basenames for the existing durable layout.
 Callbacks receive provisional records, including the header, clocks and trailer.
 They may populate a staging destination; successful callbacks alone do not prove
 that the complete artifact is valid. Do not mutate the live store during this
-pass. Cross-record checks, including duplicate identities, Node claim uniqueness
-and custom resources' CRD relationships, still belong to the pending staged restore
-implementation. Checksums and durable generation publication are also pending.
+pass. The higher-level `gr8s.resources::validate-store-snapshot` also checks
+cross-record identities and relationships; use it before completing a staged
+generation. Artifact checksum verification and durable restore remain pending.
 The reader returns header, clocks and count without collecting the data records.
 The [reader validation record](store-snapshot-reader-validation-2026-11-09.json)
 covers malformed artifacts and constrained-heap capture plus validation.
@@ -126,3 +126,33 @@ The [generation selection validation](store-generation-validation-2026-11-09.jso
 covers reopen, write routing, credential preservation, publication failures and
 native startup/restart with a prebuilt generation. Reproduce the native check with
 `python3 scripts/test-store-generation-native.py --gr8s build/gr8s`.
+
+## Snapshot-wide validation
+
+`gr8s.resources::validate-store-snapshot` accepts the artifact pathname and optional
+`:expected-index`, `:expected-term`, `:max-record-bytes`, and `:function` staging
+callback. It returns the same header, clocks and count as the record reader. The
+callback receives provisional records; the final `end` callback is delivered only
+after the complete artifact passes validation. No callback may mutate live state.
+
+This pass rejects duplicate resource keys, Pod UIDs or namespace/name pairs, Node
+IDs or names, and controller-map keys. Node underlay addresses are canonicalized
+for identity checks, WireGuard public keys must be canonical 32-byte encodings,
+and Pod CIDRs cannot overlap, including IPv6 spelling aliases and either order
+of nested networks. CIDR lookup costs at most the address width per claim.
+
+Custom objects may precede their definitions. After reading the entire artifact,
+the validator checks each distinct custom collection/kind/version/scope against
+its CRD descriptor. Missing definitions, conflicting collection mappings, invalid
+storage-version counts, mismatched CRD names and mismatched object shapes fail.
+This is a restore consistency check, not a rerun of admission or conversion
+webhooks. It does not retain CRD schemas or application payloads.
+
+The validator retains identity indexes proportional to object count, small CRD
+descriptors and distinct custom-object shapes. Record parsing remains bounded by
+the configured record limit. The constrained-heap probe now exercises this full
+validation pass with the source store still resident. The `store-snapshot-index`
+FiveAM suite covers these cross-record checks. The [validation evidence](store-snapshot-index-validation-2026-11-09.json)
+records the focused suites and constrained-heap probe. Artifact materialization, durable
+restore intent, live reload and Raft/WAL coordination remain the next integration
+work; this validator does not select or restore a generation.
