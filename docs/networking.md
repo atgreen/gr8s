@@ -135,8 +135,18 @@ deferred and failed transactions. See
 The generation and handshake stage is validated by an actual Kata guest reusing
 its source port after backend replacement; see
 [the TCP generation evidence](service-tcp-generation-validation-2026-11-09.json).
-Full FIN/RST retirement, window and late-segment validation, TCP timestamps and
-the remainder of TCP lifecycle handling remain unfinished.
+FIN sequence ends and their acknowledgments are tracked in both directions.
+Half-closed connections retain the established lifetime so the peer can send its
+final data. After both FINs are acknowledged, the retained entry expires after
+120 seconds. A reset whose sequence matches observed receiver ACK progress
+expires after 10 seconds; a SYN-SENT refusal must acknowledge the current SYN.
+Delayed packets still use the retained translation but do not refresh terminal
+metadata or timestamps. Invalid resets reach the endpoint for challenge-ACK
+handling without shortening the mapping's lifetime. Window and late-segment
+validation, TCP timestamps, out-of-order close coverage and the remainder of TCP
+lifecycle handling remain unfinished. See
+[the TCP close evidence](service-tcp-close-validation-2026-11-09.json) for bytecode,
+kernel GC and actual guest reset/graceful-close checks.
 Kernel packet tests additionally cover program lifetime. Source NAT/hairpin,
 return-tuple collision resolution, IPv6 packet translation and external Service
 replacement remain in development. Hairpin and conflicting return tuples
@@ -169,7 +179,8 @@ with static libc development libraries available, copy the resulting test-only
 binary to the VM, and pass `--tcp-client /root/service-tcp-client`. The runner
 verifies its checksum after copying it into the guest, binds a fixed source port,
 replaces the Service backend, then verifies both the new response and the pinned
-TCP generation metadata. `make test-service-tcp-state` exercises the interpreter;
+TCP generation metadata. It also verifies reset and graceful-close metadata
+using real guest connections. `make test-service-tcp-state` exercises the interpreter;
 add `--kernel` to the Python runner in a disposable root VM for kernel execution.
 
 `NodePort` and `LoadBalancer` Services allocate node ports from 30000–32767. The
