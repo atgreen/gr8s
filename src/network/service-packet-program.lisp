@@ -292,12 +292,15 @@ be cumulatively acknowledged before the entry becomes a closed tombstone."
         (ack-bit (if reverse 32 64)))
     `(when (= (logand (gr8s-pkt-tcp-state-flags state) 512) 0)
        (when (and (/= (logand (gr8s-pkt-meta-flags meta) 4) 0)
-                  ;; In SYN-SENT the ACK must acknowledge exactly this SYN.
+                  ;; SYN-SENT accepts ISS < ACK <= SND.NXT (RFC9293 3.10.7.3).
+                  ;; A peer may refuse without acknowledging all SYN payload.
                   ,(if reverse
                        '(or (and (= (logand (gr8s-pkt-tcp-state-flags state) 2) 0)
                                  (/= (logand (gr8s-pkt-meta-flags meta) 16) 0)
-                                 (= (gr8s-pkt-meta-ack meta)
-                                    (gr8s-pkt-tcp-state-client-end state)))
+                                 (pkt-seq-after (gr8s-pkt-meta-ack meta)
+                                                (gr8s-pkt-tcp-state-client-isn state))
+                                 (not (pkt-seq-after (gr8s-pkt-meta-ack meta)
+                                                     (gr8s-pkt-tcp-state-client-end state))))
                             (and (/= (logand (gr8s-pkt-tcp-state-flags state) 2) 0)
                                  (= (gr8s-pkt-meta-seq meta) (gr8s-pkt-tcp-state-server-ack state))
                                  (= (gr8s-pkt-meta-seq meta) (gr8s-pkt-tcp-state-server-end state))))

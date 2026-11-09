@@ -250,6 +250,74 @@ def closure(runner):
 
 
 
+def early_data_refusal(runner):
+    """SYN-SENT resets may acknowledge the SYN without its entire payload."""
+    cases = 0
+    payload = b"early"
+    for index, start in enumerate((1000, 0xfffffffc, 0)):
+        for offset, acknowledged in enumerate((1, 3, len(payload) + 1)):
+            port = 50700 + index * 3 + offset
+            p.publish(runner)
+            p.assert_forward(runner, request(port, start, payload=payload))
+            key = p.flow_key(sport=port, protocol=6)
+            before = tcp_state(runner, port)
+            # Neither a bare RST nor an ACK outside this SYN's sequence range
+            # can retire state, even with early data extending SND.NXT.
+            for ack, flags in ((0, 4), (start, 0x14),
+                               ((start - 1) & 0xffffffff, 0x14),
+                               ((start + len(payload) + 2) & 0xffffffff, 0x14)):
+                data = reply(port, 0x12345678, ack, flags)
+                result, output = runner.run("gr8s_packet_reverse", data)
+                assert result == p.SHOT and output == data
+                assert tcp_state(runner, port) == before
+                cases += 1
+            translate_reply(runner, reply(port, 0x12345678,
+                            (start + acknowledged) & 0xffffffff, 0x14), port)
+            assert tcp_flags(runner, port) & 128, "valid early-data SYN refusal did not retire TCP state"
+            runner.advance(6)
+            # Kernel.advance emulates elapsed time by aging pinned timestamps.
+            held = runner.lookup("gr8s_pkt_forward", key)
+            translate_reply(runner, reply(port, 0x12345678,
+                            (start + acknowledged) & 0xffffffff, 0x14), port)
+            assert runner.lookup("gr8s_pkt_forward", key) == held, "repeated refusal refreshed reset lifetime"
+            p.assert_unlocked(runner)
+            cases += 3
+    return cases
+
+
+def early_data_handshake(runner):
+    """Exercise partial SYN-data acceptance and SYN-ACK data through closure."""
+    cases = 0
+    payload = b"early"
+    server_payload = b"response"
+    for index, start in enumerate((1000, 0xfffffffc, 0)):
+        for offset, acknowledged in enumerate((1, 3, len(payload) + 1)):
+            port = 50800 + index * 3 + offset
+            p.publish(runner)
+            p.assert_forward(runner, request(port, start, payload=payload))
+            client_ack = (start + acknowledged) & 0xffffffff
+            client_end = (start + len(payload) + 1) & 0xffffffff
+            server_start = (start + 20000) & 0xffffffff
+            server_end = (server_start + len(server_payload) + 1) & 0xffffffff
+            translate_reply(runner, reply(port, server_start, client_ack,
+                                         payload=server_payload), port)
+            p.assert_forward(runner, request(port, client_ack, server_end, 0x10))
+            assert tcp_flags(runner, port) & 4
+            # Retransmit only the early bytes the SYN-ACK did not acknowledge.
+            p.assert_forward(runner, request(port, client_ack, server_end, 0x18,
+                                            payload=payload[acknowledged - 1:]))
+            state = tcp_state(runner, port)
+            assert struct.unpack_from("<II", state, 16) == (client_end, server_end)
+            p.assert_forward(runner, request(port, client_end, server_end, 0x11))
+            translate_reply(runner, reply(port, server_end, (client_end + 1) & 0xffffffff, 0x11), port)
+            p.assert_forward(runner, request(port, (client_end + 1) & 0xffffffff,
+                                            (server_end + 1) & 0xffffffff, 0x10))
+            assert tcp_flags(runner, port) & 256, "early-data connection did not close"
+            p.assert_unlocked(runner)
+            cases += 9
+    return cases
+
+
 def reordered_closure(runner):
     cases = 0
     for index, start in enumerate((1000, 0xfffffffc, 0)):
@@ -598,6 +666,8 @@ def main():
     runner = cls(programs, ids, descriptors)
     try:
         print(f"Service TCP closure ({cls.__name__}): {closure(runner)} cases passed")
+        print(f"Service TCP early-data refusal: {early_data_refusal(runner)} cases passed")
+        print(f"Service TCP early-data handshake: {early_data_handshake(runner)} cases passed")
         print(f"Service TCP reordered close: {reordered_closure(runner)} cases passed")
         print(f"Service TCP options ({cls.__name__}): {option_exercise(runner)} cases passed")
         print(f"Service TCP simultaneous open: {simultaneous_open(runner)} cases passed")
