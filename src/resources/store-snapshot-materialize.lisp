@@ -127,6 +127,7 @@ validated marker visible. This function never writes the live selector."
               (write-char #\{ stream)
               (let ((metadata (core-object "version" 2 "revision" (gethash "resourceRevision" clocks)
                                            "templateHistoryFloor" (gethash "templateHistoryFloor" clocks)
+                                           "secretsEncryption" (gethash "secretsEncryption" clocks 'null)
                                            "resourceHistoryStart" (gethash "resourceHistoryStart" clocks)
                                            "eventExpirations" (core-object)))
                     (buffer (make-string 65536)))

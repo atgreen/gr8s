@@ -27,6 +27,7 @@
   (core-journal-bytes 0)
   (core-checkpoint-bytes 0)
   (core-checkpoint-needed t)
+  secret-encryption-config
   in-cluster-config
   (credential-lock (bt:make-lock "gr8s ServiceAccount credentials"))
   service-account-signing-key

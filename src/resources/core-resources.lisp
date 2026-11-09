@@ -236,7 +236,7 @@ Startup instead passes the streaming iterator directly to REPLAY-CORE-JOURNAL."
           (unless record (return (values (nreverse records) torn bytes)))
           (push record records))))))
 
-(defun replay-core-journal (state records)
+(defun replay-core-journal (store state records)
   "Apply journal RECORDS newer than STATE's revision to STATE, a parsed checkpoint,
 rebuilding the history a commit used to write. RECORDS may be a zero-argument
 iterator instead of a list; its final values are returned after STATE."
@@ -267,7 +267,9 @@ iterator instead of a list; its final values are returned after STATE."
                                                (unless (eq namespace 'null) namespace))
                                              (gethash "name" change))
                 for old = (gethash key index)
-                for new = (let ((object (gethash "object" change))) (unless (eq object 'null) object))
+                for new = (let ((object (gethash "object" change)))
+                            (unless (eq object 'null)
+                              (decrypt-secret-object store (first key) object)))
                 do (setf history
                          (nconc history
                                 (list (core-object "revision" revision "time" time "resource" (first key)
@@ -330,9 +332,12 @@ whether the journal must be rewritten (a torn record) and its complete bytes."
         (when (and (eql 2 (gethash "version" state))
                    (not (typep (gethash "resourceHistoryStart" state) `(integer 0 ,(gethash "revision" state)))))
           (error "Invalid resource history start at ~A" path))
+        (setf (pod-store-secret-encryption-config store)
+              (gethash "secretsEncryption" state))
+        (decrypt-core-state-secrets store state)
         (if (probe-file journal)
             (with-open-file (stream journal :element-type '(unsigned-byte 8))
-              (replay-core-journal state (make-core-journal-reader stream journal)))
+              (replay-core-journal store state (make-core-journal-reader stream journal)))
             (values state nil 0))))))
 
 (defun load-core-resources (store)
@@ -400,17 +405,23 @@ whether the journal must be rewritten (a torn record) and its complete bytes."
     (progn
      (core-object "version" 2 "revision" revision "workloadDeletions" workload-deletions
                   "jobControllerStates" job-controller-states
-                  "templateHistory" (coerce durable 'vector) "templateHistoryFloor" durable-floor
+                  "templateHistory" (coerce (mapcar (lambda (entry)
+                                                       (encrypt-secret-history-entry store entry))
+                                                     durable)
+                                              'vector)
+                  "templateHistoryFloor" durable-floor
                   "templateTokenKey" (ag-grpc:base64-encode token-key)
+                  "secretsEncryption" (or (pod-store-secret-encryption-config store) 'null)
                   "resourceHistoryStart" (pod-store-resource-history-start store)
                   "eventExpirations" event-expirations
                   "items" (coerce (loop for key being the hash-keys of resources using (hash-value object)
                                         unless (or (custom-resource-key-p (first key))
                                                    (and omit-local-plane (local-plane-resource-p (first key))))
-                                          collect object) 'vector)
+                                          collect (encrypt-secret-object store (first key) object)) 'vector)
                   "customResourceItems" (coerce (loop for key being the hash-keys of resources using (hash-value object)
                                                       when (custom-resource-key-p (first key))
-                                                        collect (core-object "resource" (first key) "object" object)) 'vector)))))
+                                                        collect (core-object "resource" (first key) "object"
+                                                                             (encrypt-secret-object store (first key) object))) 'vector)))))
 
 (defun core-state-json (store resources revision workload-deletions job-controller-states
                         &key omit-local-plane)
@@ -451,7 +462,9 @@ follower cannot replace unrelated keys committed earlier in the log."
            (push (core-object "resource" (first key)
                               "namespace" (or (second key) 'null)
                               "name" (third key)
-                              "object" (or new 'null))
+                              "object" (if new
+                                           (encrypt-secret-object store (first key) new)
+                                           'null))
                  changes))))
      keys)
     (setf (gethash "version" record) 1
@@ -460,6 +473,8 @@ follower cannot replace unrelated keys committed earlier in the log."
           ;; plus its IPAddress claim), but rebase it on committed apply state.
           (gethash "revisionSpan" record) (max 1 (- revision base))
           (gethash "changes" record) (coerce changes 'vector)
+          (gethash "secretsEncryption" record)
+          (or (pod-store-secret-encryption-config store) 'null)
           (gethash "templateTokenKey" record)
           (ag-grpc:base64-encode
            (or (pod-store-template-token-key store) (secure-random-octets 32))))
@@ -491,7 +506,10 @@ follower cannot replace unrelated keys committed earlier in the log."
     (dolist (entry added)
       (let ((new (gethash "new" entry)))
         (push (core-object "resource" (gethash "resource" entry) "namespace" (or (gethash "namespace" entry) 'null)
-                           "name" (gethash "name" entry) "object" new)
+                           "name" (gethash "name" entry)
+                           "object" (if (hash-table-p new)
+                                        (encrypt-secret-object store (gethash "resource" entry) new)
+                                        new))
               changes)
         (when (and (equal "events" (gethash "resource" entry)) (hash-table-p new))
           (let ((uid (gethash "uid" (gethash "metadata" new))))
@@ -637,6 +655,9 @@ unrelated keys already present in STORE are never replaced by a stale author."
                         (gethash "revisionSpan" delta 1)))
            (workload-deletions (pod-store-workload-deletions store))
            (job-controller-states (pod-store-job-controller-states store)))
+      (let ((config (gethash "secretsEncryption" delta)))
+        (unless (eq config 'null)
+          (setf (pod-store-secret-encryption-config store) config)))
       (loop for change across (gethash "changes" delta #())
             for namespace = (gethash "namespace" change)
             for key = (core-resource-key
@@ -646,7 +667,8 @@ unrelated keys already present in STORE are never replaced by a stale author."
             for object = (gethash "object" change)
             do (if (eq object 'null)
                    (remhash key resources)
-                   (setf (gethash key resources) object)))
+                   (setf (gethash key resources)
+                         (decrypt-secret-object store (first key) object))))
       (when (gethash "workloadDeletions" delta)
         (setf workload-deletions
               (apply-core-map-delta workload-deletions

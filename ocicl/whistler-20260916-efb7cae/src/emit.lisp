@@ -986,7 +986,7 @@
   (let* ((src-vreg (first args))
          (stack-offset (emit-key-to-stack ctx src-vreg))
          (dst-loc (allocate-vreg ctx dst))
-         (dst-reg (if (eq (car dst-loc) :reg) (cadr dst-loc) whistler/bpf:+bpf-reg-1+)))
+         (dst-reg (if (eq (car dst-loc) :reg) (cadr dst-loc) whistler/bpf:+bpf-reg-0+)))
     (emit-stack-ptr ctx stack-offset dst-reg)
     (when (eq (car dst-loc) :stack)
       (ectx-emit ctx (whistler/bpf:emit-stx-mem
@@ -1108,7 +1108,7 @@
          (offset (ectx-alloc-stack ctx size "struct-alloc"))
          (dst-loc (allocate-vreg ctx dst))
          (dst-reg (if (eq (car dst-loc) :reg) (cadr dst-loc)
-                      whistler/bpf:+bpf-reg-1+))
+                      whistler/bpf:+bpf-reg-0+))
          (ptr-uses (gethash dst (emit-ctx-struct-ptr-uses ctx) 0))
          (stack-home (and (eq (car dst-loc) :stack) (cadr dst-loc))))
     ;; Record struct base offset for direct R10-relative access optimization

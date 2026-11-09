@@ -239,6 +239,10 @@ def main():
             check("guestTcpInitialGeneration", state_before["backend"] == backend_ip and
                   bool(state_before["flags"] & 4), {"connection": first, "state": state_before})
             check("guestTcpResetObserved", bool(state_before["flags"] & 128), state_before)
+            check("guestTcpOptionsTracked", state_before["flags"] & 15360 == 15360 and
+                  state_before["flags"] & 49152 == 49152 and
+                  0 <= state_before["clientScale"] <= 14 and 0 <= state_before["serverScale"] <= 14,
+                  state_before)
             apply(traffic.service("guest-tcp-reuse", [traffic.HTTP],
                                   selector={"test.gr8s.io/pod": alternate}))
             second = observed_when("same guest source port reaches replacement", fixed_connection,
@@ -260,6 +264,25 @@ def main():
             closed = tcp_state()
             check("guestTcpGracefulCloseObserved", bool(closed["flags"] & 256) and
                   closed["backend"] == alternate_ip, {"connection": graceful, "state": closed})
+            local_port = 25090
+            old_service = get("service", "guest-tcp-reuse")
+            smoke.kubectl("delete", "service", "guest-tcp-reuse", "--wait=true")
+            recreated = traffic.service("guest-tcp-reuse", [traffic.HTTP],
+                                        selector={"test.gr8s.io/pod": BACKEND})
+            recreated["spec"]["clusterIP"] = reuse_vip
+            apply(recreated)
+            current_service = get("service", "guest-tcp-reuse")
+            check("guestTcpServiceIdentityReplaced", current_service["metadata"]["uid"] !=
+                  old_service["metadata"]["uid"] and current_service["spec"]["clusterIP"] == reuse_vip,
+                  {"beforeUID": old_service["metadata"]["uid"],
+                   "afterUID": current_service["metadata"]["uid"], "vip": reuse_vip})
+            third = observed_when("recreated Service on the same guest tuple", fixed_connection,
+                                  lambda answer: answer.get("body") == BACKEND)
+            replaced_state = tcp_state()
+            check("guestTcpRecreatedServiceUsesCurrentBackend", all(third[k] == first[k] for k in identity) and
+                  replaced_state["backend"] == backend_ip and
+                  replaced_state["clientISN"] != state_after["clientISN"] and
+                  bool(replaced_state["flags"] & 4), {"connection": third, "state": replaced_state})
         apply(client_policy([]))
         for protocol, port in (("http", 80), ("udp", 81)):
             answer = observed_when(f"default-deny {protocol}", lambda: dial(vip, port, protocol), denied)

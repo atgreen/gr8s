@@ -120,6 +120,11 @@ test-node-topology:
 
 # The egress guard is JIT-compiled in-process; the fixture is its raw bytecode +
 # map descriptors as JSON, not an ELF object.
+WHISTLER_FIXTURE_SOURCES := $(wildcard ocicl/whistler-*/src/*.lisp ocicl/whistler-*/src/loader/*.lisp)
+build/gr8s-endpoint-test.json build/gr8s-service-test.json \
+build/gr8s-service-packet-test.json build/gr8s-service-packet-gc-test.json \
+build/gr8s-service-packet-guard-test.json: $(WHISTLER_FIXTURE_SOURCES)
+
 build/gr8s-endpoint-test.json: src/network/egress-guard-program.lisp src/network/egress-guard.lisp scripts/compile-endpoint-policy-fixture.lisp
 	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@
 

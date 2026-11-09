@@ -18,6 +18,7 @@
    #:core-resource-namespaced-p
    #:create-core-resource
    #:delete-core-resource
+   #:enable-secret-encryption
    #:get-core-resource
    #:get-core-resource-unlocked
    #:install-core-state-blob
@@ -49,6 +50,7 @@
                     "CORE-RESOURCE-NAMESPACED-P"
                     "CREATE-CORE-RESOURCE"
                     "DELETE-CORE-RESOURCE"
+                    "ENABLE-SECRET-ENCRYPTION"
                     "GET-CORE-RESOURCE"
                     "GET-CORE-RESOURCE-UNLOCKED"
                     "INSTALL-CORE-STATE-BLOB"

@@ -59,6 +59,22 @@
         (is (not (search "member-private-sentinel" text)))
         (is (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat (namestring target))))))))))
 
+(test encrypted-store-snapshot-does-not-expose-secret-data
+  (with-temporary-store (store directory)
+    (gr8s::enable-secret-encryption store)
+    (gr8s::create-core-resource
+     store "secrets"
+     (gr8s::core-object
+      "apiVersion" "v1" "kind" "Secret"
+      "metadata" (gr8s::core-object "name" "snapshot-secret")
+      "data" (gr8s::core-object "password" "c25hcHNob3Qtc2VudGluZWw="))
+     "default")
+    (let ((target (merge-pathnames "encrypted-snapshot.jsonl" directory)))
+      (gr8s.resources::capture-store-snapshot store target 42 7)
+      (let ((text (uiop:read-file-string target)))
+        (is (null (search "c25hcHNob3Qtc2VudGluZWw=" text)))
+        (is (search "encryptedData" text))))))
+
 (test store-snapshot-failure-does-not-publish-a-partial-artifact
   (with-temporary-store (store directory)
     (let ((target (merge-pathnames "failed.jsonl" directory))
