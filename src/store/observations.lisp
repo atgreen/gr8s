@@ -37,6 +37,9 @@
                  (client (gethash (pod-uid pod)
                                   (pod-store-pod-client-statuses store))))
   "Atomically checkpoint POD's history and actual observation before updating memory."
+  (when (pod-stage-active-p store)
+    (stage-pod-write store pod :status t)
+    (return-from persist-pod-status-state pod))
   (let* ((target (pod-status-state-path store (pod-uid pod)))
          (temporary
            (make-pathname :name (format nil "~A-~36R" (pathname-name target)

@@ -82,7 +82,9 @@
     (let ((payload nil))
       (setf (gr8s::pod-store-consensus-commit-fn source)
             (lambda (kind json)
-              (when (eq kind :pod-state) (setf payload json))))
+              (when (eq kind :pod-delta)
+                (setf payload json)
+                (gr8s::install-pod-state-delta source json))))
       (gr8s::delete-pod source "default" "deleted")
       (let ((state (and payload (com.inuoe.jzon:parse payload))))
         (is (not (null state)) "the deletion emits a Pod state command")
@@ -174,7 +176,10 @@
       ;; before the member's Pod index installs that committed view.  Exercise the
       ;; HTTP call site, not only RECONCILE-WRITTEN-POD in isolation.
       (setf (gr8s::pod-store-consensus-commit-fn store)
-            (lambda (&rest ignored) (declare (ignore ignored))))
+            (lambda (kind json)
+              (case kind
+                (:pod-delta (gr8s::install-pod-state-delta store json))
+                (:core-delta (gr8s::install-core-state-delta store json)))))
       (unwind-protect
            (progn
              (setf (symbol-function 'gr8s::reconcile-pod)
@@ -258,18 +263,40 @@
                          "the Pod observation replicates to every member"))
                    ;; A follower write returns only after that follower has applied
                    ;; the commit; the same HTTP request immediately reconciles it.
-                   (let ((original (symbol-function 'gr8s::install-pod-state-blob)))
+                   (let ((original (symbol-function 'gr8s::install-pod-state-delta)))
                      (unwind-protect
                           (progn
                             ;; Make the follower's post-commit apply lag deterministic.
-                            (setf (symbol-function 'gr8s::install-pod-state-blob)
+                            (setf (symbol-function 'gr8s::install-pod-state-delta)
                                   (lambda (store json)
                                     (when (eq store s2) (sleep 0.2))
                                     (funcall original store json)))
                             (let ((follower-uid (gr8s:pod-uid (ha-make-pod s2 "from-follower"))))
                               (is (equal follower-uid (ha-pod-uid s2 "from-follower"))
                                   "a forwarded write has read-after-write consistency locally")))
-                       (setf (symbol-function 'gr8s::install-pod-state-blob) original)))
+                       (setf (symbol-function 'gr8s::install-pod-state-delta) original)))
+                   ;; A stale proposal may commit as a rejected application
+                   ;; transaction. The follower must receive that result over RPC.
+                   (let* ((original (gr8s::pod-store-consensus-commit-fn s2))
+                          (stale nil)
+                          (pod (gr8s:get-pod s2 "default" "p1"))
+                          (object (gr8s::copy-pod-status-value (gr8s:pod-to-object pod))))
+                     (unwind-protect
+                          (progn
+                            (setf (gr8s::pod-store-consensus-commit-fn s2)
+                                  (lambda (kind json) (when (eq kind :pod-delta) (setf stale json))))
+                            (setf (gethash "labels" (gethash "metadata" object)) (gr8s::core-object "proposal" "stale"))
+                            (gr8s:update-pod s2 (gr8s:parse-pod object) (gr8s:pod-resource-version pod)))
+                       (setf (gr8s::pod-store-consensus-commit-fn s2) original))
+                     (let* ((current (gr8s:get-pod s1 "default" "p1"))
+                            (fresh (gr8s::copy-pod-status-value (gr8s:pod-to-object current))))
+                       (setf (gethash "labels" (gethash "metadata" fresh)) (gr8s::core-object "proposal" "fresh"))
+                       (gr8s:update-pod s1 (gr8s:parse-pod fresh) (gr8s:pod-resource-version current)))
+                     (multiple-value-bind (result committed)
+                         (gr8s::raft-member-forward-propose-sync
+                          (gr8s::ha-control-plane-member h2) (list :pod-delta stale))
+                       (is (eq t committed))
+                       (is (equal '(:pod-conflict) result))))
                    ;; Kill the leader; a survivor still has the Pod, same UID.
                    (gr8s::stop-ha-control-plane h1)
                    (setf h1 nil)

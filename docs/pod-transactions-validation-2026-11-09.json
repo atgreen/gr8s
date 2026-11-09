@@ -1,0 +1,262 @@
+{
+  "date": "2026-11-09",
+  "tracking": "podster-ucm.12",
+  "scope": "Per-Pod desired/status replication, commit publication, conflict propagation and shared committed revision clock. Retained Raft log and full HA recovery remain separate work.",
+  "verification": {
+    "focused": {
+      "podTransactions": 65,
+      "haPodFailover": 29,
+      "failed": 0,
+      "log": "/tmp/gr8s-pod-clocks-final.log"
+    },
+    "memory": {
+      "passed": true,
+      "population": 1024,
+      "annotationBytesPerPod": 65536,
+      "commands": 1,
+      "commandCharacters": 66181,
+      "heapLimitMiB": 384,
+      "seconds": 0.024
+    },
+    "memoryLog": "/tmp/gr8s-pod-clocks-memory.log",
+    "previousSerializer": {
+      "source": "c53575d:src/store/persistence.lisp",
+      "sameFixture": true,
+      "heapLimitMiB": 384,
+      "result": "heap exhausted in whole-state JSON serialization during the measured update",
+      "log": "/tmp/gr8s-pod-transaction-memory-baseline.log"
+    },
+    "protocolGeneration": "passed",
+    "nativeBuild": "passed",
+    "nativeBuildLog": "/tmp/gr8s-pod-clocks-native.log",
+    "nativeBinarySHA256": "1f772c903d520e1b99adfef741ba096155e6230013c7f4f98ba035d03b27a6ec",
+    "nativeCluster": {
+      "passed": true,
+      "processes": 3,
+      "preservedPIDs": [
+        767346,
+        767551,
+        767692
+      ],
+      "rollout": "patch-6b373be74109c2d658d55799",
+      "restartRecovered": true,
+      "witness": true,
+      "native": true,
+      "cliWatchCompleted": true,
+      "runtime": "fake",
+      "evidence": "/tmp/gr8s-live-patch-z1eidvqo",
+      "podTransactions": true,
+      "preservedPodUID": "f828a59b-2118-4ba2-ba05-62d222149b35"
+    },
+    "baselineComparison": {
+      "baseline": "c53575d",
+      "baselineFailures": 49,
+      "preClockChangeFailures": 49,
+      "sameCases": true,
+      "cases": [
+        [
+          "INDEPENDENT-UPSTREAM-CLIENT-DECODES-DRA-PODRESOURCES",
+          "RESOURCE-MANAGER"
+        ],
+        [
+          "A-CHANGED-IMAGE-RESTARTS-ONLY-THAT-CONTAINER-EVEN-UNDER-RESTART-POLICY-NEVER",
+          "POD-RUNTIME-GAPS"
+        ],
+        [
+          "RUNNING-CONTAINERS-TAKE-NEW-RESOURCES-IN-PLACE-AND-REPORT-WHAT-WAS-APPLIED",
+          "POD-RUNTIME-GAPS"
+        ],
+        [
+          "FINISHED-APPLICATIONS-END-THE-POD-ONLY-AFTER-ITS-SIDECARS-STOP",
+          "POD-RUNTIME-GAPS"
+        ],
+        [
+          "SIDECARS-START-FIRST-AND-KEEP-RUNNING-BESIDE-LATER-CONTAINERS",
+          "POD-RUNTIME-GAPS"
+        ],
+        [
+          "UNRESOLVABLE-CONFIGURATION-REPORTS-A-WAITING-CONTAINER-AND-SPARES-ITS-SIBLINGS",
+          "POD-RUNTIME-GAPS"
+        ],
+        [
+          "A-FINISHED-EXEC-RELAY-DOES-NOT-TOUCH-A-CONNECTION-THAT-REUSES-ITS-DESCRIPTOR",
+          "GR8S"
+        ],
+        [
+          "A-TERMINATING-POD-KEEPS-PROBING-READINESS-BUT-NOT-LIVENESS",
+          "CONTAINER-PROBES"
+        ],
+        [
+          "REAL-HTTP-BODY-ERRORS-RETRY-WITHOUT-KILLING-A-HEALTHY-ATTEMPT",
+          "CONTAINER-PROBES"
+        ],
+        [
+          "SERIOUS-CANCELLATION-DURING-A-PROBER-RETRY-DOES-NOT-PUBLISH-AN-ERROR",
+          "CONTAINER-PROBES"
+        ],
+        [
+          "PROBER-ERRORS-RETRY-WITHOUT-CHANGING-THRESHOLDS-OR-LIVENESS-POLICY",
+          "CONTAINER-PROBES"
+        ],
+        [
+          "STOPPED-RUNTIME-RESTARTS-PROBES-AND-RETAINS-ONLY-OWNED-EVENTS",
+          "CONTAINER-PROBES"
+        ],
+        [
+          "PROBE-OPERATION-SERIOUS-TIMEOUT-DOES-NOT-KILL-ITS-WORKER",
+          "CONTAINER-PROBES"
+        ],
+        [
+          "NEVER-POLICY-DOES-NOT-RESTART-A-SUCCESSFUL-PROBE-KILL-AFTER-HISTORY-COLLECTION",
+          "CONTAINER-PROBES"
+        ],
+        [
+          "FAILED-PROBE-STOP-REUSES-ABSOLUTE-DEADLINE-AFTER-RUNTIME-RECONSTRUCTION",
+          "CONTAINER-PROBES"
+        ],
+        [
+          "DELETION-CANCELS-BLOCKED-PROBE-WITHOUT-PUBLISHING-A-LATE-SUCCESS",
+          "CONTAINER-PROBES"
+        ],
+        [
+          "FAILED-PROBE-RESTARTS-ONFAILURE-ZERO-EXIT-WITHOUT-TOUCHING-HEALTHY-SIBLING",
+          "CONTAINER-PROBES"
+        ],
+        [
+          "STARTUP-SUPPRESSES-OTHER-PROBES-AND-STOPS-EXECUTING-AFTER-SUCCESS",
+          "CONTAINER-PROBES"
+        ],
+        [
+          "PROBE-READINESS-OBEYS-INITIAL-DELAY-PERIOD-AND-CONSECUTIVE-THRESHOLDS",
+          "CONTAINER-PROBES"
+        ],
+        [
+          "NATIVE-INIT-CREATED-ATTEMPT-IS-ADOPTED-WITHOUT-CREATING-A-SIBLING",
+          "INIT-CONTAINERS"
+        ],
+        [
+          "NATIVE-FAILED-INIT-ALWAYS-RETRIES-WITH-DURABLE-BACKOFF-BEFORE-ANY-APP",
+          "INIT-CONTAINERS"
+        ],
+        [
+          "FINALIZER-SHUTDOWN-RETAINS-REAL-INTERRUPTED-INIT-AS-TERMINAL-FAILED",
+          "INIT-CONTAINERS"
+        ],
+        [
+          "REPLACEMENT-SANDBOX-REEXECUTES-INIT-BEFORE-RESTARTING-APPS",
+          "INIT-CONTAINERS"
+        ],
+        [
+          "FAILED-NEVER-INIT-IS-NOT-RESURRECTED-AFTER-SANDBOX-METADATA-DISAPPEARS",
+          "INIT-CONTAINERS"
+        ],
+        [
+          "NATIVE-FAILED-INIT-NEVER-STARTS-THE-APP-AND-KEEPS-TERMINAL-FAILURE",
+          "INIT-CONTAINERS"
+        ],
+        [
+          "NATIVE-INIT-CONTAINERS-GATE-APPLICATIONS-IN-ORDER-AND-SURVIVE-REOPEN",
+          "INIT-CONTAINERS"
+        ],
+        [
+          "RESTART-ALL-CONTAINERS-RUNS-THE-POD-AGAIN-IN-ITS-SANDBOX",
+          "RESTART-ALL-CONTAINERS"
+        ],
+        [
+          "CANCELLED-CREATE-RECOVERS-THE-OWNED-CREATED-ATTEMPT-WITHOUT-DUPLICATING-SIBLINGS",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "UNKNOWN-ATTEMPT-STOP-MUST-OBTAIN-A-REAL-EXIT-BEFORE-RESTARTING",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "EXPLICIT-UNKNOWN-ATTEMPT-IS-STOPPED-BEFORE-APPLYING-RESTART-POLICY",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "DEAD-SANDBOX-CAPTURE-DOES-NOT-ADOPT-AN-OBSOLETE-SUCCESSFUL-PREDECESSOR",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "FAILED-SANDBOX-RECREATION-DOES-NOT-RERUN-A-SUCCESSFUL-ONFAILURE-CONTAINER",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "NEVER-POLICY-DOES-NOT-RECREATE-TERMINAL-CONTAINERS-IN-A-DEAD-SANDBOX",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "RETAINED-LOGS-REQUIRE-OWNED-CHECKPOINT-AND-REMAIN-READ-ONLY",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "TERMINAL-CHECKPOINTS-SURVIVE-COLLECTED-CRI-ROWS-AND-SANDBOX",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "RETAINED-LOG-ATTEMPTS-RECOVER-COUNT-WITHOUT-REUSING-LOG-PATH",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "MISSING-METADATA-DURING-DURABLE-BACKOFF-KEEPS-WAITING-HISTORY",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "MISSING-CURRENT-METADATA-NEVER-REUSES-A-CONSUMED-ATTEMPT",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "AN-UNAVAILABLE-SANDBOX-IS-NEVER-REPORTED-AS-A-HEALTHY-POD",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "PARTIAL-INITIAL-CREATION-FAILURE-PRESERVES-THE-ALREADY-RUNNING-CONTAINER",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "CREATED-ATTEMPT-IS-STARTED-AGAIN-WITHOUT-DUPLICATE-CREATE",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "RESTART-DEADLINE-AND-LAST-STATE-SURVIVE-RUNTIME-RECONSTRUCTION",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "NATIVE-POLICY-APPLIES-TO-SUCCESSFUL-AND-FAILED-EXITS",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "NATIVE-RESTARTS-ONLY-THE-FAILED-SIBLING-WHILE-POD-IS-RUNNING",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "CONTAINER-START-THAT-REALLY-FAILED-STAYS-TERMINAL",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "ABANDONED-START-THAT-CANNOT-BE-REMOVED-LEAVES-THE-POD-WAITING",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "START-ABANDONED-BY-THE-CLIENT-TIMEOUT-IS-RETRIED-TOO",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "CANCELLED-CONTAINER-START-IS-RETRIED-HOWEVER-THE-POD-RESTARTS",
+          "CONTAINER-LIFECYCLE"
+        ],
+        [
+          "MALFORMED-POD-SHAPES-ARE-KUBERNETES-ERRORS",
+          "GR8S"
+        ]
+      ]
+    }
+  },
+  "limitations": [
+    "The native harness uses two voter processes and a witness with the fake runtime. It verifies successful leadership handoff and persisted Pod recovery, not arbitrary cluster crash recovery.",
+    "Production voter WAL recovery, witness recovery and snapshot catch-up remain under podster-ucm.2.1 and podster-ucm.11.",
+    "Node staging and enrollment retry persistence remain under podster-ucm.2.3. Core, Pod and Node changes are separate commands, not a general cross-resource atomic transaction.",
+    "The memory check bounds a small update in a large live population; it does not bound retained log growth over the cluster lifetime."
+  ]
+}

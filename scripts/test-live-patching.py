@@ -44,6 +44,7 @@ def main():
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--witness", action="store_true", help="Use two control planes and a witness")
     parser.add_argument("--gr8s", type=Path, help="Run a native binary instead of SBCL server processes")
+    parser.add_argument("--pod-transactions", action="store_true", help="Check Pod writes across handoff and persisted recovery")
     args = parser.parse_args()
     work = Path(tempfile.mkdtemp(prefix="gr8s-live-patch-"))
     processes = []
@@ -142,6 +143,26 @@ def main():
             except urllib.error.HTTPError as exc:
                 raise RuntimeError(f"HTTP {exc.code}: {exc.read().decode()}") from exc
 
+        def api(node, path, method="GET", body=None):
+            url = f"http://127.0.0.1:{node['http']}{path}"
+            data = None if body is None else json.dumps(body).encode()
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, *unused):
+                    return None
+            opener = urllib.request.build_opener(NoRedirect())
+            for _ in range(8):
+                req = urllib.request.Request(url, data=data, method=method,
+                                             headers={"Content-Type": "application/json"})
+                try:
+                    with opener.open(req, timeout=30) as reply:
+                        return json.load(reply)
+                except urllib.error.HTTPError as exc:
+                    if exc.code in (307, 308):
+                        url = exc.headers["Location"]
+                    else:
+                        raise
+            raise RuntimeError("API redirect loop")
+
         launch(nodes[0])
         wait_for(lambda: version(nodes[0]))
         for node in nodes[1:]:
@@ -159,6 +180,16 @@ def main():
             else:
                 wait_for(lambda: version(node))
         time.sleep(2)
+        pod_path = "/api/v1/namespaces/default/pods/patch-survivor"
+        pod_uid = None
+        if args.pod_transactions:
+            created = api(nodes[0], "/api/v1/namespaces/default/pods", "POST",
+                          {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "patch-survivor"},
+                           "spec": {"containers": [{"name": "main", "image": "busybox"}]}})
+            pod_uid = created["metadata"]["uid"]
+            for node in nodes:
+                if not node.get("witness"):
+                    wait_for(lambda node=node: api(node, pod_path)["metadata"]["uid"] == pod_uid)
         pids = [node["process"].pid for node in nodes]
         plan = request(nodes[0], "plan", image=str(work / "image"), level=1, soakSeconds=0)
         rollout = plan["id"]
@@ -200,15 +231,28 @@ def main():
             else:
                 assert version(node)["gr8sPatch"]["loadedLevel"] == 1
                 assert (node["state"] / "patches" / "marker").read_bytes() == b"ok"
+        if args.pod_transactions:
+            current = api(nodes[0], pod_path)
+            current["metadata"]["labels"] = {"after-handoff": "updated"}
+            updated = api(nodes[0], pod_path, "PUT", current)
+            assert updated["metadata"]["uid"] == pod_uid
+            for node in nodes:
+                if not node.get("witness"):
+                    wait_for(lambda node=node: api(node, pod_path)["metadata"].get("labels", {}).get("after-handoff") == "updated")
         # Restart a follower using the same base binary and durable patch history.
         follower = nodes[0]
         follower["process"].send_signal(signal.SIGTERM)
         follower["process"].wait(timeout=30)
         launch(follower)
         wait_for(lambda: version(follower)["gr8sPatch"]["loadedLevel"] == 1)
+        if args.pod_transactions:
+            recovered = api(follower, pod_path)
+            assert recovered["metadata"]["uid"] == pod_uid
+            assert recovered["metadata"]["labels"]["after-handoff"] == "updated"
         result = {"passed": True, "processes": 3, "preservedPIDs": pids,
                   "rollout": rollout, "restartRecovered": True, "witness": args.witness,
-                  "native": bool(args.gr8s), "cliWatchCompleted": bool(watcher), "runtime": "fake", "evidence": str(work)}
+                  "native": bool(args.gr8s), "cliWatchCompleted": bool(watcher), "runtime": "fake", "evidence": str(work),
+                  "podTransactions": args.pod_transactions, "preservedPodUID": pod_uid}
         (work / "report.json").write_text(json.dumps(result, indent=2) + "\n")
         print(json.dumps(result))
         passed = True

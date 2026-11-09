@@ -109,7 +109,8 @@
                                            (:file "policy")
                                            (:file "observations")
                                            (:file "journal")
-                                           (:file "persistence")))
+                                           (:file "persistence")
+                                           (:file "pod-transactions")))
                              (:module "raft/transport"
                               :serial t
                               :components ((:file "package")
@@ -423,6 +424,7 @@
                              (:file "ha-control-plane-test")
                              (:file "ha-controller-write-test")
                              (:file "ha-pod-failover-test")
+                             (:file "pod-transactions-test")
                              (:file "ha-node-cidr-test")
                              (:file "ha-local-plane-test")
                              (:file "ha-redirect-http-test")

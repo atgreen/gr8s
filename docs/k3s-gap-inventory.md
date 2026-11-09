@@ -31,7 +31,7 @@ Current work is tracked by **`podster-ucm`**, with children `.1` (journal recove
 `.2` (HA correctness), `.3` (backup/restore), `.4` (secrets encryption), `.5`
 (certificates), `.6` (telemetry), `.7` (installation/upgrades), `.8` (IPv6
 acceptance), `.9` (AddOn/Helm), and `.10` (audit). Child `.11` tracks bounded Raft
-log retention and snapshot catch-up. Historical references remain for provenance,
+log retention and snapshot catch-up; `.12` tracks per-Pod transactions. Historical references remain for provenance,
 not as evidence of their current status.
 
 Source reconciliation found streamed checkpoints, per-key HA deltas, coalesced
@@ -48,6 +48,11 @@ not enable production snapshotting by themselves. Production HA still retains it
 committed Raft log without automatic compaction
 or snapshot catch-up; that P0 work remains open. Live disconnected-peer acceptance
 and the other HA correctness items also remain open.
+
+Pod desired state and checkpoints now use per-key staged transactions instead of
+complete Pod-index serialization. Desired UID/version preconditions are checked at
+apply time, and status-only commands cannot resurrect deleted objects. General
+cross-resource transactions and production crash-recovery integration remain open.
 
 In-process patch trains now provide signed, journaled rolling Lisp updates. Full
 binary upgrades (including incorporation of installed patches), installation,

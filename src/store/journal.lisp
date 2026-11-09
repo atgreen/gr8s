@@ -230,6 +230,12 @@
                (not (equalp status
                             (gethash uid
                                      (pod-store-pod-published-statuses store)))))
+      (when (pod-stage-active-p store)
+        (stage-pod-write store current :status t)
+        ;; Readers may retain the committed Pod object beyond the lock.
+        (setf current (gr8s.model::copy-pod current)
+              (gethash (pod-key (pod-namespace current) (pod-name current))
+                       (pod-store-pods store)) current))
       (let ((old (and (pod-store-watch-journal-p store)
                       (pod-published-view store current)))
             (revision (next-pod-revision-unlocked store)))

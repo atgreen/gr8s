@@ -27,5 +27,5 @@
       ;; Otherwise each member derives the same status lazily under a different
       ;; local revision and a follower's resumable watch can never replay it.
       (add-pod-status-conditions store pod (copy-pod-status-value copy))
-      (with-store-lock (store) (note-pod-state-change store)))
+      (with-store-lock (store) (note-pod-state-change store pod)))
     copy))

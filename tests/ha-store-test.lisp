@@ -80,6 +80,7 @@
                       (:core-state (gr8s::install-core-state-blob store (second command)))
                       (:core-delta (gr8s::install-core-state-delta store (second command)))
                       (:pod-state (gr8s::install-pod-state-blob store (second command)))
+                      (:pod-delta (gr8s::install-pod-state-delta store (second command)))
                       (:node-state (gr8s::install-node-state-blob store (second command)))
                       (:node-delta (gr8s::install-node-state-delta store (second command))))))))
 

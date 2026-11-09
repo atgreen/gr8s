@@ -79,10 +79,23 @@ and accept new writes.
 
 ## Current limits
 
-Core API resources replicate as per-key deltas. Pod desired state and observations
-still use a complete Pod-state blob, with local mutation before consensus in some
-paths; narrowing that transaction/replication boundary remains correctness and
-memory work. Focused failover tests do not prove arbitrary crash/restart safety.
+Core API resources and Pods replicate as per-key transactions. Pod changes are
+staged under the store lock, frozen into a command, and removed from the local
+published view before proposing. Committed application publishes the files,
+indexes, status checkpoints, and watch transitions. Failed proposals leave the
+previous Pod state visible and durable. Speculative revisions are rolled back
+before proposing. A durable committed revision clock prevents unused reservation
+ceilings from changing resource versions after restart; replicated Node changes
+also advance this shared clock.
+
+Pod UID/version preconditions are checked at application time. Status-only
+commands cannot create desired objects, and unmentioned Pods are never removed.
+Forwarded writes carry the application conflict result separately from consensus
+commit. A single store operation can still propose core, Pod, and Node changes
+separately; this is not a general transaction across all resource families.
+Focused failover tests do not prove arbitrary crash/restart safety.
+Node mutations still need the same staging guarantees, tracked separately under
+`podster-ucm.2.3`.
 
 The production voter startup does not yet attach/recover the core's durable Raft
 backend. Witnesses write a private WAL but do not yet recover its previous hard

@@ -24,35 +24,8 @@
   (store-json-object "phase" "Pending"))
 
 (defmacro with-store-lock ((store) &body body)
-  "Evaluate BODY while holding STORE's lock. In HA consensus mode (STORE has a
-   consensus-commit-fn) a durable write made in BODY is not published under the
-   lock; COMMIT-CORE-RESOURCES stashes the committed state, and once the store
-   lock is released the state is replicated through Raft and installed on every
-   replica. The store lock is therefore never held across the Raft round-trip, so
-   there is no deadlock with the apply path, and writers serialize on the
-   consensus-write lock. This is sound because WITH-STORE-LOCK is non-reentrant,
-   so it is never nested: every acquisition is the outermost one. Without HA this
-   is a plain lock hold, identical to the single-node path."
-  (let ((s (gensym "STORE")))
-    `(let ((,s ,store))
-       (if (pod-store-consensus-commit-fn ,s)
-           (bt:with-lock-held ((pod-store-consensus-write-lock ,s))
-             (let ((*pending-consensus-commit* nil)
-                   (*pending-pod-commit* nil)
-                   (*pending-node-commit* nil)
-                   (*core-write-active* t))
-               (multiple-value-prog1
-                   (bt:with-lock-held ((pod-store-lock ,s)) ,@body)
-                 ;; Replicate whatever the body committed, once the store lock is
-                 ;; released: core API resources, Pod desired state, node desired state.
-                 (when *pending-consensus-commit*
-                   (funcall (pod-store-consensus-commit-fn ,s) :core-delta *pending-consensus-commit*))
-                 (when *pending-pod-commit*
-                   (funcall (pod-store-consensus-commit-fn ,s) :pod-state *pending-pod-commit*))
-                 (when *pending-node-commit*
-                   (funcall (pod-store-consensus-commit-fn ,s) :node-delta
-                            (node-state-delta-json *pending-node-commit*))))))
-           (bt:with-lock-held ((pod-store-lock ,s)) ,@body)))))
+  "Hold STORE's lock; HA Pod writes are staged and published only on commit."
+  `(call-with-store-transaction ,store (lambda () ,@body)))
 
 (defvar *pending-consensus-commit* nil
   "Bound by WITH-CORE-WRITE; COMMIT-CORE-RESOURCES stashes the key-level state
@@ -72,9 +45,8 @@
    new leader regenerate them after failover.")
 
 (defvar *pending-pod-commit* nil
-  "Bound by WITH-STORE-LOCK; set to the serialized Pod desired-state index when a
-   Pod desired-state write happens on an HA store, so the change replicates to
-   the other members after the store lock is released (podster-8ia.2).")
+  "Changed Pod keys collected by WITH-STORE-LOCK. The transaction freezes their
+   desired objects and checkpoints before restoring the committed local view.")
 
 (defvar *pending-node-commit* nil
   "Bound by WITH-STORE-LOCK; node changes collect their names here so the
@@ -252,6 +224,9 @@
 
 (defun persist-pod (store pod)
   "Atomically persist POD's authoritative JSON object in STORE."
+  (when (pod-stage-active-p store)
+    (stage-pod-write store pod :desired t)
+    (return-from persist-pod pod))
   (let* ((target (pod-path store pod))
          (temporary
            (make-pathname
@@ -290,10 +265,9 @@
   (setf (gethash (pod-key (pod-namespace pod) (pod-name pod))
                  (pod-store-pods store))
         pod)
-  ;; A desired-state Pod write lands here (after persist); flag it for HA
-  ;; replication. A no-op off the consensus path. Done after the index update so
-  ;; the replicated snapshot includes this Pod (podster-8ia.2).
-  (note-pod-desired-change store)
+  ;; The transaction freezes this key after its final state and watch revision
+  ;; have been assigned. The committed apply path publishes it on every replica.
+  (note-pod-desired-change store pod)
   pod)
 
 ;;; ---------------------------------------------------------------------------
@@ -351,14 +325,13 @@
   "Compatibility name for the complete replicated Pod state blob."
   (pod-state-json store))
 
-(defun note-pod-state-change (store)
-  "On an HA store, stash current Pod state for replication after the lock release."
-  (when (and *core-write-active* (pod-store-consensus-commit-fn store))
-    (setf *pending-pod-commit* (pod-state-json store))))
+(defun note-pod-state-change (store pod)
+  "Mark one Pod for replicated observation/publication after releasing the lock."
+  (when (pod-stage-active-p store) (stage-pod-write store pod :status t)))
 
-(defun note-pod-desired-change (store)
-  "Replicate a Pod desired-state write after STORE's lock is released."
-  (note-pod-state-change store))
+(defun note-pod-desired-change (store pod)
+  "Mark one desired Pod key, never the complete Pod index."
+  (when (pod-stage-active-p store) (stage-pod-write store pod :desired t)))
 
 (defun replicated-pod-entry-table (entries)
   "Index replicated ENTRIES by their Pod UID."
@@ -405,12 +378,15 @@ checkpoint cannot hide the transition."
     (remhash uid (pod-store-pod-published-statuses store))))
 
 (defun install-pod-state-blob (store json)
+  "Install a legacy complete Pod snapshot. New transactions use per-Pod deltas."
+  (bt:with-lock-held ((pod-store-lock store))
+    (install-pod-state-object-unlocked store (com.inuoe.jzon:parse json))))
+
+(defun install-pod-state-object-unlocked (store state &key partial)
   "Install a replicated Pod state snapshot and publish its exact watch transitions.
 The snapshot watermark and published statuses make ListWatch behavior identical on
 every HA member, including a member that did not own the reporting agent session."
-  (bt:with-lock-held ((pod-store-lock store))
-    (let* ((state (com.inuoe.jzon:parse json))
-           (observations (replicated-pod-entry-table (gethash "observations" state #())))
+  (let* ((observations (replicated-pod-entry-table (gethash "observations" state #())))
            (published (replicated-pod-entry-table (gethash "published" state #())))
            (watermark (replicated-pod-revision (gethash "resourceVersion" state)))
            (seen (make-hash-table :test #'equal)))
@@ -473,7 +449,8 @@ every HA member, including a member that did not own the reporting agent session
                           store event-revision old-view new-view))))))
         ;; Drop Pods the committed snapshot no longer has, journalling deletion
         ;; at the snapshot watermark so a resumed watch cannot silently miss it.
-        (loop for key being the hash-keys of (pod-store-pods store)
+        (unless partial
+         (loop for key being the hash-keys of (pod-store-pods store)
               for pod = (gethash key (pod-store-pods store))
               unless (gethash key seen)
                 do (let ((old-view (pod-published-view store pod)))
@@ -483,8 +460,8 @@ every HA member, including a member that did not own the reporting agent session
                      (record-pod-watch-event-unlocked
                       store
                       (local-replicated-pod-event-revision-unlocked store watermark)
-                      old-view nil)))
-      (advance-replicated-pod-revision-unlocked store watermark)))))
+                      old-view nil))))
+      (advance-replicated-pod-revision-unlocked store watermark))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; HA node desired-state replication (podster-8ia.4).
@@ -507,12 +484,13 @@ every HA member, including a member that did not own the reporting agent session
                    'vector))
      table)))
 
-(defun node-state-delta-json (changes)
+(defun node-state-delta-json (changes &optional revision)
   "Serialize the Nodes actually changed by one transaction. A missing named
 Node is a tombstone. Unrelated stale member state never enters the command."
   (com.inuoe.jzon:stringify
    (store-json-object
     "version" 1
+    "resourceVersion" (write-to-string (or revision 0))
     "changes"
     (coerce
      (loop for (name . object-json) in (reverse changes)
@@ -576,7 +554,11 @@ named Nodes are replaced or deleted; unrelated records remain untouched."
                        (remhash name (pod-store-nodes store))))
                    (let ((node (parse-node-record object)))
                      (persist-node store node)
-                     (setf (gethash name (pod-store-nodes store)) node)))))))
+                     (setf (gethash name (pod-store-nodes store)) node)
+                     (advance-replicated-pod-revision-unlocked
+                      store (replicated-pod-revision (node-record-resource-version node))))))
+      (advance-replicated-pod-revision-unlocked store (replicated-pod-revision (gethash "resourceVersion" delta)))
+      (save-consensus-pod-revision-unlocked store))))
 
 (defun open-store (path)
   "Open or create a durable store at PATH and rebuild its in-memory indexes."
@@ -592,6 +574,7 @@ named Nodes are replaced or deleted; unrelated records remain untouched."
     (funcall (store-policy-load-resources *store-policy*) store)
     (load-pod-status-state store)
     (load-pod-revision store)
+    (load-consensus-pod-revision store)
     store))
 
 (defun get-pod-unlocked (store namespace name)
@@ -744,21 +727,26 @@ named Nodes are replaced or deleted; unrelated records remain untouched."
       replacement))
 
 (defun remove-pod (store namespace name &key uid)
+  "Remove a Pod through the HA transaction boundary."
+  (with-store-lock (store) (remove-pod-unlocked store namespace name :uid uid)))
+
+(defun remove-pod-unlocked (store namespace name &key uid)
   "Remove a Pod and its observed status from STORE, returning the removed Pod."
-  (with-store-lock (store)
-    (let ((pod (get-pod-unlocked store namespace name)))
+  (let ((pod (get-pod-unlocked store namespace name)))
       (when (and uid (not (equal uid (pod-uid pod))))
         (error 'kubernetes-error :status-code 409 :reason "Conflict" :message "Pod UID changed before removal"))
       (when (funcall (store-policy-retained-p *store-policy*) pod)
         (error 'kubernetes-error :status-code 409 :reason "Conflict" :message "Pod finalizers still retain this object"))
-      (let ((status-path (pod-status-state-path store (pod-uid pod))))
+      (when (pod-stage-active-p store) (stage-pod-write store pod :desired t))
+      (unless (pod-stage-active-p store)
+       (let ((status-path (pod-status-state-path store (pod-uid pod))))
         (when (probe-file status-path) (delete-file status-path)))
-      (delete-file (pod-path store pod))
+       (delete-file (pod-path store pod)))
       (remhash (pod-key namespace name) (pod-store-pods store))
       (publish-pod-removal-unlocked store pod)
       ;; Serialize only after allocating the deletion's watch revision; followers
       ;; need that watermark to replay the tombstone to a resumed ListWatch.
-      (note-pod-desired-change store)
+      (note-pod-desired-change store pod)
       (remhash (pod-uid pod) (pod-store-pod-finalization-states store))
       (remhash (pod-uid pod) (pod-store-pod-observed-phases store))
       (remhash (pod-uid pod) (pod-store-pod-observed-statuses store))
@@ -767,7 +755,7 @@ named Nodes are replaced or deleted; unrelated records remain untouched."
       (remhash (pod-uid pod) (pod-store-pod-client-statuses store))
       (remhash (pod-uid pod) (pod-store-nominated-nodes store))
       (remhash (pod-uid pod) (pod-store-scheduling-notes store))
-      pod)))
+      pod))
 
 (defun delete-pod (store namespace name)
   "Delete and return the Pod named NAME in NAMESPACE."

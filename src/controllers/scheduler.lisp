@@ -379,7 +379,9 @@ Every replica allocates from the same preceding log state, so concurrent member
 enrollments receive distinct PodCIDRs without replacing the complete node index."
   (bt:with-lock-held ((pod-store-lock store))
     (let ((existing (get-node-unlocked store node-name)))
-      (when existing (return-from install-node-enrollment-command existing))
+      (when existing
+        (gr8s.store::save-consensus-pod-revision-unlocked store)
+        (return-from install-node-enrollment-command existing))
       (loop for node being the hash-values of (pod-store-nodes store)
             when (string= node-id (node-record-id node))
               do (node-conflict "Node identity ~A is already claimed" node-id))
@@ -390,7 +392,8 @@ enrollments receive distinct PodCIDRs without replacing the complete node index.
                 :pod-cidr (aref pod-cidrs 0) :pod-cidrs pod-cidrs
                 :creation-timestamp creation-timestamp)))
         (setf (gethash node-name (pod-store-nodes store)) node)
-        (publish-node-change-unlocked store nil node)
+        (let ((*core-write-active* nil)) (publish-node-change-unlocked store nil node))
+        (gr8s.store::save-consensus-pod-revision-unlocked store)
         node))))
 
 (defun terminal-pod-phase-p (phase)
@@ -1101,6 +1104,8 @@ Call with STORE's lock held."
   "Assign POD to NODE-NAME, advance its resource version, and persist it."
   (unless (reserve-pod-dra-claims-unlocked store pod (get-node-unlocked store node-name))
     (error "ResourceClaims for ~A/~A changed during scheduling" (pod-namespace pod) (pod-name pod)))
+  (when (pod-store-consensus-commit-fn store)
+    (setf pod (gr8s.store::store-parse-pod (copy-pod-status-value (pod-to-object pod)))))
   (let* ((object (pod-to-object pod))
          (spec (gethash "spec" object))
          (metadata (gethash "metadata" object))
@@ -1112,10 +1117,11 @@ Call with STORE's lock held."
           (pod-status-revision pod) nil
           (gethash "resourceVersion" metadata) next-version)
     (persist-pod store pod)
+    (when (pod-store-consensus-commit-fn store) (index-pod store pod))
     (publish-pod-spec-change-unlocked store old pod)
     ;; Assignment changes desired state just as create/update does. Replicate it
     ;; before a follower serves reads or a newly elected leader takes over.
-    (note-pod-desired-change store)
+    (note-pod-desired-change store pod)
     pod))
 
 (defun update-node-kubelet-port (store node-name port)

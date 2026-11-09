@@ -36,6 +36,7 @@
   (pod-observed-statuses (make-hash-table :test #'equal))
   (pod-observed-resource-versions (make-hash-table :test #'equal))
   (pod-condition-histories (make-hash-table :test #'equal))
+  consensus-pod-revision
   (pod-revision 0)
   (pod-revision-ceiling 0)
   (watch-journal-p t)

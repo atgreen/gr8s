@@ -209,11 +209,14 @@
               (command (getf message :command)))
          (multiple-value-bind (result committed index)
              (raft-member-propose-sync member command :timeout 10)
-           (declare (ignore result))
            (make-instance 'gr8s.node.v1::raft-proposal-result
                           :committed (eq committed t)
                           :reason (if (eq committed t) "" (string-downcase (symbol-name committed)))
-                          :index (or index 0)))))
+                          :index (or index 0)
+                          :application-result
+                          (if (and (consp command) (eq :pod-delta (first command)))
+                              (raft-message->octets (list :result result))
+                              (make-array 0 :element-type '(unsigned-byte 8)))))))
      :join-handler (lambda (request context)
                      (let ((handler (raft-member-join-handler member)))
                        (if handler
@@ -364,7 +367,7 @@ id, or NIL."
   "Forward COMMAND from follower MEMBER to its known leader and wait for commit.
    A remote commit does not complete until MEMBER has applied the returned log
    index, preserving read-after-write consistency for the serving API member.
-   Returns (values NIL T) on commit, or (values NIL reason-keyword) when no
+   Returns (values application-result T) on commit, or (values NIL reason-keyword) when no
    leader is known or the leader refuses/times out.  The Raft transport's mutual
    TLS authenticates production members; plain transport remains available to
    tests."
@@ -405,7 +408,9 @@ id, or NIL."
                            (let ((index (gr8s.node.v1::index response)))
                              (if (and (plusp index)
                                       (raft-member-wait-applied member index deadline))
-                                 (return (values nil t))
+                                 (let ((bytes (gr8s.node.v1::application-result response)))
+                                   (return (values (when (plusp (length bytes))
+                                                     (getf (octets->raft-message bytes) :result)) t)))
                                  (setf last-reason :timeout)))
                            (setf last-reason
                                  (or (find-symbol

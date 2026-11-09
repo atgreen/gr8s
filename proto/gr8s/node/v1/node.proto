@@ -526,6 +526,9 @@ message RaftProposalResult {
   // The committed log position lets the forwarding member delay its API
   // response until its own state machine has applied the write.
   uint64 index = 3;
+  // Application rejection is distinct from consensus commit. Currently used
+  // for per-Pod transaction preconditions, encoded as a data-only Raft form.
+  bytes application_result = 4;
 }
 
 message RaftMember {

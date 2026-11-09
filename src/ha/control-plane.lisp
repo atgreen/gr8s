@@ -54,6 +54,7 @@
                          ;; idempotent for a leader-local write and necessary when
                          ;; the leader committed a proposal forwarded by a follower.
                          (:pod-state (gr8s::install-pod-state-blob store (second command)))
+                         (:pod-delta (gr8s::install-pod-state-delta store (second command)))
                          (:node-state (gr8s::install-node-state-blob store (second command)))
                          (:node-delta (gr8s::install-node-state-delta store (second command)))
                          ;; Enrollment is an operation rather than a follower-authored

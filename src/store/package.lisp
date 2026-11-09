@@ -38,6 +38,7 @@
    #:index-pod
    #:install-node-state-blob
    #:install-node-state-delta
+   #:install-pod-state-delta
    #:install-pod-state-blob
    #:list-pods
    #:load-pod-status-state
