@@ -2216,3 +2216,33 @@
           (setf (symbol-function 'gr8s::node-snapshot-delta) delta-function)
           (ignore-errors (stop-agent))
           (gr8s:stop-node-grpc-server server))))))
+
+(test vxlan-peer-routes-survive-agent-lease-expiry
+  (with-temporary-store (store path)
+    (declare (ignore path))
+    (let ((now 4000000000))
+      (dotimes (index 2)
+        (gr8s:register-node
+         store (gr8s:make-node-record :id (format nil "vxlan-~D" index)
+                                      :name (format nil "worker-~D" index)
+                                      :pod-cidr (format nil "10.88.~D.0/24" index)
+                                      :underlay-address (format nil "192.0.2.~D" (+ index 10))))
+        (gr8s:mark-node-ready store (format nil "worker-~D" index) now
+                              :lease-duration (if (zerop index) 1000 1)))
+      (let* ((server (gr8s::%make-node-grpc-server
+                      :store store :overlay-backend "vxlan" :clock (lambda () now)
+                      :gateway-stability-seconds 30 :heartbeat-timeout-seconds 15))
+             (before (gr8s::assigned-node-routes server "worker-0")))
+        (is (= 1 (length before)))
+        (incf now 2)
+        (gr8s::reconcile-node-heartbeats server now)
+        ;; Readiness still expires for scheduling and endpoint selection.
+        ;; Existing Pod traffic must retain the authenticated direct peer.
+        (is-false (gr8s::node-record-ready-p (gr8s:get-node store "worker-1")))
+        (let ((after (gr8s::assigned-node-routes server "worker-0")))
+          (is (= 1 (length after)))
+          (when after
+            (is (string= "worker-1" (slot-value (first after) 'gr8s.node.v1::node-name)))
+            (is (string= "10.88.1.0/24" (slot-value (first after) 'gr8s.node.v1::pod-cidr)))
+            (is (string= "192.0.2.11" (slot-value (first after) 'gr8s.node.v1::underlay-address)))
+            (is-false (slot-value (first after) 'gr8s.node.v1::next-hop))))))))
