@@ -32,5 +32,41 @@
     "Background/controller/node-RPC quiescence",
     "Actual Raft/WAL recovery and automatic compaction"
   ],
-  "fullGoalComplete": false
+  "fullGoalComplete": false,
+  "mergedValidation": {
+    "validatedCodeCommit": "80ac08d",
+    "integratedMain": "4eef473",
+    "passed": true,
+    "checks": 414,
+    "suites": {
+      "store-access-gate": 56,
+      "pod-watch": 149,
+      "store-application-reload": 65,
+      "store-snapshot": 62,
+      "store-snapshot-materialize": 49,
+      "store-image-tracker-snapshot": 25,
+      "secret-encryption-enable-rewrites-durable-data-and-round-trips": 4,
+      "encrypted-secret-journal-round-trips-and-authentication-fails-closed": 4
+    },
+    "integrationCoverage": [
+      "New Secret encryption policy slot classified as application state",
+      "Encrypted Secret absent in plaintext from capture and materialized checkpoint",
+      "Generation policy replaces stale loaded policy",
+      "Member CA private key bytes unchanged",
+      "Encrypted Secret readable after same-object reload and cold reopen"
+    ]
+  },
+  "mergedMemory": {
+    "passed": true,
+    "legacy": false,
+    "records": 1024,
+    "validatedRecords": 1028,
+    "materializedRecords": 1028,
+    "residentResourcesAfterOperation": 1024,
+    "reloadedSameStore": true,
+    "payloadBytes": 67108864,
+    "artifactBytes": 67347625,
+    "heapMiB": 384
+  },
+  "mergedMemoryScope": "Cached compilation; 64 MiB ConfigMap payload plus tracker/config metadata; nonempty encrypted Secret behavior covered by reload suite."
 }
