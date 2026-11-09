@@ -555,6 +555,8 @@ prevResult and only installs, checks, or removes its policy datapath."
 (defun %remove-cni-policy
     (configuration context map-path link-path directory
      &key (remove-path #'remove-cni-path)
+       (path-exists-p #'probe-file)
+       (retire-link #'retire-cni-tcx-link)
        (staged-links #'cni-policy-staged-links)
        (remove-directory #'remove-empty-cni-directory))
   "Remove this Pod's policy: unpin both guard links and any staged leftovers,
@@ -565,15 +567,23 @@ prevResult and only installs, checks, or removes its policy datapath."
   (dolist (link (list link-path (cni-ingress-guard-link-path
                                  link-path (if configuration (cni-configuration-direction configuration)
                                                (subseq (file-namestring link-path) (length "tcx-"))))))
-    (funcall remove-path link)
-    (dolist (path (funcall staged-links link)) (funcall remove-path path)))
+    ;; Retire staged entries first so removing the canonical guard cannot
+    ;; expose an older pending program to fresh packets.
+    (dolist (path (funcall staged-links link))
+      (when (funcall path-exists-p path) (funcall retire-link path))
+      (funcall remove-path path))
+    (when (funcall path-exists-p link) (funcall retire-link link))
+    (funcall remove-path link))
   (dolist (name (append (mapcar #'first +cni-policy-map-specs+)
                         '("gr8s_pkt_stages") +cni-legacy-policy-maps+))
     (funcall remove-path (cni-policy-map-path map-path name)))
   ;; Keep blockers until all ordinary policy/map pins have been retired.
   (dolist (path (cni-upgrade-block-paths map-path))
-    (funcall remove-path path)
-    (dolist (stage (funcall staged-links path)) (funcall remove-path stage)))
+    (dolist (stage (funcall staged-links path))
+      (when (funcall path-exists-p stage) (funcall retire-link stage))
+      (funcall remove-path stage))
+    (when (funcall path-exists-p path) (funcall retire-link path))
+    (funcall remove-path path))
   (funcall remove-directory directory)
   nil)
 

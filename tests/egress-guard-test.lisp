@@ -215,11 +215,11 @@
       (whistler/loader::put-u32 info 20 direction)
       (is (= 900203
              (gr8s.network::attach-packet-upgrade-blocker
-              900201 900202 info
+              900201 900202 :object-info (constantly info)
               :bpf (lambda (command attribute size context)
                      (declare (ignore context))
                      (is (= 28 command)) (is (= 32 size))
-                     (is (equal '(900201 71 8200 900202)
+                     (is (equal '(900201 71 8 0)
                                 (mapcar (lambda (offset) (gr8s::netlink-read-integer attribute offset 4))
                                         '(0 4 12 16))))
                      (is (= direction (gr8s::netlink-read-integer attribute 8 4)))
@@ -227,7 +227,7 @@
       (whistler/loader::put-u32 info 0 1)
       (signals gr8s::cni-error
         (gr8s.network::attach-packet-upgrade-blocker
-         900201 900202 info :bpf (lambda (&rest ignored)
+         900201 900202 :object-info (constantly info) :bpf (lambda (&rest ignored)
                                   (declare (ignore ignored)) (error "must not attach"))))))
   (gr8s.network::replace-packet-tcx-program
    900211 900212 900213
@@ -272,3 +272,31 @@
                      ((< interrupt 6) (is (= 2 (hash-table-count blocked))))
                      ((= interrupt 6) (is (= 1 (hash-table-count blocked))) (is-true verified))
                      (t (is (zerop (hash-table-count blocked))) (is-true verified)))))))
+
+(test packet-upgrade-budget-defers-gc-and-makes-progress-after-an-endpoint-fails
+  (let* ((dataplane (gr8s::%make-service-lb-dataplane :pin-directory "/pins/service-lb/"))
+         (paths '(#P"/pins/a/gr8s_pkt_stages" #P"/pins/b/gr8s_pkt_stages" #P"/pins/c/gr8s_pkt_stages"))
+         (calls nil) (broken t) (*error-output* (make-string-output-stream)))
+    (labels ((refresh (directory root cache allow-load)
+               (is (equal "/pins/service-lb/" root))
+               (let ((key (namestring directory)))
+                 (push key calls)
+                 (cond ((gethash key cache) :current)
+                       ((not (funcall allow-load)) :pending)
+                       ((and broken (equal key "/pins/a/")) (error "injected legacy failure"))
+                       (t (setf (gethash key cache) t) :refreshed)))))
+      (is-false (gr8s.network::refresh-service-packet-pipelines dataplane paths :budget 2 :refresh #'refresh))
+      (is (gethash "/pins/b/" (gr8s::service-lb-dataplane-upgrade-cache dataplane)))
+      (is-false (gethash "/pins/c/" (gr8s::service-lb-dataplane-upgrade-cache dataplane)))
+      (is (= 1 (gr8s::service-lb-dataplane-upgrade-completed dataplane)))
+      (is (search "injected legacy failure" (get-output-stream-string *error-output*)))
+      (is-false (gr8s.network::refresh-service-packet-pipelines dataplane paths :budget 2 :refresh #'refresh))
+      (is (gethash "/pins/c/" (gr8s::service-lb-dataplane-upgrade-cache dataplane)))
+      (is-false (search "injected legacy failure" (get-output-stream-string *error-output*)))
+      (setf broken nil)
+      (is-true (gr8s.network::refresh-service-packet-pipelines dataplane paths :budget 2 :refresh #'refresh))
+      (is (= 3 (gr8s::service-lb-dataplane-upgrade-completed dataplane)))
+      (is (zerop (hash-table-count (gr8s::service-lb-dataplane-upgrade-warnings dataplane))))
+      (is-true (gr8s.network::refresh-service-packet-pipelines dataplane (rest paths) :budget 1 :refresh #'refresh))
+      (is-false (gethash "/pins/a/" (gr8s::service-lb-dataplane-upgrade-cache dataplane)))
+      (is (= 3 (gr8s::service-lb-dataplane-upgrade-completed dataplane))))))
