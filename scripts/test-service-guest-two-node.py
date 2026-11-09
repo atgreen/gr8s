@@ -68,6 +68,8 @@ def main():
     report = {"root": str(smoke.root), "checks": [], "overlay": smoke.overlay,
               "kataSHA256": args.kata_sha256, "agentReconnectTimeoutMs": args.kata_agent_timeout_ms}
 
+    traces = []
+
     def save():
         (args.report_directory / "report.json").write_text(json.dumps(report, indent=2) + "\n")
 
@@ -296,6 +298,27 @@ def main():
             hold_stop = "/tmp/gr8s-held-tcp.stop"
             hold_exit = "/tmp/gr8s-held-tcp.exit"
             local_port = 25092
+            # Capture on both sides of the node veth/guest tap path. These
+            # processes belong to the fixture and survive agent shutdown.
+            namespaces = smoke.in_node(0, "find", smoke.root /
+                "agent-0/containerd/run/io.containerd.grpc.v1.cri/netns",
+                "-mindepth", "1", "-maxdepth", "1").stdout.splitlines()
+            pod_namespace = None
+            for namespace in namespaces:
+                addresses = json.loads(smoke.in_node(0, "nsenter", f"--net={namespace}", "--",
+                                                     "ip", "-j", "addr", "show").stdout)
+                if any(a.get("local") == client_ip for link in addresses for a in link.get("addr_info", [])):
+                    pod_namespace = namespace
+                    break
+            if pod_namespace is None:
+                raise RuntimeError("client network namespace not found for TCP trace")
+            prefix = ["nsenter", f"--mount=/proc/{smoke.keepers[0].pid}/ns/mnt",
+                      f"--net=/run/netns/{smoke.namespaces[0]}", "--"]
+            for label, extra in (("node", []), ("pod", ["nsenter", f"--net={pod_namespace}", "--"])):
+                trace_path = args.report_directory / f"held-tcp-{label}-trace.jsonl"
+                traces.append(subprocess.Popen(prefix + extra + ["python3", str(Path(guest.__file__).resolve()),
+                              "--trace-tcp", str(local_port), str(trace_path)]))
+                overlay.wait_for(f"{label} TCP trace starts", trace_path.exists, timeout=10)
             smoke.kubectl("exec", CLIENT, "--", "sh", "-c",
                            f"rm -f {hold_log} {hold_stop} {hold_exit}; "
                            f"({probe_path} {reuse_vip} {local_port} hold {hold_stop} "
@@ -338,6 +361,9 @@ def main():
             check("guestTcpHeldSelectorChanged", fresh["body"] == alternate, fresh)
             for index in range(2):
                 before_maps = map_ids(index)
+                report.setdefault("heldRestartSnapshots", []).append(
+                    {"node": index, "maps": before_maps, "state": tcp_state(), "atMs": time.time_ns() // 1000000})
+                save()
                 smoke.agents[index].send_signal(signal.SIGTERM)
                 smoke.agents[index].wait(timeout=180)
                 smoke.agents[index] = None
@@ -358,7 +384,11 @@ def main():
                       offline_state["flags"] & 4 and not offline_state["flags"] & 384,
                       {"before": stopped_state, "after": offline_state,
                        "agentDownSeconds": time.monotonic() - down_started})
+                report["heldRestartSnapshots"][-1]["beforeStartMs"] = time.time_ns() // 1000000
+                save()
                 smoke.start_agent(index)
+                report["heldRestartSnapshots"][-1]["readyMs"] = time.time_ns() // 1000000
+                save()
                 # Establish a baseline after readiness, then require a later
                 # response; pre-restart log lines cannot satisfy this check.
                 previous = held_responses()[-1]["request"]
@@ -426,6 +456,7 @@ def main():
         if args.tcp_restart and "tcp_state" in locals():
             try:
                 report["failureTcpState"] = tcp_state()
+                report["failurePacketCounters"] = {str(i): counters(i) for i in range(2)}
                 if "map_ids" in locals():
                     report["failureMapIds"] = {str(i): map_ids(i) for i in range(2)}
                 if "hold_exit" in locals():
@@ -440,6 +471,10 @@ def main():
             except Exception:
                 pass
     finally:
+        for trace in traces:
+            if trace.poll() is None:
+                trace.terminate()
+            trace.wait(timeout=10)
         if args.tcp_client and smoke.server and smoke.server.poll() is None:
             try:
                 smoke.kubectl("delete", "pod", "tcp-alternate", "--ignore-not-found", "--wait=false", check=False)
