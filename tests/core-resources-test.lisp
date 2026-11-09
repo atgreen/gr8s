@@ -122,6 +122,35 @@
          journal-path (concatenate 'string (com.inuoe.jzon:stringify record) (string #\Newline)))
         (signals error (open-store path))))))
 
+(test secret-encryption-rotation-stages-retain-old-keys-until-reencrypted
+  (with-temporary-store (store path)
+    (gr8s::enable-secret-encryption store)
+    (gr8s::create-core-resource
+     store "secrets"
+     (core-fixture "Secret" "credentials"
+                   "data" (gr8s::core-object "password" "cm90YXRpb24tc2VudGluZWw="))
+     "default")
+    (let* ((initial-status (gr8s::secret-encryption-status store))
+           (old-id (gethash "activeKeyId" initial-status))
+           (prepared-id (gr8s::prepare-secret-encryption-key store)))
+      (is (not (equal old-id prepared-id)))
+      (is (equal prepared-id
+                 (gethash "preparedKeyId" (gr8s::secret-encryption-status store))))
+      (gr8s::promote-secret-encryption-key store)
+      (is (equal prepared-id
+                 (gethash "activeKeyId" (gr8s::secret-encryption-status store))))
+      (signals error (gr8s::finalize-secret-encryption-key store))
+      (gr8s::reencrypt-secrets store)
+      (gr8s::finalize-secret-encryption-key store)
+      (let* ((status (gr8s::secret-encryption-status store))
+             (keys (gethash "keys" status))
+             (checkpoint (uiop:read-file-string (gr8s::core-resource-state-path store))))
+        (is (= 1 (length keys)))
+        (is (equal prepared-id (gethash "id" (aref keys 0))))
+        (is (null (search old-id checkpoint)))
+        (is (gr8s::get-core-resource (open-store path)
+                                     "secrets" "default" "credentials"))))))
+
 (test invalid-core-resource-input-is-rejected-without-changing-state
   (with-temporary-store (store path)
     (values path)

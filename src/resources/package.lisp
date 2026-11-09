@@ -19,13 +19,19 @@
    #:create-core-resource
    #:delete-core-resource
    #:enable-secret-encryption
+   #:finalize-secret-encryption-key
    #:get-core-resource
    #:get-core-resource-unlocked
+   #:install-secret-encryption-command
    #:install-core-state-blob
    #:install-core-state-delta
    #:list-core-resources
    #:load-core-resources
    #:normalize-core-resource
+   #:prepare-secret-encryption-key
+   #:promote-secret-encryption-key
+   #:reencrypt-secrets
+   #:secret-encryption-status
    #:stored-resource-type
    #:update-core-resource
    #:with-crd-deferred-conversions))
@@ -51,13 +57,19 @@
                     "CREATE-CORE-RESOURCE"
                     "DELETE-CORE-RESOURCE"
                     "ENABLE-SECRET-ENCRYPTION"
+                    "FINALIZE-SECRET-ENCRYPTION-KEY"
                     "GET-CORE-RESOURCE"
                     "GET-CORE-RESOURCE-UNLOCKED"
+                    "INSTALL-SECRET-ENCRYPTION-COMMAND"
                     "INSTALL-CORE-STATE-BLOB"
                     "INSTALL-CORE-STATE-DELTA"
                     "LIST-CORE-RESOURCES"
                     "LOAD-CORE-RESOURCES"
                     "NORMALIZE-CORE-RESOURCE"
+                    "PREPARE-SECRET-ENCRYPTION-KEY"
+                    "PROMOTE-SECRET-ENCRYPTION-KEY"
+                    "REENCRYPT-SECRETS"
+                    "SECRET-ENCRYPTION-STATUS"
                     "STORED-RESOURCE-TYPE"
                     "UPDATE-CORE-RESOURCE"
                     "WITH-CRD-DEFERRED-CONVERSIONS"))

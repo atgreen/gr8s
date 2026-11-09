@@ -23,12 +23,60 @@
   (let ((object (ignore-errors (gr8s::get-core-resource store "configmaps" "default" name))))
     (and object (gethash key (gethash "data" object)))))
 
+(defun ha-secret-input (name value)
+  (gr8s::core-object
+   "apiVersion" "v1" "kind" "Secret"
+   "metadata" (gr8s::core-object "name" name "namespace" "default")
+   "data" (gr8s::core-object "password" value)))
+
+(defun ha-secret-value (store name)
+  (let ((object (gr8s::get-core-resource store "secrets" "default" name)))
+    (and object (gethash "password" (gethash "data" object)))))
+
 (defun apply-ha-core-command (store command)
   "Apply one captured HA core command to STORE, as the Raft state machine does."
   (case (first command)
     (:core-state (gr8s::install-core-state-blob store (second command)))
     (:core-delta (gr8s::install-core-state-delta store (second command)))
+    (:secrets-encryption
+     (gr8s::install-secret-encryption-command store (second command)))
     (t (error "Unsupported HA core command ~S" (first command)))))
+
+(test secret-encryption-and-key-rotation-replicate-without-plaintext
+  (with-temporary-store (leader leader-path)
+    (with-temporary-store (follower follower-path)
+      ;; HA members share the cluster CA identity from which encryption keys are
+      ;; derived, but never replicate the derived keys themselves.
+      (gr8s::ensure-cluster-pki leader-path)
+      (ensure-directories-exist (merge-pathnames "pki/cluster-ca.key" follower-path))
+      (uiop:copy-file (merge-pathnames "pki/cluster-ca.key" leader-path)
+                      (merge-pathnames "pki/cluster-ca.key" follower-path))
+      (let ((commands '()))
+        (setf (gr8s::pod-store-consensus-commit-fn leader)
+              (lambda (tag payload)
+                (push (list tag payload) commands)
+                (apply-ha-core-command leader (list tag payload))
+                (apply-ha-core-command follower (list tag payload))))
+        (gr8s::enable-secret-encryption leader)
+        (gr8s::create-core-resource
+         leader "secrets" (ha-secret-input "credentials" "cmFmdC1zZW50aW5lbA==")
+         "default")
+        (is (equal "cmFmdC1zZW50aW5lbA=="
+                   (ha-secret-value follower "credentials")))
+        (is (null (search "cmFmdC1zZW50aW5lbA=="
+                          (second (find :core-delta commands :key #'first))))
+            "the Raft delta contains only ciphertext")
+        (let ((next-key (gr8s::prepare-secret-encryption-key leader)))
+          (gr8s::promote-secret-encryption-key leader)
+          (gr8s::reencrypt-secrets leader)
+          (gr8s::finalize-secret-encryption-key leader)
+          (is (equal next-key
+                     (gethash "activeKeyId"
+                              (gr8s::secret-encryption-status follower))))
+          (is (equal "cmFmdC1zZW50aW5lbA=="
+                     (ha-secret-value follower "credentials")))
+          (is (= 1 (length (gethash "keys"
+                                    (gr8s::secret-encryption-status follower))))))))))
 
 (test stale-member-core-commands-preserve-unrelated-commits
   ;; Two members can prepare writes from the same committed base before either
@@ -79,6 +127,8 @@
                     (case (car command)
                       (:core-state (gr8s::install-core-state-blob store (second command)))
                       (:core-delta (gr8s::install-core-state-delta store (second command)))
+                      (:secrets-encryption
+                       (gr8s::install-secret-encryption-command store (second command)))
                       (:pod-state (gr8s::install-pod-state-blob store (second command)))
                       (:pod-delta (gr8s::install-pod-state-delta store (second command)))
                       (:node-state (gr8s::install-node-state-blob store (second command)))

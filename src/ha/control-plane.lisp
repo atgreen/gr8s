@@ -50,6 +50,8 @@
                        (case (car command)
                          (:core-state (gr8s::install-core-state-blob store (second command)))
                          (:core-delta (gr8s::install-core-state-delta store (second command)))
+                         (:secrets-encryption
+                          (gr8s::install-secret-encryption-command store (second command)))
                          ;; Install every committed state on every member. This is
                          ;; idempotent for a leader-local write and necessary when
                          ;; the leader committed a proposal forwarded by a follower.
