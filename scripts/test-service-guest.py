@@ -30,7 +30,7 @@ traffic = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(traffic)
 
 
-def packet_counters(cluster):
+def read_packet_counters(path):
     """Read the actual shared TC counters without creating another dataplane."""
     libc = ctypes.CDLL(None, use_errno=True)
     number = {"x86_64": 321, "aarch64": 280}[platform.machine()]
@@ -42,7 +42,6 @@ def packet_counters(cluster):
             raise OSError(ctypes.get_errno(), os.strerror(ctypes.get_errno()))
         return result
 
-    path = cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_pkt_stats"
     name = ctypes.create_string_buffer(os.fsencode(path))
     fd = bpf(7, struct.pack("<QII", ctypes.addressof(name), 0, 0))
     try:
@@ -57,6 +56,10 @@ def packet_counters(cluster):
         os.close(fd)
 
 
+def packet_counters(cluster):
+    return read_packet_counters(cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_pkt_stats")
+
+
 def dial(address, destination, port, protocol, request):
     query = urllib.parse.urlencode({"host": destination, "port": port,
                                    "protocol": protocol, "request": request, "tries": 1})
@@ -68,9 +71,9 @@ def dial(address, destination, port, protocol, request):
     return status, body
 
 
-def configure_test_kata(cluster, timeout_ms):
+def configure_test_kata(cluster, timeout_ms, *, addon_root=None):
     """Allow slow nested boots and retain guest diagnostics in this test only."""
-    root = cluster.root / "state/runtime-addons/kata"
+    root = addon_root or cluster.root / "state/runtime-addons/kata"
     descriptor = root / "addon.json"
     addon = json.loads(descriptor.read_text())
     config = Path(addon["options"]["ConfigPath"])
@@ -209,4 +212,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--read-packet-counters":
+        print(json.dumps(read_packet_counters(Path(sys.argv[2]))))
+    else:
+        main()
