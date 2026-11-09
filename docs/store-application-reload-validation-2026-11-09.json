@@ -59,5 +59,14 @@
     "Power-loss and full cluster restart/failover acceptance",
     "Automatic compaction"
   ],
-  "fullGoalComplete": false
+  "fullGoalComplete": false,
+  "integrationValidation": {
+    "implementation": "e73fc4f",
+    "validatedTree": "1abd2b0",
+    "integratedMain": "3f7b557",
+    "passed": true,
+    "evidence": "store-image-tracker-snapshot-validation-2026-11-09.json",
+    "checks": 510,
+    "note": "Supersedes pre-integration native build and memory counts above. Includes preserved tracker handle with replaced replicated contents and service-account rotation regression checks."
+  }
 }

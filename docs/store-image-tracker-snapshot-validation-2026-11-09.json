@@ -1,0 +1,78 @@
+{
+  "date": "2026-11-09",
+  "scope": "Replicated tracker capture, validation, generation materialization, startup and same-store reload",
+  "implementationCommit": "e73fc4f",
+  "integratedMain": "3f7b557",
+  "passed": true,
+  "checks": 25,
+  "suite": "store-image-tracker-snapshot",
+  "coverage": [
+    "Exact lease tokens/expiry and policy roundtrip",
+    "Verified BEP52 metainfo/infohash and complete/incomplete peers roundtrip",
+    "Peers before swarm and configuration after data",
+    "Same tracker object, mutex and clock preserved on reload",
+    "State added after capture removed by reload",
+    "Cold reopen of selected generation",
+    "Duplicate config/origin/swarm/peer rejection",
+    "Missing config/swarm and origin-swarm conflicts rejected",
+    "Malformed binary fields rejected",
+    "Legacy snapshot loads empty tracker with default policy",
+    "Unsafe permissions, hard links, symbolic links and empty state files rejected"
+  ],
+  "memory": {
+    "passed": true,
+    "heapMiB": 384,
+    "records": 1024,
+    "validatedRecords": 1028,
+    "materializedRecords": 1028,
+    "residentResourcesAfterOperation": 1024,
+    "reloadedSameStore": true,
+    "payloadBytes": 67108864,
+    "artifactBytes": 67347600,
+    "legacy": false
+  },
+  "memoryScope": "Cached compilation; 64 MiB application payload. Empty tracker policy record included; tracker nonempty roundtrip covered by suite. Does not exercise active cluster compaction.",
+  "remaining": [
+    "Production node RPC/controller quiescence and real Raft/WAL recovery integration",
+    "Chunk large metainfo beyond current 2 MiB JSON string limit (podster-ucm.11.3.3.10)",
+    "Watch/revision boundary validation and automatic compaction"
+  ],
+  "fullGoalComplete": false,
+  "validatedTree": "1abd2b0",
+  "mergedValidation": {
+    "passed": true,
+    "checks": 510,
+    "suites": {
+      "store-image-tracker-snapshot": 25,
+      "store-application-reload": 59,
+      "store-snapshot-materialize": 49,
+      "store-snapshot": 60,
+      "store-snapshot-index": 28,
+      "store-access-gate": 32,
+      "store-restore-intent": 50,
+      "ha-control-plane-replicates-image-tracker-leases-and-swarms": 22,
+      "service-accounts": 169,
+      "service-account-signing-key-rotation-cli-options-are-explicit": 8,
+      "service-account-signing-key-rotation-dispatches-through-the-public-cli": 8
+    },
+    "note": "Two misspelled suite selectors in initial aggregate command ran zero tests and are excluded; correctly named service-account suite and named CLI tests ran separately."
+  },
+  "nativeBuild": {
+    "passed": true,
+    "sha256": "1d61a83c04cfcf1ea0a042679a536794ad3a2f47bb8e2fed75db70c746df726a"
+  },
+  "nativePendingRestoreStartupAndRestart": {
+    "passed": true,
+    "native": true,
+    "runtime": "fake",
+    "evidence": "/tmp/gr8s-generation-native-pu4yvip2",
+    "generationLoaded": true,
+    "legacyPodExcluded": true,
+    "pendingRestoreRecovered": true,
+    "applicationWriteSurvivesRestart": true,
+    "podPublicationSurvivesRestart": true,
+    "memberPrivateFilePreserved": true,
+    "gracefulShutdown": true
+  },
+  "nativeScope": "Fake runtime, no root/container/BPF execution. Prebuilt generation without tracker file verifies legacy compatibility and pending intent recovery. Same-object and nonempty tracker behavior are covered by Lisp suites."
+}
