@@ -180,8 +180,13 @@ Retained entries from earlier agents keep compatibility tracking until a new
 SYN records option negotiation. The pinned TCP value remains 64 bytes with
 previously used field offsets preserved. See
 [the TCP option evidence](service-tcp-options-validation-2026-11-09.json).
-Complete TCP lifecycle coverage and established guest connections across agent
-restart remain unfinished.
+An actual guest regression keeps one TCP socket open across a selector change
+and both agents' graceful restarts. Fresh sockets reach the replacement backend;
+the established socket keeps its original backend, TCP initial sequences, map
+IDs and workload identity, exchanges data while each agent is stopped, and
+responds after fresh readiness returns. See
+[the established-flow restart evidence](service-established-restart-validation-2026-11-09.json).
+Complete TCP lifecycle coverage and abrupt restart validation remain unfinished.
 Kernel packet tests additionally cover program lifetime. Source NAT/hairpin,
 return-tuple collision resolution, IPv6 packet translation and external Service
 replacement remain in development. Hairpin and conflicting return tuples
@@ -533,6 +538,14 @@ not a fabricated failure, so a new node can still bootstrap. Peer ordering is a
 copy-only operation outside the tracker lock and cannot mutate swarm membership.
 
 ## Cross-node VXLAN
+
+Registered VXLAN peers retain their direct Pod CIDR routes while an agent's
+readiness lease expires. Existing Pods can keep exchanging traffic during an
+agent restart; readiness still expires for scheduling and Service endpoint
+selection. WireGuard gateway/transit readiness rules remain separate. The
+[restart regression](service-established-restart-validation-2026-11-09.json)
+reproduces the previous route withdrawal and verifies established guest traffic
+through both agents' graceful restarts.
 
 The native VXLAN backend uses static router neighbors and forwarding-database
 entries, preserving Pod source addresses across nodes. Isolated two-node kernel
