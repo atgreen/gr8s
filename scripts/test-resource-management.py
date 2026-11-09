@@ -106,6 +106,8 @@ class Smoke:
     def running(self, name):
         def check():
             p = self.get("pod", name)
+            if p and p.get("status", {}).get("phase") == "Failed":
+                raise AssertionError(f"{name} failed: {json.dumps(p['status'], sort_keys=True)}")
             return p if p and p.get("status", {}).get("phase") == "Running" else None
         return wait(check, f"{name} Running")
 
