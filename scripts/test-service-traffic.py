@@ -416,11 +416,20 @@ def main():
                     check(f"localNodePortKeepsOutsideClient{protocol}", address == OUTSIDE_CLIENT, seen)
                 else:
                     check(f"clusterNodePortShowsTheNode{protocol}", address != OUTSIDE_CLIENT, seen)
+        shared_root = cluster.root / "state/agent/containerd/bpf/service-lb"
+        shared_maps = [shared_root / ("gr8s_" + kind + "_" + family)
+                       for kind in ("service", "backend", "backend_index")
+                       for family in ("v4", "v6")]
+        check("serviceControlMapsArePinned", all(path.exists() for path in shared_maps),
+              [str(path) for path in shared_maps])
     except Exception as error:  # Every failure is still reported with partial observations.
         failures.append(f"exception: {error}")
     finally:
         subprocess.run(["ip", "netns", "del", OUTSIDE], capture_output=True, check=False)
         cluster.stop()
+        errors = [line.strip() for line in (cluster.root / "gr8s.log").read_text().splitlines()
+                  if "Service LB convergence failed:" in line]
+        check("serviceMapsConvergeWithoutErrors", not errors, errors)
         cluster.remove()
         report["failures"] = failures
         print(json.dumps(report, indent=2, default=str))
