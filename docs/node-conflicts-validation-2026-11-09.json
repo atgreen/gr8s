@@ -40,5 +40,26 @@
     "reclaimedPayloadBytes": 1048576,
     "liveOwnerPreserved": true,
     "gracefulShutdown": true
+  },
+  "mergedValidation": {
+    "sourceCommit": "b7b1654",
+    "integratedMain": "2213d75",
+    "checks": 326,
+    "suites": {
+      "ha-node-cidr": 77,
+      "service-lb": 249
+    },
+    "passed": true,
+    "nativeBuildPassed": true,
+    "nativeSha256": "24a904f2ac11d998bba98b5889308b4e3b85190a27f8e6882259bfd4ab8e5301",
+    "nativeStartupSmoke": {
+      "passed": true,
+      "native": true,
+      "runtime": "fake",
+      "evidence": "/tmp/gr8s-native-scratch-u6xwn3f9",
+      "reclaimedPayloadBytes": 1048576,
+      "liveOwnerPreserved": true,
+      "gracefulShutdown": true
+    }
   }
 }
