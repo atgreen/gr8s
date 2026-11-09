@@ -67,6 +67,8 @@ Timeout or failure before draining reopens access; no application data is change
   (bt:with-lock-held ((pod-store-lock store))
     (when (eq :draining (pod-store-access-blocked store))
       (store-access-unavailable "Application requests are still draining"))
+    (unless (pod-store-application-loaded-p store)
+      (store-access-unavailable "Application reload has not completed successfully"))
     (when (read-store-restore-intent (pod-store-path store))
       (store-access-unavailable "Application restore intent is still pending"))
     (unless (equal (store-data-path store)

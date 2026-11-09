@@ -319,3 +319,58 @@ Run the `store-access-gate` FiveAM suite for concurrent drain, rejected reads an
 writes, error cleanup, timeout recovery, generation checks and HTTP readiness.
 The [access gate evidence](store-access-gate-validation-2026-11-09.json) records the
 concurrency and HA proposal checks, adjacent suites, native smoke and heap probe.
+
+## Reloading the existing store object
+
+`gr8s.store::reload-store-application` takes the existing store and completed
+generation UUID. The access gate must already be fully drained and blocked. It
+preserves the store object, member paths, locks, configuration, signing-key object,
+consensus callback and watch configuration. It replaces application tables,
+controller state and transient watch journals, and invalidates verified-token,
+projected-token and Pod certificate caches. Local Events are discarded and may be
+regenerated. A test requires every store slot to have an explicit reload policy.
+
+The helper takes locks in this order: workload, credentials, consensus writer,
+caller-supplied member barrier, then raw store. It durably begins/selects the
+restore before dropping old application references. It resets application fields,
+runs a full GC, and loads the selected files into the same object. This avoids
+constructing a second fully loaded store. Load or recovery failures retain the
+intent and keep access blocked; retries use the same store and target generation.
+
+For an HA store, `:call-with-member-lock` and `:commit-recovery` are required
+function arguments. The first must invoke its thunk synchronously exactly once
+under the member lock. The second receives the target descriptor and reloaded
+store under the barriers; it must durably coordinate snapshot/applied-index/WAL
+recovery and must not reenter public store operations. The intent is removed only
+after that callback succeeds. These callbacks are integration contracts, not an
+implementation of production member recovery.
+
+Successful reload also leaves access blocked. The caller reopens it only after
+all recovery work succeeds. An explicit loaded-state flag prevents reopening
+following a partial reload, including failures after the intent was removed but
+before its directory synchronization completed. Derived caches and journals reset
+before loading; member identity files remain at the stable root.
+
+Caller-owned node ingress and controller/external object references must still be
+quiesced before invoking this helper. Snapshot applied/revision boundaries and
+watch resynchronization must be coordinated by the production integration; the
+loader's captured clocks alone are insufficient for arbitrary rollback. There is
+no automatic live installer or operator restore command using this helper yet.
+
+Run `store-application-reload` for same-object state, cache/identity preservation,
+failure retry, HA callback requirements and post-reload consensus-write/reopen
+coverage. To run capture, validation, materialization and same-object reload in the
+constrained-heap probe:
+
+```sh
+GR8S_SNAPSHOT_RELOAD=1 sbcl --dynamic-space-size 384 \
+  --noinform --non-interactive --load scripts/test-store-snapshot-memory.lisp
+```
+
+In reload mode, the old application is released before loading the target. The
+probe checks the restored resource count and a payload after reopening access;
+it does not claim that old and new full application heaps remain resident together.
+
+The [application reload evidence](store-application-reload-validation-2026-11-09.json)
+records the focused checks, same-object heap result, and the distinct scope of the
+native startup smoke. Production ingress and member/WAL integration remain pending.

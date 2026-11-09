@@ -624,14 +624,8 @@ renewals use the same compact one-key delta without changing resourceVersion."
       (save-consensus-pod-revision-unlocked store)
       (list :node-ok (nreverse results)))))
 
-(defun open-store (path)
-  "Open or create a durable store at PATH and rebuild its in-memory indexes."
-  (let* ((directory (uiop:ensure-directory-pathname path))
-         (store (make-pod-store directory))
-         (restore nil))
-    (ensure-directories-exist directory)
-    (setf restore (resume-store-restore-selection directory))
-    (setf (pod-store-data-root store) (selected-store-generation-root directory))
+(defun load-store-application-files (store)
+  "Load the selected application's files into empty indexes; caller owns synchronization."
     (ensure-directories-exist (nodes-path store))
     (dolist (file (directory (merge-pathnames "*.json" (store-data-path store))))
       (index-pod store (store-parse-pod file)))
@@ -643,6 +637,17 @@ renewals use the same compact one-key delta without changing resourceVersion."
     (load-pod-revision store)
     (load-consensus-pod-revision store)
     (load-pod-publications store)
+  store)
+
+(defun open-store (path)
+  "Open or create a durable store at PATH and rebuild its in-memory indexes."
+  (let* ((directory (uiop:ensure-directory-pathname path))
+         (store (make-pod-store directory))
+         (restore nil))
+    (ensure-directories-exist directory)
+    (setf restore (resume-store-restore-selection directory))
+    (setf (pod-store-data-root store) (selected-store-generation-root directory))
+    (load-store-application-files store)
     (when restore (finish-store-restore store restore))
     store))
 

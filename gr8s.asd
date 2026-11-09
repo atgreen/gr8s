@@ -113,7 +113,8 @@
                                            (:file "publications")
                                            (:file "journal")
                                            (:file "persistence")
-                                           (:file "pod-transactions")))
+                                           (:file "pod-transactions")
+                                           (:file "application-reload")))
                              (:module "raft/transport"
                               :serial t
                               :components ((:file "package")
@@ -493,6 +494,7 @@
                              (:file "store-snapshot-materialize-test")
                              (:file "store-restore-intent-test")
                              (:file "store-access-gate-test")
+                             (:file "store-application-reload-test")
                              (:file "pod-runtime-gaps-test")
                              (:file "hpa-controller-test")
                              (:file "resource-metrics-api-test")

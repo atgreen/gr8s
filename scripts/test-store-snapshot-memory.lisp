@@ -11,6 +11,9 @@
        (bytes 65536)
        (validated-count nil)
        (materialized-count nil)
+       (reload-descriptor nil)
+       (reloaded nil)
+       (reload (equal "1" (uiop:getenv "GR8S_SNAPSHOT_RELOAD")))
        (materialize (equal "1" (uiop:getenv "GR8S_SNAPSHOT_MATERIALIZE")))
        (legacy (equal "1" (uiop:getenv "GR8S_SNAPSHOT_LEGACY"))))
   (sb-posix:mkdir (namestring directory) #o700)
@@ -37,17 +40,28 @@
                (setf validated-count
                      (nth-value 2 (gr8s.resources::validate-store-snapshot
                                    target :expected-index 1 :expected-term 1)))))
-         (when (and materialize (not legacy))
-           (setf materialized-count
-                 (nth-value 2 (gr8s.resources::materialize-store-snapshot
-                               directory target
-                               (gr8s.raft.transport::raft-snapshot-file-digest target)
-                               :expected-index 1 :expected-term 1))))
-         (format t "~&~A~%"
-                 (com.inuoe.jzon:stringify
-                  (gr8s::core-object "passed" t "legacy" legacy "records" count
-                                    "validatedRecords" validated-count "materializedRecords" materialized-count
-                                    "residentSourceResources" (hash-table-count (gr8s::pod-store-resources store))
-                                    "payloadBytes" (* count bytes)
-                                    "artifactBytes" (sb-posix:stat-size (sb-posix:stat (namestring target)))))))
+         (when (and (or materialize reload) (not legacy))
+           (multiple-value-bind (path descriptor records)
+               (gr8s.resources::materialize-store-snapshot
+                directory target (gr8s.raft.transport::raft-snapshot-file-digest target)
+                :expected-index 1 :expected-term 1)
+             (declare (ignore path))
+             (setf materialized-count records reload-descriptor descriptor)))
+         (when (and reload (not legacy))
+           (gr8s.store::quiesce-store-access store :timeout 0)
+           (setf reloaded (eq store (gr8s.store::reload-store-application
+                                     store (gethash "generation" reload-descriptor))))
+           (gr8s.store::resume-store-access store)
+           (assert (= count (hash-table-count (gr8s::pod-store-resources store))))
+           (let ((object (gr8s::get-core-resource store "configmaps" "default" (format nil "config-~D" (1- count)))))
+             (assert (= bytes (length (gethash "payload" (gethash "data" object)))))))
+         (let ((result (gr8s::core-object
+                        "passed" t "legacy" legacy "records" count
+                        "validatedRecords" validated-count "materializedRecords" materialized-count
+                        "residentResourcesAfterOperation" (hash-table-count (gr8s::pod-store-resources store))
+                        "reloadedSameStore" reloaded "payloadBytes" (* count bytes)
+                        "artifactBytes" (sb-posix:stat-size (sb-posix:stat (namestring target))))))
+           (unless reloaded
+             (setf (gethash "residentSourceResources" result) (hash-table-count (gr8s::pod-store-resources store))))
+           (format t "~&~A~%" (com.inuoe.jzon:stringify result))))
     (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore)))

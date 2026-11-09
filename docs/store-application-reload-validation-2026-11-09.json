@@ -1,0 +1,63 @@
+{
+  "date": "2026-11-09",
+  "scope": "Same-store application reset/reload with drained access and explicit HA recovery hooks; production ingress/member integration pending",
+  "passed": true,
+  "checks": 269,
+  "suites": {
+    "store-application-reload": 59,
+    "store-access-gate": 32,
+    "store-restore-intent": 50,
+    "store-snapshot-materialize": 49,
+    "pod-publications": 14,
+    "pod-transactions": 65
+  },
+  "nativeBuild": {
+    "passed": true,
+    "sha256": "619a6e3a78af957141da849647dbfae080495e87bd99d309b07af02ab9a3a560"
+  },
+  "nativePendingIntentStartupAndRestart": {
+    "passed": true,
+    "native": true,
+    "runtime": "fake",
+    "evidence": "/tmp/gr8s-generation-native-5jeer_dq",
+    "generationLoaded": true,
+    "legacyPodExcluded": true,
+    "pendingRestoreRecovered": true,
+    "applicationWriteSurvivesRestart": true,
+    "podPublicationSurvivesRestart": true,
+    "memberPrivateFilePreserved": true,
+    "gracefulShutdown": true
+  },
+  "nativeScopeNote": "Native smoke tests pending-intent startup/restart and API publication persistence. Same-object reload is tested by Lisp suites and heap probe; HA member/recovery callbacks are test doubles, not production WAL coordination. Fake runtime; no root/container/BPF execution.",
+  "memory": {
+    "passed": true,
+    "legacy": false,
+    "records": 1024,
+    "validatedRecords": 1027,
+    "materializedRecords": 1027,
+    "residentResourcesAfterOperation": 1024,
+    "reloadedSameStore": true,
+    "payloadBytes": 67108864,
+    "artifactBytes": 67347524,
+    "heapMiB": 384
+  },
+  "memoryMode": "Cached compilation. Capture/validation/materialization retain source; reload resets source application fields, performs GC, loads target on same object, reopens access and checks1024 resources plus a64KiB payload. Does not retain two full application indexes or exercise active-cluster ingress drain.",
+  "coverage": [
+    "Every store slot explicitly classified for reset or retention",
+    "Same store identity, locks, member config, actual signing-key object/file and consensus callback preserved",
+    "Application/watch state and derived credential/projection/certificate caches reset",
+    "Reload and recovery-ack failures retain intent and blocked access; same-object retry works",
+    "HA requires synchronous member barrier and durable recovery callback; reload proposes no commands",
+    "Post-reload consensus Pod write persists in selected generation across reopen",
+    "Intent unlink sync failure cannot reopen access even when intent is already absent"
+  ],
+  "remaining": [
+    "Node RPC/controller/external-reference ingress quiescence before production live invocation",
+    "Actual member snapshot/applied-index/WAL recovery hooks and coordinated startup",
+    "Snapshot revision boundaries/watch continuity (podster-ucm.11.3.3.8)",
+    "Artifact/incomplete-generation lifetime and reclamation",
+    "Power-loss and full cluster restart/failover acceptance",
+    "Automatic compaction"
+  ],
+  "fullGoalComplete": false
+}

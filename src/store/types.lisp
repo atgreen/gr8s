@@ -10,6 +10,7 @@
   path
   data-root
   access-blocked
+  (application-loaded-p t)
   (active-requests 0)
   (access-condition (bt:make-condition-variable :name "gr8s application access"))
   (pods (make-hash-table :test #'equal))
