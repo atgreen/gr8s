@@ -154,6 +154,26 @@
               27))))
     (is (eq t called))))
 
+(test cli-treats-a-closed-output-pipe-as-success
+  (multiple-value-bind (read-descriptor write-descriptor) (sb-posix:pipe)
+    (sb-posix:close read-descriptor)
+    (let ((output (sb-sys:make-fd-stream write-descriptor
+                                         :output t
+                                         :element-type 'character
+                                         :buffering :none
+                                         :auto-close t))
+          (status nil)
+          (closed nil))
+      (unwind-protect
+           (let ((*standard-output* output)
+                 (*error-output* (make-broadcast-stream)))
+             (setf status (gr8s::main-with-environment
+                           '("help") (constantly nil) (constantly 99))
+                   closed (not (open-stream-p output))))
+        (ignore-errors (close output)))
+      (is (= 0 status))
+      (is-true closed))))
+
 (test runtime-list-command-reports-the-dumped-payload
   ;; #161 replaced the runtime-assets command with `runtime list`.
   (let ((options (parse-cli-options '("runtime" "list" "--state-directory" "/tmp/gr8s-runtime-list-test/"))))
