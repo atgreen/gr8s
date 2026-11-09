@@ -34,6 +34,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gr8s", default="build/gr8s")
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--pending-restore", action="store_true",
+                        help="Seed a restore intent instead of an active selector")
     args = parser.parse_args()
     evidence = Path(tempfile.mkdtemp(prefix="gr8s-generation-native-"))
     state = evidence / "state"
@@ -44,7 +46,8 @@ def main():
     descriptor = dict(format="gr8s-store-generation", version=1, generation=generation_id,
                       index=42, term=7, artifactSha256="a" * 64)
     private_json(generation / "generation.meta", descriptor)
-    private_json(state / "metadata" / "application-generation.json", descriptor)
+    private_json(state / "metadata" / ("application-restore.json" if args.pending_restore
+                                       else "application-generation.json"), descriptor)
     namespace = dict(apiVersion="v1", kind="Namespace", metadata=dict(
         name="default", uid="11111111-1111-4111-8111-111111111111", resourceVersion="1"))
     config = dict(apiVersion="v1", kind="ConfigMap", metadata=dict(
@@ -99,6 +102,8 @@ def main():
                         if time.monotonic() >= deadline:
                             raise RuntimeError("native server did not become ready")
                         time.sleep(0.1)
+                assert not (state / "metadata" / "application-restore.json").exists(), "restore intent survived successful startup"
+                assert (state / "metadata" / "application-generation.json").exists(), "startup did not select generation"
                 found = request("/api/v1/namespaces/default/configmaps/generation-config")
                 assert found["data"]["source"] == "generation", "selected generation was not loaded"
                 try:
@@ -129,6 +134,7 @@ def main():
                 process.wait(timeout=20)
                 assert process.returncode == 0, f"shutdown returned {process.returncode}"
         result.update(passed=True, generationLoaded=True, legacyPodExcluded=True,
+                      pendingRestoreRecovered=args.pending_restore,
                       applicationWriteSurvivesRestart=True, podPublicationSurvivesRestart=True,
                       memberPrivateFilePreserved=True,
                       gracefulShutdown=True)

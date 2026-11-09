@@ -1,0 +1,59 @@
+{
+  "date": "2026-11-09",
+  "scope": "Durable application restore intent and startup generation recovery; no live restore or Raft recovery acknowledgement",
+  "passed": true,
+  "checks": 159,
+  "suites": {
+    "store-restore-intent": 50,
+    "store-snapshot-materialize": 49,
+    "store-generation": 46,
+    "pod-publications": 14
+  },
+  "nativeBuild": {
+    "passed": true,
+    "sha256": "91b1b783691b2a66ff68c1077055c376fa702a37c57355a67960e0f4b2701045"
+  },
+  "nativePendingIntentStartupAndRestart": {
+    "passed": true,
+    "native": true,
+    "runtime": "fake",
+    "evidence": "/tmp/gr8s-generation-native-xttth5pb",
+    "generationLoaded": true,
+    "legacyPodExcluded": true,
+    "pendingRestoreRecovered": true,
+    "applicationWriteSurvivesRestart": true,
+    "podPublicationSurvivesRestart": true,
+    "memberPrivateFilePreserved": true,
+    "gracefulShutdown": true
+  },
+  "nativeScopeNote": "Probe seeds a complete generation and pending intent, not a live install. Native startup resumes it before serving data, clears it after application load, and survives another restart. Fake runtime; no root/container/BPF execution.",
+  "memory": {
+    "passed": true,
+    "legacy": false,
+    "records": 1024,
+    "validatedRecords": 1027,
+    "materializedRecords": 1027,
+    "residentSourceResources": 1024,
+    "payloadBytes": 67108864,
+    "artifactBytes": 67347524,
+    "heapMiB": 384,
+    "sourceStoreResident": true
+  },
+  "coverage": [
+    "Pending intent selected before startup data loading; old store object stays unchanged",
+    "Reload failure retains intent and permits retry after repair",
+    "Conflicting intents/selection rejected; same target and successful finish are idempotent",
+    "Nonprivate intent and marker mismatch fail startup",
+    "Pre-selector write failure retains intent",
+    "Post-intent and post-selector rename sync errors report uncertainty and recover on open",
+    "Intent unlink sync failure reports uncertainty; complete selected target remains available for retry"
+  ],
+  "remaining": [
+    "Block reads/writes on an existing live store and reload in place without retaining two application heaps",
+    "Coordinate restore intent with production member snapshot descriptor, applied index and WAL recovery",
+    "Incomplete-generation and artifact lifetime/reclamation",
+    "Power-loss and full restart/failover acceptance",
+    "Automatic compaction"
+  ],
+  "fullGoalComplete": false
+}

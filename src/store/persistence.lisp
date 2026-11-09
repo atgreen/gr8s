@@ -627,8 +627,10 @@ renewals use the same compact one-key delta without changing resourceVersion."
 (defun open-store (path)
   "Open or create a durable store at PATH and rebuild its in-memory indexes."
   (let* ((directory (uiop:ensure-directory-pathname path))
-         (store (make-pod-store directory)))
+         (store (make-pod-store directory))
+         (restore nil))
     (ensure-directories-exist directory)
+    (setf restore (resume-store-restore-selection directory))
     (setf (pod-store-data-root store) (selected-store-generation-root directory))
     (ensure-directories-exist (nodes-path store))
     (dolist (file (directory (merge-pathnames "*.json" (store-data-path store))))
@@ -641,6 +643,7 @@ renewals use the same compact one-key delta without changing resourceVersion."
     (load-pod-revision store)
     (load-consensus-pod-revision store)
     (load-pod-publications store)
+    (when restore (finish-store-restore store restore))
     store))
 
 (defun get-pod-unlocked (store namespace name)

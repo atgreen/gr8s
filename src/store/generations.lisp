@@ -154,6 +154,72 @@ This helper does not change an existing store object's indexes or data-root."
   (let* ((root (uiop:ensure-directory-pathname root))
          (descriptor (checked-store-generation-descriptor root id))
          (selector (store-generation-selector-path root)))
+    (let ((intent (read-store-restore-intent root)))
+      (when (and intent (not (store-generation-descriptor-equal-p intent descriptor)))
+        (error "Generation selection conflicts with pending application restore")))
     (selected-store-generation-root root) ; never silently overwrite malformed selection
     (ensure-store-generation-directory (uiop:pathname-directory-pathname selector) root :metadata t)
     (write-store-generation-descriptor selector descriptor :replace t)))
+
+
+(defun store-generation-descriptor-equal-p (left right)
+  (and (= (hash-table-count left) (hash-table-count right))
+       (loop for key being the hash-keys of left
+             always (equal (gethash key left) (gethash key right)))))
+
+(defun store-restore-intent-path (root)
+  (merge-pathnames "metadata/application-restore.json" (uiop:ensure-directory-pathname root)))
+
+(defun read-store-restore-intent (root)
+  "An intent is the exact immutable target descriptor, never executable data."
+  (let ((path (store-restore-intent-path root)))
+    (when (store-generation-stat path)
+      (check-store-generation-directory (uiop:pathname-directory-pathname path) :metadata t)
+      (let* ((intent (read-store-generation-descriptor path))
+             (complete (checked-store-generation-descriptor root (gethash "generation" intent))))
+        (unless (store-generation-descriptor-equal-p intent complete)
+          (error "Application restore intent does not match its complete generation"))
+        intent))))
+
+(defun begin-store-restore (root id)
+  "Durably commit to selecting a complete application generation.
+Caller must quiesce live access and coordinate the member's applied/WAL boundary.
+This function neither selects nor changes any existing store object's indexes."
+  (let* ((root (uiop:ensure-directory-pathname root))
+         (descriptor (checked-store-generation-descriptor root id))
+         (path (store-restore-intent-path root))
+         (pending (read-store-restore-intent root)))
+    (selected-store-generation-root root) ; reject malformed existing selection
+    (when (and pending (not (store-generation-descriptor-equal-p pending descriptor)))
+      (error "Another application restore is pending"))
+    (ensure-store-generation-directory (uiop:pathname-directory-pathname path) root :metadata t)
+    (if pending
+        (sync-store-generation-directory (uiop:pathname-directory-pathname path))
+        (write-store-generation-descriptor path descriptor))
+    descriptor))
+
+(defun resume-store-restore-selection (root)
+  "Resume pending selection BEFORE loading or exposing application data.
+Keep the intent until application loading succeeds. Never roll back an intent."
+  (let ((intent (read-store-restore-intent root)))
+    (when intent
+      (publish-store-generation root (gethash "generation" intent))
+      intent)))
+
+(defun finish-store-restore (store descriptor)
+  "Clear the intent only after the selected application's indexes loaded successfully.
+This acknowledges application loading, not production Raft/WAL recovery."
+  (let* ((root (pod-store-path store))
+         (target (store-generation-root root (gethash "generation" descriptor)))
+         (selected (selected-store-generation-root root))
+         (pending (read-store-restore-intent root))
+         (selector (read-store-generation-descriptor (store-generation-selector-path root)))
+         (path (store-restore-intent-path root)))
+    (unless (and (equal selected target) (equal (store-data-path store) target)
+                 (store-generation-descriptor-equal-p descriptor selector)
+                 (or (null pending) (store-generation-descriptor-equal-p pending descriptor)))
+      (error "Cannot finish application restore from another generation"))
+    (when pending (sb-posix:unlink (namestring path)))
+    ;; Also synchronize on idempotent retry after an uncertain unlink sync.
+    (sync-store-generation-directory (uiop:pathname-directory-pathname path))
+    store))

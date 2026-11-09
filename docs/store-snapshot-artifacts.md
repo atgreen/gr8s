@@ -154,8 +154,8 @@ the configured record limit. The constrained-heap probe now exercises this full
 validation pass with the source store still resident. The `store-snapshot-index`
 FiveAM suite covers these cross-record checks. The [validation evidence](store-snapshot-index-validation-2026-11-09.json)
 records the focused suites and constrained-heap probe. The materializer below
-consumes validated records. Durable restore intent, live reload and Raft/WAL
-coordination remain pending; this validator does not select or restore a generation.
+consumes validated records. Coordination of restore intent with live reload and
+Raft/WAL recovery remains pending; this validator does not select or restore a generation.
 
 ## Durable Pod publications
 
@@ -241,5 +241,46 @@ GR8S_SNAPSHOT_MATERIALIZE=1 sbcl --dynamic-space-size 384 \
   --noinform --non-interactive --load scripts/test-store-snapshot-memory.lisp
 ```
 
-Durable restore intent, atomic live selection/reload, interrupted-install recovery,
-production WAL integration and automatic compaction remain separate required work.
+The startup intent protocol below handles interrupted application selection. Atomic
+live selection/reload, production WAL integration, full interrupted-install recovery
+and automatic compaction remain separate required work.
+
+## Recovering an interrupted application selection
+
+`gr8s.store::begin-store-restore` takes a member root and a completed generation
+UUID. It synchronizes a private `metadata/application-restore.json` intent naming
+the exact target descriptor. Calling it again for the same target is idempotent;
+a different pending target is rejected. The caller must first quiesce live access
+and coordinate the member's applied/WAL boundary. Beginning an intent does not
+change the selector or an existing store object's application indexes.
+
+`open-store` checks for an intent before loading any application files. It verifies
+that the target still has its matching completion marker, publishes the target
+selector, and loads that generation's application state and clocks. Only after
+loading succeeds does it unlink the intent and synchronize the metadata directory.
+Invalid intents or a failed reload stop startup instead of exposing the old data.
+A later startup retries the same target; an intent is never rolled back to an old
+generation. Selection helpers reject targets that conflict with a pending intent.
+
+These operations use the same bounded, owned, mode-0600 metadata format and
+no-symlink validation as generation selection. A directory synchronization failure
+after a rename or unlink reports uncertainty: publication or removal may already
+be visible. A retained intent is resumed on the next open; an already removed
+intent leaves the complete selected generation in place. `finish-store-restore`
+can be retried after a successful reload, but refuses to acknowledge an existing
+store object still pointing at another generation.
+
+The `store-restore-intent` suite exercises selection, reload and metadata failure
+boundaries. The [restore intent evidence](store-restore-intent-validation-2026-11-09.json)
+records the focused checks, native pending-intent startup and heap probe. The native probe accepts `--pending-restore` to seed an intent instead
+of a selector, then checks startup recovery and the next process restart:
+
+```sh
+python3 scripts/test-store-generation-native.py --gr8s build/gr8s --pending-restore
+```
+
+This acknowledges application startup loading only. It does not update a Raft
+member's stable snapshot descriptor, applied index or WAL, and it does not block
+readers of an already running store. Durable live restore, reader blocking/reload,
+member/WAL recovery coordination, reclamation and power-loss acceptance remain
+required before production snapshot installation can use this path.

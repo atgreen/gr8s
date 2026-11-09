@@ -490,6 +490,7 @@
                              (:file "store-snapshot-index-test")
                              (:file "store-generation-test")
                              (:file "store-snapshot-materialize-test")
+                             (:file "store-restore-intent-test")
                              (:file "pod-runtime-gaps-test")
                              (:file "hpa-controller-test")
                              (:file "resource-metrics-api-test")
