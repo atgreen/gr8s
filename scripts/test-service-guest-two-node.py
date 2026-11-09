@@ -303,7 +303,11 @@ def main():
 
             def held_responses():
                 output = smoke.kubectl("exec", CLIENT, "--", "cat", hold_log).stdout
-                return [json.loads(line) for line in output.splitlines() if line.strip()]
+                (args.report_directory / "held-tcp.jsonl").write_text(output)
+                try:
+                    return [json.loads(line) for line in output.splitlines() if line.strip()]
+                except ValueError as error:
+                    raise RuntimeError(f"held probe output is not JSON: {output[-1024:]!r}") from error
 
             def workload_identity():
                 return {name: {"uid": pod["metadata"]["uid"], "ip": pod["status"]["podIP"],
@@ -419,6 +423,16 @@ def main():
                     smoke.start_agent(index)
                 except Exception as restart_error:
                     report[f"cleanupRestartError{index}"] = str(restart_error)
+        if args.tcp_restart and "tcp_state" in locals():
+            try:
+                report["failureTcpState"] = tcp_state()
+                if "map_ids" in locals():
+                    report["failureMapIds"] = {str(i): map_ids(i) for i in range(2)}
+                if "hold_exit" in locals():
+                    report["heldProbeExit"] = smoke.kubectl("exec", CLIENT, "--", "cat", hold_exit,
+                                                          check=False).stdout.strip()
+            except Exception as diagnostic_error:
+                report["failureDiagnosticError"] = str(diagnostic_error)
         for resource in ("pods", "events", "endpointslices", "networkpolicies"):
             try:
                 (args.report_directory / (resource + ".json")).write_text(

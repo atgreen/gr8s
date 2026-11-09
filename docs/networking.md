@@ -219,6 +219,14 @@ using real guest connections, observes negotiated window/timestamp options,
 and deletes/recreates a Service at the same VIP and client tuple.
 `make test-service-tcp-state` exercises the interpreter;
 add `--kernel` to the Python runner in a disposable root VM for kernel execution.
+Pass `--tcp-restart` with `--tcp-client` to keep one guest socket open while
+changing the Service selector and restarting each agent. Copy
+`scripts/test-service-restart.py` alongside the other helpers for pinned map
+inspection. This mode requires both stream directions to advance while the
+agent is stopped, a further HTTP response after readiness returns, unchanged
+TCP initial sequences and backend, retained map IDs, and unchanged Pod/container
+identities. New connections must reach the updated backend while the held
+connection keeps its original backend, then closes gracefully.
 
 `NodePort` and `LoadBalancer` Services allocate node ports from 30000–32767. The
 agent relays each in userspace, for TCP and UDP, with client-address affinity, so
