@@ -1,0 +1,379 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c.3",
+  "coreCommit": "b37a72f",
+  "regressionCommit": "9c14628",
+  "nativeSHA256": "6e6b0a0b5e34a8243347f96623d14bf007d53a0a182834d29b9e3de9cc0bf4bb",
+  "fixtures": {
+    "build/gr8s-service-packet-test.json": "c4bba4af6c8302718e9b49dcb5504c02a426346309877026cb88786e7509dccb",
+    "build/gr8s-service-packet-guard-test.json": "c62b984ca5e3049fbb2c0ae10af894ddabee2e8b4b03ac03c77b7a7df3688f7d"
+  },
+  "baseline": "Previous main bytecode fails the new expiry regression: expired UDP tuple is dropped at forward NOEXIST publication instead of selecting the replacement backend.",
+  "focusedLisp": {
+    "passed": 888,
+    "failed": 0,
+    "groups": {
+      "serviceLB": 201,
+      "networking": 220,
+      "networkPolicy": 34,
+      "networkPolicyResolution": 130,
+      "egressGuardAndAll29RootCniTests": 303
+    },
+    "notes": "Initial focused run had one outdated expected map count (24 versus 26); corrected expectation passes. CNI tests live directly in the root suite, so a source reader enumerates all29 named tests; the nonexistent CNI suite is not counted."
+  },
+  "interpreter": {
+    "packetFlowChecksum": 26,
+    "expiryCoordination": 21,
+    "capacity": 5,
+    "guard": 19
+  },
+  "kernel": {
+    "environment": "Disposable Fedora44 VM22293, BPF_PROG_TEST_RUN; no BPF loaded on development host.",
+    "packetFlowChecksum": 23,
+    "expiryCoordination": 21,
+    "capacity": 5,
+    "guard": 21,
+    "clock": "Age retained timestamps rather than wait180/7200 seconds.",
+    "log": [
+      "Service TC bytecode (kernel): 23 packet/flow/checksum cases passed",
+      "Service TC expiry/coordination: 21 cases passed",
+      "Service TC capacity: 5 publication/recovery cases passed",
+      "Service endpoint guard (kernel): 21 source-validation/policy/NAT/routing cases passed"
+    ]
+  },
+  "reservationCleanup": "Both reservation maps must be empty after each complete packet, expiry, capacity and guard exercise. Contention tests separately verify foreign reservations are retained while partial acquisitions are released.",
+  "guestEnvironment": "Disposable Fedora44 VM22291, two agents in separate mount/network namespaces, VXLAN; real Kata guest client and native backend on another node; experimental TC enabled; official ctr direct preload bypasses podster-fp8 mirror fault.",
+  "guestChecks": 21,
+  "guestResult": {
+    "root": "/var/tmp/gr8s-two-node.coixacdc",
+    "checks": [
+      {
+        "name": "differentNodes",
+        "passed": true,
+        "observed": {
+          "client": "10.80.0.1",
+          "backend": "10.80.16.1",
+          "nodes": [
+            "worker-0",
+            "worker-1"
+          ]
+        }
+      },
+      {
+        "name": "realGuestKernel",
+        "passed": true,
+        "observed": {
+          "guest": "6.18.56",
+          "host": "6.19.10-300.fc44.x86_64",
+          "qemu": [
+            {
+              "pid": 1793168,
+              "command": "/var/tmp/gr8s-two-node.coixacdc/agent-0/runtime-addons/kata/opt/kata/bin/qemu-system-x86_64 -name sandbox-d12e2417577c434778d91e1ac6a592fcae727e4192a5a3b7f183f9c6b519b57b -kernel /var/tmp/gr8s-two-node.coixacdc/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/vmlinux-6.18.56-208 -append reboot=k panic=1 systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket agent.log_vport=1025 root=/dev/pmem0p1 rootflags=dax,data=ordered,errors=remount-ro ro rootfstype=ext4 agent.cdh_api_timeout=50 agent.log=debug cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1 selinux=0 console=hvc0 -smp 1 -machine q35,accel=kvm,nvdimm=on,kernel_irqchip=on,memory-backend=entire-guest-memory-share -cpu host,pmu=off -m 2G,slots=10,maxmem=3903M -object memory-backend-file,id=entire-guest-memory-share,mem-path=/dev/shm,size=2G,share=on,prealloc=off,readonly=off -qmp unix:fd=16,server=on,wait=off -rtc base=utc,clock=host,driftfix=slew -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0 -device pci-bridge,bus=pcie.0,id=pci-bridge-0,chassis_nr=1,shpc=off,addr=2,io-reserve=4k,mem-reserve=1m,pref64-reserve=1m -device virtio-scsi-pci,id=scsi0,disable-modern=true -device vhost-vsock-pci,disable-modern=true,vhostfd=17,guest-cid=1070823872 -netdev tap,id=network-tap0_kata,vhost=on,vhostfds=20,fds=19 -device virtio-net-pci,netdev=network-tap0_kata,mac=02:6b:49:1d:74:17,disable-modern=true,mq=on,vectors=4 -chardev socket,id=virtiofsd-chardev,path=/run/kata/d12e2417577c434778d91e1ac6a592fcae727e4192a5a3b7f183f9c6b519b57b/root/virtiofsd.sock -device vhost-user-fs-pci,chardev=virtiofsd-chardev,tag=kataShared,queue-size=1024 -object memory-backend-file,id=TODO,mem-path=/var/tmp/gr8s-two-node.coixacdc/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/kata-ubuntu-resolute.image,size=256M,share=off,prealloc=off,readonly=on -device nvdimm,memdev=TODO,unarmed=on -device virtio-serial-pci,id=serial0 -device virtconsole,id=console0,chardev=charconsole0 -chardev socket,id=charconsole0,server=on,wait=off,path=/run/kata/d12e2417577c434778d91e1ac6a592fcae727e4192a5a3b7f183f9c6b519b57b/root/console.sock -vga none -no-user-config -nodefaults -nographic -no-reboot "
+            }
+          ]
+        }
+      },
+      {
+        "name": "worker0UsesOverlay",
+        "passed": true,
+        "observed": [
+          {
+            "dst": "10.80.16.1",
+            "gateway": "10.80.16.0",
+            "dev": "gr8s-vxlan",
+            "prefsrc": "10.80.0.0",
+            "flags": [],
+            "uid": 0,
+            "cache": []
+          }
+        ]
+      },
+      {
+        "name": "worker1UsesOverlay",
+        "passed": true,
+        "observed": [
+          {
+            "dst": "10.80.0.1",
+            "gateway": "10.80.0.0",
+            "dev": "gr8s-vxlan",
+            "prefsrc": "10.80.16.0",
+            "flags": [],
+            "uid": 0,
+            "cache": []
+          }
+        ]
+      },
+      {
+        "name": "httpDirectBackend",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "httpCrossNodeClusterIP",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "httpTCBothDirections",
+        "passed": true,
+        "observed": {
+          "before": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "after": [
+            6,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "name": "httpPreservesSource",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "10.80.0.1:44586"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpDirectBackend",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpCrossNodeClusterIP",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpTCBothDirections",
+        "passed": true,
+        "observed": {
+          "before": [
+            12,
+            8,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "after": [
+            13,
+            9,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "name": "udpPreservesSource",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "10.80.0.1:40471"
+            ]
+          }
+        }
+      },
+      {
+        "name": "nativeSocketAcceleration",
+        "passed": true,
+        "observed": {
+          "response": "two-node-1",
+          "before": [
+            [
+              14,
+              10,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          ],
+          "after": [
+            [
+              14,
+              10,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          ]
+        }
+      },
+      {
+        "name": "httpGuestEgressDenied",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "errors": [
+              "Get \"http://10.96.0.10:80/hostname\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpGuestEgressDenied",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "errors": [
+              "reading from udp connection failed. err:'read udp 10.80.0.1:53666->10.96.0.10:81: i/o timeout'"
+            ]
+          }
+        }
+      },
+      {
+        "name": "httpPolicySeesBackendAndAllowsReplies",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpPolicySeesBackendAndAllowsReplies",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "httpRemoteIngressDenied",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "errors": [
+              "Get \"http://10.96.0.10:80/hostname\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpRemoteIngressDenied",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "errors": [
+              "reading from udp connection failed. err:'read udp 10.80.0.1:52734->10.96.0.10:81: i/o timeout'"
+            ]
+          }
+        }
+      },
+      {
+        "name": "httpRemoteIngressRecovers",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpRemoteIngressRecovers",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      }
+    ],
+    "overlay": "vxlan",
+    "kataSHA256": "1463a2b86845f4d3d8e87f2f764ec59856fc0fee3520967a79ade32762be2e97",
+    "agentReconnectTimeoutMs": 120000,
+    "passed": true,
+    "cleanupCompleted": true
+  },
+  "serviceConvergenceErrors": [],
+  "startupObservation": "One cold CNI Add attempt timed out; the native runtime retry recovered and both Pods became ready. No performance conclusion is drawn from shared nested VM timing.",
+  "scope": "Proves lazy IPv4 TCP/UDP idle expiry and tuple reinsertion, current backend selection, stale backend reply rejection, lock contention/recovery, map capacity/publication safety, and real guest/policy regression. Does not finish background reclamation of unrelated idle/orphan entries, TCP SYN/FIN/RST lifecycle, guest established-flow restart survival, SNAT/hairpin/collision resolution, IPv6 packet NAT or packet NodePort. Packet Services remain opt-in."
+}
