@@ -67,3 +67,115 @@
                    (setf (symbol-function 'gr8s::install-core-state-delta) original))))
           (gr8s::stop-ha-control-plane h2)
           (gr8s::stop-ha-control-plane h1))))))
+
+(test ha-control-plane-replicates-image-tracker-leases-and-swarms
+  (with-temporary-store (s1 p1)
+    (with-temporary-store (s2 p2)
+      (declare (ignore p1 p2))
+      (let ((h1 nil) (h2 nil))
+        (unwind-protect
+             (progn
+               (setf h1 (gr8s::start-ha-control-plane s1 :id "tracker-cp1" :init t))
+               (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p h1))))
+               (setf h2
+                     (gr8s::start-ha-control-plane
+                      s2 :id "tracker-cp2" :join-host "127.0.0.1"
+                      :join-port (gr8s::raft-member-port
+                                  (gr8s::ha-control-plane-member h1))))
+               (is (poll-until
+                    (lambda ()
+                      (member "tracker-cp2"
+                              (gr8s::raft-node-peers
+                               (gr8s::raft-member-node
+                                (gr8s::ha-control-plane-member h1)))
+                              :test #'equal))))
+               (multiple-value-bind (digest torrent) (tracker-test-torrent)
+                 (let* ((token (make-array 32 :element-type '(unsigned-byte 8)
+                                              :initial-element 17))
+                        (peer-id (bt-octets "-GR8001-AAAAAAAAAAAA"))
+                        (commit (gr8s::pod-store-consensus-commit-fn s2))
+                        (acquired
+                          (funcall
+                           commit :image-tracker
+                           (gr8s.image-distribution::make-tracker-command
+                            :action :acquire :digest digest :node-name "node-a"
+                            :now 1000 :token token))))
+                   (is (eq :granted (getf acquired :status))
+                       "a follower returns the committed lease result")
+                   (is (equalp token
+                               (gr8s.image-distribution::tracker-result-octets
+                                acquired :token)))
+                   (dolist (store (list s1 s2))
+                     (let ((view
+                             (gr8s.image-distribution::tracker-lookup
+                              (gr8s::pod-store-image-tracker store) digest "node-b"
+                              :now 1000)))
+                       (is (eq :waiting
+                               (gr8s.image-distribution::tracker-view-status view)))
+                       (is (string= "node-a"
+                                    (gr8s.image-distribution::tracker-view-origin-node view)))))
+                   (let ((renewed
+                           (funcall
+                            (gr8s::pod-store-consensus-commit-fn s1)
+                            :image-tracker
+                            (gr8s.image-distribution::make-tracker-command
+                             :action :renew :digest digest :node-name "node-a"
+                             :now 1001 :token token))))
+                     (is (eq :ok (getf renewed :status)))
+                     (is (= 1121 (getf renewed :expires-at))))
+                   (let ((published
+                           (funcall
+                            commit :image-tracker
+                            (gr8s.image-distribution::make-tracker-command
+                             :action :publish :digest digest :node-name "node-a"
+                             :now 1002 :token token
+                             :metainfo (gr8s.image-distribution::blob-torrent-metainfo torrent)
+                             :address "10.0.0.1" :port 6881 :peer-id peer-id))))
+                     (is (eq :ok (getf published :status))))
+                   (dolist (store (list s1 s2))
+                     (let ((view
+                             (gr8s.image-distribution::tracker-lookup
+                              (gr8s::pod-store-image-tracker store) digest "node-b"
+                              :now 1002)))
+                       (is (eq :available
+                               (gr8s.image-distribution::tracker-view-status view)))
+                       (is (equalp (gr8s.image-distribution::blob-torrent-infohash torrent)
+                                   (gr8s.image-distribution::tracker-view-infohash view)))
+                       (is (string= "node-a"
+                                    (gr8s.image-distribution::tracker-peer-node-name
+                                     (first
+                                      (gr8s.image-distribution::tracker-view-peers view)))))))
+                   (funcall
+                    (gr8s::pod-store-consensus-commit-fn s1)
+                    :image-tracker
+                    (gr8s.image-distribution::make-tracker-command
+                     :action :announce :digest digest :node-name "node-b"
+                     :now 1003 :address "10.0.0.2" :port 6882
+                     :peer-id (bt-octets "-GR8001-BBBBBBBBBBBB") :complete-p t))
+                   (is (poll-until
+                        (lambda ()
+                          (every
+                           (lambda (store)
+                             (= 2 (length
+                                   (gr8s.image-distribution::tracker-view-peers
+                                    (gr8s.image-distribution::tracker-lookup
+                                     (gr8s::pod-store-image-tracker store)
+                                     digest "node-c" :now 1003)))))
+                           (list s1 s2))))
+                       "the peer announcement converges on every member")
+                   (funcall
+                    commit :image-tracker
+                    (gr8s.image-distribution::make-tracker-command
+                     :action :withdraw :digest digest :node-name "node-b" :now 1004))
+                   (dolist (store (list s1 s2))
+                     (let ((peers
+                             (gr8s.image-distribution::tracker-view-peers
+                              (gr8s.image-distribution::tracker-lookup
+                               (gr8s::pod-store-image-tracker store) digest "node-c"
+                               :now 1004))))
+                       (is (= 1 (length peers)))
+                       (is (string= "node-a"
+                                    (gr8s.image-distribution::tracker-peer-node-name
+                                     (first peers))))))))
+          (gr8s::stop-ha-control-plane h2)
+          (gr8s::stop-ha-control-plane h1)))))))

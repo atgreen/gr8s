@@ -80,6 +80,7 @@
    #:pod-store-credential-lock
    #:pod-store-event-expirations
    #:pod-store-in-cluster-config
+   #:pod-store-image-tracker
    #:pod-store-job-controller-states
    #:pod-store-lock
    #:pod-store-node-watch-floor

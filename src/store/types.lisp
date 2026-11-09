@@ -59,5 +59,9 @@
   (nominated-nodes (make-hash-table :test #'equal))
   (scheduling-notes (make-hash-table :test #'equal))
   (lock (bt:make-lock "gr8s store"))
+  ;; Image-distribution state is part of the HA state machine. Keeping its
+  ;; tracker on the store gives the Raft apply callback and node RPC server the
+  ;; same member-local replica instead of two unrelated in-memory trackers.
+  (image-tracker (gr8s.image-distribution::make-image-tracker))
   consensus-commit-fn
   (consensus-write-lock (bt:make-lock "gr8s consensus write")))

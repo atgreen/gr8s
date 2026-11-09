@@ -55,13 +55,13 @@
       (setf lease nil))
     lease))
 
-(defun tracker-acquire-origin (tracker digest node-name)
+(defun tracker-acquire-origin (tracker digest node-name &key now token)
   "Grant NODE-NAME the exclusive cold-fetch lease, or report its current owner."
   (let ((digest (canonical-oci-digest digest)))
     (bt:with-lock-held ((image-tracker-lock tracker))
       (when (gethash digest (image-tracker-swarms tracker))
         (return-from tracker-acquire-origin (values :available nil nil nil)))
-      (let* ((now (funcall (image-tracker-clock tracker)))
+      (let* ((now (or now (funcall (image-tracker-clock tracker))))
              (lease (live-origin-lease tracker digest now)))
         (if lease
             (if (string= node-name (origin-lease-node-name lease))
@@ -71,7 +71,7 @@
                         (origin-lease-node-name lease)))
             (let ((lease (make-origin-lease
                           :node-name node-name
-                          :token (new-origin-token)
+                          :token (or token (new-origin-token))
                           :expires-at (+ now
                                          (image-tracker-origin-lease-seconds
                                           tracker)))))
@@ -88,10 +88,10 @@
              node-name digest))
     lease))
 
-(defun tracker-renew-origin (tracker digest node-name token)
+(defun tracker-renew-origin (tracker digest node-name token &key now)
   (let ((digest (canonical-oci-digest digest)))
     (bt:with-lock-held ((image-tracker-lock tracker))
-      (let* ((now (funcall (image-tracker-clock tracker)))
+      (let* ((now (or now (funcall (image-tracker-clock tracker))))
              (lease (require-current-origin tracker digest node-name token now)))
         (setf (origin-lease-expires-at lease)
               (+ now (image-tracker-origin-lease-seconds tracker)))))))
@@ -130,13 +130,13 @@
   tracker)
 
 (defun tracker-publish-swarm
-    (tracker digest node-name token metainfo address port peer-id)
+    (tracker digest node-name token metainfo address port peer-id &key now)
   "Publish final metadata and announce the origin as the first complete peer."
   (let ((digest (canonical-oci-digest digest)))
     (bt:with-lock-held ((image-tracker-lock tracker))
       (when (gethash digest (image-tracker-swarms tracker))
         (error "A swarm already exists for ~A" digest))
-      (let ((now (funcall (image-tracker-clock tracker))))
+      (let ((now (or now (funcall (image-tracker-clock tracker)))))
         (require-current-origin tracker digest node-name token now)
         (let* ((infohash (validated-metainfo-infohash digest metainfo))
                (swarm (make-tracker-swarm
@@ -148,13 +148,13 @@
           (copy-seq infohash))))))
 
 (defun tracker-announce-peer
-    (tracker digest node-name address port peer-id &key complete-p)
+    (tracker digest node-name address port peer-id &key complete-p now)
   (let ((digest (canonical-oci-digest digest)))
     (bt:with-lock-held ((image-tracker-lock tracker))
       (let ((swarm (or (gethash digest (image-tracker-swarms tracker))
                        (error "No published swarm exists for ~A" digest))))
         (put-tracker-peer tracker swarm node-name address port peer-id
-                          complete-p (funcall (image-tracker-clock tracker)))))))
+                          complete-p (or now (funcall (image-tracker-clock tracker))))))))
 
 (defun expire-swarm-peers (tracker swarm now)
   (let ((deadline (- now (image-tracker-peer-ttl-seconds tracker))))
@@ -168,14 +168,15 @@
     (setf (tracker-peer-peer-id copy) (copy-seq (tracker-peer-peer-id peer)))
     copy))
 
-(defun tracker-lookup (tracker digest requesting-node &key peer-ranker (maximum-peers 8))
+(defun tracker-lookup (tracker digest requesting-node
+                       &key peer-ranker (maximum-peers 8) now)
   "Return a bounded peer view, optionally ordered by PEER-RANKER.
 PEER-RANKER receives the copied peer list, outside the tracker lock, and must
 return a list.  This keeps network-policy decisions out of swarm mutation."
   (let ((digest (canonical-oci-digest digest)))
     (let ((view
             (bt:with-lock-held ((image-tracker-lock tracker))
-              (let* ((now (funcall (image-tracker-clock tracker)))
+              (let* ((now (or now (funcall (image-tracker-clock tracker))))
                      (swarm (gethash digest (image-tracker-swarms tracker))))
                 (if swarm
                     (progn
@@ -220,3 +221,68 @@ return a list.  This keeps network-policy decisions out of swarm mutation."
                (declare (ignore digest))
                (remhash node-name (tracker-swarm-peers swarm)))
              (image-tracker-swarms tracker))))
+
+(defun make-tracker-command (&key action digest node-name now token metainfo
+                                  address port peer-id complete-p)
+  "Build one deterministic image-tracker state-machine command.
+NOW and any newly generated lease TOKEN are part of the command so every Raft
+replica applies byte-identical lease and peer state."
+  (flet ((encode (octets)
+           (when octets (ag-grpc:base64-encode octets))))
+    (list :action action :digest digest :node-name node-name :now now
+          :token (encode token) :metainfo (encode metainfo)
+          :address address :port port :peer-id (encode peer-id)
+          :complete-p complete-p)))
+
+(defun tracker-command-octets (command key)
+  (let ((encoded (getf command key)))
+    (and encoded (ag-grpc:base64-decode encoded))))
+
+(defun tracker-result-octets (result key)
+  "Decode a binary tracker result field returned locally or over Raft."
+  (let ((encoded (getf result key)))
+    (and encoded (ag-grpc:base64-decode encoded))))
+
+(defun tracker-apply-command (tracker command)
+  "Apply COMMAND without allowing an invalid agent request to abort Raft apply.
+Returns a plist suitable for returning through the proposal transport."
+  (handler-case
+      (let ((action (getf command :action))
+            (digest (getf command :digest))
+            (node-name (getf command :node-name))
+            (now (getf command :now)))
+        (ecase action
+          (:acquire
+           (multiple-value-bind (status token expires-at owner)
+               (tracker-acquire-origin
+                tracker digest node-name :now now
+                :token (tracker-command-octets command :token))
+             (list :status status
+                   :token (and token (ag-grpc:base64-encode token))
+                   :expires-at expires-at :owner owner)))
+          (:renew
+           (list :status :ok
+                 :expires-at
+                 (tracker-renew-origin tracker digest node-name
+                                       (tracker-command-octets command :token)
+                                       :now now)))
+          (:publish
+           (let ((infohash
+                   (tracker-publish-swarm
+                    tracker digest node-name
+                    (tracker-command-octets command :token)
+                    (tracker-command-octets command :metainfo)
+                    (getf command :address) (getf command :port)
+                    (tracker-command-octets command :peer-id) :now now)))
+             (list :status :ok :infohash (ag-grpc:base64-encode infohash))))
+          (:announce
+           (tracker-announce-peer
+            tracker digest node-name (getf command :address)
+            (getf command :port) (tracker-command-octets command :peer-id)
+            :complete-p (getf command :complete-p) :now now)
+           (list :status :ok))
+          (:withdraw
+           (tracker-withdraw-peer tracker digest node-name)
+           (list :status :ok))))
+    (error (condition)
+      (list :status :error :message (princ-to-string condition)))))
