@@ -1,0 +1,54 @@
+{
+  "date": "2026-11-09",
+  "scope": "Internal streamed production application artifact capture only",
+  "passed": true,
+  "checks": 186,
+  "suites": {
+    "store-snapshot": 24,
+    "ha-node-cidr": 77,
+    "pod-transactions": 65,
+    "core-recovery": 20
+  },
+  "captureCoverage": [
+    "Direct stream serialization per record, with no intermediate whole-store JSON string",
+    "Header boundary, clocks, Pod checkpoint/publication and Node records",
+    "Core resources and controller/history records included",
+    "Local Events/history and member-private credential files excluded",
+    "File permissions0600 and immutable publication",
+    "Serialization failure leaves no published artifact or temporary sibling",
+    "Capture while a Node proposal is pending observes its committed record"
+  ],
+  "memory": {
+    "heapMiB": 384,
+    "streamed": {
+      "passed": true,
+      "legacy": false,
+      "records": 1024,
+      "payloadBytes": 67108864,
+      "artifactBytes": 67347524
+    },
+    "wholeStateComparison": {
+      "passed": false,
+      "exitCode": 1,
+      "failure": "SBCL HEAP-EXHAUSTED-ERROR during Jzon string-output-stream growth",
+      "availableBytes": 86933504,
+      "requestedBytes": 130023440
+    },
+    "largerFixtureLimitation": "2048 records (128MiB payload) exhausted this heap during setup GC before capture; no capture result is claimed for that fixture.",
+    "reproduce": "sbcl --dynamic-space-size 384 --noinform --non-interactive --load scripts/test-store-snapshot-memory.lisp",
+    "comparisonEnvironment": "GR8S_SNAPSHOT_LEGACY=1"
+  },
+  "nativeBuild": {
+    "passed": true,
+    "sha256": "3f19d19f016bdc73527637da14f7dc2493190f6caa394865f758c8da27b4d7c6"
+  },
+  "remaining": [
+    "Artifact reader/validation, durable restore generation and interrupted-install recovery",
+    "Binary artifact transport without opaque Lisp reconstruction",
+    "Artifact ownership/checksum/lifetime in production WAL and snapshots",
+    "Production WAL recovery and automatic compaction",
+    "Real-process catch-up/restart/failover acceptance under constrained heap",
+    "Capture currently holds the store/member locks during writing; scheduling and latency remain integration work"
+  ],
+  "fullGoalComplete": false
+}

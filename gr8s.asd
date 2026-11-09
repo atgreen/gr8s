@@ -141,6 +141,7 @@
                               :serial t
                               :components ((:file "integration")
                                            (:file "core-resources")
+                                           (:file "store-snapshot")
                                            (:file "api-defaults")
                                            (:file "yaml")
                                            (:file "podtemplate-history")
@@ -479,6 +480,7 @@
                              (:file "pod-http-proxy-test")
                              (:file "core-resource-http-test")
                              (:file "api-defaults-test")
+                             (:file "store-snapshot-test")
                              (:file "pod-runtime-gaps-test")
                              (:file "hpa-controller-test")
                              (:file "resource-metrics-api-test")

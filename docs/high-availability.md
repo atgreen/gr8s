@@ -167,8 +167,10 @@ The [snapshot-transfer validation record](raft-snapshot-transfer-validation-2026
 covers interrupted mTLS transfer, voter/learner catch-up and leadership handoff
 with a witness. Run `make test-raft-snapshots` for the focused suite.
 
-Production store snapshot capture/restore and automatic compaction remain under
-`podster-ucm.11`. The generic callback path reconstructs an opaque Lisp application
+Production store snapshot capture/restore integration and automatic compaction remain
+under `podster-ucm.11`. An internal [streamed artifact writer](store-snapshot-artifacts.md)
+now captures application records without whole-store materialization; transport,
+durable restore and generation ownership are still pending. The generic callback path reconstructs an opaque Lisp application
 snapshot on receipt: bounded RPC chunks alone do not bound that reconstruction's
 heap usage. Large production stores need streamed application artifacts before
 automatic compaction can be enabled. The retained production log is therefore not yet bounded over
