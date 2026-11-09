@@ -256,7 +256,25 @@
       "log": "/tmp/gr8s-pod-clocks-full.log",
       "checks": 22295,
       "failures": 50,
-      "sameFailureCasesAsBaseline": false
+      "sameFailureCasesAsBaseline": false,
+      "additionalFailure": {
+        "test": "NODE-CIDR-REPLICATES-AND-SURVIVES-FAILOVER",
+        "suite": "HA-NODE-CIDR",
+        "condition": "socket END-OF-FILE",
+        "status": "All 11 HA Node checks pass in the merged-source isolated run; full-suite-only socket EOF remains recorded as an intermittent test failure."
+      }
+    },
+    "mergedMain": {
+      "main": "d0f7147",
+      "checks": 239,
+      "failures": 0,
+      "suites": [
+        "pod-transactions",
+        "ha-pod-failover",
+        "ha-node-cidr",
+        "raft"
+      ],
+      "log": "/tmp/gr8s-pod-merged-tests.log"
     }
   },
   "limitations": [
