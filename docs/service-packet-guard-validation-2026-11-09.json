@@ -467,7 +467,8 @@
       },
       "failures": []
     },
-    "scope": "Native containers and host clients with experimental TC guards attached; native socket hooks still perform their Service translation. This is not evidence of guest-originated TC translation."
+    "scope": "Native containers and host clients with experimental TC guards attached; native socket hooks still perform their Service translation. This is not evidence of guest-originated TC translation.",
+    "implementationCommit": "dd36841"
   },
   "programs": {
     "gr8s_egress_guard": 100,
@@ -475,5 +476,18 @@
     "gr8s_egress_policy": 468,
     "gr8s_packet_forward": 285,
     "gr8s_packet_reverse": 176
+  },
+  "mainIntegration": {
+    "commit": "bd466b0",
+    "baseMain": "9e90374",
+    "focusedAndCNIChecks": 791,
+    "passed": true,
+    "nativeSHA256": "efb90fb02e119077f378f458c779844223cae9376c39b296774c5338d0dc04f0",
+    "version": "gr8s 1.37.2-gbd466b0+dirty, patch level 0"
+  },
+  "hostedCI": {
+    "run": 42637564334,
+    "started": false,
+    "reason": "Account payments failed or spending limit needs to be increased; no test steps ran."
   }
 }
