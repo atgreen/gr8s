@@ -846,7 +846,10 @@ each expression has only its own per-call limit.")
     (:bytes (if (and (consp type) (second type)) (second type) +cel-unknown-size+))
     (:list (if (and (consp type) (third type)) (third type) +cel-unknown-size+))
     (:map (if (and (consp type) (fourth type)) (fourth type) +cel-unknown-size+))
-    (:object +cel-unknown-size+)
+    ;; Kubernetes' schema-backed DeclType objects have MaxElements=0. Their
+    ;; fields are statically known; treating them as unbounded maps rejects
+    ;; ordinary object immutability rules such as self == oldSelf.
+    (:object 0)
     (:dyn +cel-unknown-size+)
     (t 1)))
 

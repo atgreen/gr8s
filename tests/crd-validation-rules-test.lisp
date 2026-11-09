@@ -70,6 +70,21 @@
                            "self.map(c, c.name) == oldSelf.map(c, c.name)" schema nil nil))))
       (is (< (cost bounded) gr8s::+crd-rule-cost-limit+)))))
 
+(test object-immutability-rules-admit-and-enforce-updates
+  ;; KubeVirt's backup CRDs put this transition rule on the entire spec.
+  (with-core-api (store path)
+    (values store path)
+    (check-core-status 201 +rule-crd-path+ :method :post
+      :object (rule-definition
+               "{\"type\":\"object\",\"properties\":{\"spec\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"}},\"x-kubernetes-validations\":[{\"rule\":\"self == oldSelf\",\"message\":\"spec is immutable\"}]}}}"))
+    (let* ((created (check-core-status 201 +rule-path+ :method :post
+                     :object (rule-object "immutable" "spec" (rule-spec "name" "original"))))
+           (item (concatenate 'string +rule-path+ "/immutable")))
+      (check-core-status 200 item :method :put :object created)
+      (setf (gethash "name" (gethash "spec" created)) "changed")
+      (let ((status (check-core-status 422 item :method :put :object created)))
+        (is (search "spec is immutable" (gethash "message" status)))))))
+
 (test rules-are-compiled-when-a-definition-is-admitted
   (with-core-api (store path)
     (values store path)

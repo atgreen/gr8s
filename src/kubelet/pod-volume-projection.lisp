@@ -71,7 +71,7 @@ An unset limit reports node allocatable, as a Pod with no limit can use all of i
          ;; A container without a limit of its own has the Pod's, as the kubelet merges them.
          (declared (and container (container-resource-quantity (container-with-pod-level-limits spec container) kind name)))
          (nanos (cond (declared (container-quantity-nanos declared))
-                      ((equal kind "requests") 0)
+                      ((or (equal kind "requests") (hugepage-size name)) 0)
                       ((equal name "cpu") (* (node-allocatable-cpu) (expt 10 9)))
                       ((equal name "ephemeral-storage") (* (or (filesystem-capacity-bytes "/var/lib") 0) (expt 10 9)))
                       (t (* (node-allocatable-memory) (expt 10 9)))))

@@ -208,7 +208,9 @@ As a kubelet does, a node without AppArmor refuses any profile other than Unconf
 (defun pod-spec-qos-class (spec)
   "Classify a Pod spec as Kubernetes does: from its CPU and memory requests and limits alone.
 Pod-level resources, when set, decide it on their own."
-  (when (pod-level-resources-set-p spec)
+  (when (loop for kind in '("requests" "limits")
+              thereis (loop for name in '("cpu" "memory")
+                            thereis (gethash name (gethash kind (gethash "resources" spec (core-object)) (core-object)))))
     (return-from pod-spec-qos-class (pod-level-requirements-qos (gethash "resources" spec))))
   (let ((guaranteed t) (any nil))
     (loop for container across (concatenate 'vector (gethash "initContainers" spec #()) (gethash "containers" spec #()))

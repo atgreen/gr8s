@@ -10,14 +10,22 @@
 (in-package #:gr8s.resources)
 
 (defparameter +pod-level-resource-names+ '("cpu" "memory")
-  "The resources a Pod may declare for itself; hugepages are not implemented here.")
+  "The resources that contribute to Pod QoS; huge pages are accounted separately.")
+
+(defun pod-level-supported-resource-names (resources)
+  "Return CPU, memory and all declared hugepage sizes, without changing QoS rules."
+  (remove-duplicates
+   (append +pod-level-resource-names+
+           (loop for kind in '("limits" "requests") append
+                 (loop for name being the hash-keys of (gethash kind resources (core-object))
+                       when (hugepage-size name) collect name))) :test #'equal))
 
 (defun pod-level-resource-list (spec kind)
   "Return SPEC's pod-level KIND (\"requests\" or \"limits\") table of supported resources, or NIL."
   (let* ((resources (gethash "resources" spec))
          (values (and (hash-table-p resources) (gethash kind resources))))
     (when (and (hash-table-p values)
-               (loop for name in +pod-level-resource-names+ thereis (nth-value 1 (gethash name values))))
+               (loop for name in (pod-level-supported-resource-names resources) thereis (nth-value 1 (gethash name values))))
       values)))
 
 (defun pod-level-resources-set-p (spec)
@@ -50,8 +58,7 @@ have a limit above the Pod's."
           (require-object values (format nil "spec.resources.~A" kind))
           (maphash (lambda (name value)
                      (cond ((member name +pod-level-resource-names+ :test #'equal))
-                           ((uiop:string-prefix-p "hugepages-" name)
-                            (invalid-pod "spec.resources.~A[~A]: Resource ~S has no implemented enforcement" kind name name))
+                           ((hugepage-size name) (validate-hugepage-amount name value))
                            (t (invalid-pod "spec.resources.~A[~A]: Unsupported value: ~S: supported values: \"cpu\", \"hugepages-\", \"memory\""
                                            kind name name)))
                      (let ((quantity (container-quantity-round (parse-container-quantity value) -3)))
@@ -64,7 +71,7 @@ have a limit above the Pod's."
       ;; defaultPodRequests: only a Pod that sets limits has its requests filled in.
       (when (and limits (plusp (hash-table-count limits)))
         (let ((requests (or (gethash "requests" resources) (make-hash-table :test #'equal))))
-          (dolist (name +pod-level-resource-names+)
+          (dolist (name (pod-level-supported-resource-names resources))
             (unless (nth-value 1 (gethash name requests))
               (multiple-value-bind (total present) (gethash name aggregate)
                 (cond (present
@@ -101,6 +108,7 @@ have a limit above the Pod's."
                                 (invalid-pod "spec.resources.containers[~D][~A].limits: Invalid value: ~S: must be less than or equal to pod limits of ~A"
                                              index name value pod-limit))))
                           (container-resource-map container "limits")))))
+    (validate-nonovercommittable-resources resources)
     resources))
 
 (defun apply-pod-level-resources (spec requests limits)
@@ -109,7 +117,7 @@ have a limit above the Pod's."
     (loop for (kind table) in (list (list "requests" requests) (list "limits" limits))
           for values = (gethash kind (gethash "resources" spec))
           when values
-            do (dolist (name +pod-level-resource-names+)
+            do (dolist (name (pod-level-supported-resource-names (gethash "resources" spec)))
                  (multiple-value-bind (value present) (gethash name values)
                    (when present (setf (gethash name table) (pod-level-quantity-value value)))))))
   (values requests limits))
@@ -135,12 +143,12 @@ The downward API reports these, and a container's cgroup is bounded by them."
         (own (container-resource-map container "limits")))
     (if (or (null limits)
             (every (lambda (name) (or (not (nth-value 1 (gethash name limits))) (gethash name own)))
-                   +pod-level-resource-names+))
+                   (pod-level-supported-resource-names (gethash "resources" spec))))
         container
         (let* ((copy (copy-core-object container))
                (resources (or (gethash "resources" copy) (setf (gethash "resources" copy) (core-object))))
                (merged (or (gethash "limits" resources) (setf (gethash "limits" resources) (core-object)))))
-          (dolist (name +pod-level-resource-names+ copy)
+          (dolist (name (pod-level-supported-resource-names (gethash "resources" spec)) copy)
             (multiple-value-bind (value present) (gethash name limits)
               (when (and present (not (gethash name merged)))
                 (setf (gethash name merged) value))))))))

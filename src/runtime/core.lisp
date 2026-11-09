@@ -34,6 +34,9 @@
   (:report (lambda (condition stream)
              (write-string (runtime-error-message condition) stream))))
 
+(define-condition resource-admission-error (runtime-error)
+  ((reason :initarg :reason :reader resource-admission-error-reason)))
+
 (define-condition runtime-unavailable (runtime-error) ()
   (:documentation "Report that the container runtime itself is down, so no Pod can be observed or changed until it returns."))
 

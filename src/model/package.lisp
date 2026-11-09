@@ -34,6 +34,7 @@
    #:node-record-api-only
    #:node-record-api-status
    #:node-record-capacity
+   #:node-record-allocatable
    #:node-record-creation-timestamp
    #:node-record-extended-resources
    #:node-record-id

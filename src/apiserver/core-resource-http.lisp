@@ -232,7 +232,9 @@
    :replace or :remove). Hash-tables are mutated in place; vectors return a fresh
    vector (:add inserts, :remove drops, :replace overwrites). An empty PATH
    targets the whole document, returning VALUE, or 'NULL for :remove. Signals a
-   422 when the parent is missing or a :replace/:remove target does not exist."
+   422 when the parent is missing or a :remove target does not exist. Object
+   :replace may create a member, matching Kubernetes' json-patch.v4 behavior;
+   array replacement still requires an existing index."
   (if (null path)
       (if (eq operation :remove) 'null value)
       (let ((part (first path)))
@@ -242,7 +244,7 @@
              (core-json-write object (list part)
                               (core-json-write child (cdr path) value operation) :replace)))
           ((hash-table-p object)
-           (unless (or (eq operation :add) (nth-value 1 (gethash part object)))
+           (unless (or (member operation '(:add :replace)) (nth-value 1 (gethash part object)))
              (core-resource-error 422 "Invalid" "JSON patch path does not exist"))
            (if (eq operation :remove) (remhash part object) (setf (gethash part object) value)) object)
           ((and (vectorp object) (not (stringp object)))
@@ -285,8 +287,15 @@
                ((equal op "test")
                 (unless (nth-value 1 (gethash "value" operation))
                   (core-resource-error 400 "BadRequest" "JSON patch test requires value"))
-                (unless (core-json-equal-p (core-json-at object path) (gethash "value" operation))
-                  (core-resource-error 409 "Conflict" "JSON patch test failed")))
+                ;; json-patch.v4, used by Kubernetes, treats an absent object
+                ;; member as null for test. Controllers use this to install a
+                ;; first finalizer atomically. Missing parents still fail.
+                (let* ((parent (and path (core-json-at object (butlast path))))
+                       (actual (if (hash-table-p parent)
+                                   (gethash (car (last path)) parent 'null)
+                                   (core-json-at object path))))
+                  (unless (core-json-equal-p actual (gethash "value" operation))
+                    (core-resource-error 409 "Conflict" "JSON patch test failed"))))
                ((member op '("add" "replace" "remove") :test #'equal)
                 (unless (or (equal op "remove") (nth-value 1 (gethash "value" operation)))
                   (core-resource-error 400 "BadRequest" "JSON patch operation requires value"))

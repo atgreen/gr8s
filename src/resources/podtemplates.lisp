@@ -287,9 +287,16 @@ when both were on the server and it came first, so entries new to the list lead 
       ((equal type "array")
        (unless (and (vectorp value) (not (stringp value))) (core-resource-error 422 "Invalid" "~A must be an array" path))
        (loop for item across value do (validate-template-shape item (gethash "items" schema) path (1+ depth)))
-       (let ((keys (gethash "x-kubernetes-list-map-keys" schema)) (seen (make-hash-table :test #'equal)))
+       (let* ((container-ports (equal "#/definitions/io.k8s.api.core.v1.ContainerPort"
+                                      (gethash "$ref" (gethash "items" schema))))
+              ;; ContainerPort's apply merge identity is port/protocol, but
+              ;; Kubernetes create/update validation only requires unique
+              ;; nonempty names. KubeVirt exposes API and metrics on one port.
+              (keys (if container-ports #("name") (gethash "x-kubernetes-list-map-keys" schema)))
+              (seen (make-hash-table :test #'equal)))
          (when keys
            (loop for item across value for key = (loop for field across keys collect (gethash field item))
+                 unless (and container-ports (member (first key) '(nil "") :test #'equal))
                  do (when (gethash key seen) (core-resource-error 422 "Invalid" "Duplicate entry in ~A" path))
                     (setf (gethash key seen) t)))))
       ((equal type "string") (unless (stringp value) (core-resource-error 422 "Invalid" "~A must be a string" path)))

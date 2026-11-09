@@ -140,6 +140,27 @@
       (is (equal "worker-a"
                  (gethash "name" (gethash "metadata" (aref items 0))))))))
 
+(test json-patch-replace-can-introduce-object-members
+  (with-core-api (store path)
+    (values path)
+    (gr8s::create-core-resource store "configmaps"
+      (core-fixture "ConfigMap" "finalized" "data" (gr8s::core-object)) "default")
+    (let* ((item "/api/v1/namespaces/default/configmaps/finalized")
+           (patched (check-core-status 200 item :method :patch
+                      :content-type "application/json-patch+json"
+                      :object (vector (gr8s::core-object "op" "test" "path" "/metadata/finalizers" "value" 'null)
+                                      (gr8s::core-object
+                                       "op" "replace" "path" "/metadata/finalizers"
+                                       "value" #("example.test/cleanup"))))))
+      (is (equalp #("example.test/cleanup") (gethash "finalizers" (gethash "metadata" patched))))
+      ;; Permissive member replacement must not manufacture missing parents,
+      ;; accept invalid array indices, or make remove silently succeed.
+      (dolist (patch (list (gr8s::core-object "op" "replace" "path" "/missing/child" "value" 1)
+                          (gr8s::core-object "op" "replace" "path" "/metadata/finalizers/1" "value" "x")
+                          (gr8s::core-object "op" "remove" "path" "/data/missing")))
+        (check-core-status 422 item :method :patch :content-type "application/json-patch+json"
+                           :object (vector patch))))))
+
 (test core-resource-json-patch-tests-values-case-sensitively-and-atomically
   (with-core-api (store path)
     (values path)

@@ -21,6 +21,7 @@
 (defstruct (containerd-runtime (:constructor %make-containerd-runtime))
   socket-path
   log-root
+  kubelet-root
   host-network
   ;; Returns the Pods sharing this node, once an agent knows them; resizes are judged against them.
   pod-lister
@@ -43,6 +44,12 @@
   dynamic-resource-prepare-function
   dynamic-resource-cdi-device-function
   dynamic-resource-unprepare-function
+  device-plugin-allocation-function
+  device-plugin-release-function
+  resource-prepare-function
+  resource-config-function
+  resource-release-function
+  resource-resize-function
   probes
   (lifecycle-lock (bt:make-lock "native lifecycle checkpoint writes"))
   (hooks (make-container-hook-manager))
@@ -77,6 +84,13 @@
    :credential-provider-token-function credential-provider-token-function
    :registry-host-config-directory registry-host-config-directory
    :image-mirror-port image-mirror-port))
+
+(defun containerd-effective-container-resources (runtime pod container)
+  "Apply the same resource-manager affinity to container creation and updates."
+  (let ((resources (gr8s::cri-linux-container-resources
+                    (gr8s::container-with-pod-level-limits (gethash "spec" (pod-to-object pod)) container)))
+        (configure (containerd-runtime-resource-config-function runtime)))
+    (if configure (funcall configure pod container resources) resources)))
 
 (defun call-containerd-runtime (thunk)
   "Call THUNK and return its values. Re-signals a runtime-error or
@@ -304,6 +318,8 @@ exiting mid-call still abandon it."
 
 (defmethod runtime-prepare-pod-resources ((runtime containerd-runtime) pod)
   "Prepare DRA claims through the node callback before creating a sandbox."
+  (let ((prepare (containerd-runtime-resource-prepare-function runtime)))
+    (when prepare (funcall prepare pod)))
   (let ((prepare (containerd-runtime-dynamic-resource-prepare-function runtime)))
     (if prepare (funcall prepare pod) t)))
 
@@ -314,6 +330,10 @@ exiting mid-call still abandon it."
 
 (defmethod runtime-unprepare-pod-resources ((runtime containerd-runtime) pod)
   "Unprepare DRA claims through the node callback after the sandbox is gone."
+  (let ((release (containerd-runtime-resource-release-function runtime)))
+    (when release (funcall release pod)))
+  (let ((release (containerd-runtime-device-plugin-release-function runtime)))
+    (when release (funcall release pod)))
   (let ((unprepare (containerd-runtime-dynamic-resource-unprepare-function runtime)))
     (if unprepare (funcall unprepare pod) t)))
 
@@ -390,8 +410,11 @@ A container running as any user can write here, and a user mount at the path tak
                               (lambda ()
                                 (pod-image-pull-credentials runtime pod (container-spec-name spec)
                                                             (container-spec-image spec)))))
-    (let* ((environment (containerd-pod-environment runtime pod spec sandbox-id))
-           (mounts (containerd-container-mounts runtime pod spec sandbox-id environment))
+    (let* ((allocation (when (containerd-runtime-device-plugin-allocation-function runtime)
+                         (funcall (containerd-runtime-device-plugin-allocation-function runtime)
+                                  pod (pod-runtime-container-object pod spec))))
+           (environment (append (containerd-pod-environment runtime pod spec sandbox-id) (getf allocation :env)))
+           (mounts (append (containerd-container-mounts runtime pod spec sandbox-id environment) (getf allocation :mounts)))
            (security (containerd-pod-security-context
                       pod spec :target-id (containerd-ephemeral-target-id runtime pod spec)
                                :image-user (lambda () (cri-image-user socket (container-spec-image spec)))
@@ -421,18 +444,18 @@ A container running as any user can write here, and a user mount at the path tak
                           mounts)
                       (gr8s.cri.v1::userns-options (gr8s.cri.v1::namespace-options security)))
              :security-context security
-             :resources (cri-linux-container-resources
-                         ;; Without a pod cgroup of its own, a container is bounded by the Pod's limits.
-                         (container-with-pod-level-limits (gethash "spec" (pod-to-object pod))
-                                                          (pod-runtime-container-object pod spec)))
+             :devices (getf allocation :devices)
+             :annotations (getf allocation :annotations)
+             :resources (containerd-effective-container-resources runtime pod (pod-runtime-container-object pod spec))
              :working-directory (gethash "workingDir" (pod-runtime-container-object pod spec))
              :stdin (gethash "stdin" (pod-runtime-container-object pod spec))
              :stdin-once (gethash "stdinOnce" (pod-runtime-container-object pod spec))
              :tty (gethash "tty" (pod-runtime-container-object pod spec))
              :uid (pod-uid pod)
              :cdi-device-ids
-             (runtime-container-cdi-device-ids
-              runtime pod (pod-runtime-container-object pod spec))
+             (append (runtime-container-cdi-device-ids
+                      runtime pod (pod-runtime-container-object pod spec))
+                     (getf allocation :cdi-device-ids))
              :attempt attempt
              :labels termination-labels
              :log-path (container-attempt-log-path (container-spec-name spec) attempt))))

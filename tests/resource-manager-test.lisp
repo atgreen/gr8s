@@ -1,0 +1,196 @@
+;;;; SPDX-FileCopyrightText: 2026 Anthony Green
+;;;; SPDX-License-Identifier: Apache-2.0
+(in-package #:gr8s/tests)
+(def-suite resource-manager :in gr8s)
+(in-suite resource-manager)
+
+(defun rm-test-topology ()
+  (gr8s::core-object "online" #(0 1 2 3) "cpus" (gr8s::core-object)
+    "nodes" (vector (gr8s::core-object "id" 0 "cpus" #(0 1) "memory" (* 1024 1024 1024)
+                                      "hugepages" (gr8s::core-object "hugepages-2Mi" "0"))
+                     (gr8s::core-object "id" 1 "cpus" #(2 3) "memory" (* 1024 1024 1024)
+                                      "hugepages" (gr8s::core-object "hugepages-2Mi" "67108864")))))
+
+(defun rm-test-container (name cpu &optional (memory "32Mi") device)
+  (let ((limits (gr8s::core-object "cpu" cpu "memory" memory)))
+    (when device (setf (gethash "devices.example.test/kvm" limits) "1"))
+    (gr8s::core-object "name" name "image" "busybox" "resources" (gr8s::core-object "limits" limits))))
+
+(defun rm-test-pod (name containers &optional init)
+  (parse-pod (gr8s::core-object "apiVersion" "v1" "kind" "Pod"
+               "metadata" (gr8s::core-object "name" name "uid" name)
+               "spec" (gr8s::core-object "containers" (coerce containers 'vector) "initContainers" (coerce init 'vector)))))
+
+(defun test-resource-manager (path &rest options)
+  (apply #'gr8s.kubelet::make-node-resource-manager path :policy "static"
+         :topology (rm-test-topology) (append options (list :reserved-cpus "0"))))
+
+(test cpu-set-parser-and-policy-validation
+  (is (equal '(0 1 4 6 7) (gr8s.kubelet::parse-cpu-set "0-1,4,6-7")))
+  (is (equal "0-1,4,6-7" (gr8s.kubelet::format-cpu-set '(7 1 6 4 0))))
+  (dolist (input '("-1" "1-0" "0,0" "1-" "0,,2" "0-9999999"))
+    (signals error (gr8s.kubelet::parse-cpu-set input)))
+  (with-temporary-store (store path)
+    (declare (ignore store))
+    (signals error (gr8s.kubelet::make-node-resource-manager path :policy "static" :topology (rm-test-topology)))
+    (signals error (test-resource-manager path :reserved-cpus "9"))))
+
+(test dedicated-cpus-are-exclusive-persistent-and-released
+  (with-temporary-store (store path)
+    (declare (ignore store))
+    (let* ((manager (test-resource-manager path))
+           (pod (rm-test-pod "first" (list (rm-test-container "main" "2"))))
+           (other (rm-test-pod "second" (list (rm-test-container "main" "2"))))
+           (container (first (gr8s.kubelet::resource-pod-containers pod))))
+      (gr8s.kubelet::prepare-node-pod-resources manager pod)
+      (is (equal '(1 2) (coerce (gethash "cpus" (gethash (pod-uid pod) (gr8s.kubelet::node-resource-manager-allocations manager))) 'list)))
+      (is (equal '(0 3) (gr8s.kubelet::resource-shared-cpus manager)))
+      (is (equal "1-2" (gr8s.cri.v1::cpuset-cpus (gr8s.kubelet::node-container-resources manager pod container))))
+      (signals gr8s.runtime:resource-admission-error (gr8s.kubelet::prepare-node-pod-resources manager other))
+      (let ((restored (test-resource-manager path)))
+        (is (equal '(0 3) (gr8s.kubelet::resource-shared-cpus restored)))
+        (gr8s.kubelet::prepare-node-pod-resources restored pod)
+        (is (equal "1-2" (gr8s.cri.v1::cpuset-cpus (gr8s.kubelet::node-container-resources restored pod container))))
+        (gr8s.kubelet::release-node-pod-resources restored pod)
+        (gr8s.kubelet::prepare-node-pod-resources restored other)
+        (is (equal '(0 3) (gr8s.kubelet::resource-shared-cpus restored))))
+      (signals error (test-resource-manager path :topology-policy "single-numa-node")))))
+
+(test ordinary-init-cpus-are-reused-while-sidecars-remain-exclusive
+  (with-temporary-store (store path)
+    (declare (ignore store))
+    (let* ((manager (test-resource-manager path))
+           (sidecar (rm-test-container "sidecar" "1"))
+           (init (rm-test-container "init" "2"))
+           (app (rm-test-container "app" "2")))
+      (setf (gethash "restartPolicy" sidecar) "Always")
+      (let* ((pod (rm-test-pod "init" (list app) (list sidecar init)))
+             (plan (gr8s.kubelet::plan-node-pod-resources manager pod))
+             (allocations (gethash "containers" plan)))
+        (is (= 3 (length (gethash "cpus" plan))))
+        (is (equalp (gethash "cpus" (gethash "init" allocations)) (gethash "cpus" (gethash "app" allocations))))
+        (is-false (intersection (coerce (gethash "cpus" (gethash "sidecar" allocations)) 'list)
+                                (coerce (gethash "cpus" (gethash "app" allocations)) 'list)))))))
+
+(test numa-devices-cpus-memory-and-hugepages-share-one-affinity
+  (with-temporary-store (store path)
+    (declare (ignore store))
+    (let* ((devices (gr8s.kubelet::make-device-plugin-manager path))
+           (manager (test-resource-manager path :devices devices :topology-policy "single-numa-node"))
+           (container (rm-test-container "main" "2" "32Mi" t))
+           (plugin (gr8s.kubelet::make-device-plugin :resource "devices.example.test/kvm" :endpoint "/fixture.sock")))
+      (setf (gr8s.kubelet::device-plugin-devices plugin)
+            (list (plugin-wire "DEVICE" :id "wrong" :health "Healthy" :topology (plugin-wire "TOPOLOGY-INFO" :nodes (list (plugin-wire "NUMA-NODE" :id 0))))
+                  (plugin-wire "DEVICE" :id "right" :health "Healthy" :topology (plugin-wire "TOPOLOGY-INFO" :nodes (list (plugin-wire "NUMA-NODE" :id 1)))))
+            (gethash "devices.example.test/kvm" (gr8s.kubelet::device-plugin-manager-plugins devices)) plugin)
+      (setf (gethash "hugepages-2Mi" (gethash "limits" (gethash "resources" container))) "4Mi")
+      (let* ((pod (rm-test-pod "numa" (list container))))
+        (gr8s.kubelet::prepare-node-pod-resources manager pod)
+        (let* ((config (gr8s.kubelet::node-container-resources manager pod container))
+               (allocation (gethash "devices.example.test/kvm" (gethash "main" (gethash (pod-uid pod) (gr8s.kubelet::device-plugin-manager-allocations devices))))))
+          (is (equal "2-3" (gr8s.cri.v1::cpuset-cpus config)))
+          (is (equal "1" (gr8s.cri.v1::cpuset-mems config)))
+          (is (equalp #("right") (gethash "ids" allocation)))
+          (is (= (* 4 1024 1024) (gethash "hugepages-2Mi" (gethash "memory" (gethash (pod-uid pod) (gr8s.kubelet::node-resource-manager-allocations manager)))))))))))
+
+(test disjoint-provider-hints-are-rejected-without-reservations
+  (with-temporary-store (store path)
+    (declare (ignore store))
+    (let* ((devices (gr8s.kubelet::make-device-plugin-manager path))
+           (manager (test-resource-manager path :devices devices :topology-policy "single-numa-node"))
+           (pod (rm-test-pod "disjoint" (list (rm-test-container "main" "2" "32Mi" t)))))
+      (setf (gethash "devices.example.test/kvm" (gr8s.kubelet::device-plugin-manager-plugins devices))
+            (gr8s.kubelet::make-device-plugin :resource "devices.example.test/kvm"
+              :devices (list (plugin-wire "DEVICE" :id "local0" :health "Healthy"
+                              :topology (plugin-wire "TOPOLOGY-INFO" :nodes (list (plugin-wire "NUMA-NODE" :id 0)))))))
+      (signals gr8s.runtime:resource-admission-error (gr8s.kubelet::prepare-node-pod-resources manager pod))
+      (is (= 0 (hash-table-count (gr8s.kubelet::node-resource-manager-allocations manager))))
+      (is (= 0 (hash-table-count (gr8s.kubelet::device-plugin-manager-allocations devices)))))))
+
+(test podresources-reflects-real-reservations-and-allocatable-includes-assigned
+  (with-temporary-store (store path)
+    (let* ((manager (test-resource-manager path :store store :topology-policy "single-numa-node"))
+           (pod (create-pod store (rm-test-pod "reported" (list (rm-test-container "main" "2"))))))
+      (gr8s.kubelet::prepare-node-pod-resources manager pod)
+      (let* ((all (gr8s.kubelet::podresources-list manager nil))
+             (reported (first (gr8s.podresources.v1::pod-resources all)))
+             (container (first (gr8s.podresources.v1::containers reported)))
+             (allocatable (gr8s.kubelet::podresources-allocatable manager)))
+        (is (equal "reported" (gr8s.podresources.v1::name reported)))
+        (is (equal '(2 3) (gr8s.podresources.v1::cpu-ids container)))
+        (is (equal '(1 2 3) (gr8s.podresources.v1::cpu-ids allocatable)))
+        (is (= (* 32 1024 1024) (gr8s.podresources.v1::size (first (gr8s.podresources.v1::memory container)))))
+        (let* ((memory (first (gr8s.podresources.v1::memory container)))
+               (node (first (gr8s.podresources.v1::nodes (gr8s.podresources.v1::topology memory)))))
+          (is (= 1 (gr8s.podresources.v1::id node))))))))
+
+(test podresources-unix-endpoint-uses-standard-status-and-stops-with-open-client
+  (with-temporary-store (store path)
+    (let* ((manager (test-resource-manager path :store store))
+           (socket (merge-pathnames "pod-resources/kubelet.sock" path))
+           (server (gr8s.kubelet::start-podresources-server manager nil :path socket))
+           (channel (gr8s::make-unix-grpc-channel (namestring socket) :timeout 5)))
+      (unwind-protect
+           (progn
+             (is (= #o600 (logand #o777 (sb-posix:stat-mode (sb-posix:stat socket)))))
+             (let ((list (ag-grpc:call-unary channel "/v1.PodResourcesLister/List"
+                           (make-instance 'gr8s.podresources.v1::list-pod-resources-request)
+                           :response-type 'gr8s.podresources.v1::list-pod-resources-response :timeout 5))
+                   (get (handler-case
+                            (ag-grpc:call-unary channel "/v1.PodResourcesLister/Get"
+                              (make-instance 'gr8s.podresources.v1::get-pod-resources-request :pod-name "missing" :pod-namespace "default")
+                              :response-type 'gr8s.podresources.v1::get-pod-resources-response :timeout 5)
+                          (ag-grpc:grpc-status-error (error) (ag-grpc:grpc-status-error-code error)))))
+               (is (= 0 (ag-grpc:call-status list)))
+               (is (= 5 get)))
+             (gr8s.kubelet::stop-local-resource-server server)
+             (is-false (probe-file socket))
+             (is-false (gr8s.kubelet::local-resource-server-workers server)))
+        (ag-grpc:channel-close channel)
+        (gr8s.kubelet::stop-local-resource-server server)))))
+
+(test corrupt-overlapping-checkpoint-is-rejected
+  (with-temporary-store (store path)
+    (declare (ignore store))
+    (let* ((manager (test-resource-manager path))
+           (pod (rm-test-pod "original" (list (rm-test-container "main" "1")))))
+      (gr8s.kubelet::prepare-node-pod-resources manager pod)
+      (setf (gethash "overlapping" (gr8s.kubelet::node-resource-manager-allocations manager))
+            (gr8s::copy-core-object (gethash (pod-uid pod) (gr8s.kubelet::node-resource-manager-allocations manager))))
+      (gr8s.kubelet::save-node-resource-checkpoint manager)
+      (signals error (test-resource-manager path)))))
+
+(test pod-level-shared-cpus-are-confined-without-being-reported-exclusive-to-each-container
+  (with-temporary-store (store path)
+    (let* ((manager (test-resource-manager path :store store))
+           (container (rm-test-container "exclusive" "1"))
+           (object (pod-to-object (rm-test-pod "budget" (list container (gr8s::core-object "name" "shared" "image" "busybox")))))
+           (spec (gethash "spec" object)))
+      (setf (gethash "resources" spec)
+            (gr8s::core-object "limits" (gr8s::core-object "cpu" "3" "memory" "128Mi")
+                              "requests" (gr8s::core-object "cpu" "3" "memory" "128Mi")))
+      (let ((pod (create-pod store (parse-pod object))))
+        (gr8s.kubelet::prepare-node-pod-resources manager pod)
+        (let* ((report (gr8s.kubelet::podresources-pod manager nil pod))
+               (exclusive (first (gr8s.podresources.v1::containers report)))
+               (shared (second (gr8s.podresources.v1::containers report)))
+               (config (gr8s.kubelet::node-container-resources manager pod (second (gr8s.kubelet::resource-pod-containers pod)))))
+          (is (equal '(1 2 3) (gr8s.podresources.v1::cpu-ids report)))
+          (is (equal '(1) (gr8s.podresources.v1::cpu-ids exclusive)))
+          (is-false (gr8s.podresources.v1::cpu-ids shared))
+          (is (equal "2-3" (gr8s.cri.v1::cpuset-cpus config))))))))
+
+(test plugin-registration-after-admission-cannot-bypass-the-numa-affinity
+  (with-temporary-store (store path)
+    (declare (ignore store))
+    (let* ((devices (gr8s.kubelet::make-device-plugin-manager path))
+           (manager (test-resource-manager path :devices devices :topology-policy "single-numa-node"))
+           (pod (rm-test-pod "late" (list (rm-test-container "main" "1" "32Mi" t)))))
+      (gr8s.kubelet::prepare-node-pod-resources manager pod)
+      ;; The Pod chose node 0 before a plugin appeared for its opaque resource.
+      (setf (gethash "devices.example.test/kvm" (gr8s.kubelet::device-plugin-manager-plugins devices))
+            (gr8s.kubelet::make-device-plugin :resource "devices.example.test/kvm" :endpoint "/fixture.sock"
+              :devices (list (plugin-wire "DEVICE" :id "wrong-node" :health "Healthy"
+                              :topology (plugin-wire "TOPOLOGY-INFO" :nodes (list (plugin-wire "NUMA-NODE" :id 1)))))))
+      (signals gr8s::runtime-error
+        (gr8s.kubelet::node-pod-device-config manager pod (first (gr8s.kubelet::resource-pod-containers pod)))))))

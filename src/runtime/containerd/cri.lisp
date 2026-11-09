@@ -362,7 +362,7 @@ AUTH is a (username . password) credential for the registry."
 
 (defun make-cri-container-config
     (&key name image command args env uid mounts security-context resources working-directory
-          stdin stdin-once tty labels cdi-device-ids (attempt 0) log-path)
+          stdin stdin-once tty labels cdi-device-ids devices annotations (attempt 0) log-path)
   "Build the complete CRI config, including DRA-provided CDI device names."
   (make-instance
    'gr8s.cri.v1::container-config
@@ -374,6 +374,8 @@ AUTH is a (username . password) credential for the registry."
    :working-dir (or working-directory "")
    :stdin (not (null stdin)) :stdin-once (not (null stdin-once)) :tty (not (null tty))
    :mounts mounts
+   :devices devices
+   :annotations annotations
    :linux (when (or security-context resources)
             (make-instance 'gr8s.cri.v1::linux-container-config
                            :security-context security-context :resources resources))
@@ -392,7 +394,7 @@ AUTH is a (username . password) credential for the registry."
 (defun cri-create-container
     (socket-path sandbox-id sandbox-config
      &key name image command args env uid mounts security-context resources working-directory
-          stdin stdin-once tty labels cdi-device-ids (attempt 0) log-path (timeout 120))
+          stdin stdin-once tty labels cdi-device-ids devices annotations (attempt 0) log-path (timeout 120))
   "Create a container in SANDBOX-ID and return its runtime ID."
   (let ((channel (make-unix-grpc-channel socket-path :timeout timeout)))
     (unwind-protect
@@ -408,7 +410,8 @@ AUTH is a (username . password) credential for the registry."
                         :uid uid :mounts mounts :security-context security-context
                         :resources resources :working-directory working-directory
                         :stdin stdin :stdin-once stdin-once :tty tty :labels labels
-                        :cdi-device-ids cdi-device-ids :attempt attempt :log-path log-path))
+                        :cdi-device-ids cdi-device-ids :devices devices :annotations annotations
+                        :attempt attempt :log-path log-path))
               :timeout timeout)
            (ensure-cri-status "CreateContainer" status)
            (gr8s.cri.v1::container-id response))

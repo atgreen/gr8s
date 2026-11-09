@@ -134,6 +134,18 @@
         (error "--cni-conf-dir requires external CNI mode")))
   options)
 
+(defun validate-node-resource-options (options)
+  "Reject policies that cannot be enforced by this node's runtime."
+  (let ((static (equal "static" (getf options :cpu-manager-policy)))
+        (numa (equal "single-numa-node" (getf options :topology-manager-policy))))
+    (when (and static (null (gr8s.kubelet::parse-cpu-set (or (getf options :reserved-cpus) ""))))
+      (error "Static CPU policy requires --reserved-cpus"))
+    (when (and (or static numa)
+               (not (and (equal "containerd" (getf options :runtime))
+                         (equal "managed" (getf options :containerd-mode)))))
+      (error "CPU and topology policies require managed containerd")))
+  options)
+
 (defun parse-serve-options (arguments)
   "Parse `gr8s serve' ARGUMENTS into an options plist on top of the serve
    defaults. Signals on an unknown option, a missing option value, or an out-of-
@@ -159,6 +171,9 @@
                        :node-pod-prefix-ipv6 64
                        :overlay-backend "vxlan"
                        :runtime "containerd"
+                       :cpu-manager-policy "none"
+                       :topology-manager-policy "none"
+                       :reserved-cpus nil
                        :containerd-mode "managed"
                        :containerd-executable (default-containerd-executable)
                        :containerd-oci-runtime (default-containerd-oci-runtime)
@@ -256,7 +271,18 @@
                       (setf (getf options :runtime) value))
                      ((string= option "--containerd-socket")
                       (setf (getf options :containerd-socket) value))
-                     ((string= option "--containerd-mode")
+                     ((string= option "--cpu-manager-policy")
+                (unless (member value '("none" "static") :test #'equal) (error "CPU policy must be none or static"))
+                (setf (getf options :cpu-manager-policy) value))
+               ((string= option "--reserved-cpus")
+                (gr8s.kubelet::parse-cpu-set value)
+                (setf (getf options :reserved-cpus) value))
+               ((string= option "--topology-manager-policy")
+                (unless (member value '("none" "single-numa-node") :test #'equal) (error "Topology policy must be none or single-numa-node"))
+                (setf (getf options :topology-manager-policy) value))
+               ((string= option "--topology-manager-scope")
+                (unless (equal value "pod") (error "Topology manager scope must be pod")))
+               ((string= option "--containerd-mode")
                       (unless (member value '("managed" "external") :test #'string=)
                         (error "containerd mode must be managed or external"))
                       (setf (getf options :containerd-mode) value))
@@ -322,7 +348,7 @@
                   (* 2 (getf options :wireguard-relay-max-channels)) -1)
                65535)
         (error "WireGuard relay UDP port range exceeds 65535")))
-    (validate-cni-options options)))
+    (validate-node-resource-options (validate-cni-options options))))
 
 (defun parse-agent-options (arguments)
   "Parse `gr8s agent' ARGUMENTS into an options plist. Signals on an unknown
@@ -336,6 +362,9 @@
                        :node-name nil
                        :state-directory nil
                        :runtime "containerd"
+                       :cpu-manager-policy "none"
+                       :topology-manager-policy "none"
+                       :reserved-cpus nil
                        :containerd-mode "managed"
                        :containerd-executable (default-containerd-executable)
                        :containerd-oci-runtime (default-containerd-oci-runtime)
@@ -375,6 +404,17 @@
                                 :test #'string=)
                   (error "runtime must be containerd or fake"))
                 (setf (getf options :runtime) value))
+               ((string= option "--cpu-manager-policy")
+                (unless (member value '("none" "static") :test #'equal) (error "CPU policy must be none or static"))
+                (setf (getf options :cpu-manager-policy) value))
+               ((string= option "--reserved-cpus")
+                (gr8s.kubelet::parse-cpu-set value)
+                (setf (getf options :reserved-cpus) value))
+               ((string= option "--topology-manager-policy")
+                (unless (member value '("none" "single-numa-node") :test #'equal) (error "Topology policy must be none or single-numa-node"))
+                (setf (getf options :topology-manager-policy) value))
+               ((string= option "--topology-manager-scope")
+                (unless (equal value "pod") (error "Topology manager scope must be pod")))
                ((string= option "--containerd-mode")
                 (unless (member value '("managed" "external") :test #'string=)
                   (error "containerd mode must be managed or external"))
@@ -417,7 +457,7 @@
     (unless (eq (null (getf options :image-credential-provider-config))
                 (null (getf options :image-credential-provider-bin-dir)))
       (error "image credential provider config and bin directory must be specified together"))
-    (validate-cni-options options)))
+    (validate-node-resource-options (validate-cni-options options))))
 
 (defun parse-join-token-options (arguments)
   "Parse `gr8s join-token' ARGUMENTS into an options plist (role defaults to
@@ -1031,7 +1071,10 @@ The new identity takes effect when the node agent next starts."
               (make-node-runtime
                (agent-state-path options "runtime/") runtime manager
                :wireguard-private-key wireguard-private-key
-               :dns-forward-rules (getf options :dns-forward-rules)))
+               :dns-forward-rules (getf options :dns-forward-rules)
+               :cpu-manager-policy (getf options :cpu-manager-policy "none")
+               :reserved-cpus (getf options :reserved-cpus)
+               :topology-manager-policy (getf options :topology-manager-policy "none")))
         (setf (node-runtime-node-name node-runtime) node-name)
         (unwind-protect
              (progn
