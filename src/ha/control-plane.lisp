@@ -22,6 +22,68 @@
   member
   store)
 
+(defun member-snapshot-artifact-matches-p (state index term digest)
+  (and (gr8s.raft::raft-snapshot-envelope-p state)
+       (eq t (getf (cddr state) :application-present))
+       (handler-case (progn (gr8s.raft::raft-validate-snapshot-envelope state) t) (error () nil))
+       (equal (getf (cddr state) :application)
+              (list :gr8s-store-artifact 1 :index index :term term :sha256 digest))))
+
+(defun make-member-generation-validator (member transfer-term expected-index expected-term expected-digest &key recover)
+  "Bind a staged generation to the transfer/WAL identity and current member state.
+The caller supplies the authenticated transfer's boundary/digest, not values read
+back from the generation being checked. Invoke under MEMBER's lock, after outer
+application ingress/writer barriers. This function neither persists nor adopts Raft state."
+  (unless (and (member recover '(nil t))
+               (typep transfer-term '(integer 0 #.most-positive-fixnum))
+               (typep expected-index '(integer 1 #.most-positive-fixnum))
+               (typep expected-term '(integer 0 #.most-positive-fixnum))
+               (<= expected-term transfer-term)
+               (stringp expected-digest) (= 64 (length expected-digest))
+               (every (lambda (char) (find char "0123456789abcdef")) expected-digest))
+    (error "Invalid expected application snapshot identity"))
+  ;; Do not retain a caller-mutable digest string in the validation capability.
+  (let ((digest (copy-seq expected-digest)))
+    (lambda (descriptor store)
+      (declare (ignore store))
+      (unless (sb-thread:holding-mutex-p (raft-member-lock member))
+        (error "Application snapshot validation requires the current member lock"))
+      (unless (and (hash-table-p descriptor)
+                   (eql expected-index (gethash "index" descriptor))
+                   (eql expected-term (gethash "term" descriptor))
+                   (equal digest (gethash "artifactSha256" descriptor)))
+        (error "Staged generation differs from the expected application snapshot"))
+      (let* ((node (raft-member-node member))
+             (floor (max (raft-node-commit-index node) (raft-node-last-applied node)
+                         (raft-node-snapshot-index node)))
+             (floor-term (raft-log-term node floor))
+             (pending (raft-node-snapshot-pending node)))
+        (unless (and (<= (raft-node-snapshot-index node) (raft-node-last-applied node)
+                          (raft-node-commit-index node) (raft-last-log-index node))
+                     (or (= floor (raft-node-snapshot-index node)) (raft-log-entry node floor))
+                     (<= expected-term (raft-node-current-term node))
+                     floor-term (<= floor-term expected-term)
+                     (>= expected-index floor))
+          (error "Application snapshot is incompatible with the current member boundary"))
+        (cond
+          (pending
+           (destructuring-bind (index term state entries) pending
+             (declare (ignore entries))
+             (unless (and (= index expected-index) (= term expected-term)
+                          (member-snapshot-artifact-matches-p state expected-index expected-term digest))
+               (error "Another durable application snapshot is pending"))))
+          (recover
+           (unless (and (= expected-index floor (raft-node-snapshot-index node))
+                        (= expected-term (raft-node-snapshot-term node))
+                        (member-snapshot-artifact-matches-p (raft-node-snapshot-state node) expected-index expected-term digest))
+             (error "Recovery generation does not match the member's durable snapshot")))
+          (t
+           (unless (and (eq :follower (raft-node-role node))
+                        (= transfer-term (raft-node-current-term node))
+                        (> expected-index floor))
+             (error "Application snapshot does not advance the committed/applied boundary")))))
+      t)))
+
 (defun start-ha-control-plane (store &key id (host "127.0.0.1") (port 0)
                                           init join-host join-port
                                           node-name token ca-pin pki api-url)

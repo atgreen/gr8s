@@ -523,20 +523,20 @@
                            root (getf options :member-id) host port
                            :role :witness :node-name (getf options :node-name)
                            :token (getf options :token) :ca-pin (getf options :ca-pin))))
-           (storage (open-file-raft-storage (merge-pathnames "witness.log" root)))
            (member (start-raft-member (getf options :member-id)
                                       :host (getf options :listen)
                                       :port (getf options :port)
-                                      :storage storage
+                                      :storage-path (merge-pathnames "witness.log" root)
+                                      :initial-role :witness
                                       :credentials credentials)))
       (unwind-protect
            (progn
-             (raft-member-start member)
              (unless (raft-cluster-join member host port
                                         :role :witness
                                         :node-name (getf options :node-name))
                (error "witness ~A could not join the cluster at ~A:~D"
                       (getf options :member-id) host port))
+             (raft-member-start member)
              (format t "gr8s witness ~A joined the cluster via ~A:~D; holding quorum.~%"
                      (getf options :member-id) host port)
              (finish-output)

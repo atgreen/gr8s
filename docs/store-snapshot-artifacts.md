@@ -337,10 +337,12 @@ runs a full GC, and loads the selected files into the same object. This avoids
 constructing a second fully loaded store. Load or recovery failures retain the
 intent and keep access blocked; retries use the same store and target generation.
 
-For an HA store, `:call-with-member-lock` and `:commit-recovery` are required
-function arguments. The first must invoke its thunk synchronously exactly once
-under the member lock. The second receives the target descriptor and reloaded
-store under the barriers; it must durably coordinate snapshot/applied-index/WAL
+For an HA store, `:call-with-member-lock`, `:validate-recovery` and
+`:commit-recovery` are required function arguments. The first must invoke its
+thunk synchronously exactly once under the member lock. Validation receives the
+target descriptor and store before intent or selection changes and must return
+`T`; a false return or error leaves the existing application selected. The final
+callback receives the target descriptor and reloaded store under the barriers; it must durably coordinate snapshot/applied-index/WAL
 recovery and must not reenter public store operations. The intent is removed only
 after that callback succeeds. These callbacks are integration contracts, not an
 implementation of production member recovery.
@@ -419,3 +421,122 @@ those envelopes on disk and application loading authenticates and decrypts them.
 Reload must replace a previously loaded policy rather than retain it across a
 generation change. A generation's encrypted data requires the corresponding
 cluster identity key; an artifact alone is not an identity backup.
+
+## Local revisions for a live restore
+
+`materialize-store-snapshot` accepts `:minimum-resource-revision` and
+`:minimum-pod-revision` for a live restore. Supply values strictly above the
+member's current resource revision and its Pod revision reservation ceiling,
+respectively. The caller must quiesce all ingress before taking these values;
+if writes overtake a staged generation, rematerialize it with fresh minima.
+
+With a resource minimum, materialization gives every resource the new boundary
+revision and discards pre-restore history. Its history floors advance to that
+boundary so old watches and signed continuation pages expire instead of reading
+a different state under an old revision. With a Pod minimum, Nodes and Pod
+publications receive the new local boundary. Pod desired and observation revisions
+remain unchanged because replicated delta preconditions and agent acknowledgments
+use them across members. A durable local Pod epoch rejects pre-restore client
+versions while allowing newly published versions. The original artifact and its digest
+remain unchanged. Transformation happens one validated record at a time.
+
+A private `metadata/snapshot-boundary.json` records the materialized clocks and
+artifact index/term. Live reload checks it under the barriers before creating an
+intent or changing selection, rejects clocks overtaken by the running member,
+and verifies the loaded clocks before acknowledging recovery. A failed partial
+load can retry the same selected generation. Standalone writes after restore
+maintain the durable committed Pod clock so they can survive reopening.
+
+These local revision checks do not prove the artifact is newer than the member's
+applied Raft state. Production snapshot installation must also validate its
+index/term against the actual member and coordinate WAL recovery. Older
+artifacts and manually prepared generations can still be opened at startup;
+they need rematerialization before using this live reload path.
+
+`gr8s.ha::make-member-generation-validator` creates the pre-intent callback for
+an actual Raft member. Its inputs are the authenticated transfer's sender term,
+snapshot index/term and artifact digest, obtained independently of the generation
+being checked. Validation requires the calling thread to own the member lock.
+For a fresh installation it requires a follower still in the transfer's term and
+a snapshot ahead of both committed and applied state, with a compatible log term.
+The descriptor must match the expected index, term and digest. The callback reads
+current member state at invocation, so advancing the member after staging does
+not leave a stale validation decision usable.
+
+An exact durable pending snapshot may resume after a later election term, but its
+index, term and application artifact digest must still match, and its boundary
+cannot precede the member's committed/applied state. A different pending install
+is rejected. These checks do not acquire ingress barriers, write a WAL snapshot,
+or enable a production restore caller. In particular, the transport's current
+member-lock-first dispatch still needs coordination with the outer application
+writer barriers before production artifact installation can invoke live reload.
+
+For startup recovery, the validator's explicit `:recover t` mode accepts an exact
+published snapshot already loaded from the WAL, before its suffix is applied. It
+checks the member's snapshot index/term and full application reference rather
+than treating an equal applied index as a fresh transfer. Recovery is rejected
+if the member has already committed or applied a newer boundary.
+
+The application reference is a small, readable Lisp value suitable for the WAL:
+`(:gr8s-store-artifact 1 :index INDEX :term TERM :sha256 DIGEST)`. The reference
+binds the artifact identity; it does not contain the artifact bytes. Pending and
+published recovery also validate the enclosing Raft configuration envelope.
+Production wiring of artifact transport, durable placement and retention with
+application restore remains unfinished. Both preflight and post-load recovery callbacks run under the
+member and raw store barriers and must not reenter public store operations.
+
+Durable artifact storage is available through the internal
+`gr8s.resources::retain-store-snapshot-artifact` function. Supply the stable member
+root, source pathname, expected index, term and lowercase SHA256. It copies and
+hashes bytes in 64 KiB buffers into a private staging file, synchronizes the file,
+and validates the complete snapshot and its boundary before publication. It
+atomically links the file to `snapshot-artifacts/SHA256.jsonl` without overwriting
+an existing artifact, checks the published copy, then synchronizes the directory.
+Only successful return supplies a pathname and reference eligible for a future
+WAL snapshot. An error after publication may leave a valid file visible; retry
+verifies and synchronizes it before acknowledging durability.
+
+`checked-store-snapshot-artifact-path` resolves a reference after restart. It
+rejects missing files, symlinks, unsafe ownership/permissions, changed bytes, and
+mismatched index/term. Registry directories are mode 0700 and files are mode 0600.
+Published files are immutable; these APIs assume exclusive management of the
+member root by its process. Lookup rehashes and validates the artifact without
+assembling its complete payload in memory.
+
+Transfer scratch can be deleted after retention succeeds. Registry files have
+no automatic garbage collection: current or pending WAL snapshots, recoverable
+WAL history and in-flight transfers may depend on them. Interrupted staging files
+are ignored by reference lookup. The registry does not change application
+selection, write the WAL, transport artifact bytes, or enable automatic compaction.
+Those production paths must call it before persisting an artifact reference.
+
+The internal `gr8s.resources::configure-store-artifact-transport` function binds
+registry source and retention callbacks to a Raft member and its stable member
+root. With these callbacks installed, an application reference uses the
+`:artifact-v1` transfer mode: the registry file's raw JSONL bytes travel in chunks
+of at most 64 KiB. The first chunk carries a separate configuration/reference
+header of at most 64 KiB. Its sender, election term, snapshot index/term and
+artifact digest must match the transfer identity. The complete file checksum is
+checked before the receiver invokes its durable registry retainer.
+
+Artifact chunks use a binary frame with the eight-byte magic `GR8SCK01`, three
+big-endian 32-bit lengths (metadata, envelope, data), then those byte sections.
+Each section is limited to 64 KiB; lengths must exactly match the received frame.
+The data section is decoded directly into an octet vector, avoiding Lisp reader
+allocation for tens of thousands of printed byte numbers. Ordinary Raft messages
+and generic snapshots keep their existing encoding. Members lacking artifact
+support reject this transfer; no mixed-version capability negotiation is enabled.
+
+Only a literal successful retention acknowledgement permits Raft to write the
+artifact reference to its WAL and invoke its restore callback. A failed restore
+can leave a durable pending snapshot; its retained artifact survives transfer
+scratch cleanup and is available to WAL recovery. Reference-only legacy snapshot
+transfers are rejected because they would not establish artifact availability.
+The final artifact RPC has a 60-second completion budget for verification and
+retention; intermediate chunk calls retain their two-second budget.
+
+Retention runs under the member mutex and must perform filesystem work only.
+It must not acquire application ingress/writer locks or invoke live application
+reload. Installing these callbacks does not install a production application
+restore callback or enable compaction. Production startup, restore barriers,
+artifact retention rules and automatic compaction still require coordination.

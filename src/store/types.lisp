@@ -45,6 +45,7 @@
   consensus-pod-revision
   (pod-revision 0)
   (pod-revision-ceiling 0)
+  (pod-revision-epoch-floor 0)
   (watch-journal-p t)
   (pod-watch-floor 0)
   pod-watch-journal

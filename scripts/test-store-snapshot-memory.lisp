@@ -5,6 +5,30 @@
 (require :asdf)
 (asdf:load-asd (truename "gr8s.asd"))
 (asdf:load-system "gr8s")
+(defun transfer-memory-test-artifact (root reference)
+  (let ((sink-root (merge-pathnames "transfer-sink/" root))
+        (sender nil) (receiver nil) (channel nil) (restored nil))
+    (sb-posix:mkdir (namestring sink-root) #o700)
+    (unwind-protect
+         (progn
+           (setf sender (gr8s::start-raft-member "source")
+                 receiver (gr8s::start-raft-member "sink" :storage-path (merge-pathnames "raft/wal" sink-root)
+                            :restore-fn (lambda (ref) (setf restored ref))))
+           (gr8s.resources::configure-store-artifact-transport sender root)
+           (gr8s.resources::configure-store-artifact-transport receiver sink-root)
+           (setf channel (gr8s::make-raft-channel nil "127.0.0.1" (gr8s::raft-member-port receiver) 2))
+           (gr8s.raft.transport::raft-link-send-snapshot
+            sender (gr8s.node.v1::make-raft-transport-stub channel)
+            (list :type :install-snapshot :term 1 :from "source" :last-index 1 :last-term 1
+                  :state (list :gr8s-raft-snapshot 1 :application reference :application-present t
+                               :members '(("source" . :voter) ("sink" . :learner)) :addresses nil :api-urls nil)))
+           (assert (equal reference restored))
+           (assert (= 1 (gr8s::raft-node-last-applied (gr8s::raft-member-node receiver))))
+           (gr8s.resources::checked-store-snapshot-artifact-path sink-root reference))
+      (when channel (ag-grpc:channel-close channel))
+      (when receiver (gr8s::stop-raft-member receiver))
+      (when sender (gr8s::stop-raft-member sender)))))
+
 (let* ((directory (merge-pathnames (format nil "gr8s-artifact-memory-~A/" (gr8s::generate-uid))
                                   (uiop:temporary-directory)))
        (count (parse-integer (or (uiop:getenv "GR8S_SNAPSHOT_RECORDS") "1024")))
@@ -13,6 +37,9 @@
        (materialized-count nil)
        (reload-descriptor nil)
        (reloaded nil)
+       (retained nil) (retained-reference nil) (transferred nil)
+       (transfer (equal "1" (uiop:getenv "GR8S_SNAPSHOT_TRANSFER")))
+       (retain (or transfer (equal "1" (uiop:getenv "GR8S_SNAPSHOT_RETAIN"))))
        (reload (equal "1" (uiop:getenv "GR8S_SNAPSHOT_RELOAD")))
        (materialize (equal "1" (uiop:getenv "GR8S_SNAPSHOT_MATERIALIZE")))
        (legacy (equal "1" (uiop:getenv "GR8S_SNAPSHOT_LEGACY"))))
@@ -40,11 +67,22 @@
                (setf validated-count
                      (nth-value 2 (gr8s.resources::validate-store-snapshot
                                    target :expected-index 1 :expected-term 1)))))
+         (when (and retain (not legacy))
+           (multiple-value-bind (path reference)
+               (gr8s.resources::retain-store-snapshot-artifact
+                directory target 1 1 (gr8s.raft.transport::raft-snapshot-file-digest target))
+             (delete-file target)
+             (setf target (gr8s.resources::checked-store-snapshot-artifact-path directory reference)
+                   retained (equal path target) retained-reference reference)))
+         (when (and transfer (not legacy))
+           (setf target (transfer-memory-test-artifact directory retained-reference) transferred t))
          (when (and (or materialize reload) (not legacy))
            (multiple-value-bind (path descriptor records)
                (gr8s.resources::materialize-store-snapshot
                 directory target (gr8s.raft.transport::raft-snapshot-file-digest target)
-                :expected-index 1 :expected-term 1)
+                :expected-index 1 :expected-term 1
+                :minimum-resource-revision (when reload (1+ (gr8s::pod-store-resource-revision store)))
+                :minimum-pod-revision (when reload (1+ (gr8s::pod-store-pod-revision-ceiling store))))
              (declare (ignore path))
              (setf materialized-count records reload-descriptor descriptor)))
          (when (and reload (not legacy))
@@ -59,7 +97,7 @@
                         "passed" t "legacy" legacy "records" count
                         "validatedRecords" validated-count "materializedRecords" materialized-count
                         "residentResourcesAfterOperation" (hash-table-count (gr8s::pod-store-resources store))
-                        "reloadedSameStore" reloaded "payloadBytes" (* count bytes)
+                        "reloadedSameStore" reloaded "retainedArtifactAfterTransferCleanup" retained "transferredArtifact" transferred "payloadBytes" (* count bytes)
                         "artifactBytes" (sb-posix:stat-size (sb-posix:stat (namestring target))))))
            (unless reloaded
              (setf (gethash "residentSourceResources" result) (hash-table-count (gr8s::pod-store-resources store))))

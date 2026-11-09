@@ -161,7 +161,10 @@
                   (restore-staged-pods *pod-write-context*)))
             (let ((*pod-write-context* nil))
               (when *pending-consensus-commit*
-                (funcall (pod-store-consensus-commit-fn store) :core-delta *pending-consensus-commit*))
+                (let ((result (funcall (pod-store-consensus-commit-fn store) :core-delta *pending-consensus-commit*)))
+                  (when (and (consp result) (eq :core-conflict (first result)))
+                    (error 'kubernetes-error :status-code 409 :reason "Conflict"
+                           :message "Resource changed before its consensus transaction committed"))))
               (when payload
                 (let ((result (funcall (pod-store-consensus-commit-fn store) :pod-delta payload)))
                   (when (and (consp result) (eq :pod-conflict (first result)))
@@ -178,7 +181,11 @@
                         (when record (setf (node-record-resource-version record) (second entry))))))))))))
       (bt:with-lock-held ((pod-store-lock store))
         (ensure-store-available store)
-        (funcall function))))
+        (unwind-protect (funcall function)
+          ;; A restored generation carries a committed clock even when reopened
+          ;; standalone. Keep it current after local writes as well as HA apply.
+          (when (pod-store-consensus-pod-revision store)
+            (save-consensus-pod-revision-unlocked store))))))
 
 (defun pod-delta-current (store entry)
   (gethash (pod-key (gethash "namespace" entry) (gethash "name" entry)) (pod-store-pods store)))

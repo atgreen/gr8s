@@ -66,7 +66,7 @@
     (error "Invalid store generation descriptor"))
   record)
 
-(defun read-store-generation-descriptor (path)
+(defun read-private-generation-json (path)
   "Refuse links, nonprivate files and unbounded metadata before parsing."
   (let ((fd (sb-posix:open (namestring path) (logior sb-posix:o-rdonly sb-posix:o-nofollow sb-posix:o-nonblock) 0))
         (stream nil))
@@ -81,9 +81,11 @@
                (error "Unsafe store generation descriptor ~A" path)))
            (setf stream (sb-sys:make-fd-stream fd :input t :element-type 'character
                                                :external-format :utf-8 :auto-close t))
-           (validate-store-generation-descriptor
-            (com.inuoe.jzon:parse stream :max-depth 8 :max-string-length 256)))
+           (com.inuoe.jzon:parse stream :max-depth 8 :max-string-length 256))
       (if stream (close stream) (sb-posix:close fd)))))
+
+(defun read-store-generation-descriptor (path)
+  (validate-store-generation-descriptor (read-private-generation-json path)))
 
 (defun checked-store-generation-descriptor (root id)
   (check-store-generation-directory (store-generation-base root))

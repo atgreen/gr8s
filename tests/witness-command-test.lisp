@@ -75,3 +75,146 @@
         (when witness-thread (ignore-errors (bt:join-thread witness-thread)))
         (gr8s.raft.transport::raft-member-close-snapshot-root orphan-member)
         (ignore-errors (gr8s::stop-raft-member a))))))
+
+(defun send-witness-vote-request (member term candidate)
+  (let ((channel (gr8s::make-raft-channel nil "127.0.0.1" (gr8s::raft-member-port member) 2)))
+    (unwind-protect
+         (gr8s.raft.transport::raft-link-deliver-message
+          (gr8s.node.v1::make-raft-transport-stub channel)
+          (list :type :request-vote :term term :from candidate
+                :last-log-index 1 :last-log-term 17))
+      (ag-grpc:channel-close channel))))
+
+(test recovered-witness-does-not-double-vote-after-repeated-restarts
+  (with-raft-temp-dir (path)
+    (let ((storage (gr8s::open-file-raft-storage path)))
+      (gr8s.raft::raft-storage-save-hard-state storage 17 "candidate-a")
+      (gr8s.raft::raft-storage-append-entry storage (gr8s::make-raft-entry :index 1 :term 17 :command '(:noop)))
+      (close (gr8s.raft::file-raft-storage-stream storage)))
+    (let ((first (gr8s::start-raft-member "recovered-witness" :storage-path path :initial-role :witness))
+          (stream nil))
+      (unwind-protect
+           (let ((node (gr8s::raft-member-node first)))
+             (setf stream (gr8s.raft::file-raft-storage-stream (gr8s.raft:raft-node-storage node)))
+             (is (= 17 (gr8s::raft-node-current-term node)))
+             (is (equal "candidate-a" (gr8s::raft-node-voted-for node)))
+             (is (= 1 (gr8s::raft-last-log-index node)))
+             (send-witness-vote-request first 17 "candidate-b")
+             (is (equal "candidate-a" (gr8s::raft-node-voted-for node)))
+             (send-witness-vote-request first 18 "candidate-b")
+             (is (equal "candidate-b" (gr8s::raft-node-voted-for node))))
+        (gr8s::stop-raft-member first))
+      (is-false (open-stream-p stream)))
+    (dotimes (attempt 2)
+      (let ((member (gr8s::start-raft-member "recovered-witness" :storage-path path :initial-role :witness)))
+        (unwind-protect
+             (let ((node (gr8s::raft-member-node member)))
+               (is (= 18 (gr8s::raft-node-current-term node)))
+               (is (equal "candidate-b" (gr8s::raft-node-voted-for node)))
+               (is (= 1 (gr8s::raft-last-log-index node)))
+               (send-witness-vote-request member 18 "candidate-c")
+               (is (equal "candidate-b" (gr8s::raft-node-voted-for node)))
+               (bt:with-lock-held ((gr8s::raft-member-lock member))
+                 (dotimes (tick 100) (gr8s::raft-tick node)))
+               (is (eq :follower (gr8s::raft-node-role node)))
+               (is (= 18 (gr8s::raft-node-current-term node))))
+          (gr8s::stop-raft-member member))))))
+
+(test witness-command-reopens-its-wal-and-rejoins-with-existing-credentials
+  (with-raft-temp-dir (walpath)
+    (let* ((state (uiop:pathname-directory-pathname walpath))
+           (credentials (gr8s::ensure-raft-founder-credentials (merge-pathnames "leader/" state) "leader"))
+           (pki (gr8s::raft-credentials-pki credentials))
+           (leader (gr8s::start-raft-member "leader" :credentials credentials))
+           (options nil) (thread nil) (stop nil) (outcome nil) (previous-index 0))
+      (unwind-protect
+           (progn
+             (gr8s::raft-cluster-init leader)
+             (gr8s::raft-member-start leader)
+             (is (poll-until (lambda () (gr8s::raft-member-leader-p leader))))
+             (setf options (list :member-id "restart-witness" :node-name "restart-witness"
+                           :join (format nil "127.0.0.1:~D" (gr8s::raft-member-port leader))
+                           :listen "127.0.0.1" :port 0 :state-directory (namestring state)
+                           :token (gr8s:create-join-token pki "restart-witness" :role :witness)
+                           :ca-pin (gr8s::cluster-pki-ca-fingerprint pki)))
+             (dotimes (cycle 2)
+               (setf stop nil outcome nil
+                     thread (bt:make-thread
+                             (lambda ()
+                               (setf outcome (handler-case
+                                                 (gr8s::run-witness options :stop-predicate (lambda () stop))
+                                               (error (condition) (princ-to-string condition)))))
+                             :name "gr8s restart witness command"))
+               (is (poll-until
+                    (lambda () (eq :witness (gethash "restart-witness"
+                                 (gr8s::raft-node-roles (gr8s::raft-member-node leader)))))
+                    :timeout 20))
+               ;; The new index needs this cycle's live witness acknowledgement;
+               ;; match-index from the previous incarnation cannot commit it.
+               (multiple-value-bind (value committed index)
+                   (gr8s::raft-member-propose-sync leader (list :noop cycle) :timeout 20)
+                 (declare (ignore value))
+                 (unless (eq t committed)
+                   (error "Witness restart cycle ~D failed to commit: ~S; command outcome: ~S" cycle committed outcome))
+                 (is (eq t committed))
+                 (is (> index previous-index))
+                 (setf previous-index index))
+               (setf (getf options :port)
+                     (second (gethash "restart-witness"
+                                      (gr8s::raft-node-peer-addresses (gr8s::raft-member-node leader)))))
+               (setf stop t)
+               (bt:join-thread thread)
+               (setf thread nil)
+               (is (eql 0 outcome))
+               (let ((recovered (gr8s::load-raft-log (merge-pathnames "raft/witness.log" state))))
+                 (is (plusp (gr8s::raft-recovered-term recovered)))
+                 (is (>= (gr8s::raft-entry-index (car (last (gr8s::raft-recovered-entries recovered))))
+                         previous-index)))
+               ;; Rejoin uses the saved member certificate, not a new token.
+               (setf (getf options :token) nil)))
+        (setf stop t)
+        (when thread (ignore-errors (bt:join-thread thread)))
+        (gr8s::stop-raft-member leader)))))
+
+(test witness-hard-state-survives-repeated-sigkill-process-restarts
+  (with-raft-temp-dir (path)
+    (let* ((root (uiop:pathname-directory-pathname path))
+           (script (merge-pathnames "witness-child.lisp" root))
+           (ready (merge-pathnames "witness-ready.txt" root))
+           (process nil))
+      (ensure-directories-exist script)
+      (with-open-file (out script :direction :output :if-does-not-exist :create)
+        (format out "(require :asdf)~%(asdf:load-asd ~S)~%(asdf:load-system :gr8s)~%"
+                (namestring (merge-pathnames "gr8s.asd" (asdf:system-source-directory :gr8s))))
+        (format out "(let ((member (gr8s::start-raft-member ~S :storage-path ~S :initial-role :witness)))~%"
+                "crash-witness" (namestring path))
+        (format out "(gr8s::write-private-text-atomically ~S (write-to-string (gr8s::raft-member-port member)))~%"
+                (namestring ready))
+        (write-line "(loop (sleep 1)))" out))
+      (unwind-protect
+           (dotimes (cycle 3)
+             (when (probe-file ready) (delete-file ready))
+             (let ((log (merge-pathnames (format nil "witness-child-~D.log" cycle) root)))
+               (setf process (sb-ext:run-program "sbcl"
+                              (list "--noinform" "--non-interactive" "--load" (namestring script))
+                              :search t :wait nil :input nil :output log :error :output))
+               (poll-until (lambda () (or (probe-file ready) (not (sb-ext:process-alive-p process)))) :timeout 60)
+               (unless (probe-file ready)
+                 (error "Witness child failed to start:~%~A" (uiop:read-file-string log))))
+             (let ((remote (gr8s::make-raft-member :port (parse-integer (uiop:read-file-string ready)))))
+               (send-witness-vote-request remote (if (= cycle 2) 21 20)
+                                          (if (zerop cycle) "candidate-a" "candidate-b")))
+             (let ((recovered (gr8s::load-raft-log path)))
+               (is (= (if (= cycle 2) 21 20) (gr8s::raft-recovered-term recovered)))
+               (is (equal (if (= cycle 2) "candidate-b" "candidate-a")
+                          (gr8s::raft-recovered-vote recovered))))
+             (sb-ext:process-kill process 9)
+             (sb-ext:process-wait process)
+             (is (eq :signaled (sb-ext:process-status process)))
+             (sb-ext:process-close process)
+             (setf process nil))
+        (when process
+          (when (sb-ext:process-alive-p process)
+            (sb-ext:process-kill process 9)
+            (sb-ext:process-wait process))
+          (sb-ext:process-close process))))))

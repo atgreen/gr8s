@@ -117,13 +117,19 @@
 
 (defun pod-revision-satisfied-p (store expected actual)
   "Accept EXPECTED when it was issued at or after ACTUAL, the Pod's last spec write."
-  (or (equal expected actual)
-      (let ((number (and (stringp expected) (plusp (length expected))
+  (let ((number (and (stringp expected) (plusp (length expected))
                          (every #'digit-char-p expected)
                          (parse-integer expected))))
         (and number
-             (>= number (parse-integer actual))
-             (<= number (pod-store-pod-revision store))))))
+             (or (equal expected actual)
+                 (and (>= number (parse-integer actual))
+                      (<= number (pod-store-pod-revision store)))))))
+
+(defun pod-client-revision-satisfied-p (store expected actual)
+  "Client CAS also rejects versions issued before the last restore epoch.
+Internal controllers and replicated desired-state checks keep using canonical revisions."
+  (and (pod-revision-satisfied-p store expected actual)
+       (>= (parse-integer expected) (pod-store-pod-revision-epoch-floor store))))
 
 (defun pod-published-view (store pod)
   "Return an independent API snapshot of POD using its last published status."

@@ -1,0 +1,50 @@
+{
+  "date": "2026-11-09",
+  "scope": "Mandatory pre-intent HA reload validation and actual Raft member generation validator; production caller integration remains open",
+  "implementationCommit": "f0d2bab",
+  "passed": true,
+  "checks": 515,
+  "suites": {
+    "store-application-reload": 168,
+    "store-access-gate": 56,
+    "store-restore-intent": 50,
+    "ha-control-plane": 29,
+    "raft": 212
+  },
+  "checkScope": "Distinct checks across final reload and relevant integration suites; repeated runs not double-counted. The HA recovery acknowledgement callback remains a test double; the published-snapshot recovery validation test uses real file-backed Raft storage.",
+  "coverage": [
+    "HA reload requires lock, preflight and durable recovery callbacks",
+    "Preflight must return T before any intent or selector mutation",
+    "Calling thread must own the actual member mutex; another thread holding it is insufficient",
+    "Bind independent expected sender term, snapshot index/term and copied artifact digest",
+    "Read current committed/applied/snapshot boundary at invocation; reject stale term, role, index, term regression and unverifiable log state",
+    "Exact pending artifact retries permitted after election, including already published boundary, without rolling back newer commits",
+    "Pending snapshot envelope membership/application presence and canonical artifact reference validated",
+    "Explicit recover mode matches published snapshot loaded by recover-raft-node from an fsynced file WAL before suffix replay",
+    "Fresh transfer cannot impersonate equal-index published recovery",
+    "Conflicting uncommitted tail may be replaced; validator leaves log and application unchanged",
+    "Mutable input digest cannot alter a constructed validator"
+  ],
+  "artifactReference": "(:gr8s-store-artifact 1 :index INDEX :term TERM :sha256 DIGEST)",
+  "memory": {
+    "passed": true,
+    "legacy": false,
+    "records": 1024,
+    "validatedRecords": 1028,
+    "materializedRecords": 1028,
+    "residentResourcesAfterOperation": 1024,
+    "reloadedSameStore": true,
+    "payloadBytes": 67108864,
+    "artifactBytes": 67347643,
+    "heapMiB": 384
+  },
+  "memoryScope": "384 MiB heap, cached compilation, 64 MiB ConfigMap payload capture/validation/rebased materialization/same-store reload. Standalone path; no production incoming snapshot or simultaneous active cluster workload.",
+  "remaining": [
+    "Authenticated production artifact transfer and durable artifact placement/retention",
+    "Ingress/controller/node-RPC quiescence and transport member-lock ordering",
+    "Register production snapshot/restore callbacks and coordinate WAL adoption/replay/startup",
+    "Automatic compaction and constrained-heap disconnected-member real-process acceptance",
+    "Full ten-gap objective remains open"
+  ],
+  "fullGoalComplete": false
+}

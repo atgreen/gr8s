@@ -185,3 +185,16 @@
       (is (probe-file (merge-pathnames "objects/state.json" path)))
       (is (null (probe-file (gr8s.store::store-generation-complete-path root id))))
       (is (null (gr8s.store::selected-store-generation-root root))))))
+
+(test rebased-materialization-rejects-invalid-and-exhausted-revision-space
+  (with-temporary-store (store root)
+    (let ((source (merge-pathnames "range-source.jsonl" root)))
+      (gr8s.resources::capture-store-snapshot store source 42 7)
+      (dolist (minimum (list -1 (expt 2 64) "100"))
+        (signals error (gr8s.resources::materialize-store-snapshot root source (snapshot-test-digest source)
+                                                                 :minimum-resource-revision minimum)))
+      (dolist (key '(:minimum-resource-revision :minimum-pod-revision))
+        (let ((id (gr8s::generate-uid)))
+          (signals error (apply #'gr8s.resources::materialize-store-snapshot root source (snapshot-test-digest source)
+                                :generation-id id (list key (1- (expt 2 64)))))
+          (is (null (probe-file (gr8s.store::store-generation-complete-path root id)))))))))

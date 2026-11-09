@@ -577,6 +577,11 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
                 (t (pod-status "Pending"))))
     object))
 
+(defun check-pod-client-resource-version (store pod expected)
+  (when (and expected (not (equal expected ""))
+             (not (gr8s.store::pod-client-revision-satisfied-p store expected (pod-resource-version pod))))
+    (core-resource-error 409 "Conflict" "Pod resourceVersion has changed")))
+
 (defun apply-pod-response (store reconciler name &optional (namespace "default"))
   "Serve a PATCH (or server-side apply) on NAME in NAMESPACE. Decodes the body by
    content type -- JSON Patch, strategic merge, or apply-patch+yaml, else a JSON
@@ -597,8 +602,8 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
                            (error error))))))
     (multiple-value-bind (admitted attributes)
         (admit-pod-input store (if existing "UPDATE" "CREATE") namespace name
-                         (cond ((and existing structured) (pod-patched-object (pod-to-object existing) content-type))
-                               (existing (merge-json-object (copy-json-object (pod-to-object existing)) patch))
+                         (cond ((and existing structured) (pod-patched-object (pod-published-view store existing) content-type))
+                               (existing (merge-json-object (copy-json-object (pod-published-view store existing)) patch))
                                (applied (apply-pod-created-object namespace name))
                                (structured (core-resource-error 404 "NotFound" "pods ~S not found" name))
                                (t patch))
@@ -607,6 +612,7 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
         (unless (string= name (pod-name replacement))
           (invalid-pod "request name does not match metadata.name"))
         (admit-pod-result store attributes replacement)
+        (when existing (check-pod-client-resource-version store existing (pod-resource-version replacement)))
         (when (core-resource-dry-run-p)
           (return-from apply-pod-response
             (json-response (pod-dry-run-object store replacement existing reconciler) (if existing 200 201))))
@@ -633,6 +639,7 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
         (unless (string= name (pod-name replacement))
           (invalid-pod "request name does not match metadata.name"))
         (admit-pod-result store attributes replacement)
+        (check-pod-client-resource-version store (get-pod store namespace name) (pod-resource-version replacement))
         (when (core-resource-dry-run-p)
           (return-from replace-pod-response
             (json-response (pod-dry-run-object store replacement (get-pod store namespace name) reconciler))))
@@ -690,6 +697,7 @@ With RECONCILER, an existing Pod shows the status and revision a read of it woul
                       (when (and body (plusp (length body))) (core-resource-request-object "DeleteOptions"))))
   (multiple-value-bind (status pod)
       (multiple-value-bind (arguments foreground) (pod-delete-request-arguments)
+        (check-pod-client-resource-version store (get-pod store namespace name) (getf arguments :resource-version))
         ;; A Pod with blocking dependents stops now, and its object stays until they are gone.
         (when (and foreground (not (getf arguments :dry-run)))
           (hold-pod-for-foreground-deletion store namespace name (getf arguments :uid)))

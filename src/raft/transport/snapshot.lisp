@@ -4,7 +4,7 @@
 (in-package #:gr8s.raft.transport)
 
 (defconstant +raft-snapshot-chunk-bytes+ 65536)
-(defstruct raft-snapshot-receiver from term index last-term token digest total path stream (offset 0)
+(defstruct raft-snapshot-receiver from term index last-term token digest total path stream format header (offset 0)
   (activity (get-internal-real-time)))
 
 (defparameter *raft-snapshot-root-prefix* ".raft-transfer-v2-")
@@ -180,15 +180,69 @@ Unknown files, directories, symlinks, hard links or permissions preserve the roo
             do (ironclad:update-digest hash buffer :end count)))
     (ironclad:byte-array-to-hex-string (ironclad:produce-digest hash))))
 
+(defparameter *raft-snapshot-rpc-timeout* 2)
+(defparameter *raft-artifact-completion-timeout* 60)
+
 (defun raft-link-deliver-message (stub message)
   (gr8s.node.v1::raft-transport-deliver
    stub (make-instance 'gr8s.node.v1::raft-envelope
-                       :protocol-version 1 :payload (raft-message->octets message)) :timeout 2))
+                       :protocol-version 1 :payload (raft-message->octets message)) :timeout *raft-snapshot-rpc-timeout*))
+
+(defconstant +raft-snapshot-header-bytes+ 65536)
+
+(defun raft-message-artifact-reference (message)
+  (let* ((state (getf message :state))
+         (application (and (gr8s.raft::raft-snapshot-envelope-p state)
+                           (getf (cddr state) :application))))
+    (when (and (consp application) (eq :gr8s-store-artifact (first application)))
+      (unless (and (= 8 (length application))
+                   (equal application
+                          (list :gr8s-store-artifact 1 :index (getf message :last-index)
+                                :term (getf message :last-term) :sha256 (eighth application)))
+                   (stringp (eighth application)) (= 64 (length (eighth application)))
+                   (every (lambda (char) (find char "0123456789abcdef")) (eighth application)))
+        (error "Invalid snapshot artifact reference"))
+      (gr8s.raft::raft-validate-snapshot-envelope state)
+      (unless (eq t (getf (cddr state) :application-present))
+        (error "Artifact snapshot lacks an exact application boundary"))
+      application)))
+
+(defun raft-link-send-snapshot-file (member stub message path digest &key format header)
+  (let ((token (gr8s::generate-uid)))
+    (with-open-file (stream path :element-type '(unsigned-byte 8))
+      (let ((total (file-length stream)) (offset 0)
+            (buffer (make-array +raft-snapshot-chunk-bytes+ :element-type '(unsigned-byte 8))))
+        (unless (<= 1 total (raft-member-snapshot-max-bytes member)) (error "Snapshot exceeds transfer limit"))
+        (loop for count = (read-sequence buffer stream) while (plusp count) do
+          (unless (raft-member-running member) (error "Snapshot sender stopped"))
+          (let ((*raft-snapshot-rpc-timeout*
+                  (if (and format (= (+ offset count) total))
+                      *raft-artifact-completion-timeout* *raft-snapshot-rpc-timeout*)))
+            (raft-link-deliver-message
+             stub (append (list :type :snapshot-chunk :term (getf message :term) :from (getf message :from)
+                                :last-index (getf message :last-index) :last-term (getf message :last-term)
+                                :token token :digest digest :total total :offset offset
+                                :data (if (= count (length buffer)) buffer (subseq buffer 0 count))
+                                :done (= (+ offset count) total))
+                          (when format (list :format format))
+                          (when (and header (zerop offset)) (list :artifact-envelope header)))))
+          (incf offset count))
+        (unless (= offset total) (error "Snapshot source size changed during transfer"))))))
 
 (defun raft-link-send-snapshot (member stub message)
-  "Serialize to a private file and send at most 64 KiB of file data per RPC.
-The immutable application snapshot is provided by the core; no complete wire
-string or byte vector is constructed. The normal peer retry restarts a failed transfer."
+  "Send at most 64 KiB of file data per RPC. Store artifacts travel as raw bytes,
+with a bounded configuration/reference header, never as an opaque Lisp payload."
+  (let ((reference (raft-message-artifact-reference message)))
+    (when reference
+      (let ((source (raft-member-artifact-source-fn member))
+            (header (raft-message->octets message)))
+        (unless (and (functionp source) (<= (length header) +raft-snapshot-header-bytes+))
+          (error "Artifact snapshot requires a source and a bounded header"))
+        (let ((path (funcall source member message)) (digest (eighth reference)))
+          (unless (equal digest (raft-snapshot-file-digest path)) (error "Artifact source checksum mismatch"))
+          (raft-link-send-snapshot-file member stub message path digest :format :artifact-v1 :header header)))
+      (return-from raft-link-send-snapshot nil)))
+  ;; Legacy opaque snapshots remain available for generic state-machine users.
   (let ((path (bt:with-lock-held ((raft-member-lock member)) (raft-snapshot-new-path member "out")))
         (created nil))
     (unwind-protect
@@ -197,23 +251,26 @@ string or byte vector is constructed. The normal peer retry restarts a failed tr
            (setf created t)
            (with-open-file (stream path :direction :output :if-exists :overwrite :external-format :utf-8)
              (with-standard-io-syntax
-               (let ((*print-pretty* nil) (*print-circle* nil) (*read-eval* nil))
-                 (prin1 message stream))))
-           (let ((digest (raft-snapshot-file-digest path)) (token (gr8s::generate-uid)))
-             (with-open-file (stream path :element-type '(unsigned-byte 8))
-               (let ((total (file-length stream)) (offset 0)
-                     (buffer (make-array +raft-snapshot-chunk-bytes+ :element-type '(unsigned-byte 8))))
-                 (when (> total (raft-member-snapshot-max-bytes member)) (error "Snapshot exceeds transfer limit"))
-                 (loop for count = (read-sequence buffer stream) while (plusp count) do
-                   (unless (raft-member-running member) (error "Snapshot sender stopped"))
-                   (raft-link-deliver-message
-                    stub (list :type :snapshot-chunk :term (getf message :term) :from (getf message :from)
-                               :last-index (getf message :last-index) :last-term (getf message :last-term)
-                               :token token :digest digest :total total :offset offset
-                               :data (if (= count (length buffer)) buffer (subseq buffer 0 count))
-                               :done (= (+ offset count) total)))
-                   (incf offset count))))))
+               (let ((*print-pretty* nil) (*print-circle* nil) (*read-eval* nil)) (prin1 message stream))))
+           (raft-link-send-snapshot-file member stub message path (raft-snapshot-file-digest path)))
       (when (and created (probe-file path)) (delete-file path)))))
+
+(defun raft-decode-artifact-header (member chunk)
+  (let ((bytes (getf chunk :artifact-envelope)))
+    (unless (and (functionp (raft-member-artifact-retain-fn member))
+                 (vectorp bytes) (not (stringp bytes))
+                 (<= 1 (length bytes) +raft-snapshot-header-bytes+))
+      (error "Artifact snapshot requires a retainer and a bounded header"))
+    (let* ((message (octets->raft-message bytes))
+           (reference (raft-message-artifact-reference message)))
+      (unless (and reference (eq :install-snapshot (getf message :type))
+                   (equal (getf chunk :from) (getf message :from))
+                   (= (getf chunk :term) (getf message :term))
+                   (= (getf chunk :last-index) (getf message :last-index))
+                   (= (getf chunk :last-term) (getf message :last-term))
+                   (equal (getf chunk :digest) (eighth reference)))
+        (error "Artifact header differs from transfer identity"))
+      message)))
 
 (defun raft-member-expire-snapshot-receiver (member)
   (let ((receiver (raft-member-snapshot-receiver member)))
@@ -231,7 +288,8 @@ string or byte vector is constructed. The normal peer retry restarts a failed tr
         (delete-file (raft-snapshot-receiver-path receiver))))))
 
 (defun raft-snapshot-chunk-matches-p (receiver message)
-  (and (equal (raft-snapshot-receiver-from receiver) (getf message :from))
+  (and (eq (raft-snapshot-receiver-format receiver) (getf message :format))
+       (equal (raft-snapshot-receiver-from receiver) (getf message :from))
        (= (raft-snapshot-receiver-term receiver) (getf message :term))
        (= (raft-snapshot-receiver-index receiver) (getf message :last-index))
        (= (raft-snapshot-receiver-last-term receiver) (getf message :last-term))
@@ -246,15 +304,21 @@ string or byte vector is constructed. The normal peer retry restarts a failed tr
     (setf (raft-snapshot-receiver-stream receiver) nil)
     (unless (equal (raft-snapshot-receiver-digest receiver) (raft-snapshot-file-digest path))
       (error "Snapshot transfer checksum mismatch"))
-    ;; Application callbacks currently receive their opaque Lisp snapshot. A
-    ;; production large-store callback must use a streamed artifact descriptor;
-    ;; chunking the wire alone does not bound application reconstruction memory.
     (let ((message
-            (with-open-file (stream path :external-format :utf-8)
-              (with-standard-io-syntax
-                (let* ((*read-eval* nil) (message (read stream nil :eof)))
-                  (unless (eq :eof (read stream nil :eof)) (error "Trailing snapshot data"))
-                  message)))))
+            (if (eq :artifact-v1 (raft-snapshot-receiver-format receiver))
+                (let ((header (raft-snapshot-receiver-header receiver)))
+                  ;; The callback must validate and fsync retained bytes. Only
+                  ;; then may Raft persist their reference and invoke restore.
+                  (unless (eq t (funcall (raft-member-artifact-retain-fn member) member path header))
+                    (error "Artifact retention did not acknowledge durability"))
+                  header)
+                (with-open-file (stream path :external-format :utf-8)
+                  (with-standard-io-syntax
+                    (let* ((*read-eval* nil) (message (read stream nil :eof)))
+                      (unless (eq :eof (read stream nil :eof)) (error "Trailing snapshot data"))
+                      (when (raft-message-artifact-reference message)
+                        (error "Artifact references require raw artifact transport"))
+                      message))))))
       (unless (and (eq :install-snapshot (getf message :type))
                    (equal (raft-snapshot-receiver-from receiver) (getf message :from))
                    (= (raft-snapshot-receiver-term receiver) (getf message :term))
@@ -271,7 +335,8 @@ the complete snapshot and suffix before acknowledging its applied boundary."
   (let* ((node (raft-member-node member)) (from (getf message :from)) (term (getf message :term))
          (index (getf message :last-index)) (last-term (getf message :last-term))
          (offset (getf message :offset)) (total (getf message :total)) (data (getf message :data))
-         (token (getf message :token)) (digest (getf message :digest)))
+         (token (getf message :token)) (digest (getf message :digest))
+         (format (getf message :format)) (header nil))
     (unless (and (stringp from) (typep term '(integer 0 *)) (typep index '(integer 1 *))
                  (typep last-term '(integer 0 *)) (<= last-term term) (typep offset '(integer 0 *))
                  (typep total '(integer 1 *)) (<= total (raft-member-snapshot-max-bytes member))
@@ -281,6 +346,10 @@ the complete snapshot and suffix before acknowledging its applied boundary."
                  (eq (not (null (getf message :done))) (= (+ offset (length data)) total))
                  (stringp token) (<= 1 (length token) 128) (stringp digest) (= 64 (length digest)))
       (error "Invalid snapshot chunk"))
+    (unless (member format '(nil :artifact-v1)) (error "Unknown snapshot transfer format"))
+    (if (and (eq format :artifact-v1) (zerop offset))
+        (setf header (raft-decode-artifact-header member message))
+        (when (getf message :artifact-envelope) (error "Unexpected artifact header")))
     (raft-step-down-if-stale node term)
     (when (< term (raft-node-current-term node))
       (raft-send node from (list :type :install-snapshot-reply :term (raft-node-current-term node)
@@ -304,7 +373,7 @@ the complete snapshot and suffix before acknowledging its applied boundary."
         (raft-snapshot-create-file path)
         (setf (raft-member-snapshot-receiver member)
               (make-raft-snapshot-receiver :from from :term term :index index :last-term last-term
-                :token token :digest digest :total total :path path
+                :token token :digest digest :total total :path path :format format :header header
                 :stream (open path :direction :output :if-exists :overwrite :element-type '(unsigned-byte 8))))))
     (let ((receiver (raft-member-snapshot-receiver member)))
       (unless (and receiver (raft-snapshot-chunk-matches-p receiver message)

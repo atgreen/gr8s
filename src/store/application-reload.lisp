@@ -12,7 +12,7 @@
     pod-store-workload-deletions pod-store-job-controller-states
     pod-store-pod-finalization-states pod-store-pod-observed-phases pod-store-pod-observed-statuses
     pod-store-pod-observed-resource-versions pod-store-pod-condition-histories
-    pod-store-consensus-pod-revision pod-store-pod-revision pod-store-pod-revision-ceiling
+    pod-store-consensus-pod-revision pod-store-pod-revision pod-store-pod-revision-ceiling pod-store-pod-revision-epoch-floor
     pod-store-pod-watch-floor pod-store-pod-watch-journal pod-store-pod-watch-journal-length
     pod-store-pod-watch-journal-bytes pod-store-pod-watch-views
     pod-store-node-watch-floor pod-store-node-watch-journal pod-store-node-watch-journal-length pod-store-node-watch-journal-bytes
@@ -40,22 +40,48 @@
                (zerop (pod-store-active-requests store)))
     (store-access-unavailable "Application reload requires a drained access gate")))
 
-(defun reload-store-application (store id &key call-with-member-lock commit-recovery)
+(defun check-store-reload-revisions (store id descriptor)
+  "Reject stale staged clocks BEFORE intent or selection changes. Caller holds all barriers."
+  (let* ((path (store-generation-root (pod-store-path store) id))
+         (boundary (progn (check-store-generation-directory (merge-pathnames "metadata/" path))
+                          (read-private-generation-json (merge-pathnames "metadata/snapshot-boundary.json" path)))))
+    (unless (and (hash-table-p boundary) (= 7 (hash-table-count boundary))
+                 (eql 1 (gethash "version" boundary))
+                 (eql (gethash "index" descriptor) (gethash "index" boundary))
+                 (eql (gethash "term" descriptor) (gethash "term" boundary))
+                 (typep (gethash "resourceRevision" boundary) '(unsigned-byte 64))
+                 (typep (gethash "resourceEpochFloor" boundary) `(integer 0 ,(gethash "resourceRevision" boundary)))
+                 (typep (gethash "podRevision" boundary) '(unsigned-byte 64))
+                 (typep (gethash "podEpochFloor" boundary) `(integer 0 ,(gethash "podRevision" boundary))))
+      (error "Invalid materialized snapshot revision boundary"))
+    ;; A failed load may already have installed these exact clocks. Retry the
+    ;; pending generation without demanding another revision bump.
+    (unless (and (not (pod-store-application-loaded-p store)) (equal path (store-data-path store)))
+      (unless (and (> (gethash "resourceEpochFloor" boundary) (pod-store-resource-revision store))
+                   (> (gethash "podEpochFloor" boundary) (max (pod-store-pod-revision store)
+                                                           (pod-store-pod-revision-ceiling store))))
+        (error "Snapshot generation must be rematerialized above the member's revision clocks")))
+    boundary))
+
+(defun reload-store-application (store id &key call-with-member-lock validate-recovery commit-recovery)
   "Replace application state on STORE itself, leaving access blocked on success or failure.
 Caller has quiesced remaining node/controller/retained-reference ingress. Lock order:
 workload -> credentials -> consensus writer -> supplied member barrier -> raw store.
-HA requires both callbacks. COMMIT-RECOVERY receives descriptor/STORE after load and
+HA requires all three callbacks. VALIDATE-RECOVERY receives descriptor/STORE before
+intent or selection changes and must return T after checking actual member state.
+COMMIT-RECOVERY receives descriptor/STORE after load and
 must durably coordinate member snapshot/applied/WAL state before intent removal.
 It runs under the barriers and must not reenter public store operations."
   (when (or *core-write-active* (eq store *store-request-lease*))
     (error "Cannot reload application state from a transaction or leased request"))
   (when (or (and call-with-member-lock (not (functionp call-with-member-lock)))
+            (and validate-recovery (not (functionp validate-recovery)))
             (and commit-recovery (not (functionp commit-recovery)))
             (and (pod-store-consensus-commit-fn store)
-                 (not (and call-with-member-lock commit-recovery))))
-    (error "HA application reload requires member barrier and durable recovery callbacks"))
+                 (not (and call-with-member-lock validate-recovery commit-recovery))))
+    (error "HA application reload requires member barrier, boundary validation and durable recovery callbacks"))
   (bt:with-lock-held ((pod-store-lock store)) (require-store-reload-quiescence store))
-  (let ((thread (bt:current-thread)) (started nil) (loaded nil) (descriptor nil))
+  (let ((thread (bt:current-thread)) (started nil) (loaded nil) (descriptor nil) (boundary nil))
     (bt:with-lock-held ((pod-store-workload-lock store))
       (bt:with-lock-held ((pod-store-credential-lock store))
         (bt:with-lock-held ((pod-store-consensus-write-lock store))
@@ -67,6 +93,10 @@ It runs under the barriers and must not reenter public store operations."
              (setf started t)
              (bt:with-lock-held ((pod-store-lock store))
                (require-store-reload-quiescence store)
+               (setf descriptor (checked-store-generation-descriptor (pod-store-path store) id))
+               (setf boundary (check-store-reload-revisions store id descriptor))
+               (when (and validate-recovery (not (eq t (funcall validate-recovery descriptor store))))
+                 (error "Member recovery boundary validation did not succeed"))
                ;; Validate and durably announce target BEFORE releasing old data.
                (setf descriptor (begin-store-restore (pod-store-path store) id))
                (setf (pod-store-application-loaded-p store) nil)
@@ -78,6 +108,11 @@ It runs under the barriers and must not reenter public store operations."
                  ;; Reclaim released payloads before allocating the new application.
                  (sb-ext:gc :full t)
                  (load-store-application-files store))
+               (unless (and (= (pod-store-resource-revision store) (gethash "resourceRevision" boundary))
+                            (>= (pod-store-template-history-floor store) (gethash "resourceEpochFloor" boundary))
+                            (= (pod-store-pod-revision-epoch-floor store) (gethash "podEpochFloor" boundary))
+                            (>= (pod-store-pod-revision store) (gethash "podRevision" boundary)))
+                 (error "Loaded application clocks disagree with staged snapshot boundary"))
                (when commit-recovery (funcall commit-recovery descriptor store))
                (finish-store-restore store descriptor)
                (setf (pod-store-application-loaded-p store) t loaded t)))))))

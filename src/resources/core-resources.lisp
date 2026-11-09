@@ -442,8 +442,8 @@ whether the journal must be rewritten (a torn record) and its complete bytes."
 
 (defun core-state-delta-json (store resources revision workload-deletions job-controller-states)
   "Serialize one HA core transaction as key-level effects against STORE's base.
-The effects are merged at Raft apply time, so a command prepared by a lagging
-follower cannot replace unrelated keys committed earlier in the log."
+Effects carry encrypted prior-object conditions and are merged at Raft apply
+time. A stale author cannot replace a changed key or erase unrelated commits."
   (let ((changes nil)
         (base (pod-store-resource-revision store))
         (keys (make-hash-table :test #'equal))
@@ -462,12 +462,13 @@ follower cannot replace unrelated keys committed earlier in the log."
            (push (core-object "resource" (first key)
                               "namespace" (or (second key) 'null)
                               "name" (third key)
+                              "expected" (if old (encrypt-secret-object store (first key) old) 'null)
                               "object" (if new
                                            (encrypt-secret-object store (first key) new)
                                            'null))
                  changes))))
      keys)
-    (setf (gethash "version" record) 1
+    (setf (gethash "version" record) 2
           (gethash "baseRevision" record) base
           ;; Preserve the transaction's revision width (for example a Service
           ;; plus its IPAddress claim), but rebase it on committed apply state.
@@ -478,13 +479,13 @@ follower cannot replace unrelated keys committed earlier in the log."
           (gethash "templateTokenKey" record)
           (ag-grpc:base64-encode
            (or (pod-store-template-token-key store) (secure-random-octets 32))))
-    (let ((delta (core-map-delta (pod-store-workload-deletions store) workload-deletions)))
+    (let ((delta (core-map-delta (pod-store-workload-deletions store) workload-deletions :preconditions t)))
       (when delta (setf (gethash "workloadDeletions" record) delta)))
-    (let ((delta (core-map-delta (pod-store-job-controller-states store) job-controller-states)))
+    (let ((delta (core-map-delta (pod-store-job-controller-states store) job-controller-states :preconditions t)))
       (when delta (setf (gethash "jobControllerStates" record) delta)))
     (com.inuoe.jzon:stringify record)))
 
-(defun core-map-delta (old new)
+(defun core-map-delta (old new &key preconditions)
   "Describe how the string-keyed JSON map NEW differs from OLD, or NIL when it does not."
   (unless (eq old new)
     (let ((set (core-object)) (deleted nil))
@@ -498,7 +499,18 @@ follower cannot replace unrelated keys committed earlier in the log."
                  (unless (nth-value 1 (gethash key new)) (push key deleted)))
                old)
       (when (or (plusp (hash-table-count set)) deleted)
-        (core-object "set" set "delete" (coerce deleted 'vector))))))
+        (let ((delta (core-object "set" set "delete" (coerce deleted 'vector))))
+          (when preconditions
+            (let ((expected (core-object)))
+              (labels ((expect (key)
+                         (multiple-value-bind (value present) (gethash key old)
+                           (setf (gethash key expected)
+                                 (core-object "present" (if present t :false)
+                                              "value" (if present value 'null))))))
+                (maphash (lambda (key value) (declare (ignore value)) (expect key)) set)
+                (dolist (key deleted) (expect key)))
+              (setf (gethash "expected" delta) expected)))
+          delta)))))
 
 (defun core-journal-record-json (store revision added workload-deletions job-controller-states event-expirations)
   "Serialize one commit as a journal line: only what it changed. ADDED are its history entries."
@@ -644,10 +656,29 @@ An object is streamed to the file, never held as one string as large as the stor
       ;; The carried objects are only in memory: the next commit writes them all.
       (setf (pod-store-core-checkpoint-needed store) t))))
 
+(defun core-replicated-state-equal-p (left right)
+  "Compare committed object identity/content independently of local revision epochs."
+  (if (and (hash-table-p left) (hash-table-p right))
+      (let ((a (copy-core-object left)) (b (copy-core-object right)))
+        (remhash "resourceVersion" (gethash "metadata" a))
+        (remhash "resourceVersion" (gethash "metadata" b))
+        (gr8s.store::json-value-equal-p a b))
+      (eq left right)))
+
+(defun core-map-preconditions-satisfied-p (current delta)
+  (let ((expected (gethash "expected" delta)))
+    (and (hash-table-p expected)
+         (loop for key being the hash-keys of expected using (hash-value condition)
+               always (multiple-value-bind (value present) (gethash key current)
+                        (and (eq (not (null present)) (eq t (gethash "present" condition)))
+                             (or (not present)
+                                 (gr8s.store::json-value-equal-p value (gethash "value" condition)))))))))
+
 (defun install-core-state-delta (store json)
   "Apply one committed key-level core transaction to STORE in Raft log order.
 The command's revision span is rebased on this replica's committed revision;
-unrelated keys already present in STORE are never replaced by a stale author."
+unrelated keys are preserved; version 2 conditions reject stale same-key writes
+before any state is published."
   (bt:with-lock-held ((pod-store-lock store))
     (let* ((delta (com.inuoe.jzon:parse json))
            (resources (copy-core-resource-index store))
@@ -655,6 +686,29 @@ unrelated keys already present in STORE are never replaced by a stale author."
                         (gethash "revisionSpan" delta 1)))
            (workload-deletions (pod-store-workload-deletions store))
            (job-controller-states (pod-store-job-controller-states store)))
+      ;; All conditions run before mutation, including policy/key installation
+      ;; and clock/history publication. Rejection is a committed no-op, not an
+      ;; apply exception that would stall Raft on a normal concurrent writer.
+      (when (eql 2 (gethash "version" delta))
+        (unless (gr8s.store::json-value-equal-p (or (pod-store-secret-encryption-config store) 'null)
+                                   (gethash "secretsEncryption" delta))
+          (return-from install-core-state-delta (list :core-conflict)))
+        (loop for change across (gethash "changes" delta #())
+              for namespace = (gethash "namespace" change)
+              for resource = (gethash "resource" change)
+              for key = (core-resource-key resource (unless (eq namespace 'null) namespace)
+                                          (gethash "name" change))
+              for current = (gethash key (pod-store-resources store) 'null)
+              for expected = (gethash "expected" change)
+              unless (core-replicated-state-equal-p
+                      current (if (hash-table-p expected)
+                                  (decrypt-secret-object store resource expected) expected))
+                do (return-from install-core-state-delta (list :core-conflict)))
+        (dolist (entry (list (cons "workloadDeletions" workload-deletions)
+                            (cons "jobControllerStates" job-controller-states)))
+          (let ((map-delta (gethash (car entry) delta)))
+            (when (and map-delta (not (core-map-preconditions-satisfied-p (cdr entry) map-delta)))
+              (return-from install-core-state-delta (list :core-conflict))))))
       (let ((config (gethash "secretsEncryption" delta)))
         (unless (eq config 'null)
           (setf (pod-store-secret-encryption-config store) config)))
@@ -667,8 +721,11 @@ unrelated keys already present in STORE are never replaced by a stale author."
             for object = (gethash "object" change)
             do (if (eq object 'null)
                    (remhash key resources)
-                   (setf (gethash key resources)
-                         (decrypt-secret-object store (first key) object))))
+                   (let ((object (decrypt-secret-object store (first key) object)))
+                     ;; Revisions, including post-restore epochs, are local to
+                     ;; this member; the next delta must not move one backwards.
+                     (setf (gethash "resourceVersion" (gethash "metadata" object)) (write-to-string revision)
+                           (gethash key resources) object))))
       (when (gethash "workloadDeletions" delta)
         (setf workload-deletions
               (apply-core-map-delta workload-deletions
@@ -690,7 +747,8 @@ unrelated keys already present in STORE are never replaced by a stale author."
             (*local-plane-write* nil))
         (commit-core-resources store resources revision
                                :workload-deletions workload-deletions
-                               :job-controller-states job-controller-states)))))
+                               :job-controller-states job-controller-states))
+      (list :core-ok))))
 
 (defun copy-core-resource-index (store)
   "Return a shallow copy of STORE's resource index: a fresh EQUAL table that shares
