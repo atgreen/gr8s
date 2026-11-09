@@ -296,7 +296,8 @@
   "Validate every container resource claim against POD-CLAIM-NAMES."
   (dolist (field '("containers" "initContainers" "ephemeralContainers"))
     (loop for container across (gethash field spec #())
-          for resources = (gethash "resources" container)
+          for resources = (gethash "resources"
+                                   (require-object container "container"))
           when resources
             do (let ((seen nil))
                  (loop for claim across (gethash "claims" resources #())
