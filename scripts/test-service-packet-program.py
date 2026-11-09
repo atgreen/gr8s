@@ -106,6 +106,10 @@ class PacketMachine(endpoint.Machine):
             else:
                 self.maps.update(name, key, self.read_bytes(r[3], value_size))
                 r[0] = 0
+        elif helper == 3:
+            name = self.maps.names[r[1]]
+            key = self.read_bytes(r[2], self.maps.descriptors[name][1])
+            r[0] = 0 if self.maps.entries[name].pop(key, None) is not None else (-2 & endpoint.MASK)
         elif helper == 9:
             data = self.memory[0x100000]
             assert r[2] + r[4] <= len(data), "skb_store_bytes outside packet"
@@ -158,6 +162,30 @@ class Interpreter(endpoint.Interpreter):
 
 
 class Kernel(endpoint.Kernel):
+    def keys(self, name):
+        size = self.descriptors[name][1]
+        previous, keys = None, []
+        while True:
+            key = ctypes.create_string_buffer(previous) if previous is not None else None
+            following = ctypes.create_string_buffer(size)
+            try:
+                self.bpf(4, struct.pack("<IIQQ", self.map_fds[name], 0,
+                                        ctypes.addressof(key) if key else 0, ctypes.addressof(following)))
+            except OSError as error:
+                if error.errno == 2:
+                    return keys
+                raise
+            previous = following.raw
+            keys.append(previous)
+
+    def advance(self, seconds):
+        # BPF_PROG_TEST_RUN uses the real monotonic clock; age retained state.
+        for key in self.keys("gr8s_pkt_forward"):
+            value = self.lookup("gr8s_pkt_forward", key)
+            backend, stamp = struct.unpack("<QQ", value)
+            self.update("gr8s_pkt_forward", key,
+                        struct.pack("<QQ", backend, (stamp - int(seconds * 1e9)) & endpoint.MASK))
+
     def delete(self, name, key):
         key_buffer = ctypes.create_string_buffer(bytes(key), len(key))
         self.bpf(3, struct.pack("<IIQ", self.map_fds[name], 0, ctypes.addressof(key_buffer)))
@@ -316,13 +344,86 @@ def capacity_exercise(runner):
     return 5
 
 
+def assert_unlocked(runner):
+    for name in ("gr8s_pkt_fwd_lock", "gr8s_pkt_rev_lock"):
+        keys = runner.keys(name) if isinstance(runner, Kernel) else runner.maps.entries[name]
+        assert not keys, "tuple lock leaked after success/failure"
+
+
+def flow_key(source=CLIENT, destination=VIP, sport=47000, dport=80, protocol=17):
+    return (ipaddress.ip_address(source).packed + ipaddress.ip_address(destination).packed +
+            struct.pack("!HHBBH", sport, dport, protocol, 0, 0))
+
+
+def expiry_exercise(runner):
+    cases = 0
+    for protocol, lifetime in ((17, 180), (6, 7200)):
+        publish(runner, protocol)
+        request = packet(sport=47000, protocol=protocol)
+        assert_forward(runner, request)
+        runner.advance(lifetime + 1)
+        old_reply = packet(BACKEND, CLIENT, 8080, 47000, protocol)
+        verdict, unchanged = runner.run("gr8s_packet_reverse", old_reply)
+        assert verdict == SHOT and unchanged == old_reply
+        publish(runner, protocol, backend="10.88.2.4")
+        assert_forward(runner, request, "10.88.2.4")
+        verdict, unchanged = runner.run("gr8s_packet_reverse", old_reply)
+        assert verdict == SHOT and unchanged == old_reply
+        verdict, reply = runner.run("gr8s_packet_reverse", packet("10.88.2.4", CLIENT, 8080, 47000, protocol))
+        assert verdict == OK and endpoints(reply) == (VIP, CLIENT, 80, 47000)
+        check_checksums(reply)
+        # Reuse again with the same backend, then withdraw the Service while
+        # the flow is expired. No retained forward key may block reinsertion.
+        runner.advance(lifetime + 1)
+        assert_forward(runner, request, "10.88.2.4")
+        runner.advance(lifetime + 1)
+        runner.delete("gr8s_service_v4", service_key(protocol=protocol))
+        verdict, unchanged = runner.run("gr8s_packet_forward", request)
+        assert verdict == OK and unchanged == request
+        assert runner.lookup("gr8s_pkt_forward", flow_key(protocol=protocol)) is None
+        cases += 7
+    # Another packet/collector owning a tuple cannot have its reservation
+    # removed by the losing packet, including opposite-order acquisition.
+    publish(runner, 17)
+    key = flow_key(sport=47001)
+    reverse = flow_key(BACKEND, CLIENT, 8080, 47001)
+    request = packet(sport=47001, protocol=17)
+    for name, held in (("gr8s_pkt_fwd_lock", key), ("gr8s_pkt_rev_lock", reverse)):
+        runner.update(name, held, bytes(8))
+        verdict, unchanged = runner.run("gr8s_packet_forward", request)
+        assert verdict == SHOT and unchanged == request
+        assert runner.lookup(name, held) == bytes(8), "foreign lock released"
+        if name.endswith("rev_lock"):
+            assert runner.lookup("gr8s_pkt_fwd_lock", key) is None, "partial lock leaked"
+        runner.delete(name, held)
+        cases += 2
+    assert_forward(runner, request)
+    reply = packet(BACKEND, CLIENT, 8080, 47001, 17)
+    runner.update("gr8s_pkt_fwd_lock", key, bytes(8))
+    verdict, unchanged = runner.run("gr8s_packet_reverse", reply)
+    assert verdict == SHOT and unchanged == reply
+    assert runner.lookup("gr8s_pkt_rev_lock", reverse) is None, "reply lock leaked"
+    runner.delete("gr8s_pkt_fwd_lock", key)
+    verdict, translated = runner.run("gr8s_packet_reverse", reply)
+    assert verdict == OK and endpoints(translated) == (VIP, CLIENT, 80, 47001)
+    check_checksums(translated)
+    assert_unlocked(runner)
+    return cases + 3
+
+
 def main():
     programs, ids, descriptors = read_fixture(sys.argv[1])
     runner = (Kernel if "--kernel" in sys.argv[2:] else Interpreter)(programs, ids, descriptors)
     try:
         cases = exercise(runner)
+        assert_unlocked(runner)
         print(f"Service TC bytecode ({'kernel' if isinstance(runner, Kernel) else 'interpreter'}): "
               f"{cases} packet/flow/checksum cases passed")
+    finally:
+        runner.close()
+    runner = (Kernel if "--kernel" in sys.argv[2:] else Interpreter)(programs, ids, descriptors)
+    try:
+        print(f"Service TC expiry/coordination: {expiry_exercise(runner)} cases passed")
     finally:
         runner.close()
     limited = dict(descriptors)
@@ -331,6 +432,7 @@ def main():
     runner = (Kernel if "--kernel" in sys.argv[2:] else Interpreter)(programs, ids, limited)
     try:
         cases = capacity_exercise(runner)
+        assert_unlocked(runner)
         print(f"Service TC capacity: {cases} publication/recovery cases passed")
     finally:
         runner.close()

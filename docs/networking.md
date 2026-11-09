@@ -105,6 +105,15 @@ A native two-node restart regression verifies withdrawal, retained map IDs,
 unchanged Pod identities and recovered Service traffic. See
 [the restart validation evidence](service-map-restart-validation-2026-11-09.json).
 Guest connection-state survival across agent restart remains unverified.
+Packet flows currently expire after 180 seconds of UDP inactivity or two hours
+of TCP inactivity, counting requests and replies. The next packet removes an
+expired forward entry before selecting from the current Service plan. Forward
+and reverse tuple reservations serialize state changes; contention drops the
+packet without waiting, and all reservations are released before the policy
+continuation. Replaced-backend replies fail the forward/reverse ownership check.
+This is lazy expiry: background cleanup of idle/orphan entries and TCP
+SYN/FIN/RST state handling remain unfinished. See
+[the expiry and guest regression evidence](service-packet-expiry-validation-2026-11-09.json).
 Kernel packet tests additionally cover program lifetime. Flow garbage collection,
 source NAT/hairpin,
 return-tuple collision resolution, IPv6 packet translation and external Service

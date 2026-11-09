@@ -496,7 +496,7 @@
          :close-fd (lambda (fd) (push fd closed))
          :close-object (lambda (object) (declare (ignore object))
                          (dolist (entry maps) (push (whistler/loader:map-info-fd (cdr entry)) closed)))))
-      (is (= 7 (length reused)))
+      (is (= 9 (length reused)))
       (dolist (entry maps)
         (is (= 1 (count (whistler/loader:map-info-fd (cdr entry)) closed))))
       (let ((ordered (reverse events)))
