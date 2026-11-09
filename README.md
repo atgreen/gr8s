@@ -83,6 +83,10 @@ For [adding worker nodes](docs/building-and-testing.md#a-second-node),
 [preloading images](docs/runtime.md#preloaded-images-airgap), external containerd,
 and testing, see [Building, running & testing](docs/building-and-testing.md).
 
+For a persistent server or agent managed by systemd, including verified
+upgrades, rollback, scoped cleanup, and uninstall, see
+[Installing and operating gr8s with systemd](docs/installing.md).
+
 ## Kubernetes capabilities
 
 The implemented API surface includes:
