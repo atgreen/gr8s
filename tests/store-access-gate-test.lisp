@@ -138,3 +138,34 @@
        (lambda () (gr8s:register-node store (gr8s:make-node-record :id "blocked-ha" :name "blocked-ha" :pod-cidr "10.89.0.0/20"))))
       (is (= 0 proposals))
       (gr8s.store::resume-store-access store))))
+
+(test established-watches-expire-and-release-leases-when-restore-drains
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (ha-make-pod store "watched")
+    (gr8s:register-node store (gr8s:make-node-record :id "watched-node" :name "watched-node" :pod-cidr "10.89.0.0/20"))
+    (gr8s::create-core-resource store "configmaps" (core-fixture "ConfigMap" "watched") "default")
+    (let ((server (start-http-test-server :store store :runtime (make-fake-runtime))))
+      (unwind-protect
+           (dolist (path '("/api/v1/pods" "/api/v1/nodes" "/api/v1/configmaps"))
+             (sb-sys:with-deadline (:seconds 15)
+               (multiple-value-bind (stream code)
+                   (drakma:http-request
+                    (format nil "http://127.0.0.1:~D~A" *http-test-port* path) :want-stream t
+                    :parameters '(("watch" . "true") ("resourceVersion" . "0") ("timeoutSeconds" . "300")))
+                 (unwind-protect
+                      (progn
+                        (is (= 200 code))
+                        (is (equal "ADDED" (gethash "type" (read-template-watch-event stream))))
+                        ;; A five-minute watch must release its request lease within
+                        ;; this short drain, rather than make restore time out.
+                        (is (eq store (gr8s.store::quiesce-store-access store :timeout 3)))
+                        (let* ((event (read-template-watch-event stream)) (status (gethash "object" event)))
+                          (is (equal "ERROR" (gethash "type" event)))
+                          (is (= 410 (gethash "code" status)))
+                          (is (equal "Expired" (gethash "reason" status))))
+                        (is (zerop (gr8s.store::pod-store-active-requests store)))
+                        (is (null (handler-case (read-template-watch-event stream) (end-of-file () nil))))
+                        (gr8s.store::resume-store-access store))
+                   (close stream)))))
+        (stop-server server)))))

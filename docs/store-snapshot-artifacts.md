@@ -398,3 +398,15 @@ The existing snapshot limits apply: 16 MiB per record and 2 MiB per JSON string.
 Metainfo is currently one base64 string, so larger metainfo needs a chunked format
 before it can be included. This does not enable production compaction or replace
 the required node RPC and background-writer barriers and Raft/WAL recovery hooks.
+
+Established watches cooperate with the access gate. When draining begins, Pod,
+Node and durable-resource watches emit a Kubernetes `ERROR` event with status
+`410 Expired`, close their streams, and release their request leases. Clients
+must relist after access resumes. This avoids waiting for the watch's normal
+five-minute timeout before a restore can acquire its barrier. A blocked socket
+write can still delay a request; the gate's drain timeout remains authoritative
+and leaves the application unchanged if requests cannot drain.
+
+This stream termination does not establish revision safety for a restored
+snapshot. Production restore still needs member/applied-boundary validation and
+a policy for monotonic resource versions before it can be exposed to operators.

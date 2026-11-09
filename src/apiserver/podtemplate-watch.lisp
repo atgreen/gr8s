@@ -8,6 +8,11 @@
 
 (in-package #:gr8s.apiserver)
 
+(defun check-watch-store-access (store)
+  "End established watches so restore can drain their routed request leases."
+  (when (gr8s.store::store-access-blocked-p store)
+    (core-resource-error 410 "Expired" "Application restore requires a fresh list/watch")))
+
 (defun template-watch-events (store namespace labels fields revision &key (resource "podtemplates"))
   "Read matching journal events after REVISION and the current storage watermark."
   (let ((label-test (core-selector-predicate labels)) (field-test (crd-field-selector-test resource fields)))
@@ -116,6 +121,7 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
                                                         "kind" bookmark-kind "metadata" metadata)))))))
         (handler-case
             (progn
+              (check-watch-store-access store)
               (when expired (error expired))
               (dolist (event first-events) (emit event))
               ;; client-go waits for this bookmark before trusting its initial state.
@@ -124,7 +130,8 @@ PAGE-READER and EVENT-READER replace the durable journal for separately stored r
               (finish-output out)
               (loop while (and (< (get-internal-real-time) deadline)
                                (not (api-watch-client-departed-p)))
-                    do (when (and *crd-view-definition*
+                    do (check-watch-store-access store)
+                       (when (and *crd-view-definition*
                                   (not (crd-watch-definition-current-p store *crd-view-definition* *crd-request-version*)))
                          (core-resource-error 410 "Expired" "Custom definition identity or served version has changed"))
                        (multiple-value-bind (events watermark)

@@ -1,0 +1,36 @@
+{
+  "date": "2026-11-09",
+  "scope": "Established watch termination when application restore starts draining requests",
+  "passed": true,
+  "checks": 205,
+  "suites": {
+    "store-access-gate": 56,
+    "pod-watch": 149
+  },
+  "httpCoverage": {
+    "collections": [
+      "pods",
+      "nodes",
+      "configmaps"
+    ],
+    "requestedWatchTimeoutSeconds": 300,
+    "drainTimeoutSeconds": 3,
+    "assertions": [
+      "Initial ADDED event received on each stream",
+      "Drain succeeds while watch is established",
+      "ERROR event contains 410 Expired",
+      "Request lease count reaches zero",
+      "Stream reaches EOF",
+      "Store access can resume"
+    ]
+  },
+  "runtime": "fake; loopback HTTP; no root/container/BPF operations",
+  "remaining": [
+    "Applied/member snapshot boundary validation",
+    "Monotonic resource-version policy across restore and restart",
+    "Pagination continuity across generation changes",
+    "Background/controller/node-RPC quiescence",
+    "Actual Raft/WAL recovery and automatic compaction"
+  ],
+  "fullGoalComplete": false
+}
