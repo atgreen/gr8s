@@ -72,3 +72,22 @@ is performed: WAL snapshots, retained suffixes and transfers may still depend on
            (gr8s.store::sync-store-generation-directory directory)
            (values target reference))
       (when (probe-file temporary) (delete-file temporary)))))
+
+(defun configure-store-artifact-transport (member root)
+  "Bind filesystem-only source/retention callbacks to MEMBER's stable ROOT.
+This does not install application restore callbacks or enable compaction."
+  (let ((root (uiop:ensure-directory-pathname root)))
+    (bt:with-lock-held ((gr8s.raft.transport:raft-member-lock member))
+      (setf (gr8s.raft.transport::raft-member-artifact-source-fn member)
+            (lambda (member message)
+              (declare (ignore member))
+              (checked-store-snapshot-artifact-path root
+               (getf (cddr (getf message :state)) :application)))
+            (gr8s.raft.transport::raft-member-artifact-retain-fn member)
+            (lambda (member path message)
+              (declare (ignore member))
+              (let ((reference (getf (cddr (getf message :state)) :application)))
+                (retain-store-snapshot-artifact root path (getf message :last-index)
+                                               (getf message :last-term) (eighth reference)))
+              t))))
+  member)

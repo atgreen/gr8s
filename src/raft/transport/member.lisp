@@ -15,18 +15,17 @@
 ;;;; the cluster stays stable despite per-call gRPC latency on the order of tens
 ;;;; of milliseconds.
 ;;;;
-;;;; Wire format: one Raft message per Deliver call, the message plist encoded as
-;;;; a readable Lisp form (entries flattened to (index term command) triples) and
-;;;; read back with *read-eval* bound off. Members are mutually authenticated
-;;;; peers (see raft-tls.lisp), and a message is authenticated before it's read, so
-;;;; the trust boundary is the cluster; a binary codec is a later hardening.
+;;;; Wire format: one Raft message per Deliver call. Artifact chunks use bounded
+;;;; binary frames; ordinary messages use readable Lisp forms with entries flattened
+;;;; to (index term command) triples and *read-eval* disabled on decode. Members
+;;;; authenticate each message through mutual TLS before decoding it.
 
 (in-package #:gr8s.raft.transport)
 
 ;;; ---------------------------------------------------------------------------
 ;;; Wire encoding.
 
-(defun raft-message->octets (msg)
+(defun raft-lisp-message->octets (msg)
   "Encode the Raft message plist MSG to UTF-8 octets for one Deliver call: entries
    are flattened to (index term command) triples and the form is printed with
    *PRINT-READABLY*/*PRINT-CIRCLE*/*PRINT-PRETTY* bound off. MSG is not mutated."
@@ -39,7 +38,7 @@
       (let ((*print-readably* nil) (*print-circle* nil) (*print-pretty* nil))
         (babel:string-to-octets (prin1-to-string wire) :encoding :utf-8)))))
 
-(defun octets->raft-message (octets)
+(defun octets->raft-lisp-message (octets)
   "Decode OCTETS back into a Raft message plist, reading the form with *READ-EVAL*
    bound off and rebuilding RAFT-ENTRY structs from their triples. The inverse of
    RAFT-MESSAGE->OCTETS."
@@ -53,6 +52,56 @@
                                        :command (third triple)))
                     (getf wire :entries))))
     wire))
+
+(defparameter +raft-artifact-wire-magic+ #(71 82 56 83 67 75 48 49)) ; GR8SCK01
+(defconstant +raft-artifact-wire-part-limit+ 65536)
+
+(defun raft-wire-put-u32 (bytes offset value)
+  (dotimes (i 4) (setf (aref bytes (+ offset i)) (ldb (byte 8 (* 8 (- 3 i))) value))))
+
+(defun raft-wire-get-u32 (bytes offset)
+  (loop for i below 4 for value = (aref bytes offset) then (+ (ash value 8) (aref bytes (+ offset i)))
+        finally (return value)))
+
+(defun raft-message->octets (message)
+  "Use a bounded binary frame for artifact chunks; other messages keep their Lisp codec."
+  (unless (and (eq :snapshot-chunk (getf message :type)) (eq :artifact-v1 (getf message :format)))
+    (return-from raft-message->octets (raft-lisp-message->octets message)))
+  (let* ((metadata (copy-list message)) (data (getf message :data))
+         (envelope (or (getf message :artifact-envelope) #())))
+    (remf metadata :data)
+    (remf metadata :artifact-envelope)
+    (let* ((header (raft-lisp-message->octets metadata))
+           (h (length header)) (e (length envelope)) (d (length data)))
+      (unless (and (<= 1 h +raft-artifact-wire-part-limit+)
+                   (<= 0 e +raft-artifact-wire-part-limit+) (<= 1 d +raft-artifact-wire-part-limit+))
+        (error "Artifact chunk exceeds binary frame limits"))
+      (let ((bytes (make-array (+ 20 h e d) :element-type '(unsigned-byte 8))))
+        (replace bytes +raft-artifact-wire-magic+)
+        (raft-wire-put-u32 bytes 8 h)
+        (raft-wire-put-u32 bytes 12 e)
+        (raft-wire-put-u32 bytes 16 d)
+        (replace bytes header :start1 20)
+        (replace bytes envelope :start1 (+ 20 h))
+        (replace bytes data :start1 (+ 20 h e))
+        bytes))))
+
+(defun octets->raft-message (octets)
+  (let ((bytes (coerce octets '(vector (unsigned-byte 8)))))
+    (unless (and (>= (length bytes) 8) (equalp +raft-artifact-wire-magic+ (subseq bytes 0 8)))
+      (return-from octets->raft-message (octets->raft-lisp-message bytes)))
+    (unless (>= (length bytes) 20) (error "Truncated artifact chunk frame"))
+    (let ((h (raft-wire-get-u32 bytes 8)) (e (raft-wire-get-u32 bytes 12)) (d (raft-wire-get-u32 bytes 16)))
+      (unless (and (<= 1 h +raft-artifact-wire-part-limit+) (<= 0 e +raft-artifact-wire-part-limit+)
+                   (<= 1 d +raft-artifact-wire-part-limit+) (= (length bytes) (+ 20 h e d)))
+        (error "Invalid artifact chunk frame lengths"))
+      (let ((message (octets->raft-lisp-message (subseq bytes 20 (+ 20 h)))))
+        (unless (and (eq :snapshot-chunk (getf message :type)) (eq :artifact-v1 (getf message :format))
+                     (null (getf message :data)) (null (getf message :artifact-envelope)))
+          (error "Invalid artifact chunk frame metadata"))
+        (setf (getf message :data) (subseq bytes (+ 20 h e)))
+        (when (plusp e) (setf (getf message :artifact-envelope) (subseq bytes (+ 20 h) (+ 20 h e))))
+        message))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Per-peer delivery link: its own queue, thread, channel and stub.
@@ -82,6 +131,8 @@
   ;; Installed after the node gRPC server starts. RelayOperation dispatches
   ;; incoming frames here; NIL on witnesses and transport-only tests.
   operation-server
+  ;; Filesystem-only callbacks; retention runs under the member lock before WAL adoption.
+  artifact-source-fn artifact-retain-fn
   snapshot-directory snapshot-root snapshot-owner-fd snapshot-receiver
   (snapshot-max-bytes (* 16 1024 1024 1024))
   ;; This member's RAFT-CREDENTIALS. Only in-process tests run without any.

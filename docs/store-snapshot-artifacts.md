@@ -481,8 +481,8 @@ The application reference is a small, readable Lisp value suitable for the WAL:
 `(:gr8s-store-artifact 1 :index INDEX :term TERM :sha256 DIGEST)`. The reference
 binds the artifact identity; it does not contain the artifact bytes. Pending and
 published recovery also validate the enclosing Raft configuration envelope.
-Artifact byte transport and integration of durable placement and retention with
-the production WAL remain unfinished. Both preflight and post-load recovery callbacks run under the
+Production wiring of artifact transport, durable placement and retention with
+application restore remains unfinished. Both preflight and post-load recovery callbacks run under the
 member and raw store barriers and must not reenter public store operations.
 
 Durable artifact storage is available through the internal
@@ -509,3 +509,34 @@ WAL history and in-flight transfers may depend on them. Interrupted staging file
 are ignored by reference lookup. The registry does not change application
 selection, write the WAL, transport artifact bytes, or enable automatic compaction.
 Those production paths must call it before persisting an artifact reference.
+
+The internal `gr8s.resources::configure-store-artifact-transport` function binds
+registry source and retention callbacks to a Raft member and its stable member
+root. With these callbacks installed, an application reference uses the
+`:artifact-v1` transfer mode: the registry file's raw JSONL bytes travel in chunks
+of at most 64 KiB. The first chunk carries a separate configuration/reference
+header of at most 64 KiB. Its sender, election term, snapshot index/term and
+artifact digest must match the transfer identity. The complete file checksum is
+checked before the receiver invokes its durable registry retainer.
+
+Artifact chunks use a binary frame with the eight-byte magic `GR8SCK01`, three
+big-endian 32-bit lengths (metadata, envelope, data), then those byte sections.
+Each section is limited to 64 KiB; lengths must exactly match the received frame.
+The data section is decoded directly into an octet vector, avoiding Lisp reader
+allocation for tens of thousands of printed byte numbers. Ordinary Raft messages
+and generic snapshots keep their existing encoding. Members lacking artifact
+support reject this transfer; no mixed-version capability negotiation is enabled.
+
+Only a literal successful retention acknowledgement permits Raft to write the
+artifact reference to its WAL and invoke its restore callback. A failed restore
+can leave a durable pending snapshot; its retained artifact survives transfer
+scratch cleanup and is available to WAL recovery. Reference-only legacy snapshot
+transfers are rejected because they would not establish artifact availability.
+The final artifact RPC has a 60-second completion budget for verification and
+retention; intermediate chunk calls retain their two-second budget.
+
+Retention runs under the member mutex and must perform filesystem work only.
+It must not acquire application ingress/writer locks or invoke live application
+reload. Installing these callbacks does not install a production application
+restore callback or enable compaction. Production startup, restore barriers,
+artifact retention rules and automatic compaction still require coordination.
