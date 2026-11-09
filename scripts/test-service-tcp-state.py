@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Anthony Green
 # SPDX-License-Identifier: Apache-2.0
-"""Exercise SYN generations/handshake metadata in the actual packet bytecode.
+"""Exercise TCP generations, closure, windows and timestamps in actual packet bytecode.
 
-Run unprivileged by default; --kernel requires a disposable root VM. Full TCP
-Window/timestamp handling and the remainder of TCP lifecycle remain in progress.
+Run unprivileged by default; --kernel requires a disposable root VM. Real guest
+and restart coverage is supplied by the separate native runtime fixtures.
 """
 import importlib.util
 from pathlib import Path
@@ -46,7 +46,7 @@ def exercise(runner):
         key = p.flow_key(sport=port, protocol=6)
         state = runner.lookup("gr8s_pkt_tcp", key)
         assert len(state) == 64 and struct.unpack_from("<I", state, 8)[0] == start
-        assert struct.unpack_from("<I", state, 48)[0] & 1
+        assert struct.unpack_from("<H", state, 48)[0] & 1
         next_client = (start + 1) & 0xffffffff
         server_start = (3000, 0xfffffff0, 0)[index]
         next_server = (server_start + 1) & 0xffffffff
@@ -54,7 +54,7 @@ def exercise(runner):
         translate_reply(runner, reply(port, server_start, next_client), port)
         p.assert_forward(runner, request(port, next_client, next_server, 0x10))
         state = runner.lookup("gr8s_pkt_tcp", key)
-        assert struct.unpack_from("<I", state, 48)[0] & 4, "handshake never established"
+        assert struct.unpack_from("<H", state, 48)[0] & 4, "handshake never established"
         assert struct.unpack_from("<I", state, 28)[0] == next_server
         body = b"reply payload"
         translate_reply(runner, reply(port, next_server, next_client, 0x18, payload=body), port)
@@ -107,7 +107,7 @@ def exercise(runner):
     translate_reply(runner, reply(50026, 9000, 5001), 50026)
     p.assert_forward(runner, request(50026, 5001, 9001, 0x14))
     state = runner.lookup("gr8s_pkt_tcp", p.flow_key(sport=50026, protocol=6))
-    assert not struct.unpack_from("<I", state, 48)[0] & 4, "RST/ACK falsely completed the handshake"
+    assert not struct.unpack_from("<H", state, 48)[0] & 4, "RST/ACK falsely completed the handshake"
     cases += 1
     # Illegal data offset and SYN control combinations cannot publish state.
     for flags in (3, 6):
@@ -130,7 +130,7 @@ def tcp_state(runner, port):
 
 
 def tcp_flags(runner, port):
-    return struct.unpack_from("<I", tcp_state(runner, port), 48)[0]
+    return struct.unpack_from("<H", tcp_state(runner, port), 48)[0]
 
 
 def establish(runner, port, client=1000, server=9000):
@@ -280,6 +280,200 @@ def reordered_closure(runner):
     return cases
 
 
+def options(timestamp=None, scale=None, echo=0):
+    data = b""
+    if timestamp is not None:
+        data += b"\x01\x01\x08\x0a" + struct.pack("!II", timestamp, echo)
+    if scale is not None:
+        data += b"\x03\x03" + bytes([scale])
+    return data + b"\x01" * (-len(data) % 4)
+
+
+def option_handshake(runner, port, *, start=1000, server=9000, stamp=100,
+                     client_scale=7, server_scale=9, window=4096):
+    p.publish(runner)
+    p.assert_forward(runner, request(port, start, tcp_options=options(stamp, client_scale), window=window))
+    state = tcp_state(runner, port)
+    assert state[54] == min(client_scale, 14)
+    assert struct.unpack_from("<I", state, 32)[0] == window, "SYN window was scaled"
+    c, s = (start + 1) & 0xffffffff, (server + 1) & 0xffffffff
+    translate_reply(runner, reply(port, server, c, tcp_options=options(300, server_scale, stamp),
+                                 window=window), port)
+    state = tcp_state(runner, port)
+    assert state[55] == min(server_scale, 14)
+    assert struct.unpack_from("<I", state, 36)[0] == window
+    p.assert_forward(runner, request(port, c, s, 0x10,
+                                     tcp_options=options((stamp + 1) & 0xffffffff, echo=300), window=4))
+    assert tcp_flags(runner, port) & 64512 == 64512, "timestamp/window negotiation missing"
+    return c, s
+
+
+def simultaneous_open(runner):
+    cases = 0
+    for index, start in enumerate((0, 1000, 0xffffffff)):
+        for timestamps in (False, True):
+            port = 50700 + index * 2 + timestamps
+            c = (start + 1) & 0xffffffff
+            opts = options(100, 7) if timestamps else b""
+            p.publish(runner)
+            p.assert_forward(runner, request(port, start, tcp_options=opts))
+            translate_reply(runner, reply(port, start, 0, 2,
+                                         tcp_options=options(300, 9) if timestamps else b""), port)
+            p.assert_forward(runner, request(port, start, c, 0x12,
+                                             tcp_options=options(101, 7, 300) if timestamps else b""))
+            assert not tcp_flags(runner, port) & 4
+            translate_reply(runner, reply(port, c, c, 0x10,
+                                         tcp_options=options(301, echo=101) if timestamps else b""), port)
+            assert tcp_flags(runner, port) & 4, "server final ACK did not finish crossed SYN handshake"
+            runner.advance(121)
+            p.assert_forward(runner, request(port, c, c, 0x18, payload=b"data",
+                                             tcp_options=options(102) if timestamps else b""))
+            p.assert_unlocked(runner)
+            cases += 6
+    p.publish(runner)
+    p.assert_forward(runner, request(50720, 1000))
+    translate_reply(runner, reply(50720, 9000, 1001), 50720)
+    runner.advance(1)
+    before = tcp_state(runner, 50720)
+    key = p.flow_key(sport=50720, protocol=6)
+    forward = runner.lookup("gr8s_pkt_forward", key)
+    translate_reply(runner, reply(50720, 19000, 1001, 0x10), 50720)
+    assert tcp_state(runner, 50720) == before, "future pending-handshake ACK poisoned the stream"
+    assert runner.lookup("gr8s_pkt_forward", key) == forward
+    return cases + 2
+
+
+def option_exercise(runner):
+    cases = 0
+    port = 50600
+    c, s = option_handshake(runner, port, window=2)
+    key = p.flow_key(sport=port, protocol=6)
+    state = tcp_state(runner, port)
+    assert struct.unpack_from("<I", state, 32)[0] == 512
+    # Until a non-SYN server ACK advertises its scaled window, the old
+    # unscaled SYN window still bounds metadata acceptance.
+    runner.advance(1)
+    forward = runner.lookup("gr8s_pkt_forward", key)
+    p.assert_forward(runner, request(port, c, s, 0x18, payload=bytes(64), tcp_options=options(103)))
+    assert tcp_state(runner, port) == state
+    assert runner.lookup("gr8s_pkt_forward", key) == forward
+    translate_reply(runner, reply(port, s, c, 0x10, tcp_options=options(301, echo=101), window=4), port)
+    assert struct.unpack_from("<I", tcp_state(runner, port), 36)[0] == 2048
+    p.assert_forward(runner, request(port, c, s, 0x18, payload=bytes(1024), tcp_options=options(102)))
+    c += 1024
+    assert struct.unpack_from("<I", tcp_state(runner, port), 16)[0] == c
+    translate_reply(runner, reply(port, s, c, 0x10, tcp_options=options(302), window=4), port)
+    cases += 7
+    # A newer timestamp on a reordered segment must not poison the floor
+    # used to accept the earlier packet that fills its data gap.
+    p.assert_forward(runner, request(port, c + 3, s, 0x18, payload=b"def", tcp_options=options(200)))
+    assert struct.unpack_from("<I", tcp_state(runner, port), 56)[0] == 102
+    p.assert_forward(runner, request(port, c, s, 0x18, payload=b"abc", tcp_options=options(103)))
+    assert struct.unpack_from("<I", tcp_state(runner, port), 56)[0] == 103
+    c += 6
+    translate_reply(runner, reply(port, s, c, 0x10, tcp_options=options(303), window=4), port)
+    p.assert_forward(runner, request(port, c, s, 0x18, payload=b"next", tcp_options=options(104)))
+    assert struct.unpack_from("<I", tcp_state(runner, port), 56)[0] == 104
+    # Stale/missing timestamps and unacceptable ACKs cannot update metadata
+    # or refresh its lifetime, but endpoints can still send challenge ACKs.
+    for data in (request(port, c, s, 0x10, tcp_options=options(103)),
+                 request(port, c, s, 0x10),
+                 request(port, c, s + 10000, 0x10, tcp_options=options(105))):
+        runner.advance(1)
+        before, forward = tcp_state(runner, port), runner.lookup("gr8s_pkt_forward", key)
+        p.assert_forward(runner, data)
+        assert tcp_state(runner, port) == before
+        assert runner.lookup("gr8s_pkt_forward", key) == forward
+    # A reset at an old ACK edge while newer data is outstanding is uncertain.
+    p.assert_forward(runner, request(port, c, s, 0x04))
+    assert not tcp_flags(runner, port) & 128
+    c += 4
+    translate_reply(runner, reply(port, s, c, 0x10, tcp_options=options(304)), port)
+    before = tcp_state(runner, port)
+    p.assert_forward(runner, request(port, c, s, 0x14, tcp_options=options(1)))
+    assert tcp_flags(runner, port) & 128, "RST incorrectly subjected to timestamp freshness"
+    assert tcp_state(runner, port)[56:64] == before[56:64], "RST updated timestamp floors"
+    cases += 13
+    # Reusing the exact ISN after reset requires a strictly newer negotiated
+    # timestamp. A delayed same-ACK SYN-ACK must echo this new SYN generation.
+    replacement = "10.88.2.4"
+    p.publish(runner, backend=replacement)
+    p.assert_forward(runner, request(port, 1000, tcp_options=options(110, 7)), replacement)
+    before = tcp_state(runner, port)
+    stale = reply(port, 9000, 1001, backend=replacement, tcp_options=options(300, 9, 100))
+    verdict, unchanged = runner.run("gr8s_packet_reverse", stale)
+    assert verdict == p.SHOT and unchanged == stale
+    assert tcp_state(runner, port) == before
+    translate_reply(runner, reply(port, 7000, 1001, backend=replacement,
+                                 tcp_options=options(500, 9, 110)), port)
+    p.assert_forward(runner, request(port, 1001, 7001, 0x10, tcp_options=options(111)), replacement)
+    assert tcp_flags(runner, port) & 4
+    cases += 5
+    # A new ISN can be below the previous high data sequence after a long
+    # transfer. Fresh negotiated timestamps identify this incarnation.
+    c, s = option_handshake(runner, 50601)
+    p.assert_forward(runner, request(50601, c, s, 0x18, payload=bytes(3000), tcp_options=options(102)))
+    p.publish(runner, backend=replacement)
+    p.assert_forward(runner, request(50601, 1000, tcp_options=options(103, 1)))
+    assert tcp_state(runner, 50601)[54] == 7, "SYN retransmit renegotiated window scaling"
+    p.assert_forward(runner, request(50601, 2000, tcp_options=options(104, 7)), replacement)
+    assert struct.unpack_from("<I", tcp_state(runner, 50601), 8)[0] == 2000
+    cases += 5
+    # Zero/wrapped timestamps are valid values, and received scales cap at14.
+    for index, stamp in enumerate((0, 0xfffffffe)):
+        port = 50610 + index
+        c, s = option_handshake(runner, port, stamp=stamp, client_scale=20)
+        p.assert_forward(runner, request(port, c, s, 0x10, tcp_options=options((stamp + 2) & 0xffffffff)))
+        assert struct.unpack_from("<I", tcp_state(runner, port), 56)[0] == (stamp + 2) & 0xffffffff
+        before = tcp_state(runner, port)
+        p.assert_forward(runner, request(port, c, s, 0x10, tcp_options=options(stamp)))
+        assert tcp_state(runner, port) == before
+        cases += 4
+    # One-sided window scale does not negotiate scaling or TS enforcement.
+    port = 50620
+    p.publish(runner)
+    p.assert_forward(runner, request(port, 1000, tcp_options=options(100, 14), window=2))
+    translate_reply(runner, reply(port, 9000, 1001, window=2), port)
+    p.assert_forward(runner, request(port, 1001, 9001, 0x10, window=4))
+    assert struct.unpack_from("<I", tcp_state(runner, port), 32)[0] == 4
+    cases += 3
+    # Age floors independently. Fresh traffic in one direction must expire an
+    # old peer floor; the live mapping itself remains fresh during this test.
+    import time
+    port = 50621
+    c, s = option_handshake(runner, port)
+    state = bytearray(tcp_state(runner, port))
+    now = runner.clock[0] if isinstance(runner, p.Interpreter) else time.monotonic_ns()
+    minute = (now // 60_000_000_000) & 0xffff
+    struct.pack_into("<H", state, 50, (minute - 34561) & 0xffff)
+    runner.update("gr8s_pkt_tcp", p.flow_key(sport=port, protocol=6), state)
+    translate_reply(runner, reply(port, s, c, 0x10, tcp_options=options(301)), port)
+    assert not tcp_flags(runner, port) & 16384 and tcp_flags(runner, port) & 32768
+    p.assert_forward(runner, request(port, c, s, 0x10, tcp_options=options(1)))
+    assert tcp_flags(runner, port) & 16384
+    assert struct.unpack_from("<I", tcp_state(runner, port), 56)[0] == 1
+    cases += 4
+    # Every option is bounded by the declared TCP header, including on nonlinear skbs.
+    for index, malformed in enumerate((b"\x03\x02\x00\x00", b"\x08\x09" + bytes(10),
+                                        b"\x02\x00\x00\x00", b"\x02\x10\x00\x00",
+                                        options(1) + options(2))):
+        port = 50630 + index
+        data = request(port, 1000, tcp_options=malformed)
+        verdict, output = runner.run("gr8s_packet_forward", data)
+        assert verdict == p.SHOT and output == data
+        assert tcp_state(runner, port) is None
+        cases += 1
+    if isinstance(runner, p.Interpreter):
+        data = request(50640, 1000, tcp_options=options(100, 7), options=bytes(4))
+        verdict, output = runner.run("gr8s_packet_forward", data, linear_length=34)
+        assert verdict == p.OK
+        assert tcp_flags(runner, 50640) & 17408 == 17408
+        p.check_checksums(output)
+        cases += 1
+    p.assert_unlocked(runner)
+    return cases
+
+
 def closure_gc(runner, gc):
     cases = 0
     for reverse_gc in (False, True):
@@ -386,6 +580,8 @@ def main():
     try:
         print(f"Service TCP closure ({cls.__name__}): {closure(runner)} cases passed")
         print(f"Service TCP reordered close: {reordered_closure(runner)} cases passed")
+        print(f"Service TCP options ({cls.__name__}): {option_exercise(runner)} cases passed")
+        print(f"Service TCP simultaneous open: {simultaneous_open(runner)} cases passed")
     finally:
         runner.close()
     limited = dict(descriptors)

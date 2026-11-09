@@ -38,17 +38,20 @@
       (source u32) (destination u32) (sport u16) (dport u16)
       (protocol u8) (pad0 u8) (pad1 u16))
     (defstruct gr8s-pkt-meta
-      (l4 u32) (seq u32) (ack u32) (end u32) (flags u32) (window u32))
+      (l4 u32) (seq u32) (ack u32) (end u32) (flags u16) (window u16) (timestamp u32) (echo u32))
     (defstruct gr8s-pkt-tcp-input (seq u32) (ack u32) (header u64))
     ;; SYN/client=1, SYN/server=2, established=4, FIN/client=8, FIN/server=16,
     ;; FIN ACK/client=32, FIN ACK/server=64, reset=128, closed=256, legacy=512.
-    ;; Window scale/timestamp slots are reserved for further protocol tracking.
+    ;; TS/client=1024, TS/server=2048, WS/client=4096, WS/server=8192.
+    ;; TS-floor valid/client=16384, valid/server=32768. Minute ages use reserved
+    ;; option bytes; all previously used field offsets and the 64-byte map stay fixed.
+    ;; Packet flags pack TS-present=256, WS-present=512, WS shift in bits12..15.
     (defstruct gr8s-pkt-tcp-state
       (backend u64) (client-isn u32) (server-isn u32)
       (client-end u32) (server-end u32) (client-ack u32) (server-ack u32)
       (client-window u32) (server-window u32) (client-fin u32) (server-fin u32)
-      (flags u32) (client-scale u8) (server-scale u8) (pad u16)
-      (client-ts u32) (server-ts u32))))
+      (flags u16) (client-ts-age u16) (server-ts-age u16)
+      (client-scale u8) (server-scale u8) (client-ts u32) (server-ts u32))))
 
 (defmacro pkt-count (pointer)
   `(when (/= ,pointer 0) (atomic-add ,pointer 0 1)))
@@ -106,9 +109,21 @@ so opposite acquisition orders cannot deadlock."
   `(when-let ((tcp (map-lookup-ptr gr8s-pkt-tcp ,key)))
      (when (/= (map-delete-ptr gr8s-pkt-tcp ,key) 0) (pkt-drop failed))))
 
+(defmacro pkt-tcp-ts-expired (age)
+  ;; A flow must be used within 2h or is removed before observation. On every
+  ;; tracked packet, expire both floors at 24 days, before 16-bit minutes wrap.
+  `(>= (cast u16 (- (cast u16 (/ now 60000000000)) ,age)) 34560))
+
+(defmacro pkt-tcp-fresh-syn-timestamp (tcp)
+  `(and (= (logand (load u16 ,tcp 48) 19456) 19456)
+        (not (pkt-tcp-ts-expired (load u16 ,tcp 50)))
+        (/= (logand (gr8s-pkt-meta-flags meta) 256) 0)
+        (pkt-seq-after (gr8s-pkt-meta-timestamp meta) (load u32 ,tcp 56))))
+
 (defmacro pkt-tcp-new-generation (key backend)
-  "A different initial sequence beyond the observed stream is a new incarnation.
-Same-ISN retransmissions retain the original backend; older SYNs fail closed.
+  "A new sequence or fresh negotiated timestamp identifies a new incarnation.
+Same-ISN active retransmissions retain their backend. After closure, a strictly
+newer timestamp can distinguish even a reused ISN; older SYNs fail closed.
 Caller holds the forward reservation; reverse readers cannot commit concurrently."
   `(when (and (= (gr8s-pkt-flow-protocol ,key) 6)
               (= (logand (gr8s-pkt-meta-flags meta) 18) 2))
@@ -117,13 +132,146 @@ Caller holds the forward reservation; reverse readers cannot commit concurrently
          (when (= (load u64 tcp 0) ,backend)
            (when (/= (logand (load u32 tcp 48) 1) 0)
              (if (= (load u32 tcp 8) (gr8s-pkt-meta-seq meta))
-                 (setf replace 0)
-                 (unless (pkt-seq-after (gr8s-pkt-meta-seq meta) (load u32 tcp 16))
-                   (pkt-drop failed))))))
+                 (unless (and (/= (logand (load u32 tcp 48) 384) 0)
+                              (pkt-tcp-fresh-syn-timestamp tcp))
+                   (setf replace 0))
+                 (progn
+                   (when (and (= (logand (load u16 tcp 48) 19456) 19456)
+                              (not (pkt-tcp-ts-expired (load u16 tcp 50)))
+                              (/= (logand (gr8s-pkt-meta-flags meta) 256) 0)
+                              (pkt-seq-after (load u32 tcp 56) (gr8s-pkt-meta-timestamp meta)))
+                     (pkt-drop failed))
+                   (unless (or (pkt-seq-after (gr8s-pkt-meta-seq meta) (load u32 tcp 16))
+                               (pkt-tcp-fresh-syn-timestamp tcp))
+                     (pkt-drop failed)))))))
        (when (/= replace 0)
          (when (/= (map-delete-ptr gr8s-pkt-forward ,key) 0) (pkt-drop failed))
          (pkt-tcp-forget ,key)
          (setf (gr8s-pkt-pair-first target) 0)))))
+
+(defmacro pkt-tcp-syn-options (reverse)
+  "Record options from the first SYN in this direction; retransmits cannot renegotiate."
+  (let ((scale (if reverse 'gr8s-pkt-tcp-state-server-scale 'gr8s-pkt-tcp-state-client-scale))
+        (timestamp (if reverse 'gr8s-pkt-tcp-state-server-ts 'gr8s-pkt-tcp-state-client-ts))
+        (age (if reverse 'gr8s-pkt-tcp-state-server-ts-age 'gr8s-pkt-tcp-state-client-ts-age))
+        (ts-bit (if reverse 34816 17408)) (ws-bit (if reverse 8192 4096)))
+    `(progn
+       (when (/= (logand (gr8s-pkt-meta-flags meta) 256) 0)
+         (setf (,timestamp state) (gr8s-pkt-meta-timestamp meta)
+               (,age state) (cast u16 (/ now 60000000000))
+               (gr8s-pkt-tcp-state-flags state)
+               (logior (gr8s-pkt-tcp-state-flags state) ,ts-bit)))
+       (when (/= (logand (gr8s-pkt-meta-flags meta) 512) 0)
+         (setf (,scale state) (logand (>> (gr8s-pkt-meta-flags meta) 12) 15)
+               (gr8s-pkt-tcp-state-flags state)
+               (logior (gr8s-pkt-tcp-state-flags state) ,ws-bit))))))
+
+(defmacro pkt-tcp-trackable (reverse)
+  "Conservative metadata acceptance; uncertain packets still reach the endpoint.
+Window bounds retain the largest negotiated window, allowing retransmission and
+window shrink. Timestamp floors advance only at/before observed receiver ACKs."
+  (let ((acked (if reverse 'gr8s-pkt-tcp-state-server-ack 'gr8s-pkt-tcp-state-client-ack))
+        (window (if reverse 'gr8s-pkt-tcp-state-client-window 'gr8s-pkt-tcp-state-server-window))
+        (timestamp (if reverse 'gr8s-pkt-tcp-state-server-ts 'gr8s-pkt-tcp-state-client-ts))
+        (age (if reverse 'gr8s-pkt-tcp-state-server-ts-age 'gr8s-pkt-tcp-state-client-ts-age))
+        (valid (if reverse 32768 16384)))
+    `(or (/= (logand (gr8s-pkt-tcp-state-flags state) 512) 0)
+         (and
+          ;; RST must reach ordinary sequence validation even without TSopt.
+          (or (/= (logand (gr8s-pkt-meta-flags meta) 4) 0)
+              (/= (logand (gr8s-pkt-tcp-state-flags state) 3072) 3072)
+              (and (/= (logand (gr8s-pkt-meta-flags meta) 256) 0)
+                   (or (= (logand (gr8s-pkt-tcp-state-flags state) ,valid) 0)
+                       (pkt-tcp-ts-expired (,age state))
+                       (not (pkt-seq-after (,timestamp state) (gr8s-pkt-meta-timestamp meta))))))
+          (or (= (logand (gr8s-pkt-meta-flags meta) 16) 0)
+              (/= (logand (gr8s-pkt-tcp-state-flags state) 3) 3)
+              (and (not (pkt-seq-after
+                         (gr8s-pkt-meta-ack meta)
+                         (,(if reverse 'gr8s-pkt-tcp-state-client-end 'gr8s-pkt-tcp-state-server-end) state)))
+                   (pkt-seq-after
+                    (gr8s-pkt-meta-ack meta)
+                    (,(if reverse 'gr8s-pkt-tcp-state-client-isn 'gr8s-pkt-tcp-state-server-isn) state))))
+          (or (/= (logand (gr8s-pkt-tcp-state-flags state) 3) 3)
+              (let ((window u32 (,window state)))
+                ;; Keepalive and zero-window probes need one sequence position.
+                (when (= window 0) (setf window 1))
+                (and (not (pkt-seq-after (gr8s-pkt-meta-end meta)
+                                         (cast u32 (+ (,acked state) window))))
+                     (not (pkt-seq-after (,acked state)
+                                         (cast u32 (+ (gr8s-pkt-meta-end meta) window)))))))))))
+
+(defmacro pkt-tcp-expire-timestamps ()
+  `(progn
+     (when (pkt-tcp-ts-expired (gr8s-pkt-tcp-state-client-ts-age state))
+       (setf (gr8s-pkt-tcp-state-flags state) (logand (gr8s-pkt-tcp-state-flags state) 49151)))
+     (when (pkt-tcp-ts-expired (gr8s-pkt-tcp-state-server-ts-age state))
+       (setf (gr8s-pkt-tcp-state-flags state) (logand (gr8s-pkt-tcp-state-flags state) 32767)))))
+
+(defmacro pkt-tcp-update-options (reverse)
+  (let ((acked (if reverse 'gr8s-pkt-tcp-state-server-ack 'gr8s-pkt-tcp-state-client-ack))
+        (scale (if reverse 'gr8s-pkt-tcp-state-server-scale 'gr8s-pkt-tcp-state-client-scale))
+        (window-field (if reverse 'gr8s-pkt-tcp-state-server-window 'gr8s-pkt-tcp-state-client-window))
+        (timestamp (if reverse 'gr8s-pkt-tcp-state-server-ts 'gr8s-pkt-tcp-state-client-ts))
+        (age (if reverse 'gr8s-pkt-tcp-state-server-ts-age 'gr8s-pkt-tcp-state-client-ts-age))
+        (valid (if reverse 32768 16384)))
+    `(when (= (logand (gr8s-pkt-meta-flags meta) 4) 0)
+       (when (and (= (logand (gr8s-pkt-tcp-state-flags state) 3072) 3072)
+                  (/= (logand (gr8s-pkt-meta-flags meta) 256) 0)
+                  (not (pkt-seq-after (gr8s-pkt-meta-seq meta) (,acked state)))
+                  (or (= (logand (gr8s-pkt-tcp-state-flags state) ,valid) 0)
+                      (not (pkt-seq-after (,timestamp state) (gr8s-pkt-meta-timestamp meta)))))
+         (setf (,timestamp state) (gr8s-pkt-meta-timestamp meta)
+               (,age state) (cast u16 (/ now 60000000000))
+               (gr8s-pkt-tcp-state-flags state) (logior (gr8s-pkt-tcp-state-flags state) ,valid)))
+       (let ((window u32 (gr8s-pkt-meta-window meta)))
+         ;; SYN window fields are never scaled; both peers must have offered WSopt.
+         (when (and (= (logand (gr8s-pkt-meta-flags meta) 2) 0)
+                    (= (logand (gr8s-pkt-tcp-state-flags state) 12288) 12288))
+           (let ((shift u32 (,scale state)))
+             (when (> shift 14) (setf shift 14))
+             (setf window (cast u32 (<< window shift)))))
+         (when (> window (,window-field state))
+           (setf (,window-field state) window))))))
+
+(defmacro pkt-tcp-parse-options ()
+  "Walk at most forty TCP option bytes, copying through skb_load_bytes for nonlinear skbs."
+  `(when (> header 20)
+     (let ((cursor u32 20))
+       (dotimes (option 40)
+         (when (< cursor header)
+           (when (/= (skb-load-bytes (ctx-ptr) (+ (gr8s-pkt-meta-l4 meta) cursor) wire 1) 0)
+             (pkt-drop malformed))
+           (let ((kind u32 (load u8 wire 0)))
+             (cond
+               ((= kind 0) (setf cursor header))
+               ((= kind 1) (setf cursor (+ cursor 1)))
+               (t
+                (when (> (+ cursor 2) header) (pkt-drop malformed))
+                (when (/= (skb-load-bytes (ctx-ptr) (+ (gr8s-pkt-meta-l4 meta) cursor) wire 2) 0)
+                  (pkt-drop malformed))
+                (let ((size u32 (load u8 wire 1)))
+                  (when (or (< size 2) (> (+ cursor size) header)) (pkt-drop malformed))
+                  (cond
+                    ((= kind 3)
+                     (when (/= size 3) (pkt-drop malformed))
+                     (when (/= (logand (gr8s-pkt-meta-flags meta) 2) 0)
+                       (when (/= (logand (gr8s-pkt-meta-flags meta) 512) 0) (pkt-drop malformed))
+                       (when (/= (skb-load-bytes (ctx-ptr) (+ (gr8s-pkt-meta-l4 meta) (+ cursor 2)) wire 1) 0)
+                         (pkt-drop malformed))
+                       (let ((shift u32 (load u8 wire 0)))
+                         (when (> shift 14) (setf shift 14))
+                         (setf (gr8s-pkt-meta-flags meta)
+                               (logior (gr8s-pkt-meta-flags meta) (logior 512 (<< shift 12)))))))
+                    ((= kind 8)
+                     (when (or (/= size 10) (/= (logand (gr8s-pkt-meta-flags meta) 256) 0))
+                       (pkt-drop malformed))
+                     (when (/= (skb-load-bytes (ctx-ptr) (+ (gr8s-pkt-meta-l4 meta) (+ cursor 2)) wire 8) 0)
+                       (pkt-drop malformed))
+                     (setf (gr8s-pkt-meta-timestamp meta) (ntohl (load u32 wire 0))
+                           (gr8s-pkt-meta-echo meta) (ntohl (load u32 wire 4))
+                           (gr8s-pkt-meta-flags meta) (logior (gr8s-pkt-meta-flags meta) 256))))
+                  (setf cursor (+ cursor size)))))))))))
 
 (defmacro pkt-tcp-lifecycle (reverse)
   "Observe closure only from sequence/ACK evidence for the current generation.
@@ -147,9 +295,11 @@ be cumulatively acknowledged before the entry becomes a closed tombstone."
                                  (= (gr8s-pkt-meta-ack meta)
                                     (gr8s-pkt-tcp-state-client-end state)))
                             (and (/= (logand (gr8s-pkt-tcp-state-flags state) 2) 0)
-                                 (= (gr8s-pkt-meta-seq meta) (gr8s-pkt-tcp-state-server-ack state))))
+                                 (= (gr8s-pkt-meta-seq meta) (gr8s-pkt-tcp-state-server-ack state))
+                                 (= (gr8s-pkt-meta-seq meta) (gr8s-pkt-tcp-state-server-end state))))
                        '(and (/= (logand (gr8s-pkt-tcp-state-flags state) 2) 0)
-                             (= (gr8s-pkt-meta-seq meta) (gr8s-pkt-tcp-state-client-ack state))))
+                             (= (gr8s-pkt-meta-seq meta) (gr8s-pkt-tcp-state-client-ack state))
+                             (= (gr8s-pkt-meta-seq meta) (gr8s-pkt-tcp-state-client-end state))))
                   ;; An ACK on the reset must not refer to unsent/old data.
                   (or (= (logand (gr8s-pkt-meta-flags meta) 16) 0)
                       (and (not (pkt-seq-after (gr8s-pkt-meta-ack meta) (,other-end state)))
@@ -161,10 +311,12 @@ be cumulatively acknowledged before the entry becomes a closed tombstone."
                   (/= (logand (gr8s-pkt-meta-flags meta) 16) 0)
                   (not (pkt-seq-after (gr8s-pkt-meta-ack meta) (,other-end state)))
                   (not (pkt-seq-after (,other-acked state) (gr8s-pkt-meta-ack meta))))
-         ;; A contiguous FIN (possibly after payload) or its retransmission.
+         ;; An in-window FIN may precede a data gap. Only the peer's later
+         ;; cumulative ACK proves receipt through that FIN; no early retirement.
          (when (and (/= (logand (gr8s-pkt-meta-flags meta) 1) 0)
                     (or (and (= (logand (gr8s-pkt-tcp-state-flags state) ,fin-bit) 0)
-                             (= (gr8s-pkt-meta-seq meta) (,end state)))
+                             (not (pkt-seq-after (,acked state) (gr8s-pkt-meta-seq meta)))
+                             (not (pkt-seq-after (,end state) (gr8s-pkt-meta-end meta))))
                         (and (/= (logand (gr8s-pkt-tcp-state-flags state) ,fin-bit) 0)
                              (= (gr8s-pkt-meta-end meta) (,fin state)))))
            (setf (,fin state) (gr8s-pkt-meta-end meta)
@@ -187,20 +339,21 @@ be cumulatively acknowledged before the entry becomes a closed tombstone."
 Protocol state is published before a new forward entry; interrupted publication
 cannot create a reverse-translatable TCP flow without its metadata."
   (let ((end-field (if reverse 'gr8s-pkt-tcp-state-server-end 'gr8s-pkt-tcp-state-client-end))
-        (ack-field (if reverse 'gr8s-pkt-tcp-state-client-ack 'gr8s-pkt-tcp-state-server-ack))
-        (window-field (if reverse 'gr8s-pkt-tcp-state-server-window 'gr8s-pkt-tcp-state-client-window)))
+        (ack-field (if reverse 'gr8s-pkt-tcp-state-client-ack 'gr8s-pkt-tcp-state-server-ack)))
     `(when (= (gr8s-pkt-flow-protocol ,key) 6)
        (let ((state (make-gr8s-pkt-tcp-state)))
          (when-let ((tcp (map-lookup-ptr gr8s-pkt-tcp ,key)))
            (when (= (load u64 tcp 0) ,backend)
              ,@(loop for offset from 0 below 64 by 8
                      collect `(store u64 state ,offset (load u64 tcp ,offset)))))
-         (if (/= (logand (gr8s-pkt-tcp-state-flags state) 384) 0)
+         (if (or (/= (logand (gr8s-pkt-tcp-state-flags state) 384) 0)
+                 (not (pkt-tcp-trackable ,reverse)))
              ;; Preserve translation for delayed controls, without refreshing
              ;; the tombstone or changing this generation's protocol metadata.
              (when-let ((held (map-lookup-ptr gr8s-pkt-forward ,key)))
                (setf now (load u64 held 8)))
              (progn
+               (pkt-tcp-expire-timestamps)
                (when (= (gr8s-pkt-tcp-state-backend state) 0)
                  (setf (gr8s-pkt-tcp-state-backend state) ,backend
                        (gr8s-pkt-tcp-state-flags state) 516)
@@ -208,30 +361,54 @@ cannot create a reverse-translatable TCP flow without its metadata."
                      '((when (= (logand (gr8s-pkt-meta-flags meta) 18) 2)
                          (setf (gr8s-pkt-tcp-state-flags state) 1
                                (gr8s-pkt-tcp-state-client-isn state) (gr8s-pkt-meta-seq meta)
-                               (gr8s-pkt-tcp-state-client-ack state) (gr8s-pkt-meta-seq meta)))))
+                               (gr8s-pkt-tcp-state-client-ack state) (gr8s-pkt-meta-seq meta))
+                         (pkt-tcp-syn-options nil))))
                  (setf ,(if reverse '(gr8s-pkt-tcp-state-server-end state)
                                    '(gr8s-pkt-tcp-state-client-end state)) (gr8s-pkt-meta-end meta)))
                ,@(if reverse
                      '((when (/= (logand (gr8s-pkt-tcp-state-flags state) 1) 0)
                          (when (= (logand (gr8s-pkt-tcp-state-flags state) 2) 0)
-                           (unless (and (/= (logand (gr8s-pkt-meta-flags meta) 16) 0)
-                                        (or (= (logand (gr8s-pkt-meta-flags meta) 6) 2)
-                                            (= (logand (gr8s-pkt-meta-flags meta) 6) 4))
-                                        (pkt-seq-after (gr8s-pkt-meta-ack meta)
-                                                       (gr8s-pkt-tcp-state-client-isn state))
-                                        (not (pkt-seq-after (gr8s-pkt-meta-ack meta)
-                                                           (gr8s-pkt-tcp-state-client-end state))))
+                           (unless (or (= (logand (gr8s-pkt-meta-flags meta) 18) 2)
+                                       (and (/= (logand (gr8s-pkt-meta-flags meta) 16) 0)
+                                            (or (= (logand (gr8s-pkt-meta-flags meta) 6) 2)
+                                                (= (logand (gr8s-pkt-meta-flags meta) 6) 4))
+                                            (pkt-seq-after (gr8s-pkt-meta-ack meta)
+                                                           (gr8s-pkt-tcp-state-client-isn state))
+                                            (not (pkt-seq-after (gr8s-pkt-meta-ack meta)
+                                                               (gr8s-pkt-tcp-state-client-end state)))))
                              (pkt-drop failed)))
                          (when (/= (logand (gr8s-pkt-meta-flags meta) 2) 0)
                            (when (and (/= (logand (gr8s-pkt-tcp-state-flags state) 2) 0)
                                       (/= (gr8s-pkt-tcp-state-server-isn state) (gr8s-pkt-meta-seq meta)))
                              (pkt-drop failed))
                            (when (= (logand (gr8s-pkt-tcp-state-flags state) 2) 0)
+                             ;; Echoed SYN timestamps distinguish an older SYN-ACK
+                             ;; even when the client reused exactly the same ISN.
+                             (when (and (/= (logand (gr8s-pkt-meta-flags meta) 16) 0)
+                                        (/= (logand (gr8s-pkt-tcp-state-flags state) 1024) 0)
+                                        (/= (logand (gr8s-pkt-meta-flags meta) 256) 0)
+                                        (pkt-seq-after (gr8s-pkt-tcp-state-client-ts state)
+                                                       (gr8s-pkt-meta-echo meta)))
+                               (pkt-drop failed))
                              (setf (gr8s-pkt-tcp-state-server-isn state) (gr8s-pkt-meta-seq meta)
                                    (gr8s-pkt-tcp-state-server-end state) (gr8s-pkt-meta-end meta)
-                                   (gr8s-pkt-tcp-state-server-ack state) (gr8s-pkt-meta-seq meta)))
+                                   (gr8s-pkt-tcp-state-server-ack state) (gr8s-pkt-meta-seq meta))
+                             (pkt-tcp-syn-options t))
                            (setf (gr8s-pkt-tcp-state-flags state)
-                                 (logior (gr8s-pkt-tcp-state-flags state) 2)))))
+                                 (logior (gr8s-pkt-tcp-state-flags state) 2)))
+                         ;; In a simultaneous open, the client SYN-ACK can be
+                         ;; followed by a server ACK rather than another client ACK.
+                         (when (and (= (logand (gr8s-pkt-tcp-state-flags state) 3) 3)
+                                    (= (logand (gr8s-pkt-meta-flags meta) 6) 0)
+                                    (/= (logand (gr8s-pkt-meta-flags meta) 16) 0)
+                                    (pkt-seq-after (gr8s-pkt-tcp-state-server-ack state)
+                                                   (gr8s-pkt-tcp-state-server-isn state))
+                                    (pkt-seq-after (gr8s-pkt-meta-ack meta)
+                                                   (gr8s-pkt-tcp-state-client-isn state))
+                                    (pkt-seq-after (gr8s-pkt-meta-seq meta)
+                                                   (gr8s-pkt-tcp-state-server-isn state)))
+                           (setf (gr8s-pkt-tcp-state-flags state)
+                                 (logior (gr8s-pkt-tcp-state-flags state) 4)))))
                      '((when (/= (logand (gr8s-pkt-tcp-state-flags state) 1) 0)
                          (if (/= (logand (gr8s-pkt-meta-flags meta) 2) 0)
                              (when (/= (gr8s-pkt-meta-seq meta) (gr8s-pkt-tcp-state-client-isn state))
@@ -250,6 +427,10 @@ cannot create a reverse-translatable TCP flow without its metadata."
                                  (setf (gr8s-pkt-tcp-state-flags state)
                                        (logior (gr8s-pkt-tcp-state-flags state) 4))))))))
                (pkt-tcp-lifecycle ,reverse)
+               (when (and (/= (logand (gr8s-pkt-meta-flags meta) 4) 0)
+                          (= (logand (gr8s-pkt-tcp-state-flags state) 128) 0))
+                 (when-let ((held (map-lookup-ptr gr8s-pkt-forward ,key)))
+                   (setf now (load u64 held 8))))
                (when (and (= (logand (gr8s-pkt-meta-flags meta) 4) 0)
                           (or (/= (logand (gr8s-pkt-tcp-state-flags state) 512) 0)
                               (pkt-seq-after (gr8s-pkt-meta-end meta) (,end-field state))))
@@ -270,7 +451,7 @@ cannot create a reverse-translatable TCP flow without its metadata."
                                                              'gr8s-pkt-tcp-state-server-end) state)))
                             (pkt-seq-after (gr8s-pkt-meta-ack meta) (,ack-field state)))
                    (setf (,ack-field state) (gr8s-pkt-meta-ack meta))))
-               (setf (,window-field state) (gr8s-pkt-meta-window meta))
+               (pkt-tcp-update-options ,reverse)
                (when (/= (map-update-ptr gr8s-pkt-tcp ,key state 0) 0) (pkt-drop failed))))))))
 
 (defmacro pkt-make-reverse-key (reverse flow backend)
@@ -523,7 +704,8 @@ Runs through BPF_PROG_TEST_RUN, never attached to a traffic interface. Results:
          (when (/= (skb-load-bytes (ctx-ptr) (gr8s-pkt-meta-l4 meta) (+ flow 8) 4) 0)
            (pkt-drop malformed))
          (when (= (gr8s-pkt-flow-protocol flow) 6)
-           (let ((wire (make-gr8s-pkt-tcp-input))
+           ;; Reuse the still-empty target while parsing, then clear it before selection.
+           (let ((wire u64 target)
                  (length u32 (- (ntohs (load u16 data 16)) (- (gr8s-pkt-meta-l4 meta) 14))))
              (when (/= (skb-load-bytes (ctx-ptr) (+ (gr8s-pkt-meta-l4 meta) 4) wire 16) 0)
                (pkt-drop malformed))
@@ -539,7 +721,9 @@ Runs through BPF_PROG_TEST_RUN, never attached to a traffic interface. Results:
                                      (+ (if (/= (logand (gr8s-pkt-meta-flags meta) 2) 0) 1 0)
                                         (if (/= (logand (gr8s-pkt-meta-flags meta) 1) 0) 1 0))))))
                (when (and (/= (logand (gr8s-pkt-meta-flags meta) 2) 0)
-                          (/= (logand (gr8s-pkt-meta-flags meta) 5) 0)) (pkt-drop malformed)))))
+                          (/= (logand (gr8s-pkt-meta-flags meta) 5) 0)) (pkt-drop malformed))
+               (pkt-tcp-parse-options)))
+           (setf (gr8s-pkt-pair-first target) 0 (gr8s-pkt-pair-second target) 0))
          ,@body
          (pkt-unlock)))
 
@@ -556,9 +740,12 @@ returning from the enclosing guard, so non-Service traffic still crosses policy.
          (now u64 (ktime-get-ns)))
      (let ((flow (make-gr8s-pkt-flow)) (target (make-gr8s-pkt-pair))
            (meta (make-gr8s-pkt-meta))
-           (locked-forward (make-gr8s-pkt-flow)) (locked-reverse (make-gr8s-pkt-flow))
-           (held-locks u32 0) (new-flow u32 0)
            (data u64 (tc-data)) (data-end u64 (tc-data-end)))
+       ;; The original tuple never changes. Its same-direction lock key can
+       ;; alias it; only the opposite-direction tuple needs another buffer.
+       (let ((locked-forward u64 ,(if (eq (second (first body)) :forward) 'flow '(make-gr8s-pkt-flow)))
+             (locked-reverse u64 ,(if (eq (second (first body)) :reverse) 'flow '(make-gr8s-pkt-flow)))
+             (held-locks u32 0) (new-flow u32 0))
        ,@(if continue-guard
              `((when (> (+ data 34) data-end) (pkt-drop malformed))
                (when (and (= (eth-type data) #x0800)
@@ -575,7 +762,7 @@ returning from the enclosing guard, so non-Service traffic still crosses policy.
                (when (and (/= (load u8 data 23) 6) (/= (load u8 data 23) 17))
                  (return TC_ACT_OK))
                ,@(gr8s.network::service-packet-processing-form body)
-               TC_ACT_OK)))))
+               TC_ACT_OK))))))
 
 (defun gr8s.network::service-packet-program-form (name body)
   `(defprog ,name (:type :tc :section "classifier" :license "GPL")

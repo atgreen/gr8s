@@ -247,3 +247,91 @@
     ;; log2(1000) = 9 (floor), so the result must be 1009.
     (is (= 1009 (interpret-scalar-bpf bytes '(1000)))
         "log2 corrupted its source: (+ (log2 1000) 1000) must be 1009")))
+
+;;; Spill homes have storage lifetimes beyond register allocation decisions.
+(defun spill-compaction-test-program (instructions)
+  (whistler/ir::make-ir-program
+   :entry 'entry
+   :blocks (list (whistler/ir::make-basic-block
+                  :label 'entry
+                  :insns (mapcar (lambda (spec)
+                                   (destructuring-bind (op dst args) spec
+                                     (whistler/ir::make-ir-insn :op op :dst dst :args args :type :u64)))
+                                 instructions)))))
+
+(defun forced-spill-homes (&rest vregs)
+  (let ((result (make-hash-table)))
+    (loop for vreg in vregs for offset from 1
+          do (setf (gethash vreg result) (list :stack (* -8 offset))))
+    result))
+
+(test spill-compaction-keeps-inclusive-boundaries
+  "A result cannot overwrite an operand that is still consumed at the same instruction."
+  (let ((prog (spill-compaction-test-program
+               '((:mov 1 ((:imm 11))) (:add 2 (1 (:imm 1)))
+                 (:mov 3 ((:imm 99))) (:ret nil (3)))))
+        (homes (forced-spill-homes 1 2 3)))
+    (multiple-value-bind (result extent) (whistler/ir::compact-spill-slots prog homes)
+      (is (not (equal (gethash 1 result) (gethash 2 result))))
+      (is (equal (gethash 1 result) (gethash 3 result)))
+      (is (= -16 extent)))))
+
+(test spill-compaction-preserves-address-backed-storage
+  "Emitter caches can continue using address-backed values after their register use ends."
+  (let ((prog (spill-compaction-test-program
+               '((:mov 1 ((:imm 11))) (:stack-addr 2 (1))
+                 (:mov 3 ((:imm 22))) (:call nil ((:helper 7) 2 3))
+                 (:struct-alloc 4 ((:imm 16))) (:mov 5 ((:imm 33))) (:ret nil (5)))))
+        (homes (forced-spill-homes 1 2 3 4 5)))
+    (multiple-value-bind (result extent) (whistler/ir::compact-spill-slots prog homes)
+      (dolist (private '(1 2 4))
+        (is (not (equal (gethash private result) (gethash 3 result))))
+        (is (not (equal (gethash private result) (gethash 5 result)))))
+      (is (equal (gethash 3 result) (gethash 5 result)))
+      (is (= -32 extent)))))
+
+(test spill-compaction-preserves-phi-edge-copies
+  "PHI homes become live on predecessor edges, before their textual definitions."
+  (let* ((entry (whistler/ir::make-basic-block
+                 :label 'entry :succs '(join)
+                 :insns (list (whistler/ir::make-ir-insn :op :mov :dst 1 :args '((:imm 11)) :type :u64)
+                              (whistler/ir::make-ir-insn :op :mov :dst 2 :args '((:imm 22)) :type :u64)
+                              (whistler/ir::make-ir-insn :op :br :args '((:label join))))))
+         (join (whistler/ir::make-basic-block
+                :label 'join :preds '(entry)
+                :insns (list (whistler/ir::make-ir-insn :op :phi :dst 3 :args '((2 (:label entry))) :type :u64)
+                             (whistler/ir::make-ir-insn :op :phi :dst 4 :args '((1 (:label entry))) :type :u64)
+                             (whistler/ir::make-ir-insn :op :add :dst 5 :args '(3 4) :type :u64)
+                             (whistler/ir::make-ir-insn :op :ret :args '(5)))))
+         (prog (whistler/ir::make-ir-program :entry 'entry :blocks (list entry join)))
+         (homes (forced-spill-homes 1 2 3 4 5)))
+    (multiple-value-bind (result extent) (whistler/ir::compact-spill-slots prog homes)
+      (is (not (equal (gethash 1 result) (gethash 3 result))))
+      (is (not (equal (gethash 2 result) (gethash 4 result))))
+      (is (not (equal (gethash 3 result) (gethash 4 result))))
+      (is (= -32 extent)))))
+
+(test disjoint-spill-pressure-fits-bpf-stack
+  "Many disjoint helper-result groups must fit and execute correctly without accumulating homes."
+  (let* ((body (format nil "(let ((total u64 0)) ~{~A~%~} (return total))"
+                       (loop repeat 80 collect
+                         "(setf total (+ total (let ((a (get-prandom-u32)) (b (get-prandom-u32))
+                                                    (c (get-prandom-u32)) (d (get-prandom-u32))
+                                                    (e (get-prandom-u32)) (f (get-prandom-u32)))
+                                               (+ (+ (+ a b) (+ c d)) (+ e f)))))")))
+         (bytes (w-body body))
+         (values (loop repeat 80 append '(1 2 4 8 16 32))))
+    (is (= (* 80 63) (interpret-scalar-bpf bytes values)))))
+
+(test spill-liveness-stays-a-set-across-diamonds
+  "A long-lived spilled value must not multiply by the number of CFG paths."
+  (let* ((body (format nil
+                       "(let ((a (get-prandom-u32)) (b (get-prandom-u32))
+                              (c (get-prandom-u32)) (d (get-prandom-u32))
+                              (e (get-prandom-u32)) (f (get-prandom-u32)))
+                          (let ((total u64 0)) ~{~A~%~}
+                            (return (+ total (+ (+ (+ a b) (+ c d)) (+ e f))))))"
+                       (loop repeat 25 collect
+                         "(setf total (if (> (get-prandom-u32) 0) (+ total 1) (+ total 2)))")))
+         (bytes (w-body body)))
+    (is (= 88 (interpret-scalar-bpf bytes (append '(1 2 4 8 16 32) (make-list 25 :initial-element 1)))))))
