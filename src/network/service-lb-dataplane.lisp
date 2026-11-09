@@ -21,6 +21,7 @@
   "A loaded and attached ClusterIP socket load balancer on one node."
   cgroup-path
   pin-directory
+  (reopened-p nil) ; retained pins require inventory before controller reconciliation
   maps        ; alist of (name . map-info), e.g. "gr8s_service_v4"
   program     ; prog-info for gr8s_service_lb, the connect4 hook
   programs    ; alist of (name . prog-info) for every hook, connect4 first
@@ -178,7 +179,7 @@ decides whether a dataplane failure is fatal to the node."
               (%make-service-lb-dataplane
                :cgroup-path cgroup-path
                :pin-directory (namestring (uiop:ensure-directory-pathname pin-directory))
-               :maps maps :program (cdr (first programs)) :programs programs
+               :maps maps :reopened-p (not (null opened)) :program (cdr (first programs)) :programs programs
                :attachment (nreverse attachments))))
         (error (condition)
           ;; Roll back pins and map fds so a half-start leaves nothing behind.
