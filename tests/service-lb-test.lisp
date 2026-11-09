@@ -233,6 +233,7 @@
                               (list (cons "gr8s_service_lb" (fake-lb-program 900003))))
              :attach (lambda (program-fd cgroup attach-type)
                        (setf attach-args (list program-fd cgroup attach-type)) :attachment))))
+      (is-false (gr8s::service-lb-dataplane-reopened-p dataplane))
       ;; Both maps are pinned, under the given bpffs directory, by their names.
       (is (= 2 (length pinned)))
       (is (member "/run/gr8s/bpf/service-lb/gr8s_service_v4" pinned
@@ -285,6 +286,7 @@
              :attach (lambda (program-fd cgroup attach-type)
                        (declare (ignore program-fd cgroup attach-type))
                        :attachment))))
+      (is (gr8s::service-lb-dataplane-reopened-p dataplane))
       (is (null created))
       (is (null pinned))
       (is (equal '("gr8s_backend_v4" "gr8s_service_v4") opened))
@@ -688,6 +690,89 @@
                  (error 'whistler/loader:bpf-error :context "map-update" :errno 2))))
     (is (zerop (hash-table-count entries)))
     (is-false (gr8s::service-lb-controller-applied-signature controller))))
+
+(defun service-lb-fixture-next-key (entries)
+  (lambda (map previous)
+    (let ((keys (loop for entry being the hash-keys of entries
+                      when (equal (first entry) (whistler/loader:map-info-name map))
+                        collect (second entry))))
+      (if previous
+          (second (member previous keys :test #'equalp))
+          (first keys)))))
+
+(test service-lb-restart-inventories-both-families-and-sparse-backends
+  (multiple-value-bind (old entries update delete) (service-lb-cleanup-fixture)
+    (let* ((dataplane (gr8s::service-lb-controller-dataplane old))
+           (service (fake-lb-service "10.96.0.10" :ports '(80)))
+           (next-key (service-lb-fixture-next-key entries)))
+      (setf (gethash "clusterIPs" (gethash "spec" service)) #("10.96.0.10" "fd96::a"))
+      (gr8s::converge-service-lb-controller
+       old :list-services (constantly (list service))
+       :endpoints-of (constantly '(("10.88.1.5" 8080) ("fd88::5" 8080)))
+       :update update :delete delete)
+      ;; Retained keys need not occupy a dense slot range, and the same slot
+      ;; may exist in both families after an interrupted prior update.
+      (dolist (family '(:ipv4 :ipv6))
+        (funcall update (gr8s::service-lb-family-map dataplane family :backend)
+                 (gr8s::service-lb-backend-key #xffffffff) #(0)))
+      (is (= 8 (hash-table-count entries)))
+      (setf (gr8s::service-lb-dataplane-reopened-p dataplane) t)
+      (let ((controller (gr8s::make-service-lb-controller nil dataplane))
+            (touched nil))
+        (is-false (gr8s::service-lb-controller-map-state-adopted-p controller))
+        ;; A failure after the first map was read must publish no inventory,
+        ;; perform no writes, and leave the next tick able to retry all maps.
+        (signals whistler/loader:bpf-error
+          (gr8s::converge-service-lb-controller
+           controller :list-services (constantly nil) :endpoints-of (constantly nil)
+           :next-key (lambda (map previous)
+                       (when (equal "gr8s_backend_v4" (whistler/loader:map-info-name map))
+                         (error 'whistler/loader:bpf-error :context "map-get-next-key" :errno 5))
+                       (funcall next-key map previous))
+           :update (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t))
+           :delete (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t))))
+        (is-false touched)
+        (is-false (gr8s::service-lb-controller-map-state-adopted-p controller))
+        (is-false (gr8s::service-lb-controller-applied-service-keys controller))
+        (is-false (gr8s::service-lb-controller-applied-backend-keys controller))
+        (is-false (gr8s::service-lb-controller-applied-index-keys controller))
+        ;; Inventory succeeds; fail cleanup after deleting the VIPs/backends.
+        (signals whistler/loader:bpf-error
+          (gr8s::converge-service-lb-controller
+           controller :list-services (constantly nil) :endpoints-of (constantly nil)
+           :next-key next-key :update update
+           :delete (lambda (map key)
+                     (when (search "backend_index" (whistler/loader:map-info-name map))
+                       (error 'whistler/loader:bpf-error :context "map-delete" :errno 5))
+                     (funcall delete map key))))
+        (is (gr8s::service-lb-controller-map-state-adopted-p controller))
+        (is (= 2 (hash-table-count entries)))
+        (is-false (gr8s::service-lb-controller-applied-signature controller))
+        (gr8s::converge-service-lb-controller
+         controller :list-services (constantly nil) :endpoints-of (constantly nil)
+         :next-key next-key :update update :delete delete)
+        (is (zerop (hash-table-count entries)))
+        (is (eq dataplane (gr8s::service-lb-controller-dataplane controller)))
+        (gr8s::converge-service-lb-controller
+         controller :list-services (constantly nil) :endpoints-of (constantly nil)
+         :next-key (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t))
+         :update (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t))
+         :delete (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t)))
+        (is-false touched)))))
+
+(test service-lb-repacking-removes-backends-from-the-old-family
+  (multiple-value-bind (controller entries update delete) (service-lb-cleanup-fixture)
+    (flet ((converge (address endpoint)
+             (gr8s::converge-service-lb-controller
+              controller :list-services (constantly (list (fake-lb-service address :ports '(80))))
+              :endpoints-of (constantly (list (list endpoint 8080)))
+              :update update :delete delete)))
+      (converge "10.96.0.10" "10.88.1.5")
+      (converge "fd96::a" "fd88::5")
+      (is (= 3 (hash-table-count entries)))
+      (is-false (loop for entry being the hash-keys of entries
+                      thereis (search "_v4" (first entry))))
+      (is (= 1 (gr8s::service-lb-controller-applied-slot-count controller))))))
 
 ;;; Traffic policies and topology, as kube-proxy's CategorizeEndpoints decides them.
 

@@ -1,0 +1,465 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c.2",
+  "coreCommit": "4e90a82",
+  "nativeSHA256": "e3af77731481523b7be6d941e9c6206ec517515920aa0185d71fabd1676e4ec0",
+  "runnerSHA256": "7413fc5ae033fa1c52aa985f138e65225a55d0c3665fd24b392189edf507de5c",
+  "serviceLBChecks": 201,
+  "serviceLBFailed": 0,
+  "nativeEnvironment": "Disposable Fedora 44 VM22291; two native agents in separate mount/network namespaces, VXLAN, experimental TC guards enabled; official ctr direct preload bypasses mirror fault podster-fp8.",
+  "nativeChecks": 9,
+  "nativeResult": {
+    "root": "/var/tmp/gr8s-two-node.jh_yc9lk",
+    "checks": [
+      {
+        "name": "sixControlMaps",
+        "passed": true,
+        "observed": {
+          "gr8s_backend_index_v4": {
+            "id": 42832,
+            "keySize": 16,
+            "valueSize": 4,
+            "keys": [
+              "00500a60000a06000a5010011f900000",
+              "00500a60000b06000a5010011f900000"
+            ]
+          },
+          "gr8s_backend_index_v6": {
+            "id": 42837,
+            "keySize": 40,
+            "valueSize": 4,
+            "keys": []
+          },
+          "gr8s_backend_v4": {
+            "id": 42831,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": [
+              "00000000",
+              "01000000"
+            ]
+          },
+          "gr8s_backend_v6": {
+            "id": 42836,
+            "keySize": 4,
+            "valueSize": 20,
+            "keys": []
+          },
+          "gr8s_pkt_affinity": {
+            "id": 42842,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_forward": {
+            "id": 42840,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_reverse": {
+            "id": 42841,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_stats": {
+            "id": 42843,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_service_v4": {
+            "id": 42830,
+            "keySize": 8,
+            "valueSize": 16,
+            "keys": [
+              "00500a60000a0600",
+              "00500a60000b0600"
+            ]
+          },
+          "gr8s_service_v6": {
+            "id": 42835,
+            "keySize": 20,
+            "valueSize": 16,
+            "keys": []
+          }
+        }
+      },
+      {
+        "name": "existingWorkloadWhileAgentDown",
+        "passed": true,
+        "observed": {
+          "identities": [
+            [
+              "34e0e09a-9a9a-4911-89b7-a94a1d0145e8",
+              "worker-0",
+              "10.80.0.1",
+              [
+                "10.80.0.1"
+              ]
+            ],
+            [
+              "9db273c9-1382-44d2-a474-ac76e454b99e",
+              "worker-1",
+              "10.80.16.1",
+              [
+                "10.80.16.1"
+              ]
+            ]
+          ],
+          "probe": "two-node-1\n"
+        }
+      },
+      {
+        "name": "retainedMapsBeforeRestart",
+        "passed": true,
+        "observed": {
+          "gr8s_backend_index_v4": {
+            "id": 42832,
+            "keySize": 16,
+            "valueSize": 4,
+            "keys": [
+              "00500a60000a06000a5010011f900000",
+              "00500a60000b06000a5010011f900000",
+              "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            ]
+          },
+          "gr8s_backend_index_v6": {
+            "id": 42837,
+            "keySize": 40,
+            "valueSize": 4,
+            "keys": [
+              "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            ]
+          },
+          "gr8s_backend_v4": {
+            "id": 42831,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": [
+              "00000000",
+              "01000000",
+              "eeeeeeee"
+            ]
+          },
+          "gr8s_backend_v6": {
+            "id": 42836,
+            "keySize": 4,
+            "valueSize": 20,
+            "keys": [
+              "eeeeeeee"
+            ]
+          },
+          "gr8s_pkt_affinity": {
+            "id": 42842,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_forward": {
+            "id": 42840,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_reverse": {
+            "id": 42841,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_stats": {
+            "id": 42843,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_service_v4": {
+            "id": 42830,
+            "keySize": 8,
+            "valueSize": 16,
+            "keys": [
+              "00500a60000a0600",
+              "00500a60000b0600",
+              "eeeeeeeeeeeeeeee"
+            ]
+          },
+          "gr8s_service_v6": {
+            "id": 42835,
+            "keySize": 20,
+            "valueSize": 16,
+            "keys": [
+              "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            ]
+          }
+        }
+      },
+      {
+        "name": "allControlMapsContainOrphans",
+        "passed": true,
+        "observed": {
+          "gr8s_backend_index_v4": {
+            "id": 42832,
+            "keySize": 16,
+            "valueSize": 4,
+            "keys": [
+              "00500a60000a06000a5010011f900000",
+              "00500a60000b06000a5010011f900000",
+              "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            ]
+          },
+          "gr8s_backend_index_v6": {
+            "id": 42837,
+            "keySize": 40,
+            "valueSize": 4,
+            "keys": [
+              "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            ]
+          },
+          "gr8s_backend_v4": {
+            "id": 42831,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": [
+              "00000000",
+              "01000000",
+              "eeeeeeee"
+            ]
+          },
+          "gr8s_backend_v6": {
+            "id": 42836,
+            "keySize": 4,
+            "valueSize": 20,
+            "keys": [
+              "eeeeeeee"
+            ]
+          },
+          "gr8s_pkt_affinity": {
+            "id": 42842,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_forward": {
+            "id": 42840,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_reverse": {
+            "id": 42841,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_stats": {
+            "id": 42843,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_service_v4": {
+            "id": 42830,
+            "keySize": 8,
+            "valueSize": 16,
+            "keys": [
+              "00500a60000a0600",
+              "00500a60000b0600",
+              "eeeeeeeeeeeeeeee"
+            ]
+          },
+          "gr8s_service_v6": {
+            "id": 42835,
+            "keySize": 20,
+            "valueSize": 16,
+            "keys": [
+              "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            ]
+          }
+        }
+      },
+      {
+        "name": "serviceAfterRestart",
+        "passed": true,
+        "observed": "10.96.0.10"
+      },
+      {
+        "name": "orphanKeysWithdrawn",
+        "passed": true,
+        "observed": {
+          "gr8s_backend_index_v4": {
+            "id": 42832,
+            "keySize": 16,
+            "valueSize": 4,
+            "keys": [
+              "00500a60000a06000a5010011f900000"
+            ]
+          },
+          "gr8s_backend_index_v6": {
+            "id": 42837,
+            "keySize": 40,
+            "valueSize": 4,
+            "keys": []
+          },
+          "gr8s_backend_v4": {
+            "id": 42831,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": [
+              "00000000"
+            ]
+          },
+          "gr8s_backend_v6": {
+            "id": 42836,
+            "keySize": 4,
+            "valueSize": 20,
+            "keys": []
+          },
+          "gr8s_pkt_affinity": {
+            "id": 42842,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_forward": {
+            "id": 42840,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_reverse": {
+            "id": 42841,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_stats": {
+            "id": 42843,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_service_v4": {
+            "id": 42830,
+            "keySize": 8,
+            "valueSize": 16,
+            "keys": [
+              "00500a60000a0600"
+            ]
+          },
+          "gr8s_service_v6": {
+            "id": 42835,
+            "keySize": 20,
+            "valueSize": 16,
+            "keys": []
+          }
+        }
+      },
+      {
+        "name": "mapIdsPreserved",
+        "passed": true,
+        "observed": {
+          "gr8s_backend_index_v4": {
+            "id": 42832,
+            "keySize": 16,
+            "valueSize": 4,
+            "keys": [
+              "00500a60000a06000a5010011f900000"
+            ]
+          },
+          "gr8s_backend_index_v6": {
+            "id": 42837,
+            "keySize": 40,
+            "valueSize": 4,
+            "keys": []
+          },
+          "gr8s_backend_v4": {
+            "id": 42831,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": [
+              "00000000"
+            ]
+          },
+          "gr8s_backend_v6": {
+            "id": 42836,
+            "keySize": 4,
+            "valueSize": 20,
+            "keys": []
+          },
+          "gr8s_pkt_affinity": {
+            "id": 42842,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_forward": {
+            "id": 42840,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_reverse": {
+            "id": 42841,
+            "keySize": 16,
+            "valueSize": 16,
+            "keys": []
+          },
+          "gr8s_pkt_stats": {
+            "id": 42843,
+            "keySize": 4,
+            "valueSize": 8,
+            "keys": []
+          },
+          "gr8s_service_v4": {
+            "id": 42830,
+            "keySize": 8,
+            "valueSize": 16,
+            "keys": [
+              "00500a60000a0600"
+            ]
+          },
+          "gr8s_service_v6": {
+            "id": 42835,
+            "keySize": 20,
+            "valueSize": 16,
+            "keys": []
+          }
+        }
+      },
+      {
+        "name": "deletedServiceWithdrawn",
+        "passed": true,
+        "observed": "00500a60000b0600"
+      },
+      {
+        "name": "podIdentityPreserved",
+        "passed": true,
+        "observed": [
+          [
+            "34e0e09a-9a9a-4911-89b7-a94a1d0145e8",
+            "worker-0",
+            "10.80.0.1",
+            [
+              "10.80.0.1"
+            ]
+          ],
+          [
+            "9db273c9-1382-44d2-a474-ac76e454b99e",
+            "worker-1",
+            "10.80.16.1",
+            [
+              "10.80.16.1"
+            ]
+          ]
+        ]
+      }
+    ],
+    "passed": true,
+    "cleanupCompleted": true,
+    "convergenceErrors": []
+  },
+  "earlierHarnessFailure": "The first attempt tried kubectl exec through the deliberately stopped agent and timed out. Corrected to probe retained client network namespace directly; restored agent on offline-interval failures so cleanup can proceed. The corrected run passed with normal cleanup.",
+  "scope": "Verifies retained IPv4/IPv6 control-map inventory and cleanup, sparse seeded orphan keys, offline Service deletion, retained canonical/packet map IDs and native Pod identity/connectivity. Does not establish guest TCP/UDP connection-state survival, packet state expiry/GC, source NAT, IPv6 packet translation or packet NodePort."
+}

@@ -98,8 +98,15 @@ guest ingress, and remote backend ingress denial/recovery. It uses two agents in
 separate mount/network namespaces within one disposable VM; physical-host and NIC
 offload behavior remains unverified. See
 [the cross-node validation evidence](service-guest-two-node-validation-2026-11-09.json).
+On reopening pinned maps, the controller inventories all six IPv4/IPv6 Service
+control maps before reconciliation. It removes retained entries for Services
+deleted while the agent was offline, including sparse orphan backend slots.
+A native two-node restart regression verifies withdrawal, retained map IDs,
+unchanged Pod identities and recovered Service traffic. See
+[the restart validation evidence](service-map-restart-validation-2026-11-09.json).
+Guest connection-state survival across agent restart remains unverified.
 Kernel packet tests additionally cover program lifetime. Flow garbage collection,
-restart reconciliation, source NAT/hairpin,
+source NAT/hairpin,
 return-tuple collision resolution, IPv6 packet translation and external Service
 replacement remain in development. Hairpin and conflicting return tuples
 currently drop safely. See [the engine validation scope](service-packet-engine-validation-2026-11-09.json)
