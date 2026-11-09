@@ -22,7 +22,7 @@ NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
 NODE_PROTOCOL_LISP := src/generated/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 
-.PHONY: test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory test-patches test-live-patching all help containerd-bundle generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api check smoke smoke-two-node run kubeconfig notices native clean
+.PHONY: test-raft-snapshots test-raft-checkpoint-memory test-pod-transactions test-pod-transaction-memory test-core-recovery test-core-recovery-memory test-patches test-live-patching all help containerd-bundle generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api test-install-lifecycle check smoke smoke-two-node run kubeconfig notices native clean
 
 all: native
 
@@ -43,6 +43,7 @@ help:
 	@echo "  test-core-recovery Test journal recovery, corruption detection, and history budgets"
 	@echo "  test-core-recovery-memory Recover a 512 MiB journal within a 384 MiB Lisp heap"
 	@echo "  test-core-api Verify ConfigMap/Secret kubectl workflows and restart persistence"
+	@echo "  test-install-lifecycle Verify rootless install, upgrade, cleanup, and uninstall contracts"
 	@echo "  test-containerd Include the live CRI/containerd integration tests"
 	@echo "  test-routed-network Test native routed veths in isolated user/network namespaces"
 	@echo "  test-vxlan-network Test two-node VXLAN and routed Pod connectivity"
@@ -183,10 +184,15 @@ test-endpoint-policy-kernel: build/gr8s-endpoint-test.json
 test-core-api:
 	scripts/test-core-api.sh
 
+test-install-lifecycle:
+	python3 scripts/test_install_lifecycle.py
+	python3 scripts/test_uninstall_lifecycle.py
+
 test-whistler-cni: containerd-bundle test
 
-check: containerd-bundle test-protocol-generation test-whistler-cni test-endpoint-policy test-service-lb-program test-service-packet-program test-service-packet-guard test-service-packet-gc test-service-tcp-state
-	sh -n scripts/gr8s scripts/install-containerd.sh scripts/collect-notices.sh \
+check: containerd-bundle test-protocol-generation test-whistler-cni test-endpoint-policy test-service-lb-program test-service-packet-program test-service-packet-guard test-service-packet-gc test-service-tcp-state test-install-lifecycle
+	sh -n install.sh gr8s-killall.sh gr8s-uninstall.sh \
+	  scripts/gr8s scripts/install-containerd.sh scripts/collect-notices.sh \
 	  scripts/verify-static-runtime.sh scripts/smoke.sh scripts/test-core-api.sh
 	scripts/verify-static-runtime.sh build/containerd
 

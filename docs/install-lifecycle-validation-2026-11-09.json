@@ -1,0 +1,27 @@
+{
+  "install": {
+    "active": true,
+    "enabled": true,
+    "sha256": "b404c10c9137ab1f94a837d493c7e369108cfc4142e520649f9f7a7bab28e32c"
+  },
+  "killall": {
+    "data_preserved": true,
+    "inactive": true
+  },
+  "purge": {
+    "data_removed": true,
+    "inactive": true
+  },
+  "rollback": {
+    "installer_status": 1,
+    "restored_sha256": "08a37acd6677fcd02bbbb125a6ba162e2125d23ecf3bb1fb9466d29dbd5da47a"
+  },
+  "uninstall": {
+    "binary_removed": true,
+    "data_preserved": true
+  },
+  "upgrade": {
+    "active": true,
+    "sha256": "08a37acd6677fcd02bbbb125a6ba162e2125d23ecf3bb1fb9466d29dbd5da47a"
+  }
+}

@@ -742,6 +742,8 @@ The new identity takes effect when the node agent next starts."
      (parse-wireguard-options (rest arguments)))
     ((string= "network" (first arguments))
      (parse-network-options (rest arguments)))
+    ((string= "certificate" (first arguments))
+     (parse-certificate-options (rest arguments)))
     ((string= "doctor" (first arguments))
      (parse-doctor-options (rest arguments)))
     (t (error "unknown command: ~A" (first arguments)))))
@@ -1612,6 +1614,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (format t "  trace        Trace selector-matched Pods with an ephemeral bpftrace program~%")
   (format t "  wireguard rotate-key   Replace this node's WireGuard identity on its next start~%")
   (format t "  network explain NODE PEER   Explain an agent's selected WireGuard path~%")
+  (format t "  certificate status     Inventory local certificates and expiry warnings~%")
   (format t "  version      Print the gr8s version~%")
   (format t "  notices      Print third-party copyright and license notices~%~%")
   (format t "serve options:~%")
@@ -1711,6 +1714,8 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                (rotate-wireguard-node-key options))
               (:network-explain
                (print-network-explanation options))
+              (:certificate-status
+               (run-certificate-status options))
               (:doctor
                (if (plusp (apply #'run-doctor
                                  (append
