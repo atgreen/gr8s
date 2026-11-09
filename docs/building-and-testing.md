@@ -200,6 +200,33 @@ python3 test-service-restart.py --gr8s ./gr8s --report-directory ./restart-evide
 Optional `--ctr /path/to/ctr` preloads the test image through the managed
 containerd socket when testing independently of the image mirror.
 
+**Packet Service state collection** — unprivileged bytecode tests cover expiry,
+paired ownership, reservation contention and capacity recovery:
+
+```sh
+make test-service-packet-gc
+```
+
+For actual kernel execution, copy both emitted fixtures plus
+`scripts/test-service-packet-gc.py`, `scripts/test-service-packet-program.py` and
+`scripts/test-endpoint-policy.py` to a disposable root VM, then run:
+
+```sh
+python3 test-service-packet-gc.py gr8s-service-packet-test.json gr8s-service-packet-gc-test.json --kernel
+```
+
+This includes simultaneous traffic and collector invocations. To test the running
+agent's ordinary reconciliation worker, copy `scripts/test-service-state-gc.py`
+and `scripts/test-service-traffic.py` together with the native binary:
+
+```sh
+python3 test-service-state-gc.py --gr8s ./gr8s --report-directory ./gc-evidence
+```
+
+No images or Pods are needed for this last test. It seeds 300 expired pairs,
+a fresh pair and an orphan reverse entry, then checks reclamation, fresh-state
+preservation, stable map IDs, diagnostics and normal shutdown.
+
 **Direct containerd checks** (opt-in; require a prepared CRI socket with a working
 CRI plugin, snapshotter, OCI runtime, pause image, and CNI configuration):
 
