@@ -21,5 +21,15 @@
     "logSHA256": "c27068482e4409be4d4868a2f3f06d711b7247da103741053832b4035f9b4847"
   },
   "runtimeActivation": false,
-  "scope": "Allocation prerequisite only. No CNI caller or packet rewrite uses these leases yet. Runtime return-route installation, trusted alias identity distribution, endpoint generation fencing, source NAT, direct-flow/Service collision ownership, policy normalization, versioned packet maps/GC/upgrades and actual guest/native TCP/UDP hairpin/collision tests remain required under podster-p9c.10. Parent also retains IPv6 packet NAT, packet NodePort and broader Service semantics/diagnostics work."
+  "scope": "Allocation prerequisite only. No CNI caller or packet rewrite uses these leases yet. Runtime return-route installation, trusted alias identity distribution, endpoint generation fencing, source NAT, direct-flow/Service collision ownership, policy normalization, versioned packet maps/GC/upgrades and actual guest/native TCP/UDP hairpin/collision tests remain required under podster-p9c.10. Parent also retains IPv6 packet NAT, packet NodePort and broader Service semantics/diagnostics work.",
+  "upstreamIntegration": {
+    "commit": "4705afe2838bfd7327a45165b151f3fd12f0c659",
+    "main": "b6274f5",
+    "ipamSourceUnchanged": true,
+    "cniIpamChecks": 352,
+    "failed": 0,
+    "skipped": 0,
+    "logSHA256": "fff06b14c5c6a3118b891d3ee9be0e1c0c104866e3cf926b1a5e3461d264a86b"
+  },
+  "hostedCI": "Hosted unit job on4705afe could not start due GitHub account payments/spending limits; privileged hosted job skipped. No full-repository green claim."
 }
