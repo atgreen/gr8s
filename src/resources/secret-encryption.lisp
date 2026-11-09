@@ -153,11 +153,7 @@
              (lambda (object)
                (decrypt-secret-object
                 store
-                (or (first (find (gethash "kind" object)
-                                 (append *stored-resource-types*
-                                         *internal-stored-resource-types*)
-                                 :key #'second :test #'equal))
-                    "")
+                (if (equal "Secret" (gethash "kind" object)) "secrets" "")
                 object))
              (gethash "items" state #()))
         (gethash "templateHistory" state)
@@ -171,27 +167,142 @@
          (id (subseq (ironclad:byte-array-to-hex-string
                       (ironclad:digest-sequence :sha256 salt)) 0 16)))
     (secret-json-object
-     "version" 1 "enabled" t "activeKeyId" id
+     "version" 1 "enabled" t "phase" "ready" "activeKeyId" id
+     "reencryptedKeyId" id
      "keys" (vector (secret-json-object "id" id
                                          "salt" (ag-grpc:base64-encode salt))))))
 
+(defun rewrite-secret-encryption-checkpoint-unlocked (store config)
+  (setf (pod-store-secret-encryption-config store) config)
+  (let ((token-key (or (pod-store-template-token-key store)
+                       (secure-random-octets 32))))
+    (write-core-checkpoint
+     store
+     (core-checkpoint-object
+      store (pod-store-resources store) (pod-store-resource-revision store)
+      (pod-store-workload-deletions store)
+      (pod-store-job-controller-states store)
+      (pod-store-template-history store)
+      (pod-store-template-history-floor store)
+      token-key (pod-store-event-expirations store)))
+    (setf (pod-store-template-token-key store) token-key)))
+
+(defun persist-secret-encryption-metadata-unlocked (store config)
+  "Atomically update checkpoint metadata without consuming its following journal."
+  (setf (pod-store-secret-encryption-config store) config)
+  (let ((path (core-resource-state-path store)))
+    (if (probe-file path)
+        (let ((state (com.inuoe.jzon:parse path :max-string-length (* 2 1024 1024))))
+          (setf (gethash "secretsEncryption" state) config)
+          (gr8s.security::write-private-text-atomically
+           path (lambda (stream) (com.inuoe.jzon:stringify state :stream stream)))
+          (setf (pod-store-core-checkpoint-bytes store)
+                (sb-posix:stat-size (sb-posix:stat (namestring path)))))
+        (rewrite-secret-encryption-checkpoint-unlocked store config))))
+
+(defun install-secret-encryption-command (store json)
+  "Apply one committed encryption-management command identically on every member."
+  (let* ((command (if (stringp json) (com.inuoe.jzon:parse json) json))
+         (operation (gethash "operation" command))
+         (config (gethash "config" command)))
+    (unless (and (member operation '("metadata" "rewrite") :test #'equal)
+                 (hash-table-p config))
+      (error "Invalid Secret encryption command"))
+    (bt:with-lock-held ((pod-store-lock store))
+      (if (equal operation "rewrite")
+          (rewrite-secret-encryption-checkpoint-unlocked store config)
+          (persist-secret-encryption-metadata-unlocked store config)))
+    config))
+
+(defun commit-secret-encryption-command (store operation config)
+  (let ((json (com.inuoe.jzon:stringify
+               (secret-json-object "operation" operation "config" config))))
+    (if (pod-store-consensus-commit-fn store)
+        (funcall (pod-store-consensus-commit-fn store) :secrets-encryption json)
+        (install-secret-encryption-command store json))))
+
+(defun call-with-secret-encryption-update (store function)
+  "Serialize management transitions with ordinary HA writes and commit FUNCTION's result."
+  (flet ((perform ()
+           (let ((config
+                   (bt:with-lock-held ((pod-store-lock store))
+                     (let ((current (pod-store-secret-encryption-config store)))
+                       (unless (secret-encryption-enabled-p store)
+                         (error "Secret encryption is not enabled"))
+                       (copy-core-object current)))))
+             (multiple-value-bind (next operation result) (funcall function config)
+               (commit-secret-encryption-command store operation next)
+               result))))
+    (bt:with-lock-held ((pod-store-consensus-write-lock store)) (perform))))
+
 (defun enable-secret-encryption (store)
   "Enable encryption and atomically rewrite all currently durable Secret data."
+  (gr8s.security::ensure-cluster-pki (pod-store-path store))
+  (bt:with-lock-held ((pod-store-consensus-write-lock store))
+    (bt:with-lock-held ((pod-store-lock store))
+      (when (secret-encryption-enabled-p store)
+        (return-from enable-secret-encryption
+          (copy-core-object (pod-store-secret-encryption-config store)))))
+    (let ((config (new-secret-encryption-config)))
+      (commit-secret-encryption-command store "rewrite" config)
+      config)))
+
+(defun secret-encryption-status (store)
   (bt:with-lock-held ((pod-store-lock store))
-    (unless (secret-encryption-enabled-p store)
-      (gr8s.security::ensure-cluster-pki (pod-store-path store))
-      (setf (pod-store-secret-encryption-config store)
-            (new-secret-encryption-config))
-      (let ((token-key (or (pod-store-template-token-key store)
-                           (secure-random-octets 32))))
-        (write-core-checkpoint
-         store
-         (core-checkpoint-object
-          store (pod-store-resources store) (pod-store-resource-revision store)
-          (pod-store-workload-deletions store)
-          (pod-store-job-controller-states store)
-          (pod-store-template-history store)
-          (pod-store-template-history-floor store)
-          token-key (pod-store-event-expirations store)))
-        (setf (pod-store-template-token-key store) token-key)))
-    (pod-store-secret-encryption-config store)))
+    (copy-core-object
+     (or (pod-store-secret-encryption-config store)
+         (secret-json-object "version" 1 "enabled" nil "phase" "disabled"
+                             "keys" #())))))
+
+(defun new-secret-encryption-key-record ()
+  (let* ((salt (ironclad:random-data 32))
+         (id (subseq (ironclad:byte-array-to-hex-string
+                      (ironclad:digest-sequence :sha256 salt)) 0 16)))
+    (secret-json-object "id" id "salt" (ag-grpc:base64-encode salt))))
+
+(defun prepare-secret-encryption-key (store)
+  (call-with-secret-encryption-update
+   store
+   (lambda (config)
+     (when (gethash "preparedKeyId" config)
+       (error "A Secret encryption key is already prepared"))
+     (let* ((record (new-secret-encryption-key-record))
+            (id (gethash "id" record)))
+       (setf (gethash "keys" config)
+             (concatenate 'vector (gethash "keys" config) (vector record))
+             (gethash "preparedKeyId" config) id
+             (gethash "phase" config) "prepared")
+       (values config "metadata" id)))))
+
+(defun promote-secret-encryption-key (store)
+  (call-with-secret-encryption-update
+   store
+   (lambda (config)
+     (let ((id (gethash "preparedKeyId" config)))
+       (unless id (error "No Secret encryption key is prepared"))
+       (setf (gethash "activeKeyId" config) id
+             (gethash "phase" config) "promoted")
+       (remhash "preparedKeyId" config)
+       (values config "metadata" id)))))
+
+(defun reencrypt-secrets (store)
+  (call-with-secret-encryption-update
+   store
+   (lambda (config)
+     (let ((id (gethash "activeKeyId" config)))
+       (setf (gethash "reencryptedKeyId" config) id
+             (gethash "phase" config) "reencrypted")
+       (values config "rewrite" id)))))
+
+(defun finalize-secret-encryption-key (store)
+  (call-with-secret-encryption-update
+   store
+   (lambda (config)
+     (let ((active (gethash "activeKeyId" config)))
+       (unless (equal active (gethash "reencryptedKeyId" config))
+         (error "Secrets must be re-encrypted with the active key before finalizing"))
+       (let ((record (secret-encryption-key-record config active)))
+         (unless record (error "Missing active Secret encryption key ~A" active))
+         (setf (gethash "keys" config) (vector record)
+               (gethash "phase" config) "ready")
+         (values config "metadata" active))))))
