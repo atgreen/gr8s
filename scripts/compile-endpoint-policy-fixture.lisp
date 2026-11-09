@@ -7,8 +7,8 @@
 ;;;; the map descriptors they share.  scripts/test-endpoint-policy.py reads this in place of
 ;;;; parsing an ELF object.
 ;;;;
-;;;; Usage:  sbcl --script scripts/compile-endpoint-policy-fixture.lisp OUTPUT [service-lb]
-;;;; The optional selector emits the Service socket hooks instead of endpoint guards.
+;;;; Usage: sbcl --script scripts/compile-endpoint-policy-fixture.lisp OUTPUT [service-lb|service-packet-lb]
+;;;; The optional selector emits the Service socket or packet programs instead of endpoint guards.
 
 (require :asdf)
 (let ((project (truename (merge-pathnames "../" (uiop:pathname-directory-pathname *load-truename*)))))
@@ -22,10 +22,14 @@
 
 (let ((arguments (uiop:command-line-arguments)))
   (unless (and (<= 1 (length arguments) 2)
-               (or (= 1 (length arguments)) (equal "service-lb" (second arguments))))
-    (error "usage: sbcl --script compile-endpoint-policy-fixture.lisp OUTPUT [service-lb]"))
+               (or (= 1 (length arguments))
+                   (member (second arguments) '("service-lb" "service-packet-lb") :test #'equal)))
+    (error "usage: sbcl --script compile-endpoint-policy-fixture.lisp OUTPUT [service-lb|service-packet-lb]"))
   (multiple-value-bind (map-specs program-specs)
-      (if (second arguments) (compile-service-lb) (compile-egress-guard))
+      (cond ((equal "service-packet-lb" (second arguments))
+             (gr8s.network::compile-service-packet-lb))
+            ((second arguments) (compile-service-lb))
+            (t (compile-egress-guard)))
     (flet ((program-document (program)
              (let ((code (copy-seq (getf program :insns)))
                    (relocations (getf program :relocs)))

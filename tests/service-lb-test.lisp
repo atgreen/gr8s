@@ -11,6 +11,23 @@
 (def-suite service-lb :in gr8s)
 (in-suite service-lb)
 
+(test service-packet-and-socket-programs-share-map-schemas
+  ;; These maps are shared by FD, so both compiled programs must agree on
+  ;; their full schemas. Packet connection/affinity state is separate.
+  (multiple-value-bind (packet-maps packet-programs)
+      (gr8s.network::compile-service-packet-lb)
+    (multiple-value-bind (socket-maps ignored)
+        (gr8s::compile-service-lb)
+      (declare (ignore ignored))
+      (dolist (name '("gr8s_service_v4" "gr8s_backend_v4" "gr8s_backend_index_v4"))
+        (is (equalp (find name socket-maps :test #'equal :key (lambda (spec) (getf spec :name)))
+                    (find name packet-maps :test #'equal :key (lambda (spec) (getf spec :name)))))))
+    (is (equal '("gr8s_packet_forward" "gr8s_packet_reverse")
+               (mapcar (lambda (spec) (getf spec :name)) packet-programs)))
+    (dolist (program packet-programs)
+      (is (equal "classifier" (getf program :section)))
+      (is (plusp (length (getf program :insns)))))))
+
 ;;; Byte-order contract.  A ClusterIP:port and a backend addr:port encode to the
 ;;; exact octets the eBPF program composes and copies into the socket address.
 

@@ -213,6 +213,7 @@
                                            (:file "egress-guard-program")
                                            (:file "egress-guard")
                                            (:file "service-lb-program")
+                                           (:file "service-packet-program")
                                            (:file "service-lb-dataplane")
                                            (:file "network-policy-program")
                                            (:file "network-policy")
