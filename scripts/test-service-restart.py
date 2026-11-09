@@ -105,6 +105,7 @@ def main():
     def check(name, passed, observed):
         report["checks"].append({"name": name, "passed": bool(passed), "observed": observed})
         save()
+        print(f"{name}: {'passed' if passed else 'failed'}", flush=True)
         if not passed:
             raise AssertionError(name)
 
