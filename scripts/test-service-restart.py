@@ -151,7 +151,29 @@ def main():
         smoke.agents[0].send_signal(signal.SIGTERM)
         smoke.agents[0].wait(timeout=180)
         smoke.agents[0] = None
-        check("existingWorkloadWhileAgentDown", fetch(vips["kept"]) == "two-node-1", identities)
+        # API exec requires the agent being deliberately stopped. Probe from
+        # the retained client network namespace instead, directly to the remote
+        # Pod, so this check measures surviving workload connectivity.
+        namespaces = smoke.in_node(0, "find", smoke.root /
+            "agent-0/containerd/run/io.containerd.grpc.v1.cri/netns",
+            "-mindepth", "1", "-maxdepth", "1").stdout.splitlines()
+        client_namespace = None
+        for namespace in namespaces:
+            addresses = json.loads(smoke.in_node(0, "nsenter", f"--net={namespace}", "--",
+                                                 "ip", "-j", "addr", "show").stdout)
+            if any(address.get("local") == identities[0][2]
+                   for link in addresses for address in link.get("addr_info", [])):
+                client_namespace = namespace
+                break
+        if client_namespace is None:
+            raise RuntimeError("retained client network namespace not found")
+        probe = smoke.in_node(0, "nsenter", f"--net={client_namespace}", "--", "python3", "-c",
+            "import urllib.request; print(urllib.request.urlopen(" +
+            repr(f"http://{identities[1][2]}:8080/hostname") + ",timeout=5).read().decode())",
+            check=False, timeout=15)
+        check("existingWorkloadWhileAgentDown", probe.returncode == 0 and
+              probe.stdout.strip() == "two-node-1",
+              {"identities": identities, "probe": probe.stdout + probe.stderr})
         smoke.kubectl("delete", "service", "removed", "--wait=true")
         retained = maps(seed=True)
         check("retainedMapsBeforeRestart", {k: v["id"] for k, v in before.items()} ==
@@ -178,6 +200,14 @@ def main():
         report["passed"] = True
     except (Exception, KeyboardInterrupt) as error:
         report.update(passed=False, error=f"{type(error).__name__}: {error}")
+        save()
+        # Restore the deliberately stopped agent so ordinary Pod deletion can
+        # clean up even when an assertion in the offline interval fails.
+        if smoke.agents[0] is None and smoke.server and smoke.server.poll() is None:
+            try:
+                smoke.start_agent(0)
+            except Exception as restart_error:
+                report["cleanupRestartError"] = str(restart_error)
     finally:
         smoke.success = report.get("passed", False)
         try:
