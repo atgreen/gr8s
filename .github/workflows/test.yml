@@ -88,6 +88,7 @@ jobs:
         run: |
           make test
           make test-service-lb-program
+          make test-service-packet-program
 
   privileged:
     name: privileged dataplane (self-hosted, opt-in)
