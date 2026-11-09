@@ -744,6 +744,8 @@ The new identity takes effect when the node agent next starts."
      (parse-network-options (rest arguments)))
     ((string= "certificate" (first arguments))
      (parse-certificate-options (rest arguments)))
+    ((string= "secrets-encrypt" (first arguments))
+     (parse-secrets-encrypt-options (rest arguments)))
     ((string= "doctor" (first arguments))
      (parse-doctor-options (rest arguments)))
     (t (error "unknown command: ~A" (first arguments)))))
@@ -1616,6 +1618,7 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
   (format t "  network explain NODE PEER   Explain an agent's selected WireGuard path~%")
   (format t "  certificate status     Inventory local certificates and expiry warnings~%")
   (format t "  certificate service-account-key <prepare|promote|finalize>   Rotate the token signer safely~%")
+  (format t "  secrets-encrypt <status|enable|disable|prepare|promote|reencrypt|finalize>~%")
   (format t "  version      Print the gr8s version~%")
   (format t "  notices      Print third-party copyright and license notices~%~%")
   (format t "serve options:~%")
@@ -1721,6 +1724,11 @@ its writes need the Raft leader, which a member may not yet be (or ever be) at s
                 :certificate-service-account-key-promote
                 :certificate-service-account-key-finalize)
                (run-service-account-signing-key-rotation options))
+              ((:secrets-encrypt-status :secrets-encrypt-enable
+                :secrets-encrypt-disable :secrets-encrypt-prepare
+                :secrets-encrypt-promote :secrets-encrypt-reencrypt
+                :secrets-encrypt-finalize)
+               (run-secrets-encrypt-command options))
               (:doctor
                (if (plusp (apply #'run-doctor
                                  (append

@@ -254,6 +254,19 @@
          (secret-json-object "version" 1 "enabled" nil "phase" "disabled"
                              "keys" #())))))
 
+(defun disable-secret-encryption (store)
+  "Rewrite all durable Secrets as plaintext and discard encryption key metadata."
+  (call-with-secret-encryption-update
+   store
+   (lambda (config)
+     (setf (gethash "enabled" config) nil
+           (gethash "phase" config) "disabled"
+           (gethash "keys" config) #())
+     (remhash "activeKeyId" config)
+     (remhash "preparedKeyId" config)
+     (remhash "reencryptedKeyId" config)
+     (values config "rewrite" config))))
+
 (defun new-secret-encryption-key-record ()
   (let* ((salt (ironclad:random-data 32))
          (id (subseq (ironclad:byte-array-to-hex-string

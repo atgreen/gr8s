@@ -18,6 +18,7 @@
    #:core-resource-namespaced-p
    #:create-core-resource
    #:delete-core-resource
+   #:disable-secret-encryption
    #:enable-secret-encryption
    #:finalize-secret-encryption-key
    #:get-core-resource
@@ -56,6 +57,7 @@
                     "CORE-RESOURCE-NAMESPACED-P"
                     "CREATE-CORE-RESOURCE"
                     "DELETE-CORE-RESOURCE"
+                    "DISABLE-SECRET-ENCRYPTION"
                     "ENABLE-SECRET-ENCRYPTION"
                     "FINALIZE-SECRET-ENCRYPTION-KEY"
                     "GET-CORE-RESOURCE"
