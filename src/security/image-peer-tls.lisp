@@ -175,13 +175,17 @@
         do (handler-case
                (let ((socket (usocket:socket-accept
                               (image-peer-server-listener server)
-                              :element-type '(unsigned-byte 8))))
+                              :element-type '(unsigned-byte 8)))
+                     (accepted nil))
                  (bt:with-lock-held ((image-peer-server-lock server))
-                   (push socket (image-peer-server-clients server))
-                   (push (bt:make-thread
-                          (lambda () (image-peer-server-client server socket))
-                          :name "gr8s image peer connection")
-                         (image-peer-server-client-threads server))))
+                   (unless (image-peer-server-stopping-p server)
+                     (setf accepted t)
+                     (push socket (image-peer-server-clients server))
+                     (push (bt:make-thread
+                            (lambda () (image-peer-server-client server socket))
+                            :name "gr8s image peer connection")
+                           (image-peer-server-client-threads server))))
+                 (unless accepted (ignore-errors (usocket:socket-close socket))))
              (error ()
                (unless (image-peer-server-stopping-p server) (sleep 0.01))))))
 
@@ -206,19 +210,28 @@
 
 (defun stop-image-peer-server (server)
   "Stop accepting, close live peer streams, and join every owned thread."
-  (setf (image-peer-server-stopping-p server) t)
-  (ignore-errors (usocket:socket-close (image-peer-server-listener server)))
-  (let ((clients nil) (threads nil))
-    (bt:with-lock-held ((image-peer-server-lock server))
-      (setf clients (copy-list (image-peer-server-clients server))
-            threads (copy-list (image-peer-server-client-threads server))))
-    (dolist (socket clients) (ignore-errors (usocket:socket-close socket)))
-    (dolist (thread threads)
-      (unless (eq thread (bt:current-thread))
-        (ignore-errors (bt:join-thread thread))))
+  (bt:with-lock-held ((image-peer-server-lock server))
+    (setf (image-peer-server-stopping-p server) t))
+  ;; Closing a descriptor in another thread does not wake Linux ACCEPT or
+  ;; RECV. Shut down the socket first so blocked readers observe termination.
+  (flet ((shutdown (socket)
+           (ignore-errors
+             (sb-bsd-sockets:socket-shutdown (usocket:socket socket) :direction :io))
+           (ignore-errors (usocket:socket-close socket))))
+    (shutdown (image-peer-server-listener server))
+    ;; No accepted connection can be added after this join. Take the client
+    ;; snapshot afterwards so an ACCEPT racing shutdown cannot escape cleanup.
     (let ((thread (image-peer-server-thread server)))
       (when (and thread (not (eq thread (bt:current-thread))))
-        (ignore-errors (bt:join-thread thread)))))
+        (ignore-errors (bt:join-thread thread))))
+    (let ((clients nil) (threads nil))
+      (bt:with-lock-held ((image-peer-server-lock server))
+        (setf clients (copy-list (image-peer-server-clients server))
+              threads (copy-list (image-peer-server-client-threads server))))
+      (dolist (socket clients) (shutdown socket))
+      (dolist (thread threads)
+        (unless (eq thread (bt:current-thread))
+          (ignore-errors (bt:join-thread thread))))))
   server)
 
 (defun load-image-peer-pki (ca-certificate-path)
