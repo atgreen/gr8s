@@ -93,6 +93,7 @@
   (resource-version "1")
   ;; Quantity strings the node's agent measured about itself.
   capacity
+  allocatable
   ;; Quantity strings clients advertised through the Node status subresource.
   extended-resources
   ;; Written through the API and enforced by the scheduler and the eviction pass.

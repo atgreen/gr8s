@@ -1,0 +1,41 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: gr8s-kubevirt-smoke
+  namespace: default
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        app: gr8s-kubevirt-smoke
+    spec:
+      terminationGracePeriodSeconds: 10
+      domain:
+        resources:
+          requests:
+            memory: 128Mi
+        devices:
+          disks:
+          - name: containerdisk
+            disk:
+              bus: virtio
+          - name: cloudinit
+            disk:
+              bus: virtio
+          interfaces:
+          - name: default
+            masquerade: {}
+      networks:
+      - name: default
+        pod: {}
+      volumes:
+      - name: containerdisk
+        containerDisk:
+          image: quay.io/kubevirt/cirros-container-disk-demo:latest
+          imagePullPolicy: IfNotPresent
+      - name: cloudinit
+        cloudInitNoCloud:
+          userData: |
+            #!/bin/sh
+            echo GR8S_KUBEVIRT_BOOT_OK >/dev/ttyS0

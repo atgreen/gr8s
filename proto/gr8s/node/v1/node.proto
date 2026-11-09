@@ -163,6 +163,11 @@ message NodeStatus {
   // Endpoints learned by this node's kernel from authenticated WireGuard
   // handshakes. The server binds the report to this node's mTLS session.
   repeated WireguardPeerObservation wireguard_peer_observations = 6;
+  // Full healthy inventory for every device-plugin resource known to this node.
+  // Disconnected plugins report zero, so stale devices cannot remain schedulable.
+  map<string, string> device_plugin_resources = 7;
+  map<string, string> resource_capacity = 8;
+  map<string, string> resource_allocatable = 9;
 }
 
 message WireguardPeerObservation {

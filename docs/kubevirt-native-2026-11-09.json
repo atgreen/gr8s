@@ -1,0 +1,62 @@
+{
+  "passed": true,
+  "vm": "gr8s-kubevirt-smoke",
+  "namespace": "default",
+  "startedAt": "2026-11-09T11:27:32.145905+00:00",
+  "existingVM": true,
+  "reportDirectory": "/var/tmp/gr8s-kubevirt/proof-final",
+  "kubevirtVersions": [
+    "v1.9.1"
+  ],
+  "launcherPod": "virt-launcher-gr8s-kubevirt-smoke-qbgfl",
+  "node": "gr8s-kubevirt",
+  "vmiUID": "4a8c0274-cfd4-466a-874d-5b685fcaa70d",
+  "domainType": "kvm",
+  "guestBootMarker": "GR8S_KUBEVIRT_BOOT_OK",
+  "keptRunning": true,
+  "nativeSHA256": "0caab037cb61597fd5e17fbc3104970644caacc2e50d6135a892402f96ee2c5a",
+  "baseCommit": "7b8fc90",
+  "workingTreeChanges": true,
+  "debugServerEnabled": true,
+  "imagePreload": true,
+  "validation": {
+    "focusedChecks": 629,
+    "focusedPassed": 629,
+    "fullChecks": 21915,
+    "fullPassed": 21855,
+    "fullSkipped": 8,
+    "fullFailed": 52,
+    "cancellationIsolatedChecks": 7,
+    "cancellationIsolatedPassed": 7
+  },
+  "guestBootNote": "CirrOS reached userspace, obtained a DHCP lease, started dropbear, and wrote the boot marker.",
+  "vmiPhase": "Running",
+  "vmiReady": true,
+  "vmStatus": "Running",
+  "nodeAllocatable": {
+    "devices.kubevirt.io/kvm": "1000",
+    "devices.kubevirt.io/sev": "0",
+    "devices.kubevirt.io/tun": "1000",
+    "devices.kubevirt.io/vhost-net": "1000"
+  },
+  "guestConsoleExcerpt": [
+    "Lease of 10.0.2.2 obtained",
+    "Starting dropbear sshd: OK",
+    "GR8S_KUBEVIRT_BOOT_OK",
+    "Platform: KubeVirt None/RHEL",
+    "Arch: x86_64"
+  ],
+  "followUpIssues": {
+    "registryProxy": "podster-sxx",
+    "hostTests": "podster-tci"
+  },
+  "nativeRestart": {
+    "sameQemuProcessAfterNativeRestart": true,
+    "before": {
+      "1716172": "47796740"
+    },
+    "after": {
+      "1716172": "47796740"
+    }
+  }
+}

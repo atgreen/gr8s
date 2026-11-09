@@ -266,7 +266,7 @@
                   "spec" (gr8s::core-object
                           "containers"
                           (vector (gr8s::core-object "name" "main" "image" "busybox"
-                                                     "env" (vector (funcall resource "BAD" "limits.hugepages-2Mi"))))))))))
+                                                     "env" (vector (funcall resource "BAD" "limits.hugepages-2048Ki"))))))))))
 
 (defun token-ownership-pod (security)
   "Return a Pod with a projected token volume and the Pod SECURITY context JSON."

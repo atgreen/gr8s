@@ -1,0 +1,42 @@
+// SPDX-FileCopyrightText: 2026 Anthony Green
+// SPDX-License-Identifier: Apache-2.0
+// Kubernetes kubelet device-plugin v1beta1 wire API (k8s.io/kubelet).
+syntax = "proto3";
+package v1beta1;
+service Registration { rpc Register(RegisterRequest) returns (Empty); }
+service DevicePlugin {
+  rpc GetDevicePluginOptions(Empty) returns (DevicePluginOptions);
+  rpc ListAndWatch(Empty) returns (stream ListAndWatchResponse);
+  rpc Allocate(AllocateRequest) returns (AllocateResponse);
+  rpc PreStartContainer(PreStartContainerRequest) returns (PreStartContainerResponse);
+}
+message Empty {}
+message DevicePluginOptions {
+  bool pre_start_required = 1;
+  bool get_preferred_allocation_available = 2;
+}
+message RegisterRequest {
+  string version = 1;
+  string endpoint = 2;
+  string resource_name = 3;
+  DevicePluginOptions options = 4;
+}
+message NUMANode { int64 id = 1; }
+message TopologyInfo { repeated NUMANode nodes = 1; }
+message Device { string id = 1; string health = 2; TopologyInfo topology = 3; }
+message ListAndWatchResponse { repeated Device devices = 1; }
+message ContainerAllocateRequest { repeated string devices_ids = 1; }
+message AllocateRequest { repeated ContainerAllocateRequest container_requests = 1; }
+message Mount { string container_path = 1; string host_path = 2; bool read_only = 3; }
+message DeviceSpec { string container_path = 1; string host_path = 2; string permissions = 3; }
+message CDIDevice { string name = 1; }
+message ContainerAllocateResponse {
+  map<string, string> envs = 1;
+  repeated Mount mounts = 2;
+  repeated DeviceSpec devices = 3;
+  map<string, string> annotations = 4;
+  repeated CDIDevice cdi_devices = 5;
+}
+message AllocateResponse { repeated ContainerAllocateResponse container_responses = 1; }
+message PreStartContainerRequest { repeated string devices_ids = 1; }
+message PreStartContainerResponse {}

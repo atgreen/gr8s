@@ -174,6 +174,7 @@
    #:mark-node-ready
    #:node-record-id
    #:node-record-last-heartbeat
+   #:node-record-allocatable
    #:node-record-name
    #:node-record-pod-cidr
    #:node-record-pod-cidrs

@@ -1315,6 +1315,11 @@ candidates; agents still require their transactional handshake/probe gates."
       (slot-value envelope 'gr8s.node.v1::snapshot-ack)))
     (:status
      (let ((status (slot-value envelope 'gr8s.node.v1::status)))
+       (when (slot-value status 'gr8s.node.v1::resource-capacity)
+         (update-node-capacity
+          (node-grpc-server-store server) node-name
+          (node-capacity-from-entries (slot-value status 'gr8s.node.v1::resource-capacity))
+          :allocatable (node-capacity-from-entries (slot-value status 'gr8s.node.v1::resource-allocatable))))
        (setf (slot-value status 'gr8s.node.v1::wireguard-peer-observations)
              (canonical-node-wireguard-observations
               server node-name
@@ -1326,6 +1331,15 @@ candidates; agents still require their transactional handshake/probe gates."
                                           (slot-value status 'gr8s.node.v1::csi-drivers))
          (kubernetes-error (condition)
            (format *error-output* "gr8s CSINode ~A update failed: ~A~%" node-name condition)))
+       (let ((entries (slot-value status 'gr8s.node.v1::device-plugin-resources)))
+         (when entries
+           (let ((resources (core-object)))
+             (dolist (entry entries)
+               (unless (and (extended-resource-name-p (car entry))
+                            (plusp (length (cdr entry))) (every #'digit-char-p (cdr entry)))
+                 (error "Invalid device plugin capacity from node ~A" node-name))
+               (setf (gethash (car entry) resources) (cdr entry)))
+             (update-node-extended-resources (node-grpc-server-store server) node-name resources :merge t))))
        (record-authenticated-wireguard-observations
         server node-name
         (slot-value status 'gr8s.node.v1::wireguard-peer-observations))

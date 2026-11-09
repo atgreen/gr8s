@@ -107,6 +107,8 @@
     (is (search "BinaryName = '/opt/gr8s/bin/runc'" config))
     (is (search "Root = '/var/lib/gr8s/containerd/run/runc'" config))
     (is (search "restrict_oom_score_adj = true" config))
+    (is (search "disable_hugetlb_controller = false" config))
+    (is (search "tolerate_missing_hugetlb_controller = false" config))
     (is (search "bin_dirs = [\"/opt/gr8s/bin/cni/\"]" config))
     (is (search "conf_dir = '/var/lib/gr8s/containerd/cni/net.d'" config))
     (is (search "platform = 'linux/arm64'" config))))
