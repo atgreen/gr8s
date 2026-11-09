@@ -11,6 +11,11 @@ This tests cross-node routing, not two physical hosts or NIC offloads.
 """
 
 import argparse
+import base64
+import gzip
+import hashlib
+import ipaddress
+import struct
 import importlib.util
 import json
 import os
@@ -42,6 +47,8 @@ def main():
     parser.add_argument("--kata-sha256", required=True)
     parser.add_argument("--report-directory", type=Path, required=True)
     parser.add_argument("--ctr", type=Path)
+    parser.add_argument("--tcp-client", type=Path,
+                        help="optional static service-tcp-client probe for real guest source-port reuse")
     parser.add_argument("--state-parent", type=Path, default=Path("/var/tmp"))
     parser.add_argument("--kata-agent-timeout-ms", type=int, default=120000)
     args = parser.parse_args()
@@ -190,6 +197,60 @@ def main():
         check("nativeSocketAcceleration", native == BACKEND and
               all(a[:2] == b[:2] for a, b in zip(before, after)),
               {"response": native, "before": before, "after": after})
+        if args.tcp_client:
+            alternate = "tcp-alternate"
+            probe_path = "/tmp/gr8s-service-tcp-client"
+            payload = args.tcp_client.read_bytes()
+            encoded = base64.b64encode(gzip.compress(payload)).decode()
+            smoke.kubectl("exec", CLIENT, "--request-timeout=120s", "-i", "--", "sh", "-c",
+                           f"base64 -d | gzip -d > {probe_path} && chmod 755 {probe_path}",
+                           input=encoded, timeout=130)
+            actual = smoke.kubectl("exec", CLIENT, "--", "sha256sum", probe_path).stdout.split()[0]
+            check("guestTcpProbeVerified", actual == hashlib.sha256(payload).hexdigest(), actual)
+            alternate_pod = traffic.server_pod(alternate)
+            alternate_pod["spec"]["nodeName"] = "worker-1"
+            apply(alternate_pod, traffic.service("guest-tcp-reuse", [traffic.HTTP],
+                                               selector={"test.gr8s.io/pod": BACKEND}))
+            overlay.wait_for("alternate backend ready", lambda: any(
+                c["type"] == "Ready" and c["status"] == "True"
+                for c in get("pod", alternate).get("status", {}).get("conditions", [])), timeout=300)
+            reuse_vip = get("service", "guest-tcp-reuse")["spec"]["clusterIP"]
+            local_port = 25090  # outside the default ephemeral range used by ordinary probes
+
+            def fixed_connection():
+                answer = smoke.kubectl("exec", CLIENT, "--request-timeout=30s", "--", probe_path,
+                                       reuse_vip, str(local_port), check=False, timeout=40)
+                try:
+                    return json.loads(answer.stdout)
+                except ValueError:
+                    return {"error": answer.stdout + answer.stderr, "returncode": answer.returncode}
+
+            def tcp_state():
+                key = (ipaddress.ip_address(client_ip).packed + ipaddress.ip_address(reuse_vip).packed +
+                       struct.pack("!HHBBH", local_port, 80, 6, 0, 0)).hex()
+                path = smoke.root / "agent-0/containerd/bpf/service-lb/gr8s_pkt_tcp"
+                return json.loads(smoke.in_node(0, "python3", Path(guest.__file__).resolve(),
+                                               "--read-tcp-state", path, key).stdout)
+
+            first = observed_when("fixed-port initial guest connection", fixed_connection,
+                                  lambda answer: answer.get("body") == BACKEND)
+            state_before = tcp_state()
+            check("guestTcpInitialGeneration", state_before["backend"] == backend_ip and
+                  bool(state_before["flags"] & 4), {"connection": first, "state": state_before})
+            apply(traffic.service("guest-tcp-reuse", [traffic.HTTP],
+                                  selector={"test.gr8s.io/pod": alternate}))
+            second = observed_when("same guest source port reaches replacement", fixed_connection,
+                                   lambda answer: answer.get("body") == alternate)
+            state_after = tcp_state()
+            alternate_ip = get("pod", alternate)["status"]["podIP"]
+            identity = ("localIP", "localPort", "peerIP", "peerPort")
+            check("guestTcpSourcePortReused", all(first[k] == second[k] for k in identity) and
+                  first["localIP"] == client_ip and first["localPort"] == local_port and
+                  first["peerIP"] == reuse_vip and first["peerPort"] == 80,
+                  {"before": first, "after": second})
+            check("guestTcpNewGenerationSelectsReplacement", state_after["backend"] == alternate_ip and
+                  state_after["clientISN"] != state_before["clientISN"] and bool(state_after["flags"] & 4),
+                  {"before": state_before, "after": state_after, "replacement": alternate_ip})
         apply(client_policy([]))
         for protocol, port in (("http", 80), ("udp", 81)):
             answer = observed_when(f"default-deny {protocol}", lambda: dial(vip, port, protocol), denied)
@@ -225,6 +286,12 @@ def main():
             except Exception:
                 pass
     finally:
+        if args.tcp_client and smoke.server and smoke.server.poll() is None:
+            try:
+                smoke.kubectl("delete", "pod", "tcp-alternate", "--ignore-not-found", "--wait=false", check=False)
+            except Exception as error:
+                report["extraPodCleanupError"] = str(error)
+                report["passed"] = False
         smoke.success = report.get("passed", False)
         try:
             smoke.cleanup()

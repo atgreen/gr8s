@@ -81,7 +81,7 @@ New endpoints installed by this agent use the current compiled guard variant."
               (let ((stages-seen 0)
                     (required
                       (loop for name in '("gr8s_pkt_forward" "gr8s_pkt_reverse"
-                                          "gr8s_pkt_fwd_lock" "gr8s_pkt_rev_lock")
+                                          "gr8s_pkt_fwd_lock" "gr8s_pkt_rev_lock" "gr8s_pkt_tcp")
                             collect (funcall map-id (or (service-lb-map dataplane name)
                                                        (error "Missing Service state map ~A" name))))))
                 (dolist (path (funcall paths))

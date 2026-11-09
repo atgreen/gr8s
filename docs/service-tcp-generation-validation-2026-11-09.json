@@ -1,0 +1,476 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c.4",
+  "implementationCommit": "70b99213454c204ebd253e43c07b9abc24124f23",
+  "nativeSHA256": "88e6acec8b6ef9585a9ef039efd2666accf0427c9200f75e4cb09fb9afb046b7",
+  "staticGuestProbeSHA256": "d4b0022d619d43dce9757827a2c8fc6d44f1e38bab482cb01d6c8d3d6b2beec6",
+  "fixtures": {
+    "build/gr8s-service-packet-test.json": {
+      "sha256": "30f111b732523b4e6a47035ba239a8e0bab98f22999ad729af7dbcf62f001edf",
+      "mapCount": 10,
+      "instructions": {
+        "gr8s_packet_forward": 1656,
+        "gr8s_packet_reverse": 1055
+      }
+    },
+    "build/gr8s-service-packet-gc-test.json": {
+      "sha256": "be0a46379bbfee914d81a7e36a9a8b11c4433ff8f9ce31adef5c13ae62d8cb88",
+      "mapCount": 10,
+      "instructions": {
+        "gr8s_packet_gc": 559
+      }
+    },
+    "build/gr8s-service-packet-guard-test.json": {
+      "sha256": "e8b6decb1f80eb9ccf7abf11f954f11297c7572479b3850fcd00b288f80db970",
+      "mapCount": 27,
+      "instructions": {
+        "gr8s_egress_guard": 200,
+        "gr8s_ingress_guard": 465,
+        "gr8s_egress_policy": 936,
+        "gr8s_packet_forward": 1599,
+        "gr8s_packet_reverse": 1055
+      }
+    }
+  },
+  "focusedLisp": {
+    "passed": 939,
+    "failed": 0
+  },
+  "interpreter": {
+    "tcpGeneration": 59,
+    "metadataCapacity": 4,
+    "metadataGC": 6,
+    "orphanCapacityGC": 6,
+    "packet": 26,
+    "expiryCoordination": 21,
+    "flowCapacity": 5,
+    "gcOwnership": 29,
+    "gcForwardCapacity": 5,
+    "gcReverseCapacity": 7,
+    "policyGuard": 19
+  },
+  "kernel": {
+    "tcpGeneration": 58,
+    "metadataCapacity": 4,
+    "metadataGC": 6,
+    "orphanCapacityGC": 6,
+    "packet": 23,
+    "expiryCoordination": 21,
+    "flowCapacity": 5,
+    "gcOwnership": 29,
+    "gcForwardCapacity": 5,
+    "gcReverseCapacity": 7,
+    "gcConcurrentWorkerIterations": 512,
+    "policyGuard": 21
+  },
+  "kernelEnvironment": "Disposable Fedora44 VM22293, BPF_PROG_TEST_RUN; nonlinear header case is interpreter only. No privileged BPF executed on development host.",
+  "baselineReproduction": {
+    "commit": "721d4e0",
+    "result": "Existing main bytecode retains backend A for SYN sequence2000 after a previous sequence1000 connection and replacement by backend B on the same five-tuple."
+  },
+  "guestEnvironment": "Disposable Fedora44 VM22291, real Kata guest kernel6.18.56 versus host6.19.10. Two agents in separate mount/network namespaces within one VM; VXLAN. Official ctr preload bypasses podster-fp8.",
+  "guestResult": {
+    "root": "/var/tmp/gr8s-two-node.jhll2dtt",
+    "checks": [
+      {
+        "name": "differentNodes",
+        "passed": true,
+        "observed": {
+          "client": "10.80.0.1",
+          "backend": "10.80.16.1",
+          "nodes": [
+            "worker-0",
+            "worker-1"
+          ]
+        }
+      },
+      {
+        "name": "realGuestKernel",
+        "passed": true,
+        "observed": {
+          "guest": "6.18.56",
+          "host": "6.19.10-300.fc44.x86_64",
+          "qemu": [
+            {
+              "pid": 1808339,
+              "command": "/var/tmp/gr8s-two-node.jhll2dtt/agent-0/runtime-addons/kata/opt/kata/bin/qemu-system-x86_64 -name sandbox-1ded98232f20d720920b339ba854e70a1b99c6099ad707be4af5a6a1ad8df3cb -kernel /var/tmp/gr8s-two-node.jhll2dtt/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/vmlinux-6.18.56-208 -append reboot=k panic=1 systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket agent.log_vport=1025 root=/dev/pmem0p1 rootflags=dax,data=ordered,errors=remount-ro ro rootfstype=ext4 agent.cdh_api_timeout=50 agent.log=debug cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1 selinux=0 console=hvc0 -smp 1 -machine q35,accel=kvm,nvdimm=on,kernel_irqchip=on,memory-backend=entire-guest-memory-share -cpu host,pmu=off -m 2G,slots=10,maxmem=3903M -object memory-backend-file,id=entire-guest-memory-share,mem-path=/dev/shm,size=2G,share=on,prealloc=off,readonly=off -qmp unix:fd=16,server=on,wait=off -rtc base=utc,clock=host,driftfix=slew -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0 -device pci-bridge,bus=pcie.0,id=pci-bridge-0,chassis_nr=1,shpc=off,addr=2,io-reserve=4k,mem-reserve=1m,pref64-reserve=1m -device virtio-scsi-pci,id=scsi0,disable-modern=true -device vhost-vsock-pci,disable-modern=true,vhostfd=17,guest-cid=4075842842 -netdev tap,id=network-tap0_kata,vhost=on,vhostfds=20,fds=19 -device virtio-net-pci,netdev=network-tap0_kata,mac=02:6f:8d:14:00:8b,disable-modern=true,mq=on,vectors=4 -chardev socket,id=virtiofsd-chardev,path=/run/kata/1ded98232f20d720920b339ba854e70a1b99c6099ad707be4af5a6a1ad8df3cb/root/virtiofsd.sock -device vhost-user-fs-pci,chardev=virtiofsd-chardev,tag=kataShared,queue-size=1024 -object memory-backend-file,id=TODO,mem-path=/var/tmp/gr8s-two-node.jhll2dtt/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/kata-ubuntu-resolute.image,size=256M,share=off,prealloc=off,readonly=on -device nvdimm,memdev=TODO,unarmed=on -device virtio-serial-pci,id=serial0 -device virtconsole,id=console0,chardev=charconsole0 -chardev socket,id=charconsole0,server=on,wait=off,path=/run/kata/1ded98232f20d720920b339ba854e70a1b99c6099ad707be4af5a6a1ad8df3cb/root/console.sock -vga none -no-user-config -nodefaults -nographic -no-reboot "
+            }
+          ]
+        }
+      },
+      {
+        "name": "worker0UsesOverlay",
+        "passed": true,
+        "observed": [
+          {
+            "dst": "10.80.16.1",
+            "gateway": "10.80.16.0",
+            "dev": "gr8s-vxlan",
+            "prefsrc": "10.80.0.0",
+            "flags": [],
+            "uid": 0,
+            "cache": []
+          }
+        ]
+      },
+      {
+        "name": "worker1UsesOverlay",
+        "passed": true,
+        "observed": [
+          {
+            "dst": "10.80.0.1",
+            "gateway": "10.80.0.0",
+            "dev": "gr8s-vxlan",
+            "prefsrc": "10.80.16.0",
+            "flags": [],
+            "uid": 0,
+            "cache": []
+          }
+        ]
+      },
+      {
+        "name": "httpDirectBackend",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "httpCrossNodeClusterIP",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "httpTCBothDirections",
+        "passed": true,
+        "observed": {
+          "before": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "after": [
+            6,
+            4,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "name": "httpPreservesSource",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "10.80.0.1:37350"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpDirectBackend",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpCrossNodeClusterIP",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpTCBothDirections",
+        "passed": true,
+        "observed": {
+          "before": [
+            12,
+            8,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "after": [
+            13,
+            9,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "name": "udpPreservesSource",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "10.80.0.1:47931"
+            ]
+          }
+        }
+      },
+      {
+        "name": "nativeSocketAcceleration",
+        "passed": true,
+        "observed": {
+          "response": "two-node-1",
+          "before": [
+            [
+              14,
+              10,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          ],
+          "after": [
+            [
+              14,
+              10,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          ]
+        }
+      },
+      {
+        "name": "guestTcpProbeVerified",
+        "passed": true,
+        "observed": "d4b0022d619d43dce9757827a2c8fc6d44f1e38bab482cb01d6c8d3d6b2beec6"
+      },
+      {
+        "name": "guestTcpInitialGeneration",
+        "passed": true,
+        "observed": {
+          "connection": {
+            "localIP": "10.80.0.1",
+            "localPort": 25090,
+            "peerIP": "10.96.0.11",
+            "peerPort": 80,
+            "body": "two-node-1"
+          },
+          "state": {
+            "backend": "10.80.16.1",
+            "backendPort": 8080,
+            "clientISN": 2336031003,
+            "serverISN": 3413911037,
+            "clientEnd": 2336031079,
+            "serverEnd": 3413911165,
+            "flags": 7
+          }
+        }
+      },
+      {
+        "name": "guestTcpSourcePortReused",
+        "passed": true,
+        "observed": {
+          "before": {
+            "localIP": "10.80.0.1",
+            "localPort": 25090,
+            "peerIP": "10.96.0.11",
+            "peerPort": 80,
+            "body": "two-node-1"
+          },
+          "after": {
+            "localIP": "10.80.0.1",
+            "localPort": 25090,
+            "peerIP": "10.96.0.11",
+            "peerPort": 80,
+            "body": "tcp-alternate"
+          }
+        }
+      },
+      {
+        "name": "guestTcpNewGenerationSelectsReplacement",
+        "passed": true,
+        "observed": {
+          "before": {
+            "backend": "10.80.16.1",
+            "backendPort": 8080,
+            "clientISN": 2336031003,
+            "serverISN": 3413911037,
+            "clientEnd": 2336031079,
+            "serverEnd": 3413911165,
+            "flags": 7
+          },
+          "after": {
+            "backend": "10.80.16.2",
+            "backendPort": 8080,
+            "clientISN": 2364704718,
+            "serverISN": 139697520,
+            "clientEnd": 2364704794,
+            "serverEnd": 139697651,
+            "flags": 7
+          },
+          "replacement": "10.80.16.2"
+        }
+      },
+      {
+        "name": "httpGuestEgressDenied",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "errors": [
+              "Get \"http://10.96.0.10:80/hostname\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpGuestEgressDenied",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "errors": [
+              "reading from udp connection failed. err:'read udp 10.80.0.1:43806->10.96.0.10:81: i/o timeout'"
+            ]
+          }
+        }
+      },
+      {
+        "name": "httpPolicySeesBackendAndAllowsReplies",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpPolicySeesBackendAndAllowsReplies",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "httpRemoteIngressDenied",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "errors": [
+              "Get \"http://10.96.0.10:80/hostname\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpRemoteIngressDenied",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "errors": [
+              "reading from udp connection failed. err:'read udp 10.80.0.1:39506->10.96.0.10:81: i/o timeout'"
+            ]
+          }
+        }
+      },
+      {
+        "name": "httpRemoteIngressRecovers",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      },
+      {
+        "name": "udpRemoteIngressRecovers",
+        "passed": true,
+        "observed": {
+          "returncode": 0,
+          "body": {
+            "responses": [
+              "two-node-1"
+            ]
+          }
+        }
+      }
+    ],
+    "overlay": "vxlan",
+    "kataSHA256": "1463a2b86845f4d3d8e87f2f764ec59856fc0fee3520967a79ade32762be2e97",
+    "agentReconnectTimeoutMs": 120000,
+    "passed": true,
+    "cleanupCompleted": true
+  },
+  "startupObservation": "Two CNI ADD timeouts per simulated node before runtime retries recovered. All25 checks and normal cleanup passed; cold-start cause remains unproven and tracked as podster-p9c.6.",
+  "scope": "First generation/handshake stage only. FIN/RST retirement, late-segment/window/timestamp handling, complete TCP lifecycle and the broader parent scope remain unfinished. Existing loose midstream flows retain compatibility behavior. Older retained program refresh is tracked separately. Packet Services remain opt-in. Child4 stays in_progress.",
+  "hostedCI": "Unit job did not start because GitHub account payments/spending limit blocked execution. Local focused and VM validation above are the available evidence; the full repository suite is not claimed green."
+}

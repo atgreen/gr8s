@@ -105,8 +105,13 @@ A native two-node restart regression verifies withdrawal, retained map IDs,
 unchanged Pod identities and recovered Service traffic. See
 [the restart validation evidence](service-map-restart-validation-2026-11-09.json).
 Guest connection-state survival across agent restart remains unverified.
-Packet flows currently expire after 180 seconds of UDP inactivity or two hours
-of TCP inactivity, counting requests and replies. The next packet removes an
+Packet flows expire after 180 seconds of UDP inactivity, 120 seconds for pending
+TCP handshakes, or two hours for established and legacy TCP flows, counting
+requests and replies. A separate TCP metadata map records initial sequence
+numbers and handshake progress without changing NAT value layouts. Same-sequence
+SYN retransmissions retain their backend; a newer SYN beyond the observed stream
+retires the old generation and selects a current eligible backend. Stale SYN and
+SYN-ACK packets cannot overwrite that handshake metadata. The next packet removes an
 expired forward entry before selecting from the current Service plan. Forward
 and reverse tuple reservations serialize state changes; contention drops the
 packet without waiting, and all reservations are released before the policy
@@ -120,14 +125,18 @@ Collection preserves fresh flows and does not refresh their timestamps. Affinity
 state is separately bounded by its LRU map and validated on use.
 
 Before collecting retained state, the agent checks that existing endpoint NAT
-programs reference the current flow and reservation maps. Pre-reservation
+programs reference the current flow, reservation and TCP metadata maps. Older
 experimental endpoint programs defer GC with a diagnostic until those endpoints
 are refreshed or recreated. The agent reports verified retained pipelines and
 logs enumeration/syscall failures; its dataplane tracks scanned, reclaimed,
 deferred and failed transactions. See
 [the expiry evidence](service-packet-expiry-validation-2026-11-09.json) and
 [the background collection evidence](service-packet-gc-validation-2026-11-09.json).
-TCP SYN/FIN/RST state handling remains unfinished.
+The generation and handshake stage is validated by an actual Kata guest reusing
+its source port after backend replacement; see
+[the TCP generation evidence](service-tcp-generation-validation-2026-11-09.json).
+Full FIN/RST retirement, window and late-segment validation, TCP timestamps and
+the remainder of TCP lifecycle handling remain unfinished.
 Kernel packet tests additionally cover program lifetime. Source NAT/hairpin,
 return-tuple collision resolution, IPv6 packet translation and external Service
 replacement remain in development. Hairpin and conflicting return tuples
@@ -155,6 +164,13 @@ when testing independently of the image mirror.
 and report arguments for the cross-node checks. Copy it with the two guest-test
 helpers and `scripts/smoke-two-node.py`. The fixture isolates each node's standard
 kubelet sockets/checkpoints and preserves that directory across agent restarts.
+For the additional TCP generation checks, build `make build/service-tcp-client`
+with static libc development libraries available, copy the resulting test-only
+binary to the VM, and pass `--tcp-client /root/service-tcp-client`. The runner
+verifies its checksum after copying it into the guest, binds a fixed source port,
+replaces the Service backend, then verifies both the new response and the pinned
+TCP generation metadata. `make test-service-tcp-state` exercises the interpreter;
+add `--kernel` to the Python runner in a disposable root VM for kernel execution.
 
 `NodePort` and `LoadBalancer` Services allocate node ports from 30000–32767. The
 agent relays each in userspace, for TCP and UDP, with client-address affinity, so
