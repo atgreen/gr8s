@@ -131,10 +131,12 @@
 (defun write-pod-resize-response (store reconciler name namespace method)
   "Declare new resources for POD's containers, and leave carrying them out to its node."
   (let* ((pod (get-pod store namespace name))
+         (current (gr8s.store::call-with-store-transaction store
+                    (lambda () (gr8s.store:pod-published-view store pod))))
          (input (admit-subresource-write
                  store "pods" "resize" namespace name
-                 (require-object (pod-ephemeral-write-input (pod-to-object pod) method) "Pod")
-                 (pod-to-object pod) :dry-run (core-resource-dry-run-p)))
+                 (require-object (pod-ephemeral-write-input current method) "Pod")
+                 current :dry-run (core-resource-dry-run-p)))
          (metadata (require-object (gethash "metadata" input) "metadata"))
          (expected (gethash "resourceVersion" metadata)))
     (when (and (gethash "name" metadata) (not (equal name (gethash "name" metadata))))

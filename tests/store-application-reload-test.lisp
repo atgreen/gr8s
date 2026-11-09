@@ -378,6 +378,11 @@
                (is (= 409 (nth-value 1 (request url :method :delete :content-type "application/json"
                                               :content (com.inuoe.jzon:stringify
                                                         (gr8s::core-object "preconditions" (gr8s::core-object "resourceVersion" old-version)))))))
+               (dolist (entry '(("/resize" . "{\"spec\":{}}")
+                                ("/ephemeralcontainers" . "{\"spec\":{\"ephemeralContainers\":[]}}")
+                                ("/status" . "{\"status\":{}}")))
+                 (is (= 200 (nth-value 1 (request (concatenate 'string url (car entry))
+                                                :method :patch :content-type "application/merge-patch+json" :content (cdr entry))))))
                (is (= 200 (nth-value 1 (request url :method :patch :content-type "application/merge-patch+json"
                                               :content "{\"metadata\":{\"labels\":{\"unconditional\":\"yes\"}}}"))))
                (multiple-value-bind (body code) (request url)

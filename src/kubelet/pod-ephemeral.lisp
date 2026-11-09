@@ -78,10 +78,13 @@
 (defun write-pod-ephemeral-containers-response (store reconciler name namespace method)
   "Add to a Pod's ephemeral containers, leaving every other part of it untouched."
   (let* ((pod (get-pod store namespace name))
+         ;; This file precedes the store macros in ASDF's load order.
+         (current (gr8s.store::call-with-store-transaction store
+                    (lambda () (gr8s.store:pod-published-view store pod))))
          (input (admit-subresource-write
                  store "pods" "ephemeralcontainers" namespace name
-                 (require-object (pod-ephemeral-write-input (pod-to-object pod) method) "Pod")
-                 (pod-to-object pod) :dry-run (core-resource-dry-run-p)))
+                 (require-object (pod-ephemeral-write-input current method) "Pod")
+                 current :dry-run (core-resource-dry-run-p)))
          (metadata (require-object (gethash "metadata" input) "metadata"))
          (expected (gethash "resourceVersion" metadata)))
     (when (and (gethash "name" metadata) (not (equal name (gethash "name" metadata))))
