@@ -68,5 +68,18 @@
     "artifactBytes": 67347625,
     "heapMiB": 384
   },
-  "mergedMemoryScope": "Cached compilation; 64 MiB ConfigMap payload plus tracker/config metadata; nonempty encrypted Secret behavior covered by reload suite."
+  "mergedMemoryScope": "Cached compilation; 64 MiB ConfigMap payload plus tracker/config metadata; nonempty encrypted Secret behavior covered by reload suite.",
+  "rotationIntegrationValidation": {
+    "validatedTree": "30dda4b",
+    "integratedMain": "a49561a",
+    "passed": true,
+    "checks": 284,
+    "suites": {
+      "store-application-reload": 65,
+      "store-access-gate": 56,
+      "core-resources": 148,
+      "ha-store": 15
+    },
+    "scope": "Integration with staged Secret encryption key rotation and HA rotation regression; supplements the earlier 414 checks and memory probe."
+  }
 }
