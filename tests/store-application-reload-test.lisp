@@ -175,3 +175,29 @@
       (is (eq store (gr8s.store::reload-store-application store id)))
       (gr8s.store::resume-store-access store)
       (is (gr8s:get-pod store "default" "snapshot-pod")))))
+
+(test encrypted-secret-generation-reloads-policy-and-keeps-member-key
+  (with-temporary-store (store root)
+    (let* ((config (gr8s::enable-secret-encryption store))
+           (ca-path (merge-pathnames "pki/cluster-ca.key" root))
+           (ca-bytes (uiop:read-file-string ca-path))
+           (sentinel "cmVsb2FkLXNlY3JldC1zZW50aW5lbA==")
+           (source (merge-pathnames "encrypted-reload.jsonl" root)))
+      (gr8s::create-core-resource store "secrets"
+                                  (core-fixture "Secret" "reload-secret" "data"
+                                                (gr8s::core-object "password" sentinel)) "default")
+      (gr8s.resources::capture-store-snapshot store source 42 7)
+      (is (not (search sentinel (uiop:read-file-string source))))
+      (multiple-value-bind (path descriptor)
+          (gr8s.resources::materialize-store-snapshot root source (snapshot-test-digest source))
+        (is (not (search sentinel (uiop:read-file-string (merge-pathnames "objects/state.json" path)))))
+        ;; A different currently loaded policy must not survive the generation change.
+        (setf (gr8s.store:pod-store-secret-encryption-config store) (gr8s.resources::new-secret-encryption-config))
+        (gr8s.store::quiesce-store-access store :timeout 0)
+        (gr8s.store::reload-store-application store (gethash "generation" descriptor))
+        (gr8s.store::resume-store-access store)
+        (is (equalp config (gr8s.store:pod-store-secret-encryption-config store)))
+        (is (equal ca-bytes (uiop:read-file-string ca-path)))
+        (dolist (target (list store (gr8s:open-store root)))
+          (let ((secret (gr8s::get-core-resource target "secrets" "default" "reload-secret")))
+            (is (equal sentinel (gethash "password" (gethash "data" secret))))))))))

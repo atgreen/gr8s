@@ -410,3 +410,12 @@ and leaves the application unchanged if requests cannot drain.
 This stream termination does not establish revision safety for a restored
 snapshot. Production restore still needs member/applied-boundary validation and
 a policy for monotonic resource versions before it can be exposed to operators.
+
+Secret encryption policy is application state and reloads from the selected
+checkpoint, including its active key identifier and public salts. The member's
+CA private key remains at the stable member root. Captured Secret data and Secret
+history use encrypted envelopes when encryption is enabled; materialization keeps
+those envelopes on disk and application loading authenticates and decrypts them.
+Reload must replace a previously loaded policy rather than retain it across a
+generation change. A generation's encrypted data requires the corresponding
+cluster identity key; an artifact alone is not an identity backup.
