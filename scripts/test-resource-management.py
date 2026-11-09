@@ -113,7 +113,11 @@ class Smoke:
         return self.k("exec", name, "--", "sh", "-c", "grep -E '^(Cpus_allowed_list|Mems_allowed_list):' /proc/self/status").stdout
 
     def report(self, name="exclusive"):
-        r = subprocess.run([self.args.probe, "-name", name], text=True, capture_output=True, check=True, timeout=30)
+        r = subprocess.run([self.args.probe, "-name", name], text=True, capture_output=True, timeout=30)
+        if r.returncode:
+            with (self.dir / "report-errors.log").open("a") as log:
+                log.write(r.stderr)
+            r.check_returncode()
         return json.loads(r.stdout)
 
     def delete(self, name):
@@ -180,7 +184,16 @@ def main():
         smoke.start()
         after = smoke.running("exclusive")
         assert after["status"]["containerStatuses"][0]["containerID"] == proof["containerID"], after
-        proof["afterRestart"] = wait(lambda: (r if (r := smoke.report())["get"]["pod_resources"]["containers"][0].get("devices", [{}])[0].get("topology") else None), "restored plugin topology")
+        def restored_report():
+            try:
+                report = smoke.report()
+            except subprocess.CalledProcessError as error:
+                if any(code in error.stderr for code in ("code = Unavailable", "code = DeadlineExceeded", "code = NotFound")):
+                    return None
+                raise
+            container = report["get"]["pod_resources"]["containers"][0]
+            return report if container.get("devices", [{}])[0].get("topology") else None
+        proof["afterRestart"] = wait(restored_report, "restored plugin topology")
         def normalized(value):
             if isinstance(value, list):
                 return sorted((normalized(item) for item in value), key=lambda item: json.dumps(item, sort_keys=True))
