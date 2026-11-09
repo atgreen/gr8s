@@ -218,3 +218,128 @@
                           :timeout 10)
                          "a delete replicates to every survivor's store"))))
             (dolist (m live) (ignore-errors (gr8s::stop-raft-member m)))))))))
+
+(defun capture-ha-core-write (store function)
+  (let ((original (gr8s::pod-store-consensus-commit-fn store)) (command nil))
+    (unwind-protect
+         (progn
+           (setf (gr8s::pod-store-consensus-commit-fn store)
+                 (lambda (tag payload) (setf command (list tag payload)) nil))
+           (funcall function)
+           command)
+      (setf (gr8s::pod-store-consensus-commit-fn store) original))))
+
+(test concurrent-core-writers-conflict-without-partial-publication
+  (with-temporary-store (left lp)
+    (with-temporary-store (right rp)
+      (declare (ignore lp rp))
+      (let ((seed (capture-ha-core-write
+                   left (lambda () (gr8s::create-core-resource left "configmaps"
+                                    (configmap-input "shared" "k" "base") "default")))))
+        (dolist (store (list left right)) (apply-ha-core-command store seed)))
+      ;; A restored/local-event-heavy member may expose a different RV for the
+      ;; same replicated object. Conditions must not compare those local clocks.
+      (setf (gr8s::pod-store-resource-revision right) 10000)
+      (setf (gethash "resourceVersion" (gethash "metadata"
+                     (gethash '("configmaps" "default" "shared") (gr8s::pod-store-resources right)))) "10000")
+      (let* ((winner (capture-ha-core-write left
+                       (lambda () (gr8s::update-core-resource left "configmaps" "default" "shared"
+                         (lambda (object) (setf (gethash "k" (gethash "data" object)) "winner") object)))))
+             (loser (capture-ha-core-write right
+                      (lambda () (gr8s::update-core-resource right "configmaps" "default" "shared"
+                        (lambda (object) (setf (gethash "k" (gethash "data" object)) "loser") object))))))
+        (dolist (store (list left right))
+          (apply-ha-core-command store winner)
+          (let ((revision (gr8s::pod-store-resource-revision store))
+                (history (gr8s::pod-store-template-history store)))
+            (is (equal '(:core-conflict) (apply-ha-core-command store loser)))
+            (is (= revision (gr8s::pod-store-resource-revision store)))
+            (is (eq history (gr8s::pod-store-template-history store)))
+            (is (equal "winner" (configmap-value store "shared" "k")))))))))
+
+(test stale-delete-cannot-remove-a-recreated-core-object
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (gr8s::create-core-resource store "configmaps" (configmap-input "aba" "k" "same") "default")
+    (let ((stale (capture-ha-core-write store
+                   (lambda () (gr8s::delete-core-resource store "configmaps" "default" "aba")))))
+      (gr8s::delete-core-resource store "configmaps" "default" "aba")
+      (gr8s::create-core-resource store "configmaps" (configmap-input "aba" "k" "same") "default")
+      (is (equal '(:core-conflict) (apply-ha-core-command store stale)))
+      (is (equal "same" (configmap-value store "aba" "k"))))))
+
+(test core-map-conflicts-reject-the-whole-transaction
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (let* ((resources (gr8s::copy-core-resource-index store))
+           (jobs (gr8s::core-object "job" (gr8s::core-object "finished" 1)))
+           (payload (gr8s.resources::core-state-delta-json
+                     store resources 1 (gr8s::pod-store-workload-deletions store) jobs)))
+      (setf (gethash "job" (gr8s::pod-store-job-controller-states store))
+            (gr8s::core-object "finished" 2))
+      (is (equal '(:core-conflict) (gr8s::install-core-state-delta store payload)))
+      (is (= 2 (gethash "finished" (gethash "job" (gr8s::pod-store-job-controller-states store)))))
+      (is (= 0 (gr8s::pod-store-resource-revision store))))))
+
+(test encrypted-core-preconditions-preserve-secrecy-and-reject-stale-policy
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (gr8s::enable-secret-encryption store)
+    (gr8s::create-core-resource store "secrets" (ha-secret-input "guarded" "c2VjcmV0LW9sZA==") "default")
+    (let ((command (capture-ha-core-write store
+                     (lambda () (gr8s::update-core-resource store "secrets" "default" "guarded"
+                       (lambda (object)
+                         (setf (gethash "password" (gethash "data" object)) "c2VjcmV0LW5ldw==") object))))))
+      (is (null (search "c2VjcmV0LW9sZA==" (second command))))
+      (is (null (search "c2VjcmV0LW5ldw==" (second command))))
+      (gr8s::prepare-secret-encryption-key store)
+      (let ((config (gr8s::pod-store-secret-encryption-config store)))
+        (is (equal '(:core-conflict) (apply-ha-core-command store command)))
+        (is (eq config (gr8s::pod-store-secret-encryption-config store)))
+        (is (equal "c2VjcmV0LW9sZA==" (ha-secret-value store "guarded")))))))
+
+(test a-core-key-conflict-rejects-all-other-effects-in-the-same-delta
+  (with-temporary-store (store root)
+    (declare (ignore root))
+    (dolist (name '("first" "second"))
+      (gr8s::create-core-resource store "configmaps" (configmap-input name "k" "base") "default"))
+    (let ((resources (gr8s::copy-core-resource-index store)))
+      (dolist (name '("first" "second"))
+        (let* ((key (list "configmaps" "default" name))
+               (object (gr8s::copy-core-object (gethash key resources))))
+          (setf (gethash "k" (gethash "data" object)) "staged"
+                (gethash key resources) object)))
+      (let ((payload (gr8s.resources::core-state-delta-json
+                      store resources 4 (gr8s::pod-store-workload-deletions store)
+                      (gr8s::pod-store-job-controller-states store))))
+        (gr8s::update-core-resource store "configmaps" "default" "second"
+          (lambda (object) (setf (gethash "k" (gethash "data" object)) "winner") object))
+        (let ((revision (gr8s::pod-store-resource-revision store)))
+          (is (equal '(:core-conflict) (gr8s::install-core-state-delta store payload)))
+          (is (= revision (gr8s::pod-store-resource-revision store)))
+          (is (equal "base" (configmap-value store "first" "k")))
+          (is (equal "winner" (configmap-value store "second" "k"))))))))
+
+(test encrypted-prior-object-conditions-apply-and-survive-reopen
+  (with-temporary-store (store root)
+    (gr8s::enable-secret-encryption store)
+    (gr8s::create-core-resource store "secrets" (ha-secret-input "updated" "b2xk") "default")
+    (let ((command (capture-ha-core-write store
+                     (lambda () (gr8s::update-core-resource store "secrets" "default" "updated"
+                       (lambda (object) (setf (gethash "password" (gethash "data" object)) "bmV3") object))))))
+      (is (equal '(:core-ok) (apply-ha-core-command store command)))
+      (is (equal "bmV3" (ha-secret-value store "updated")))
+      (is (equal "bmV3" (ha-secret-value (gr8s:open-store root) "updated"))))))
+
+(test replicated-core-conditions-include-status-and-case-sensitive-content
+  (let* ((before (gr8s::core-object "metadata" (gr8s::core-object "uid" "same-uid" "resourceVersion" "1")
+                                  "spec" (gr8s::core-object "mode" "Active")
+                                  "status" (gr8s::core-object "ready" 1)))
+         (after (gr8s::copy-core-object before)))
+    (setf (gethash "resourceVersion" (gethash "metadata" after)) "10000")
+    (is-true (gr8s.resources::core-replicated-state-equal-p before after))
+    (setf (gethash "ready" (gethash "status" after)) 2)
+    (is-false (gr8s.resources::core-replicated-state-equal-p before after))
+    (setf (gethash "ready" (gethash "status" after)) 1
+          (gethash "mode" (gethash "spec" after)) "active")
+    (is-false (gr8s.resources::core-replicated-state-equal-p before after))))

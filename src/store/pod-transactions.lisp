@@ -161,7 +161,10 @@
                   (restore-staged-pods *pod-write-context*)))
             (let ((*pod-write-context* nil))
               (when *pending-consensus-commit*
-                (funcall (pod-store-consensus-commit-fn store) :core-delta *pending-consensus-commit*))
+                (let ((result (funcall (pod-store-consensus-commit-fn store) :core-delta *pending-consensus-commit*)))
+                  (when (and (consp result) (eq :core-conflict (first result)))
+                    (error 'kubernetes-error :status-code 409 :reason "Conflict"
+                           :message "Resource changed before its consensus transaction committed"))))
               (when payload
                 (let ((result (funcall (pod-store-consensus-commit-fn store) :pod-delta payload)))
                   (when (and (consp result) (eq :pod-conflict (first result)))

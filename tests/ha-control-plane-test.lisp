@@ -179,3 +179,82 @@
                                      (first peers))))))))
           (gr8s::stop-ha-control-plane h2)
           (gr8s::stop-ha-control-plane h1)))))))
+
+(defun race-ha-core-http-writes (left right left-server right-server method path left-body right-body)
+  "Pause each member after authoring its command, then commit left before right."
+  (let ((arrived (sb-thread:make-semaphore :count 0))
+        (release-left (sb-thread:make-semaphore :count 0))
+        (release-right (sb-thread:make-semaphore :count 0))
+        (original-left (gr8s::pod-store-consensus-commit-fn left))
+        (original-right (gr8s::pod-store-consensus-commit-fn right))
+        (a nil) (b nil) (left-result nil) (right-result nil))
+    (labels ((wrapper (original release)
+               (lambda (tag payload)
+                 (when (eq tag :core-delta)
+                   (sb-thread:signal-semaphore arrived)
+                   (unless (sb-thread:wait-on-semaphore release :timeout 30)
+                     (error "Timed out waiting to commit concurrent core write")))
+                 (funcall original tag payload)))
+             (send (server body)
+               (handler-case
+                   (nth-value 1 (drakma:http-request
+                                 (format nil "http://127.0.0.1:~D~A" (hunchentoot:acceptor-port server) path)
+                                 :method method :content-type (if (eq method :post) "application/json" "application/merge-patch+json")
+                                 :content body :proxy nil :redirect nil :connection-timeout 20))
+                 (error (condition) (princ-to-string condition)))))
+      (unwind-protect
+           (progn
+             (setf (gr8s::pod-store-consensus-commit-fn left) (wrapper original-left release-left)
+                   (gr8s::pod-store-consensus-commit-fn right) (wrapper original-right release-right)
+                   a (sb-thread:make-thread (lambda () (setf left-result (send left-server left-body))))
+                   b (sb-thread:make-thread (lambda () (setf right-result (send right-server right-body)))))
+             (assert (sb-thread:wait-on-semaphore arrived :timeout 15))
+             (assert (sb-thread:wait-on-semaphore arrived :timeout 15))
+             (sb-thread:signal-semaphore release-left)
+             (assert (not (eq :timeout (sb-thread:join-thread a :timeout 15 :default :timeout))))
+             (sb-thread:signal-semaphore release-right)
+             (assert (not (eq :timeout (sb-thread:join-thread b :timeout 15 :default :timeout))))
+             (list left-result right-result))
+        (sb-thread:signal-semaphore release-left)
+        (sb-thread:signal-semaphore release-right)
+        (when a (sb-thread:join-thread a :timeout 20 :default nil))
+        (when b (sb-thread:join-thread b :timeout 20 :default nil))
+        (setf (gr8s::pod-store-consensus-commit-fn left) original-left
+              (gr8s::pod-store-consensus-commit-fn right) original-right)))))
+
+(test concurrent-http-core-writes-return-conflicts-through-real-raft-forwarding
+  (with-temporary-store (left lp)
+    (with-temporary-store (right rp)
+      (declare (ignore lp rp))
+      (let ((h1 nil) (h2 nil) (s1 nil) (s2 nil))
+        (unwind-protect
+             (progn
+               (setf h1 (gr8s::start-ha-control-plane left :id "conflict-left" :init t))
+               (is (poll-until (lambda () (gr8s::ha-control-plane-leader-p h1))))
+               (setf h2 (gr8s::start-ha-control-plane right :id "conflict-right"
+                         :join-host "127.0.0.1"
+                         :join-port (gr8s::raft-member-port (gr8s::ha-control-plane-member h1))))
+               (is (poll-until (lambda () (member "conflict-right"
+                          (gr8s::raft-node-peers (gr8s::raft-member-node (gr8s::ha-control-plane-member h1)))
+                          :test #'equal))))
+               ;; Admit writes on both test acceptors to exercise the same store
+               ;; forwarding path used by internal writers on production followers.
+               (setf s1 (gr8s::start-server :address "127.0.0.1" :port 0 :store left :runtime (make-fake-runtime))
+                     s2 (gr8s::start-server :address "127.0.0.1" :port 0 :store right :runtime (make-fake-runtime)))
+               (is (equal '(201 409)
+                          (race-ha-core-http-writes left right s1 s2 :post
+                           "/api/v1/namespaces/default/configmaps"
+                           (com.inuoe.jzon:stringify (configmap-input "raced" "k" "created-left"))
+                           (com.inuoe.jzon:stringify (configmap-input "raced" "k" "created-right")))))
+               (is (equal "created-left" (configmap-value left "raced" "k")))
+               (is (equal "created-left" (configmap-value right "raced" "k")))
+               (is (equal '(200 409)
+                          (race-ha-core-http-writes left right s1 s2 :patch
+                           "/api/v1/namespaces/default/configmaps/raced"
+                           "{\"data\":{\"k\":\"updated-left\"}}" "{\"data\":{\"k\":\"updated-right\"}}")))
+               (is (equal "updated-left" (configmap-value left "raced" "k")))
+               (is (equal "updated-left" (configmap-value right "raced" "k"))))
+          (when s1 (gr8s::stop-server s1))
+          (when s2 (gr8s::stop-server s2))
+          (gr8s::stop-ha-control-plane h2)
+          (gr8s::stop-ha-control-plane h1))))))

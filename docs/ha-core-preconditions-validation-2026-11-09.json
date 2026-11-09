@@ -1,0 +1,36 @@
+{
+  "date": "2026-11-09",
+  "passed": true,
+  "fullGoalComplete": false,
+  "scope": "Core-resource same-key committed preconditions and forwarded conflict propagation",
+  "checks": {
+    "ha-store": 37,
+    "ha-control-plane": 37,
+    "store-application-reload": 168,
+    "pod-transactions": 65,
+    "core-resources": 153,
+    "encrypted-prior-object-conditions-apply-and-survive-reopen": 3,
+    "replicated-core-conditions-include-status-and-case-sensitive-content": 3,
+    "total": 466
+  },
+  "observations": [
+    "Two real in-process Raft members and two loopback HTTP acceptors; fake container runtimes, no root required",
+    "Commands paused after preparation, left committed before stale right",
+    "Concurrent POST statuses201/409; concurrent PATCH statuses200/409; both replicas retain winner",
+    "Follower409 travels over real Raft proposal forwarding RPC",
+    "Existing three-member core replication/failover test passes",
+    "Stale delete rejected after delete/recreate with different UID",
+    "Two-key conflict publishes neither losing effect and does not advance local revision",
+    "Local RV divergence10000 accepted for equal replicated content",
+    "Secret expected/replacement data encrypted; encrypted prior condition successfully applies and reopens",
+    "Encryption policy mismatch rejects without replacing current policy",
+    "Status changes and case-sensitive content changes fail semantic equality"
+  ],
+  "limitations": [
+    "Content ABA retaining UID requires replicated per-object mutation tokens",
+    "Dedicated same-key race across restart/failover and status/spec HTTP races not yet proven",
+    "No mixed-version negotiation; version1 entries retained for existing WAL replay",
+    "No native multi-process or root VM acceptance in this change",
+    "Production snapshot transport/barrier/WAL integration and automatic compaction remain separate unfinished work"
+  ]
+}
