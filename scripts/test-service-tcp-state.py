@@ -274,8 +274,9 @@ def early_data_refusal(runner):
             translate_reply(runner, reply(port, 0x12345678,
                             (start + acknowledged) & 0xffffffff, 0x14), port)
             assert tcp_flags(runner, port) & 128, "valid early-data SYN refusal did not retire TCP state"
-            held = runner.lookup("gr8s_pkt_forward", key)
             runner.advance(6)
+            # Kernel.advance emulates elapsed time by aging pinned timestamps.
+            held = runner.lookup("gr8s_pkt_forward", key)
             translate_reply(runner, reply(port, 0x12345678,
                             (start + acknowledged) & 0xffffffff, 0x14), port)
             assert runner.lookup("gr8s_pkt_forward", key) == held, "repeated refusal refreshed reset lifetime"
