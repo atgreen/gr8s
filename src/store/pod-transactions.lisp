@@ -145,6 +145,7 @@
               (payload nil) (node-payload nil) (node-records nil))
           (multiple-value-prog1
               (bt:with-lock-held ((pod-store-lock store))
+                (ensure-store-available store)
                 (unless (pod-store-consensus-pod-revision store)
                   (save-consensus-pod-revision-unlocked store))
                 (setf (pod-write-context-revision *pod-write-context*) (pod-store-pod-revision store))
@@ -175,7 +176,9 @@
                     (dolist (entry (second result))
                       (let ((record (find (first entry) node-records :key #'node-record-name :test #'equal)))
                         (when record (setf (node-record-resource-version record) (second entry))))))))))))
-      (bt:with-lock-held ((pod-store-lock store)) (funcall function))))
+      (bt:with-lock-held ((pod-store-lock store))
+        (ensure-store-available store)
+        (funcall function))))
 
 (defun pod-delta-current (store entry)
   (gethash (pod-key (gethash "namespace" entry) (gethash "name" entry)) (pod-store-pods store)))

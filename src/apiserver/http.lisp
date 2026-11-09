@@ -1390,6 +1390,13 @@ Watches are long-running requests, which that filter leaves alone."
                        (runtime-error-message error) 500))))
 
 (defun route-http-request (store runtime reconciler path method)
+  "Hold an application access lease across the complete routed request."
+  (if store
+      (gr8s.store::call-with-store-request
+       store (lambda () (route-http-request-with-access store runtime reconciler path method)))
+      (route-http-request-with-access store runtime reconciler path method)))
+
+(defun route-http-request-with-access (store runtime reconciler path method)
   "Answer the current request from whichever API handler serves PATH."
   (progn
         (cond

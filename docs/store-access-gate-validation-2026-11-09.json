@@ -1,0 +1,62 @@
+{
+  "date": "2026-11-09",
+  "scope": "Quiescence of routed API requests and ordinary store transactions; actual live reload remains pending",
+  "passed": true,
+  "checks": 371,
+  "suites": {
+    "store-access-gate": 32,
+    "pod-transactions": 65,
+    "pod-watch": 149,
+    "pod-status-http": 75,
+    "store-restore-intent": 50
+  },
+  "nativeBuild": {
+    "passed": true,
+    "sha256": "d260d446679913f8ac4163fa73ce04e9fcc163099af64b67bbf7a7bdd34f8cf5"
+  },
+  "nativePendingIntentStartupAndRestart": {
+    "passed": true,
+    "native": true,
+    "runtime": "fake",
+    "evidence": "/tmp/gr8s-generation-native-66cy5w1o",
+    "generationLoaded": true,
+    "legacyPodExcluded": true,
+    "pendingRestoreRecovered": true,
+    "applicationWriteSurvivesRestart": true,
+    "podPublicationSurvivesRestart": true,
+    "memberPrivateFilePreserved": true,
+    "gracefulShutdown": true
+  },
+  "nativeScopeNote": "Native smoke verifies the new build, pending-intent startup/restart and normal API/publication persistence. Quiescence concurrency and blocked HTTP/readiness behavior are exercised by Lisp tests, not a native live restore. Fake runtime; no root/container/BPF execution.",
+  "memory": {
+    "passed": true,
+    "legacy": false,
+    "records": 1024,
+    "validatedRecords": 1027,
+    "materializedRecords": 1027,
+    "residentSourceResources": 1024,
+    "payloadBytes": 67108864,
+    "artifactBytes": 67347524,
+    "heapMiB": 384,
+    "sourceStoreResident": true
+  },
+  "memoryNote": "Cached compilation; captures, validates and materializes64MiB while retaining source. Does not exercise live reload.",
+  "coverage": [
+    "New readers, writers and routed requests receive503 while a leased request drains",
+    "Existing leased write finishes before quiescence returns",
+    "Nested routing and handler errors release all leases",
+    "Drain timeout restores access without application changes",
+    "Resume while draining, pending restore intent and old-generation store object rejected",
+    "Blocked HTTP resources and readyz return503; livez stays200",
+    "Rejected HA Pod/core/Node writes propose no consensus commands",
+    "Existing watch/status and transaction behavior passes adjacent suites"
+  ],
+  "remaining": [
+    "Actual in-place application reload and credential/cache invalidation without two application heaps",
+    "Consensus-writer/member-lock barrier and non-HTTP/node/controller ingress quiescence",
+    "Production applied-index/WAL/snapshot descriptor recovery coordination",
+    "Power-loss/restart/failover acceptance and reclamation",
+    "Automatic compaction"
+  ],
+  "fullGoalComplete": false
+}

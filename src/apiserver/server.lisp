@@ -135,7 +135,7 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
       (append (subseq +health-common-checks+ 0 3) '("informer-sync") (subseq +health-common-checks+ 3))
       +health-common-checks+))
 
-(defun health-response (path)
+(defun health-response (path &optional store)
   "Answer a health PATH such as /readyz or /livez/etcd, or return NIL for any other path."
   (let* ((parts (cl-ppcre:split "/" path :limit 3))
          (endpoint (second parts))
@@ -145,6 +145,9 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
         (setf (hunchentoot:content-type*) "text/plain; charset=utf-8"
               (hunchentoot:header-out "X-Content-Type-Options") "nosniff")
         (cond
+          ((and (equal endpoint "readyz") store (gr8s.store::store-access-blocked-p store))
+           (setf (hunchentoot:return-code*) 503)
+           "application restore in progress")
           ((and (equal endpoint "readyz") gr8s.patch:*manager*
                 (not (equal "healthy" (gethash "state" (gr8s.patch:inventory gr8s.patch:*manager*)))))
            (setf (hunchentoot:return-code*) 503)
@@ -168,7 +171,7 @@ without input, and a client without WebSocket pings (any before v5.channel.k8s.i
 (defmethod hunchentoot:acceptor-dispatch-request
     ((acceptor gr8s-acceptor) request)
   (cond
-    ((health-response (hunchentoot:script-name request)))
+    ((health-response (hunchentoot:script-name request) (acceptor-store acceptor)))
     ((ha-redirect-response acceptor request))
     (t
      (handle-http-request (acceptor-store acceptor)

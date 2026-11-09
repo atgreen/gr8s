@@ -284,3 +284,38 @@ member's stable snapshot descriptor, applied index or WAL, and it does not block
 readers of an already running store. Durable live restore, reader blocking/reload,
 member/WAL recovery coordination, reclamation and power-loss acceptance remain
 required before production snapshot installation can use this path.
+
+## Quiescing routed requests before live reload
+
+`gr8s.store::quiesce-store-access` closes an application access gate and waits for
+routed API request leases to drain. New routed requests and ordinary
+`with-store-lock` operations receive Kubernetes `503 ServiceUnavailable`. Existing
+leased requests may finish their transactions while draining; the gate stays
+closed once they have all returned. Nested routing shares its outer lease, and
+handler errors release leases during unwinding.
+
+The default drain timeout is 30 seconds and `:timeout` can select a shorter bound.
+If draining fails or times out, the gate reopens without changing application
+state. Long-lived watch, exec or streaming requests can therefore defer a restore;
+this helper does not forcibly terminate them. It cannot be called from its own
+leased request. A restore API must hand work to a control-plane worker after its
+request returns.
+
+`resume-store-access` refuses to reopen a gate that is still draining, has a
+pending restore intent, or belongs to a store object whose data root differs from
+the selected generation. A separate successful `open-store` does not reload an
+older store object. The caller must complete that object's application reload and
+recovery before reopening access. While blocked, `/readyz` reports unavailable;
+`/livez` remains healthy.
+
+This gate covers routed HTTP request lifetimes and ordinary store transactions.
+It does not stop raw consensus application, node RPC ingress, controller work
+outside store transactions, or already retained external object references.
+The live restore caller still needs a consensus-writer/member-lock barrier and
+quiescence for those remaining paths before clearing indexes. No production live
+reload or automatic compaction is enabled by this access gate alone.
+
+Run the `store-access-gate` FiveAM suite for concurrent drain, rejected reads and
+writes, error cleanup, timeout recovery, generation checks and HTTP readiness.
+The [access gate evidence](store-access-gate-validation-2026-11-09.json) records the
+concurrency and HA proposal checks, adjacent suites, native smoke and heap probe.

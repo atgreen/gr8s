@@ -9,6 +9,9 @@
   "Hold durable paths, in-memory indexes, observed status, and the store lock."
   path
   data-root
+  access-blocked
+  (active-requests 0)
+  (access-condition (bt:make-condition-variable :name "gr8s application access"))
   (pods (make-hash-table :test #'equal))
   (nodes (make-hash-table :test #'equal))
   (resources (make-hash-table :test #'equal))
