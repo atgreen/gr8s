@@ -1018,7 +1018,11 @@ operation. No-op when no operation matches MESSAGE's id."
     (let* ((eligible
              (remove-if
               (lambda (node)
-                (or (and (node-grpc-server-gateway-stability-seconds server)
+                ;; VXLAN peers are direct Pod routes, independent of the
+                ;; agent lease. Existing Pods and sockets survive a restart.
+                ;; WireGuard transit selection retains its readiness fencing.
+                (or (and wireguard-p
+                         (node-grpc-server-gateway-stability-seconds server)
                          (not (node-record-ready-p node)))
                     (string= "" (node-record-underlay-address node))
                     (string= "" (node-record-pod-cidr node))
