@@ -10,6 +10,8 @@
        (count (parse-integer (or (uiop:getenv "GR8S_SNAPSHOT_RECORDS") "1024")))
        (bytes 65536)
        (validated-count nil)
+       (materialized-count nil)
+       (materialize (equal "1" (uiop:getenv "GR8S_SNAPSHOT_MATERIALIZE")))
        (legacy (equal "1" (uiop:getenv "GR8S_SNAPSHOT_LEGACY"))))
   (sb-posix:mkdir (namestring directory) #o700)
   (unwind-protect
@@ -35,9 +37,17 @@
                (setf validated-count
                      (nth-value 2 (gr8s.resources::validate-store-snapshot
                                    target :expected-index 1 :expected-term 1)))))
+         (when (and materialize (not legacy))
+           (setf materialized-count
+                 (nth-value 2 (gr8s.resources::materialize-store-snapshot
+                               directory target
+                               (gr8s.raft.transport::raft-snapshot-file-digest target)
+                               :expected-index 1 :expected-term 1))))
          (format t "~&~A~%"
                  (com.inuoe.jzon:stringify
                   (gr8s::core-object "passed" t "legacy" legacy "records" count
-                                    "validatedRecords" validated-count "payloadBytes" (* count bytes)
+                                    "validatedRecords" validated-count "materializedRecords" materialized-count
+                                    "residentSourceResources" (hash-table-count (gr8s::pod-store-resources store))
+                                    "payloadBytes" (* count bytes)
                                     "artifactBytes" (sb-posix:stat-size (sb-posix:stat (namestring target)))))))
     (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore)))

@@ -1,0 +1,59 @@
+{
+  "date": "2026-11-09",
+  "scope": "Offline streamed artifact materialization and completed-generation reopen; no live restore",
+  "passed": true,
+  "checks": 137,
+  "suites": {
+    "store-snapshot-materialize": 49,
+    "store-snapshot-index": 28,
+    "store-generation": 46,
+    "pod-publications": 14
+  },
+  "memory": {
+    "passed": true,
+    "legacy": false,
+    "records": 1024,
+    "validatedRecords": 1027,
+    "materializedRecords": 1027,
+    "residentSourceResources": 1024,
+    "payloadBytes": 67108864,
+    "artifactBytes": 67347524,
+    "heapMiB": 384,
+    "sourceStoreResident": true,
+    "sourceLivenessProof": "Source resource table is accessed after materialization and all1024 entries are reported"
+  },
+  "memorySetupLimitation": "An earlier cold-compilation run exhausted the384MiB heap during fixture setup full GC before capture/materialization. The accepted run uses cached compilation and explicitly retains the source store through completion. This does not prove cold compilation fits that heap.",
+  "nativeBuild": {
+    "passed": true,
+    "sha256": "e033749a8debc15a27aa9ba3746e03429c1d7142c5e57b06691f2062ea8d3329"
+  },
+  "nativePrebuiltGenerationSmoke": {
+    "passed": true,
+    "native": true,
+    "runtime": "fake",
+    "evidence": "/tmp/gr8s-generation-native-hrovf0u_",
+    "generationLoaded": true,
+    "legacyPodExcluded": true,
+    "applicationWriteSurvivesRestart": true,
+    "podPublicationSurvivesRestart": true,
+    "memberPrivateFilePreserved": true,
+    "gracefulShutdown": true
+  },
+  "nativeScopeNote": "Native smoke seeds a prebuilt generation, then verifies API data/publication/restart. Artifact materialization and reopen are exercised by the Lisp suite and heap probe; no native materialize CLI exists. Fake runtime; no root/container/BPF execution.",
+  "coverage": [
+    "Reopen materialized Pod/Node/core/custom resources, observed and published status/revision",
+    "Controller maps, retained history/clocks/token key and Unicode data round trip",
+    "Stable member-private sentinel preserved and no PKI in generation",
+    "Empty store with absent template token key",
+    "Checksum/duplicate identity errors and injected staged write/directory sync failures leave no completion marker or selector",
+    "Fresh-generation retry after partial failure",
+    "Replacement of caller source after private copy cannot substitute validation data"
+  ],
+  "remaining": [
+    "Durable restore intent and live reader blocking/reload",
+    "Interrupted-install recovery and incomplete-generation reclamation",
+    "Production WAL/applied-index recovery and artifact transport/lifetime integration",
+    "Automatic compaction and power-loss/failover acceptance"
+  ],
+  "fullGoalComplete": false
+}

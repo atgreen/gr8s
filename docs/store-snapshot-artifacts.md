@@ -44,9 +44,9 @@ uses Linux `renameat2(RENAME_NOREPLACE)` to preserve any existing destination, a
 synchronizes the containing directory. Serialization failures remove the private
 temporary file and leave the destination absent. A directory synchronization error
 can leave a complete published file but returns an error; no Raft descriptor has
-been published by this helper. Durable generation ownership, checksums, restore
-intent, interrupted-install recovery and reclamation belong to the pending
-integration.
+been published by this helper. Private generation ownership and checksum verification are handled by the
+materializer described below. Live restore intent, interrupted-install recovery
+and reclamation remain pending.
 
 `gr8s.resources::map-store-snapshot-records` reads one bounded record at a time.
 Pass `nil` as its callback for a validation pass, with `:expected-index` and
@@ -62,7 +62,7 @@ They may populate a staging destination; successful callbacks alone do not prove
 that the complete artifact is valid. Do not mutate the live store during this
 pass. The higher-level `gr8s.resources::validate-store-snapshot` also checks
 cross-record identities and relationships; use it before completing a staged
-generation. Artifact checksum verification and durable restore remain pending.
+generation. The materializer verifies the artifact checksum; live restore remains pending.
 The reader returns header, clocks and count without collecting the data records.
 The [reader validation record](store-snapshot-reader-validation-2026-11-09.json)
 covers malformed artifacts and constrained-heap capture plus validation.
@@ -112,7 +112,7 @@ metadata and select complete generations. The caller must first validate and
 synchronize every staged file and subdirectory, quiesce the member, manage restore
 intent, and reload the live indexes. Selection does not change an existing store
 object's indexes or application root. These helpers are not a live restore command;
-staged artifact materialization, crash recovery and Raft integration remain under
+live restore, crash recovery and Raft integration remain under
 `podster-ucm.11.3.3`.
 
 Metadata publication synchronizes its private temporary file, renames it, then
@@ -153,9 +153,9 @@ descriptors and distinct custom-object shapes. Record parsing remains bounded by
 the configured record limit. The constrained-heap probe now exercises this full
 validation pass with the source store still resident. The `store-snapshot-index`
 FiveAM suite covers these cross-record checks. The [validation evidence](store-snapshot-index-validation-2026-11-09.json)
-records the focused suites and constrained-heap probe. Artifact materialization, durable
-restore intent, live reload and Raft/WAL coordination remain the next integration
-work; this validator does not select or restore a generation.
+records the focused suites and constrained-heap probe. The materializer below
+consumes validated records. Durable restore intent, live reload and Raft/WAL
+coordination remain pending; this validator does not select or restore a generation.
 
 ## Durable Pod publications
 
@@ -188,5 +188,58 @@ Run the `pod-publications` FiveAM suite for restart, consensus application,
 specification changes, deletion, stale records, unsafe links and write-failure
 coverage. The [publication validation evidence](pod-publication-validation-2026-11-09.json)
 includes a native API status/revision round trip across process restart, broader
-watch/status/failover checks and the constrained-heap probe. Full artifact
-materialization and restore intent remain pending.
+watch/status/failover checks and the constrained-heap probe. The materializer
+restores publication files; live restore intent remains pending.
+
+## Materializing a completed generation
+
+`gr8s.resources::materialize-store-snapshot` takes the existing member root, source
+artifact pathname and expected lowercase SHA-256. Optional `:expected-index` and
+`:expected-term` bind the header to the caller's Raft descriptor; `:generation-id`
+can supply a fresh UUID. It returns the completed generation pathname, its
+completion descriptor and the artifact record count. It never changes the active
+selector or an existing store object's indexes. This is an internal staging
+operation, not an operator backup/restore command.
+
+The materializer first copies a regular, non-symlink source through a 64 KiB
+buffer into the private pending generation and hashes the exact bytes copied.
+Changes to the source size or a digest mismatch fail. Validation and application
+file generation then read only that private copy, so later changes to the caller's
+pathname cannot substitute a different artifact.
+
+Pod desired objects, observation checkpoints, API publications and Node records
+are written individually. Observations omit absent optional fields to remain
+compatible with the existing checkpoint loader. Core resources, custom resources,
+controller maps and retained history are streamed into temporary fragments. After
+snapshot-wide validation succeeds, these fragments are copied through a fixed
+character buffer into the ordinary core checkpoint format. No combined resource
+array, whole-store JSON string or second live application index is constructed.
+The identity validation index still grows with object count.
+
+The materializer preserves resource/Pod revisions, retained history floors and the
+shared template token key. Pod and Node watches restart at the captured committed
+clock because their transient journals are not included. Local Events remain
+excluded. Stable member credentials, signing keys, PKI and Raft files are neither
+copied nor changed.
+
+Every resulting payload file is private and synchronized. Temporary fragments and
+the private artifact copy are removed, affected directories are synchronized, and
+only then is the immutable completion marker published. A failure before this
+last step leaves an incomplete, unselectable generation for diagnostics. Retry
+with a fresh UUID; automatic reclamation of incomplete generations remains pending.
+A completion-marker directory synchronization failure may leave the fully
+validated marker visible even though the call reports an error. The active
+selector is unchanged in every case.
+
+Run the `store-snapshot-materialize` FiveAM suite for round-trip and failure tests.
+The [materialization evidence](store-snapshot-materialization-validation-2026-11-09.json)
+records round-trip/failure coverage and the heap result, including its cold-compilation
+setup limitation. To include materialization in the constrained-heap probe:
+
+```sh
+GR8S_SNAPSHOT_MATERIALIZE=1 sbcl --dynamic-space-size 384 \
+  --noinform --non-interactive --load scripts/test-store-snapshot-memory.lisp
+```
+
+Durable restore intent, atomic live selection/reload, interrupted-install recovery,
+production WAL integration and automatic compaction remain separate required work.
