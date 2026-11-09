@@ -187,7 +187,7 @@ def exercise(runner):
 def main():
     programs, ids, descriptors = packet.read_fixture(
         sys.argv[1], names=("gr8s_egress_guard", "gr8s_ingress_guard", *STAGES))
-    assert len(descriptors) == 24
+    assert len(descriptors) == 26
     runner = (packet.Kernel if "--kernel" in sys.argv[2:] else GuardInterpreter)(programs, ids, descriptors)
     try:
         for index, name in enumerate(STAGES):
@@ -220,6 +220,7 @@ def main():
             finally:
                 pin.unlink(missing_ok=True)
                 directory.rmdir()
+        packet.assert_unlocked(runner)
         print(f"Service endpoint guard ({'kernel' if isinstance(runner, packet.Kernel) else 'interpreter'}): "
               f"{count} source-validation/policy/NAT/routing cases passed")
     finally:
