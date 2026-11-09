@@ -132,6 +132,34 @@ def capacity(runner):
     return 5
 
 
+def reverse_capacity(runner):
+    p.publish(runner, 17)
+    first, old_reverse = pair_keys(port=48110)
+    request = p.packet(sport=48110, protocol=17)
+    p.assert_forward(runner, request)
+    vip = "10.96.0.11"
+    p.publish(runner, 17, vip=vip)
+    second = p.packet(sport=48111, destination=vip, protocol=17)
+    result, unchanged = runner.run("gr8s_packet_forward", second)
+    assert result == p.SHOT and unchanged == second
+    assert collect(runner, 1, old_reverse) == 0, "capacity pressure evicted live state"
+    p.assert_forward(runner, request)
+    runner.advance(181)
+    assert collect(runner, 1, old_reverse) == 1
+    p.assert_forward(runner, second)
+    # A new backend needs another reverse key. The old reverse entry must be
+    # reclaimed even when failed foreground reinsertion removed its forward key.
+    _, old_reverse = pair_keys(port=48111, vip=vip)
+    runner.advance(181)
+    p.publish(runner, 17, vip=vip, backend="10.88.2.4")
+    result, unchanged = runner.run("gr8s_packet_forward", second)
+    assert result == p.SHOT and unchanged == second
+    assert collect(runner, 1, old_reverse) == 1
+    p.assert_forward(runner, second, "10.88.2.4")
+    p.assert_unlocked(runner)
+    return 7
+
+
 def concurrent(runner):
     p.publish(runner, 17)
     forward, reverse = pair_keys(port=48200)
@@ -185,6 +213,14 @@ def main():
     runner = cls(programs, ids, limited)
     try:
         print(f"Service GC capacity recovery: {capacity(runner)} cases passed")
+    finally:
+        runner.close()
+    limited = dict(descriptors)
+    kind, key_size, value_size, _, flags = limited["gr8s_pkt_reverse"]
+    limited["gr8s_pkt_reverse"] = kind, key_size, value_size, 1, flags
+    runner = cls(programs, ids, limited)
+    try:
+        print(f"Service GC reverse capacity recovery: {reverse_capacity(runner)} cases passed")
     finally:
         runner.close()
     if cls is p.Kernel:

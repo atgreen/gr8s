@@ -78,17 +78,23 @@ New endpoints installed by this agent use the current compiled guard variant."
     (when (assoc "gr8s_packet_gc" (service-lb-dataplane-programs dataplane) :test #'equal)
       (or (service-lb-dataplane-gc-compatible-p dataplane)
           (handler-case
-              (let ((required
+              (let ((stages-seen 0)
+                    (required
                       (loop for name in '("gr8s_pkt_forward" "gr8s_pkt_reverse"
                                           "gr8s_pkt_fwd_lock" "gr8s_pkt_rev_lock")
                             collect (funcall map-id (or (service-lb-map dataplane name)
                                                        (error "Missing Service state map ~A" name))))))
                 (dolist (path (funcall paths))
+                  (incf stages-seen)
                   (let ((stages (funcall stage-map-ids path)))
                     (unless (and (= 2 (length stages))
                                  (every (lambda (ids) (subsetp required ids)) stages))
                       (error "Endpoint ~A lacks the current tuple reservations/state maps" path))))
+                (when (plusp stages-seen)
+                  (format *error-output*
+                          "gr8s: Service flow GC verified ~D retained endpoint pipelines~%" stages-seen))
                 (setf (service-lb-dataplane-gc-warning dataplane) nil
+                      (service-lb-dataplane-gc-compatible-stage-count dataplane) stages-seen
                       (service-lb-dataplane-gc-compatible-p dataplane) t))
             (error (condition)
               (let ((message (princ-to-string condition)))

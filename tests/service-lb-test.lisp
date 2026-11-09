@@ -1078,6 +1078,7 @@
         (is (equal "" (get-output-stream-string *error-output*)))
         (setf legacy nil)
         (is-true (verify))
+        (is (= 1 (gr8s::service-lb-dataplane-gc-compatible-stage-count dataplane)))
         (is (null (gr8s::service-lb-dataplane-gc-warning dataplane)))
         (is-true (verify))
         (is (= 3 queries))))))

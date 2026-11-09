@@ -219,10 +219,17 @@ def main():
         for path in smoke.root.glob("*.log"):
             shutil.copyfile(path, args.report_directory / path.name)
         errors = []
+        verified = []
         for path in args.report_directory.glob("agent-*.log"):
-            errors.extend(line for line in path.read_text(errors="replace").splitlines()
+            lines = path.read_text(errors="replace").splitlines()
+            verified.extend(line for line in lines if "Service flow GC verified " in line)
+            errors.extend(line for line in lines
                           if any(message in line for message in ("Service LB convergence failed:",
                           "Service flow GC failed:", "Service flow GC deferred:")))
+        report["checks"].append({"name": "retainedPacketStagesVerified", "passed": bool(verified),
+                                 "observed": verified})
+        if not verified:
+            report["passed"] = False
         report["convergenceErrors"] = errors
         if errors:
             report["passed"] = False

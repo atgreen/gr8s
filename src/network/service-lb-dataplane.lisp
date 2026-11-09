@@ -27,6 +27,7 @@
   programs    ; alist of (name . prog-info) for every hook, connect4 first
   (gc-cursors (make-hash-table :test #'equal)) ; next unprocessed key per flow map
   (gc-compatible-p nil)
+  (gc-compatible-stage-count 0)
   (gc-warning nil)
   (gc-scanned 0)
   (gc-reclaimed 0)
