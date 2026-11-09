@@ -194,3 +194,17 @@
                               :topology (plugin-wire "TOPOLOGY-INFO" :nodes (list (plugin-wire "NUMA-NODE" :id 1)))))))
       (signals gr8s::runtime-error
         (gr8s.kubelet::node-pod-device-config manager pod (first (gr8s.kubelet::resource-pod-containers pod)))))))
+
+(test debug-containers-share-their-targets-dedicated-affinity
+  (with-temporary-store (store path)
+    (declare (ignore store))
+    (let* ((manager (test-resource-manager path :topology-policy "single-numa-node"))
+           (pod (rm-test-pod "debug" (list (rm-test-container "main" "2"))))
+           (debug (gr8s::core-object "name" "debug" "image" "busybox" "targetContainerName" "main")))
+      (setf (gethash "ephemeralContainers" (gethash "spec" (pod-to-object pod))) (vector debug))
+      (gr8s.kubelet::prepare-node-pod-resources manager pod)
+      (let ((config (gr8s.kubelet::node-container-resources manager pod debug))
+            (report (gr8s.kubelet::podresources-pod manager nil pod)))
+        (is (equal "2-3" (gr8s.cri.v1::cpuset-cpus config)))
+        (is (equal "1" (gr8s.cri.v1::cpuset-mems config)))
+        (is (= 1 (length (gr8s.podresources.v1::containers report))))))))

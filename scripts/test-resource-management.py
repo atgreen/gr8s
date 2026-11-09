@@ -163,6 +163,7 @@ def main():
                   command="/resource-probe -mode probe -directory /huge -pages 2 && echo devices=$ALLOCATED_NUMA_DEVICES && sleep 3600")
         running = smoke.running("exclusive")
         proof["containerID"] = running["status"]["containerStatuses"][0]["containerID"]
+        proof["processStartTicksBefore"] = smoke.k("exec", "exclusive", "--", "cat", "/proc/1/stat").stdout.split(") ", 1)[1].split()[19]
         logs = wait(lambda: (r.stdout if "RESOURCE_PROBE_OK" in (r := smoke.k("logs", "exclusive")).stdout else None), "kernel probe")
         (directory / "probe.log").write_text(logs)
         assert "Cpus_allowed_list:\t2-3" in logs and "Mems_allowed_list:\t1" in logs, logs
@@ -176,10 +177,12 @@ def main():
         assert c["cpu_ids"] == [2, 3], c
         assert c["devices"][0]["topology"]["nodes"] == [{"ID": 1}], c
         assert report["allocatable"]["cpu_ids"] == [1, 2, 3], report
-        over = smoke.k("exec", "exclusive", "--", "/resource-probe", "-mode", "probe", "-directory", "/huge", "-pages", "3", check=False)
-        (directory / "hugepage-overlimit.log").write_text(over.stdout + over.stderr)
-        assert over.returncode != 0 and "hugepage-touched=2" in over.stdout and "hugepage-touched=3" not in over.stdout, over
-        proof["hugepageOverLimitExit"] = over.returncode
+        pod = smoke.get("pod", "exclusive")
+        pod["spec"]["ephemeralContainers"] = [{"name": "debug", "image": IMAGE, "targetContainerName": "main",
+            "command": ["sh", "-c", "grep -E '^(Cpus_allowed_list|Mems_allowed_list):' /proc/self/status; echo DEBUG_AFFINITY_OK; sleep 3600"]}]
+        smoke.k("replace", "--raw", "/api/v1/namespaces/default/pods/exclusive/ephemeralcontainers", "-f", "-", obj=pod)
+        proof["debugAffinity"] = wait(lambda: (r.stdout if "DEBUG_AFFINITY_OK" in (r := smoke.k("logs", "exclusive", "-c", "debug", check=False)).stdout else None), "dedicated debug affinity")
+        assert "Cpus_allowed_list:\t2-3" in proof["debugAffinity"] and "Mems_allowed_list:\t1" in proof["debugAffinity"], proof
         smoke.stop()
         smoke.start()
         after = smoke.running("exclusive")
@@ -213,6 +216,14 @@ def main():
         smoke.running("after-terminal")
         proof["afterTerminalAffinity"] = smoke.affinity("after-terminal")
         assert "Cpus_allowed_list:\t1\n" in proof["afterTerminalAffinity"], proof
+        proof["processStartTicksAfter"] = smoke.k("exec", "exclusive", "--", "cat", "/proc/1/stat").stdout.split(") ", 1)[1].split()[19]
+        proof["containerIDAfter"] = smoke.get("pod", "exclusive")["status"]["containerStatuses"][0]["containerID"]
+        assert proof["processStartTicksAfter"] == proof["processStartTicksBefore"], proof
+        assert proof["containerIDAfter"] == proof["containerID"], proof
+        over = smoke.k("exec", "exclusive", "--", "/resource-probe", "-mode", "probe", "-directory", "/huge", "-pages", "3", check=False)
+        (directory / "hugepage-overlimit.log").write_text(over.stdout + over.stderr)
+        assert over.returncode != 0 and "hugepage-touched=2" in over.stdout and "hugepage-touched=3" not in over.stdout, over
+        proof["hugepageOverLimitExit"] = over.returncode
         proof["passed"] = True
     finally:
         if smoke.process is not None:

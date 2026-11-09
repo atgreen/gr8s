@@ -246,7 +246,14 @@
                                  (container-with-pod-level-limits (resource-pod-spec pod) container))))
          (plan (gethash (pod-uid pod) (node-resource-manager-allocations manager)))
          (allocation (and plan (gethash (gethash "name" container) (gethash "containers" plan))))
-         (cpus (and allocation (coerce (gethash "cpus" allocation #()) 'list)))
+         (debug (find (gethash "name" container) (gethash "ephemeralContainers" (resource-pod-spec pod) #())
+                      :key (lambda (entry) (gethash "name" entry)) :test #'equal))
+         (target (and debug plan (gethash (gethash "targetContainerName" debug)
+                                          (gethash "containers" plan))))
+         ;; Debug containers consume no new reservation. They share the target
+         ;; container or the Pod's existing dedicated pool, never a foreign Pod's CPUs.
+         (cpus (or (and allocation (coerce (gethash "cpus" allocation #()) 'list))
+                   (and debug plan (coerce (or (and target (gethash "cpus" target)) (gethash "cpus" plan)) 'list))))
          (node (and plan (gethash "node" plan))))
     (when (equal "static" (node-resource-manager-policy manager))
       (let ((shared (resource-shared-cpus manager)))
@@ -265,7 +272,9 @@
           (when sandbox
             (dolist (summary (containerd-containers runtime sandbox))
               (when (= gr8s.cri.v1::+containerstate-container_running+ (cri-container-summary-state summary))
-                (let ((container (find (cdr (assoc +gr8s-container-label+ (cri-container-summary-labels summary) :test #'equal)) (resource-pod-containers pod)
+                (let ((container (find (cdr (assoc +gr8s-container-label+ (cri-container-summary-labels summary) :test #'equal))
+                                       (append (resource-pod-containers pod)
+                                               (coerce (gethash "ephemeralContainers" (resource-pod-spec pod) #()) 'list))
                                        :key (lambda (c) (gethash "name" c)) :test #'equal)))
                   (when container
                     (let* ((state (load-container-lifecycle-state runtime (pod-uid pod)))
