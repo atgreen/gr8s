@@ -206,11 +206,17 @@ the caller can fall back to the userspace Service proxy."
 BACKENDS is a list of (ip . target-port); they occupy consecutive slots from
 BASE-SLOT.  The service entry is written last so the program never reads a VIP
 whose backend slots are not yet present."
-  (multiple-value-bind (vip-key service-value backend-entries)
+  (multiple-value-bind (vip-key service-value backend-entries index-entries)
       (service-lb-entries address port base-slot backends)
     (let ((family (if (find #\: address) :ipv6 :ipv4)))
       (dolist (entry backend-entries)
         (funcall update (service-lb-backend-table dataplane family) (car entry) (cdr entry)))
+      (let ((index (service-lb-map dataplane
+                                   (if (eq family :ipv4) "gr8s_backend_index_v4"
+                                       "gr8s_backend_index_v6"))))
+        (when index
+          (dolist (entry index-entries)
+            (funcall update index (car entry) (cdr entry)))))
       (funcall update (service-lb-service-table dataplane family) vip-key service-value))))
 
 (defun stop-service-lb-dataplane

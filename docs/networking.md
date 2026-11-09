@@ -58,15 +58,27 @@ Managed native clusters allocate durable IPv4 ClusterIP Services from
 `10.96.0.0/16`, over TCP, UDP, or SCTP. Services accept JSON and typed Kubernetes
 protobuf requests, including numeric and named target ports.
 
-A **`cgroup/connect4` eBPF socket load balancer** rewrites a Pod's `connect(2)` to
+A **cgroup eBPF socket load balancer** rewrites a native client's `connect(2)` to
 a ready backend, resolving numeric or named target ports against selected Pods or
 manually managed slices. There is no DNAT and no conntrack: the socket connects
 directly to the real backend, so the return path needs no reverse translation.
-Unconnected UDP `sendto(2)` does not pass through it. `sessionAffinity: ClientIP`
+IPv4 and IPv6 `connect` hooks steer connected sockets, `sendmsg` hooks steer
+unconnected UDP `sendto(2)`, and `recvmsg` hooks restore the Service source address
+on UDP replies. `sessionAffinity: ClientIP`
 holds each client's network namespace on one backend until the timeout passes or
 the Service's backend set changes. The reserved `default/kubernetes` Service
 describes the HTTPS API at `10.96.0.1:443`, with matching Endpoints and an
 EndpointSlice.
+
+Before rewriting a socket, the program validates that the selected backend belongs
+to the requested Service. This prevents shared backend-slot repacking from sending
+a connection to another Service during a reconcile or interrupted update. A failed
+membership check refuses the attempt; later attempts recover after convergence.
+`make test-service-lb-program` exercises the compiled bytecode across these update
+boundaries. The same fixture can be tested with actual attached socket hooks using
+`scripts/test-service-lb-program.py FIXTURE --kernel` inside a disposable root VM.
+Host socket hooks do not intercept connections initiated inside a guest kernel;
+packet-level Service translation for those workloads remains in development.
 
 `NodePort` and `LoadBalancer` Services allocate node ports from 30000–32767. The
 agent relays each in userspace, for TCP and UDP, with client-address affinity, so

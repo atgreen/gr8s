@@ -469,10 +469,11 @@ A fixed or random port in the ephemeral range can already be taken on a shared h
         (gr8s::stop-host-port-forwarders forwarders)))))
 
 (test service-lb-program-compiles-with-affinity
-  ;; Service, backend, affinity index, affinity and UDP reverse maps; connect4, sendmsg4 and recvmsg4.
+  ;; Service, backend, membership/affinity index, affinity and UDP reverse maps
+  ;; and connect/sendmsg/recvmsg hooks for both address families.
   (multiple-value-bind (maps programs) (gr8s::compile-service-lb)
-    (is (= 5 (length maps)))
-    (is (= 3 (length programs)))))
+    (is (= 10 (length maps)))
+    (is (= 6 (length programs)))))
 
 ;;; Traffic policies, external IPs and health check node ports
 

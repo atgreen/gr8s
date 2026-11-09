@@ -44,6 +44,7 @@ help:
 	@echo "  test-node-topology Test live node snapshots, VXLAN, and route recovery"
 	@echo "  test-whistler-cni Test the chained Whistler TC/eBPF CNI plugin"
 	@echo "  test-service-lb Load/attach/pin the ClusterIP socket LB on a real kernel (sudo)"
+	@echo "  test-service-lb-program Execute Service socket bytecode across interrupted map updates"
 	@echo "  smoke-service-lb End-to-end: redirect an unrouted ClusterIP connect to backends (sudo)"
 	@echo "  smoke-service-lb-agent End-to-end agent path: Service+EndpointSlice -> redirect (sudo)"
 	@echo "  check         Syntax-check scripts and run tests"
@@ -97,6 +98,14 @@ build/gr8s-endpoint-test.json: src/network/egress-guard-program.lisp src/network
 test-endpoint-policy: build/gr8s-endpoint-test.json
 	python3 scripts/test-endpoint-policy.py $<
 
+# Execute the socket LB bytecode across interrupted Service map updates.
+build/gr8s-service-test.json: src/network/service-lb-program.lisp src/network/service-lb.lisp scripts/compile-endpoint-policy-fixture.lisp
+	$(SBCL) --noinform --script scripts/compile-endpoint-policy-fixture.lisp $@ service-lb
+
+.PHONY: test-service-lb-program
+test-service-lb-program: build/gr8s-service-test.json
+	python3 scripts/test-service-lb-program.py $<
+
 # Real-root verification that the Service LB JIT-compiles, loads, attaches to a
 # cgroup, pins its maps, and round-trips entries through the kernel. No ELF.
 test-service-lb:
@@ -120,7 +129,7 @@ test-core-api:
 
 test-whistler-cni: containerd-bundle test
 
-check: containerd-bundle test-protocol-generation test-whistler-cni test-endpoint-policy
+check: containerd-bundle test-protocol-generation test-whistler-cni test-endpoint-policy test-service-lb-program
 	sh -n scripts/gr8s scripts/install-containerd.sh scripts/collect-notices.sh \
 	  scripts/verify-static-runtime.sh scripts/smoke.sh scripts/test-core-api.sh
 	scripts/verify-static-runtime.sh build/containerd

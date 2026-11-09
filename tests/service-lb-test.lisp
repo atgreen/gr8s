@@ -338,18 +338,23 @@
   (let ((writes nil)
         (dataplane (gr8s::%make-service-lb-dataplane
                     :maps (list (fake-lb-map "gr8s_service_v4" 900001)
-                                (fake-lb-map "gr8s_backend_v4" 900002)))))
+                                (fake-lb-map "gr8s_backend_v4" 900002)
+                                (fake-lb-map "gr8s_backend_index_v4" 900003)))))
     (gr8s::service-lb-write-service
      dataplane "10.96.0.10" 80 3 '(("10.88.1.5" . 8080) ("10.88.2.7" . 8080))
      :update (lambda (map key value)
                (push (list (whistler/loader:map-info-fd map) key value) writes)))
     (setf writes (nreverse writes))
-    ;; Two backend writes (fd 900002) then the service write (fd 900001).
-    (is (equal '(900002 900002 900001) (mapcar #'first writes)))
+    ;; Backends, membership entries (even without affinity), then the Service.
+    (is (equal '(900002 900002 900003 900003 900001) (mapcar #'first writes)))
     (is (equalp (gr8s::service-lb-backend-key 3) (second (first writes))))
     (is (equalp (gr8s::service-lb-backend-value "10.88.1.5" 8080) (third (first writes))))
-    (is (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80) (second (third writes))))
-    (is (equalp (gr8s::service-lb-service-value 2 3) (third (third writes))))))
+    (is (equalp (gr8s::service-lb-index-key
+                (gr8s::service-lb-vip-key "10.96.0.10" 80)
+                (gr8s::service-lb-backend-value "10.88.1.5" 8080))
+               (second (third writes))))
+    (is (equalp (gr8s::service-lb-vip-key "10.96.0.10" 80) (second (fifth writes))))
+    (is (equalp (gr8s::service-lb-service-value 2 3) (third (fifth writes))))))
 
 (test service-lb-write-service-selects-the-ipv6-map-pair
   (let ((writes nil)
@@ -357,17 +362,18 @@
                     :maps (list (fake-lb-map "gr8s_service_v4" 900001)
                                 (fake-lb-map "gr8s_backend_v4" 900002)
                                 (fake-lb-map "gr8s_service_v6" 900003)
-                                (fake-lb-map "gr8s_backend_v6" 900004)))))
+                                (fake-lb-map "gr8s_backend_v6" 900004)
+                                (fake-lb-map "gr8s_backend_index_v6" 900005)))))
     (gr8s::service-lb-write-service
      dataplane "fd96::a" 80 3 '(("fd88::5" . 8080))
      :update (lambda (map key value)
                (push (list (whistler/loader:map-info-fd map) key value) writes)))
     (setf writes (nreverse writes))
-    (is (equal '(900004 900003) (mapcar #'first writes)))
+    (is (equal '(900004 900005 900003) (mapcar #'first writes)))
     (is (equalp (gr8s::service-lb-backend-value "fd88::5" 8080)
                 (third (first writes))))
     (is (equalp (gr8s::service-lb-vip-key "fd96::a" 80)
-                (second (second writes))))))
+                (second (third writes))))))
 
 (test service-lb-pin-directory-is-under-state
   (is (string= "/var/lib/gr8s/containerd/bpf/service-lb/"
@@ -546,7 +552,7 @@
                (push (whistler/loader:map-info-fd map) writes))
      :delete (constantly nil))
     ;; One backend and one Service entry land in each family's maps.
-    (is (equal '(2 5 1 4) (nreverse writes)))))
+    (is (equal '(2 5 3 6 1 4) (nreverse writes)))))
 
 (test service-lb-converge-frees-slots-when-a-backend-leaves
   (let ((controller (make-fake-lb-controller)))
@@ -702,8 +708,9 @@
                 (car (second indexed))))
     (is (equalp #(1 0 0 0) (cdr (second indexed))))
     (is (= 16 (length (car (first indexed))))))
-  ;; Without affinity there is nothing to index.
-  (is (null (nth-value 3 (gr8s::service-lb-entries "10.96.0.10" 80 0 '(("10.88.1.5" . 8080)))))))
+  ;; Membership is checked even without affinity, to reject another Service's
+  ;; backend while shared slots are being repacked.
+  (is (= 1 (length (nth-value 3 (gr8s::service-lb-entries "10.96.0.10" 80 0 '(("10.88.1.5" . 8080))))))))
 
 (test service-lb-converge-retires-index-entries-of-departed-backends
   (let* ((index-map (fake-lb-map "gr8s_backend_index_v4" 3))
