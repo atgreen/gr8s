@@ -58,12 +58,27 @@
       "appliedIndex": 1,
       "resourceRevision": 1
     },
-    "note": "Fresh SBCL processes and loopback RPC with controlled snapshot boundary; verifies receiver resource count, final resource payload and completed intent/gate, plus source-side materialization/reload."
+    "note": "Fresh SBCL processes and loopback RPC with controlled snapshot boundary; verifies receiver resource count, final resource payload and completed intent/gate, plus source-side materialization/reload.",
+    "codeCommit": "ea96f19"
   },
   "limitations": [
     "No unmodified gr8s serve production voter WAL startup or automatic compaction enabled",
     "No interrupted-install receiver process restart with exact WAL suffix replay in this change",
     "No native agent retained-reference drain acceptance or constrained-heap TLS/multi-node failover run",
     "Live barrier bead remains in progress for these integration/acceptance requirements"
-  ]
+  ],
+  "subsequentMainMerge": {
+    "main": "068a42e",
+    "mergeCommit": "bba6c47",
+    "restoreImplementationUnchanged": true,
+    "changedProductionFile": "src/network/service-packet-program.lisp",
+    "scope": "TCP early-data ACK predicate plus documentation and VM probe updates",
+    "checks": {
+      "store-member-restore": 47,
+      "egress-guard": 190,
+      "service-lb": 252,
+      "total": 489
+    },
+    "passed": true
+  }
 }
