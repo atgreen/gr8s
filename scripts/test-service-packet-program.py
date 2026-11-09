@@ -35,11 +35,13 @@ def checksum(data):
 
 
 def packet(source=CLIENT, destination=VIP, sport=40000, dport=80, protocol=6,
-           options=b"", udp_zero=False):
+           options=b"", udp_zero=False, tcp_flags=0x18, seq=1, ack=0,
+           payload=b"service-packet-test", tcp_options=b""):
     source, destination = ipaddress.ip_address(source).packed, ipaddress.ip_address(destination).packed
-    payload = b"service-packet-test"
     if protocol == 6:
-        l4 = bytearray(struct.pack("!HHIIBBHHH", sport, dport, 1, 0, 0x50, 0x18, 4096, 0, 0) + payload)
+        l4 = bytearray(struct.pack("!HHIIBBHHH", sport, dport, seq, ack,
+                                    ((20 + len(tcp_options)) // 4) << 4, tcp_flags, 4096, 0, 0) +
+                       tcp_options + payload)
         csum_offset = 16
     else:
         l4 = bytearray(struct.pack("!HHHH", sport, dport, 8 + len(payload), 0) + payload)

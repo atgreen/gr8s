@@ -25,8 +25,10 @@
       :key-size 16 :value-size 16 :max-entries 65536 :map-flags 1)
     (defmap gr8s-pkt-affinity :type :lru-hash
       :key-size 16 :value-size 16 :max-entries 65536)
+    (defmap gr8s-pkt-tcp :type :hash
+      :key-size 16 :value-size 64 :max-entries 65536 :map-flags 1)
     ;; Requests, replies, no endpoints, invalid membership, tuple collision,
-    ;; failed map/checksum/header writes, malformed packets.
+    ;; failed publication/protocol validation/checksum/header writes, malformed packets.
     (defmap gr8s-pkt-stats :type :array
       :key-size 4 :value-size 8 :max-entries 7)))
 
@@ -35,7 +37,17 @@
     (defstruct gr8s-pkt-flow
       (source u32) (destination u32) (sport u16) (dport u16)
       (protocol u8) (pad0 u8) (pad1 u16))
-    (defstruct gr8s-pkt-meta (l4 u32))))
+    (defstruct gr8s-pkt-meta
+      (l4 u32) (seq u32) (ack u32) (end u32) (flags u32) (window u32))
+    (defstruct gr8s-pkt-tcp-input (seq u32) (ack u32) (header u64))
+    ;; SYN/client=1, SYN/server=2, handshake established=4, loose legacy=512.
+    ;; FIN/window/timestamp slots retain a stable layout for lifecycle tracking.
+    (defstruct gr8s-pkt-tcp-state
+      (backend u64) (client-isn u32) (server-isn u32)
+      (client-end u32) (server-end u32) (client-ack u32) (server-ack u32)
+      (client-window u32) (server-window u32) (client-fin u32) (server-fin u32)
+      (flags u32) (client-scale u8) (server-scale u8) (pad u16)
+      (client-ts u32) (server-ts u32))))
 
 (defmacro pkt-count (pointer)
   `(when (/= ,pointer 0) (atomic-add ,pointer 0 1)))
@@ -72,8 +84,111 @@ so opposite acquisition orders cannot deadlock."
        (setf held-locks (logior held-locks ,bit)
              now (ktime-get-ns)))))
 
-(defmacro pkt-lifetime (flow)
-  `(if (= (gr8s-pkt-flow-protocol ,flow) 6) 7200000000000 180000000000))
+(defmacro pkt-lifetime (flow &optional (key flow))
+  `(let ((lifetime u64 180000000000))
+     (when (= (gr8s-pkt-flow-protocol ,flow) 6)
+       (setf lifetime 7200000000000)
+       (when-let ((tcp (map-lookup-ptr gr8s-pkt-tcp ,key)))
+         (when (and (/= (logand (load u32 tcp 48) 1) 0)
+                    (= (logand (load u32 tcp 48) 4) 0))
+           (setf lifetime 120000000000))))
+     lifetime))
+
+(defmacro pkt-seq-after (left right)
+  `(and (/= ,left ,right) (< (cast u32 (- ,left ,right)) #x80000000)))
+
+(defmacro pkt-tcp-forget (key)
+  `(when-let ((tcp (map-lookup-ptr gr8s-pkt-tcp ,key)))
+     (when (/= (map-delete-ptr gr8s-pkt-tcp ,key) 0) (pkt-drop failed))))
+
+(defmacro pkt-tcp-new-generation (key backend)
+  "A different initial sequence beyond the observed stream is a new incarnation.
+Same-ISN retransmissions retain the original backend; older SYNs fail closed.
+Caller holds the forward reservation; reverse readers cannot commit concurrently."
+  `(when (and (= (gr8s-pkt-flow-protocol ,key) 6)
+              (= (logand (gr8s-pkt-meta-flags meta) 18) 2))
+     (let ((tcp (map-lookup-ptr gr8s-pkt-tcp ,key)) (replace u32 1))
+       (when (/= tcp 0)
+         (when (= (load u64 tcp 0) ,backend)
+           (when (/= (logand (load u32 tcp 48) 1) 0)
+             (if (= (load u32 tcp 8) (gr8s-pkt-meta-seq meta))
+                 (setf replace 0)
+                 (unless (pkt-seq-after (gr8s-pkt-meta-seq meta) (load u32 tcp 16))
+                   (pkt-drop failed))))))
+       (when (/= replace 0)
+         (when (/= (map-delete-ptr gr8s-pkt-forward ,key) 0) (pkt-drop failed))
+         (pkt-tcp-forget ,key)
+         (setf (gr8s-pkt-pair-first target) 0)))))
+
+(defmacro pkt-tcp-observe (key backend reverse)
+  "Keep initial sequence/handshake metadata bound to this NAT backend.
+Protocol state is published before a new forward entry; interrupted publication
+cannot create a reverse-translatable TCP flow without its metadata."
+  (let ((end-field (if reverse 'gr8s-pkt-tcp-state-server-end 'gr8s-pkt-tcp-state-client-end))
+        (ack-field (if reverse 'gr8s-pkt-tcp-state-client-ack 'gr8s-pkt-tcp-state-server-ack))
+        (window-field (if reverse 'gr8s-pkt-tcp-state-server-window 'gr8s-pkt-tcp-state-client-window)))
+    `(when (= (gr8s-pkt-flow-protocol ,key) 6)
+       (let ((state (make-gr8s-pkt-tcp-state)))
+         (when-let ((tcp (map-lookup-ptr gr8s-pkt-tcp ,key)))
+           (when (= (load u64 tcp 0) ,backend)
+             ,@(loop for offset from 0 below 64 by 8
+                     collect `(store u64 state ,offset (load u64 tcp ,offset)))))
+         (when (= (gr8s-pkt-tcp-state-backend state) 0)
+           (setf (gr8s-pkt-tcp-state-backend state) ,backend
+                 (gr8s-pkt-tcp-state-flags state) 516)
+           ,@(unless reverse
+               '((when (= (logand (gr8s-pkt-meta-flags meta) 18) 2)
+                   (setf (gr8s-pkt-tcp-state-flags state) 1
+                         (gr8s-pkt-tcp-state-client-isn state) (gr8s-pkt-meta-seq meta)
+                         (gr8s-pkt-tcp-state-client-ack state) (gr8s-pkt-meta-seq meta)))))
+           (setf ,(if reverse '(gr8s-pkt-tcp-state-server-end state)
+                             '(gr8s-pkt-tcp-state-client-end state)) (gr8s-pkt-meta-end meta)))
+         ,@(if reverse
+               '((when (/= (logand (gr8s-pkt-tcp-state-flags state) 1) 0)
+                   (when (= (logand (gr8s-pkt-tcp-state-flags state) 2) 0)
+                     (unless (and (/= (logand (gr8s-pkt-meta-flags meta) 16) 0)
+                                  (or (= (logand (gr8s-pkt-meta-flags meta) 6) 2)
+                                      (= (logand (gr8s-pkt-meta-flags meta) 6) 4))
+                                  (pkt-seq-after (gr8s-pkt-meta-ack meta)
+                                                 (gr8s-pkt-tcp-state-client-isn state))
+                                  (not (pkt-seq-after (gr8s-pkt-meta-ack meta)
+                                                     (gr8s-pkt-tcp-state-client-end state))))
+                       (pkt-drop failed)))
+                   (when (/= (logand (gr8s-pkt-meta-flags meta) 2) 0)
+                     (when (and (/= (logand (gr8s-pkt-tcp-state-flags state) 2) 0)
+                                (/= (gr8s-pkt-tcp-state-server-isn state) (gr8s-pkt-meta-seq meta)))
+                       (pkt-drop failed))
+                     (when (= (logand (gr8s-pkt-tcp-state-flags state) 2) 0)
+                       (setf (gr8s-pkt-tcp-state-server-isn state) (gr8s-pkt-meta-seq meta)
+                             (gr8s-pkt-tcp-state-server-end state) (gr8s-pkt-meta-end meta)
+                             (gr8s-pkt-tcp-state-server-ack state) (gr8s-pkt-meta-seq meta)))
+                     (setf (gr8s-pkt-tcp-state-flags state)
+                           (logior (gr8s-pkt-tcp-state-flags state) 2)))))
+               '((when (/= (logand (gr8s-pkt-tcp-state-flags state) 1) 0)
+                   (if (/= (logand (gr8s-pkt-meta-flags meta) 2) 0)
+                       (when (/= (gr8s-pkt-meta-seq meta) (gr8s-pkt-tcp-state-client-isn state))
+                         (pkt-drop failed))
+                       (when (= (logand (gr8s-pkt-tcp-state-flags state) 4) 0)
+                         (unless (and (/= (logand (gr8s-pkt-tcp-state-flags state) 2) 0)
+                                      (/= (logand (gr8s-pkt-meta-flags meta) 16) 0)
+                                      (pkt-seq-after (gr8s-pkt-meta-ack meta)
+                                                     (gr8s-pkt-tcp-state-server-isn state))
+                                      (not (pkt-seq-after (gr8s-pkt-meta-ack meta)
+                                                         (gr8s-pkt-tcp-state-server-end state)))
+                                      (pkt-seq-after (gr8s-pkt-meta-seq meta)
+                                                     (gr8s-pkt-tcp-state-client-isn state)))
+                           (pkt-drop failed))
+                         (when (= (logand (gr8s-pkt-meta-flags meta) 4) 0)
+                           (setf (gr8s-pkt-tcp-state-flags state)
+                                 (logior (gr8s-pkt-tcp-state-flags state) 4))))))))
+         (when (or (/= (logand (gr8s-pkt-tcp-state-flags state) 512) 0)
+                   (pkt-seq-after (gr8s-pkt-meta-end meta) (,end-field state)))
+           (setf (,end-field state) (gr8s-pkt-meta-end meta)))
+         (when (/= (logand (gr8s-pkt-meta-flags meta) 16) 0)
+           (when (pkt-seq-after (gr8s-pkt-meta-ack meta) (,ack-field state))
+             (setf (,ack-field state) (gr8s-pkt-meta-ack meta))))
+         (setf (,window-field state) (gr8s-pkt-meta-window meta))
+         (when (/= (map-update-ptr gr8s-pkt-tcp ,key state 0) 0) (pkt-drop failed))))))
 
 (defmacro pkt-make-reverse-key (reverse flow backend)
   `(setf (gr8s-pkt-flow-source ,reverse) (cast u32 ,backend)
@@ -122,11 +237,16 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
                                     (cast u64 (gr8s-pkt-flow-dport flow))))))
       (when-let ((held (map-lookup-ptr gr8s-pkt-forward flow)))
         (if (<= (- now (load u64 held 8)) (pkt-lifetime flow))
-            (setf (gr8s-pkt-pair-first target) (load u64 held 0))
+            (progn
+              (setf (gr8s-pkt-pair-first target) (load u64 held 0))
+              (pkt-tcp-new-generation flow (gr8s-pkt-pair-first target)))
             ;; Under the tuple reservation no packet/collector can refresh or
             ;; republish this key between expiration and NOEXIST insertion.
-            (when (/= (map-delete-ptr gr8s-pkt-forward flow) 0) (pkt-drop failed))))
+            (progn
+              (when (/= (map-delete-ptr gr8s-pkt-forward flow) 0) (pkt-drop failed))
+              (pkt-tcp-forget flow))))
       (when (= (gr8s-pkt-pair-first target) 0)
+        (pkt-tcp-forget flow)
         (when-let ((service (map-lookup gr8s-service-v4 key)))
           (let ((count u32 (load u16 service 0)))
             (when (= count 0) (pkt-drop empty))
@@ -177,8 +297,7 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
               (setf (gr8s-pkt-pair-second target) now)
               ;; Only one concurrent first packet may publish this flow. A
               ;; losing packet retries through the winner on its next attempt.
-              (when (/= (map-update-ptr gr8s-pkt-forward flow target 1) 0)
-                (pkt-drop failed))
+              (setf new-flow 1)
               (when (/= sticky 0)
                 (progn
                   (setf (gr8s-pkt-pair-first probe) key
@@ -197,8 +316,9 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
                       (logior (cast u64 (gr8s-pkt-flow-destination flow))
                                (<< (cast u64 (gr8s-pkt-flow-dport flow)) 32)))
               (pkt-drop collision))))
+        (pkt-tcp-observe flow (gr8s-pkt-pair-first target) nil)
         (setf (gr8s-pkt-pair-second target) now)
-        (when (/= (map-update-ptr gr8s-pkt-forward flow target 0) 0)
+        (when (/= (map-update-ptr gr8s-pkt-forward flow target (if (/= new-flow 0) 1 0)) 0)
           (pkt-drop failed))
         (pkt-write-address flow target meta nil)
         (pkt-count requests))))))
@@ -216,11 +336,14 @@ All original fields and TARGET are stack copies: helpers invalidate packet point
         (pkt-lock :forward locked-forward)
         (let ((held (map-lookup-ptr gr8s-pkt-forward locked-forward)))
           (when (= held 0) (pkt-drop failed))
-          (when (> (- now (load u64 held 8)) (pkt-lifetime flow)) (pkt-drop failed))
+          (when (> (- now (load u64 held 8)) (pkt-lifetime flow locked-forward)) (pkt-drop failed))
           (when (/= (load u64 held 0)
                     (logior (cast u64 (gr8s-pkt-flow-source flow))
                              (<< (cast u64 (gr8s-pkt-flow-sport flow)) 32)))
             (pkt-drop collision))
+          (pkt-tcp-observe locked-forward
+                           (logior (cast u64 (gr8s-pkt-flow-source flow))
+                                   (<< (cast u64 (gr8s-pkt-flow-sport flow)) 32)) t)
           (let ((refreshed (make-gr8s-pkt-pair)))
             (setf (gr8s-pkt-pair-first refreshed) (load u64 held 0)
                   (gr8s-pkt-pair-second refreshed) now)
@@ -261,6 +384,7 @@ Runs through BPF_PROG_TEST_RUN, never attached to a traffic interface. Results:
                      (when (/= (map-delete-ptr gr8s-pkt-reverse locked-reverse) 0)
                        (pkt-drop failed))))
                  (when (/= (map-delete-ptr gr8s-pkt-forward flow) 0) (pkt-drop failed))
+                 (pkt-tcp-forget flow)
                  (setf changed 1))))
            (progn
              (pkt-lock :reverse flow)
@@ -274,16 +398,17 @@ Runs through BPF_PROG_TEST_RUN, never attached to a traffic interface. Results:
                  (pkt-lock :forward locked-forward)
                  (let ((held (map-lookup-ptr gr8s-pkt-forward locked-forward)))
                    (if (= held 0)
-                       (setf changed 1)
+                       (progn (pkt-tcp-forget locked-forward) (setf changed 1))
                        (if (/= (load u64 held 0)
                                (logior (cast u64 (gr8s-pkt-flow-source flow))
                                        (<< (cast u64 (gr8s-pkt-flow-sport flow)) 32)))
                            ;; Retire only the obsolete reverse entry when a
                            ;; replacement backend owns this live forward key.
                            (setf changed 1)
-                           (when (> (- now (load u64 held 8)) (pkt-lifetime flow))
+                           (when (> (- now (load u64 held 8)) (pkt-lifetime flow locked-forward))
                              (when (/= (map-delete-ptr gr8s-pkt-forward locked-forward) 0)
                                (pkt-drop failed))
+                             (pkt-tcp-forget locked-forward)
                              (setf changed 1))))
                    (when (/= changed 0)
                      (when (/= (map-delete-ptr gr8s-pkt-reverse flow) 0) (pkt-drop failed))))))))
@@ -314,6 +439,24 @@ Runs through BPF_PROG_TEST_RUN, never attached to a traffic interface. Results:
          ;; repeated scalar stack loads to retain a verifier packet-range ID.
          (when (/= (skb-load-bytes (ctx-ptr) (gr8s-pkt-meta-l4 meta) (+ flow 8) 4) 0)
            (pkt-drop malformed))
+         (when (= (gr8s-pkt-flow-protocol flow) 6)
+           (let ((wire (make-gr8s-pkt-tcp-input))
+                 (length u32 (- (ntohs (load u16 data 16)) (- (gr8s-pkt-meta-l4 meta) 14))))
+             (when (/= (skb-load-bytes (ctx-ptr) (+ (gr8s-pkt-meta-l4 meta) 4) wire 16) 0)
+               (pkt-drop malformed))
+             (let ((header u32 (* (>> (load u8 wire 8) 4) 4)))
+               (when (or (< header 20) (> header length)) (pkt-drop malformed))
+               (setf (gr8s-pkt-meta-seq meta) (ntohl (load u32 wire 0))
+                     (gr8s-pkt-meta-ack meta) (ntohl (load u32 wire 4))
+                     (gr8s-pkt-meta-flags meta) (cast u32 (load u8 wire 9))
+                     (gr8s-pkt-meta-window meta) (cast u32 (ntohs (load u16 wire 10)))
+                     (gr8s-pkt-meta-end meta)
+                     (cast u32 (+ (gr8s-pkt-meta-seq meta)
+                                  (+ (- length header)
+                                     (+ (if (/= (logand (gr8s-pkt-meta-flags meta) 2) 0) 1 0)
+                                        (if (/= (logand (gr8s-pkt-meta-flags meta) 1) 0) 1 0))))))
+               (when (and (/= (logand (gr8s-pkt-meta-flags meta) 2) 0)
+                          (/= (logand (gr8s-pkt-meta-flags meta) 5) 0)) (pkt-drop malformed)))))
          ,@body
          (pkt-unlock)))
 
@@ -331,7 +474,7 @@ returning from the enclosing guard, so non-Service traffic still crosses policy.
      (let ((flow (make-gr8s-pkt-flow)) (target (make-gr8s-pkt-pair))
            (meta (make-gr8s-pkt-meta))
            (locked-forward (make-gr8s-pkt-flow)) (locked-reverse (make-gr8s-pkt-flow))
-           (held-locks u32 0)
+           (held-locks u32 0) (new-flow u32 0)
            (data u64 (tc-data)) (data-end u64 (tc-data-end)))
        ,@(if continue-guard
              `((when (> (+ data 34) data-end) (pkt-drop malformed))
