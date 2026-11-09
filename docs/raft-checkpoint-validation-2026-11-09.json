@@ -61,7 +61,21 @@
       "Post-rename directory fsync failure closes storage, rejects further writes and recovers the replacement snapshot and tail",
       "Unreadable state cannot replace a valid WAL",
       "Recovery rejects read-time evaluation even when its caller allows it"
-    ]
+    ],
+    "mergedMain": {
+      "main": "4808b10",
+      "checks": 323,
+      "failures": 0,
+      "suites": [
+        "raft",
+        "egress-guard"
+      ],
+      "additionalTest": "cni-service-guard-pins-continuations-before-attachment-and-closes-shared-fds-once",
+      "logs": [
+        "/tmp/gr8s-raft-checkpoint-merged.log",
+        "/tmp/gr8s-raft-checkpoint-merged-cni.log"
+      ]
+    }
   },
   "remaining": [
     "Production application snapshot capture and restore at the exact applied boundary, including membership",
