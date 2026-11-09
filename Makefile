@@ -146,6 +146,9 @@ build/gr8s-service-packet-test.json: src/network/service-packet-program.lisp src
 test-service-packet-program: build/gr8s-service-packet-test.json
 	python3 scripts/test-service-packet-program.py $<
 
+build/gr8s-legacy-service-packet-guard-test.json: scripts/compile-legacy-service-packet-guard-fixture.lisp scripts/compile-endpoint-policy-fixture.lisp tests/fixtures/service-packet-pre-reservation.lisp $(wildcard src/network/*.lisp) gr8s.asd $(WHISTLER_FIXTURE_SOURCES)
+	sbcl --noinform --script scripts/compile-legacy-service-packet-guard-fixture.lisp $@ service-packet-guard
+
 TCP_CLIENT_LDFLAGS ?= -static
 build/service-tcp-client: scripts/service-tcp-client.c
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror $(TCP_CLIENT_LDFLAGS) $< -o $@

@@ -68,11 +68,14 @@ the ELF path the CNI installer still passes; there is no ELF to open."
     (object replacements
      &key (create-map #'whistler/loader::create-map)
           (update #'whistler/loader:map-update)
-          (load-programs #'whistler/loader::session-load-progs))
+          (load-programs #'whistler/loader::session-load-progs)
+          (publish-stages t))
   "Create the egress maps and load the program.  REPLACEMENTS is an alist of
 (map-name . fd) for maps already pinned on bpffs; those fds are reused so their
 counters persist, and only the remaining maps are created fresh.  CREATE-MAP and
-LOAD-PROGRAMS are injected so the orchestration is testable without CAP_BPF."
+LOAD-PROGRAMS are injected so the orchestration is testable without CAP_BPF.
+With PUBLISH-STAGES NIL, loading does not change the live continuation table;
+the upgrade path publishes only after both directions are quiescent."
   (when (find "gr8s_pkt_forward" (egress-policy-object-map-specs object)
               :key (lambda (spec) (getf spec :name)) :test #'equal)
     (dolist (spec (service-packet-map-specs))
@@ -95,15 +98,24 @@ LOAD-PROGRAMS are injected so the orchestration is testable without CAP_BPF."
     (setf (egress-policy-object-maps object) maps
           (egress-policy-object-programs object)
           (funcall load-programs (egress-policy-object-program-specs object) maps))
-    (let ((stages (cdr (assoc "gr8s_pkt_stages" maps :test #'equal))))
-      (when stages
-        (loop for name in '("gr8s_packet_forward" "gr8s_egress_policy" "gr8s_packet_reverse")
-              for index from 0
-              for program = (cdr (assoc name (egress-policy-object-programs object) :test #'equal))
-              do (unless program (invalid-cni "Service guard stage ~A is missing" name))
-                 (funcall update stages (service-lb-bytes index 4)
-                          (service-lb-bytes (whistler/loader:prog-info-fd program) 4)))))
+    (when publish-stages
+      (publish-egress-policy-stages object :update update))
     object))
+
+(defun publish-egress-policy-stages (object &key (update #'whistler/loader:map-update))
+  "Publish a fully loaded object's policy/NAT continuations. Caller quiesces
+retained legacy writers before updating a table already used by live programs."
+  (let ((stages (cdr (assoc "gr8s_pkt_stages" (egress-policy-object-maps object) :test #'equal))))
+    (when stages
+      ;; Validate the whole object before the first write.
+      (let ((programs
+              (loop for name in '("gr8s_packet_forward" "gr8s_egress_policy" "gr8s_packet_reverse")
+                    for program = (cdr (assoc name (egress-policy-object-programs object) :test #'equal))
+                    do (unless program (invalid-cni "Service guard stage ~A is missing" name))
+                    collect program)))
+        (loop for program in programs for index from 0
+              do (funcall update stages (service-lb-bytes index 4)
+                          (service-lb-bytes (whistler/loader:prog-info-fd program) 4)))))))
 
 (defun egress-policy-object-find-map (object name)
   "Return the map-info named NAME, or NIL."

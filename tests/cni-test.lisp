@@ -546,7 +546,7 @@
            (gr8s::remove-cni-policy nil nil
                                     (namestring map-path)
                                     (namestring link-path)
-                                    (namestring root))
+                                    (namestring root) :retire-link (constantly nil))
            (is (not (probe-file map-path)))
            (is (not (probe-file link-path)))
            (is (not (probe-file root)))
@@ -718,3 +718,35 @@
                (lambda (&rest args) (declare (ignore args))
                  (error "host policy must not enter the Pod namespace"))
                (lambda (name) (is (string= "gr-owned" name)) 42))))))
+
+(test cni-check-rejects-interrupted-packet-upgrades-before-reporting-healthy
+  (dolist (staged '(nil t))
+    (signals gr8s::cni-error
+      (gr8s::check-cni-policy
+       (gr8s::make-cni-configuration) (gr8s::make-cni-context)
+       "/pins/rejected_spoofs" "/pins/tcx-egress"
+       :path-exists-p (lambda (path) (and (not staged) (search "gr8s_pkt_upgrade_ingress" path)))
+       :staged-links (lambda (path) (when (and staged (search "gr8s_pkt_upgrade_ingress" path))
+                                     '("/pins/gr8s_pkt_upgrade_ingress_pending_1")))
+       :open-pinned (lambda (path) (declare (ignore path)) (error "must reject before opening maps"))))))
+
+(test cni-delete-detaches-staged-and-canonical-guards-before-unpinning
+  (let ((events nil))
+    (gr8s::remove-cni-policy
+     nil nil "/pins/rejected_spoofs" "/pins/tcx-egress" "/pins/"
+     :path-exists-p (constantly t)
+     :retire-link (lambda (path) (push (list :detach path) events))
+     :remove-path (lambda (path) (push (list :unpin path) events))
+     :staged-links (lambda (path) (list (concatenate 'string path "_pending_1")))
+     :remove-directory (lambda (path) (push (list :directory path) events)))
+    (let ((ordered (nreverse events)))
+      (dolist (path '("/pins/tcx-egress" "/pins/tcx-ingress"
+                      "/pins/gr8s_pkt_upgrade_ingress" "/pins/gr8s_pkt_upgrade_egress"))
+        (let ((stage (concatenate 'string path "_pending_1")))
+          (is (< (position (list :detach stage) ordered :test #'equal)
+                 (position (list :unpin stage) ordered :test #'equal)))
+          (is (< (position (list :unpin stage) ordered :test #'equal)
+                 (position (list :detach path) ordered :test #'equal)))
+          (is (< (position (list :detach path) ordered :test #'equal)
+                 (position (list :unpin path) ordered :test #'equal)))))
+      (is (equal '(:directory "/pins/") (car (last ordered)))))))

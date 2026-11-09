@@ -154,3 +154,22 @@
                                     (whistler/loader:map-lookup-int map index)))))
             (sb-posix:close fd))))
       result)))
+
+(defun detach-cni-tcx-link (fd &key (bpf #'whistler/loader::%bpf))
+  "Synchronously detach an owned TCX link and drain its preexisting executions."
+  (let ((attribute (whistler/loader::make-attr-buf)))
+    (whistler/loader::put-u32 attribute 0 fd)
+    (funcall bpf 34 attribute 4 "detach CNI TCX link")))
+
+(defun retire-cni-tcx-link
+    (path &key (open-pinned #'whistler/loader:open-pinned-object)
+               (object-info #'bpf-object-kernel-info) (detach #'detach-cni-tcx-link)
+               (close-fd #'sb-posix:close))
+  "Stop a pinned guard before unpinning; other open FDs cannot keep it executing."
+  (let ((fd (funcall open-pinned path)))
+    (unwind-protect
+         (progn
+           (unless (= 11 (netlink-read-integer (funcall object-info fd) 0 4))
+             (invalid-cni "refusing to retire a non-TCX policy pin ~A" path))
+           (funcall detach fd))
+      (funcall close-fd fd))))

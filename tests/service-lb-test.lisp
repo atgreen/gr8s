@@ -1066,6 +1066,7 @@
       (flet ((verify ()
                (gr8s.network:service-packet-gc-compatible-p
                 dataplane :paths (constantly '("endpoint/gr8s_pkt_stages"))
+                :refresh (constantly t)
                 :map-id #'whistler/loader:map-info-fd
                 :stage-map-ids (lambda (path)
                                  (declare (ignore path)) (incf queries)
@@ -1096,3 +1097,14 @@
                            (if (= type 3) (error "collector rejected") 900041))
        :close-fd (lambda (fd) (push fd closed))))
     (is (equal '(900041) closed))))
+
+(test service-packet-gc-does-not-reuse-a-successful-check-while-an-upgrade-is-pending
+  (multiple-value-bind (dataplane keys next-key) (service-packet-gc-fixture)
+    (declare (ignore keys next-key))
+    (setf (gr8s::service-lb-dataplane-gc-compatible-p dataplane) t)
+    (let ((*error-output* (make-string-output-stream)))
+      (is-false (gr8s.network:service-packet-gc-compatible-p
+                 dataplane :paths (constantly nil) :refresh (constantly nil)
+                 :map-id (lambda (map) (declare (ignore map)) (error "must defer before map checks"))))
+      (is-false (gr8s::service-lb-dataplane-gc-compatible-p dataplane))
+      (is (search "packet pipeline upgrades are pending" (get-output-stream-string *error-output*))))))

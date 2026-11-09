@@ -110,6 +110,13 @@ def read_tcp_state(path, key):
             "serverTimestamp": struct.unpack_from("<I", value, 60)[0]}
 
 
+def read_service_flow(path, key):
+    value = read_pinned_values(path, [key], 16)[0]
+    return {"backend": str(ipaddress.ip_address(value[:4])),
+            "backendPort": struct.unpack_from("!H", value, 4)[0],
+            "stamp": struct.unpack_from("<Q", value, 8)[0]}
+
+
 def packet_counters(cluster):
     return read_packet_counters(cluster.root / "state/agent/containerd/bpf/service-lb/gr8s_pkt_stats")
 
@@ -270,6 +277,8 @@ if __name__ == "__main__":
         trace_tcp(int(sys.argv[2]), Path(sys.argv[3]))
     elif len(sys.argv) == 3 and sys.argv[1] == "--read-packet-counters":
         print(json.dumps(read_packet_counters(Path(sys.argv[2]))))
+    elif len(sys.argv) == 4 and sys.argv[1] == "--read-service-flow":
+        print(json.dumps(read_service_flow(Path(sys.argv[2]), bytes.fromhex(sys.argv[3]))))
     elif len(sys.argv) == 4 and sys.argv[1] == "--read-tcp-state":
         print(json.dumps(read_tcp_state(Path(sys.argv[2]), bytes.fromhex(sys.argv[3]))))
     else:

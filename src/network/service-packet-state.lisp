@@ -69,13 +69,23 @@ invocation, even if the requesting agent exits while the syscall is running."
                  (map-id (lambda (map)
                            (netlink-read-integer (bpf-object-kernel-info
                                                  (whistler/loader:map-info-fd map)) 4 4)))
-                 (stage-map-ids #'packet-stage-map-ids))
-  "Enable collection only after retained endpoint programs use current locks/maps.
+                 (stage-map-ids #'packet-stage-map-ids)
+                 (refresh #'refresh-service-packet-pipelines))
+  "Refresh retained pipelines before enabling collection over their locks/maps.
 A pre-reservation experimental endpoint may still execute after an upgrade.
-Defer GC with a diagnostic until it is refreshed/recreated; never race its writes.
-New endpoints installed by this agent use the current compiled guard variant."
+Pending or failed migration keeps GC deferred; never race legacy writers."
   (bt:with-lock-held ((service-lb-dataplane-lock dataplane))
     (when (assoc "gr8s_packet_gc" (service-lb-dataplane-programs dataplane) :test #'equal)
+      ;; Recheck actual endpoint generations even after a prior successful pass:
+      ;; an out-of-process ADD can create another pinned pipeline later.
+      (let ((endpoints (funcall paths)))
+        (unless (funcall refresh dataplane endpoints)
+          (setf (service-lb-dataplane-gc-compatible-p dataplane) nil)
+          (unless (equal "packet pipeline upgrades are pending" (service-lb-dataplane-gc-warning dataplane))
+            (format *error-output* "gr8s: Service flow GC deferred: packet pipeline upgrades are pending~%")
+            (setf (service-lb-dataplane-gc-warning dataplane) "packet pipeline upgrades are pending"))
+          (return-from service-packet-gc-compatible-p nil))
+        (setf (service-lb-dataplane-gc-compatible-stage-count dataplane) (length endpoints))
       (or (service-lb-dataplane-gc-compatible-p dataplane)
           (handler-case
               (let ((stages-seen 0)
@@ -84,7 +94,7 @@ New endpoints installed by this agent use the current compiled guard variant."
                                           "gr8s_pkt_fwd_lock" "gr8s_pkt_rev_lock" "gr8s_pkt_tcp")
                             collect (funcall map-id (or (service-lb-map dataplane name)
                                                        (error "Missing Service state map ~A" name))))))
-                (dolist (path (funcall paths))
+                (dolist (path endpoints)
                   (incf stages-seen)
                   (let ((stages (funcall stage-map-ids path)))
                     (unless (and (= 2 (length stages))
@@ -101,7 +111,7 @@ New endpoints installed by this agent use the current compiled guard variant."
                 (unless (equal message (service-lb-dataplane-gc-warning dataplane))
                   (format *error-output* "gr8s: Service flow GC deferred: ~A~%" message)
                   (setf (service-lb-dataplane-gc-warning dataplane) message)))
-              nil))))))
+              nil)))))))
 
 (defun sweep-service-packet-state
     (dataplane &key (budget 128)

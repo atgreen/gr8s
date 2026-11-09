@@ -91,9 +91,10 @@ static void request_once(int fd, unsigned serial) {
 
 int main(int argc, char **argv) {
     int graceful = argc == 4 && !strcmp(argv[3], "fin");
-    int held = argc == 5 && !strcmp(argv[3], "hold");
+    int patient = argc == 5 && !strcmp(argv[3], "hold-patient");
+    int held = argc == 5 && (!strcmp(argv[3], "hold") || patient);
     if (argc != 3 && !graceful && !held) {
-        fprintf(stderr, "usage: service-tcp-client SERVICE_IPV4 LOCAL_PORT [fin | hold STOP_FILE]\n");
+        fprintf(stderr, "usage: service-tcp-client SERVICE_IPV4 LOCAL_PORT [fin | hold STOP_FILE | hold-patient STOP_FILE]\n");
         return 2;
     }
     char *end = NULL;
@@ -103,7 +104,8 @@ int main(int argc, char **argv) {
     int fd = socket(AF_INET, SOCK_STREAM, 0), yes = 1;
     if (fd < 0) fail("socket");
     struct linger reset = {.l_onoff = 1, .l_linger = 0};
-    struct timeval timeout = {.tv_sec = 10};
+    /* Interrupted-upgrade tests deliberately retain drop guards across startup. */
+    struct timeval timeout = {.tv_sec = patient ? 90 : 10};
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) ||
         (!graceful && !held && setsockopt(fd, SOL_SOCKET, SO_LINGER, &reset, sizeof(reset))) ||
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) ||
