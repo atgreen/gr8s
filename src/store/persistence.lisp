@@ -442,10 +442,13 @@ every HA member, including a member that did not own the reporting agent session
                      (setf (gethash uid (pod-store-pod-published-statuses store))
                            (copy-pod-status-value (gethash "status" publication))))
                    (let ((new-view (pod-published-view store pod)))
+                     (when (and old-view (json-value-equal-p old-view new-view))
+                       (persist-pod-publication store pod))
                      (unless (and old-view (json-value-equal-p old-view new-view))
                        (let ((event-revision
                                (local-replicated-pod-event-revision-unlocked
                                 store incoming-revision)))
+                         (persist-pod-publication store pod :revision event-revision)
                          (setf (pod-status-revision pod) event-revision
                                new-view (pod-published-view store pod))
                          (record-pod-watch-event-unlocked
@@ -458,6 +461,7 @@ every HA member, including a member that did not own the reporting agent session
               unless (gethash key seen)
                 do (let ((old-view (pod-published-view store pod)))
                      (ignore-errors (delete-file (pod-path store pod)))
+                     (ignore-errors (delete-file (pod-publication-path store (pod-uid pod))))
                      (remhash key (pod-store-pods store))
                      (clear-replicated-pod-state-unlocked store pod)
                      (record-pod-watch-event-unlocked
@@ -636,6 +640,7 @@ renewals use the same compact one-key delta without changing resourceVersion."
     (load-pod-status-state store)
     (load-pod-revision store)
     (load-consensus-pod-revision store)
+    (load-pod-publications store)
     store))
 
 (defun get-pod-unlocked (store namespace name)
@@ -802,7 +807,9 @@ renewals use the same compact one-key delta without changing resourceVersion."
       (unless (pod-stage-active-p store)
        (let ((status-path (pod-status-state-path store (pod-uid pod))))
         (when (probe-file status-path) (delete-file status-path)))
-       (delete-file (pod-path store pod)))
+       (delete-file (pod-path store pod))
+       (let ((publication (pod-publication-path store (pod-uid pod))))
+         (when (store-generation-stat publication) (sb-posix:unlink (namestring publication)))))
       (remhash (pod-key namespace name) (pod-store-pods store))
       (publish-pod-removal-unlocked store pod)
       ;; Serialize only after allocating the deletion's watch revision; followers

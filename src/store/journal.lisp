@@ -215,6 +215,7 @@
 
 (defun publish-pod-spec-change-unlocked (store old pod)
   "Journal POD at its current revision; OLD is its prior API view."
+  (persist-pod-publication store pod)
   (record-pod-watch-event-unlocked
    store (parse-integer (pod-resource-version pod)) old
    (and (pod-store-watch-journal-p store)
@@ -239,6 +240,7 @@
       (let ((old (and (pod-store-watch-journal-p store)
                       (pod-published-view store current)))
             (revision (next-pod-revision-unlocked store)))
+        (persist-pod-publication store current :status status :revision revision)
         (setf (gethash uid (pod-store-pod-published-statuses store))
               (copy-pod-status-value status)
               (pod-status-revision current) revision)

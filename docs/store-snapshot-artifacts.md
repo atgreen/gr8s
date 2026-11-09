@@ -88,7 +88,7 @@ member root for PKI, signing keys, issuer records and Raft state.
 
 | Data | Location after generation selection |
 |---|---|
-| Desired Pods, Nodes and observation checkpoints | Selected application generation |
+| Desired Pods, Nodes, observation and publication checkpoints | Selected application generation |
 | Core checkpoint/journal and Pod/Node revision files | Selected application generation |
 | PKI and ServiceAccount private signing key | Stable member root |
 | Server-owned credential issuer records | Stable member root |
@@ -156,3 +156,37 @@ FiveAM suite covers these cross-record checks. The [validation evidence](store-s
 records the focused suites and constrained-heap probe. Artifact materialization, durable
 restore intent, live reload and Raft/WAL coordination remain the next integration
 work; this validator does not select or restore a generation.
+
+## Durable Pod publications
+
+Pod observation checkpoints describe what the runtime reported. The API's last
+published status and revision are stored separately in private
+`publications/<UID>.json` files under the application data root. A version-1
+publication contains the Pod UID, namespace/name, desired resourceVersion,
+published resourceVersion and status. Snapshot materialization must restore both
+observation and publication records; writing desired Pods and observations alone
+would lose the captured API view on restart.
+
+Status and specification publication paths write these records, including Raft
+application and idempotent retries. Speculative HA transactions only stage their
+changes. A publication file is written privately, synchronized, atomically renamed
+and followed by directory synchronization before its watch event is announced.
+A pre-publication write failure leaves the previous published status and watch
+journal unchanged for a local status update. A failure after rename can leave the
+new file visible and must be treated as uncertain, as with generation selection.
+This is per-file durability, not an atomic transaction across Pod desired state,
+observations and Raft metadata; production WAL recovery remains required.
+
+Startup restores matching UID and desired revisions after loading revision clocks.
+Obsolete publications are ignored, so a stale checkpoint cannot apply to a new
+Pod or desired revision. Malformed, linked, nonprivate or oversized files and a
+matching publication beyond the durable revision clock fail startup. Parsing is
+bounded by a 16 MiB file size, 2 MiB strings and depth 128. Older stores without
+publication files remain readable. Normal Pod deletion removes its publication.
+
+Run the `pod-publications` FiveAM suite for restart, consensus application,
+specification changes, deletion, stale records, unsafe links and write-failure
+coverage. The [publication validation evidence](pod-publication-validation-2026-11-09.json)
+includes a native API status/revision round trip across process restart, broader
+watch/status/failover checks and the constrained-heap probe. Full artifact
+materialization and restore intent remain pending.

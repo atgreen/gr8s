@@ -1,0 +1,57 @@
+{
+  "date": "2026-11-09",
+  "scope": "Durable Pod API publications, independent of runtime observations",
+  "passed": true,
+  "checks": 416,
+  "suites": {
+    "pod-publications": 14,
+    "pod-transactions": 65,
+    "store-generation": 46,
+    "store-snapshot-index": 28,
+    "pod-watch": 149,
+    "pod-status-http": 75,
+    "ha-pod-failover": 29,
+    "ha-store": 10
+  },
+  "nativeBuild": {
+    "passed": true,
+    "sha256": "76dcc5108e849a6c66b8f1fbc5365f8dbb335e3e5241fa06992be1f148871823"
+  },
+  "nativeGenerationStartupAndRestart": {
+    "passed": true,
+    "native": true,
+    "runtime": "fake",
+    "evidence": "/tmp/gr8s-generation-native-43uzqps0",
+    "generationLoaded": true,
+    "legacyPodExcluded": true,
+    "applicationWriteSurvivesRestart": true,
+    "podPublicationSurvivesRestart": true,
+    "memberPrivateFilePreserved": true,
+    "gracefulShutdown": true
+  },
+  "nativeFixtureNote": "The fake-runtime API computes and durably publishes a status during the first native process. The second process must return the same status and publication resourceVersion, despite fresh local revision reservations. No root or container/BPF execution. This is not full artifact restore.",
+  "memory": {
+    "passed": true,
+    "legacy": false,
+    "records": 1024,
+    "validatedRecords": 1027,
+    "payloadBytes": 67108864,
+    "artifactBytes": 67347524,
+    "heapMiB": 384,
+    "sourceStoreResident": true
+  },
+  "coverage": [
+    "Local status publication persists status and revision across reopen",
+    "Consensus apply persists API view across reopen",
+    "Pre-write failure preserves local published view and watch journal",
+    "Stale desired revision ignored; legacy stores without publication files open",
+    "Spec changes retain current publication and deletion removes checkpoint",
+    "Linked publication files and revisions beyond durable clock rejected"
+  ],
+  "remaining": [
+    "Staged artifact materialization and checksum verification",
+    "Restore intent and live reload/interruption recovery",
+    "Production WAL recovery and automatic compaction"
+  ],
+  "fullGoalComplete": false
+}

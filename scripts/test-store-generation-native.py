@@ -55,6 +55,11 @@ def main():
         templateHistory=[], templateHistoryFloor=1, resourceHistoryStart=1,
         templateTokenKey=base64.b64encode(bytes(32)).decode(), eventExpirations={},
         items=[namespace, config], customResourceItems=[]))
+    published_uid = "44444444-4444-4444-8444-444444444444"
+    private_json(generation / (published_uid + ".json"), dict(
+        apiVersion="v1", kind="Pod", metadata=dict(name="published-pod", namespace="default",
+                                                   uid=published_uid, resourceVersion="3"),
+        spec=dict(nodeName="external-worker", containers=[dict(name="main", image="busybox")])))
     legacy_uid = "33333333-3333-4333-8333-333333333333"
     private_json(state / (legacy_uid + ".json"), dict(
         apiVersion="v1", kind="Pod", metadata=dict(name="legacy-pod", namespace="default",
@@ -69,6 +74,7 @@ def main():
                "--node-port", str(node_port), "--node-name", "generation-native-check",
                "--kubeconfig", str(evidence / "kubeconfig")]
     process = None
+    published_before_restart = None
     result = dict(passed=False, native=True, runtime="fake", evidence=str(evidence))
 
     def request(path, value=None):
@@ -100,6 +106,15 @@ def main():
                     raise AssertionError("legacy root Pod leaked into selected generation")
                 except urllib.error.HTTPError as error:
                     assert error.code == 404
+                published = request("/api/v1/namespaces/default/pods/published-pod")
+                if cycle == 0:
+                    published_before_restart = published
+                    saved = json.loads((generation / "publications" / (published_uid + ".json")).read_text())
+                    assert saved["status"] == published["status"], "API status was not checkpointed"
+                    assert saved["resourceVersion"] == published["metadata"]["resourceVersion"]
+                else:
+                    assert published["status"] == published_before_restart["status"], "published status changed on restart"
+                    assert published["metadata"]["resourceVersion"] == published_before_restart["metadata"]["resourceVersion"], "publication revision changed on restart"
                 if cycle == 0:
                     request("/api/v1/namespaces/default/configmaps", dict(
                         apiVersion="v1", kind="ConfigMap", metadata=dict(name="native-write"),
@@ -114,7 +129,8 @@ def main():
                 process.wait(timeout=20)
                 assert process.returncode == 0, f"shutdown returned {process.returncode}"
         result.update(passed=True, generationLoaded=True, legacyPodExcluded=True,
-                      applicationWriteSurvivesRestart=True, memberPrivateFilePreserved=True,
+                      applicationWriteSurvivesRestart=True, podPublicationSurvivesRestart=True,
+                      memberPrivateFilePreserved=True,
                       gracefulShutdown=True)
     except Exception as error:
         result["error"] = str(error)
