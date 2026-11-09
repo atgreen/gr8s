@@ -3,17 +3,15 @@
   "issue": "podster-p9c",
   "scope": "Real Kata guest on worker-0 to native backend on worker-1 over VXLAN. Two node agents in distinct mount/network namespaces in one disposable Fedora44 VM22291 with nested KVM.",
   "binary": {
-    "nativeSHA256": "c8b97e37114661ca51952915584e1d8c3dda25af6c2178dcb6fa66eb3f0541d1",
-    "sourceCommit": "4789a01",
-    "peerChecks": 74,
-    "baselineRegressionFailures": 4,
-    "protocolRegressionPassed": true
+    "sourceCommit": "6c9365f",
+    "nativeSHA256": "ca7fc2b50d87f9412611e92cf80b274558a35119e0a67655d8fc61bb0c343fc8",
+    "version": "gr8s1.37.2-g6c9365f"
   },
   "runnerCommit": "00f7dff",
   "runnerSHA256": "93b08ebd4af9c4cf737c9c1cf99c91a43bd284de7c3010c70e608ac741ab0aae",
   "checksPassed": 21,
   "result": {
-    "root": "/var/tmp/gr8s-two-node.8jnqy609",
+    "root": "/var/tmp/gr8s-two-node.g484df62",
     "checks": [
       {
         "name": "differentNodes",
@@ -35,8 +33,8 @@
           "host": "6.19.10-300.fc44.x86_64",
           "qemu": [
             {
-              "pid": 1774177,
-              "command": "/var/tmp/gr8s-two-node.8jnqy609/agent-0/runtime-addons/kata/opt/kata/bin/qemu-system-x86_64 -name sandbox-ef7753fbba27d264a491a7629a3b896208ba8b2cbf8336042679627f774b9868 -kernel /var/tmp/gr8s-two-node.8jnqy609/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/vmlinux-6.18.56-208 -append reboot=k panic=1 systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket agent.log_vport=1025 root=/dev/pmem0p1 rootflags=dax,data=ordered,errors=remount-ro ro rootfstype=ext4 agent.cdh_api_timeout=50 agent.log=debug cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1 selinux=0 console=hvc0 -smp 1 -machine q35,accel=kvm,nvdimm=on,kernel_irqchip=on,memory-backend=entire-guest-memory-share -cpu host,pmu=off -m 2G,slots=10,maxmem=3903M -object memory-backend-file,id=entire-guest-memory-share,mem-path=/dev/shm,size=2G,share=on,prealloc=off,readonly=off -qmp unix:fd=16,server=on,wait=off -rtc base=utc,clock=host,driftfix=slew -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0 -device pci-bridge,bus=pcie.0,id=pci-bridge-0,chassis_nr=1,shpc=off,addr=2,io-reserve=4k,mem-reserve=1m,pref64-reserve=1m -device virtio-scsi-pci,id=scsi0,disable-modern=true -device vhost-vsock-pci,disable-modern=true,vhostfd=17,guest-cid=1662102326 -netdev tap,id=network-tap0_kata,vhost=on,vhostfds=20,fds=19 -device virtio-net-pci,netdev=network-tap0_kata,mac=02:fd:17:b5:32:5f,disable-modern=true,mq=on,vectors=4 -chardev socket,id=virtiofsd-chardev,path=/run/kata/ef7753fbba27d264a491a7629a3b896208ba8b2cbf8336042679627f774b9868/root/virtiofsd.sock -device vhost-user-fs-pci,chardev=virtiofsd-chardev,tag=kataShared,queue-size=1024 -object memory-backend-file,id=TODO,mem-path=/var/tmp/gr8s-two-node.8jnqy609/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/kata-ubuntu-resolute.image,size=256M,share=off,prealloc=off,readonly=on -device nvdimm,memdev=TODO,unarmed=on -device virtio-serial-pci,id=serial0 -device virtconsole,id=console0,chardev=charconsole0 -chardev socket,id=charconsole0,server=on,wait=off,path=/run/kata/ef7753fbba27d264a491a7629a3b896208ba8b2cbf8336042679627f774b9868/root/console.sock -vga none -no-user-config -nodefaults -nographic -no-reboot "
+              "pid": 1779138,
+              "command": "/var/tmp/gr8s-two-node.g484df62/agent-0/runtime-addons/kata/opt/kata/bin/qemu-system-x86_64 -name sandbox-22b728899cd0020252053d8a41e8071a190849f7138db3636a1e1b044c1b7729 -kernel /var/tmp/gr8s-two-node.g484df62/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/vmlinux-6.18.56-208 -append reboot=k panic=1 systemd.unit=kata-containers.target systemd.mask=systemd-networkd.service systemd.mask=systemd-networkd.socket agent.log_vport=1025 root=/dev/pmem0p1 rootflags=dax,data=ordered,errors=remount-ro ro rootfstype=ext4 agent.cdh_api_timeout=50 agent.log=debug cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1 selinux=0 console=hvc0 -smp 1 -machine q35,accel=kvm,nvdimm=on,kernel_irqchip=on,memory-backend=entire-guest-memory-share -cpu host,pmu=off -m 2G,slots=10,maxmem=3903M -object memory-backend-file,id=entire-guest-memory-share,mem-path=/dev/shm,size=2G,share=on,prealloc=off,readonly=off -qmp unix:fd=16,server=on,wait=off -rtc base=utc,clock=host,driftfix=slew -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-pci,rng=rng0 -device pci-bridge,bus=pcie.0,id=pci-bridge-0,chassis_nr=1,shpc=off,addr=2,io-reserve=4k,mem-reserve=1m,pref64-reserve=1m -device virtio-scsi-pci,id=scsi0,disable-modern=true -device vhost-vsock-pci,disable-modern=true,vhostfd=17,guest-cid=4286916317 -netdev tap,id=network-tap0_kata,vhost=on,vhostfds=20,fds=19 -device virtio-net-pci,netdev=network-tap0_kata,mac=02:70:ca:ff:9d:e1,disable-modern=true,mq=on,vectors=4 -chardev socket,id=virtiofsd-chardev,path=/run/kata/22b728899cd0020252053d8a41e8071a190849f7138db3636a1e1b044c1b7729/root/virtiofsd.sock -device vhost-user-fs-pci,chardev=virtiofsd-chardev,tag=kataShared,queue-size=1024 -object memory-backend-file,id=TODO,mem-path=/var/tmp/gr8s-two-node.g484df62/agent-0/runtime-addons/kata/opt/kata/share/kata-containers/kata-ubuntu-resolute.image,size=256M,share=off,prealloc=off,readonly=on -device nvdimm,memdev=TODO,unarmed=on -device virtio-serial-pci,id=serial0 -device virtconsole,id=console0,chardev=charconsole0 -chardev socket,id=charconsole0,server=on,wait=off,path=/run/kata/22b728899cd0020252053d8a41e8071a190849f7138db3636a1e1b044c1b7729/root/console.sock -vga none -no-user-config -nodefaults -nographic -no-reboot "
             }
           ]
         }
@@ -126,7 +124,7 @@
           "returncode": 0,
           "body": {
             "responses": [
-              "10.80.0.1:52208"
+              "10.80.0.1:37360"
             ]
           }
         }
@@ -186,7 +184,7 @@
           "returncode": 0,
           "body": {
             "responses": [
-              "10.80.0.1:47482"
+              "10.80.0.1:53643"
             ]
           }
         }
@@ -257,7 +255,7 @@
           "returncode": 0,
           "body": {
             "errors": [
-              "reading from udp connection failed. err:'read udp 10.80.0.1:33927->10.96.0.10:81: i/o timeout'"
+              "reading from udp connection failed. err:'read udp 10.80.0.1:59541->10.96.0.10:81: i/o timeout'"
             ]
           }
         }
@@ -305,7 +303,7 @@
           "returncode": 0,
           "body": {
             "errors": [
-              "reading from udp connection failed. err:'read udp 10.80.0.1:51350->10.96.0.10:81: i/o timeout'"
+              "reading from udp connection failed. err:'read udp 10.80.0.1:41118->10.96.0.10:81: i/o timeout'"
             ]
           }
         }
@@ -354,14 +352,15 @@
     "pr": 241,
     "observedFailure": "Before fix all21 traffic/policy checks passed but agent cleanup required forced termination. SIGUSR1 traces showed main joining the image peer listener blocked in ACCEPT.",
     "regression": "Bounded blocked-ACCEPT and incomplete-TLS-reader test failed on old code. All74 peer protocol/transfer/recovery/lifecycle checks passed after explicit socket shutdown and registration ordering fix.",
-    "nativeRepeat": "Fresh run with rebuilt binary passed all21 checks and completed normal cleanup; no diagnostic wakeups or forced stops."
+    "nativeRepeat": "Fresh run with rebuilt binary passed all21 checks and completed normal cleanup; no diagnostic wakeups or forced stops.",
+    "readerFollowup": "The first listener fix did not reliably stop incomplete TLS readers. Failure-time traces identified buffered readers still waiting after close. PR243 fixes descriptor close ordering; repeated and combined tests and early native shutdown pass."
   },
   "knownFollowup": {
     "issue": "podster-p9c.1",
     "description": "Service reconciliation reports ENOENT when deleting already absent keys; desired-state cleanup must be idempotent.",
     "observedLogCounts": {
       "agent-0": 0,
-      "agent-1": 1
+      "agent-1": 0
     }
   },
   "remainingScope": [
@@ -373,5 +372,38 @@
     "Packet NodePort replacement, Local/Cluster policies and health checks",
     "Broader diagnostics, capacity and runtime validation"
   ],
-  "limits": "This establishes IPv4 TCP/UDP and the named policy cases on two simulated nodes. It does not establish physical multi-host/NIC offload behavior, nor the remaining original feature scope."
+  "limits": "This establishes IPv4 TCP/UDP and the named policy cases on two simulated nodes. It does not establish physical multi-host/NIC offload behavior, nor the remaining original feature scope.",
+  "priorSuccessfulBinarySource": "4789a01",
+  "mainIntegration": {
+    "commit": "6c9365f",
+    "passed": true,
+    "crossNodeChecks": 21,
+    "normalCleanup": true
+  },
+  "finalPeerLifecycleFix": {
+    "issue": "podster-s0e",
+    "pr": 243,
+    "sourceCommit": "d7a633e",
+    "nativeSHA256": "e7ab958e4cd7039a37b97688c71ffdda508c03667b44cb0e3e62cc7cf4554ff7",
+    "combinedNetworkingCNIPeerChecks": 830,
+    "combinedFailed": 0,
+    "repeatedLifecycleChecks": 40,
+    "peerProtocolAndLifecycleChecks": 74,
+    "earlyNativeShutdown": {
+      "containerdSocketExistedAtSignal": false,
+      "shutdownSeconds": 10.82869087497238,
+      "nativeExitCode": 0,
+      "passed": true
+    },
+    "scope": "Follow-up retains descriptors until reader exit and serializes shutdown with worker unregistration. No Service translation code changed; the cross-node result above used the preceding peer-listener fix."
+  },
+  "hostedCI": {
+    "runs": [
+      42647805138,
+      42649483363,
+      42650870187
+    ],
+    "started": false,
+    "reason": "Account billing/spending limits prevented jobs from starting; no test steps ran."
+  }
 }
