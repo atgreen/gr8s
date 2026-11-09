@@ -1,0 +1,57 @@
+{
+  "date": "2026-11-09",
+  "issue": "podster-p9c",
+  "scope": "Standalone Whistler IPv4 TCP/UDP TC Service translation engine. It is not yet attached by the node agent or CNI.",
+  "sourceSHA256": "fa57a2c6b77b2ecabdc0d32b1e2153ffe258f6887fc9c797ca643e15e2958af8",
+  "fixtureSHA256": "60a16067592b16b2760ccc18ffc0d9fe553eab35abc42e0e779bcbebb7c2fa86",
+  "programs": {
+    "gr8s_packet_forward": 598,
+    "gr8s_packet_reverse": 353
+  },
+  "interpreter": {
+    "command": "make test-service-packet-program",
+    "passed": true,
+    "packetFlowChecksumCases": 26,
+    "capacityPublicationRecoveryCases": 5,
+    "checksBoundsAndStackInitialization": true,
+    "clobbersHelperArgumentRegisters": true,
+    "honorsMapUpdateFlags": true,
+    "includesNonLinearTransportHeaderCase": true
+  },
+  "kernel": {
+    "command": "python3 scripts/test-service-packet-program.py FIXTURE --kernel",
+    "environment": "Disposable Fedora VM, SSH port 22293",
+    "execution": "BPF_PROG_TEST_RUN over real maps and actual compiled TC programs; no live guest or container traffic in this gate.",
+    "passed": true,
+    "packetFlowChecksumCases": 23,
+    "capacityPublicationRecoveryCases": 5,
+    "coverage": [
+      "TCP and UDP destination NAT and reverse source NAT with valid wire checksums",
+      "IPv4 options and UDP zero checksums",
+      "Established flows retain their backend during endpoint replacement",
+      "ClientIP affinity across connections and reselection after endpoint removal",
+      "Return-tuple ownership prevents another Service taking an existing translation",
+      "Direct backend traffic passes unchanged without double translation",
+      "Backend slot repacking fails closed on invalid Service membership",
+      "Empty Services and malformed packets fail closed",
+      "A one-entry forward map rejects new flows at capacity while existing flows work",
+      "Orphan reverse entries from failed publication do not translate replies",
+      "New traffic recovers after capacity is freed",
+      "Drop-reason counters report actual failures"
+    ]
+  },
+  "regressions": {
+    "focusedNetworkingChecks": 605,
+    "passed": 605,
+    "failed": 0,
+    "endpointPacketCounterCases": 143,
+    "socketBytecodeCases": "passed",
+    "sharedSocketPacketMapSchemaContract": "passed"
+  },
+  "nativeBuild": {
+    "passed": true,
+    "sha256": "3f6315ddd0a77dfde721c819be9bca8fdeffee9af203e3aceb5fee781f2d8348",
+    "versionCommand": "gr8s 1.37.2-gbfb222c+dirty, patch level 0"
+  },
+  "scopeLimits": "This gate does not prove live guest networking, policy ordering, cross-node routing, offloaded skb behavior, runtime attachment/recovery, flow garbage collection, source NAT/hairpin, IPv6 packet translation, or NodePort replacement. Hairpin and conflicting return tuples currently fail closed. Those remain part of podster-p9c before completion."
+}

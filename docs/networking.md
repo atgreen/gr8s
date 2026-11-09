@@ -77,8 +77,11 @@ membership check refuses the attempt; later attempts recover after convergence.
 `make test-service-lb-program` exercises the compiled bytecode across these update
 boundaries. The same fixture can be tested with actual attached socket hooks using
 `scripts/test-service-lb-program.py FIXTURE --kernel` inside a disposable root VM.
-Host socket hooks do not intercept connections initiated inside a guest kernel;
-packet-level Service translation for those workloads remains in development.
+Host socket hooks do not intercept connections initiated inside a guest kernel.
+The IPv4 TCP/UDP TC translation engine has passed compiled-bytecode checksum,
+connection, affinity and capacity tests in a disposable VM, but the node agent
+does not attach it yet. Guest networking and external Service replacement remain
+in development; see [the engine validation scope](service-packet-engine-validation-2026-11-09.json).
 
 `NodePort` and `LoadBalancer` Services allocate node ports from 30000–32767. The
 agent relays each in userspace, for TCP and UDP, with client-address affinity, so
