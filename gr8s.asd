@@ -62,6 +62,11 @@
                                            (:file "node-protocol")))
                              (:file "foundation/dns")
                              (:file "foundation/json")
+                             (:module "patch"
+                              :serial t
+                              :components ((:file "package") (:file "artifact")
+                                           (:file "publisher") (:file "executor") (:file "coordinator")
+                                           (:file "cli")))
                              (:file "foundation/network-steering")
                              (:module "image-distribution"
                               :serial t
@@ -374,6 +379,7 @@
                                            (:file "doctor")
                                            (:file "memory-monitor")
                                            (:file "main")
+                                           (:file "patch-integration")
                                            (:file "compat"))))))
   :in-order-to ((test-op (test-op "gr8s/tests"))))
 
@@ -383,6 +389,7 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "package")
+                             (:file "patch-test")
                              (:file "protocol-package-test")
                              (:file "torrent-v2-test")
                              (:file "image-tracker-test")
@@ -560,3 +567,12 @@
                       :fiveam :run!
                       (find-symbol "GR8S" "GR8S/TESTS"))
                (error "gr8s tests failed"))))
+
+;; Keep the patch suite runnable inside a real ASDF TEST-OP: loading a patch must
+;; establish its own session rather than inherit the test operation's forcing policy.
+(asdf:defsystem "gr8s/patch-tests"
+  :depends-on ("gr8s/tests")
+  :perform (test-op (operation component)
+             (declare (ignore operation component))
+             (unless (uiop:symbol-call :fiveam :run! (find-symbol "PATCH" "GR8S/TESTS"))
+               (error "gr8s patch tests failed"))))

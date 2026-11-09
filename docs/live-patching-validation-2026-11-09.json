@@ -1,0 +1,59 @@
+{
+  "date": "2026-11-09",
+  "scope": "Arbitrary publisher-trusted Lisp reload with optional quiescence and local checkpoints; fake container runtime, no BPF loads or real containers.",
+  "buildID": "sha256:040b7349dbea16212ce5553681d1669e1fd6c132abc8a870ffc3bc52c0ca467b",
+  "nativeBinarySHA256": "5f0d23b43f475c4b13c7c1f8bd9d85d7faf4fab5abe500fc6e262b0e7f279c6d",
+  "patchArtifactDigest": "sha256:f0ca7010539985015466d25b0301f55218a58a390c6c39714e65b8979d074c79",
+  "focusedPatchTests": {
+    "command": "make test-patches",
+    "checks": 94,
+    "passed": 94,
+    "failed": 0,
+    "runsInsideASDFTestOperation": true,
+    "coverageAdded": [
+      "Function replacement without domains, PID preservation and restart replay",
+      "Optional domain with descriptive unregistered replacement metadata",
+      "Reject explicitly requested unknown domains",
+      "Class and method redefinition and live-object update with omitted domains and replaces"
+    ]
+  },
+  "otherGates": {
+    "nativeBuild": "passed",
+    "nodeProtocolGeneration": "passed",
+    "endpointGuardPacketCounterCases": 143,
+    "staticRuntimePayload": "passed",
+    "shellSyntax": "passed",
+    "pythonSyntax": "passed",
+    "gitDiffCheck": "passed"
+  },
+  "nativeRollout": {
+    "passed": true,
+    "processes": 3,
+    "preservedPIDs": [
+      719112,
+      719148,
+      719191
+    ],
+    "rollout": "patch-930627a28ceb74bca5d23247",
+    "restartRecovered": true,
+    "witness": true,
+    "native": true,
+    "cliWatchCompleted": true,
+    "runtime": "fake",
+    "evidence": "/tmp/gr8s-live-patch-kkykisei",
+    "requestedDomains": []
+  },
+  "fullSuite": {
+    "status": "Not green; unrelated failures reproduced on original commit",
+    "baselineCommit": "187dd85",
+    "baselineFailingCases": 49,
+    "baselineFailingChecks": 50,
+    "issue": "podster-utb",
+    "baselineLog": "/tmp/gr8s-patch-baseline.log",
+    "fullRunLog": "/tmp/gr8s-patch-check.log"
+  },
+  "scopeExtensions": {
+    "sharedMigrationsAndEpochs": "podster-hof",
+    "patchedBaseReleaseMigration": "podster-e7f"
+  }
+}

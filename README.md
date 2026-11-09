@@ -155,9 +155,11 @@ The embedded containerd uses runc by default. `RuntimeClass` resolves Pod
 overhead, scheduling constraints, and the CRI runtime handler, allowing Pods
 to select configured handlers on a node.
 
-Automatic installation and end-to-end validation of optional gVisor and microVM
-runtimes are still in progress. See [Runtime & the container stack](docs/runtime.md)
-for the supported configuration and current limits.
+Optional gVisor and Kata Containers runtimes support sandboxed and microVM
+workloads, with automatic installation and end-to-end validation. Use
+`gr8s runtime install gvisor` or `gr8s runtime install kata` to install them,
+then select the runtime through `RuntimeClass`. See
+[Runtime & the container stack](docs/runtime.md) for configuration.
 
 ## Development and documentation
 
@@ -170,6 +172,7 @@ follow the [testing guide](docs/building-and-testing.md#test-matrix).
 - [Networking & the eBPF dataplane](docs/networking.md)
 - [Runtime & the container stack](docs/runtime.md)
 - [High availability](docs/high-availability.md)
+- [In-process patching](docs/live-patching.md)
 - [Design & compatibility boundary](docs/design.md)
 - [Multi-node design](docs/multi-node-design.md)
 - [Known compatibility gaps](docs/k3s-gap-inventory.md)

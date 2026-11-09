@@ -29,6 +29,9 @@
    #:update-core-resource
    #:with-crd-deferred-conversions))
 
+(defvar gr8s.resources::*internal-stored-resource-types* nil
+  "Private consensus records, persisted with resources but not exposed through generic Kubernetes CRUD.")
+
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (let ((resources (find-package '#:gr8s.resources))
         (composition (find-package '#:gr8s)))

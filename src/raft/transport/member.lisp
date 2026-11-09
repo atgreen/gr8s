@@ -190,6 +190,11 @@
           (raft-member-running member) t)
     (gr8s.node.v1::register-raft-transport-service
      server
+     :patch-management-handler
+     (lambda (request context)
+       (unless credentials (error "Patch management requires mutual TLS"))
+       (let ((peer (gr8s::authenticate-raft-peer credentials context)))
+         (gr8s.patch::handle-member-command member peer request)))
      :deliver-handler (lambda (request context)
                         (let ((msg (gr8s::authenticated-raft-message
                                     credentials request context)))

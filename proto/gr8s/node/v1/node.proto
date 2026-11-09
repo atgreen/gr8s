@@ -133,6 +133,7 @@ message NodeHello {
   // session binds it to node_name; private key material never leaves the node.
   bytes wireguard_public_key = 10;
   repeated WireguardEndpoint wireguard_endpoints = 11;
+  bytes patch_inventory_json = 12;
 }
 
 message Heartbeat {
@@ -344,6 +345,7 @@ enum OperationKind {
   OPERATION_KIND_PORT_FORWARD = 6;
   OPERATION_KIND_NETWORK_EXPLAIN = 7;
   OPERATION_KIND_TRACE = 8;
+  OPERATION_KIND_PATCH = 9;
 }
 
 message OperationRequest {
@@ -377,6 +379,7 @@ message OperationRequest {
   // TRACE: hard node-side deadline. The agent rejects zero and out-of-range
   // values rather than accepting an unbounded tracing session.
   uint64 trace_duration_milliseconds = 19;
+  bytes patch_command_json = 20;
 }
 
 message OperationInput {
@@ -429,7 +432,11 @@ message CniResponse {
 // Raft consensus transport between HA control-plane members (podster-c2d.3).
 // A single one-way delivery carrying one serialized Raft message; replies flow
 // as their own Deliver calls, matching the core's fire-and-forget send model.
+message PatchManagementRequest { bytes command_json = 1; }
+message PatchManagementResponse { bytes result_json = 1; string error_message = 2; }
+
 service RaftTransport {
+  rpc PatchManagement(PatchManagementRequest) returns (PatchManagementResponse);
   rpc Deliver(RaftEnvelope) returns (RaftAck);
   // A follower forwards an internal durable-store write to the current leader.
   // Mutual Raft TLS authenticates the caller; the leader commits the serialized
@@ -531,6 +538,7 @@ message JoinRequest {
   string node_name = 5;   // the name the join token is bound to
   string join_token = 6;
   string api_url = 7;     // the joiner's HTTP API base URL, for leader-aware redirects
+  bytes patch_inventory_json = 8;
 }
 
 message JoinResponse {

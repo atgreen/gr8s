@@ -22,7 +22,7 @@ NODE_PROTOCOL_PROTO := proto/gr8s/node/v1/node.proto
 NODE_PROTOCOL_LISP := src/generated/node-v1-generated.lisp
 TEST_EVAL := --eval '(require :asdf)' --eval '(asdf:test-system :gr8s)'
 
-.PHONY: all help containerd-bundle generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api check smoke smoke-two-node run kubeconfig notices native clean
+.PHONY: test-patches test-live-patching all help containerd-bundle generate-protocol test-protocol-generation test test-containerd test-whistler-cni test-routed-network test-vxlan-network test-agent-network test-node-topology test-endpoint-policy test-endpoint-policy-kernel test-service-lb smoke-service-lb smoke-service-lb-agent test-core-api check smoke smoke-two-node run kubeconfig notices native clean
 
 all: native
 
@@ -35,6 +35,7 @@ help:
 	@echo "  generate-protocol Generate Common Lisp node-protocol bindings"
 	@echo "  test-protocol-generation Verify standalone protocol generation from a clean output"
 	@echo "  test          Run the unit and HTTP test suite"
+	@echo "  test-live-patching Test signed in-process upgrades across three fake-runtime control planes"
 	@echo "  test-core-api Verify ConfigMap/Secret kubectl workflows and restart persistence"
 	@echo "  test-containerd Include the live CRI/containerd integration tests"
 	@echo "  test-routed-network Test native routed veths in isolated user/network namespaces"
@@ -61,6 +62,12 @@ $(NODE_PROTOCOL_LISP): $(NODE_PROTOCOL_PROTO) scripts/generate-node-protocol.lis
 
 test-protocol-generation:
 	scripts/test-node-protocol-generation.sh
+
+test-patches: generate-protocol
+	$(SBCL) --noinform --non-interactive --eval '(require :asdf)' --eval '(asdf:test-system "gr8s/patch-tests")'
+
+test-live-patching:
+	python3 scripts/test-live-patching.py
 
 test: generate-protocol
 	$(SBCL) --noinform --non-interactive $(TEST_EVAL)
