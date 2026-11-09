@@ -607,6 +607,88 @@
       (is (member (list 1 (gr8s::service-lb-vip-key "10.96.0.10" 80)) deletes :test #'equalp))
       (is (member (list 2 (gr8s::service-lb-backend-key 0)) deletes :test #'equalp)))))
 
+(defun service-lb-cleanup-fixture ()
+  "Model actual hash-map ENOENT semantics for both address families."
+  (let* ((entries (make-hash-table :test #'equalp))
+         (maps (loop for name in '("gr8s_service_v4" "gr8s_backend_v4" "gr8s_backend_index_v4"
+                                  "gr8s_service_v6" "gr8s_backend_v6" "gr8s_backend_index_v6")
+                     for fd from 1 collect (fake-lb-map name fd))))
+    (flet ((key (map bytes) (list (whistler/loader:map-info-name map) (copy-seq bytes))))
+      (values
+       (gr8s::make-service-lb-controller nil (gr8s::%make-service-lb-dataplane :maps maps))
+       entries
+       (lambda (map bytes value) (setf (gethash (key map bytes) entries) (copy-seq value)))
+       (lambda (map bytes)
+         (unless (remhash (key map bytes) entries)
+           (error 'whistler/loader:bpf-error :context "map-delete" :errno 2)))))))
+
+(test service-lb-cleanup-skips-absent-address-family-slots
+  (multiple-value-bind (controller entries update delete) (service-lb-cleanup-fixture)
+    (let ((services (list (fake-lb-service "10.96.0.10" :ports '(80)))))
+      (flet ((converge (backends)
+               (gr8s::converge-service-lb-controller
+                controller :list-services (constantly services) :endpoints-of (constantly backends)
+                :update update :delete delete)))
+        (converge '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))
+        ;; IPv6 maps exist, but never contained the retired IPv4 slot.
+        (converge '(("10.88.1.5" 8080)))
+        (is (= 3 (hash-table-count entries)))
+        (is (= 1 (gr8s::service-lb-controller-applied-slot-count controller)))
+        (let ((touched nil))
+          (gr8s::converge-service-lb-controller
+           controller :list-services (constantly services)
+           :endpoints-of (constantly '(("10.88.1.5" 8080)))
+           :update (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t))
+           :delete (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t)))
+          (is-false touched))))))
+
+(test service-lb-cleanup-retries-partial-deletion-and-preserves-other-errors
+  (multiple-value-bind (controller entries update delete) (service-lb-cleanup-fixture)
+    (gr8s::converge-service-lb-controller
+     controller :list-services (constantly (list (fake-lb-service "10.96.0.10" :ports '(80))))
+     :endpoints-of (constantly '(("10.88.1.5" 8080) ("10.88.1.6" 8080)))
+     :update update :delete delete)
+    (let* ((signature (gr8s::service-lb-controller-applied-signature controller))
+           (condition
+             (handler-case
+                 (gr8s::converge-service-lb-controller
+                  controller :list-services (constantly nil) :endpoints-of (constantly nil)
+                  :update update
+                  :delete (lambda (map key)
+                            (when (equal "gr8s_backend_index_v4" (whistler/loader:map-info-name map))
+                              (error 'whistler/loader:bpf-error :context "map-delete" :errno 5))
+                            (funcall delete map key)))
+               (whistler/loader:bpf-error (error) error))))
+      (is (typep condition 'whistler/loader:bpf-error))
+      (when condition (is (= 5 (whistler/loader::bpf-error-errno condition))))
+      (is (eq signature (gr8s::service-lb-controller-applied-signature controller)))
+      (is (= 2 (hash-table-count entries))))
+    ;; Retry must tolerate the already removed VIP and slots, then finish
+    ;; deleting membership entries and commit the empty desired state.
+    (gr8s::converge-service-lb-controller
+     controller :list-services (constantly nil) :endpoints-of (constantly nil)
+     :update update :delete delete)
+    (is (zerop (hash-table-count entries)))
+    (is (zerop (gr8s::service-lb-controller-applied-slot-count controller)))
+    (let ((touched nil))
+      (gr8s::converge-service-lb-controller
+       controller :list-services (constantly nil) :endpoints-of (constantly nil)
+       :update (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t))
+       :delete (lambda (&rest ignored) (declare (ignore ignored)) (setf touched t)))
+      (is-false touched))))
+
+(test service-lb-cleanup-does-not-ignore-missing-key-write-errors
+  (multiple-value-bind (controller entries update delete) (service-lb-cleanup-fixture)
+    (declare (ignore update))
+    (signals whistler/loader:bpf-error
+      (gr8s::converge-service-lb-controller
+       controller :list-services (constantly (list (fake-lb-service "10.96.0.10" :ports '(80))))
+       :endpoints-of (constantly '(("10.88.1.5" 8080))) :delete delete
+       :update (lambda (&rest ignored) (declare (ignore ignored))
+                 (error 'whistler/loader:bpf-error :context "map-update" :errno 2))))
+    (is (zerop (hash-table-count entries)))
+    (is-false (gr8s::service-lb-controller-applied-signature controller))))
+
 ;;; Traffic policies and topology, as kube-proxy's CategorizeEndpoints decides them.
 
 (defun endpoint-record (address &key (ready t) (serving t) terminating node zone zone-hints node-hints)

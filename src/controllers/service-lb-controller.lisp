@@ -245,6 +245,13 @@ order; a port's external addresses share its ClusterIP's slots when the backends
                                        (:ipv4 "gr8s_backend_index_v4")
                                        (:ipv6 "gr8s_backend_index_v6"))))))
 
+(defun service-lb-delete-if-present (delete map key)
+  "An absent key already satisfies withdrawal, including after a partial retry."
+  (handler-case (funcall delete map key)
+    (whistler/loader:bpf-error (condition)
+      (unless (= sb-posix:enoent (whistler/loader::bpf-error-errno condition))
+        (error condition)))))
+
 (defun converge-service-lb-controller
     (controller
      &key (update #'whistler/loader:map-update)
@@ -290,19 +297,19 @@ withdrawn VIPs.  A plan identical to the last applied one writes nothing."
           ;; Remove withdrawn VIPs and freed backend slots.
           (dolist (old (service-lb-controller-applied-service-keys controller))
             (unless (member old new-keys :test #'equalp)
-              (funcall delete
+              (service-lb-delete-if-present delete
                        (service-lb-family-map dataplane
                                               (if (= 8 (length old)) :ipv4 :ipv6) :service)
                        old)))
           (loop for slot from slot-count below (service-lb-controller-applied-slot-count controller)
                 do (dolist (family '(:ipv4 :ipv6))
                      (let ((map (service-lb-family-map dataplane family :backend)))
-                       (when map (funcall delete map (service-lb-backend-key slot))))))
+                       (when map (service-lb-delete-if-present delete map (service-lb-backend-key slot))))))
           (dolist (old (service-lb-controller-applied-index-keys controller))
             (unless (member old new-index-keys :test #'equalp)
               (let ((map (service-lb-family-map dataplane
                                                 (if (= 16 (length old)) :ipv4 :ipv6) :index)))
-                (when map (funcall delete map old)))))
+                (when map (service-lb-delete-if-present delete map old)))))
           (setf (service-lb-controller-applied-index-keys controller) new-index-keys
                 (service-lb-controller-applied-service-keys controller) new-keys
                 (service-lb-controller-applied-slot-count controller) slot-count
